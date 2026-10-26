@@ -84,3 +84,15 @@ fn bad_inputs_exit_2() {
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
     assert!(stderr(&o).contains("read "), "{}", stderr(&o));
 }
+
+/// Asserts that an empty base file, which is how CI reads a base branch that predates
+/// the gate, passes a head whose every crate is at zero and fails one with any crate
+/// above zero: every crate is new and enters at zero.
+#[test]
+fn an_empty_base_admits_only_crates_at_zero() {
+    let root = workspace("base-empty");
+    let o = against_base(&root, "", "a 0 0\nb 0 -\n");
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let o = against_base(&root, "", "a 0 0\nb 2 0\n");
+    assert_eq!(o.status.code(), Some(1), "{}{}", stdout(&o), stderr(&o));
+}

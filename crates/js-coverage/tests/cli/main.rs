@@ -914,9 +914,12 @@ fn a_failed_rename_leaves_no_temporary_file() {
             "new\n"
         );
         assert_eq!(to, path);
-        Err(std::io::Error::other("planted"))
+        Err(std::io::Error::other("the rename is refused"))
     });
-    assert_eq!(got.map_err(|e| e.to_string()), Err("planted".to_owned()));
+    assert_eq!(
+        got.map_err(|e| e.to_string()),
+        Err("the rename is refused".to_owned())
+    );
     assert!(!root.join("coverage-baseline.tighten-tmp").exists());
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "old\n");
     js_coverage::tighten::replace(&path, "new\n").expect("replace");
