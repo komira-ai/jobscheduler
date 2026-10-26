@@ -139,3 +139,44 @@ fn defects_break_one_behaviour_each() {
     );
     assert_eq!(f.booked().len(), 1);
 }
+
+/// Asserts that a start of a stopped lease is refused with `LeaseEnded` and books
+/// nothing, also for a lease stopped before its first start and for a stop that
+/// answered Unknown but landed, and that an Unknown stop that did not land ends nothing.
+#[test]
+fn a_stopped_lease_never_starts_again() {
+    let mut f = fake();
+    f.start(spec(1, 1000));
+    f.stop(&lease(1));
+    let ended = StartAck::Refused(RefusalCode::LeaseEnded);
+    assert_eq!(f.start(spec(1, 1000)), ended);
+    assert!(f.booked().is_empty());
+    assert_eq!(f.observe(&lease(1)), Observed::Absent);
+    f.stop(&lease(2));
+    assert_eq!(f.start(spec(2, 1000)), ended);
+
+    f.start(spec(3, 1000));
+    f.script_unknown(Call::Stop, false);
+    assert_eq!(f.stop(&lease(3)), StopAck::Unknown);
+    assert_eq!(
+        f.start(spec(3, 1000)),
+        StartAck::Started { host: host("h1") }
+    );
+    f.script_unknown(Call::Stop, true);
+    f.stop(&lease(3));
+    assert_eq!(f.start(spec(3, 1000)), ended);
+    assert!(f.booked().is_empty());
+}
+
+/// Asserts that the resurrecting defect books a stopped lease again.
+#[test]
+fn the_resurrecting_defect_books_a_stopped_lease() {
+    let mut f = fake().with_defect(Defect::ResurrectsStoppedLease);
+    f.start(spec(1, 1000));
+    f.stop(&lease(1));
+    assert_eq!(
+        f.start(spec(1, 1000)),
+        StartAck::Started { host: host("h1") }
+    );
+    assert_eq!(f.booked().len(), 1);
+}

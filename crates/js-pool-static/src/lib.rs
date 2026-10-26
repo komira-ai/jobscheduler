@@ -12,6 +12,9 @@
 //! - **Rank (6.1).** The first free host by id (byte order of the id) among those that
 //!   fit. There is no load term: with whole-host leases every free fitting host is
 //!   equal, so the id order makes placement deterministic.
+//! - **Stopped leases.** A stopped lease id never starts again: a late or duplicate
+//!   start after the stop is refused with `LeaseEnded`, books nothing, and the lease
+//!   observes `Absent`. A stop of a lease the pool never held is remembered the same way.
 //! - **Absence (5.6).** The pool owns its state, so it knows absence exactly:
 //!   [`js_provider::Provider::observe`] answers `Present` or `Absent`, never
 //!   `Unknown`, and a stop frees the host at once.

@@ -6,9 +6,12 @@
 //! `Unknown`, and the effect lands or not as scripted. Switch on a [`Defect`] to build
 //! a deliberately broken provider; the conformance suite must report exactly the
 //! rules that defect breaks (13.2), which is how the suite is shown able to fail.
+//! The fake remembers every lease id it has stopped, as an exact set, and refuses a
+//! start of one with `LeaseEnded`; see the static pool for why the set and not a
+//! high-water mark.
 //! [`FakeProvider::booked`] reads the host table directly, for conformance hooks.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use js_provider::{
     Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
@@ -31,6 +34,9 @@ pub enum Defect {
     ForgetsUnknownStart,
     /// An observation of a booked lease answers Absent.
     ObservesAbsent,
+    /// A start of a lease that was stopped books a host again, as a late or duplicate
+    /// start would.
+    ResurrectsStoppedLease,
 }
 
 #[derive(Debug)]
@@ -46,6 +52,7 @@ pub struct FakeProvider {
     hosts: BTreeMap<HostId, Host>,
     script: Vec<(Call, bool)>,
     unacked: Vec<LeaseId>,
+    ended: BTreeSet<LeaseId>,
     defect: Option<Defect>,
 }
 
@@ -60,6 +67,7 @@ impl FakeProvider {
             hosts: hosts.collect(),
             script: Vec::new(),
             unacked: Vec::new(),
+            ended: BTreeSet::new(),
             defect: None,
         }
     }
@@ -132,6 +140,11 @@ impl FakeProvider {
     }
 
     fn book(&mut self, spec: &StartSpec) -> StartAck {
+        let ended = self.ended.contains(&spec.lease());
+        let remembers = !self.defect_is(Defect::ResurrectsStoppedLease);
+        if [ended, remembers].into_iter().all(|yes| yes) {
+            return StartAck::Refused(RefusalCode::LeaseEnded);
+        }
         let repeats_booking = self.defect_is(Defect::RestartBooksAgain);
         let forgotten = self.forgets(&spec.lease());
         let blind = [repeats_booking, forgotten].into_iter().any(|yes| yes);
@@ -225,6 +238,7 @@ impl Provider for FakeProvider {
 
 impl FakeProvider {
     fn stop_now(&mut self, lease: &LeaseId) -> StopAck {
+        self.ended.insert(*lease);
         if self.defect_is(Defect::StopKeepsBooking) {
             return StopAck::Stopped {
                 read_back: Observed::Absent,

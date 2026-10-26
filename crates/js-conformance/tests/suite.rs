@@ -131,12 +131,16 @@ fn non_idempotent_start_is_caught() {
     );
 }
 
-/// Asserts that a fake that claims a stop it did not do fails exactly the
-/// stop-then-absent check, which only the state hook can see.
+/// Asserts that a fake that claims a stop it did not do fails the stop-then-absent
+/// check, which only the state hook can see, and the start-after-stop check, whose
+/// table still holds the booking it was told was stopped.
 #[test]
 fn a_lying_stop_is_caught_by_the_state_hook() {
     let report = broken(Defect::StopKeepsBooking);
-    assert_eq!(report.failed(), vec![Check::StopThenAbsent]);
+    assert_eq!(
+        report.failed(),
+        vec![Check::StopThenAbsent, Check::StartAfterStopIsRefused]
+    );
     let (_, verdict) = &report.results[1];
     assert!(matches!(verdict, Verdict::Failed(text) if text.contains("expected")));
 }
@@ -180,4 +184,15 @@ fn the_report_lists_each_check_once_in_order() {
     let report = run(|| fake(None));
     let ran: Vec<_> = report.results.iter().map(|(check, _)| *check).collect();
     assert_eq!(ran, Check::ALL.to_vec());
+}
+
+/// Asserts that a fake that books a host again for a start of a stopped lease fails
+/// the start-after-stop check and nothing else: no other check starts a lease after
+/// stopping it.
+#[test]
+fn a_resurrected_lease_is_caught() {
+    assert_eq!(
+        broken(Defect::ResurrectsStoppedLease).failed(),
+        vec![Check::StartAfterStopIsRefused]
+    );
 }

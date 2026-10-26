@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use js_provider::{
@@ -16,11 +16,18 @@ struct Host {
 
 /// A provider over a fixed list of hosts, each leased whole. See the crate docs for
 /// the placement rules.
+///
+/// The pool remembers every lease id it has stopped, as an exact set, and refuses a
+/// start of one with `LeaseEnded`. A high-water mark per term would be smaller but
+/// would also refuse a lower sequence that was never started and arrives late behind
+/// a higher one that was stopped, so the pool keeps the set: 16 bytes per stopped lease
+/// for the life of the process. The memory is in-process only, as the pool is.
 #[derive(Debug)]
 pub struct StaticPool {
     id: ProviderId,
     classes: Vec<ResourceClass>,
     hosts: BTreeMap<HostId, Host>,
+    ended: BTreeSet<LeaseId>,
 }
 
 impl StaticPool {
@@ -34,6 +41,7 @@ impl StaticPool {
             id,
             classes: vec![ResourceClass::gpu_host()],
             hosts: hosts.collect(),
+            ended: BTreeSet::new(),
         })
     }
 
@@ -90,6 +98,9 @@ impl Provider for StaticPool {
     }
 
     fn start(&mut self, spec: StartSpec) -> StartAck {
+        if self.ended.contains(&spec.lease()) {
+            return StartAck::Refused(RefusalCode::LeaseEnded);
+        }
         if let Observed::Present { host } = self.read(&spec.lease()) {
             return StartAck::Started { host };
         }
@@ -125,6 +136,7 @@ impl Provider for StaticPool {
     }
 
     fn stop(&mut self, lease: &LeaseId) -> StopAck {
+        self.ended.insert(*lease);
         for host in self.hosts.values_mut() {
             if host.lease.as_ref() == Some(lease) {
                 host.lease = None;

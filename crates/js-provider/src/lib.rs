@@ -50,6 +50,11 @@ pub trait Provider {
     /// Records the intent to start one attempt. Idempotent on the lease id: a second
     /// start of the same lease answers [`StartAck::Started`] again and books nothing
     /// more.
+    ///
+    /// A stopped lease id never starts again. A start that arrives after the stop of
+    /// its lease (late, duplicated or reordered) is refused with
+    /// [`RefusalCode::LeaseEnded`] and books nothing, and the lease then observes
+    /// `Absent`. A retry that needs a new attempt takes a new lease id.
     fn start(&mut self, spec: StartSpec) -> StartAck;
 
     /// Stops one lease and reads its state back. The answer never claims more than

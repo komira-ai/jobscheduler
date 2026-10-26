@@ -242,3 +242,31 @@ fn a_class_that_is_not_book_all_is_refused() {
     assert!(matches!(pool.start(whole), StartAck::Started { .. }));
     assert_eq!(pool.booked().len(), 1);
 }
+
+/// Asserts that a start of a stopped lease id is refused with `LeaseEnded`, books
+/// nothing and leaves the lease Absent, that a stop that arrives before the lease was
+/// ever started ends it the same way, and that a different lease still starts.
+#[test]
+fn a_stopped_lease_never_starts_again() {
+    let mut p = example();
+    let ended = LeaseId::new(1, 1);
+    p.start(spec(1, request("nvidia-a100", 1000)));
+    p.stop(&ended);
+    let late = p.start(spec(1, request("nvidia-a100", 1000)));
+    assert_eq!(late, StartAck::Refused(RefusalCode::LeaseEnded));
+    assert!(p.booked().is_empty());
+    assert_eq!(p.observe(&ended), Observed::Absent);
+
+    p.stop(&LeaseId::new(1, 2));
+    let early_stop = p.start(spec(2, request("nvidia-a100", 1000)));
+    assert_eq!(early_stop, StartAck::Refused(RefusalCode::LeaseEnded));
+    assert!(p.booked().is_empty());
+
+    let fresh = p.start(spec(3, request("nvidia-a100", 1000)));
+    assert_eq!(
+        fresh,
+        StartAck::Started {
+            host: host("gpu-01")
+        }
+    );
+}

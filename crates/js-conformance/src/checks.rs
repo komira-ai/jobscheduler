@@ -38,11 +38,15 @@ pub enum Check {
     /// A start that answers Unknown is found by observing the lease id, whether or not
     /// it landed, and the retry books exactly one host (design 5.6).
     StartUnknownThenRetry,
+    /// A start of a lease id that was stopped is refused with `LeaseEnded`, books
+    /// nothing and leaves the lease Absent, whether the stop followed a start or came
+    /// first.
+    StartAfterStopIsRefused,
 }
 
 impl Check {
     /// Every check, in the order [`crate::run`] runs them.
-    pub const ALL: [Check; 10] = [
+    pub const ALL: [Check; 11] = [
         Check::StartThenPresent,
         Check::StopThenAbsent,
         Check::UnknownDoesNotFree,
@@ -53,6 +57,7 @@ impl Check {
         Check::StartIsIdempotent,
         Check::NeverDoubleBooks,
         Check::StartUnknownThenRetry,
+        Check::StartAfterStopIsRefused,
     ];
 
     /// The start-contract refusal this check guards, or `None` for a check that reads a
@@ -68,7 +73,8 @@ impl Check {
             | Self::UnknownDoesNotFree
             | Self::StartIsIdempotent
             | Self::NeverDoubleBooks
-            | Self::StartUnknownThenRetry => None,
+            | Self::StartUnknownThenRetry
+            | Self::StartAfterStopIsRefused => None,
         }
     }
 
@@ -85,6 +91,7 @@ impl Check {
             Self::StartIsIdempotent => start_is_idempotent(subject),
             Self::NeverDoubleBooks => never_double_books(subject),
             Self::StartUnknownThenRetry => start_unknown_then_retry(subject),
+            Self::StartAfterStopIsRefused => start_after_stop_is_refused(subject),
         }
     }
 }
@@ -282,4 +289,29 @@ fn unknown_start_leg<S: Subject>(
     let after_lookup = s.booked();
     let retry = s.provider().start(spec(sequence));
     (first, seen, after_lookup, retry, s.booked())
+}
+
+/// Lease 1 starts, stops, and a start of it arrives again; lease 2 is stopped before
+/// any start of it and then a start of it arrives. Both late starts must be refused
+/// with `LeaseEnded`, both leases must read Absent, and the provider's table must hold
+/// nothing: neither the duplicate nor the reordered start may book a host.
+fn start_after_stop_is_refused<S: Subject>(mut s: S) -> Verdict {
+    s.provider().start(spec(1));
+    s.provider().stop(&lease(1));
+    let after_stop = s.provider().start(spec(1));
+    s.provider().stop(&lease(2));
+    let before_start = s.provider().start(spec(2));
+    let seen = (
+        s.provider().observe(&lease(1)),
+        s.provider().observe(&lease(2)),
+    );
+    let ended = StartAck::Refused(RefusalCode::LeaseEnded);
+    let observed = (after_stop, before_start, seen, s.booked());
+    let expected = (
+        ended.clone(),
+        ended,
+        (Observed::Absent, Observed::Absent),
+        held(&[]),
+    );
+    judge(observed, expected)
 }

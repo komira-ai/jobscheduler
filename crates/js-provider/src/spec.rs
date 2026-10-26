@@ -21,6 +21,9 @@ pub enum RefusalCode {
     NoFit,
     /// A host would fit, but every fitting host is booked.
     NoCapacity,
+    /// The lease id was stopped, and a stopped lease id never starts again: the start
+    /// is a late or duplicate one and books nothing.
+    LeaseEnded,
 }
 
 impl RefusalCode {
@@ -45,6 +48,7 @@ impl RefusalCode {
             Self::UnsupportedClass => "unsupported-class",
             Self::NoFit => "no-fit",
             Self::NoCapacity => "no-capacity",
+            Self::LeaseEnded => "lease-ended",
         }
     }
 }
@@ -200,9 +204,11 @@ mod tests {
             RefusalCode::UnsupportedClass,
             RefusalCode::NoFit,
             RefusalCode::NoCapacity,
+            RefusalCode::LeaseEnded,
         ];
         let names: std::collections::BTreeSet<_> = codes.iter().map(|c| c.as_str()).collect();
         assert_eq!(names.len(), codes.len());
         assert_eq!(RefusalCode::NoFit.as_str(), "no-fit");
+        assert_eq!(RefusalCode::LeaseEnded.as_str(), "lease-ended");
     }
 }
