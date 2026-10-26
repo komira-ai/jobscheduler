@@ -15,9 +15,13 @@
 //! coverage improves is required and is not a bypass. The table CI prints also shows each
 //! crate's percentages and gap to 100%, the project's target.
 //!
+//! The file of the same change is not a check on itself, so CI also compares it with the
+//! base branch's file ([`base`]): no count may rise, and a new crate enters at zero.
+//!
 //! Percentages are floored to hundredths ([`Percent`]), so one uncovered line in a
 //! large crate shows as 99.99% and a gap of 0.01%, never as a rounded-up 100.00%.
 
+pub mod base;
 pub mod baseline;
 pub mod lcov;
 pub mod ratchet;

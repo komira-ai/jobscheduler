@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod against_base;
 mod relative_root;
 mod unmeasured;
 
