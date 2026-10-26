@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use js_conformance::{Check, Report, Subject, Verdict, run};
 use js_pool_static::StaticPool;
-use js_provider::{Call, Provider};
+use js_provider::{Call, Provider, RefusalCode};
 use js_provider_fake::{Defect, FakeProvider};
 use js_types::{HostId, LeaseId, ProviderId};
 
@@ -86,8 +86,8 @@ fn the_fake_conforms() {
     assert_eq!(report.results.len(), Check::ALL.len());
 }
 
-/// Asserts that the static pool passes every check except the one it cannot take
-/// part in, which is reported as not applicable and not skipped silently.
+/// Asserts that the static pool passes every check except the two it cannot take
+/// part in, which are reported as not applicable and not skipped silently.
 #[test]
 fn the_static_pool_conforms() {
     let make = || {
@@ -96,7 +96,10 @@ fn the_static_pool_conforms() {
     };
     let report = run(make);
     assert!(report.failed().is_empty(), "{report:?}");
-    assert_eq!(report.not_applicable(), vec![Check::UnknownDoesNotFree]);
+    assert_eq!(
+        report.not_applicable(),
+        vec![Check::UnknownDoesNotFree, Check::StartUnknownThenRetry]
+    );
 }
 
 /// Asserts that a fake that frees a booking on an Unknown observation fails exactly
@@ -108,22 +111,23 @@ fn frees_on_unknown_is_caught() {
     assert!(report.not_applicable().is_empty());
 }
 
-/// Asserts that a fake that books a host twice fails exactly the double-booking check.
+/// Asserts that a fake that books a host twice fails the double-booking check, and the
+/// start-Unknown check, whose second lease it also books onto a taken host.
 #[test]
 fn double_booking_is_caught() {
     assert_eq!(
         broken(Defect::DoubleBooks).failed(),
-        vec![Check::NeverDoubleBooks]
+        vec![Check::NeverDoubleBooks, Check::StartUnknownThenRetry]
     );
 }
 
-/// Asserts that a fake that books again on a repeated start fails exactly the
-/// idempotence check.
+/// Asserts that a fake that books again on a repeated start fails the idempotence check,
+/// and the start-Unknown check, whose retry it also books again.
 #[test]
 fn non_idempotent_start_is_caught() {
     assert_eq!(
         broken(Defect::RestartBooksAgain).failed(),
-        vec![Check::StartIsIdempotent]
+        vec![Check::StartIsIdempotent, Check::StartUnknownThenRetry]
     );
 }
 
@@ -137,16 +141,43 @@ fn a_lying_stop_is_caught_by_the_state_hook() {
     assert!(matches!(verdict, Verdict::Failed(text) if text.contains("expected")));
 }
 
-/// Asserts that each of the three start-contract rules has its own check, so a rule
-/// without a check would be a missing entry in this list.
+/// Asserts that a fake whose retry of a landed Unknown start books a second host fails
+/// the start-Unknown check and nothing else, so that check reads the lookup by lease id
+/// that design 5.6 requires before a retry.
 #[test]
-fn every_start_contract_rule_has_a_check() {
-    let rules = [
-        Check::RefusesNonPositiveWallTime,
-        Check::RefusesReservedLabel,
-        Check::RefusesUnknownClass,
-    ];
-    for rule in rules {
-        assert!(Check::ALL.contains(&rule));
-    }
+fn a_retry_after_an_unknown_start_that_landed_is_caught() {
+    assert_eq!(
+        broken(Defect::ForgetsUnknownStart).failed(),
+        vec![Check::StartUnknownThenRetry]
+    );
+}
+
+/// Asserts that a fake that observes Absent for a started lease fails the
+/// start-then-present check, and the start-Unknown check that also reads the lookup.
+#[test]
+fn an_observation_that_misses_a_started_lease_is_caught() {
+    assert_eq!(
+        broken(Defect::ObservesAbsent).failed(),
+        vec![Check::StartThenPresent, Check::StartUnknownThenRetry]
+    );
+}
+
+/// Asserts that the refusal checks guard exactly the start-contract rules this slice
+/// models: the codes the checks guard are the codes of `RefusalCode::START_CONTRACT`,
+/// each once, so a rule without a check, or a check without a rule, fails here.
+#[test]
+fn the_refusal_checks_cover_the_start_contract() {
+    let mut guarded: Vec<_> = Check::ALL.iter().filter_map(Check::guards).collect();
+    let mut rules = RefusalCode::START_CONTRACT.to_vec();
+    guarded.sort();
+    rules.sort();
+    assert_eq!(guarded, rules);
+}
+
+/// Asserts that every check is run once, in the order of `Check::ALL`.
+#[test]
+fn the_report_lists_each_check_once_in_order() {
+    let report = run(|| fake(None));
+    let ran: Vec<_> = report.results.iter().map(|(check, _)| *check).collect();
+    assert_eq!(ran, Check::ALL.to_vec());
 }

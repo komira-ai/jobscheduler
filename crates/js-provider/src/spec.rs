@@ -24,6 +24,16 @@ pub enum RefusalCode {
 }
 
 impl RefusalCode {
+    /// The codes of the start-contract rules this slice models, one per rule that
+    /// `StartSpec::new` refuses with a code of its own: wall time, reserved label,
+    /// malformed label and unknown class. The conformance suite holds a check for each.
+    pub const START_CONTRACT: [RefusalCode; 4] = [
+        RefusalCode::WallTimeNotPositive,
+        RefusalCode::ReservedLabel,
+        RefusalCode::InvalidLabel,
+        RefusalCode::UnknownClass,
+    ];
+
     /// The code as a constant string.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -51,8 +61,9 @@ impl From<RequestError> for RefusalCode {
 
 /// Everything a provider needs to start one attempt, already checked.
 ///
-/// The only constructor, [`StartSpec::new`], runs the start contract of design 5.2,
-/// so a provider never sees a request that broke it.
+/// The only constructor, [`StartSpec::new`], runs the wall-time and reserved-label rules
+/// of the start contract of design 5.2 and the class checks, so a provider never sees a
+/// request that broke one of them. The fence and retry rules of 5.2 are not modelled yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartSpec {
     lease: LeaseId,

@@ -13,9 +13,12 @@
 //! silently skipped.
 //!
 //! The suite is shown able to fail by the broken fakes of `js-provider-fake`: each of
-//! the five checks that read provider behaviour has a defect that fails exactly that
-//! check (see this crate's tests). The three refusal checks guard `StartSpec::new`, which
-//! every provider shares, so they fail when a rule is dropped from it.
+//! the six checks that read provider behaviour has a defect that fails it (see this
+//! crate's tests); a defect fails every check that reads the thing it breaks, and the
+//! tests name them. The four `Refuses...` checks call no provider. They guard
+//! `StartSpec::new`, which every provider shares, and fail only when a rule is dropped
+//! from it or a provider lists the wrong classes. The
+//! rules themselves are unit-tested in `js-provider`.
 
 mod checks;
 

@@ -8,9 +8,13 @@
 //! leaves the process; they become async at the edge with the first provider that
 //! calls a network.
 //!
-//! The start contract of 5.2 lives in [`StartSpec::new`], the one constructor of the
-//! only value [`Provider::start`] accepts. A request that breaks a rule therefore
-//! cannot reach a provider, and a provider cannot relax a rule.
+//! The wall-time and reserved-label rules of the start contract of 5.2, and the class
+//! checks this slice adds to it, live in
+//! [`StartSpec::new`], the one constructor of the only value [`Provider::start`]
+//! accepts. A request that breaks one of them cannot reach a provider, and a provider
+//! cannot relax it. Two rules of 5.2 are not modelled yet: the fence must be stated, and
+//! retries are never passed to a provider. `Request` has no fence or retry field, so
+//! nothing checks either.
 //!
 //! Observed state follows 5.6: [`Observed::Present`] and [`Observed::Absent`] are
 //! answers, [`Observed::Unknown`] is the lack of one. Only `Absent` frees a booking

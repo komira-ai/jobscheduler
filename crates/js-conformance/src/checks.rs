@@ -7,8 +7,13 @@ use js_types::{HostId, LeaseId, ResourceClass};
 
 use crate::{Subject, Verdict, standard_request};
 
-/// One rule of the delegated contract. Each has a name in the suite's output and a
-/// defect in `js-provider-fake` that fails it alone.
+/// One rule of the delegated contract, with a name in the suite's output.
+///
+/// Six checks read a provider's behaviour, and each of those has a defect in
+/// `js-provider-fake` that makes it fail. The four `Refuses...` checks call no provider:
+/// they guard [`StartSpec::new`], which every provider shares, so only dropping a rule
+/// from it can fail them. The rules themselves are unit-tested in `js-provider`
+/// (`each_rule_has_its_code`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Check {
     /// A started lease is observed Present on the host the state shows.
@@ -21,26 +26,51 @@ pub enum Check {
     RefusesNonPositiveWallTime,
     /// A caller label under the reserved prefix is refused before the provider is called.
     RefusesReservedLabel,
+    /// A caller label with a malformed key or value is refused before the provider is
+    /// called.
+    RefusesInvalidLabel,
     /// A class the provider does not serve is refused before the provider is called.
     RefusesUnknownClass,
     /// A second start of the same lease books nothing more.
     StartIsIdempotent,
     /// No host is booked by two leases, and a full pool refuses.
     NeverDoubleBooks,
+    /// A start that answers Unknown is found by observing the lease id, whether or not
+    /// it landed, and the retry books exactly one host (design 5.6).
+    StartUnknownThenRetry,
 }
 
 impl Check {
     /// Every check, in the order [`crate::run`] runs them.
-    pub const ALL: [Check; 8] = [
+    pub const ALL: [Check; 10] = [
         Check::StartThenPresent,
         Check::StopThenAbsent,
         Check::UnknownDoesNotFree,
         Check::RefusesNonPositiveWallTime,
         Check::RefusesReservedLabel,
+        Check::RefusesInvalidLabel,
         Check::RefusesUnknownClass,
         Check::StartIsIdempotent,
         Check::NeverDoubleBooks,
+        Check::StartUnknownThenRetry,
     ];
+
+    /// The start-contract refusal this check guards, or `None` for a check that reads a
+    /// provider's behaviour.
+    pub fn guards(&self) -> Option<RefusalCode> {
+        match self {
+            Self::RefusesNonPositiveWallTime => Some(RefusalCode::WallTimeNotPositive),
+            Self::RefusesReservedLabel => Some(RefusalCode::ReservedLabel),
+            Self::RefusesInvalidLabel => Some(RefusalCode::InvalidLabel),
+            Self::RefusesUnknownClass => Some(RefusalCode::UnknownClass),
+            Self::StartThenPresent
+            | Self::StopThenAbsent
+            | Self::UnknownDoesNotFree
+            | Self::StartIsIdempotent
+            | Self::NeverDoubleBooks
+            | Self::StartUnknownThenRetry => None,
+        }
+    }
 
     /// Runs this check on a fresh subject.
     pub(crate) fn run<S: Subject>(&self, subject: S) -> Verdict {
@@ -50,9 +80,11 @@ impl Check {
             Self::UnknownDoesNotFree => unknown_does_not_free(subject),
             Self::RefusesNonPositiveWallTime => refuses_wall_time(subject),
             Self::RefusesReservedLabel => refuses_reserved_label(subject),
+            Self::RefusesInvalidLabel => refuses_invalid_label(subject),
             Self::RefusesUnknownClass => refuses_unknown_class(subject),
             Self::StartIsIdempotent => start_is_idempotent(subject),
             Self::NeverDoubleBooks => never_double_books(subject),
+            Self::StartUnknownThenRetry => start_unknown_then_retry(subject),
         }
     }
 }
@@ -148,6 +180,14 @@ fn refuses_reserved_label<S: Subject>(mut s: S) -> Verdict {
     refusal(&mut s, request, RefusalCode::ReservedLabel)
 }
 
+fn refuses_invalid_label<S: Subject>(mut s: S) -> Verdict {
+    let mut request = standard_request();
+    request
+        .labels
+        .insert("tenant".to_string(), "NOT VALID".to_string());
+    refusal(&mut s, request, RefusalCode::InvalidLabel)
+}
+
 fn refuses_unknown_class<S: Subject>(mut s: S) -> Verdict {
     let mut request = standard_request();
     request.class = js_types::ClassId::new("no-such-class").expect("constant id is valid");
@@ -155,7 +195,9 @@ fn refuses_unknown_class<S: Subject>(mut s: S) -> Verdict {
 }
 
 /// A request that breaks a start-contract rule never becomes a spec, so no provider
-/// call is possible; the state must also show nothing booked.
+/// call is possible. This guards `StartSpec::new` against the provider's class list;
+/// the booked state is empty because nothing was started, so no provider defect can
+/// fail it.
 fn refusal<S: Subject>(s: &mut S, request: js_types::Request, code: RefusalCode) -> Verdict {
     let known = s.provider().classes();
     let made = StartSpec::new(lease(1), request, &known).map(|_| ());
@@ -189,4 +231,55 @@ fn never_double_books<S: Subject>(mut s: S) -> Verdict {
             true,
         ),
     )
+}
+
+/// Lease 1 starts, answers Unknown and landed; lease 2 starts, answers Unknown and did
+/// not land. In both legs, observing the lease id must tell the two apart, and the
+/// retry must end with exactly one host booked for the lease.
+fn start_unknown_then_retry<S: Subject>(mut s: S) -> Verdict {
+    if !s.script_unknown(Call::Start, true) {
+        return Verdict::NotApplicable;
+    }
+    let landed = unknown_start_leg(&mut s, 1);
+    s.script_unknown(Call::Start, false);
+    let lost = unknown_start_leg(&mut s, 2);
+    let started = |name: &str| StartAck::Started { host: host(name) };
+    let present = Observed::Present { host: host("h1") };
+    let expected = (
+        (
+            StartAck::Unknown,
+            present,
+            held(&[("h1", 1)]),
+            started("h1"),
+            held(&[("h1", 1)]),
+        ),
+        (
+            StartAck::Unknown,
+            Observed::Absent,
+            held(&[("h1", 1)]),
+            started("h2"),
+            held(&[("h1", 1), ("h2", 2)]),
+        ),
+    );
+    judge((landed, lost), expected)
+}
+
+/// One start that was scripted Unknown, then the lookup by lease id, then the retry.
+/// Returns the first answer, the lookup, the state after it, the retry's answer and
+/// the state after the retry.
+fn unknown_start_leg<S: Subject>(
+    s: &mut S,
+    sequence: u64,
+) -> (
+    StartAck,
+    Observed,
+    BTreeMap<HostId, LeaseId>,
+    StartAck,
+    BTreeMap<HostId, LeaseId>,
+) {
+    let first = s.provider().start(spec(sequence));
+    let seen = s.provider().observe(&lease(sequence));
+    let after_lookup = s.booked();
+    let retry = s.provider().start(spec(sequence));
+    (first, seen, after_lookup, retry, s.booked())
 }

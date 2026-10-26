@@ -5,7 +5,7 @@
 //! Unknown with [`FakeProvider::script_unknown`] to see a timeout: the call answers
 //! `Unknown`, and the effect lands or not as scripted. Switch on a [`Defect`] to build
 //! a deliberately broken provider; the conformance suite must report exactly the
-//! rule that defect breaks (13.2), which is how the suite is shown able to fail.
+//! rules that defect breaks (13.2), which is how the suite is shown able to fail.
 //! [`FakeProvider::booked`] reads the host table directly, for conformance hooks.
 
 use std::collections::BTreeMap;
@@ -26,6 +26,11 @@ pub enum Defect {
     RestartBooksAgain,
     /// A stop leaves the host booked but reads back Absent.
     StopKeepsBooking,
+    /// A start that answered Unknown but landed is not found by the retry, which books
+    /// a second host instead of answering the lease's first one.
+    ForgetsUnknownStart,
+    /// An observation of a booked lease answers Absent.
+    ObservesAbsent,
 }
 
 #[derive(Debug)]
@@ -40,6 +45,7 @@ pub struct FakeProvider {
     id: ProviderId,
     hosts: BTreeMap<HostId, Host>,
     script: Vec<(Call, bool)>,
+    unacked: Vec<LeaseId>,
     defect: Option<Defect>,
 }
 
@@ -53,6 +59,7 @@ impl FakeProvider {
             id,
             hosts: hosts.collect(),
             script: Vec::new(),
+            unacked: Vec::new(),
             defect: None,
         }
     }
@@ -86,6 +93,17 @@ impl FakeProvider {
         Some(self.script.remove(at).1)
     }
 
+    /// Whether this retry of a start must ignore the lease's booking: the defect is on
+    /// and an earlier start of the lease answered Unknown. Consumes that memory.
+    fn forgets(&mut self, lease: &LeaseId) -> bool {
+        let before = self.unacked.len();
+        self.unacked.retain(|unacked| unacked != lease);
+        let was_unacked = self.unacked.len() != before;
+        [was_unacked, self.defect_is(Defect::ForgetsUnknownStart)]
+            .into_iter()
+            .all(|yes| yes)
+    }
+
     fn defect_is(&self, defect: Defect) -> bool {
         self.defect == Some(defect)
     }
@@ -115,7 +133,9 @@ impl FakeProvider {
 
     fn book(&mut self, spec: &StartSpec) -> StartAck {
         let repeats_booking = self.defect_is(Defect::RestartBooksAgain);
-        let already = self.holder(&spec.lease()).filter(|_| !repeats_booking);
+        let forgotten = self.forgets(&spec.lease());
+        let blind = [repeats_booking, forgotten].into_iter().any(|yes| yes);
+        let already = self.holder(&spec.lease()).filter(|_| !blind);
         if let Some(host) = already {
             return StartAck::Started { host };
         }
@@ -164,6 +184,7 @@ impl Provider for FakeProvider {
         };
         if landed {
             self.book(&spec);
+            self.unacked.push(spec.lease());
         }
         StartAck::Unknown
     }
@@ -180,7 +201,11 @@ impl Provider for FakeProvider {
 
     fn observe(&mut self, lease: &LeaseId) -> Observed {
         if self.take_script(Call::Observe).is_none() {
-            return self.read(lease);
+            let seen = self.read(lease);
+            return match self.defect_is(Defect::ObservesAbsent) {
+                true => Observed::Absent,
+                false => seen,
+            };
         }
         if self.defect_is(Defect::FreesOnUnknownObserve) {
             self.free(lease);

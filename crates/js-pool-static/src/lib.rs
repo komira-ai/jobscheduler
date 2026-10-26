@@ -2,7 +2,9 @@
 //! host at a time.
 //!
 //! The pool serves one class, `gpu-host` ([`js_types::ResourceClass::gpu_host`]),
-//! admitted `BookAll`: a lease holds a whole host, so nothing else runs on it. Its
+//! admitted `BookAll`: a lease holds a whole host, so nothing else runs on it. The pool
+//! refuses any other admission mode with `UnsupportedClass` (see
+//! [`StaticPool::with_classes`]) rather than leasing a whole host anyway. Its
 //! rules, in design terms:
 //!
 //! - **Fit (6.1).** A host fits when its shape offers at least the requested
