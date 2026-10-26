@@ -21,9 +21,11 @@ hex = "0.4.3"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.0"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
+toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
 
 # Every public item carries a doc comment; the lint job runs clippy with `-D warnings`,

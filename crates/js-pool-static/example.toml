@@ -1,0 +1,29 @@
+# One [[host]] table per machine the operator owns. A host's id is unique in the file.
+# `resources` lists dimensions by name; a name the scheduler does not know is an error.
+# `gpu_class` is required when gpus is above zero and refused otherwise.
+
+[[host]]
+id = "gpu-01"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+
+[host.capabilities]
+isa = "x86-64-v3"
+driver = "550"
+
+[[host]]
+id = "gpu-02"
+gpu_class = "nvidia-a100"
+
+[host.resources]
+cpu_millis = 64000
+memory_bytes = 549755813888
+gpus = 8
+
+[host.capabilities]
+isa = "x86-64-v3"
+driver = "550"

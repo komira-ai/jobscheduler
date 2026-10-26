@@ -407,16 +407,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "js-conformance"
-version = "0.0.1"
-dependencies = [
- "js-pool-static",
- "js-provider",
- "js-provider-fake",
- "js-types",
-]
-
-[[package]]
 name = "js-coverage"
 version = "0.0.1"
 dependencies = [
@@ -439,14 +429,6 @@ dependencies = [
 name = "js-provider"
 version = "0.0.1"
 dependencies = [
- "js-types",
-]
-
-[[package]]
-name = "js-provider-fake"
-version = "0.0.1"
-dependencies = [
- "js-provider",
  "js-types",
 ]
 
