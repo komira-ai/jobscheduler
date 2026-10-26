@@ -81,6 +81,26 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
+  # the release binary, checked against its SHA-256 before use.
+  deny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DENY_VERSION: 0.20.2
+      DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Install cargo-deny (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/EmbarkStudios/cargo-deny/releases/download/$DENY_VERSION/cargo-deny-$DENY_VERSION-x86_64-unknown-linux-musl.tar.gz" --sha256 "$DENY_SHA256" --out "$HOME/.cargo/bin/cargo-deny" --extract tar.gz --member "cargo-deny-$DENY_VERSION-x86_64-unknown-linux-musl/cargo-deny"
+      - run: cargo deny --version
+      # The arguments cargo-deny-action passed by default.
+      - run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
+
   # Line and branch coverage per crate, and the ratchet in `coverage-baseline`
   # (crates/js-coverage): a crate may miss no more lines or branches than its line in
   # that file records, and the file starts at 0 for every crate. Branch coverage
