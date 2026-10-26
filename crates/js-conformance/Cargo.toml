@@ -1,0 +1,19 @@
+[package]
+name = "js-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+js-types = { path = "../js-types" }
+js-provider = { path = "../js-provider" }
+
+[dev-dependencies]
+js-provider-fake = { path = "../js-provider-fake" }
+js-pool-static = { path = "../js-pool-static" }
+
+[lints]
+workspace = true

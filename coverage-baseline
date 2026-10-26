@@ -11,8 +11,10 @@
 # measured, so a new crate goes in only as `0 0` or `0 -`. The only hand edit is a `-`
 # that tighten refuses and says to put in by hand, in a reviewed pull request.
 # crate lines-missed branches-missed
-js-coverage         0      0
-js-pool-static      0      0
-js-provider         0      -
-js-types            0      0
-xtask               0      0
+js-conformance        0      0
+js-coverage           0      0
+js-pool-static        0      0
+js-provider           0      -
+js-provider-fake      0      0
+js-types              0      0
+xtask                 0      0
