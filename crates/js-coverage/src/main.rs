@@ -1,6 +1,7 @@
 //! `js-coverage`: prints per-crate line and branch coverage from an lcov tracefile and
 //! checks it against the `coverage-baseline` ratchet (`check`, also the default when
-//! no subcommand is named), or lowers that file to a measurement (`tighten`). See the
+//! no subcommand is named), lowers that file to a measurement (`tighten`), or compares
+//! it with the base branch's (`against-base`). See the
 //! library docs.
 //!
 //! Exit status: 0 when every crate passes (`check`) or the file now matches the
@@ -33,6 +34,9 @@ enum Command {
     Check(CheckArgs),
     /// Lower coverage-baseline to a measurement; refuses any rise.
     Tighten(TightenArgs),
+    /// Fail when a baseline file records a higher count than the base branch's, or a
+    /// new crate that does not enter at zero.
+    AgainstBase(AgainstBaseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -67,6 +71,16 @@ struct CheckArgs {
 }
 
 #[derive(Debug, Args)]
+struct AgainstBaseArgs {
+    /// The base branch's coverage-baseline, e.g. written by `git show`.
+    #[arg(long)]
+    base: PathBuf,
+    /// The change's coverage-baseline.
+    #[arg(long)]
+    head: PathBuf,
+}
+
+#[derive(Debug, Args)]
 struct TightenArgs {
     /// The measured baseline file the coverage job writes (`--write-baseline`) and
     /// uploads as `coverage-baseline.measured`.
@@ -91,6 +105,7 @@ fn main() -> ExitCode {
     let result = match (cli.command, cli.check) {
         (Some(Command::Check(args)), _) | (None, Some(args)) => check(&args),
         (Some(Command::Tighten(args)), _) => run_tighten(&args),
+        (Some(Command::AgainstBase(args)), _) => against_base(&args),
         (None, None) => Cli::command()
             .error(
                 clap::error::ErrorKind::MissingRequiredArgument,
@@ -233,6 +248,22 @@ fn tighten_command(args: &CheckArgs) -> String {
             arg(&args.root)
         ),
     }
+}
+
+/// Prints each way `--head` is looser than `--base`; returns whether there is none.
+fn against_base(args: &AgainstBaseArgs) -> Result<bool, Box<dyn Error>> {
+    let (_, base) = read_baseline(&args.base)?;
+    let (_, head) = read_baseline(&args.head)?;
+    let violations = js_coverage::base::compare(&base, &head);
+    for v in &violations {
+        println!("{v}");
+    }
+    if violations.is_empty() {
+        println!("coverage against base: PASS");
+    } else {
+        println!("coverage against base: FAIL");
+    }
+    Ok(violations.is_empty())
 }
 
 /// Lowers `--baseline` to the measurement; returns false (file untouched) on a refusal.
