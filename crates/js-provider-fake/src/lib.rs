@@ -48,6 +48,10 @@ pub enum Defect {
     /// A start of a lease that was stopped books a host again, as a late or duplicate
     /// start would.
     ResurrectsStoppedLease,
+    /// A start books a free host without checking that the host satisfies the request.
+    IgnoresShape,
+    /// A start of a class the fake lists but cannot lease books a whole host anyway.
+    LeasesUnsupportedClass,
 }
 
 #[derive(Debug)]
@@ -65,6 +69,7 @@ pub struct FakeProvider {
     unacked: Vec<LeaseId>,
     ended: BTreeSet<LeaseId>,
     rank: Rank,
+    unleasable: Vec<ResourceClass>,
     defect: Option<Defect>,
 }
 
@@ -81,6 +86,7 @@ impl FakeProvider {
             unacked: Vec::new(),
             ended: BTreeSet::new(),
             rank: Rank::default(),
+            unleasable: Vec::new(),
             defect: None,
         }
     }
@@ -94,6 +100,13 @@ impl FakeProvider {
     /// The same fake choosing among free fitting hosts by `rank`.
     pub fn with_rank(mut self, rank: Rank) -> Self {
         self.rank = rank;
+        self
+    }
+
+    /// The same fake also listing `class`, which it cannot lease: a start of it is refused
+    /// with `UnsupportedClass` and books nothing.
+    pub fn with_unleasable_class(mut self, class: ResourceClass) -> Self {
+        self.unleasable.push(class);
         self
     }
 
@@ -171,32 +184,40 @@ impl FakeProvider {
         if let Some(host) = already {
             return StartAck::Started { host };
         }
+        let lists_it = self.unleasable.contains(spec.class());
+        let refuses_it = !self.defect_is(Defect::LeasesUnsupportedClass);
+        if [lists_it, refuses_it].into_iter().all(|yes| yes) {
+            return StartAck::Refused(RefusalCode::UnsupportedClass);
+        }
         let wanted = spec.request();
         let double_books = self.defect_is(Defect::DoubleBooks);
+        let ignores_shape = self.defect_is(Defect::IgnoresShape);
+        let fits = |host: &Host| {
+            let satisfied = host
+                .shape
+                .satisfies(&wanted.resources, &wanted.capabilities);
+            [satisfied, ignores_shape].into_iter().any(|ok| ok)
+        };
         let open = |host: &Host| {
             [host.lease.is_none(), double_books]
                 .into_iter()
                 .any(|ok| ok)
         };
+        let fits_somewhere = self.hosts.values().any(&fits);
         let mut order: Vec<_> = self.hosts.iter_mut().collect();
         if self.rank == Rank::HighestHostFirst {
             order.reverse();
         }
-        let target = order.into_iter().find(|(_, host)| {
-            [
-                open(host),
-                host.shape
-                    .satisfies(&wanted.resources, &wanted.capabilities),
-            ]
+        let target = order
             .into_iter()
-            .all(|ok| ok)
-        });
+            .find(|(_, host)| [open(host), fits(host)].into_iter().all(|ok| ok));
         match target {
             Some((id, host)) => {
                 host.lease = Some(spec.lease());
                 StartAck::Started { host: id.clone() }
             }
-            None => StartAck::Refused(RefusalCode::NoCapacity),
+            None if fits_somewhere => StartAck::Refused(RefusalCode::NoCapacity),
+            None => StartAck::Refused(RefusalCode::NoFit),
         }
     }
 }
@@ -211,7 +232,9 @@ impl Provider for FakeProvider {
     }
 
     fn classes(&self) -> Vec<ResourceClass> {
-        vec![ResourceClass::gpu_host()]
+        let mut listed = vec![ResourceClass::gpu_host()];
+        listed.extend(self.unleasable.iter().cloned());
+        listed
     }
 
     fn start(&mut self, spec: StartSpec) -> StartAck {

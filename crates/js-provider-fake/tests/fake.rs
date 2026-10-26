@@ -62,7 +62,7 @@ fn books_idempotently_and_frees_on_stop() {
     );
     assert_eq!(
         f.start(spec(4, 99_000)),
-        StartAck::Refused(RefusalCode::NoCapacity)
+        StartAck::Refused(RefusalCode::NoFit)
     );
     assert_eq!(f.booked().len(), 2);
     assert_eq!(f.capacity().len(), 2);

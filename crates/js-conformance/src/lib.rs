@@ -1,31 +1,46 @@
 //! The provider conformance suite for the delegated flavour (design 13.2).
 //!
 //! A provider is put under test by implementing [`Subject`], then calling [`run`].
-//! The suite starts leases, stops them, scripts Unknown answers and checks each
-//! outcome against the provider's real state, which the subject reads through
-//! [`Subject::booked`] from its own tables and not through the provider's answers: a
-//! suite that asks the provider whether it did what it said cannot fail.
+//! The suite starts leases, stops them, scripts Unknown answers and compares what the
+//! provider answered with what its booking table shows. The hooks read the provider's
+//! booking table ([`Subject::booked`]), not its call answers, so a provider whose
+//! answers disagree with its own table fails. The table is not an independent witness:
+//! a provider whose table itself is wrong is caught only by the checks that compare it
+//! with the request (a request no host satisfies is refused and books nothing, a
+//! started lease sits on a host the request fits on, no host holds two leases, a
+//! stopped lease's host is free). An independent read, such as a cloud provider's API
+//! queried apart from its adapter (design 13.2), is a stronger hook that a provider
+//! with a cloud behind it should supply.
 //!
 //! Every check builds a fresh subject over [`standard_hosts`] and compares what it
-//! saw with what the contract says it must see. A check a provider cannot take part in
-//! (a static pool never answers Unknown, so it cannot be scripted to) reports
-//! [`Verdict::NotApplicable`] and is listed by [`Report::not_applicable`], never
-//! silently skipped.
+//! saw with what the contract says it must see. Where a lease lands is the provider's
+//! rank (design 6.1), so no check names a host: the checks read the placement from the
+//! table and assert a host the request fits on, and distinct hosts across concurrent
+//! leases. A check a provider cannot take part in (a static pool never answers Unknown,
+//! so it cannot be scripted to) reports [`Verdict::NotApplicable`] and is listed by
+//! [`Report::not_applicable`], never silently skipped.
 //!
 //! The suite is shown able to fail by the broken fakes of `js-provider-fake`: each of
-//! the six checks that read provider behaviour has a defect that fails it (see this
+//! the nine checks that read provider behaviour has a defect that fails it (see this
 //! crate's tests); a defect fails every check that reads the thing it breaks, and the
-//! tests name them. The four `Refuses...` checks call no provider. They guard
-//! `StartSpec::new`, which every provider shares, and fail only when a rule is dropped
-//! from it or a provider lists the wrong classes. The
-//! rules themselves are unit-tested in `js-provider`.
+//! tests name them. The four `Refuses...` checks guard `StartSpec::new`, which every
+//! provider shares, not providers: they read only the provider's class list, and fail
+//! only when a rule is dropped from `StartSpec::new` or a provider lists the wrong
+//! classes. The rules themselves are unit-tested in `js-provider`.
+//!
+//! # Follow-ups
+//!
+//! - Labels on created resources (design 13.2: labels are present on every created
+//!   resource) are not checked. The static pool and the fake create nothing, so the
+//!   rule has no resource to read; the check belongs with the first provider that
+//!   creates resources.
 
 mod checks;
 
 use std::collections::BTreeMap;
 
 use js_provider::{Call, Provider};
-use js_types::{Capabilities, ClassId, HostId, LeaseId, Request, Resources, Shape};
+use js_types::{Capabilities, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
 pub use checks::Check;
 
@@ -41,6 +56,11 @@ pub trait Subject {
     /// `landed` is set. Returns `false` when the provider cannot be made to answer
     /// Unknown, as a provider that owns its state and always knows.
     fn script_unknown(&mut self, call: Call, landed: bool) -> bool;
+
+    /// Makes the provider list `class` among its classes while it cannot lease it, as a
+    /// whole-host provider cannot lease a class that books by the GPU. Returns `false`
+    /// when the provider cannot be made to list such a class.
+    fn list_unleasable_class(&mut self, class: ResourceClass) -> bool;
 }
 
 /// What one check found.

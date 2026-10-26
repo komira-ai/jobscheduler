@@ -3,20 +3,22 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use js_provider::{Call, Observed, RefusalCode, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LeaseId, ResourceClass};
+use js_types::{Admission, HostId, LeaseId, ResourceClass, Resources};
 
 use crate::{Subject, Verdict, standard_hosts, standard_request};
 
 /// One rule of the delegated contract, with a name in the suite's output.
 ///
-/// Six checks read a provider's behaviour, and each of those has a defect in
-/// `js-provider-fake` that makes it fail. The four `Refuses...` checks call no provider:
-/// they guard [`StartSpec::new`], which every provider shares, so only dropping a rule
-/// from it can fail them. The rules themselves are unit-tested in `js-provider`
+/// Nine checks read a provider's behaviour, and each of those has a defect in
+/// `js-provider-fake` that makes it fail. The four `Refuses...` checks guard
+/// [`StartSpec::new`], which every provider shares, and not providers: they read only a
+/// provider's class list, so only dropping a rule from it (or listing the wrong classes)
+/// can fail them. The rules themselves are unit-tested in `js-provider`
 /// (`each_rule_has_its_code`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Check {
-    /// A started lease is observed Present on the host the state shows.
+    /// A started lease is observed Present on the host the table shows, and the request
+    /// fits that host.
     StartThenPresent,
     /// A stopped lease is observed Absent and its host is free in the state.
     StopThenAbsent,
@@ -42,11 +44,16 @@ pub enum Check {
     /// nothing and leaves the lease Absent, whether the stop followed a start or came
     /// first.
     StartAfterStopIsRefused,
+    /// A request no host satisfies is refused with `NoFit` and books nothing.
+    NoFitIsRefused,
+    /// A class the provider lists but cannot lease is refused with `UnsupportedClass`
+    /// and books nothing.
+    UnsupportedClassIsRefused,
 }
 
 impl Check {
     /// Every check, in the order [`crate::run`] runs them.
-    pub const ALL: [Check; 11] = [
+    pub const ALL: [Check; 13] = [
         Check::StartThenPresent,
         Check::StopThenAbsent,
         Check::UnknownDoesNotFree,
@@ -58,6 +65,8 @@ impl Check {
         Check::NeverDoubleBooks,
         Check::StartUnknownThenRetry,
         Check::StartAfterStopIsRefused,
+        Check::NoFitIsRefused,
+        Check::UnsupportedClassIsRefused,
     ];
 
     /// The start-contract refusal this check guards, or `None` for a check that reads a
@@ -74,7 +83,9 @@ impl Check {
             | Self::StartIsIdempotent
             | Self::NeverDoubleBooks
             | Self::StartUnknownThenRetry
-            | Self::StartAfterStopIsRefused => None,
+            | Self::StartAfterStopIsRefused
+            | Self::NoFitIsRefused
+            | Self::UnsupportedClassIsRefused => None,
         }
     }
 
@@ -92,6 +103,8 @@ impl Check {
             Self::NeverDoubleBooks => never_double_books(subject),
             Self::StartUnknownThenRetry => start_unknown_then_retry(subject),
             Self::StartAfterStopIsRefused => start_after_stop_is_refused(subject),
+            Self::NoFitIsRefused => no_fit_is_refused(subject),
+            Self::UnsupportedClassIsRefused => unsupported_class_is_refused(subject),
         }
     }
 }
@@ -162,6 +175,14 @@ fn spec(sequence: u64) -> StartSpec {
     let known = [ResourceClass::gpu_host()];
     StartSpec::new(lease(sequence), standard_request(), &known)
         .expect("the standard request meets the start contract")
+}
+
+/// A class admitted by `Book`, which gates only on GPUs: a provider that leases whole
+/// hosts, as the static pool does, cannot lease it.
+fn unleasable_class() -> ResourceClass {
+    let gate = std::collections::BTreeSet::from([js_types::Dim::Gpus]);
+    let id = js_types::ClassId::new("gpu-shared").expect("constant id is valid");
+    ResourceClass::new(id, Admission::Book(gate), 1)
 }
 
 /// One start answered `Started`, observed Present on the host the table shows, and
@@ -410,4 +431,38 @@ fn start_after_stop_is_refused<S: Subject>(mut s: S) -> Verdict {
         none_held(),
     );
     judge(observed, expected)
+}
+
+/// A request that asks for more CPU than any standard host offers. Every provider that
+/// lists hosts must refuse it with `NoFit`, which is not `NoCapacity`: no wait will
+/// ever make it fit (design 6.1). Nothing may be booked.
+fn no_fit_is_refused<S: Subject>(mut s: S) -> Verdict {
+    let mut request = standard_request();
+    let too_big = Resources::new(1_000_000, 1, 1, Some("conformance-gpu".to_string()));
+    request.resources = too_big.expect("constant resources are valid");
+    let known = [ResourceClass::gpu_host()];
+    let made = StartSpec::new(lease(1), request, &known).map(|spec| s.provider().start(spec));
+    let expected = (Ok(StartAck::Refused(RefusalCode::NoFit)), none_held());
+    judge((made, s.booked()), expected)
+}
+
+/// The subject lists a class it cannot lease; a request for it must be refused with
+/// `UnsupportedClass` and book nothing, and not be given a host the provider leases
+/// under other rules. A provider that does not list the class when asked fails: the
+/// request is then refused by `StartSpec::new` as an unknown class, not by the
+/// provider.
+fn unsupported_class_is_refused<S: Subject>(mut s: S) -> Verdict {
+    let class = unleasable_class();
+    if !s.list_unleasable_class(class.clone()) {
+        return Verdict::NotApplicable;
+    }
+    let mut request = standard_request();
+    request.class = class.id().clone();
+    let known = s.provider().classes();
+    let made = StartSpec::new(lease(1), request, &known).map(|spec| s.provider().start(spec));
+    let expected = (
+        Ok(StartAck::Refused(RefusalCode::UnsupportedClass)),
+        none_held(),
+    );
+    judge((made, s.booked()), expected)
 }

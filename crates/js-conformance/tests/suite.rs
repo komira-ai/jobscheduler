@@ -13,30 +13,49 @@ use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 enum Under {
     Fake(FakeProvider),
     Pool(StaticPool),
+    /// A fake that cannot be made to list an unleasable class.
+    Bare(FakeProvider),
 }
 
 impl Subject for Under {
     fn provider(&mut self) -> &mut dyn Provider {
         match self {
-            Self::Fake(fake) => fake,
+            Self::Fake(fake) | Self::Bare(fake) => fake,
             Self::Pool(pool) => pool,
         }
     }
 
     fn booked(&self) -> BTreeMap<HostId, LeaseId> {
         match self {
-            Self::Fake(fake) => fake.booked(),
+            Self::Fake(fake) | Self::Bare(fake) => fake.booked(),
             Self::Pool(pool) => pool.booked(),
         }
     }
 
     fn script_unknown(&mut self, call: Call, landed: bool) -> bool {
         match self {
-            Self::Fake(fake) => {
+            Self::Fake(fake) | Self::Bare(fake) => {
                 fake.script_unknown(call, landed);
                 true
             }
             Self::Pool(_) => false,
+        }
+    }
+
+    fn list_unleasable_class(&mut self, class: ResourceClass) -> bool {
+        match self {
+            Self::Fake(fake) => {
+                let kept = std::mem::replace(fake, placeholder());
+                *fake = kept.with_unleasable_class(class);
+                true
+            }
+            Self::Pool(pool) => {
+                let id = ProviderId::new("pool").unwrap();
+                let kept = std::mem::replace(pool, StaticPool::from_toml(id, POOL_CONFIG).unwrap());
+                *pool = kept.with_classes(vec![ResourceClass::gpu_host(), class]);
+                true
+            }
+            Self::Bare(_) => false,
         }
     }
 }
@@ -59,9 +78,13 @@ memory_bytes = 1073741824
 gpus = 1
 ";
 
-fn fake(defect: Option<Defect>) -> Under {
+fn placeholder() -> FakeProvider {
     let id = ProviderId::new("fake").unwrap();
-    let provider = FakeProvider::new(id, js_conformance::standard_hosts());
+    FakeProvider::new(id, js_conformance::standard_hosts())
+}
+
+fn fake(defect: Option<Defect>) -> Under {
+    let provider = placeholder();
     Under::Fake(match defect {
         Some(defect) => provider.with_defect(defect),
         None => provider,
@@ -280,6 +303,9 @@ impl Subject for Refuser {
     fn script_unknown(&mut self, _: Call, _: bool) -> bool {
         true
     }
+    fn list_unleasable_class(&mut self, _: ResourceClass) -> bool {
+        true
+    }
 }
 
 /// Asserts that a provider that refuses every start (and so never ends a lease with
@@ -298,6 +324,40 @@ fn a_provider_that_never_starts_anything_is_caught() {
             Check::NeverDoubleBooks,
             Check::StartUnknownThenRetry,
             Check::StartAfterStopIsRefused,
+            Check::NoFitIsRefused,
+            Check::UnsupportedClassIsRefused,
         ]
+    );
+}
+
+/// Asserts that a fake that books a host the request does not fit on fails the no-fit
+/// check and nothing else: every other check asks for a request that fits.
+#[test]
+fn a_provider_that_ignores_the_shape_is_caught() {
+    assert_eq!(
+        broken(Defect::IgnoresShape).failed(),
+        vec![Check::NoFitIsRefused]
+    );
+}
+
+/// Asserts that a fake that leases a class it lists as unleasable fails the
+/// unsupported-class check and nothing else: no other check lists such a class.
+#[test]
+fn leasing_an_unsupported_class_is_caught() {
+    assert_eq!(
+        broken(Defect::LeasesUnsupportedClass).failed(),
+        vec![Check::UnsupportedClassIsRefused]
+    );
+}
+
+/// Asserts that a subject that cannot list an unleasable class is reported as not
+/// applicable for that check and passes every other.
+#[test]
+fn a_subject_without_an_unleasable_class_is_not_applicable() {
+    let report = run(|| Under::Bare(placeholder()));
+    assert!(report.failed().is_empty(), "{report:?}");
+    assert_eq!(
+        report.not_applicable(),
+        vec![Check::UnsupportedClassIsRefused]
     );
 }
