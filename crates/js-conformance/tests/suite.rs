@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use js_conformance::{Check, Report, Subject, Verdict, run};
 use js_pool_static::StaticPool;
-use js_provider::{Call, Provider, RefusalCode};
-use js_provider_fake::{Defect, FakeProvider};
-use js_types::{HostId, LeaseId, ProviderId};
+use js_provider::{Call, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck};
+use js_provider_fake::{Defect, FakeProvider, Rank};
+use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 /// One subject type for both providers, so the generic suite is exercised under one
 /// instantiation that reaches every arm: the fake can be scripted, the pool cannot.
@@ -194,5 +194,110 @@ fn a_resurrected_lease_is_caught() {
     assert_eq!(
         broken(Defect::ResurrectsStoppedLease).failed(),
         vec![Check::StartAfterStopIsRefused]
+    );
+}
+
+/// Asserts that a conformant fake whose rank picks the highest host id first passes
+/// every check, so no check names a host: where a lease lands is the provider's rank
+/// (design 6.1), and the checks read it from the provider's booking table.
+#[test]
+fn a_provider_that_places_on_the_highest_host_first_conforms() {
+    let make = || {
+        let id = ProviderId::new("fake").unwrap();
+        let hosts = js_conformance::standard_hosts();
+        Under::Fake(FakeProvider::new(id, hosts).with_rank(Rank::HighestHostFirst))
+    };
+    let report = run(make);
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|(_, verdict)| *verdict == Verdict::Passed),
+        "{report:?}"
+    );
+}
+
+/// Asserts that the rank option is in force: the first lease lands on `h2`.
+#[test]
+fn the_highest_rank_option_places_on_h2_first() {
+    let mut subject = {
+        let id = ProviderId::new("fake").unwrap();
+        let hosts = js_conformance::standard_hosts();
+        FakeProvider::new(id, hosts).with_rank(Rank::HighestHostFirst)
+    };
+    subject.start(
+        StartSpec::new(
+            LeaseId::new(1, 1),
+            js_conformance::standard_request(),
+            &[ResourceClass::gpu_host()],
+        )
+        .unwrap(),
+    );
+    let placed: Vec<_> = subject
+        .booked()
+        .into_keys()
+        .map(|h| h.as_str().to_string())
+        .collect();
+    assert_eq!(placed, vec!["h2".to_string()]);
+}
+
+/// A provider that refuses every start and books nothing.
+struct Refuser;
+
+impl Provider for Refuser {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("refuser").unwrap()
+    }
+    fn flavour(&self) -> js_provider::Flavour {
+        js_provider::Flavour::Delegated
+    }
+    fn classes(&self) -> Vec<ResourceClass> {
+        vec![ResourceClass::gpu_host()]
+    }
+    fn start(&mut self, _: StartSpec) -> StartAck {
+        StartAck::Refused(RefusalCode::NoCapacity)
+    }
+    fn stop(&mut self, _: &LeaseId) -> StopAck {
+        StopAck::Stopped {
+            read_back: Observed::Absent,
+        }
+    }
+    fn observe(&mut self, _: &LeaseId) -> Observed {
+        Observed::Absent
+    }
+    fn capacity(&self) -> Vec<js_provider::HostCapacity> {
+        Vec::new()
+    }
+}
+
+impl Subject for Refuser {
+    fn provider(&mut self) -> &mut dyn Provider {
+        self
+    }
+    fn booked(&self) -> BTreeMap<HostId, LeaseId> {
+        BTreeMap::new()
+    }
+    fn script_unknown(&mut self, _: Call, _: bool) -> bool {
+        true
+    }
+}
+
+/// Asserts that a provider that refuses every start (and so never ends a lease with
+/// `LeaseEnded`) fails each check that expects a
+/// lease to start, so a provider booking nothing cannot pass by agreeing with an empty
+/// table.
+#[test]
+fn a_provider_that_never_starts_anything_is_caught() {
+    let report = run(|| Refuser);
+    assert_eq!(
+        report.failed(),
+        vec![
+            Check::StartThenPresent,
+            Check::UnknownDoesNotFree,
+            Check::StartIsIdempotent,
+            Check::NeverDoubleBooks,
+            Check::StartUnknownThenRetry,
+            Check::StartAfterStopIsRefused,
+        ]
     );
 }

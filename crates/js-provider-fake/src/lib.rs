@@ -18,6 +18,17 @@ use js_provider::{
 };
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
 
+/// Which free fitting host the fake picks first (design 6.1: rank is the provider's).
+/// An option, not a defect: both orders are conformant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rank {
+    /// The lowest host id.
+    #[default]
+    LowestHostFirst,
+    /// The highest host id.
+    HighestHostFirst,
+}
+
 /// A deliberate fault, for showing the conformance suite can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Defect {
@@ -53,6 +64,7 @@ pub struct FakeProvider {
     script: Vec<(Call, bool)>,
     unacked: Vec<LeaseId>,
     ended: BTreeSet<LeaseId>,
+    rank: Rank,
     defect: Option<Defect>,
 }
 
@@ -68,6 +80,7 @@ impl FakeProvider {
             script: Vec::new(),
             unacked: Vec::new(),
             ended: BTreeSet::new(),
+            rank: Rank::default(),
             defect: None,
         }
     }
@@ -75,6 +88,12 @@ impl FakeProvider {
     /// The same fake with a defect switched on.
     pub fn with_defect(mut self, defect: Defect) -> Self {
         self.defect = Some(defect);
+        self
+    }
+
+    /// The same fake choosing among free fitting hosts by `rank`.
+    pub fn with_rank(mut self, rank: Rank) -> Self {
+        self.rank = rank;
         self
     }
 
@@ -159,7 +178,11 @@ impl FakeProvider {
                 .into_iter()
                 .any(|ok| ok)
         };
-        let target = self.hosts.iter_mut().find(|(_, host)| {
+        let mut order: Vec<_> = self.hosts.iter_mut().collect();
+        if self.rank == Rank::HighestHostFirst {
+            order.reverse();
+        }
+        let target = order.into_iter().find(|(_, host)| {
             [
                 open(host),
                 host.shape
