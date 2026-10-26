@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/komira-ai/jobscheduler"
+publish = false
+
+# Every external dependency is declared here once and used from a member as
+# `name.workspace = true` (members add the features they need). A dependency enters
+# Cargo.lock only when a member first uses it.
+[workspace.dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+hex = "0.4.3"
+# Test certificates only.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+sha2 = "0.11.0"
+tar = { version = "0.4.46", default-features = false }
+thiserror = "2.0.21"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
+
+# Every public item carries a doc comment; the lint job runs clippy with `-D warnings`,
+# so a missing one fails the build.
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+disallowed_methods = "allow"
+disallowed_types = "allow"
+
+# Dev and test builds: a test binary with full debug info is large and a target
+# directory holds many of them. Line tables keep panic backtraces and profilers at
+# file:line. `test` inherits `dev`; it is spelled out so the two cannot drift.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
