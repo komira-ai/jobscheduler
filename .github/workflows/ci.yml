@@ -156,13 +156,20 @@ jobs:
         run: cargo "+$COVERAGE_TOOLCHAIN" run -p js-coverage --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --baseline coverage-baseline --write-baseline target/coverage/coverage-baseline.measured --summary-file "$GITHUB_STEP_SUMMARY" --run-id "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --artifact coverage
       # A pull request may not raise any count above the base branch's file, and a new
       # crate enters at zero (the table above only compares with this change's own
-      # file). A push to main has no base.
+      # file). A push to main has no base. A base branch that exists but has no file yet
+      # (it predates this gate) is an empty baseline: every crate is new and enters at
+      # zero. A base ref that cannot be read fails the step.
       - name: Compare with the base branch
         if: ${{ github.event_name == 'pull_request' }}
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          git show "origin/$BASE_REF:coverage-baseline" > target/coverage/base-baseline
+          git rev-parse --verify --quiet "origin/$BASE_REF^{commit}" > /dev/null
+          if git cat-file -e "origin/$BASE_REF:coverage-baseline" 2> /dev/null; then
+            git show "origin/$BASE_REF:coverage-baseline" > target/coverage/base-baseline
+          else
+            : > target/coverage/base-baseline
+          fi
           cargo "+$COVERAGE_TOOLCHAIN" run -q -p js-coverage --locked -- against-base --base target/coverage/base-baseline --head coverage-baseline
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
