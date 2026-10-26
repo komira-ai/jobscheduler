@@ -20,7 +20,7 @@ These are rules the project already follows. The design cites them by tag.
 | R3 | Formats change additively only: new protobuf fields, old binaries skip what they do not know; no new required fields, no raises, no finalize steps. |
 | R4 | Configuration is flags, not environment variables. |
 | R5 | kbf and jobscheduler are public repositories: no internal names, no people, no internal plans in code, docs, commits or PR text. |
-| R6 | Every crate holds 99% line and 99% branch coverage in kbf CI, or a recorded floor that may only rise (`coverage-floors`). |
+| R6 | In kbf CI every crate holds 99% line and 99% branch coverage, or a recorded floor that may only rise (`coverage-floors`). In this repository's CI the rule is stricter: every crate has zero uncovered lines and branches, recorded in `coverage-baseline` (the floors file here); no count may rise against the base branch, and a new crate enters at zero. |
 | R7 | Cloud spend, uploads and deploys happen only on an explicit go from the project owner for that action. |
 
 ## 1. Summary
@@ -618,8 +618,8 @@ variants, `Answer`). Splitting it into two modules with re-exports is step 3, be
 ### 10.4 How kbf keeps working at every step
 1. Each PR leaves kbf as the sole implementer of any new trait.
 2. The gate for each PR from step 3 on is: the golden trace file (step 0) is byte-identical; the golden corpus (step 1) decodes and
-   re-encodes byte-identical; per-crate line and branch coverage is stated old and new, not lower (R6), and a moved crate passes 99% with
-   its own tests only; the farm build shows no local actions. A change to a trace line's format or to a Debug output is a step 0 change,
+   re-encodes byte-identical; per-crate line and branch coverage is stated old and new, not lower (R6), and a moved crate passes kbf's 99%
+   with its own tests only (zero once it is in this repository, 13.6); the farm build shows no local actions. A change to a trace line's format or to a Debug output is a step 0 change,
    not an extraction side effect.
 3. A wire change is optional-field only. The cross-version tests (`crates/kbf-integration-test/tests/cross_version.rs`) run a matrix:
    {old, new} daemon against {old, new} frontend; two frontends of different versions sharing one store, with a daemon reconnecting
@@ -772,12 +772,15 @@ core already takes time as input (`Input{now, event}`), so the core needs no cha
 counts explicit events (leases started, results acknowledged, zero unacknowledged) and asserts no elapsed time.
 
 ### 13.6 Coverage
-(R6.) Each new crate holds 99% lines and branches. The gate counts a generic by its best single instantiation, so every branch of a
-generic body must be hit by one instantiation: the trivial test type gets the full suite, or arm-bearing bodies are made non-generic
-helpers. A second instantiation is not a substitute. Each move step lists the destination crate's own tests that carry its 99% and moves
-the floor entries (`coverage-floors`) in the same PR, recording old and new per crate; `js-sched` must pass 99% with only its own tests,
-not those of `kbf-sim` or `kbf-sim-cell` (its generic code is exercised mostly from those today, so kbf-sched's floor drops and
-js-sched's is seeded). Test target names must not collide with files that tests write under `target/`. A bug fix ships with a test that
+(R6.) A crate in this repository has zero uncovered lines and branches, and a crate still in kbf holds kbf's 99% or its recorded floor.
+The gate counts a generic by its best single instantiation, and a function compiled into several test binaries by its best-covered copy,
+so every branch of a body must be hit by one instantiation in one test binary: the trivial test type gets the full suite, or
+arm-bearing bodies are made non-generic helpers. A second instantiation is not a substitute. Until the repository split (step 22) the
+`js-*` crates build in kbf's workspace under kbf's rule: each move step lists the destination crate's own tests that carry its 99% and
+moves the floor entries (`coverage-floors`) in the same PR, recording old and new per crate. At the split each crate enters this
+repository's `coverage-baseline` at zero, so it is brought to zero uncovered lines and branches with its own tests before step 22.
+`js-sched` must get there with only its own tests, not those of `kbf-sim` or `kbf-sim-cell` (its generic code is exercised mostly from
+those today), so tests move with it or are written first. Test target names must not collide with files that tests write under `target/`. A bug fix ships with a test that
 failed before it.
 
 ### 13.7 Persisted and wire compatibility
@@ -858,7 +861,7 @@ dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector wi
     switch; the same seeded scenario run through the real daemon on the fake runtime yields the same event trace as the v1 path; a farm
     soak counts explicit events with zero unacknowledged results and asserts no elapsed time.
 22. Repository split, after Phase C and as a mechanical move: create the jobscheduler repository with history-preserving copies; kbf pins
-    it by revision; the layering test becomes a cross-repository dependency check; coverage floors are re-seeded per crate; the
+    it by revision; the layering test becomes a cross-repository dependency check; each crate enters `coverage-baseline` at zero (R6); the
     public-repo lint runs on the new repository. *Proves:* golden traces and corpus unchanged.
 
 **Phase D. New capability.**
