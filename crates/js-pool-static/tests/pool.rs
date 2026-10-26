@@ -215,3 +215,30 @@ fn config_file_loads_and_missing_file_is_refused() {
     assert!(matches!(err, ConfigError::Read { .. }));
     assert!(err.to_string().contains("absent.toml"));
 }
+
+/// A class admitted by `Book` (it gates only on GPUs), which a static pool does not lease.
+fn shared_class() -> ResourceClass {
+    let gate = std::collections::BTreeSet::from([js_types::Dim::Gpus]);
+    let id = ClassId::new("gpu-shared").unwrap();
+    ResourceClass::new(id, Admission::Book(gate), 1)
+}
+
+/// Asserts that a class admitted by `Book` is refused as unsupported and books
+/// nothing, while a `BookAll` class of the same pool still gets a whole host, so a
+/// class added as data never silently receives whole-host semantics.
+#[test]
+fn a_class_that_is_not_book_all_is_refused() {
+    let mut pool = example().with_classes(vec![ResourceClass::gpu_host(), shared_class()]);
+    let known = [ResourceClass::gpu_host(), shared_class()];
+    let mut shared = request("nvidia-a100", 1000);
+    shared.class = shared_class().id().clone();
+    let shared = StartSpec::new(LeaseId::new(1, 1), shared, &known).unwrap();
+    assert_eq!(
+        pool.start(shared),
+        StartAck::Refused(RefusalCode::UnsupportedClass)
+    );
+    assert!(pool.booked().is_empty());
+    let whole = StartSpec::new(LeaseId::new(1, 2), request("nvidia-a100", 1000), &known).unwrap();
+    assert!(matches!(pool.start(whole), StartAck::Started { .. }));
+    assert_eq!(pool.booked().len(), 1);
+}
