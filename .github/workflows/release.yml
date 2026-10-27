@@ -71,6 +71,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # js does not build for macOS yet: js-cli draws its run label with rustix getrandom,
+        # which exists only on Linux. Add aarch64-apple-darwin here once it does.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
           # Linux host, whatever its libc. rustls links ring, which compiles C, hence
@@ -78,14 +80,9 @@ jobs:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
             builds: js-lease-server:js-lease-server js-cli:js
-          # The client for macOS machines (the server is Linux only).
-          - target: aarch64-apple-darwin
-            runner: macos-15
-            builds: js-cli:js
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.version.outputs.version }}
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -133,8 +130,7 @@ jobs:
               done
               ;;
           esac
-          # The client runs on the build host for macOS; the server runs here for Linux.
-          # Both answer --version.
+          # Both binaries run on the build host and answer --version.
           for entry in $BUILDS; do
             bin="${entry##*:}"
             "target/$TARGET/release/$bin" --version
@@ -166,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"

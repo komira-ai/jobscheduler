@@ -25,12 +25,11 @@ For version `X.Y.Z`:
 |---|---|
 | `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary and `LICENSE` |
 | `js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE` |
-| `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary and `LICENSE` (macOS on Apple silicon, built for macOS 14 or newer) |
-| `SHA256SUMS` | SHA-256 of the three archives |
+| `SHA256SUMS` | SHA-256 of the two archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; no crate code changes were needed. The server is not built for macOS.
+The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; no crate code changes were needed. There is no macOS asset yet: `js` does not build for macOS because `js-cli` draws its run label with the Linux-only `getrandom` of rustix. Add `aarch64-apple-darwin` to the build matrix when it does.
 
 ## Downloading and verifying
 
@@ -38,10 +37,10 @@ Needs the GitHub CLI (`gh`), signed in.
 
 ```sh
 gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_64-unknown-linux-musl.tar.gz' -p SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS      # on macOS: shasum -a 256 -c --ignore-missing SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS     
 gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler
 ```
 
-For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` or `-p 'js-[0-9]*-aarch64-apple-darwin.tar.gz'` instead (`js-[0-9]*` keeps the server archive, whose name starts with `js-lease-server-`, out of the match).
+For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz'` instead (`js-[0-9]*` keeps the server archive, whose name starts with `js-lease-server-`, out of the match).
 
 The checksum check proves the download is intact; the attestation check proves the file was built from this repository by the `release` workflow. To pin the check to this workflow and tag, add `--signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z`.
