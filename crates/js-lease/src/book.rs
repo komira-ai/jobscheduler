@@ -184,11 +184,14 @@ impl Book {
                 return Err(store::corrupt(&path, format!("lease {id} is listed twice")));
             }
         }
+        let term = document.term.checked_add(1);
+        let term = term.filter(|term| *term <= store::LARGEST);
+        let term = term.ok_or_else(|| OpenError::TermExhausted { path: path.clone() })?;
         Ok(Self {
             settings,
             path,
             _lock: lock,
-            term: document.term.saturating_add(1),
+            term,
             next_sequence: document.next_sequence.max(1),
             leases,
             version: document.version,
@@ -221,11 +224,15 @@ impl Book {
         self.settings.grant(asked)
     }
 
-    /// The next lease id of this boot.
-    pub(crate) fn next_id(&mut self) -> LeaseId {
+    /// The next lease id of this boot; `None` when the sequence after it could not be
+    /// stored (the file holds integers up to [`store::LARGEST`]), in which case nothing
+    /// changes.
+    pub(crate) fn next_id(&mut self) -> Option<LeaseId> {
+        let after = self.next_sequence.checked_add(1);
+        let after = after.filter(|after| *after <= store::LARGEST)?;
         let id = LeaseId::new(self.term, self.next_sequence);
-        self.next_sequence += 1;
-        id
+        self.next_sequence = after;
+        Some(id)
     }
 
     /// Records a lease before the provider is told to start it, and returns the record.

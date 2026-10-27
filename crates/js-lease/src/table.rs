@@ -68,7 +68,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     ) -> Result<Lease, AcquireError> {
         let ttl = self.book.grant(ttl).ok_or(AcquireError::TtlNotPositive)?;
         let now = self.clock.now();
-        let id = self.book.next_id();
+        let id = self.book.next_id().ok_or(AcquireError::IdsExhausted)?;
         let known = self.provider.classes();
         let spec = StartSpec::new(id, request, &known).map_err(AcquireError::Refused)?;
         let record = self.book.insert_pending(&spec, now, ttl);

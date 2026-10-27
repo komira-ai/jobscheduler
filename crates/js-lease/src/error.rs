@@ -63,6 +63,13 @@ pub enum OpenError {
         /// What was wrong.
         reason: String,
     },
+    /// The file's term is the largest the file can hold, so this boot cannot take the
+    /// next one and no id of it could be told apart from an earlier boot's.
+    #[error("lease file {}: the term cannot advance: the ids of this file are used up", path.display())]
+    TermExhausted {
+        /// The file.
+        path: PathBuf,
+    },
     /// The file could not be written after loading.
     #[error(transparent)]
     Save(#[from] SaveError),
@@ -74,6 +81,10 @@ pub enum AcquireError {
     /// The ttl was zero.
     #[error("the ttl must be positive")]
     TtlNotPositive,
+    /// The sequence has reached the largest value the file can hold, so no further id
+    /// can be issued. Nothing was recorded and the provider was not called.
+    #[error("lease ids are used up: the next sequence cannot be stored")]
+    IdsExhausted,
     /// The request or the provider was refused, with a plain constant code.
     #[error("the start was refused: {}", .0.as_str())]
     Refused(RefusalCode),

@@ -16,6 +16,11 @@ use crate::state::LeaseState;
 /// that is higher, so an older build in between does not destroy a later one's data.
 pub(crate) const FORMAT_VERSION: u32 = 1;
 
+/// The largest integer a TOML file holds (`i64::MAX`). A term or a sequence above it
+/// cannot be written, so the last id of a term or of the sequence is the one whose
+/// successor is this value.
+pub(crate) const LARGEST: u64 = i64::MAX.unsigned_abs();
+
 /// The whole file.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Document {

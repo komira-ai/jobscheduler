@@ -212,6 +212,10 @@ fn messages_are_stable() {
         "lease 2-3 is pending: the provider did not answer the start"
     );
     assert_eq!(
+        AcquireError::IdsExhausted.to_string(),
+        "lease ids are used up: the next sequence cannot be stored"
+    );
+    assert_eq!(
         ReleaseError::Unknown(id).to_string(),
         "lease 2-3 is not known"
     );

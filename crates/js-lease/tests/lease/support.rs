@@ -35,6 +35,7 @@ impl Scratch {
     }
 
     pub fn clear(&self) {
+        let _ = fs::remove_dir(self.dir.join("leases.toml.tmp"));
         for name in ["leases.toml", "leases.toml.tmp", "leases.toml.lock"] {
             let _ = fs::remove_file(self.dir.join(name));
         }

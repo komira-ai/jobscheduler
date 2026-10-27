@@ -4,6 +4,7 @@
 mod acquire;
 mod crash;
 mod expiry;
+mod ids;
 mod persistence;
 mod renew_release;
 mod support;
