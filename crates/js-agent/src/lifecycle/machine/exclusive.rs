@@ -71,12 +71,19 @@ impl Lifecycle {
     }
 
     /// Follows the `exclusive` of a reply: a lease that is not the one held starts a new
-    /// hold, not yet ready; none ends it. The first reply after a restart is the exception:
-    /// a lease that a run taken over at start belongs to is ready at once, since the agent
-    /// only starts a run of the lease after it found the host quiet, and the consumer is
-    /// using the host.
+    /// hold, not yet ready; none ends it. The first reply after a restart that names a lease
+    /// is the exception: a lease that a run taken over at start belongs to is ready at
+    /// once, since the agent only starts a run of the lease after it found the host quiet,
+    /// and the consumer is using the host. The adopted leases are consumed by that reply,
+    /// not by an earlier one that names none: a reply and a grant may cross, and the grant
+    /// that follows a reply without `exclusive` is still the restart's. (With no adopted
+    /// run a restart prepares again on a quiet host, which costs one quiet check.)
     pub(super) fn follow(&mut self, lease: Option<&str>) {
-        let adopted = mem::take(&mut self.adopted_leases);
+        let adopted = if lease.is_some() {
+            mem::take(&mut self.adopted_leases)
+        } else {
+            Vec::new()
+        };
         let same = self
             .exclusive()
             .zip(lease)

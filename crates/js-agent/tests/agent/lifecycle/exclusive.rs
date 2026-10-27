@@ -447,14 +447,30 @@ fn a_restart_with_the_runs_of_another_lease_prepares_as_usual() {
     assert_eq!(prepare(&mut h).0, Quiet::Busy);
 }
 
-/// Asserts that the proof is of the first reply only: a lease granted later, after the
-/// restart, is prepared for even though a run of that lease is held. It catches adopted
-/// leases that stay trusted for the life of the process.
+/// Asserts that a first reply naming no lease does not spend the proof: the grant that
+/// follows it names the adopted lease, the hold starts ready, the consumer's start is
+/// admitted and nothing is refused. It catches adopted leases dropped by a reply that
+/// names none, which loses the ready mark when a reply and a grant cross.
 #[test]
-fn the_restart_rule_applies_to_the_first_reply_only() {
+fn a_reply_without_exclusive_keeps_the_restart_proof() {
+    let mut h = Harness::new("ex-restart-crossed");
+    h.start(of(LEASE, "a"));
+    h.restart().unwrap();
+    h.life.apply(&reply(Vec::new()));
+    let events = h.life.apply(&granting(LEASE, vec![start(of(LEASE, "b"))]));
+    assert_eq!(names(&events), ["started b"]);
+    assert_eq!(prepare(&mut h).0, Quiet::Ready);
+}
+
+/// Asserts that the proof is spent by the first reply that names a lease: the lease
+/// ends, is granted again later, and is prepared for although a run of it is held. It
+/// catches adopted leases that stay trusted for the life of the process.
+#[test]
+fn the_restart_rule_applies_to_the_first_named_lease_only() {
     let mut h = Harness::new("ex-restart-first");
     h.start(of(LEASE, "a"));
     h.restart().unwrap();
+    h.life.apply(&granting(LEASE, Vec::new()));
     h.life.apply(&reply(Vec::new()));
     h.life.apply(&granting(LEASE, Vec::new()));
     assert_eq!(prepare(&mut h).0, Quiet::Busy);
