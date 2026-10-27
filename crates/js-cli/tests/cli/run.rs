@@ -13,8 +13,8 @@ use js_provider::Call;
 
 use crate::procs::{assert_reaped, fifo, path_str, secs};
 use crate::support::{
-    EndsRun, FixedClock, Harness, Manual, Never, Outcome, Scratch, T0, acquire_words, against,
-    http, run_words, sequence, services,
+    EndsRun, FixedClock, Harness, Manual, Never, Outcome, Scratch, T0, TOKEN, acquire_words,
+    against, http, run_words, sequence, services,
 };
 
 /// Runs `lease run` with `extra` flags and `command`, with a waiter nobody steps.
@@ -39,6 +39,30 @@ fn the_command_gets_the_lease_in_its_environment() {
     );
     assert_eq!(fs::read_to_string(file).unwrap(), "1-1 gpu-01\n");
     assert!(h.listed().is_empty());
+}
+
+/// Asserts that the token reaches the command neither in its environment nor as an open
+/// file: the environment the command dumps does not contain the token string, and no
+/// descriptor it holds (the links of `/proc/self/fd`) points at the token file.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_token_does_not_reach_the_command() {
+    let h = Harness::new("run_token");
+    let (env, fds) = (h.scratch.path("environment"), h.scratch.path("descriptors"));
+    let script = r#"env > "$0"; ls -l /proc/self/fd > "$1""#;
+    let command = ["sh", "-c", script, path_str(&env), path_str(&fds)];
+    let got = run_idle(&h, &[], &command);
+    assert_eq!(got.code, 0, "{}", got.err);
+    let environment = fs::read_to_string(&env).unwrap();
+    assert!(environment.contains("JS_LEASE_ID=1-1"), "{environment}");
+    assert!(!environment.contains(TOKEN), "{environment}");
+    let descriptors = fs::read_to_string(&fds).unwrap();
+    assert!(descriptors.contains("->"), "{descriptors}");
+    assert!(!descriptors.contains(TOKEN), "{descriptors}");
+    assert!(
+        !descriptors.contains(path_str(&h.js.token_file)),
+        "{descriptors}"
+    );
 }
 
 /// Asserts that the held lease is printed as JSON on stderr with `--json`.
