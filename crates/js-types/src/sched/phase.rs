@@ -13,7 +13,7 @@ pub enum NodePhase {
     /// It switches the GUI session to the user of this whole-machine lease, which it
     /// holds, then runs the lease's action there. The switch restarts the daemon: the
     /// scheduler keeps the lease while the worker is silent for up to its session
-    /// switch grace (`kbf_sched::fence::SESSION_SWITCH_GRACE`), and sends its `Start`
+    /// switch grace (a fence setting of the scheduler core), and sends its `Start`
     /// again to the session that names it after the restart.
     Preparing(LeaseId),
     /// It switches the session back after this whole-machine lease's action ended, or

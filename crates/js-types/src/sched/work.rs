@@ -56,13 +56,13 @@ impl fmt::Display for WorkerId {
 ///
 /// Both parts are plain text, so the scheduler, the control log and the durable rows
 /// that name work need nothing from the code that builds it. For a build the class is
-/// the REAPI instance name and the dedup text is the action digest's text form
-/// (`<lowercase hex>/<size>`): `kbf_types::ActionKey` converts to and from a `WorkKey`
-/// (`WorkKey::from`, `ActionKey::try_from`), and the log codec writes a `WorkKey` through
-/// that conversion, so the bytes on the log and in the rows are those of an `ActionKey`.
+/// the build provider's instance name and the dedup text is its action digest's text form
+/// (`<lowercase hex>/<size>`). The provider's own action key type converts to and from a
+/// `WorkKey`, and the log codec writes a `WorkKey` through that conversion, so the bytes on
+/// the log and in the rows are those of the provider's key.
 ///
 /// Keys compare class first, then dedup text, as text. For action digests that is the
-/// order of the `ActionKey` (instance, then hash) except between two digests with the
+/// order of the provider's key (instance, then hash) except between two digests with the
 /// same hash and different sizes, which sort by the size's decimal text.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WorkKey {
@@ -89,7 +89,7 @@ impl WorkKey {
 /// GPUs are whole and exclusive: a request books whole GPUs, and a booked GPU is
 /// another lease's only once the lease holding it ends. VM slots are counted the same
 /// way: a node's `vms` is how many VMs may run on it at once. A node's `vms` is
-/// filled from its `vm.slots` report (at most two), and a VM lease (`kbf-lease=vm`) books
+/// filled from its `vm.slots` report (at most two), and a VM lease (the `vm` lease kind) books
 /// one of them together with its CPUs and memory.
 ///
 /// Not the crate root's [`crate::Resources`]: that one names its dimensions, this one
@@ -257,7 +257,7 @@ impl fmt::Display for LostWhy {
 }
 
 /// Why a run ended as the farm's fault, counted against the operation's farm reruns
-/// (`FARM_RERUNS` in `kbf-sched`).
+/// (the scheduler core's farm rerun limit).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FarmFault {
     /// The node killed it for memory below the action's own limit.
@@ -295,7 +295,7 @@ pub struct FarmRun {
 /// 32-byte identity and a size, which it keeps and hands on and never reads.
 ///
 /// For a build the identity is the hash of the stored `ActionResult` and the size its
-/// length in bytes: `kbf_types::Digest` converts to and from a `ResultRef` (`From`), and
+/// length in bytes: the provider's own digest type converts to and from a `ResultRef`, and
 /// the log codec writes a `ResultRef` through that conversion, so the bytes on the log
 /// and in the rows are those of the digest. Two refs order by identity, then size, as
 /// the digests do.

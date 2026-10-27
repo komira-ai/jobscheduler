@@ -35,7 +35,7 @@ impl fmt::Display for LeaseId {
     }
 }
 
-/// What a lease takes on its worker, named by an action's `kbf-lease` platform property.
+/// What a lease takes on its worker, named by the platform property that carries an action's lease kind.
 ///
 /// Placement gives a lease only to a worker whose node report lists a driver that
 /// serves its kind ([`LeaseKind::drivers`]).
@@ -55,7 +55,8 @@ impl LeaseKind {
     /// Every kind, in order.
     pub const ALL: [Self; 3] = [Self::Action, Self::WholeMachine, Self::Vm];
 
-    /// Its name, as `kbf-lease` and the worker protocol's `Start.kind` spell it.
+    /// Its name, as the lease-kind platform property and the worker protocol's `Start.kind`
+    /// spell it.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -72,7 +73,7 @@ impl LeaseKind {
     }
 
     /// The node report `drivers` values that serve this kind. `local` is
-    /// `kbf-daemon`'s test-only runtime, which runs actions as child processes.
+    /// the worker daemon's test-only runtime, which runs actions as child processes.
     #[must_use]
     pub const fn drivers(self) -> &'static [&'static str] {
         match self {
@@ -120,8 +121,8 @@ mod tests {
         assert_eq!(ids, want);
     }
 
-    /// Catches: a kind spelt differently from `kbf-lease` and `Start.kind`, a name that
-    /// does not read back, and a driver serving a kind it does not run (a container
+    /// Catches: a kind spelt differently from the lease-kind property and `Start.kind`, a
+    /// name that does not read back, and a driver serving a kind it does not run (a container
     /// worker offered a whole-machine lease, or a whole-machine driver offered actions).
     #[test]
     fn kinds_name_and_drivers() {

@@ -22,7 +22,7 @@ pub trait StateMachine {
 /// Something a [`StateMachine`] asks its caller to do.
 ///
 /// Variants arrive with the cores that emit them; today that is the scheduler
-/// (`kbf-sched`). Effects are carried out in list order.
+/// (the scheduler core). Effects are carried out in list order.
 ///
 /// Exhaustive on purpose: a caller matches every variant, so a new effect is a compile
 /// error in each place that carries effects out, not an arm that logs and drops it.
