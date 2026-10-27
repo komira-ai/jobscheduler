@@ -108,7 +108,7 @@ fn draining_and_unknown_phase_take_no_lease() {
     ] {
         let mut beat = heartbeat("a", epoch);
         beat.phase = phase;
-        fx.registry.heartbeat(&beat).unwrap();
+        fx.registry.heartbeat(&beat, &cred("t")).unwrap();
         assert_eq!(
             fx.provider.start(spec(1)),
             StartAck::Refused(RefusalCode::NoCapacity)
@@ -118,7 +118,7 @@ fn draining_and_unknown_phase_take_no_lease() {
     assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
     let mut draining = heartbeat("a", epoch);
     draining.phase = Phase::Draining;
-    fx.registry.heartbeat(&draining).unwrap();
+    fx.registry.heartbeat(&draining, &cred("t")).unwrap();
     assert_eq!(
         fx.provider.observe(&lease(1)),
         Observed::Present { host: host("a") }
@@ -148,7 +148,9 @@ fn awaiting_seat_unknown_then_binds_on_hello() {
         StartAck::Refused(RefusalCode::NoCapacity)
     );
     assert_eq!(
-        fx.registry.heartbeat(&heartbeat("a", 0)).unwrap_err(),
+        fx.registry
+            .heartbeat(&heartbeat("a", 0), &cred("t"))
+            .unwrap_err(),
         Refusal::UnknownHost
     );
     assert_eq!(fx.join("a", "t"), 1);

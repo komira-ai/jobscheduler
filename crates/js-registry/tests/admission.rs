@@ -109,7 +109,10 @@ fn hello_after_grace_replaces_and_bumps_epoch() {
     let second = fx.join("a", "t");
     assert_eq!(second, first + 1);
     assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
-    let stale = fx.registry.heartbeat(&heartbeat("a", first)).unwrap_err();
+    let stale = fx
+        .registry
+        .heartbeat(&heartbeat("a", first), &cred("t"))
+        .unwrap_err();
     assert_eq!(stale, Refusal::StaleEpoch);
     assert_eq!(stale.code(), refusal::STALE_EPOCH);
     fx.beat("a", second);
@@ -185,10 +188,16 @@ fn other_hellos_refused_with_their_codes() {
 #[test]
 fn heartbeat_refusals_and_revival() {
     let fx = fixture(4);
-    let unknown = fx.registry.heartbeat(&heartbeat("a", 1)).unwrap_err();
+    let unknown = fx
+        .registry
+        .heartbeat(&heartbeat("a", 1), &cred("t"))
+        .unwrap_err();
     assert_eq!(unknown, Refusal::UnknownHost);
     assert_eq!(unknown.code(), refusal::UNKNOWN_HOST);
-    let upper = fx.registry.heartbeat(&heartbeat("A", 1)).unwrap_err();
+    let upper = fx
+        .registry
+        .heartbeat(&heartbeat("A", 1), &cred("t"))
+        .unwrap_err();
     assert_eq!(upper.code(), refusal::INVALID_HELLO);
     let epoch = fx.join("a", "t");
     let mut broken = heartbeat("a", epoch);
@@ -196,10 +205,39 @@ fn heartbeat_refusals_and_revival() {
         run_id: String::new(),
         state: js_agent_wire::HeldState::Running,
     }];
-    let invalid = fx.registry.heartbeat(&broken).unwrap_err();
+    let invalid = fx.registry.heartbeat(&broken, &cred("t")).unwrap_err();
     assert_eq!(invalid.code(), refusal::INVALID_HEARTBEAT);
     fx.pass_grace();
     assert_eq!(fx.registry.hosts()[0].state, HostState::Lost);
+    fx.beat("a", epoch);
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
+}
+
+/// Asserts that a heartbeat from a credential other than the one the host id is bound to
+/// is refused as host-bound, whatever epoch it names, and changes nothing: the epoch is a
+/// small counter anyone can guess, so it cannot be the only proof of a session. The
+/// refused beat must not refresh the last-heard time (the host still goes lost on its own
+/// silence) nor change the announced phase; the bound credential still works.
+#[test]
+fn heartbeat_from_another_credential_refused_and_changes_nothing() {
+    let fx = fixture(4);
+    let epoch = fx.join("a", "t");
+    let three_quarters = std::time::Duration::from_millis(js_agent_wire::DEFAULT_GRACE_MS / 4 * 3);
+    fx.clock.advance(three_quarters);
+    let mut intruder = heartbeat("a", epoch);
+    intruder.phase = Phase::Draining;
+    let other = cred("token-two");
+    let refused = fx.registry.heartbeat(&intruder, &other).unwrap_err();
+    assert_eq!(refused, Refusal::HostBound);
+    assert_eq!(refused.code(), refusal::HOST_BOUND);
+    let guessed = heartbeat("a", epoch + 7);
+    let wrong_epoch = fx.registry.heartbeat(&guessed, &other).unwrap_err();
+    assert_eq!(wrong_epoch, Refusal::HostBound);
+    fx.clock.advance(three_quarters);
+    let view = &fx.registry.hosts()[0];
+    assert_eq!(view.state, HostState::Lost);
+    assert_eq!(view.phase, Phase::Serving);
+    assert_eq!(view.epoch, epoch);
     fx.beat("a", epoch);
     assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
 }
@@ -276,9 +314,11 @@ fn every_refusal_has_a_fixed_text_without_peer_data() {
         fx.registry
             .hello(&hello("newcomer"), &cred("t"))
             .unwrap_err(),
-        fx.registry.heartbeat(&heartbeat("nobody", 1)).unwrap_err(),
         fx.registry
-            .heartbeat(&heartbeat(id, epoch + 1))
+            .heartbeat(&heartbeat("nobody", 1), &cred("t"))
+            .unwrap_err(),
+        fx.registry
+            .heartbeat(&heartbeat(id, epoch + 1), &cred("t"))
             .unwrap_err(),
     ];
     let mut elsewhere = hello(id);

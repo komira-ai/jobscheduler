@@ -225,11 +225,14 @@ impl Registry {
     /// Records that a host is alive in its session, with the phase it announces. A host
     /// that was lost is live again, with the booking it kept.
     ///
-    /// Refused when the message breaks the wire rules, when the host has no session (the
-    /// registry restarted, or the host only awaits its first hello after one), or when it
-    /// names an epoch that is not the current one. The agent answers the last two by
+    /// `credential` is what the transport authenticated the request with. Refused when the
+    /// message breaks the wire rules, when the host has no session (the
+    /// registry restarted, or the host only awaits its first hello after one), when the
+    /// credential is not the one the host id is bound to (checked before the epoch, which
+    /// is a small counter and no proof of a session), or when it
+    /// names an epoch that is not the current one. The agent answers the first and last by
     /// saying hello again.
-    pub fn heartbeat(&self, heartbeat: &Heartbeat) -> Result<(), Refusal> {
+    pub fn heartbeat(&self, heartbeat: &Heartbeat, credential: &Credential) -> Result<(), Refusal> {
         let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHostId)?;
         heartbeat.validate().map_err(Refusal::Invalid)?;
         let now = self.shared.clock.now();
@@ -239,6 +242,13 @@ impl Registry {
             .get_mut(&host)
             .filter(|record| record.heard.is_some())
             .ok_or(Refusal::UnknownHost)?;
+        if record
+            .binding
+            .as_ref()
+            .is_some_and(|bound| bound != credential)
+        {
+            return Err(Refusal::HostBound);
+        }
         if record.epoch != heartbeat.epoch {
             return Err(Refusal::StaleEpoch);
         }

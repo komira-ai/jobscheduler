@@ -67,7 +67,9 @@ impl Fixture {
     }
 
     pub fn beat(&self, host: &str, epoch: u64) {
-        self.registry.heartbeat(&heartbeat(host, epoch)).unwrap();
+        self.registry
+            .heartbeat(&heartbeat(host, epoch), &cred("t"))
+            .unwrap();
     }
 }
 
