@@ -10,7 +10,7 @@
 //! | field | cap |
 //! |---|---|
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
-//! | `image` | [`MAX_IMAGE_LEN`] bytes of `[A-Za-z0-9._:/@+-]`, leading alphanumeric |
+//! | `image` | at most [`MAX_IMAGE_LEN`] bytes of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes; value [`MAX_LABEL_VALUE_LEN`] bytes |

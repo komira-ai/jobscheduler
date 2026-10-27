@@ -1,13 +1,13 @@
 //! Work sent down to the agent: [`Command`] and the [`JobSpec`] a start carries.
 
 use std::collections::BTreeMap;
-use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
 use crate::error::{Rule, ValidationError};
 use crate::hello::WireShape;
+use crate::image;
 use crate::limits;
 use crate::refusal;
 
@@ -83,10 +83,11 @@ pub struct Mount {
     /// The name of one of the agent's configured roots: `[A-Za-z0-9._-]`, leading
     /// alphanumeric, at most [`limits::MAX_ROOT_NAME_LEN`] bytes.
     pub root_name: String,
-    /// The path below that root: relative, with at least one named component (`.` and `./`
-    /// alone name the root, which is not mountable), no `..` component, no control
-    /// character, no `:` and no `,` (so it cannot add a field to a mount option string),
-    /// at most [`limits::MAX_REL_LEN`] bytes.
+    /// The path below that root: relative, split on `/` alone (on every OS), every part
+    /// a name: no empty part, no `.` and no `..` part (so `.` and `./` alone, which name
+    /// the root, are refused), no `\`, no `:` and no `,` (so it cannot add a field to a
+    /// mount option string), and none of the control, format and separator characters
+    /// free text refuses (U+202E among them). At most [`limits::MAX_REL_LEN`] bytes.
     pub rel: String,
     /// Whether the job sees the directory read-only.
     pub ro: bool,
@@ -116,23 +117,20 @@ impl Mount {
         let unsafe_char = self
             .rel
             .chars()
-            .any(|c| c.is_control() || c == ':' || c == ',');
+            .any(|c| check::hidden(c) || matches!(c, ':' | ',' | '\\'));
         if unsafe_char {
             return Err(rel.fail(Rule::BadChars));
         }
-        let climbs = Path::new(&self.rel).components().any(|part| {
-            matches!(
-                part,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        });
-        if climbs {
+        // Split on `/` alone, never through `std::path`, so the answer is the same on
+        // every OS the validator runs on.
+        if self.rel.starts_with('/') || self.rel.split('/').any(|part| part == "..") {
             return Err(rel.fail(Rule::Escapes));
         }
-        let names_something = Path::new(&self.rel)
-            .components()
-            .any(|part| matches!(part, Component::Normal(_)));
-        if !names_something {
+        if self
+            .rel
+            .split('/')
+            .any(|part| part.is_empty() || part == ".")
+        {
             return Err(rel.fail(Rule::Empty));
         }
         Ok(())
@@ -151,8 +149,12 @@ pub struct JobSpec {
     /// The lease the run belongs to.
     pub lease_id: String,
     /// The container image; the agent holds no registry credential, so it must be
-    /// present on the host or pullable without one. An OCI reference: it starts with a
-    /// letter or digit, so it can never be read as a command-line option.
+    /// present on the host or pullable without one. A registry reference
+    /// `name[:tag][@digest]` as the OCI distribution grammar defines it (a domain with an
+    /// optional port only in the first component, lower-case path components, a tag of
+    /// at most 128 bytes, a digest `algorithm:hex`). A transport prefix such as `oci:`,
+    /// `dir:`, `docker-archive:`, `containers-storage:` or `docker://` is refused, and a
+    /// reference starts with a letter or digit, so it is never read as an option.
     pub image: String,
     /// The command line after the image: at most [`limits::MAX_ARGS`] entries, no NUL.
     #[serde(default)]
@@ -162,7 +164,8 @@ pub struct JobSpec {
     /// The GPU device indices the job may use. A device is in at most one job.
     #[serde(default)]
     pub gpu_indices: Vec<u32>,
-    /// The directories the job sees.
+    /// The directories the job sees: at most [`limits::MAX_MOUNTS`], none twice (the same
+    /// root and rel is a duplicate whether the two are read-only or not).
     #[serde(default)]
     pub mounts: Vec<Mount>,
     /// Container or host. Absent means contained.
@@ -188,8 +191,7 @@ impl JobSpec {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
         check::ident(at.field("lease_id"), &self.lease_id)?;
-        let image = At::new("image", refusal::INVALID_IMAGE);
-        check::token(image, &self.image, limits::MAX_IMAGE_LEN, check::image_byte)?;
+        image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
         self.check_args(at.field("args"))?;
         self.limits.check(at)?;
         let gpus = at.field("gpu_indices");
@@ -203,6 +205,12 @@ impl JobSpec {
         for mount in &self.mounts {
             mount.check(mounts)?;
         }
+        // `rel` has no empty, `.` or `//` part, so two spellings of one path are equal.
+        let places = self
+            .mounts
+            .iter()
+            .map(|mount| (mount.root_name.as_str(), mount.rel.as_str()));
+        check::distinct(mounts, places)?;
         check::labels(at.field("labels"), &self.labels)?;
         check::range(
             at.field("valid_for_ms"),
