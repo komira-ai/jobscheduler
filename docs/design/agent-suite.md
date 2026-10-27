@@ -20,5 +20,15 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
   `host_jobs` grant or the host `Start`), which grants it no new lease, and a Result, hello or heartbeat does not untaint it;
 - per session (5.1): the leasee's session obeys the cancel, grace, ack and never-started rules for its placements, and the scheduler
   cancels none of them; a hello that announces a lease not committed to its host id is answered `Cancel`; a mount outside the agent's
-  roots is refused.
+  roots is refused;
+- VM runs (5.14, [vm-backend.md](vm-backend.md)): the VM is destroyed before the slot is freed, and a failed destroy frees nothing and
+  taints; no VM id serves two runs; a `host` VM job, a GPU VM job and a `vm` job on an agent with no VM backend (`vm-unavailable`) are
+  refused before anything is cloned; a boot that never says ready ends `vm-boot-timeout`; a hostile or out-of-order guest frame ends the
+  run `vm-guest-protocol` and never taints; a read-write mount is copied back by the agent and the guest never holds a writable host path;
+  an agent restart destroys every clone and reports none held; an image whose digest differs from the pinned one is `image-unavailable`;
+  the VM store check finds an unaccounted directory;
+- warm pool: a warm VM has never been handed a job; assignment is irreversible; an aged warm VM is destroyed and replaced; refill is one
+  at a time into free capacity; the failure brake stops it; warm VMs count in `vms` and in the offer in the order of 5.15;
+- whole-node lease (5.15): preparing destroys every warm VM, refill stays off, the lease token is not minted before `exclusive_ready`, a
+  timeout gives the lease up as `exclusive-not-ready`, and release restores and refills.
 

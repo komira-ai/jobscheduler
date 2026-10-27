@@ -4,6 +4,11 @@ Companion to [docs/design.md](../design.md), sections 5.4 and 5.8. Section numbe
 
 ## 5.10 Machine reuse
 
+*VM jobs.* The machine is reused exactly as below, but a VM is not: every VM job gets a fresh VM that is destroyed before the slot is freed,
+and a warm VM is destroyed, never reused, once assigned or aged out (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
+"stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check. A host refill of the warm pool follows
+the freed slot and never delays it.
+
 A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs in a row before it is given up.
 
 **After every job, in this order, `js-agent`:**
@@ -98,7 +103,9 @@ and none is removed without a decision:
   listing and digest of a configured watch list of directories; the set of mounts (`/proc/self/mountinfo`) against the baseline; the user
   and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline;
 - *cleanup failure*: the container or its scratch directory could not be removed, a cgroup could not be emptied, or the slot could not be
-  freed.
+  freed; for a VM job, the VM could not be stopped or its clone deleted;
+- *VM store* (an agent with a VM backend): a directory in the VM store that is neither a base image nor the clone of a run or warm VM the
+  agent holds, or a hypervisor driver process the agent does not account for (5.14).
 
 Any finding taints the host, whatever the job declared. A check that cannot run (an unreadable file) is a finding; it is never skipped.
 

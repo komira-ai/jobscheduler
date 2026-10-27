@@ -84,4 +84,32 @@ max_leased_machines = 16                    # kbf's own cap on machine leases he
 allow_host_jobs = false                     # default; a host job also needs the pool's and the agent's consent (5.12)
 ```
 
+Capabilities, VMs and the whole-node class (5.13 to 5.15) add this, all optional. The schema declares namespaced keys beyond the built-in
+ones; a pool may state the class its hosts serve, the time it waits for a whole-node host to become ready, and a base image its elastic
+hosts are launched with (so the scaler can count a constrained request as demand); the agent's VM settings are flags (R4), not file keys:
+
+```toml
+[[capability]]                              # beyond the built-in arch, os, os_version, xcode, sim.*, base_images, warm_images, vms
+key = "acme.metal"
+kind = "count"                              # text | version | set_text | set_version | count
+
+[[pool]]
+name = "mac-vms"
+provider = "lab"
+shape = "mac-arm64"
+class = "vm"                                # runtime_tag vm (6.2)
+prepare_timeout = "10m"                     # a whole-node lease gives up when its host is not ready this soon (5.15)
+base_images = ["macos15-xcode16-a"]         # what an elastic host of this pool is launched with; the scaler counts a guest constraint as demand only if one of these can meet it
+[pool.capabilities]
+os = "macos"
+arch = "aarch64"
+```
+
+```sh
+# the agent's own flags (5.14): the VM backend is off unless --vms is above zero
+js-agent --vms 2 --vm-driver <absolute-path> --vm-store <dir> --vm-network none \
+  --vm-boot-timeout 5m --vm-warm macos15-xcode16-a=1 --vm-warm-max-age 12h \
+  --cap acme.metal=1 --facts-interval 5m
+```
+
 Pool keys are `min_machines` and `max_machines` (not `min` and `max`); the loader refuses the old names and names the new ones (5.7).

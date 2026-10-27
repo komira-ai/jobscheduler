@@ -1,8 +1,8 @@
 # Extraction steps 0 to 22
 
 Companion to [docs/design.md](../design.md), section 14. These are Phases 0, A, B and C of the extraction ladder: the gates, the moves
-inside kbf, the crates that move out, and the wire and the agent. Section numbers refer to design.md. Phases D and E (capacity providers
-and pools) are in design.md itself.
+inside kbf, the crates that move out, and the wire and the agent. Section numbers refer to design.md. Phases D, E and F (new capability,
+capacity providers and pools, capabilities as data and the VM backend) are in [extraction-steps-d.md](extraction-steps-d.md).
 
 **Phase 0. Gates.**
 
@@ -51,7 +51,8 @@ dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector wi
     from the new path; the corpus is unchanged.
 14. Move `kbf-estimator` as `js-sizing` with `SizingPolicy`; kbf passes today's values. *Proves:* golden outputs identical on recorded
     input; the codec version is unchanged; `shadow_diff` passes.
-15. Move `kbf-caps` matching as `js-caps` with the schema; kbf supplies its tables. First pin kbf's present behaviour on an unknown request
+15. Move `kbf-caps` matching as `js-caps` with the schema (into the crate step 36 made, if that came first: kbf's comparators become schema
+    entries of the typed kinds of 5.13); kbf supplies its tables. First pin kbf's present behaviour on an unknown request
     key with a test that passes on main (own commit). Then make the schema's unknown-key policy a parameter (refuse, or skip and report),
     with kbf supplying today's value; both are tested on the trivial schema. *Proves:* the existing capability tests pass. kbf's policy
     does not change in this PR.

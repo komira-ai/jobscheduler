@@ -10,7 +10,8 @@ marked (not found) means a search of the named place did not find the thing; it 
 jobscheduler itself are named `js-*`; the map is in 10.2.
 
 Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-provider-fake`, `js-conformance`, `js-lease`,
-`js-lease-server`, `js-cli` and `js-coverage`. Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
+`js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry` and `js-agent` (session,
+facts and a lifecycle over a `ContainerRuntime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
 describes future work. What exists in kbf today (the former section 4) is in [design/kbf-today.md](design/kbf-today.md); references of the
 form 4.n point there.
 
@@ -73,6 +74,11 @@ The decisions, in one place:
     never exceeded and growth is a few machines per tick; this is overload protection, not a cost guardrail (5.10, 5.11).
 14. **A job declares `contained` or `host`; a machine can be tainted.** A host job taints its machine (the scheduler records this itself, not on the agent's report), `js-agent` checks after every job
     and taints on any finding, and a tainted machine takes no work and is replaced, never cleared on the agent's word (5.12).
+15. **Capabilities are typed data; consumers translate into constraints.** An agent advertises scalars, version sets and counters; the
+    scheduler matches equality, membership, version ranges and counters, and knows no consumer's words (5.13).
+16. **A VM per lease, never reused.** The machine is reused, the guest is not: a fresh VM is cloned, booted, used and destroyed for each
+    lease, with an optional warm pool of fresh unassigned VMs. VMs share a host with containers under the caps; a whole-node class gives a
+    performance test the host alone (5.14, 5.15).
 
 ### 1.1 What this amendment deletes and adds
 
@@ -89,6 +95,12 @@ between `min_machines` and `max_machines` (5.8); machine reuse, `max_machines` c
 the `contained`/`host` isolation with post-job checks and taint (5.10 to 5.12, [design/machines.md](design/machines.md)); the mapping of
 the merged crates (5.9); the fake aws and the fake agent's taint paths (13.1); steps 27 to 35 (with 30b and 31b), decisions D14 to D25
 and risks K8 to K18. The pool keys `min` and `max` are renamed `min_machines` and `max_machines`.
+
+Added by the capabilities amendment: typed capabilities, a constraint language and refusal codes (5.13,
+[design/capabilities.md](design/capabilities.md)); a VM backend in `js-agent` with a fresh VM per lease, an optional warm pool, the guest
+channel and VM integrity (5.14); shared hosts and a whole-node class (5.15, [design/vm-backend.md](design/vm-backend.md)); the terms of
+section 3; steps 36 to 47; decisions D26 to D31 (D26 open); risks K19 to K26. Text moved to companions to keep this file short: 5.6,
+12.1 to 12.3 and steps 23 to 35.
 
 ## 2. Goals and non-goals
 
@@ -150,7 +162,14 @@ Non-goals:
   total, whether it needs an empty pool, which runtime the agent uses. Replaces the closed `LeaseKind` enum
   (`crates/kbf-types/src/lease.rs`). A consumer selects pools by class and labels (6.2).
 - **Capabilities.** Typed key/value facts a host reports (ISA level, features, device attributes) under a schema; a request states needs
-  the same way (`crates/kbf-caps`).
+  the same way (`crates/kbf-caps`). A value is a `text`, a `version`, a set of either, or a `count` (5.13). On the merged wire they are
+  string pairs today; the typed form is an additive field.
+- **Constraint.** One need of a request over one capability: key, op, value and scope (`host` or `guest`). A request's constraints all
+  hold or the host does not match (5.13).
+- **Base image, VM, warm VM.** A *base image* is a named, immutable disk image primed by an operator, with a profile of facts. A *VM* is a
+  fresh clone of one, booted for one lease and destroyed after it; it is never reused. A *warm VM* is one booted ahead, never yet handed
+  a job; assigning it to a lease is irreversible (5.14).
+- **Whole-node lease.** The lease class `whole_machine`: the host is quiet and exclusive for the lease, warm VMs destroyed (5.15).
 - **Booking.** The amount of a pool's resource vector the scheduler counts as taken by a lease. A booking is not a limit; the limit is
   what the agent enforces (7.3).
 - **Request history.** What the scheduler has learned about past attempts of similar work: peak memory, CPU parallelism, kills,
@@ -197,7 +216,8 @@ from agent sessions and executes the `Start` effect; another drives the capacity
 The agent is a stream, not a Rust trait. Its messages are the `jobscheduler.agent.v1` package (10.3):
 
 - `Hello` (agent to scheduler): host id; pool name and provider identity (for a launched instance, its instance id); `agent_version`;
-  capacity as a resource vector (`cpus`, `mem_gib`, `gpus`, lease-count cap); GPU facts; labels; capabilities; phase; the leases it holds.
+  capacity as a resource vector (`cpus`, `mem_gib`, `gpus`, lease-count cap); GPU facts; labels; capabilities (string pairs today;
+  typed `facts`, refreshed by heartbeat, are the additive form of 5.13); phase; the leases it holds.
   Proof of admission is not a field: it travels in message metadata (5.8).
 - `Welcome` (scheduler to agent): epoch, heartbeat interval, and the pool the host was admitted to, or a refusal (5.8).
 - `Heartbeat`: the leases or placements the agent holds on that session (5.1), including those whose result is not yet acknowledged; and,
@@ -206,7 +226,8 @@ The agent is a stream, not a Rust trait. Its messages are the `jobscheduler.agen
   reference, host mounts (directories under the agent's configured roots, 5.4), the fence, labels, and the validity anchor below.
 - `Stop` and `Cancel`: stop one lease; `Result` and `ResultAck`: one result, resent until acknowledged; `Usage` with a `basis`.
 
-An agent runs only containers, with the limits the message states (`js-contain`, step 19), and holds no credential of the work (5.4). The
+An agent runs only containers, with the limits the message states (`js-contain`, step 19), or, when it has a VM backend, a fresh VM (5.14),
+and holds no credential of the work (5.4). The
 agent adapter must not invent answers, so its outcome table is the stream's:
 
 | Call | Outcome |
@@ -356,37 +377,11 @@ Later kinds are named only, each a crate behind the trait: `gcp`, `k8s` (pods as
 `vsphere`, `proxmox`, and bare metal (a static inventory with power control). None is designed here.
 
 ### 5.6 Failure and absence semantics
-This is the most important part of the contract. A thing the scheduler holds can be in one of three observed states, and the core treats
-them differently. It applies to two things: a *lease on an agent*, where the three are derived from the heartbeat stream (5.2), and an
-*instance at a capacity provider*, where they are answers to `observe` (5.5).
-
-| Observed | Meaning | Core action |
-|---|---|---|
-| Present | the lease is listed, or the provider confirms the instance, with a state | keep it; update state |
-| Absent | the heartbeat omitted the lease with its `Start` due (5.2), or the provider answered that the instance does not exist | the lease or host is over: if no result was accepted, give up and rerun against the right budget |
-| Unknown | no answer, a partial answer, or an error other than not-found | keep it; never free its resources; retry the observation; escalate to an alert after a configured count of unknown observations |
-
-Rules:
-
-- **Acquire outcome unknown.** A timed-out `acquire` leaves a durable intent. The provider looks the instance up by the acquire-id tag
-  with `list` before any retry, and never launches a second instance for the same id. For an agent the intent is the lease record, and
-  the validity bound ends it.
-- **Release outcome.** `release` terminates, reads back, and claims no more than it read. An agent `stop` claims nothing at call time; its
-  outcome is an event.
-- **Agent silence is not absence.** Silence past the grace period triggers the fence rules of 4.1. An agent silent while its instance is
-  `Present` at the provider is a partition and the agent self-fences. Silence while the instance is `Absent` means the host is gone. For
-  a static host silence is Unknown, never Absent (5.5), and a run-on lease is given up only when the host is proven stopped (5.8).
-- **A host leaves a pool only after `release` reads back Absent.** An instance gone underneath (reclaim, an operator terminating it) is
-  `Absent` on `observe` or missing from `list`, and is treated as host-lost: its machine leases are given up and the consumer reruns its
-  placements (8.1).
-- **Provider outage.** While a capacity provider is unreachable, its pool can neither grow nor shrink, and existing leases stay. While an
-  agent's stream is down, no new leases are placed on its host and its leases keep their resources booked. This is the store-outage rule
-  of `crates/kbf-sched/src/scheduler/outage.rs` applied per provider: expiry timers restart with a grace window on recovery.
-- **Cordon and drain.** Operator `Cordon` and `Drain` apply to a host and are scheduler state, lost on a server restart. A wait caused
-  only by a cordon is never refused as unservable, and a cordoned host is not released on idle. Agent-announced draining is a phase (5.3).
-- **Poison and duplicates.** A lease lost `LOSS_REQUEUES` (3) times refuses the operation (4.1); the value becomes a per-class retry policy
-  value (8.1). A second result for an accepted request is answered DUPLICATE and ignored; a result for a lease that is not the committed
-  lease is STALE.
+Text in [design/absence.md](design/absence.md). A thing the scheduler holds (a lease on an agent, derived from the heartbeat stream; an
+instance at a capacity provider, from `observe`) is Present, Absent or Unknown. Only Absent frees a booking; Unknown never does. An
+unknown `acquire` leaves a durable intent and is looked up by its tag before any retry; agent silence is not absence; a host leaves a pool
+only after `release` reads back Absent; a provider outage freezes its pool; a cordon is scheduler state; a lease lost three times refuses
+the operation; a VM that vanishes under a run is a failed run (5.14).
 
 ### 5.7 Configuration
 The scheduler is configured by one file named by a flag (`--config`; R4), in the TOML style of `js-pool-static` (`deny_unknown_fields`,
@@ -460,6 +455,34 @@ slot; queued work that fits goes on the same machine at once; a host is released
 `max_machines` and grows by at most `max_step` per tick for demand that does not fit: overload protection, not a cost guardrail (5.11). A
 job is `contained` (default) or `host`; a host job or any failed check taints its machine, which is replaced or cordoned (5.12).
 
+### 5.13 Capabilities as data
+Text in [design/capabilities.md](design/capabilities.md). An agent advertises typed facts: scalars (`arch`, `os`, `os_version`), sets
+(`xcode`, `sim.ios`, `base_images`, `warm_images`) and counters (`vms`); the facts of each primed base image travel as its profile. They
+ride an additive `facts` field of `Hello` (major 1 stays), refreshed by a full snapshot in the heartbeat when a revision changes,
+acknowledged like the taint; an old server ignores them, and a new agent mirrors its scalars into the legacy string map. A request carries
+up to 32 constraints that must all hold: equality and membership on text; `eq`, `gt`, `ge`, `lt`, `le`, `series`, `range` on versions (a
+total order, `16 = 16.0`, no pre-release); comparisons on counters; `has`-forms on sets. An absent fact never matches; a `guest` scope
+matches when one image's profile meets all its constraints. A malformed constraint is refused at submit with a constant code
+(`constraint-unknown-key` and six more); an unknown op is refused, never skipped. kbf's table from its platform properties to
+constraints is kbf's configuration; the companion has the worked example.
+
+### 5.14 The VM backend
+Text in [design/vm-backend.md](design/vm-backend.md). `js-agent` gains a VM runtime beside the container one. **A fresh VM per lease; a
+VM is never reused:** it is cloned from a base image, booted, given its inputs over a guest channel, run, collected, stopped and
+destroyed, whatever the outcome; the host, not the VM, is reused (5.10). The lifecycle stays one state machine over a small `Sandbox`
+seam with two backend traits (`ContainerRuntime` unchanged, a new `VmRuntime`; D28). The guest channel is one hypervisor-tied stream per
+VM with bounded frames; nothing of the host is shared writable; the guest is untrusted. The cleanup order is the VM, the scratch, the
+checks, the slot; a failed destroy taints the host; destroying the VM is the cleanup of the guest. An optional warm pool per agent holds
+fresh booted VMs that have never held a job; assignment is irreversible. A base image is named, immutable and primed outside the agent;
+`base_images` is a capability.
+
+### 5.15 Sharing a host, and the whole-node class
+Text in [design/vm-backend.md](design/vm-backend.md). VMs, warm VMs and containers share one host's CPU, memory and `vms` counter: a booted
+VM counts in full whether or not a job runs in it; containers are admitted against the total less VM memory; the agent offers what it
+will give and never raises its offer before an assignment. A whole-node lease makes the host quiet before it is usable: the agent
+announces `preparing`, destroys the warm VMs, stops refilling and reports ready in its heartbeat, and the lease token is minted only
+then. The macOS VM sizing question (fixed or dynamic CPU and memory) is open as D26.
+
 ## 6. Placement
 
 ### 6.1 Pipeline
@@ -482,7 +505,7 @@ generic form:
 struct ResourceClass {
     id: ClassId,                   // a string, e.g. "action", "whole_machine"
     admission: Admission,          // see below
-    runtime_tag: RuntimeTag,       // what the agent runs for it (container, native)
+    runtime_tag: RuntimeTag,       // what the agent runs for it (container, native, vm)
     exclusive_when: Option<Rule>,  // e.g. memory at least pool memory
     fence_default: Option<Fence>,  // a declared class field, resolved at submit and recorded (5.2)
 }
@@ -505,7 +528,8 @@ booking, not reservation, and per class, so it does not conflict with R1.
 selectors, and the scheduler offers it the pools whose `class` is that class and whose labels satisfy every selector (equality on
 each key; richer set selectors are additive later). The merged pool serves one class,
 `gpu-host`, admitted `BookAll`, one whole host per lease; a share of a host needs `Book` admission on the pool (step 29). A request that
-matches no pool is refused; one that matches a pool at `max_machines` queues. A request for `host_jobs` is refused unless the pool allows them (5.12). The map from a consumer's own classes (kbf's `action`,
+matches no pool is refused (`no-matching-pool`); one that matches a pool at `max_machines` queues. The request's constraints (5.13) then
+pick a host, and for a VM class an image, inside the pools selected. A request for `host_jobs` is refused unless the pool allows them (5.12). The map from a consumer's own classes (kbf's `action`,
 `whole_machine`, `vm`) to class and selectors is in the consumer's configuration (5.7, 9.4), never in the scheduler's.
 
 ### 6.3 Oversubscription and 6.4 Devices
@@ -649,11 +673,12 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |
 | `js-provider-<kind>` | new | one crate per later kind; the core names none (5.7) |
 | `js-sched` | `crates/kbf-sched` | per-request placement, generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants; scope per D15 |
-| `js-caps` | `crates/kbf-caps/src/matching.rs` | schema-driven; kbf keeps its key tables and host detection |
+| `js-caps` | new at step 36; `crates/kbf-caps/src/matching.rs` joins at step 15 | the typed model, version order, schema and constraint evaluator of 5.13; kbf keeps its key tables and host detection |
+| `js-guest-wire` | new | the frame codec of the guest channel, shared by the agent and the in-guest program (5.14) |
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
-| `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts |
+| `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend and warm pool (5.14) |
 | `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs` of `kbf-driver-container` | node-local containment; `js-agent` depends on it |
 | `js-sim` | `crates/kbf-sim*` | invariants and replay |
 
@@ -676,6 +701,9 @@ variants, `Answer`). Splitting it into two modules with re-exports is step 3, be
   server never sees the new package.
 - `fence`, `limits`, `assignments`, `labels`, `mounts` and `isolation` are added to `Start` in *both* packages as optional fields (R3). Absent means
   today's behaviour: self-fence, derive limits locally, one device id, no labels, no mounts, contained. `Heartbeat` gains an optional taint.
+- **Capabilities and VMs (5.13, 5.14), all optional fields, major 1 unchanged:** `Hello.facts`; `Heartbeat.facts_rev` and `facts`;
+  `HeartbeatReply.facts_ack` and `exclusive`; `Heartbeat.exclusive_ready`; `JobSpec.runtime` and `vm`; the lease request's `needs`. A new
+  value an old peer does not know is skipped, except a constraint op (refused) and the phase (read as quarantined).
 - Stale comment in `worker.proto` on `memory_bytes` is corrected in step 2.
 
 ### 10.4 How kbf keeps working at every step
@@ -709,44 +737,11 @@ quota mechanism, and its "budgets" are retry and storage budgets. ucdk has shape
 R1 forbids reservation and per-category admission for kbf farm work. Everything below applies to every class, none of it changes how kbf
 places or runs work, and none of it is behind a flag.
 
-### 12.1 Lease limits (always on)
-Max wall time (required), max attempts, max resource size, max arguments size. These bound how long and how large one lease can be, so a
-lease always ends: the wall time is the deadline of the attempt, and the fence (5.2) ends the lease when its agent cannot be heard.
-Checked at submit, as part of the start contract (5.2), and refused there. A refusal carries a plain constant code; no central code table
-is introduced until a second consumer needs one.
-
-**Lease TTL and the reaper.** A held lease also has a TTL: the client renews it before it lapses, and a renewal never extends it past
-its acquisition plus the max wall time. The reaper is a periodic tick, the only place time acts: it stops and frees every lease whose
-TTL has passed, and retries a start, a stop, an acquire or a release whose outcome was unknown, freeing a lease only when the provider is
-observed without it (5.6). So a client that disappears loses its lease at the end of its TTL, never later than its max wall time. The
-lease table in this repository (`js-lease`) implements this.
-
-The reaper also owns the machines. In the same tick it (a) releases a host that has been idle past its pool's `idle_timeout` (5.10) while
-the pool is above `min_machines`, and a tainted host with no lease (5.12), through `release`, and (b) releases a leaked instance: one that `list` returns, that carries this scheduler's tags,
-and that no pool host or acquire record accounts for after a grace of ticks. A `list` that fails reaps nothing. The reaper acts on
-nothing in its first N ticks after start, and never releases an instance whose agent is connected and holding leases: that instance is
-adopted as a pool host from its tags and its hello, or alerts. Pool scaling (5.8) also runs only in `tick`, so `js-lease` stays the one place time acts and scaling is deterministic under an injected clock.
-
-### 12.2 Usage record (always on)
-The scheduler's record is per machine lease: instance-hours (attribution, not a charge), wall phases, queue time, and the aggregate usage
-the agent reports for the lease. Per-run usage (CPU-seconds, GB-seconds, GPU-seconds, peak memory with basis, and whether it ran, was
-cached or was joined) is the consumer's: it arrives from the agent on the work session, and kbf feeds its own sizing history (7, level
-2). The scheduler writes per-run records only for classes whose runs it places itself (ucdk). Stored in the state store and queryable,
-for sizing and for the run record (8.3), not for charging anyone. This is the "Accounting" record planned in
-`docs/design/scheduler.md`. Attempts charged to the platform-fault budget (8.1) are recorded and flagged.
-
-### 12.3 Labels (always on)
-Every request carries labels. jobscheduler owns a small label schema and imports no ucdk type: a reserved prefix `jobscheduler.dev/` with
-the keys `tenant`, `run`, `validation-run`, `definition`, `instance`, `scheduler`, `pool`, `acquire` and `lease`, each value at most 63 characters of
-`[a-z0-9._-]`. The caller mints the validation run id; the scheduler only carries and applies it. A user label under the reserved prefix
-is refused at submit. Labels flow request, lease, `Start`, agent. A capacity provider tags each instance it launches with `pool`,
-`acquire` and `scheduler` (the scheduler's instance id), and the lease once one is bound, as `jobscheduler.dev/*` instance tags (aws), so `list` and the
-reaper can find what is ours and attribution can read it. In ucdk the adapter translates the label set into `Stamp.extra`
-(`ucdk/crates/ucdk-provider/src/stamp.rs`); a tagless kind cannot carry it, so a class that carries a validation run id is refused at
-submit on such a kind unless its adapter defines a name rule that includes the id.
-
-Runs are not nodes in any ledger, so the sweep key is the `instance` label. Destroying a Job definition, or the environment, cancels or
-drains its runs and sweeps billable leftovers by that label; the sweep is part of the closed-world delete, with a test on the fake.
+### 12.1 to 12.3 Lease limits, usage and labels
+Text in [design/lease-limits.md](design/lease-limits.md). 12.1: a required max wall time, max attempts and sizes, checked at submit with a
+plain constant code; a held lease has a TTL its client renews, and the reaper (the only place time acts) frees expired leases, retries
+unknown outcomes, and releases idle, tainted and leaked machines. 12.2: a usage record per machine lease, for sizing and attribution.
+12.3: the reserved `jobscheduler.dev/` label keys, which flow from request to agent and tag every instance a provider launches.
 
 ### 12.4 Real accounts need a go
 A provider that bills a real account is registered disabled. A provider declared in configuration with such a kind stays disabled
@@ -764,7 +759,10 @@ The merged `js-provider-fake` becomes the fake capacity provider, a fake aws in 
 launch failure, slow boot, an `acquire` accepted but answered Unknown, a `release` answered Unknown, an instance that disappears
 (reclaim), a leaked instance in `list`, a quota refusal, and a duplicate acquire id. A fake agent (in `js-sim`) models the agent
 side: loss, fence, out-of-memory kill, node pressure, phase changes, unknown observations and slow starts, and the taint paths: a host
-job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. Starting points:
+job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. A fake
+VM runtime (in memory, scripted: clone failure, a boot that never says ready, hostile guest frames, an unannounced exit, a failed destroy,
+a leaked clone, a changed image) and the fake agent's warm pool and whole-node sequence are described in
+[design/vm-backend.md](design/vm-backend.md). Starting points:
 `kbf_daemon::Runtime`'s fake in `crates/kbf-daemon/src/runtime.rs` and `crates/kbf-sim-cell`. The fakes are the executable spec, as in
 ucdk (`ucdk/crates/ucdk-provider-fake`).
 
@@ -784,7 +782,10 @@ in and never skips it silently) and runs two suites, each over every implementat
 *Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
 results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
 taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check, sticky and
-resent taint, no `Start` on a tainted host), and the per-session rules.
+resent taint, no `Start` on a tainted host), the per-session rules, and the VM cases (no VM serves two runs, destroy before the slot frees,
+warm VMs destroyed and not reused, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
+**constraint suite** of [design/capabilities.md](design/capabilities.md), runs the evaluator over every op, kind and refusal code and the
+ordering properties of versions; the server and the kbf table both pass its worked example.
 The hooks **read the real state**: for the fakes, their internal tables; for aws, an independent `DescribeInstances` made apart from the
 adapter. A suite that asks the provider whether it did what it said cannot fail. The suite therefore ships one deliberately broken
 provider per rule above, each asserting that the suite reports exactly that rule's failure, and a test that counts the broken providers
@@ -800,7 +801,9 @@ not there is demand (never released at or below it); queued work that fits a fre
 tainted host takes no lease and is never untainted by a hello, a heartbeat or a Result, even when the agent reports no taint after a host
 job (the scheduler tainted it itself); a tainted host id is refused at admission; a pool stops replacing after `max_taints_in_a_row`; a
 host holding a lease is never released, including when a lease commits between selection and release; a host in `releasing` takes no lease
-or placed job (run service, ucdk), selection and placement committing under the table lock, first one wins; a pool with a failing boot stops
+or placed job (run service, ucdk), selection and placement committing under the table lock, first one wins; a host's offer is never above
+its total less booked less warm VM size at any step, and a VM id serves one run only; a whole-node lease's token is never minted before
+the agent reports ready; a stale or repeated facts revision never changes what is stored; a pool with a failing boot stops
 acquiring after `max_boot_failures`; the reaper never releases an instance whose agent holds leases; every instance in `list` is a pool host or is being reaped. A kbf case: an out-of-memory kill at the top rung of a half-node
 lease is rerun in a whole-node lease (7.4).
 
@@ -829,57 +832,15 @@ only if D15 keeps per-request placement in the core. The merged slice was built 
 step 16a; `js-provider` and `js-provider-fake` are the host-booking part of step 23 and the fake of step 12; `js-conformance` is step
 20b's machinery; `js-lease`, `js-lease-server` and `js-cli` are level 1 (9.1), which the ladder did not anticipate.
 
-**Phase D. New capability.**
-
-23. Change `js-provider`: rename `Provider` to `Pool` and `ProviderId` to `PoolId`, delete `Flavour`, rename `capacity()` to `hosts()`, add
-    `CapacityProvider` with `list`, `AcquireAck`, `ReleaseAck` and `Instance` beside them (5.9), and model the fence and no-retries rules in
-    `StartSpec`. Add the new `Stop` effect and its retained-intent row (5.1, 5.2). *Proves:* the merged tests pass unchanged apart from the
-    names, so the GPU-host service is unchanged; a stop of a held lease is resent until the lease leaves the heartbeat.
-24. Usage record per lease (12.2); labels (12.3). *Proves:* usage on failure; labels on every fake resource.
-24b. The *task failure* retry axis of 8.1 and the portable `max_retries` budget. *Proves:* a UJ1/UJ2 case on the fake in which a
-    non-zero exit is retried up to `max_retries` and a kbf class with budget zero is not retried.
-25. Schedule triggers and run records; the launcher API. *Proves:* run record before return; missed ticks skipped; overlap rules, all
-    with an injected clock.
-26. ucdk side: the launcher wiring and, later, the provider crate, in the ucdk repository.
-
-**Phase E. Capacity providers and pools.** Steps 27 to 29 need no agent. Step 30 needs steps 20 and 21a. Step 31 is tested on fake agents.
-
-27. `js-config`: the schema of 5.7, the loader and its validation; the merged `--pool-config` file loads as one implicit provider.
-    *Proves:* each rule of 5.7 refuses with the key and line; an old file loads unchanged; the layering test: no crate below the binary
-    names a provider kind.
-28. The fake capacity provider (13.1) and the capacity suite with its broken providers (13.2); `js-conformance` re-keyed. *Proves:* the
-    suite is green on `static` and the fake and red on each broken provider.
-29. The lease table: the `acquiring` state, the acquire record committed before the call, acquire off the table lock (D19), the pool
-    name in the lease file, and share leases under `Book` admission. *Proves:* a crash between the record and the call resolves by `list`;
-    a lease file written before the change loads; the GPU-host tests pass unchanged.
-30. Agent registration in `js-agent` and the server: hello with identity and shape, admission, join credentials, deny file,
-    `RegisteredAgentSource`. *Proves:* a host with a wrong credential, an unknown pool, a duplicate id, a rebinding or a shape that does
-    not satisfy is refused; a denied host's stream closes at the next tick; a lost host's leases are given up once.
-30b. Reuse and integrity in `js-agent` and the server: post-job removal and slot freeing, the `isolation` field and its three consents,
-    the post-job checks, the taint report and the durable tainted set, `js-cli host clear-taint`. *Proves:* the taint paths of 13.1 on
-    the fake agent; a `host` start without any one consent is refused; a taint is not cleared by a clean hello; a tainted id is refused.
-31. The pool scaler in `tick`: `min_machines`, `max_machines`, `max_step`, cooldown, idle and boot timeouts, the boot-failure brake,
-    `releasing`, replacement of tainted hosts. *Proves:* the invariants of 13.3 over seeds, with an injected clock and no elapsed-time assertion.
-31b. Placement reuse: a freed slot places queued work that fits before any acquire. *Proves:* a burst that fits idle machines acquires
-    nothing; the same seeded run is identical with the scaler on or off when no demand exceeds capacity.
-32. `js-provider-aws` against a fake cloud client, disabled by default; seating becomes re-adoption by tag; the IAM scope of 12.4.
-    *Proves:* tags on every created instance; an Unknown `acquire` never launches twice; a restart re-adopts and reaps; the documented
-    policy passes the check of 12.4.
-33. Consumer pool selection: class and label selectors in the lease request, and `--pool`, `--class`, `--label` in `js-cli`. *Proves:*
-    no match is refused, a pool at `max_machines` queues, a selector picks the right pool.
-34. `kbf-executor` beside `js-agent`, with host mounts for the input cache (9.2). *Proves:* the action container holds no storage
-    credential; a container that reads the executor's credential path, the metadata endpoint or a mount outside the roots fails, and
-    the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
-34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a static pool of kbf's own hosts, a node
-    lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
-    floor of whole-node leases, more on queue depth, drained before release); each frontend leases only for the hosts it owns, as
-    today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside the TTL
-    changes no placement; the cross-version matrix with a frontend pair.
-35. The first real aws pool, disabled by default; enabling it needs the go in R7.
+Steps 23 to 35 (Phase D, new capability; Phase E, capacity providers and pools) and **Phase F, steps 36 to 47 (capabilities as data
+and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
+(38), needs and matching (39), kbf's table (40), the `Sandbox` seam (41), `VmRuntime` and its fake (42), the VM lifecycle (43), mixed-host
+accounting (44), the warm pool (45), whole-node readiness (46), the first real driver (47); steps 43 (sizes) and 45 wait for D26. All are in
+[design/extraction-steps-d.md](design/extraction-steps-d.md).
 
 ## 15. Decisions
 
-Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to D25 with no gaps.
+Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to D31 with no gaps; D26 is open and has no recommendation yet.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -952,6 +913,32 @@ package (10.3).
   machine, the agent checks after every job and taints on any finding, and a tainted machine is replaced or cordoned, never cleared on
   the agent's word; (c) b, and the scheduler also records the taint itself when it grants a `host_jobs` lease or sends a host `Start`,
   before the job runs. Recommend (c), host jobs off by default and needing consumer, pool and agent consent (5.12). The scheduler's record is of what it granted, not a check of the host, so it does not depend on an agent that may be compromised; the agent's report is the second path.
+- **D26. macOS VM sizing: fixed or dynamic CPU and memory. OPEN; another engineer is answering it, and the answer is folded in here.**
+  Facts: the virtualization framework fixes a VM's CPU count and memory at creation; a memory balloon can only reclaim memory and give it
+  back, never grow a VM past its configured size; a VM is cloned and booted for each lease, so any size can be chosen at lease time, and
+  the boot cost is what a warm pool hides; booted VM memory is committed in full (5.15). (A) **Fixed size classes** declared by the agent;
+  a lease names a class; the warm pool is keyed (image, class), so any warm VM serves any lease of its key and no lease gets more than it
+  asked; bookings are a few quantized vectors; a job larger than the largest class cannot use a VM and a small job pays for a class.
+  (B) **Dynamic, per lease**: the lease states CPUs and memory and the VM is created at that size; a warm VM exists at a size fixed in
+  advance, serves only a lease that asks for no more, and is booked at the VM's size, not the request's; any other lease cold-boots; an
+  optional balloon returns idle warm memory but never exceeds the configured size; bookings are arbitrary, so packing matters more (6.5).
+  The wire carries the VM's size under both, and the lifecycle, the channel and the integrity rules do not change; only the size fields
+  (step 43) and the warm pool (step 45) wait. No recommendation until the answer arrives; detail in [design/vm-backend.md](design/vm-backend.md).
+- **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
+  `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
+  scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
+- **D28. Runtime traits for VMs.** (a) Widen `ContainerRuntime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
+  internal `Sandbox` seam; (c) a second lifecycle. Recommend (b): the stages, channel, destroy and restart rules differ, (a) forces optional
+  parts on every backend and changes merged code, and (c) writes the cleanup order, results and slot accounting twice (5.14).
+- **D29. VM reuse. Settled by the project owner:** a fresh VM for each lease, never reused, with an optional warm pool of fresh booted VMs
+  per agent. Rejected: reverting a used VM to a snapshot or cleaning it in place, because what remains of a guest after a job cannot be
+  shown to be clean; destroying it can. The cost is a boot per lease, which the warm pool and D26 bear.
+- **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has drained
+  the warm pool and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test start
+  beside a booted idle VM, and the token gate needs no change in an older client (5.15).
+- **D31. Matching what is inside an image.** (a) The consumer names the image and constrains `base_images has <name>`; (b) each image has a
+  profile and a `guest` scope matches when one image meets all the guest constraints. Recommend (b), with (a) always available: Xcode and
+  runtimes are properties of the image the VM boots, and a consumer should ask for what it needs, not memorise image names (5.13).
 
 ## 16. Risks
 
@@ -997,3 +984,15 @@ package (10.3).
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,
   `cooldown` and `max_machines`, and by `max_taints_in_a_row` stopping replacement with an alert (5.12).
+- **K19. A wrong constraint places work on a host that cannot run it, or on none.** Skipping an unknown op, reading an absent fact as zero,
+  or matching images one constraint at a time would. Mitigated by refusing unknown ops, absent-is-unmet, one-image guest scope, and the constraint suite (5.13).
+- **K20. Stale or false facts.** An agent that reports a runtime it lost, or a snapshot lost in transit, misleads placement. Mitigated by full
+  snapshots with an ack, the agent re-probing after each job, and the agent refusing a `Start` it cannot honour (`image-unavailable`); a fact never reaches a lease already granted.
+- **K21. A guest attacks the host through the channel or the hypervisor.** Mitigated by a bounded, fuzzed frame codec, no shared writable host
+  path, no network by default, no credential in a guest, host checks after every VM job, and taint on a failed destroy (5.14). A hypervisor escape is not
+  covered by any check here.
+- **K22. Warm VMs starve the host.** Idle booted VMs hold memory containers could use. Mitigated by counting them in full, refilling only into free capacity, one at a time, a failure brake, and a pool that is off by default (5.15).
+- **K23. Base image drift.** A mutable image would make two leases differ. Mitigated by immutable names, a digest pinned in the `Start` and verified (5.14).
+- **K24. A whole-node lease never becomes ready, or is shared by mistake.** Mitigated by the withheld token, `prepare_timeout` and the offer invariant (5.15).
+- **K25. Boot cost per lease.** A boot each time; bounded by the warm pool, whose hit rate D26 decides.
+- **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
