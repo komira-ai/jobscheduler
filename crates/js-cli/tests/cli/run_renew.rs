@@ -95,7 +95,10 @@ fn a_lease_that_cannot_be_renewed_is_given_up_before_the_server_expires_it() {
         got.err
     );
     // The period, the time left to the deadline, and then the grace period of the stop.
-    assert_eq!(waiter.intervals(), vec![secs(200), secs(20), secs(30)]);
+    assert_eq!(
+        waiter.intervals_reaching(3),
+        vec![secs(200), secs(20), secs(30)]
+    );
     let expires = T0 + 600_000;
     let at_loss = js_lease::Clock::now(&h.clock).millis();
     assert_eq!(at_loss, T0 + 400_000);
@@ -144,7 +147,10 @@ fn a_failed_renewal_is_tried_again_after_a_sixth_of_the_period() {
         "{}",
         got.err
     );
-    assert_eq!(waiter.intervals(), vec![secs(200), RETRY, secs(30)]);
+    assert_eq!(
+        waiter.intervals_reaching(3),
+        vec![secs(200), RETRY, secs(30)]
+    );
 }
 
 /// Asserts that one renewal that fails (a 500) does not cost the lease: the next try, a
@@ -329,5 +335,5 @@ fn a_renewal_that_fails_after_the_deadline_gives_the_lease_up() {
         "{}",
         got.err
     );
-    assert_eq!(waiter.intervals(), vec![secs(200), secs(30)]);
+    assert_eq!(waiter.intervals_reaching(2), vec![secs(200), secs(30)]);
 }
