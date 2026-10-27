@@ -22,6 +22,13 @@
 //! | `--capability k=v` | a capability to report; repeatable; `os` and `arch` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
+//! | `--allow-host-jobs` | accept a start with `isolation = host`; off by default, and without it such a start creates nothing and is refused |
+//! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
+//! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
+//!
+//! The job flags are checked at start and a wrong one ends the agent with exit status 2.
+//! What they configure is the [`lifecycle`], which no change has connected to the session
+//! yet: today the flags are validated and nothing runs a job.
 //!
 //! # What is detected
 //!
@@ -87,6 +94,7 @@ mod cli;
 mod container;
 mod facts;
 mod host;
+pub mod lifecycle;
 mod run;
 mod session;
 mod signals;
@@ -106,6 +114,7 @@ pub use facts::{
     Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
+use lifecycle::Local;
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
 pub use signals::SystemSleeper;
@@ -212,6 +221,9 @@ fn execute(
     });
     let checked = offer.hello.validate();
     checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
+    // The job flags are checked now so a wrong one stops the agent before it registers.
+    // The change that runs jobs builds the lifecycle from them.
+    Local::from_cli(&cli).map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

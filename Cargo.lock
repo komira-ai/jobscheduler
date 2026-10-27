@@ -570,6 +570,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2",
+ "thiserror",
  "tokio",
 ]
 

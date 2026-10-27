@@ -14,6 +14,7 @@ mod drive;
 mod e2e;
 mod facts;
 mod flags;
+mod lifecycle;
 mod server;
 mod session;
 mod support;

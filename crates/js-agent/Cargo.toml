@@ -19,6 +19,7 @@ hex.workspace = true
 rustix = { workspace = true, features = ["process", "rand"] }
 serde_json.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
 
 [dev-dependencies]
