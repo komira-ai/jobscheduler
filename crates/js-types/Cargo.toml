@@ -9,6 +9,9 @@ publish.workspace = true
 
 
 [dependencies]
+serde.workspace = true
+# `sched::Version::parse` reads the report of `kbf --version --json`.
+serde_json.workspace = true
 thiserror.workspace = true
 
 [lints]

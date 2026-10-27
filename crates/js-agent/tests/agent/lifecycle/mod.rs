@@ -6,6 +6,7 @@
 
 mod adopt;
 mod cleanup;
+mod exclusive;
 pub mod fake;
 mod flags;
 mod mounts;

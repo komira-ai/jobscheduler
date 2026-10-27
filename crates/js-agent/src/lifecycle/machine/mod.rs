@@ -6,6 +6,7 @@
 
 mod adopt;
 mod cleanup;
+mod exclusive;
 mod job;
 
 use std::collections::BTreeSet;
@@ -15,6 +16,7 @@ use js_agent_wire::{
     RunResult, Taint, limits, refusal,
 };
 
+pub use self::exclusive::{Quiet, Restored};
 use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
 use super::runtime::{ContainerRuntime, ResolvedMount};
 use super::taint::TaintState;
@@ -44,6 +46,12 @@ pub struct Lifecycle {
     stuck: Vec<Stuck>,
     retired: Retired,
     taint: TaintState,
+    /// The whole-node lease the server told this host to prepare for, and whether the host
+    /// has been found quiet for it (see `exclusive`).
+    exclusive: Option<exclusive::Hold>,
+    /// The leases of the runs taken over at start, until a reply that names a lease is followed: a
+    /// restart while a lease was ready (see `exclusive`).
+    adopted_leases: Vec<String>,
 }
 
 impl Lifecycle {
@@ -62,6 +70,11 @@ impl Lifecycle {
                 code: refused.error.code(),
             })
             .collect();
+        // The lease is followed before the commands, so a `Start` in the reply that grants
+        // an exclusive lease is judged against it.
+        if checked.exclusive.is_ok() {
+            self.follow(reply.exclusive.as_deref());
+        }
         for command in &checked.commands {
             match command {
                 Command::Start(spec) => self.start(spec, received, &mut events),
@@ -206,6 +219,7 @@ impl Lifecycle {
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
         }
+        self.admit_exclusive(spec)?;
         if (spec.isolation, self.config.allow_host_jobs) == (Isolation::Host, false) {
             return Err(no(
                 refusal::HOST_JOBS_NOT_ALLOWED,

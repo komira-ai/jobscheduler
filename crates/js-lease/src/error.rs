@@ -31,6 +31,9 @@ pub enum SettingsError {
     /// The default ttl was above the maximum ttl.
     #[error("the default ttl must not exceed the maximum ttl")]
     DefaultAboveMax,
+    /// The prepare timeout was zero.
+    #[error("the prepare timeout must be positive")]
+    PrepareNotPositive,
 }
 
 /// The table could not be opened over its file.

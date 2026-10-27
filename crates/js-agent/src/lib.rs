@@ -88,6 +88,19 @@
 //! SIGTERM and SIGINT make the agent send one last heartbeat with the phase `draining`
 //! and exit 0, so the server leases the host no more.
 //!
+//! # A whole-node lease
+//!
+//! A session given a [`Quiesce`] ([`Session::with_quiesce`]) follows the `exclusive` lease a
+//! heartbeat reply names: `preparing`, then `exclusive_ready` once the host is quiet, or
+//! `exclusive_refused` (`host-unsafe` for a finding, `not-quiet` when a run is still held
+//! after `prepare_timeout`), then `restoring` when the reply stops naming the lease; see
+//! the `exclusive` module for the sequence and [`lifecycle::Lifecycle::prepare`] for what
+//! quiet means. The agent started by [`run_with`] does not run jobs yet, so it gives the
+//! session no host and ignores `exclusive`; the change that wires the lifecycle to the
+//! session implements [`Quiesce`] on its worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
+//! until a flag sets it. The VM check and the readiness hook of the design are later
+//! changes.
+//!
 //! # Secrets
 //!
 //! The join token is read from its file by `js-client`, held there, and sent in the
@@ -104,6 +117,7 @@ mod backoff;
 mod cli;
 pub mod cli_runtime;
 mod container;
+mod exclusive;
 mod facts;
 mod host;
 pub mod integrity;
@@ -123,6 +137,7 @@ use clap::Parser;
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
 use cli_runtime::Settings;
+pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
