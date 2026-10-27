@@ -1,0 +1,33 @@
+[package]
+name = "js-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "js-agent"
+path = "src/main.rs"
+
+[dependencies]
+js-agent-wire = { path = "../js-agent-wire" }
+js-client = { path = "../js-client" }
+clap.workspace = true
+hex.workspace = true
+rustix = { workspace = true, features = ["rand"] }
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt", "signal"] }
+
+[dev-dependencies]
+js-lease = { path = "../js-lease" }
+js-lease-server = { path = "../js-lease-server" }
+js-pool-static = { path = "../js-pool-static" }
+clap.workspace = true
+rustix = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+
+[lints]
+workspace = true
