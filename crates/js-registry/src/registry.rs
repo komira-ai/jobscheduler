@@ -6,13 +6,14 @@ use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, T
 use js_lease::{Clock, Timestamp};
 use js_pool_static::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
+use js_types::{Admission, HostId, LeaseId, ProviderId, ResourceClass, Shape};
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
-use crate::runs::{RunRefusal, RunView, Runs, vet};
+use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
+use crate::whole::exclusive::Exclusive;
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,9 +46,10 @@ pub struct HostView {
     pub agent_version: Option<String>,
     /// The current session epoch; 0 for a host that has not yet said hello.
     pub epoch: u64,
-    /// Whether the host holds no lease but still has runs to finish: runs of a lease that
-    /// ended, or runs it lists that the server does not know. It takes no new lease until
-    /// a heartbeat shows none.
+    /// Whether the host holds no lease but is not yet clear of the last one: it still has
+    /// runs to finish (runs of a lease that ended, or runs it lists that the server does
+    /// not know), or it is restoring after a whole-node lease. It takes no new lease until
+    /// a heartbeat shows none and, after a whole-node lease, shows it serving.
     pub releasing: bool,
     /// The taint the host reported, once it has: it can no longer be trusted clean, so it
     /// is sent no start and takes no new run. It is kept across a restart and is not
@@ -76,6 +78,8 @@ struct Record {
     /// The first taint the host reported. It outlives a session and, through the file of
     /// bindings, a restart.
     taint: Option<Taint>,
+    /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
+    exclusive: Exclusive,
 }
 
 impl Record {
@@ -95,6 +99,7 @@ impl Record {
             labels: BTreeMap::new(),
             held: BTreeSet::new(),
             beats: 0,
+            exclusive: Exclusive::Free,
         }
     }
 
@@ -117,13 +122,17 @@ impl Record {
     }
 
     /// Whether a new lease may be placed here: heard from within the grace period,
-    /// serving, `quiet` (no run left over from the last lease) and not tainted. Every
-    /// other phase takes no new lease. A lease already on a tainted host is untouched.
+    /// serving, `quiet` (no run left over from the last lease), not tainted and clear of
+    /// a whole-node lease (not held, not restoring). Every other phase takes no new
+    /// lease. A lease already on a tainted host is untouched.
     fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
         let live = self.state(now, grace_ms) == HostState::Live;
         let serving = self.phase == Phase::Serving;
         let clean = self.taint.is_none();
-        [live, serving, quiet, clean].into_iter().all(|ok| ok)
+        let clear = self.exclusive.is_free();
+        [live, serving, quiet, clean, clear]
+            .into_iter()
+            .all(|ok| ok)
     }
 
     /// Whether the host has been silent for longer than the grace period and the
@@ -322,6 +331,7 @@ impl Registry {
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
+        let kept_exclusive = known.map_or(Exclusive::Free, |record| record.exclusive.after_hello());
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -373,6 +383,7 @@ impl Registry {
                 held,
                 beats: 0,
                 taint: kept_taint,
+                exclusive: kept_exclusive,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -490,15 +501,20 @@ impl Registry {
             })
         });
         record.taint = record.taint.take().or(reported);
-        let reply = runs.answer(
-            &host,
-            heartbeat,
-            (gap, record.taint.is_some()),
-            (book, now.millis()),
-        );
+        record.exclusive = record.exclusive.after_beat();
+        let clean = record.taint.is_none();
+        if let Some(ready) = &heartbeat.exclusive_ready {
+            record.exclusive = record.exclusive.report_ready(ready, clean);
+        }
+        let standing = Standing {
+            gap,
+            tainted: !clean,
+            unready: record.exclusive.awaits_ready(),
+        };
+        let reply = runs.answer(&host, heartbeat, standing, (book, now.millis()));
         Ok(HeartbeatReply {
             taint_ack: heartbeat.taint.is_some(),
-            exclusive: None,
+            exclusive: record.exclusive.granted(),
             ..reply
         })
     }
@@ -555,6 +571,9 @@ impl Registry {
         }
         if record.taint.is_some() {
             return Err(RunRefusal::HostTainted);
+        }
+        if record.exclusive.awaits_ready() {
+            return Err(RunRefusal::NotReady);
         }
         if record.phase != Phase::Serving {
             return Err(RunRefusal::NoCapacity);
@@ -637,12 +656,20 @@ impl Registry {
             labels: record.labels.clone(),
             agent_version: record.agent_version.clone(),
             epoch: record.epoch,
-            releasing: !booked.contains_key(id) & !record.quiet(&state.runs, id),
+            releasing: !booked.contains_key(id)
+                & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
             taint: record.taint.clone(),
         });
         views.collect()
     }
 
+    /// Books `spec`'s lease as [`js_pool_static::HostBook`] does. A `Whole` class is
+    /// committed, not granted: the booking is made only on a host that is bookable (live,
+    /// serving, clean), quiet (no held run, none live here) and clear of another
+    /// whole-node lease or a restore, and the answer is `Unknown` so the lease stays
+    /// pending. It reads `Present` once the agent reports the host ready
+    /// ([`Registry::heartbeat`]), and a repeated start answers `Unknown` until then and
+    /// `Started` after.
     pub(crate) fn start(&self, classes: &[ResourceClass], spec: &StartSpec) -> StartAck {
         let now = self.shared.clock.now();
         let grace = self.grace_ms();
@@ -653,12 +680,34 @@ impl Registry {
             runs,
             ..
         } = &mut *guard;
+        let lease = spec.lease();
+        let held = book.read(&lease);
+        let pending = match &held {
+            Observed::Present { host } => records
+                .get(host)
+                .is_some_and(|record| record.exclusive.awaits_ready()),
+            Observed::Absent | Observed::Unknown => false,
+        };
+        if pending {
+            return StartAck::Unknown;
+        }
         let gate = HostBook::class_gate(classes, spec);
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
             record.is_some_and(|record| record.bookable(now, grace, record.quiet(runs, id)))
         };
         let ack = book.start_where(spec, gate, &eligible);
+        let whole = matches!(spec.class().admission(), Admission::Whole);
+        let fresh = !matches!(held, Observed::Present { .. });
+        let commit = [whole, fresh].into_iter().all(|ok| ok);
+        if let (StartAck::Started { host }, true) = (&ack, commit) {
+            // The host was eligible, so it has a record.
+            let record = records.get_mut(host);
+            record.into_iter().for_each(|record| {
+                record.exclusive = Exclusive::Committed { lease, at: now };
+            });
+            return StartAck::Unknown;
+        }
         // The book answers `NoFit` when no listed host fits. Every host is booked as the
         // pool's shape, so that happens for a request the pool's shape fits only when
         // no host is listed yet: a host could still join, which is capacity, not fit.
@@ -675,14 +724,30 @@ impl Registry {
 
     /// Frees the booking at once, as the book does, and asks every live run of the lease
     /// to stop. The host takes no new lease until a heartbeat lists none of those runs.
+    /// After a whole-node lease it takes none until a second heartbeat has followed the
+    /// stop (the first may have crossed it) and the last one shows it serving with
+    /// nothing held (design `whole-node.md` section 8).
     pub(crate) fn stop(&self, lease: &LeaseId) -> Observed {
         let mut guard = self.lock();
-        guard.runs.stop_lease(lease);
-        guard.book.stop(lease)
+        let State {
+            book,
+            records,
+            runs,
+            ..
+        } = &mut *guard;
+        runs.stop_lease(lease);
+        if let Observed::Present { host } = book.read(lease) {
+            let record = records.get_mut(&host);
+            record.into_iter().for_each(|record| {
+                record.exclusive = record.exclusive.stopped();
+            });
+        }
+        book.stop(lease)
     }
 
-    /// `Present` only while the host holding the lease is live; a lost or awaiting
-    /// host is `Unknown`, never `Absent`, so the booking stays.
+    /// `Present` only while the host holding the lease is live and, for a whole-node
+    /// lease, ready; a lost or awaiting host, and a whole-node host not yet ready, is
+    /// `Unknown`, never `Absent`, so the booking stays.
     pub(crate) fn observe(&self, lease: &LeaseId) -> Observed {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
@@ -691,7 +756,8 @@ impl Registry {
                 let record = state.records.get(&host);
                 let live = record
                     .is_some_and(|record| record.state(now, self.grace_ms()) == HostState::Live);
-                match live {
+                let ready = record.is_some_and(|record| !record.exclusive.awaits_ready());
+                match [live, ready].into_iter().all(|ok| ok) {
                     true => Observed::Present { host },
                     false => Observed::Unknown,
                 }

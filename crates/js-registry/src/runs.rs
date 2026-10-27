@@ -123,6 +123,10 @@ pub enum RunRefusal {
     /// Its live runs still finish.
     #[error("the host is tainted")]
     HostTainted,
+    /// The lease is committed to its host and the agent has not yet reported the host
+    /// ready (a whole-node lease, whose token is not minted before), so no run is queued.
+    #[error("the lease's host is not ready")]
+    NotReady,
     /// The run id is already in use. A caller that mints ids never sees it.
     #[error("the run id is in use")]
     RunExists,
@@ -145,6 +149,7 @@ impl RunRefusal {
             Self::HostJobsNotAllowed => refusal::HOST_JOBS_NOT_ALLOWED,
             Self::NoCapacity => refusal::NO_CAPACITY,
             Self::HostTainted => refusal::HOST_TAINTED,
+            Self::NotReady => "not-ready",
             Self::RunExists => "run-exists",
             Self::UnknownRun => "unknown-run",
         }
@@ -301,6 +306,17 @@ fn next_life(life: Life, listed: Option<HeldState>, abandoned: bool) -> Life {
     }
 }
 
+/// What a heartbeat's host stands at, as far as sending it a start goes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Standing {
+    /// The host was lost or only awaited before this heartbeat.
+    pub(crate) gap: bool,
+    /// The host reported a taint.
+    pub(crate) tainted: bool,
+    /// A whole-node lease is committed to the host and the agent has not reported ready.
+    pub(crate) unready: bool,
+}
+
 /// Every run the server knows, across hosts. The id is the key, so a result for a run of
 /// another host is found and told apart from one for no run at all.
 #[derive(Debug, Default)]
@@ -421,16 +437,17 @@ impl Runs {
     }
 
     /// The reply to a heartbeat of `host` received at `now`: its list is taken, each
-    /// result is answered, and the commands go out. A tainted host is sent no start; its
-    /// live runs finish and their results are answered as ever.
+    /// result is answered, and the commands go out. A tainted host is sent no start, nor
+    /// is one whose exclusive lease is not ready ([`Standing::unready`]); its live runs
+    /// finish and their results are answered as ever.
     pub(crate) fn answer(
         &mut self,
         host: &HostId,
         heartbeat: &Heartbeat,
-        (gap, tainted): (bool, bool),
+        standing: Standing,
         (book, now): (&HostBook, u64),
     ) -> HeartbeatReply {
-        self.sync(host, &heartbeat.held, gap);
+        self.sync(host, &heartbeat.held, standing.gap);
         let mut result_acks = Vec::new();
         for result in &heartbeat.results {
             let ack = self.ack(host, result, book);
@@ -440,7 +457,9 @@ impl Runs {
             });
         }
         let serving = heartbeat.phase == js_agent_wire::Phase::Serving;
-        let starts = [serving, !tainted].into_iter().all(|ok| ok);
+        let starts = [serving, !standing.tainted, !standing.unready]
+            .into_iter()
+            .all(|ok| ok);
         let commands = self.commands(host, (starts, now), &heartbeat.held);
         self.sweep(host, book);
         HeartbeatReply {
@@ -548,5 +567,69 @@ impl Runs {
         for id in doomed {
             self.map.remove(&id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_agent_wire::{Limits, Phase};
+
+    fn job() -> JobSpec {
+        JobSpec {
+            run_id: "r1".into(),
+            lease_id: "1-1".into(),
+            image: "busybox:1".into(),
+            args: Vec::new(),
+            limits: Limits {
+                cpu_millis: 1000,
+                memory_bytes: 1 << 20,
+                pids: None,
+                wall_ms: 60_000,
+            },
+            gpu_indices: Vec::new(),
+            mounts: Vec::new(),
+            isolation: Isolation::Contained,
+            labels: Default::default(),
+            heartbeat_seq: 0,
+            valid_for_ms: 0,
+        }
+    }
+
+    fn beat() -> Heartbeat {
+        Heartbeat {
+            host_id: "a".into(),
+            epoch: 1,
+            session: String::new(),
+            phase: Phase::Serving,
+            held: Vec::new(),
+            results: Vec::new(),
+            taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
+        }
+    }
+
+    /// Asserts the starts gate on its own, whatever the registry lets into the queue: a
+    /// queued run of a host whose exclusive lease is not ready is sent no start, and the
+    /// same run is started once the host is. It catches a start sent to a host that is
+    /// still preparing, which the queue's refusal alone would leave to chance.
+    #[test]
+    fn a_queued_run_waits_for_an_unready_host() {
+        let host = HostId::new("a").unwrap();
+        let book = HostBook::new();
+        let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
+        let mut runs = Runs::default();
+        runs.admit(&host, &LeaseId::new(1, 1), job(), &shape, (0, 0))
+            .unwrap();
+        let held = |unready| Standing {
+            gap: false,
+            tainted: false,
+            unready,
+        };
+        let reply = runs.answer(&host, &beat(), held(true), (&book, 0));
+        assert!(reply.commands.is_empty());
+        let reply = runs.answer(&host, &beat(), held(false), (&book, 0));
+        assert!(matches!(reply.commands[..], [Command::Start(_)]));
     }
 }

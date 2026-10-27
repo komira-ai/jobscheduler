@@ -1,0 +1,101 @@
+//! Where a registered host stands in an exclusive (whole-node) lease: committed to a
+//! lease and preparing, ready for it, or restoring after it. In memory only.
+//!
+//! The states are transitions of one value, so the registry cannot reach a state by
+//! assigning a field and the rules read in one place:
+//!
+//! - **Committed.** The commit gate (a quiet, bookable host) passed and the lease holds
+//!   the host. The host's replies say `exclusive`, the lease reads `Unknown` (the
+//!   consumer's lease stays pending), and no run is queued or started.
+//! - **Ready.** The agent reported `exclusive_ready` for exactly this lease. The lease
+//!   reads `Present`, and the lease holder's runs are queued and started as for any lease.
+//! - **Restoring.** The lease ended. The host is bookable again only after a heartbeat
+//!   sent after the agent was answered without `exclusive`: the heartbeat that crossed
+//!   the stop on the wire says nothing about the restore, so the first heartbeat after
+//!   the stop only marks the agent as told, and the second ends the state. Whether the
+//!   host then books is the ordinary rule, read from the last heartbeat at the start:
+//!   phase `serving`, no held run, no live run.
+//!
+//! A host that says hello again lost its session, so its preparation is void: `Ready`
+//! falls back to `Committed` (the same lease and commit time) until it reports again.
+
+use js_lease::Timestamp;
+use js_types::LeaseId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Exclusive {
+    /// No exclusive lease is on the host and none is being undone.
+    Free,
+    /// `lease` holds the host since `at`, and the agent has not reported ready.
+    Committed { lease: LeaseId, at: Timestamp },
+    /// The agent reported ready for `lease`, committed at `at`.
+    Ready { lease: LeaseId, at: Timestamp },
+    /// The lease ended. `told` is whether a heartbeat reply without `exclusive` has gone
+    /// to the agent since.
+    Restoring { told: bool },
+}
+
+impl Exclusive {
+    /// Whether the host may be booked as far as this state goes: nothing is held on it
+    /// or being undone.
+    pub(crate) fn is_free(&self) -> bool {
+        *self == Self::Free
+    }
+
+    /// The lease id the heartbeat reply names, while a lease holds the host.
+    pub(crate) fn granted(&self) -> Option<String> {
+        match self {
+            Self::Committed { lease, .. } | Self::Ready { lease, .. } => Some(lease.to_string()),
+            Self::Free | Self::Restoring { .. } => None,
+        }
+    }
+
+    /// Whether the lease holding the host is committed and the agent has not reported
+    /// it ready. The caller has found the lease on the host, so the state names it: no
+    /// lease id is compared here.
+    pub(crate) fn awaits_ready(&self) -> bool {
+        matches!(self, Self::Committed { .. })
+    }
+
+    /// The state after the agent reported `reported` ready, on a host that is `clean`
+    /// (not tainted). Only the committed lease, named exactly, becomes ready.
+    pub(crate) fn report_ready(self, reported: &str, clean: bool) -> Self {
+        match self {
+            Self::Committed { lease, at }
+                if [clean, lease.to_string() == reported]
+                    .into_iter()
+                    .all(|ok| ok) =>
+            {
+                Self::Ready { lease, at }
+            }
+            other => other,
+        }
+    }
+
+    /// The state after the lease holding the host ended (the caller found it there).
+    pub(crate) fn stopped(self) -> Self {
+        match self {
+            Self::Committed { .. } | Self::Ready { .. } => Self::Restoring { told: false },
+            other => other,
+        }
+    }
+
+    /// The state after a heartbeat: the first after the stop marks the agent as told, the
+    /// next ends the restore.
+    pub(crate) fn after_beat(self) -> Self {
+        match self {
+            Self::Restoring { told: false } => Self::Restoring { told: true },
+            Self::Restoring { told: true } => Self::Free,
+            other => other,
+        }
+    }
+
+    /// The state after the host said hello again.
+    pub(crate) fn after_hello(self) -> Self {
+        match self {
+            Self::Ready { lease, at } => Self::Committed { lease, at },
+            Self::Restoring { .. } => Self::Restoring { told: false },
+            other => other,
+        }
+    }
+}
