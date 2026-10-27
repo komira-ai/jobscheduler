@@ -8,7 +8,7 @@ use js_provider_fake::FakeProvider;
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
 use crate::support::{
-    Scratch, T0, at, break_dir, clock, fake, fresh, host, open, open_err, open_with,
+    Scratch, T0, Table, at, break_dir, clock, fake, fresh, host, open, open_err, open_with,
     provider_classes, request, secs, settings, states,
 };
 
@@ -350,4 +350,53 @@ fn a_held_lease_takes_the_host_the_provider_names_at_open() {
     let provider = table.into_provider();
     let table = open_with(Moved(provider), &scratch);
     assert_eq!(table.list()[0].host, Some(host("moved")));
+}
+
+/// Leaves a lease in the file, stops the process, puts `stale` where an interrupted save
+/// left its temporary file, and opens again. Returns the table, the lease of the first
+/// boot and the scratch directory.
+fn reopen_over_stale_temp(name: &str, stale: &str) -> (Table, LeaseId, Scratch) {
+    let (mut table, clock, scratch) = fresh(name);
+    let lease = table.acquire(request(3600), None).unwrap();
+    let provider = table.into_provider();
+    let temp = scratch.dir.join("leases.toml.tmp");
+    fs::write(&temp, stale).unwrap();
+
+    let table = LeaseTable::open(provider, clock, settings(), scratch.file(), Boot::Resume);
+    assert!(
+        !temp.exists(),
+        "the open save renamed the temporary file away"
+    );
+    (table.unwrap(), lease.id, scratch)
+}
+
+/// Asserts the crash after a temporary file was written and before the rename, when the
+/// temporary file is a complete, valid document that disagrees with the real one (term
+/// 50, no leases): the old file is what loads (its lease, its term plus one), the open
+/// save replaces the temporary file, and the next ids follow the old file, not the stale
+/// one.
+#[test]
+fn a_complete_stale_temp_file_is_ignored_and_replaced() {
+    let stale = "version = 1\nterm = 50\nnext_sequence = 99\nlease_count = 0\n";
+    let (mut table, id, scratch) = reopen_over_stale_temp("stale_complete", stale);
+    assert_eq!(states(&table), vec![(id, LeaseState::Held)]);
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert!(text.starts_with("version = 1\nterm = 2\nnext_sequence = 2\nlease_count = 1\n"));
+    let next = table.acquire(request(3600), None).unwrap();
+    assert_eq!(next.id, LeaseId::new(2, 2));
+    assert!(!scratch.dir.join("leases.toml.tmp").exists());
+}
+
+/// Asserts the crash in the middle of writing the temporary file, when what it holds is
+/// cut off and not a document at all: it is ignored the same way, the open does not fail
+/// on it, and the next save overwrites it.
+#[test]
+fn a_cut_off_stale_temp_file_is_ignored_and_replaced() {
+    let stale = "version = 1\nterm = 50\nnext_sequence = 9";
+    let (mut table, id, scratch) = reopen_over_stale_temp("stale_cut", stale);
+    assert_eq!(states(&table), vec![(id, LeaseState::Held)]);
+    let next = table.acquire(request(3600), None).unwrap();
+    assert_eq!(next.id, LeaseId::new(2, 2));
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert!(text.contains("lease_count = 2\n"));
 }
