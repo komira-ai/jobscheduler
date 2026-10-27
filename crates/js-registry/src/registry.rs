@@ -8,7 +8,7 @@ use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
 
 use crate::config::PoolConfig;
-use crate::credential::Credential;
+use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
 
 /// Where a host's session stands.
@@ -46,7 +46,7 @@ pub struct HostView {
 
 #[derive(Debug)]
 struct Record {
-    binding: Option<Credential>,
+    binding: Option<Binding>,
     epoch: u64,
     phase: Phase,
     heard: Option<Timestamp>,
@@ -55,9 +55,9 @@ struct Record {
 }
 
 impl Record {
-    fn awaiting() -> Self {
+    fn awaiting(binding: Option<Binding>) -> Self {
         Self {
-            binding: None,
+            binding,
             epoch: 0,
             phase: Phase::Quarantined,
             heard: None,
@@ -83,11 +83,37 @@ impl Record {
         let serving = self.phase == Phase::Serving;
         [live, serving].into_iter().all(|ok| ok)
     }
+
+    /// Whether the host has been silent for longer than the grace period and the
+    /// retention together. A host never heard (awaiting) is not.
+    fn out_of_retention(&self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> bool {
+        let kept_for = grace_ms.saturating_add(retention_ms);
+        self.heard
+            .is_some_and(|heard| now.millis().saturating_sub(heard.millis()) > kept_for)
+    }
 }
 
 struct State {
     book: HostBook,
     records: BTreeMap<HostId, Record>,
+}
+
+impl State {
+    /// Forgets every host that has been lost for longer than the retention and holds no
+    /// booking, binding included. A booked host stays however long it is silent.
+    fn forget_lost(&mut self, now: Timestamp, grace_ms: u64, retention_ms: u64) {
+        let lost = self
+            .records
+            .iter()
+            .filter(|(_, record)| record.out_of_retention(now, grace_ms, retention_ms))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in lost {
+            if self.book.remove_free(&id) {
+                self.records.remove(&id);
+            }
+        }
+    }
 }
 
 struct Shared {
@@ -104,7 +130,16 @@ struct Shared {
 /// internal mutex for the length of the call and returns; none awaits, and no call
 /// holds the mutex while calling out. Time comes only from the clock given at
 /// construction: a host is *lost* when the clock reads more than the grace period past
-/// its last hello or heartbeat, computed when asked, so nothing ticks.
+/// its last hello or heartbeat, computed when asked, so nothing ticks. A lost host that
+/// holds no booking is forgotten, binding included, once it has been lost for the pool's
+/// lost-host retention ([`PoolConfig::with_lost_retention`]), also computed when asked:
+/// every call forgets such hosts first, so they stop counting toward the pool's limit.
+/// A host that holds a booking is never forgotten. An awaiting host (seated after a
+/// restart, never heard) has no time to count from, so it is kept, even after its lease
+/// is stopped, until its agent says hello.
+///
+/// A call that panics while it holds the mutex leaves the state as the panic left it: a
+/// poisoned mutex is recovered, not propagated.
 ///
 /// # Lock order
 ///
@@ -136,11 +171,22 @@ impl Registry {
         crate::RegisteredProvider::new(self.clone(), self.shared.config.class().clone())
     }
 
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.shared
+    /// The registry's state as of `now`: hosts lost for longer than the retention, with
+    /// no booking, are forgotten first, so no call sees or counts one. Every call locks
+    /// through here.
+    fn lock_at(&self, now: Timestamp) -> MutexGuard<'_, State> {
+        let mut state = self
+            .shared
             .state
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let config = &self.shared.config;
+        state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        state
+    }
+
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.lock_at(self.shared.clock.now())
     }
 
     pub(crate) fn pool_id(&self) -> ProviderId {
@@ -156,13 +202,21 @@ impl Registry {
     ///
     /// The hello is checked as the wire rules say first ([`Hello::negotiate`] and
     /// [`Hello::validate`], which include the reserved label prefix), then in this
-    /// order: the pool is this one; the host id was not first admitted with another
-    /// credential; the host id is not live; the shape claimed offers at least the pool's
-    /// shape; the pool has room for a host it does not know. A refused hello creates and
-    /// changes nothing. An admitted one starts a new session: the epoch is one more than
-    /// the host's last, the host is live, and the id is bound to `credential` if it was
-    /// not bound yet. A host that is lost or only awaiting is replaced, keeping its
-    /// booking.
+    /// order: the pool is this one; the host id is not bound to another credential, nor
+    /// to another instance when its binding names one; the host id is not live; the
+    /// shape claimed offers at least the pool's shape; the pool has room for a host it
+    /// does not know (hosts forgotten after the lost-host retention do not count). A
+    /// refused hello creates and changes nothing. An admitted one starts a new session:
+    /// the epoch is one more than the host's last, the host is live, and the id is bound
+    /// to `credential`, and to `Hello::instance` when the hello names one, if it was not
+    /// bound yet. A host that is lost or only awaiting is replaced, keeping its booking.
+    ///
+    /// The binding is as strong as what the first hello presented. With an instance
+    /// identity it names the machine. Without one it holds at the level of the pool
+    /// credential only: whoever holds the pool's token can say hello for the id once
+    /// the host is lost, and inherits its booking. Per-host tokens or client
+    /// certificates close that later (design D18). A binding is not upgraded by a later
+    /// hello that names an instance.
     ///
     /// The runs a hello lists as held are not looked at yet.
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
@@ -174,11 +228,13 @@ impl Registry {
             return Err(Refusal::UnknownPool);
         }
         let now = self.shared.clock.now();
-        let mut state = self.lock();
+        let mut state = self.lock_at(now);
         let known = state.records.get(&host);
-        let bound_elsewhere = known
-            .and_then(|record| record.binding.as_ref())
-            .is_some_and(|bound| bound != credential);
+        let kept_binding = known.and_then(|record| record.binding.clone());
+        let instance = hello.instance.as_ref();
+        let bound_elsewhere = kept_binding
+            .as_ref()
+            .is_some_and(|bound| !bound.admits(credential, instance));
         if bound_elsewhere {
             return Err(Refusal::HostBound);
         }
@@ -205,7 +261,10 @@ impl Registry {
         state.records.insert(
             host,
             Record {
-                binding: Some(credential.clone()),
+                binding: Some(
+                    kept_binding
+                        .unwrap_or_else(|| Binding::new(credential.clone(), instance.cloned())),
+                ),
                 epoch,
                 phase: hello.phase,
                 heard: Some(now),
@@ -233,10 +292,10 @@ impl Registry {
     /// names an epoch that is not the current one. The agent answers the first and last by
     /// saying hello again.
     pub fn heartbeat(&self, heartbeat: &Heartbeat, credential: &Credential) -> Result<(), Refusal> {
-        let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHostId)?;
+        let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHeartbeatHostId)?;
         heartbeat.validate().map_err(Refusal::Invalid)?;
         let now = self.shared.clock.now();
-        let mut state = self.lock();
+        let mut state = self.lock_at(now);
         let record = state
             .records
             .get_mut(&host)
@@ -245,7 +304,7 @@ impl Registry {
         if record
             .binding
             .as_ref()
-            .is_some_and(|bound| bound != credential)
+            .is_some_and(|bound| bound.credential() != credential)
         {
             return Err(Refusal::HostBound);
         }
@@ -260,7 +319,7 @@ impl Registry {
     /// Every host the registry holds, in id order.
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
-        let state = self.lock();
+        let state = self.lock_at(now);
         let booked = state.book.booked();
         let shape = self.shared.config.shape();
         let views = state.records.iter().map(|(id, record)| HostView {
@@ -279,7 +338,7 @@ impl Registry {
     pub(crate) fn start(&self, classes: &[ResourceClass], spec: &StartSpec) -> StartAck {
         let now = self.shared.clock.now();
         let grace = self.grace_ms();
-        let mut guard = self.lock();
+        let mut guard = self.lock_at(now);
         let State { book, records } = &mut *guard;
         let gate = HostBook::class_gate(classes, spec);
         let eligible = |id: &HostId, _: &Shape| {
@@ -309,7 +368,7 @@ impl Registry {
     /// host is `Unknown`, never `Absent`, so the booking stays.
     pub(crate) fn observe(&self, lease: &LeaseId) -> Observed {
         let now = self.shared.clock.now();
-        let state = self.lock();
+        let state = self.lock_at(now);
         match state.book.read(lease) {
             Observed::Present { host } => {
                 let record = state.records.get(&host);
@@ -334,14 +393,20 @@ impl Registry {
 
     /// Puts back a booking the registry lost with its process. A host the registry does
     /// not know becomes an awaiting host: held, unobservable, not bookable, until its
-    /// agent says hello. See [`crate::RegisteredProvider::seat`].
-    pub(crate) fn seat(&self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
+    /// agent says hello; `binding` is what that hello must match, or `None` to let the
+    /// first hello bind it. See [`crate::RegisteredProvider::seat`].
+    pub(crate) fn seat(
+        &self,
+        host: &HostId,
+        lease: LeaseId,
+        binding: Option<Binding>,
+    ) -> Result<(), SeatError> {
         let mut guard = self.lock();
         let State { book, records } = &mut *guard;
         match book.seat(host, lease) {
             Err(SeatError::Unlisted(_)) => {
                 book.insert_host(host.clone(), self.shared.config.shape().clone());
-                records.insert(host.clone(), Record::awaiting());
+                records.insert(host.clone(), Record::awaiting(binding));
                 book.seat(host, lease)
             }
             settled => settled,

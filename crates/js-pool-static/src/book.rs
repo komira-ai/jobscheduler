@@ -71,6 +71,13 @@ impl HostBook {
         self.hosts.entry(id).or_insert(Host { shape, lease: None });
     }
 
+    /// Unlists `id` when it is listed and free; answers whether it did. A booked host is
+    /// never removed: its booking would go with it.
+    pub fn remove_free(&mut self, id: &HostId) -> bool {
+        let free = self.hosts.get(id).is_some_and(|host| host.lease.is_none());
+        free && self.hosts.remove(id).is_some()
+    }
+
     /// Whether `id` is listed.
     pub fn contains(&self, id: &HostId) -> bool {
         self.hosts.contains_key(id)

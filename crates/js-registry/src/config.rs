@@ -3,6 +3,23 @@ use js_agent_wire::{
 };
 use js_types::{ProviderId, ResourceClass, Shape};
 
+/// How long a lost host that holds no booking is kept, unless the operator says
+/// otherwise: one day.
+pub const DEFAULT_LOST_RETENTION_MS: u64 = 86_400_000;
+/// The shortest retention [`PoolConfig::with_lost_retention`] accepts: one minute.
+pub const MIN_LOST_RETENTION_MS: u64 = 60_000;
+/// The longest retention [`PoolConfig::with_lost_retention`] accepts: thirty days.
+pub const MAX_LOST_RETENTION_MS: u64 = 30 * 86_400_000;
+
+/// Why a pool setting was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    /// The lost-host retention is outside [`MIN_LOST_RETENTION_MS`] to
+    /// [`MAX_LOST_RETENTION_MS`].
+    #[error("the lost-host retention must be between one minute and thirty days")]
+    LostRetention,
+}
+
 /// What an operator decides about a pool of self-registering hosts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolConfig {
@@ -12,6 +29,7 @@ pub struct PoolConfig {
     max_machines: usize,
     heartbeat_interval_ms: u64,
     grace_ms: u64,
+    lost_retention_ms: u64,
 }
 
 impl PoolConfig {
@@ -21,7 +39,8 @@ impl PoolConfig {
     /// `shape` is both the floor a host's claim must meet to join and the shape the
     /// pool books: a lease is placed and sized against it, never against what a host
     /// says about itself, so a host that claims more than the pool promises gains
-    /// nothing. Timing starts at the wire defaults.
+    /// nothing. Timing starts at the wire defaults, and a lost host that holds no
+    /// booking is kept for [`DEFAULT_LOST_RETENTION_MS`].
     pub fn new(name: ProviderId, class: ResourceClass, shape: Shape, max_machines: usize) -> Self {
         Self {
             name,
@@ -30,6 +49,7 @@ impl PoolConfig {
             max_machines,
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             grace_ms: DEFAULT_GRACE_MS,
+            lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
         }
     }
 
@@ -55,6 +75,23 @@ impl PoolConfig {
         Ok(self)
     }
 
+    /// The same pool keeping a lost host that holds no booking for `retention_ms` after
+    /// the host became lost, then forgetting it together with the credential and
+    /// instance it was bound to. A host that holds a booking is never forgotten.
+    ///
+    /// Refused outside [`MIN_LOST_RETENTION_MS`] to [`MAX_LOST_RETENTION_MS`], so that a
+    /// slip neither forgets hosts the moment they blink nor keeps dead ids for ever.
+    pub fn with_lost_retention(mut self, retention_ms: u64) -> Result<Self, ConfigError> {
+        let allowed = MIN_LOST_RETENTION_MS..=MAX_LOST_RETENTION_MS;
+        match allowed.contains(&retention_ms) {
+            true => {
+                self.lost_retention_ms = retention_ms;
+                Ok(self)
+            }
+            false => Err(ConfigError::LostRetention),
+        }
+    }
+
     pub(crate) fn name(&self) -> &ProviderId {
         &self.name
     }
@@ -77,5 +114,9 @@ impl PoolConfig {
 
     pub(crate) fn grace_ms(&self) -> u64 {
         self.grace_ms
+    }
+
+    pub(crate) fn lost_retention_ms(&self) -> u64 {
+        self.lost_retention_ms
     }
 }

@@ -68,8 +68,8 @@ fn pool_full_refused_but_rehello_of_known_host_ok() {
 #[test]
 fn seat_ignores_the_limit_but_counts_toward_it() {
     let fx = fixture(1);
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
-    fx.provider.seat(&host("b"), lease(2)).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
+    fx.provider.seat(&host("b"), lease(2), None).unwrap();
     let full = fx.registry.hello(&hello("c"), &cred("t")).unwrap_err();
     assert_eq!(full, Refusal::PoolFull);
 }
@@ -198,7 +198,8 @@ fn heartbeat_refusals_and_revival() {
         .registry
         .heartbeat(&heartbeat("A", 1), &cred("t"))
         .unwrap_err();
-    assert_eq!(upper.code(), refusal::INVALID_HELLO);
+    assert_eq!(upper.code(), refusal::INVALID_HEARTBEAT);
+    assert_eq!(upper.to_string(), "the host id is not a valid host id");
     let epoch = fx.join("a", "t");
     let mut broken = heartbeat("a", epoch);
     broken.held = vec![js_agent_wire::HeldRun {
@@ -290,9 +291,9 @@ fn timing_is_validated_and_sent_in_the_welcome() {
 fn credential_debug_hides_the_digest_and_seat_errors_pass_through() {
     assert_eq!(format!("{:?}", cred("secret")), "Credential(..)");
     let fx = fixture(4);
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
     assert_eq!(
-        fx.provider.seat(&host("a"), lease(2)),
+        fx.provider.seat(&host("a"), lease(2), None),
         Err(SeatError::Taken {
             host: host("a"),
             holder: lease(1)

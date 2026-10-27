@@ -4,6 +4,7 @@ use js_pool_static::SeatError;
 use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
+use crate::credential::Binding;
 use crate::registry::Registry;
 
 /// The [`Provider`] the lease table runs on for a pool of self-registered hosts.
@@ -64,8 +65,20 @@ impl RegisteredProvider {
     /// hello, the host is admitted as any other and the lease observes `Present` on it.
     /// The refusals are those of [`js_pool_static::StaticPool::seat`] except `Unlisted`,
     /// which this never returns.
-    pub fn seat(&self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
-        self.registry.seat(host, lease)
+    ///
+    /// `binding` is what the awaiting host's hello must match: the caller passes the
+    /// binding it persisted when it admitted the host, and a hello from another
+    /// credential or instance is refused as host-bound. With `None` the first hello
+    /// binds the host and takes the restored lease, whoever sends it: that is the
+    /// restart gap, closed by a caller that persists bindings. `binding` is ignored for
+    /// a host the registry already knows.
+    pub fn seat(
+        &self,
+        host: &HostId,
+        lease: LeaseId,
+        binding: Option<Binding>,
+    ) -> Result<(), SeatError> {
+        self.registry.seat(host, lease, binding)
     }
 }
 

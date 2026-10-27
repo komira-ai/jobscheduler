@@ -112,3 +112,18 @@ fn stop_reads_absent_and_seat_refuses_unlisted() {
         Err(SeatError::Unlisted(host("zz")))
     );
 }
+
+/// Asserts that removing a free host unlists it and answers true, that a booked host is
+/// kept with its booking and answers false, and that an unlisted host answers false. A
+/// defect that removed a booked host would drop a lease's booking with its host.
+#[test]
+fn remove_free_unlists_only_a_free_host() {
+    let mut book = book();
+    book.start_where(&spec(1), None, &|_, _| true);
+    assert!(!book.remove_free(&host("a")));
+    assert_eq!(book.booked().len(), 1);
+    assert!(book.contains(&host("a")));
+    assert!(book.remove_free(&host("b")));
+    assert!(!book.contains(&host("b")));
+    assert!(!book.remove_free(&host("b")));
+}

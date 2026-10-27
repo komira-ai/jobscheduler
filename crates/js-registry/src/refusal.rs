@@ -12,11 +12,14 @@ pub enum Refusal {
     /// The host id is not a valid scheduler host id.
     #[error("the host id is not a valid host id")]
     BadHostId(IdError),
+    /// The host id of a heartbeat is not a valid scheduler host id.
+    #[error("the host id is not a valid host id")]
+    BadHeartbeatHostId(IdError),
     /// The hello names another pool.
     #[error("the pool is not served here")]
     UnknownPool,
-    /// The host id was admitted first with another credential.
-    #[error("the host id is bound to another credential")]
+    /// The host id is bound to another credential, or to another instance.
+    #[error("the host id is bound to another credential or instance")]
     HostBound,
     /// The host id has a live session.
     #[error("the host id has a live session")]
@@ -41,6 +44,7 @@ impl Refusal {
         match self {
             Self::Invalid(err) => err.code(),
             Self::BadHostId(_) => refusal::INVALID_HELLO,
+            Self::BadHeartbeatHostId(_) => refusal::INVALID_HEARTBEAT,
             Self::UnknownPool => refusal::UNKNOWN_POOL,
             Self::HostBound => refusal::HOST_BOUND,
             Self::HostLive => refusal::HOST_LIVE,

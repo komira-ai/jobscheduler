@@ -136,7 +136,7 @@ fn draining_and_unknown_phase_take_no_lease() {
 #[test]
 fn awaiting_seat_unknown_then_binds_on_hello() {
     let mut fx = fixture(4);
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
     assert_eq!(fx.provider.observe(&lease(1)), Observed::Unknown);
     let awaiting = &fx.registry.hosts()[0];
     assert_eq!(
@@ -170,7 +170,7 @@ fn awaiting_seat_unknown_then_binds_on_hello() {
 #[test]
 fn awaiting_host_still_checked_at_hello() {
     let fx = fixture(4);
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
     let mut small = hello("a");
     small.shape.memory_bytes = 1;
     assert_eq!(
@@ -197,7 +197,7 @@ fn stop_frees_and_reads_absent_and_ended_lease_never_restarts() {
         StartAck::Refused(RefusalCode::LeaseEnded)
     );
     assert_eq!(
-        fx.provider.seat(&host("a"), lease(1)),
+        fx.provider.seat(&host("a"), lease(1), None),
         Err(SeatError::Ended(lease(1)))
     );
 }
@@ -284,14 +284,27 @@ fn seat_on_a_known_host() {
     let fx = fixture(4);
     fx.join("a", "t");
     fx.join("b", "t");
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
-    fx.provider.seat(&host("a"), lease(1)).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
+    fx.provider.seat(&host("a"), lease(1), None).unwrap();
     assert_eq!(
-        fx.provider.seat(&host("b"), lease(1)),
+        fx.provider.seat(&host("b"), lease(1), None),
         Err(SeatError::Elsewhere {
             lease: lease(1),
             host: host("a")
         })
     );
     assert_eq!(fx.provider.booked().len(), 1);
+}
+
+/// Asserts that a start passes over a lost host for the next live one: host `a` is lost
+/// and `b` live, and the lease lands on `b`. A defect that looked at the first host by
+/// id only would answer no capacity while `b` sat free.
+#[test]
+fn start_skips_a_lost_host_for_a_live_one() {
+    let mut fx = fixture(4);
+    fx.join("a", "t");
+    fx.pass_grace();
+    let epoch = fx.join("b", "t");
+    assert_eq!(epoch, 1);
+    assert_eq!(started_on(&fx.provider.start(spec(1))), Some("b"));
 }

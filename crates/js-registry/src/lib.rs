@@ -17,6 +17,18 @@
 //! - **Admission** ([`Registry::hello`]): the wire rules, the pool, the credential a host
 //!   id is bound to, a live session of the same id, the shape, room in the pool. Every
 //!   refusal is a [`Refusal`] with a constant wire code and changes nothing.
+//! - **Binding, and what it does not do.** A host id binds to the credential of its
+//!   first hello and, when that hello named `Hello::instance`, to that instance
+//!   ([`Binding`]); a later hello or heartbeat that does not match is refused as
+//!   host-bound. Without an instance identity the binding is at the level of the pool
+//!   credential only: all hosts of a pool share the join token, so a holder of the pool
+//!   token can say hello for an unbound-instance host id once that host is lost, and
+//!   takes over its booking. Per-host tokens or client certificates close that later
+//!   (design D18). [`Credential`] equality is on a digest; the constant-time compare of
+//!   the token belongs to the transport.
+//! - **Retention.** A lost host with no booking is forgotten, binding included, after
+//!   [`PoolConfig::with_lost_retention`], so ids made up by a token holder stop filling
+//!   the pool. A booked host is never forgotten.
 //! - **Booked shape.** A host is booked as the pool's configured shape
 //!   ([`PoolConfig::new`]), and the host's claim only has to offer at least that. A
 //!   claim bigger than the pool's shape is never leased out, so an agent cannot inflate
@@ -28,7 +40,10 @@
 //!   reads as quarantined, which takes none.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
-//!   that the agent's next hello completes.
+//!   that the agent's next hello completes. The seat takes the binding the caller
+//!   persisted; with none, the first hello for that id binds it and takes the lease,
+//!   from any holder of the pool token. That is the restart gap a caller that persists
+//!   bindings closes.
 
 mod config;
 mod credential;
@@ -36,8 +51,11 @@ mod provider;
 mod refusal;
 mod registry;
 
-pub use config::PoolConfig;
-pub use credential::Credential;
+pub use config::{
+    ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
+    PoolConfig,
+};
+pub use credential::{Binding, Credential};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{HostState, HostView, Registry};
