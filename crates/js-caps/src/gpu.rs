@@ -90,7 +90,11 @@ pub fn gpu_cores_from_macos_ioreg(text: &str) -> Option<u64> {
 #[must_use]
 pub fn metal_family_of_apple_chip(brand: &str) -> Option<u32> {
     let generation = brand.strip_prefix("Apple M")?;
-    let digits = generation.split(|c: char| !c.is_ascii_digit()).next()?;
+    // `split` always yields a first item, possibly empty (which the parse below refuses).
+    let digits = generation
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or_default();
     match digits.parse::<u32>().ok()? {
         1 => Some(7),
         2 => Some(8),
@@ -107,5 +111,6 @@ fn hex(text: &str, digits: usize) -> Result<u32, ParseError> {
     if value.len() != digits || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(bad());
     }
-    u32::from_str_radix(value, 16).map_err(|_| bad())
+    // At most 6 hex digits (the callers pass 6 or 4), all checked above, so this cannot fail.
+    Ok(u32::from_str_radix(value, 16).unwrap_or_default())
 }
