@@ -262,6 +262,7 @@ fn an_orphan_that_cannot_be_removed_is_booked_and_retried() {
         (label::MEMORY_BYTES, "1073741824"),
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
+        (label::ISOLATION, "contained"),
         (label::CREATED_MS, "1000000"),
     ]);
     w.docker.fail("rm", 1000);
@@ -274,7 +275,11 @@ fn an_orphan_that_cannot_be_removed_is_booked_and_retried() {
     .unwrap();
     assert_eq!(
         names(&events),
-        ["adopted r1", "finding - unadoptable-container-kept"]
+        [
+            "adopted r1",
+            "tainted - cleanup-failed",
+            "finding - unadoptable-container-kept"
+        ]
     );
     assert!(w.docker.ids().contains(&orphan));
     assert_eq!(life.free().cpu_millis, 2000, "the orphan is booked");
@@ -305,4 +310,38 @@ fn a_dead_container_never_reports_success() {
     let results = coded.life.results();
     assert_eq!(results[0].outcome, Outcome::Failed);
     assert_eq!(results[0].exit_code, Some(2));
+}
+
+/// Asserts, over the command line, that an agent whose `/proc` does not show the process of
+/// a container it started removes the container, reports the run `failed_to_start`, taints
+/// the host as unchecked, and starts nothing after it. It catches the lifecycle and the
+/// runtime disagreeing on what a blind start is, so that the container stays up or the host
+/// stays untainted.
+#[test]
+fn an_agent_that_does_not_see_the_containers_process_taints_the_host() {
+    let dir = Scratch::new("cli-life-blind");
+    let (docker, clock) = (docker(), ManualClock::default());
+    let (mut life, _) = Lifecycle::adopt(
+        config_in(&dir, false),
+        Box::new(open_at(&docker, "linux", made_at).with_pid_seen(|_| false)),
+        Box::new(NoChecks),
+        Box::new(clock),
+    )
+    .unwrap();
+    let start = |life: &mut Lifecycle, run_id: &str| {
+        names(&life.apply(&reply(vec![Command::Start(Box::new(job(run_id)))])))
+    };
+    assert_eq!(
+        start(&mut life, "r1"),
+        [
+            "tainted r1 unchecked",
+            "finding r1 start-failed",
+            "result r1"
+        ]
+    );
+    assert!(docker.ids().is_empty(), "the container was removed");
+    assert_eq!(life.results()[0].outcome, Outcome::FailedToStart);
+    assert!(life.is_tainted());
+    assert_eq!(start(&mut life, "r2"), ["refused r2 host-tainted"]);
+    assert_eq!(docker.calls_of("create").len(), 1);
 }

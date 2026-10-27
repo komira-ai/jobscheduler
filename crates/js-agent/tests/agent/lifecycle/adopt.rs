@@ -17,6 +17,7 @@ fn labels<'a>(run: &'a str, gpus: &'a str) -> Vec<(&'static str, &'a str)> {
         (label::MEMORY_BYTES, "1073741824"),
         (label::GPUS, gpus),
         (label::WALL_MS, "60000"),
+        (label::ISOLATION, "contained"),
     ]
 }
 
@@ -162,7 +163,13 @@ fn an_unadoptable_container_that_cannot_be_removed_is_a_louder_finding() {
     let stuck = h.fake.leak(&broken, 0);
     h.fake.fail("remove", 1);
     let events = names(&h.restart().unwrap());
-    assert_eq!(events, ["finding - unadoptable-container-kept"]);
+    assert_eq!(
+        events,
+        [
+            "tainted - cleanup-failed",
+            "finding - unadoptable-container-kept"
+        ]
+    );
     assert_eq!(h.fake.existing(), [stuck], "it is still there");
     assert!(h.held().is_empty());
 
@@ -191,7 +198,11 @@ fn a_container_that_cannot_be_removed_stays_booked_and_is_retried() {
     let events = names(&h.restart().unwrap());
     assert_eq!(
         events,
-        ["finding - unadoptable-container-kept", "adopted good"]
+        [
+            "tainted - cleanup-failed",
+            "finding - unadoptable-container-kept",
+            "adopted good"
+        ]
     );
     assert_eq!(
         h.held(),
@@ -205,13 +216,16 @@ fn a_container_that_cannot_be_removed_stays_booked_and_is_retried() {
     );
     assert!(h.life.free().gpus.is_empty());
     assert_eq!(h.life.free().memory_bytes, 0);
-    assert!(matches!(
-        h.start(job("late")).as_slice(),
-        [js_agent::lifecycle::Event::Refused {
-            code: "no-capacity",
-            ..
-        }]
-    ));
+    assert!(
+        matches!(
+            h.start(job("late")).as_slice(),
+            [js_agent::lifecycle::Event::Refused {
+                code: "host-tainted",
+                ..
+            }]
+        ),
+        "the container left on the host tainted it, which is refused before capacity"
+    );
     assert_eq!(h.fake.stops().len(), 1);
 
     assert!(

@@ -64,7 +64,36 @@ pub fn open_with(world: &Scripted, os: &str, set: Settings) -> CliRuntime {
 }
 
 fn open_as(world: &Scripted, os: &str, set: Settings, now: fn() -> u64) -> CliRuntime {
-    CliRuntime::open(set, HOST, &platform(os), now, Box::new(world.clone())).unwrap()
+    CliRuntime::open(set, HOST, &platform(os), now, Box::new(world.clone()))
+        .unwrap()
+        .with_pid_seen(sees_the_engines_pid)
+        .with_proc_files(no_file, in_another_pid_namespace)
+}
+
+/// The process id the scripted engine gives a running container.
+pub const ENGINE_PID: u32 = 4000;
+
+/// A `/proc` with no readable file.
+pub fn no_file(_path: &str) -> Option<String> {
+    None
+}
+
+/// Links that show the engine's process in a pid namespace other than the agent's.
+pub fn in_another_pid_namespace(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/ns/pid" => Some("pid:[1]".to_owned()),
+        _ => Some("pid:[2]".to_owned()),
+    }
+}
+
+/// Links that show every process in the agent's own pid namespace.
+pub fn in_the_agents_pid_namespace(_path: &str) -> Option<String> {
+    Some("pid:[1]".to_owned())
+}
+
+/// An agent whose `/proc` shows the process the scripted engine reports.
+pub fn sees_the_engines_pid(pid: u32) -> bool {
+    pid == ENGINE_PID
 }
 
 /// A Docker runtime over `world` on Linux.

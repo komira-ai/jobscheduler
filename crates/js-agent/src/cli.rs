@@ -57,9 +57,9 @@ pub struct Cli {
     #[arg(long, value_name = "CLASS")]
     pub gpu_class: Option<String>,
     /// Accept a start whose job is not confined to a container (`isolation = host`). Not
-    /// available yet: a host job taints the host, the record of that taint does not exist,
-    /// and the agent refuses this flag at start. Without it such a start creates nothing
-    /// and is refused.
+    /// available yet: the scheduler does not record a host job's taint, and the agent
+    /// refuses this flag at start. Without it such a start creates nothing and is
+    /// refused.
     #[arg(long)]
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
@@ -72,6 +72,40 @@ pub struct Cli {
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
+    /// The directory the agent keeps its taint marker in: it must be owned by the user
+    /// running the agent, with no permission for group or others. Required with
+    /// `--container-bin`. A host that a post-job check found unclean is tainted for good:
+    /// the marker survives a restart, and no code of the agent removes it. It may not be,
+    /// or lie in, a mount root or the scratch root (a job with a read-write mount could
+    /// delete the marker). It must be on a disk of its own: a job that fills a disk the
+    /// state root shares makes the marker unwritable. The agent compares the device number
+    /// (`st_dev`) of the state root with that of every mount root and the scratch root and
+    /// refuses to start when one is equal. That is a best-effort guard, not a guarantee: the
+    /// engine's data root and the container layers are not compared, and file systems that
+    /// share free space under distinct device numbers (btrfs subvolumes, for one) pass it.
+    /// The operator provides the separate disk. The taint belongs to this directory, not to
+    /// the machine: a second agent, another state root, or a state root on a file system
+    /// that is lost at a reboot (a `tmpfs`) does not know of it, so give each machine one
+    /// agent and one state root.
+    #[arg(long, value_name = "PATH")]
+    pub state_root: Option<PathBuf>,
+    /// A directory whose listing (names, sizes, modification and status change times,
+    /// inodes, owners and modes of its entries) the post-job checks compare with the
+    /// listing taken when the host was last known clean; a change taints the host. May be
+    /// given more than once. An absolute path to an existing directory that holds no mount
+    /// root, scratch root or state root and lies in none. A directory with more than 4096
+    /// entries cannot be checked and taints the host. Only the directory's own entries are
+    /// listed, one level deep: a write to an existing file inside a subdirectory is not
+    /// seen, and only a name added to, removed from or renamed in the subdirectory moves
+    /// its modification time (watch the subdirectory itself to see more). Without any
+    /// `--watch-dir` only `/etc/passwd`, `/etc/group`, the processes, the mounts and the
+    /// kernel modules are checked, and the agent warns at start; suggested: `/etc`,
+    /// `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`,
+    /// `/root/.ssh`, `/usr/local/bin` and `/usr/local/sbin`. What a job leaves in a
+    /// read-write `--mount-root` is never examined (those directories change with every
+    /// job). Needs `--container-bin`.
+    #[arg(long = "watch-dir", value_name = "PATH")]
+    pub watch_dirs: Vec<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
@@ -80,7 +114,12 @@ pub struct Cli {
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
     /// that a rootless Podman needs (it may then run containers without their limits), so
-    /// use a rootful engine.
+    /// use a rootful engine, without user-namespace remapping (`userns-remap` shows the
+    /// container user as another uid on the host, and the check for a job's leftover
+    /// processes would miss them). The agent must see the host: it must be in the pid and
+    /// mount namespaces of `init` (not in a container, and not under a service manager's
+    /// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`), and able to read
+    /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
     /// The network containers join: the name of a user-defined network. By default
@@ -95,12 +134,13 @@ pub struct Cli {
     /// `<uid>:<gid>`. Needs `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
-    /// The engine to talk to, as `unix:///<path>`, `tcp://<address>` or `ssh://<address>`;
-    /// given to the program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By
-    /// default none is given and the engine uses its own default. An `ssh://` host is
-    /// accepted but not supported: the engine gets no `SSH_AUTH_SOCK` and no `HOME`, so
-    /// it cannot authenticate through an SSH agent or the user's keys. Needs
-    /// `--container-bin`.
+    /// The engine to talk to, as `unix:///<path>`: a socket on this machine; given to the
+    /// program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By default none
+    /// is given and the engine uses its own default. Any other address (`tcp://`,
+    /// `ssh://`) is refused: the post-job checks read this machine's `/proc`, mounts and
+    /// users, and a job that runs on another machine would pass them all. (A socket that
+    /// is forwarded to another machine cannot be told from a local one and is not
+    /// supported.) Needs `--container-bin`.
     #[arg(long, value_name = "URI")]
     pub container_host: Option<String>,
     /// When a job's image is pulled: `never` (the default: the image must be on the host,

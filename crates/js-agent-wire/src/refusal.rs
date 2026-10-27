@@ -20,7 +20,15 @@ pub const INVALID_IMAGE: &str = "invalid-image";
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.
 pub const HOST_LIVE: &str = "host-live";
-/// A hello for a host id the scheduler holds as tainted.
+/// A hello for a host id the scheduler holds as tainted; and, as the detail of a
+/// `failed_to_start` result, a `Start` that a tainted agent refused. The second is terminal
+/// for that `Start`: the run did not start on that host and the host will not start it
+/// later, so the server must not send the same run to that host again.
+///
+/// The server must treat a `Start` refused with it as the host's taint: the agent's marker
+/// may be unwritable, and then its heartbeat carries no taint although the host refuses
+/// every start. It is the host's fault and not the run's, so it must not be counted against
+/// the run's retries.
 pub const HOST_TAINTED: &str = "host-tainted";
 /// A heartbeat for a session epoch the server no longer holds.
 pub const STALE_EPOCH: &str = "stale-epoch";

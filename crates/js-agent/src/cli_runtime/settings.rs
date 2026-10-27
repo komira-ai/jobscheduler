@@ -20,8 +20,10 @@ const NETWORK_NAME_MAX: usize = 64;
 /// The longest engine host accepted.
 const HOST_MAX: usize = 256;
 
-/// The schemes of an engine host (`--container-host`).
-const HOST_SCHEMES: [&str; 3] = ["unix:///", "tcp://", "ssh://"];
+/// The only scheme of an engine host (`--container-host`): a socket on this machine. The
+/// post-job checks read this machine's `/proc`, mounts and users, so a job that runs on
+/// another machine (`tcp://`, `ssh://`) would pass every one of them.
+const HOST_SCHEME: &str = "unix:///";
 
 /// Why a container flag is wrong. The text names the flag.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,8 +53,11 @@ pub enum SettingsError {
         /// The agent's own `<uid>:<gid>`.
         agent: String,
     },
-    /// `--container-host` is not `unix:///<path>`, `tcp://<address>` or `ssh://<address>`.
-    #[error("--container-host: not a unix:///, tcp:// or ssh:// address")]
+    /// `--container-host` is not `unix:///<path>`: an engine on another machine runs jobs
+    /// where the agent's own `/proc`, mounts and users show nothing of them.
+    #[error(
+        "--container-host: only a unix:///<path> socket on this host is accepted: the post-job checks read this host, and a job on another one would pass them all"
+    )]
     Host,
     /// `--container-pull` is neither `never` nor `missing`.
     #[error("--container-pull: not never or missing")]
@@ -262,7 +267,7 @@ impl Settings {
         &self.user
     }
 
-    /// The engine host (`unix:///..`, `tcp://..`, `ssh://..`) the runtime is told to use,
+    /// The engine host (`unix:///<path>`: a socket on this machine) the runtime is told to use,
     /// when one is given; otherwise the engine uses its own default.
     pub fn host(&self) -> Option<&str> {
         self.host.as_deref()
@@ -320,13 +325,14 @@ fn non_root(text: &str) -> Result<(u32, u32), SettingsError> {
         .ok_or(SettingsError::User)
 }
 
-/// `text` when it is an address the engine's client takes as its host: printable ASCII
-/// without a space, with one of the schemes and something after it.
+/// `text` when it is a socket on this machine as the engine's client takes it: printable
+/// ASCII without a space, `unix:///` and something after it.
 fn engine_host(text: &str) -> Result<String, SettingsError> {
-    let rest = |scheme: &&str| text.strip_prefix(*scheme).filter(|rest| !rest.is_empty());
-    let shaped = text.len() <= HOST_MAX
-        && text.bytes().all(|b| b.is_ascii_graphic())
-        && HOST_SCHEMES.iter().any(|scheme| rest(scheme).is_some());
+    let path = text
+        .strip_prefix(HOST_SCHEME)
+        .filter(|rest| !rest.is_empty());
+    let shaped =
+        text.len() <= HOST_MAX && text.bytes().all(|b| b.is_ascii_graphic()) && path.is_some();
     shaped.then(|| text.to_owned()).ok_or(SettingsError::Host)
 }
 

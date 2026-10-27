@@ -404,6 +404,33 @@ fn the_system_runner_and_reader_report_success_and_failure() {
     assert!(said.starts_with("/nonexistent/js-agent: "), "{said}");
 }
 
+/// The real reader's link and device: a symbolic link reads as its target (and not as the
+/// file it points at), a missing path is an error naming it, and the device is the one the
+/// file system reports for a file and for a directory, the same for two paths of one
+/// directory. It catches a reader that follows the link, or answers for another path.
+#[test]
+fn the_system_reader_reads_a_link_and_a_device() {
+    let dir = Scratch::new("facts-link-device");
+    let target = dir.path("target");
+    fs::write(&target, "x").unwrap();
+    let link = dir.path("link");
+    std::os::unix::fs::symlink("pid:[4026531836]", &link).unwrap();
+    assert_eq!(
+        SystemFiles.link(link.to_str().unwrap()),
+        Ok("pid:[4026531836]".to_owned())
+    );
+    let said = SystemFiles.link("/nonexistent/js-agent").unwrap_err();
+    assert!(said.starts_with("/nonexistent/js-agent: "), "{said}");
+
+    let dev = std::os::unix::fs::MetadataExt::dev(&fs::metadata(&target).unwrap());
+    assert_eq!(SystemFiles.device(&target), Ok(dev));
+    assert_eq!(SystemFiles.device(&dir.path("")), Ok(dev));
+    let said = SystemFiles
+        .device(Path::new("/nonexistent/js-agent"))
+        .unwrap_err();
+    assert!(said.starts_with("/nonexistent/js-agent: "), "{said}");
+}
+
 /// The pid a probe script wrote to `file` before it blocked.
 fn pid_in(file: &Path) -> Pid {
     let text = fs::read_to_string(file).unwrap();

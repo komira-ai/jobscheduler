@@ -38,7 +38,10 @@
 //! - **Cleanup runs in one order**: the container, the scratch directory, the post-job
 //!   checks, and only then the slot is freed. A step that fails stops the order there and
 //!   is tried again at the next [`Lifecycle::step`]; the slot stays held and a
-//!   [`Finding`] is recorded.
+//!   [`Finding`] is recorded. A retry that succeeds does not free the slot by itself: the
+//!   order goes on, the checks run after the cleanup that failed, and the slot is freed
+//!   only if they ran clean and the marker is on disk (a job whose checks find something
+//!   stays blocked).
 //! - **A restart loses no running job.** [`Lifecycle::adopt`] finds the containers the
 //!   agent labelled, before the first heartbeat of the new process, and lists them first,
 //!   so the server never sees a gap that would make it run the work twice. A labelled
@@ -51,12 +54,52 @@
 //!   (those that have exited first, then the longest running), so an offer lowered since
 //!   the last start evicts the newest jobs that no longer fit.
 //!
+//! - **A host that is not known to be clean is tainted** (design 5.12, see the [`taint`]
+//!   module). A check that finds something or cannot run, a container or scratch
+//!   directory that cannot be removed, a job that was allowed to change the host
+//!   (`isolation = host`, tainted when it starts, before its container exists), a labelled
+//!   container that no job can stand for and that may be a host job's (one labelled `host`,
+//!   with no isolation label or with one the agent never writes: removed, and tainted
+//!   first), and the record of a job's owed checks found when the agent starts, each write
+//!   the taint marker under `--state-root`. The marker is written before the taint is
+//!   reported: [`Lifecycle::pending_taint`] offers it for the heartbeat only once the
+//!   marker is on disk, so a taint the server was told of is a taint a restart finds, and a
+//!   taint on disk is reported at the first heartbeat of the process that finds it. (The
+//!   run's own result is not held back by it: it is reported as soon as the container has
+//!   exited, before its cleanup and checks.) A tainted agent answers every later `Start`
+//!   `failed_to_start` with the code `host-tainted`, lets the jobs it runs finish, and
+//!   offers the taint until the server acknowledges it. A marker that cannot be written
+//!   keeps the agent tainted in memory (it refuses starts and frees no slot) and the taint
+//!   is not reported until it is written; the marker is tried again at every step.
+//! - **A check owed is not lost with the agent.** Before the first step of a job's cleanup
+//!   the agent records, in the state root, that the job's checks are owed; it removes the
+//!   record once they have run (and, when they found something, once the taint is on
+//!   disk). If the agent stops in between, the record is found when the next process
+//!   starts, and the host is tainted (`check-owed`): what the job left behind may be part
+//!   of the baseline the new process took. A record that cannot be written holds the
+//!   cleanup where it is, the container included; one that cannot be removed holds the
+//!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
+//!   at the next start**, and until a flow to clear a taint exists nothing ends it; that
+//!   flow must remove the `owed-*` records as well as `taint.json`, or the next start
+//!   taints the host again (see [`taint`]).
+//! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
+//!   not start on this host and will not; the server must not send it to this host again
+//!   (see `refusal::HOST_TAINTED`), and must treat a `Start` refused with it as the host's
+//!   taint even when the heartbeat carries none (the marker may be unwritable, and a taint
+//!   that is not on disk is not reported), and must not count the refusal against the
+//!   run's retries. `taint_ack` acknowledges the taint this process reported: an
+//!   acknowledgement that arrives before the taint was reportable (not on disk) counts for
+//!   nothing, and a restarted process reports the taint again. **The agent does not
+//!   check which session an acknowledgement belongs to**: that the server answers
+//!   `taint_ack` only to the session that carried the taint is the server's rule, and the
+//!   agent takes any `taint_ack` of a reply it accepts once its taint is on disk.
+//!
 //! # What this change does not do
 //!
 //! - **A blocked run never leaves.** A check that finds something, or cannot run, leaves
 //!   the run `Blocked`: its slot stays booked, it counts toward the runs the agent holds
-//!   and is listed as `exited_unacked` for as long as the agent lives. There is no way
-//!   out until the taint of design 5.12 exists; it is the integrity-check change's to add.
+//!   and is listed as `exited_unacked` for as long as the agent lives. Nothing clears a
+//!   taint yet: the host is reimaged, which is the clear flow's to add.
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
 //!   flag. A job that holds a read-write mount can write in its root, so it can swap a
@@ -72,9 +115,15 @@
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
-//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until a host
-//!   job can taint the host ([`Local::from_cli`]). [`Config::allow_host_jobs`] is the
-//!   switch the lifecycle honours once that exists.
+//! - **Cgroup emptiness is not checked.** A container is removed, and nothing reads its
+//!   control group to see that no process of the job is left in it.
+//! - **A user-namespace remapping engine is not supported.** The container user would be
+//!   another uid on the host, and the check for a job's leftover processes compares the
+//!   host's uid with `--container-user`.
+//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until the
+//!   scheduler records a host job's taint itself ([`Local::from_cli`]).
+//!   [`Config::allow_host_jobs`] is the switch the lifecycle honours once that exists; it
+//!   already taints the host when such a job starts.
 //!
 //! # The threading contract of the runtime seam
 //!
@@ -101,12 +150,16 @@ mod machine;
 mod mounts;
 mod runtime;
 mod scratch;
+pub mod taint;
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_agent_wire::Hello;
+use js_agent_wire::{Hello, Taint};
 
+use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
@@ -117,6 +170,7 @@ pub use runtime::{
     label,
 };
 pub use scratch::ScratchRoot;
+pub use taint::{MARKER_FILE, StateRoot};
 
 /// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
 pub mod detail {
@@ -127,6 +181,9 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The job may change the host and the taint marker could not be written, so the job
+    /// was not started.
+    pub const TAINT_FAILED: &str = "taint-failed";
 }
 
 /// The codes of a [`Finding`].
@@ -146,6 +203,19 @@ pub mod code {
     /// A container that could not be accounted for could not be removed either, so it is
     /// still on the host, unbooked.
     pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
+    /// A started container's process is not in the agent's `/proc`: the agent does not see
+    /// the host its jobs run on. The container was removed and the host is tainted as
+    /// unchecked.
+    pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
+    /// The taint marker could not be written. The host is tainted in memory all the same.
+    pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
+    /// The record that a job's checks are owed could not be written or removed. While it
+    /// cannot be written the job's container is not removed; while it cannot be removed
+    /// the job's slot is not freed.
+    pub const OWED_FAILED: &str = "owed-record-failed";
+    /// The records of owed checks in the state root could not be listed when the agent
+    /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
+    pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
@@ -156,15 +226,27 @@ pub trait Clock {
     fn now_ms(&self) -> u64;
 }
 
+/// A job whose container and scratch directory are gone, as the post-job checks see it.
+#[derive(Debug, Clone, Copy)]
+pub struct Finished<'a> {
+    /// The run.
+    pub run_id: &'a str,
+    /// The containers of the agent's other jobs that are still on the host (running, or
+    /// exited and not yet removed), and those that could not be removed. What they run and
+    /// mount is not the finished job's, so a check must not count it against the job.
+    pub live: &'a [ContainerId],
+}
+
 /// Runs after every job, after cleanup and before the slot is freed (design 5.12). The
-/// next change puts the integrity checks here.
+/// integrity checks of [`crate::integrity`] are the hook of an agent that runs jobs.
 pub trait CheckHook {
-    /// Checks the host after the run `run_id`.
+    /// Checks the host after the job `job`.
     ///
     /// # Errors
     ///
-    /// What was found, or that the check could not run. The slot is not freed.
-    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding>;
+    /// What was found, or that the check could not run. The slot is not freed and the host
+    /// is tainted.
+    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
 }
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
@@ -241,7 +323,7 @@ fn bounded(text: &str) -> &str {
 pub struct NoChecks;
 
 impl CheckHook for NoChecks {
-    fn run(&mut self, _run_id: &str) -> Result<(), CheckFinding> {
+    fn run(&mut self, _job: &Finished<'_>) -> Result<(), CheckFinding> {
         Ok(())
     }
 }
@@ -328,6 +410,10 @@ pub enum Event {
         /// The run.
         run_id: String,
     },
+    /// The host is tainted from now on, and this is why (the first taint stays). It is
+    /// pushed once the marker has been tried and before the findings that follow from the
+    /// same cause; a failure to write the marker is a [`Finding`] after it.
+    Tainted(Taint),
     /// The slot is free again.
     SlotFreed {
         /// The run.
@@ -370,6 +456,8 @@ pub struct Config {
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
     pub scratch: ScratchRoot,
+    /// Where the taint marker is kept.
+    pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
 }
@@ -384,13 +472,21 @@ pub struct Local {
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
+    /// `--state-root`, when given; always given when containers are enabled.
+    pub state: Option<StateRoot>,
+    /// The `--watch-dir` flags, canonicalised, sorted, each once.
+    pub watch: Vec<PathBuf>,
 }
 
 impl Local {
-    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (a host job taints the
-    /// host, and the record of that taint does not exist yet), every mount root exists and
-    /// is canonicalised, the scratch root is private to the user running the agent, the
-    /// container runtime is an absolute path to an executable file.
+    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (the scheduler does
+    /// not record a host job's taint yet), every mount root exists and is canonicalised,
+    /// the scratch root and the state root are private to the user running the agent, the
+    /// container runtime is an absolute path to an executable file, containers need a state
+    /// root (the taint marker is kept there) that is not, and does not lie in, a mount root
+    /// or the scratch root (a job with a read-write mount could delete the marker), and every watched directory is an absolute
+    /// path to an existing directory that no mount root, scratch root or state root lies in
+    /// or holds (those change with every job).
     ///
     /// # Errors
     ///
@@ -398,32 +494,135 @@ impl Local {
     pub fn from_cli(cli: &Cli) -> Result<Self, String> {
         if cli.allow_host_jobs {
             return Err(
-                "--allow-host-jobs: host jobs need the taint record, which is not available yet"
+                "--allow-host-jobs: host jobs are not available yet: the scheduler \
+                        does not record a host job's taint"
                     .to_owned(),
             );
         }
+        let mounts = MountRoots::new(&cli.mount_roots)?;
+        let scratch = cli
+            .scratch_root
+            .as_deref()
+            .map(ScratchRoot::open)
+            .transpose()?;
+        let container = Settings::from_flags(
+            &Flags {
+                bin: cli.container_bin.as_deref(),
+                network: cli.container_network.as_deref(),
+                user: cli.container_user.as_deref(),
+                host: cli.container_host.as_deref(),
+                pull: cli.container_pull.as_deref(),
+                tmp_size: cli.container_tmp_size.as_deref(),
+            },
+            (
+                rustix::process::geteuid().as_raw(),
+                rustix::process::getegid().as_raw(),
+            ),
+        )
+        .map_err(|why| why.to_string())?;
+        let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
+        if container.is_none() && !cli.watch_dirs.is_empty() {
+            return Err("--watch-dir: needs --container-bin".to_owned());
+        }
+        if container.is_some() && state.is_none() {
+            return Err(
+                "--state-root: required with --container-bin: the taint marker is \
+                        kept there"
+                    .to_owned(),
+            );
+        }
+        if let Some(state) = &state {
+            let mut writable = mounts.paths().chain(scratch.iter().map(ScratchRoot::path));
+            if writable.any(|root| state.path().starts_with(root)) {
+                return Err(
+                    "--state-root: lies in a --mount-root or the --scratch-root, where a \
+                     job can delete or overwrite the taint marker"
+                        .to_owned(),
+                );
+            }
+        }
+        let busy: Vec<&Path> = mounts
+            .paths()
+            .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(state.iter().map(StateRoot::path))
+            .collect();
         Ok(Self {
-            mounts: MountRoots::new(&cli.mount_roots)?,
-            scratch: cli
-                .scratch_root
-                .as_deref()
-                .map(ScratchRoot::open)
-                .transpose()?,
-            container: Settings::from_flags(
-                &Flags {
-                    bin: cli.container_bin.as_deref(),
-                    network: cli.container_network.as_deref(),
-                    user: cli.container_user.as_deref(),
-                    host: cli.container_host.as_deref(),
-                    pull: cli.container_pull.as_deref(),
-                    tmp_size: cli.container_tmp_size.as_deref(),
-                },
-                (
-                    rustix::process::geteuid().as_raw(),
-                    rustix::process::getegid().as_raw(),
-                ),
-            )
-            .map_err(|why| why.to_string())?,
+            watch: watch_dirs(&cli.watch_dirs, &busy)?,
+            mounts,
+            scratch,
+            container,
+            state,
         })
     }
+}
+
+impl Local {
+    /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or
+    /// the scratch root. A job with a read-write mount, or its own scratch directory, can
+    /// fill that file system, and the taint marker could then not be written. This is a
+    /// best-effort guard: the state root is to be on a disk of its own, which `st_dev` does
+    /// not prove (subvolumes sharing free space have distinct device numbers), and the
+    /// engine's data root and container layers are not compared.
+    ///
+    /// # Errors
+    ///
+    /// The text names the flags at fault; a path that cannot be looked at is an error too.
+    pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
+        let Some(state) = &self.state else {
+            return Ok(());
+        };
+        let device = |path: &Path| {
+            files
+                .device(path)
+                .map_err(|why| format!("--state-root: cannot compare file systems: {why}"))
+        };
+        let own = device(state.path())?;
+        let roots = self
+            .mounts
+            .paths()
+            .map(|path| ("the --mount-root", path))
+            .chain(
+                self.scratch
+                    .iter()
+                    .map(|root| ("the --scratch-root", root.path())),
+            );
+        for (flag, root) in roots {
+            if device(root)? == own {
+                return Err(format!(
+                    "--state-root: on the same file system as {flag} {}: a job could fill it and the taint marker could not be written",
+                    root.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `--watch-dir` flags as canonical paths, sorted, each once. A directory that a job
+/// writes into by design would taint the host after every job, so one that lies in or
+/// holds a path of `busy` is refused.
+fn watch_dirs(given: &[PathBuf], busy: &[&Path]) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = given
+        .iter()
+        .map(|path| {
+            let fail = |why: &str| format!("--watch-dir {}: {why}", path.display());
+            let canonical = fs::canonicalize(path)
+                .ok()
+                .filter(|canonical| path.is_absolute() && canonical.is_dir())
+                .ok_or_else(|| fail("not an existing directory given as an absolute path"))?;
+            match busy
+                .iter()
+                .any(|root| root.starts_with(&canonical) || canonical.starts_with(root))
+            {
+                true => Err(fail(
+                    "lies in or holds a --mount-root, --scratch-root or --state-root, which \
+                     change with every job",
+                )),
+                false => Ok(canonical),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
 }

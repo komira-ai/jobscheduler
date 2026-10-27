@@ -159,38 +159,40 @@ fn the_scratch_must_be_writable_by_the_container_user() {
     );
 }
 
-/// Asserts the engine host: the three schemes with something after them are taken and
-/// kept as written; an empty or bare scheme, another scheme, a space, a control
+/// Asserts the engine host: a socket on this host (`unix:///<path>`) is taken and kept as
+/// written; every address of an engine that runs somewhere else (`tcp://`, `ssh://`, even
+/// to the loopback), an empty or bare scheme, another scheme, a space, a control
 /// character, a non-ASCII character and a text over 256 bytes are refused. It catches an
-/// address that would be split into more environment text than one value.
+/// engine on another machine, where the agent's own `/proc`, mounts and users show
+/// nothing of the jobs and every post-job check would pass, and an address that would be
+/// split into more environment text than one value.
 #[test]
-fn the_engine_host_is_one_address() {
-    let long = format!("tcp://{}", "h".repeat(251));
+fn the_engine_host_is_a_socket_on_this_host() {
+    let long = format!("unix:///{}", "h".repeat(250));
     for host in [
         "",
         "unix://",
         "unix:///",
         "tcp://",
         "ssh://",
+        "tcp://127.0.0.1:2375",
+        "tcp://localhost:2375",
+        "ssh://user@host",
         "http://h",
         "unix://relative",
+        "unix://remote-host/run/engine.sock",
         "/run/engine.sock",
-        "tcp://a b",
-        "tcp://a\nb",
-        "tcp://h\u{e9}",
-        long.as_str(),
+        "unix:///run/a b",
+        "unix:///run/a\nb",
+        "unix:///run/h\u{e9}",
+        &format!("{long}x"),
     ] {
         let said = Settings::new(bin(), None, None)
             .unwrap()
             .with_host(Some(host));
         assert_eq!(said, Err(SettingsError::Host), "{host:?}");
     }
-    for host in [
-        "unix:///run/engine.sock",
-        "tcp://127.0.0.1:2375",
-        "ssh://user@host",
-        &long[..256],
-    ] {
+    for host in ["unix:///run/engine.sock", &long[..256]] {
         let ok = Settings::new(bin(), None, None)
             .unwrap()
             .with_host(Some(host))
@@ -287,7 +289,7 @@ fn network_and_user_need_the_runtime() {
             bin: Some(bin()),
             network: Some("jobs"),
             user: Some("1000:1000"),
-            host: Some("tcp://127.0.0.1:2375"),
+            host: Some("unix:///run/engine.sock"),
             pull: Some("missing"),
             tmp_size: Some("128m"),
         },
@@ -296,7 +298,7 @@ fn network_and_user_need_the_runtime() {
     .unwrap()
     .unwrap();
     assert_eq!((on.network(), on.user()), ("jobs", "1000:1000"));
-    assert_eq!(on.host(), Some("tcp://127.0.0.1:2375"));
+    assert_eq!(on.host(), Some("unix:///run/engine.sock"));
     assert_eq!((on.pull(), on.tmp_size()), (Pull::Missing, "128m"));
     assert_eq!(on.chown_scratch(), None);
     let root = Settings::from_flags(
@@ -380,8 +382,14 @@ fn container_flags_are_checked_when_the_agent_starts() {
     let exec = exec.to_str().unwrap();
     let (uid, gid) = own_ids();
     let own = format!("{uid}:{gid}");
+    let state = dir.path("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let state = state.to_str().unwrap();
     if uid > 0 {
         let (status, err, sent) = start(&[
+            "--state-root",
+            state,
             "--container-bin",
             exec,
             "--container-network",
@@ -412,7 +420,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert_eq!(sent, 0);
     }
 
-    let cases: [(&[&str], &str); 8] = [
+    let cases: [(&[&str], &str); 10] = [
         (
             &["--container-bin", "docker"],
             "--container-bin: not an absolute",
@@ -431,7 +439,25 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ),
         (
             &["--container-bin", exec, "--container-host", "nope"],
-            "--container-host: not a unix:///",
+            "--container-host: only a unix:///<path> socket on this host",
+        ),
+        (
+            &[
+                "--container-bin",
+                exec,
+                "--container-host",
+                "tcp://127.0.0.1:2375",
+            ],
+            "--container-host: only a unix:///<path> socket on this host",
+        ),
+        (
+            &[
+                "--container-bin",
+                exec,
+                "--container-host",
+                "ssh://user@host",
+            ],
+            "--container-host: only a unix:///<path> socket on this host",
         ),
         (
             &["--container-bin", exec, "--container-pull", "always"],

@@ -4,7 +4,7 @@
 //! records every call with the environment it was given. No process starts.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use js_agent::CommandRunner;
@@ -29,6 +29,8 @@ struct Container {
     binds: Vec<Bind>,
     started: bool,
     exit: Option<(i32, bool)>,
+    /// The process id the engine reports while it runs.
+    pid: u32,
 }
 
 #[derive(Default)]
@@ -44,6 +46,13 @@ struct State {
     prefaces: BTreeMap<String, String>,
     after_create: Option<Result<String, ()>>,
     tamper: Option<Change>,
+    /// What every look at the process of a container prints, instead of its pid and state.
+    pid_says: Option<String>,
+    /// How many more looks at the process of a container fail.
+    pid_fails: u32,
+    /// What the next looks at the process of a container print, one each, before the
+    /// others: `None` is a call that exits with status 1.
+    pid_queue: VecDeque<Option<String>>,
 }
 
 /// The runner. Clones share one world, so a test keeps a handle after it has handed the
@@ -94,6 +103,24 @@ impl Scripted {
     /// `Ok(text)` an exit 0 that printed `text` instead of the id.
     pub fn ambiguous_create(&self, outcome: Result<&str, ()>) {
         self.0.borrow_mut().after_create = Some(outcome.map(str::to_owned));
+    }
+
+    /// Makes every look at a container's process (`inspect` of `State.Pid`) print `text`.
+    pub fn pid_says(&self, text: &str) {
+        self.0.borrow_mut().pid_says = Some(text.to_owned());
+    }
+
+    /// Makes the next looks at a container's process (`inspect` of `State.Pid`) print
+    /// `answers` in order (`None`: exit with status 1); later looks are answered as usual.
+    pub fn pid_looks(&self, answers: &[Option<&str>]) {
+        let queue = answers.iter().map(|a| a.map(str::to_owned)).collect();
+        self.0.borrow_mut().pid_queue = queue;
+    }
+
+    /// Makes the next look at a container's process (`inspect` of `State.Pid`) exit with
+    /// status 1; the other `inspect` calls are not touched.
+    pub fn fail_pid(&self) {
+        self.0.borrow_mut().pid_fails = 1;
     }
 
     /// Makes every `create` bind the container's mounts as `change` says, as a job that
@@ -211,6 +238,7 @@ impl Scripted {
                 binds: Vec::new(),
                 started,
                 exit: None,
+                pid: 4000,
             },
         );
         id
@@ -302,6 +330,7 @@ impl State {
             binds,
             started: false,
             exit: None,
+            pid: 4000,
         };
         self.containers.insert(id.clone(), container);
         format!("{id}\n")
@@ -331,6 +360,14 @@ impl State {
             (true, None) => "running",
             (true, Some(_)) => "exited",
         };
+        if format.contains("State.Pid") {
+            // A container that is not running has no process.
+            let pid = if state == "running" { container.pid } else { 0 };
+            return self
+                .pid_says
+                .clone()
+                .unwrap_or_else(|| format!("{pid} {state}\n"));
+        }
         let labels = serde_json::to_string(&container.labels).unwrap();
         match (format.contains("Mounts"), format.contains("Config.Labels")) {
             (true, _) => format!("{}\n", Self::mounts(container)),
@@ -371,6 +408,14 @@ impl Scripted {
             .push(args.iter().map(|a| (*a).to_owned()).collect());
         state.envs.push(env);
         let sub = args[0];
+        let looks_at_pid = sub == "inspect" && values(args, "--format")[0].contains("State.Pid");
+        if looks_at_pid && state.pid_fails > 0 {
+            state.pid_fails -= 1;
+            return failed(program);
+        }
+        if let Some(answer) = looks_at_pid.then(|| state.pid_queue.pop_front()).flatten() {
+            return answer.ok_or_else(|| format!("{program}: exit status: 1"));
+        }
         if let Some(left) = state.failing.get_mut(sub).filter(|left| **left > 0) {
             *left -= 1;
             return failed(program);

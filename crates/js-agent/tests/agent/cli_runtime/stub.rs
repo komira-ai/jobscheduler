@@ -12,7 +12,10 @@ use std::time::Duration;
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, system_runner};
 use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
 
-use super::{HOST, NAME_R1, made_at, mount, platform, spec};
+use super::{
+    HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform,
+    sees_the_engines_pid, spec,
+};
 use crate::support::Scratch;
 
 const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -29,6 +32,7 @@ inspect)
   case "$*" in
   *Config.Labels*) echo 'running {"jobscheduler.dev/run-id":"r1","jobscheduler.dev/created-ms":"1000000"}' ;;
   *Mounts*) echo '[{"Type":"bind","Source":"/work/scratch/r1","Destination":"/scratch","Mode":"","RW":true},{"Type":"bind","Source":"/srv/in","Destination":"/mnt/data/in","Mode":"","RW":false}]' ;;
+  *State.Pid*) echo "4000 running" ;;
   *) echo "exited 3 false" ;;
   esac ;;
 esac
@@ -80,7 +84,9 @@ fn cli_runtime_argv_snapshot() {
     let runner = Box::new(system_runner(Duration::from_secs(10)));
     let mut rt = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner)
         .ok()
-        .unwrap();
+        .unwrap()
+        .with_pid_seen(sees_the_engines_pid)
+        .with_proc_files(no_file, in_another_pid_namespace);
 
     let mut job = spec("r1");
     job.gpu_indices = vec![1];
@@ -163,6 +169,15 @@ fn cli_runtime_argv_snapshot() {
             ID,
         ]),
         strings(&["start", "--", ID]),
+        strings(&[
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            "{{.State.Pid}} {{.State.Status}}",
+            "--",
+            ID,
+        ]),
         strings(&[
             "inspect",
             "--type",

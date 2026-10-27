@@ -45,6 +45,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read};
 use std::num::NonZeroUsize;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -79,10 +81,19 @@ pub trait CommandRunner {
     fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String>;
 }
 
-/// Reads a text file.
+/// Reads a text file, and looks at the files around it.
 pub trait FileReader {
     /// The text of the file at `path`, or the system's reason it cannot be read.
     fn read(&self, path: &str) -> Result<String, String>;
+
+    /// The target of the symbolic link at `path`, as the kernel prints it (for a namespace
+    /// link such as `/proc/self/ns/pid`, `pid:[4026531836]`), or the system's reason it
+    /// cannot be read.
+    fn link(&self, path: &str) -> Result<String, String>;
+
+    /// The device number of the file system that holds `path` (`st_dev`; a link is
+    /// followed), or the system's reason it cannot be looked at.
+    fn device(&self, path: &Path) -> Result<u64, String>;
 }
 
 /// How long a helper may take to print its output, and again to exit once it has.
@@ -228,6 +239,18 @@ impl FileReader for SystemFiles {
     fn read(&self, path: &str) -> Result<String, String> {
         std::fs::read_to_string(path).map_err(|err| format!("{path}: {err}"))
     }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        std::fs::read_link(path)
+            .map(|target| target.to_string_lossy().into_owned())
+            .map_err(|err| format!("{path}: {err}"))
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        std::fs::metadata(path)
+            .map(|meta| meta.dev())
+            .map_err(|err| format!("{}: {err}", path.display()))
+    }
 }
 
 /// The operating system and CPU architecture the agent runs on, as the capability values
@@ -249,7 +272,8 @@ impl Platform {
         }
     }
 
-    fn is_macos(&self) -> bool {
+    /// Whether this is a Mac.
+    pub fn is_macos(&self) -> bool {
         self.os == "macos"
     }
 }

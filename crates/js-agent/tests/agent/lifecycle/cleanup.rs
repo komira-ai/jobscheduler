@@ -22,7 +22,11 @@ fn result_sent_before_cleanup_and_slot_freed_after() {
     let events = names(&h.life.step());
     assert_eq!(
         events,
-        ["result r1", "finding r1 container-remove-failed"],
+        [
+            "result r1",
+            "tainted r1 cleanup-failed",
+            "finding r1 container-remove-failed"
+        ],
         "the result is ready in the step that saw the exit, and the cleanup stopped there"
     );
     let results = h.life.results();
@@ -121,8 +125,9 @@ fn scratch_removed_after_every_outcome() {
 
 /// Asserts that a container that cannot be removed keeps the slot booked for as long as
 /// it fails, records one finding however often the step is retried, blocks a start that
-/// needs the booked CPUs, and frees the slot on the step after it works. It catches a
-/// slot freed on a failed cleanup, and a finding list that grows with every retry.
+/// needs the booked CPUs (refused as `host-tainted`, since the failed cleanup tainted the
+/// host), and frees the slot on the step after it works. It catches a slot freed on a
+/// failed cleanup, and a finding list that grows with every retry.
 #[test]
 fn slot_not_freed_when_remove_fails() {
     let mut h = Harness::new("remove-fails");
@@ -139,7 +144,11 @@ fn slot_not_freed_when_remove_fails() {
     assert_eq!(h.life.findings()[0].code, code::CONTAINER_REMOVE_FAILED);
     assert_eq!(h.life.findings()[0].run_id.as_deref(), Some("r1"));
     let events = names(&h.start(job("r2")));
-    assert_eq!(events, ["refused r2 no-capacity"]);
+    assert_eq!(
+        events,
+        ["refused r2 host-tainted"],
+        "the failed cleanup tainted the host, which is refused first; the booked CPUs above are the capacity half"
+    );
     h.fake.fail("remove", 0);
     assert_eq!(names(&h.life.step()), cleanup("r1"));
     assert_eq!(h.life.free().cpu_millis, 4000);
@@ -162,6 +171,7 @@ fn slot_not_freed_when_scratch_removal_fails() {
         [
             "result r1",
             "container removed r1",
+            "tainted r1 cleanup-failed",
             "finding r1 scratch-failed"
         ]
     );
@@ -176,8 +186,8 @@ fn slot_not_freed_when_scratch_removal_fails() {
 }
 
 /// Asserts that a post-job check that finds something keeps the slot booked for good,
-/// is not run again, and leaves the finding on the job. The slot is the next change's
-/// to taint. It catches a check result that is dropped.
+/// taints the host, is not run again, and leaves the finding on the job; a job beside it
+/// that passes is still freed. It catches a check result that is dropped.
 #[test]
 fn a_check_finding_blocks_the_slot() {
     let mut h = Harness::with(
@@ -199,6 +209,7 @@ fn a_check_finding_blocks_the_slot() {
                 "result r1",
                 "container removed r1",
                 "scratch removed r1",
+                "tainted r1 residue",
                 "finding r1 stray-process",
                 "result r2"
             ]

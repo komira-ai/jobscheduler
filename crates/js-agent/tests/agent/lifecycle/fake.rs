@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found,
-    RuntimeError, Status, label,
+    CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Finished,
+    Found, RuntimeError, Status, label,
 };
 
 /// A clock that moves only when a test says so. Clones share one reading.
@@ -51,6 +51,10 @@ struct State {
     create_takes_ms: u64,
     stops: Vec<(String, Duration)>,
     creates: Vec<ContainerSpec>,
+    /// When set, the log notes whether this file exists at each call.
+    marker: Option<PathBuf>,
+    /// Whether the next create fails as a start that shows the host is not seen.
+    blind: bool,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -63,7 +67,7 @@ pub struct FakeRuntime {
 }
 
 fn err(call: &str) -> RuntimeError {
-    RuntimeError(format!("{call} failed"))
+    RuntimeError::new(format!("{call} failed"))
 }
 
 impl FakeRuntime {
@@ -85,9 +89,30 @@ impl FakeRuntime {
         self.state.borrow_mut().failing.insert(call, times);
     }
 
+    /// The next `create_and_start` fails as a start does when the agent cannot see the host
+    /// its containers run on (the container is not made).
+    pub fn blind_next_create(&self) {
+        self.state.borrow_mut().blind = true;
+    }
+
     /// Whether a stop makes the container exit. On by default.
     pub fn stop_exits(&self, on: bool) {
         self.state.borrow_mut().stop_exits = on;
+    }
+
+    /// From now on the log notes, on every create, remove and check, whether `marker`
+    /// exists at that moment.
+    pub fn watch_marker(&self, marker: PathBuf) {
+        self.state.borrow_mut().marker = Some(marker);
+    }
+
+    /// The note for the log: nothing when no marker is watched.
+    fn marker_note(&self) -> String {
+        match &self.state.borrow().marker {
+            None => String::new(),
+            Some(path) if path.exists() => " [marker present]".to_owned(),
+            Some(_) => " [no marker]".to_owned(),
+        }
     }
 
     /// Every `create_and_start` takes `ms` on the test's clock.
@@ -191,10 +216,15 @@ impl ContainerRuntime for FakeRuntime {
     fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
         self.log
             .borrow_mut()
-            .push(format!("create {}", spec.run_id));
+            .push(format!("create {}{}", spec.run_id, self.marker_note()));
         self.clock.advance(self.state.borrow().create_takes_ms);
         if self.fails("create") {
             return Err(err("create"));
+        }
+        if std::mem::take(&mut self.state.borrow_mut().blind) {
+            return Err(RuntimeError::blind(
+                "create: the agent does not see the host",
+            ));
         }
         let mut state = self.state.borrow_mut();
         state.next += 1;
@@ -257,7 +287,7 @@ impl ContainerRuntime for FakeRuntime {
         };
         self.log
             .borrow_mut()
-            .push(format!("remove {} ({seen})", id.0));
+            .push(format!("remove {} ({seen}){}", id.0, self.marker_note()));
         if self.fails("remove") {
             return Err(err("remove"));
         }
@@ -309,7 +339,8 @@ impl ScriptedChecks {
 }
 
 impl CheckHook for ScriptedChecks {
-    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding> {
+    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
+        let run_id = job.run_id;
         let container = match self.runtime.gone(run_id) {
             true => "container gone",
             false => "container present",
@@ -318,9 +349,16 @@ impl CheckHook for ScriptedChecks {
             true => "scratch present",
             false => "scratch gone",
         };
-        self.log
-            .borrow_mut()
-            .push(format!("check {run_id} ({container}, {scratch})"));
+        self.log.borrow_mut().push(format!(
+            "check {run_id} ({container}, {scratch}){}",
+            self.runtime.marker_note()
+        ));
+        if !job.live.is_empty() {
+            let live: Vec<&str> = job.live.iter().map(|id| id.0.as_str()).collect();
+            self.log
+                .borrow_mut()
+                .push(format!("live beside {run_id}: {}", live.join(",")));
+        }
         self.findings
             .get(run_id)
             .map_or(Ok(()), |finding| Err(finding.clone()))

@@ -9,8 +9,11 @@ mod cleanup;
 pub mod fake;
 mod flags;
 mod mounts;
+mod owed;
+mod reach;
 mod results;
 mod rules;
+mod taint;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -19,8 +22,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, CheckFinding, CheckHook, Config, Event, Lifecycle, MountRoots, NoChecks,
-    RuntimeError, ScratchRoot,
+    Capacity, CheckFinding, CheckHook, Config, Event, Lifecycle, MARKER_FILE, MountRoots,
+    RuntimeError, ScratchRoot, StateRoot,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
 use serde_json::{Value, json};
@@ -48,6 +51,11 @@ pub struct Options {
     pub allow_host_jobs: bool,
     /// Runs whose post-job check finds something.
     pub findings: Vec<(&'static str, CheckFinding)>,
+    /// The fake runtime and the checks note in the log whether the marker exists when they
+    /// are called.
+    pub watch_marker: bool,
+    /// Checks to use instead of the scripted ones.
+    pub hook: Option<Box<dyn CheckHook>>,
 }
 
 impl Harness {
@@ -62,7 +70,12 @@ impl Harness {
         let config = config_in(&dir, options.allow_host_jobs);
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
-        let checks = hook(&log, &fake, &scratch, &options.findings);
+        if options.watch_marker {
+            fake.watch_marker(dir.path("state").join(MARKER_FILE));
+        }
+        let checks = options
+            .hook
+            .unwrap_or_else(|| hook(&log, &fake, &scratch, &options.findings));
         let (life, _) = Lifecycle::adopt(
             config.clone(),
             Box::new(fake.clone()),
@@ -82,16 +95,22 @@ impl Harness {
 
     /// Replaces the lifecycle with a fresh one over the same runtime, clock and scratch
     /// root, as the process of an agent that has just started: it adopts what the runtime
-    /// lists. It has no post-job checks, like the agent until the integrity checks exist.
+    /// lists. Its post-job checks are the scripted ones, which pass.
     pub fn restart(&mut self) -> Result<Vec<Event>, RuntimeError> {
+        let scratch = self.dir.path("scratch");
         let (life, events) = Lifecycle::adopt(
             self.config.clone(),
             Box::new(self.fake.clone()),
-            Box::new(NoChecks),
+            hook(&self.log, &self.fake, &scratch, &[]),
             Box::new(self.clock.clone()),
         )?;
         self.life = life;
         Ok(events)
+    }
+
+    /// The taint marker file, which may not exist.
+    pub fn marker(&self) -> PathBuf {
+        self.dir.path("state").join(MARKER_FILE)
     }
 
     /// The scratch directory of a run, by the canonical path the scratch root keeps.
@@ -145,6 +164,9 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
     fs::create_dir(&scratch).unwrap();
     fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
     fs::create_dir(dir.path("data")).unwrap();
+    let state = dir.path("state");
+    fs::create_dir(&state).unwrap();
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
     Config {
         capacity: Capacity {
             cpu_millis: 4000,
@@ -154,6 +176,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         allow_host_jobs,
         mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
         scratch: ScratchRoot::open(&scratch).unwrap(),
+        state: StateRoot::open(&state).unwrap(),
         stop_grace: GRACE,
     }
 }
@@ -222,6 +245,11 @@ pub fn names(events: &[Event]) -> Vec<String> {
             Event::ContainerRemoved { run_id } => format!("container removed {run_id}"),
             Event::ScratchRemoved { run_id } => format!("scratch removed {run_id}"),
             Event::ChecksPassed { run_id } => format!("checks passed {run_id}"),
+            Event::Tainted(taint) => format!(
+                "tainted {} {}",
+                taint.run_id.as_deref().unwrap_or("-"),
+                taint.reason
+            ),
             Event::SlotFreed { run_id } => format!("freed {run_id}"),
             Event::Finding(finding) => format!(
                 "finding {} {}",

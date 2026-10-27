@@ -25,7 +25,22 @@
 //!   [--pid private] --pull never --user 65534:65534 -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
 //! <bin> start -- <id>
+//! <bin> inspect --type container --format "{{.State.Pid}} {{.State.Status}}" -- <id>
 //! ```
+//!
+//! After `start` the agent asks for the process id the engine gives the container
+//! (`State.Pid`) and requires that process in the agent's own `/proc`, and to be the
+//! container's: its `/proc/<pid>/cgroup` names the container's id, or its
+//! `/proc/<pid>/ns/pid` differs from the agent's. A quick job can end between the answer
+//! and the look, so a miss is looked at once more: a container that is over by then (or
+//! gone) is let through, and only one that still runs with its process still missing is
+//! blind. A pid that is not there means the agent is in a container, or a pid namespace of its own, while its jobs
+//! run on the host through the engine's socket: the post-job checks would read the wrong
+//! host. The container is then removed, the start fails (`failed_to_start`, detail
+//! `runtime-failed`) and the lifecycle taints the host as unchecked
+//! ([`RuntimeError::is_blind`]). A container that has already exited has no process id (0)
+//! and is let through, since there is nothing left to look for; the checks still run after
+//! it.
 //!
 //! Every container carries `jobscheduler.dev/agent=<host id>` and the time it was
 //! created, beside the lifecycle's own labels; [`ContainerRuntime::list_labelled`] asks
@@ -42,13 +57,17 @@
 //! the agent's own `PATH`) reaches the engine, and the host is a flag, not a variable.
 //! Without `--container-host` the engine uses its own default (the system socket).
 //!
-//! **Not supported:** rootless engines and `ssh://` hosts. A rootless Podman needs
-//! `XDG_RUNTIME_DIR`, `HOME` and the D-Bus session of its user, none of which it is
-//! given, and may then run a container without its limits; an `ssh://` engine host needs
-//! `SSH_AUTH_SOCK` (or the keys under `HOME`) to log in, and gets neither. They are not
-//! passed through: a rootless engine or an `ssh://` host is configured at the
-//! operator's own risk, and a rootful engine on a socket or `tcp://` address is the
-//! supported setup.
+//! **Not supported:** rootless engines, engines with user-namespace remapping, and an
+//! engine on another machine. A rootless Podman needs `XDG_RUNTIME_DIR`, `HOME` and the
+//! D-Bus session of its user, none of which it is given, and may then run a container
+//! without its limits; they are not passed through, so a rootless engine is configured at
+//! the operator's own risk. With `userns-remap` the container's user is another uid on the
+//! host, so the post-job check for a job's leftover processes (which compares the host uid
+//! with `--container-user`) would miss them. `--container-host` accepts only a socket on
+//! this machine (`unix:///<path>`): the post-job checks read this machine's `/proc`,
+//! mounts and users, and a job on a machine reached through `tcp://` or `ssh://` would
+//! pass them all, so those are refused when the agent starts. The supported setup is a
+//! rootful engine on a local socket.
 //!
 //! # Names, and a create that may have worked
 //!
@@ -171,8 +190,8 @@
 //! A daemon that stops answering does not hang the agent: the runner ends every call after
 //! [`CALL_LIMIT`] plus the stop grace ([`system_runner`]) and the call fails. The calls are
 //! made on the lifecycle's worker thread (see the lifecycle documentation), which is
-//! required for exactly this: a start can make up to five calls (a `create`, its `rm` and
-//! `ps`; or a read-back and a removal), so the worker can be held for several times the
+//! required for exactly this: a start can make up to six calls (a `create`, its `rm` and
+//! `ps`; or a read-back, a `start`, a look at the process and a removal), so the worker can be held for several times the
 //! bound, which delays the wall limit of every job but never a heartbeat.
 //!
 //! # macOS
@@ -180,7 +199,9 @@
 //! A container on a Mac runs in a Linux virtual machine that cannot reach the Apple GPU.
 //! A job that names a GPU there is refused as `failed_to_start` with the detail
 //! `gpu-unsupported` and nothing is created ([`ContainerRuntime::supports_gpus`]); the Mac
-//! path for GPU work is a lease of the whole host.
+//! path for GPU work is a lease of the whole host. The runtime itself works on a Mac, but
+//! the agent does not accept `--container-bin` there: the post-job checks of
+//! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
 //!
 //! # Not here
 //!
@@ -305,6 +326,15 @@ pub enum CliError {
     /// The mounts the engine made are not the ones the agent resolved.
     #[error("the mounts of the container are not the ones the agent resolved")]
     MountsDiffer,
+    /// The process the engine names for a started container is not in the agent's
+    /// `/proc`: the agent does not see the host its jobs run on.
+    #[error(
+        "the process {pid} of the container is not in the agent's /proc: the agent does not see the host its jobs run on"
+    )]
+    Blind {
+        /// The process id the engine reported (`State.Pid`).
+        pid: u32,
+    },
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
     #[error("{why}{note}")]
@@ -313,12 +343,18 @@ pub enum CliError {
         why: String,
         /// Empty, or `; the container could not be removed: ..` .
         note: String,
+        /// The failed step was [`CliError::Blind`].
+        blind: bool,
     },
 }
 
 impl From<CliError> for RuntimeError {
     fn from(err: CliError) -> Self {
-        Self(err.to_string())
+        // A blind start is always abandoned (the container removed) before it leaves.
+        match matches!(err, CliError::Abandoned { blind: true, .. }) {
+            true => Self::blind(err.to_string()),
+            false => Self::new(err.to_string()),
+        }
     }
 }
 
@@ -349,6 +385,43 @@ pub fn hand_over(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
     std::os::unix::fs::lchown(path, Some(uid), Some(gid))
 }
 
+/// Whether the process `pid` is in the agent's `/proc`.
+pub type PidSeen = fn(u32) -> bool;
+
+/// The agent's own `/proc` lists `pid`.
+pub fn pid_in_proc(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// The text of a file of the agent's `/proc`, `None` when it cannot be read.
+pub type ProcRead = fn(&str) -> Option<String>;
+
+/// The target of a symbolic link of the agent's `/proc`, `None` when it cannot be read.
+pub type ProcLink = fn(&str) -> Option<String>;
+
+/// The text of the file at `path`.
+pub fn read_proc(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The target of the link at `path`.
+pub fn read_proc_link(path: &str) -> Option<String> {
+    let target = std::fs::read_link(path).ok()?;
+    Some(target.to_string_lossy().into_owned())
+}
+
+/// What one look at a started container showed.
+enum Look {
+    /// Its process is in the agent's `/proc` and is the container's.
+    Seen,
+    /// It is over (exited, stopped or dead): there is no process left to look for.
+    Ended,
+    /// The engine no longer has it.
+    Gone,
+    /// It runs, and `pid` is not in the agent's `/proc` or is not the container's.
+    Missing(u32),
+}
+
 /// The container runtime of the lifecycle, over the `docker` or `podman` command line.
 pub struct CliRuntime {
     settings: Settings,
@@ -359,6 +432,9 @@ pub struct CliRuntime {
     now_ms: fn() -> u64,
     runner: Box<dyn CommandRunner>,
     chown: Chown,
+    pid_seen: PidSeen,
+    proc_read: ProcRead,
+    proc_link: ProcLink,
     warnings: Vec<String>,
 }
 
@@ -394,6 +470,9 @@ impl CliRuntime {
             now_ms,
             runner,
             chown: hand_over,
+            pid_seen: pid_in_proc,
+            proc_read: read_proc,
+            proc_link: read_proc_link,
             warnings: Vec::new(),
         };
         runtime.warnings = runtime.swap_warning().into_iter().collect();
@@ -405,6 +484,25 @@ impl CliRuntime {
     #[must_use]
     pub fn with_chown(self, chown: Chown) -> Self {
         Self { chown, ..self }
+    }
+
+    /// The same runtime looking for a started container's process with `pid_seen` instead
+    /// of the agent's `/proc` ([`pid_in_proc`]): a test's seam.
+    #[must_use]
+    pub fn with_pid_seen(self, pid_seen: PidSeen) -> Self {
+        Self { pid_seen, ..self }
+    }
+
+    /// The same runtime reading the files and links of the agent's `/proc` that tell whose
+    /// a process is (`cgroup`, `ns/pid`) with `read` and `link` instead of the file system:
+    /// a test's seam.
+    #[must_use]
+    pub fn with_proc_files(self, proc_read: ProcRead, proc_link: ProcLink) -> Self {
+        Self {
+            proc_read,
+            proc_link,
+            ..self
+        }
     }
 
     /// What the operator should know about the engine, found when the runtime was opened.
@@ -472,8 +570,67 @@ impl CliRuntime {
         };
         self.verify_mounts(&id, spec)
             .and_then(|()| self.call("start", &["start", "--", &id.0]))
-            .map(|_| id.clone())
+            .and_then(|_| self.verify_seen(&id))
+            .map(|()| id.clone())
             .map_err(|why| abandoned(&why, self.delete(&id)))
+    }
+
+    /// Requires that the process the engine reports for the started container
+    /// (`State.Pid`) is in the agent's own `/proc`. An agent in a container or a pid
+    /// namespace of its own has a `/proc` that does not hold the host's processes, and its
+    /// jobs run on the host through the engine's socket: every post-job check would read a
+    /// host that is not the one the job ran on. A container that has exited already has no
+    /// process (pid 0) to look for and is let through: its processes are gone, and the
+    /// checks still run after it.
+    ///
+    /// A job that is quick (`true`) can end and be reaped between the engine's answer and
+    /// the look at `/proc`, so a miss is looked at once more: a container that is over by
+    /// then (or gone) is let through like one that was over at the first look, and only a
+    /// container that still runs with its process still missing is blind. A process that
+    /// is in `/proc` must also be the container's: its control group names the container's
+    /// id, or its pid namespace is not the agent's.
+    fn verify_seen(&self, id: &ContainerId) -> Result<(), CliError> {
+        match self.look(id)? {
+            Look::Seen | Look::Ended => Ok(()),
+            Look::Gone => Err(CliError::Unreadable { call: "inspect" }),
+            Look::Missing(_) => match self.look(id)? {
+                Look::Missing(pid) => Err(CliError::Blind { pid }),
+                Look::Seen | Look::Ended | Look::Gone => Ok(()),
+            },
+        }
+    }
+
+    /// One `inspect` of the process and state of a started container, and what `/proc`
+    /// shows of that process.
+    fn look(&self, id: &ContainerId) -> Result<Look, CliError> {
+        let unreadable = || CliError::Unreadable { call: "inspect" };
+        let Some(text) = self.inspect(id, "{{.State.Pid}} {{.State.Status}}")? else {
+            return Ok(Look::Gone);
+        };
+        match parse_pid(&text).ok_or_else(unreadable)? {
+            (_, true) => Ok(Look::Ended),
+            (0, false) => Err(unreadable()),
+            (pid, false) => Ok(match self.is_its_process(pid, id) {
+                true => Look::Seen,
+                false => Look::Missing(pid),
+            }),
+        }
+    }
+
+    /// Whether `pid` is in the agent's `/proc` and is a process of the container `id`: its
+    /// control group holds the id, or its pid namespace is another than the agent's (both
+    /// links must be readable).
+    fn is_its_process(&self, pid: u32, id: &ContainerId) -> bool {
+        if !(self.pid_seen)(pid) {
+            return false;
+        }
+        let cgroup = (self.proc_read)(&format!("/proc/{pid}/cgroup"));
+        if cgroup.is_some_and(|text| text.contains(&id.0)) {
+            return true;
+        }
+        let theirs = (self.proc_link)(&format!("/proc/{pid}/ns/pid"));
+        let own = (self.proc_link)("/proc/self/ns/pid");
+        matches!((theirs, own), (Some(theirs), Some(own)) if theirs != own)
     }
 
     /// Gives the run's scratch directory to the container's user, when the agent is root.
@@ -705,7 +862,18 @@ fn abandoned(why: &CliError, cleaned: Result<(), CliError>) -> CliError {
     CliError::Abandoned {
         why: why.to_string(),
         note,
+        blind: matches!(why, CliError::Blind { .. }),
     }
+}
+
+/// The process id and whether the container has ended, from the `inspect` of
+/// `{{.State.Pid}} {{.State.Status}}`. `None` when the text is not that.
+fn parse_pid(text: &str) -> Option<(u32, bool)> {
+    let [pid, state] = text.split_whitespace().collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    let ended = matches!(state, "exited" | "stopped" | "dead");
+    pid.parse().ok().map(|pid| (pid, ended))
 }
 
 /// The bind mounts in the JSON `.Mounts` of an `inspect`; other kinds are left out. `None`
