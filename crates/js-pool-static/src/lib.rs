@@ -2,8 +2,7 @@
 //! host at a time.
 //!
 //! The pool serves one class, `gpu-host` ([`js_types::ResourceClass::gpu_host`]),
-//! admitted `Whole`, which books a whole host as `BookAll` does: a lease holds a whole
-//! host, so nothing else runs on it. The pool refuses an admission mode that does not
+//! admitted `BookAll`: a lease holds a whole host, so nothing else runs on it. The pool refuses an admission mode that does not
 //! book a whole host with `UnsupportedClass` (see [`StaticPool::with_classes`]) rather
 //! than leasing a whole host anyway. A static pool has no agent, so a `Whole` lease is
 //! held at once: the table shows the host quiet and there is nothing to wait for. Its
