@@ -9,12 +9,14 @@ mod support;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_agent_wire::{ExclusiveRefusal, RefusalReason};
+use js_agent_wire::{
+    Command, ExclusiveRefusal, HeldRun, HeldState, Isolation, JobSpec, Limits, RefusalReason,
+};
 use js_lease::{Clock, Timestamp};
 use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_RESERVE_BACKOFF_MS, Exclusion, NotReady, PoolConfig,
-    WholeNodeConfig,
+    RunState, WholeNodeConfig,
 };
 use js_types::{ProviderId, Request, ResourceClass};
 use support::*;
@@ -471,4 +473,130 @@ fn a_restored_booking_times_out_without_charging_a_request() {
     assert_eq!(provider.observe(&lease(7)), Observed::Absent);
     assert!(fx.registry.request_record(&whole_request()).is_none());
     assert_eq!(provider.booked().get(&host("b")), None);
+}
+
+/// A small job, queued for the committed lease.
+fn job(run: &str) -> JobSpec {
+    JobSpec {
+        run_id: run.into(),
+        lease_id: String::new(),
+        image: "busybox:1".into(),
+        args: Vec::new(),
+        limits: Limits {
+            cpu_millis: 1000,
+            memory_bytes: 1 << 20,
+            pids: None,
+            wall_ms: 60_000,
+        },
+        gpu_indices: Vec::new(),
+        mounts: Vec::new(),
+        isolation: Isolation::Contained,
+        labels: Default::default(),
+        heartbeat_seq: 0,
+        valid_for_ms: 0,
+    }
+}
+
+/// Takes lease 1 to ready on host `a`, queues a run, and has the host say hello again still listing the run:
+/// the preparation is void, the lease is committed once more with its run still queued.
+/// Returns the host with the epoch of its new session.
+fn committed_again_with_a_run(fx: &Fixture, epoch: u64) -> (&'static str, u64) {
+    let mut ready = fx.heartbeat("a", epoch);
+    ready.exclusive_ready = Some("1-1".into());
+    fx.registry.heartbeat(&ready, &cred("t")).unwrap();
+    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+    assert_eq!(queued.unwrap().state, RunState::Queued);
+    fx.pass_grace();
+    let mut again = hello("a");
+    again.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    ("a", fx.hello(&again, &cred("t")).unwrap().epoch)
+}
+
+/// The commands the next heartbeat of host `a` is answered with, the host still listing
+/// run `r1` as running.
+fn commands_for_listed_run(fx: &Fixture, epoch: u64) -> Vec<Command> {
+    let mut message = fx.heartbeat("a", epoch);
+    message.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    fx.registry
+        .heartbeat(&message, &cred("t"))
+        .unwrap()
+        .commands
+}
+
+fn stop_r1() -> Vec<Command> {
+    vec![Command::Stop {
+        run_id: "r1".into(),
+    }]
+}
+
+/// A refused prepare asks the runs of the committed lease to stop: the host that still
+/// lists the run is told to stop it, on the heartbeat after the refusal. It catches a
+/// failed prepare that ends the lease and leaves its container running.
+#[test]
+fn a_refused_prepare_asks_the_leases_runs_to_stop() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
+    let mut provider = fx.provider.clone();
+    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+    let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
+    assert_eq!(commands_for_listed_run(&fx, epoch), []);
+    let mut message = fx.heartbeat("a", epoch);
+    message.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    message.exclusive_refused = Some(ExclusiveRefusal {
+        lease_id: "1-1".into(),
+        code: RefusalReason::NotQuiet,
+        detail: String::new(),
+    });
+    fx.registry.heartbeat(&message, &cred("t")).unwrap();
+    assert_eq!(commands_for_listed_run(&fx, epoch), stop_r1());
+}
+
+/// A prepare that times out asks the runs of the committed lease to stop, as a refusal
+/// does: nothing is sent a millisecond before the deadline, the stop from the deadline.
+#[test]
+fn a_prepare_timeout_asks_the_leases_runs_to_stop() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
+    let mut provider = fx.provider.clone();
+    assert_eq!(provider.start(whole_spec(1)), StartAck::Unknown);
+    let (_, epoch) = committed_again_with_a_run(&fx, hosts[0].1);
+    let mut left = TIMEOUT - 1;
+    while left > 0 {
+        let step = left.min(5_000);
+        fx.clock.advance(Duration::from_millis(step));
+        assert_eq!(commands_for_listed_run(&fx, epoch), []);
+        left -= step;
+    }
+    fx.clock.advance(Duration::from_millis(1));
+    assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+    assert_eq!(commands_for_listed_run(&fx, epoch), stop_r1());
+}
+
+/// A booking restored on a host that lists live runs is ready already: it is not
+/// overdue however long it waits, and no request is charged.
+#[test]
+fn a_restored_booking_with_live_runs_never_times_out() {
+    let (fx, hosts) = pool(short_config(), &["a"]);
+    let mut message = fx.heartbeat("a", hosts[0].1);
+    message.held = vec![HeldRun {
+        run_id: "r1".into(),
+        state: HeldState::Running,
+    }];
+    fx.registry.heartbeat(&message, &cred("t")).unwrap();
+    let mut provider = fx.provider.clone();
+    provider.seat(&host("a"), lease(7), None).unwrap();
+    wait(&fx, &hosts, TIMEOUT * 3);
+    assert_eq!(
+        provider.observe(&lease(7)),
+        Observed::Present { host: host("a") }
+    );
+    assert_eq!(provider.booked().get(&host("a")), Some(&lease(7)));
+    assert!(fx.registry.request_record(&whole_request()).is_none());
 }

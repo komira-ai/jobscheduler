@@ -29,12 +29,11 @@
 //! heartbeat is answered as usual: the report is a claim of the agent, and a claim that
 //! does not match what the registry holds is not an error.
 //!
-//! A committed lease has no deadline here and no check that the agent is able to
-//! prepare: both come later (a per-lease prepare timeout that ends the lease and
-//! excludes the host, and a refusal when no capable host exists).
-//!
 //! A committed lease that is not reported ready within `prepare_timeout` of its commit
-//! is overdue ([`Exclusive::overdue`]); the registry then ends it as a failed prepare.
+//! is overdue ([`Exclusive::overdue`]); the registry then ends it as a failed prepare,
+//! excluding or tainting the host as the cause says. Only `Committed` is overdue: a
+//! lease seated `Ready` (a restored booking with live runs, see [`Exclusive::seated`])
+//! has been prepared and never times out.
 //!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
 //! falls back to `Committed` (the same lease and commit time) until it reports again.
