@@ -1,5 +1,5 @@
-//! Whole-machine leases under a stream of actions, over a seed sweep (issue #169 is
-//! the action-lease side of the same starvation). Three workers of 4 cores heartbeat
+//! Whole-machine leases under a stream of actions, over a seed sweep (the action-lease side of
+//! the same starvation is an action that asks for most of a worker's cores). Three workers of 4 cores heartbeat
 //! every second: `w0` and `w1` run the container and whole-machine drivers, `w2` the
 //! container driver only. One-core CI actions arrive at random and run 5-60 s, about
 //! 80% of the farm, and the spread keeps `w0` and `w1` busy: without a reservation they

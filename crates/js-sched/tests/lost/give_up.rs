@@ -1,4 +1,4 @@
-//! What the farm's budget charges and what it leaves free, at the give-ups (issue #22):
+//! What the farm's budget charges and what it leaves free, at the give-ups:
 //! a lease given up for silence or replacement is charged only if its `Start` went out
 //! and nothing is on its way to the log; a lease given up for reconnection
 //! or a session switch is never charged to the farm budget, however often; a lease

@@ -283,7 +283,7 @@ fn an_explicit_ask_books_as_asked_and_climbs_from_there() {
     f.node("large", 64, linux());
     f.submit(1, request(1, GIB));
     let one = f.start();
-    assert_eq!(one.resources.memory_bytes, GIB, "kbf-book-mem-gib=1");
+    assert_eq!(one.resources.memory_bytes, GIB, "a 1 GiB ask books 1 GiB");
     let rerun = f.killed(&one, OOM);
     assert_eq!(rerun.resources.memory_bytes, 4 * GIB);
     f.finishes(&rerun, ok());
@@ -599,7 +599,7 @@ fn a_whole_machine_kill_asks_for_a_larger_node() {
 /// Catches a memory kill committed for a lease the operation no longer holds (it was
 /// given up, and the result raced the log) that still raises the booking or a floor,
 /// records a run, or counts against the node; and a lost run committed so that is
-/// charged to the farm budget (issue #22) again: the silence charged one run, and the
+/// charged to the farm budget again: the silence charged one run, and the
 /// three results committed after it add none.
 #[test]
 fn a_memory_kill_of_a_lease_given_up_changes_nothing() {

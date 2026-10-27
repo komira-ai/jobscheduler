@@ -23,7 +23,8 @@ pub const TERM: u64 = 1;
 
 /// The term of leader incarnation `incarnation`, and the lease epoch its `Welcome`
 /// names. As `kbf-server`'s `process_term`, every process has its own term, after
-/// every earlier process's (issue #137).
+/// every earlier process's, so a restarted server never grants a lease id an earlier
+/// process granted.
 #[must_use]
 pub const fn term(incarnation: u64) -> u64 {
     TERM + incarnation

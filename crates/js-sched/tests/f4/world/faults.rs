@@ -65,7 +65,7 @@ impl World {
             self.check.hit("mass reconnect");
             // Every node comes back in the same second: most of them rebooted. Each is
             // another daemon process, so the scheduler gives up the leases they lost
-            // only once the handover grace has passed (issue #140); they come back just
+            // only once the handover grace has passed; they come back just
             // after it, so that all of those are requeued at once.
             let handover_s = HANDOVER_GRACE.as_secs();
             let until = t + handover_s + self.rng.between(1, 4);

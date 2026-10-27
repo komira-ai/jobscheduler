@@ -47,8 +47,7 @@ const _: () =
     assert!(SELF_FENCE.as_millis() + LEADER_LEASE_MARGIN.as_millis() < LEASE_GRACE.as_millis());
 
 /// How long the scheduler keeps the leases of a node's replaced daemon process, counted
-/// from when it last heard the node before another process registered as it (issue
-/// #140). Two processes may hold one node's certificate (a cloned machine, a second
+/// from when it last heard the node before another process registered as it Two processes may hold one node's certificate (a cloned machine, a second
 /// daemon started, a node replaced while the old one runs), and the newer one cannot say
 /// what the older runs. The older one's stream is not acknowledged once it is replaced,
 /// so it stops self-fenced work at most T after the scheduler last heard it; the margin

@@ -56,6 +56,10 @@ impl Digest {
         for (out, pair) in hash.iter_mut().zip(bytes.chunks(2)) {
             *out = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
+        // `u64::from_str` accepts a leading `+`; a digest has one text form, so refuse it.
+        if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("{size:?} is not a size"));
+        }
         let size_bytes = size
             .parse()
             .map_err(|_| format!("{size:?} is not a size"))?;

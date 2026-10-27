@@ -1,4 +1,4 @@
-//! Runs the farm lost (issue #22): a daemon that restarted while its lease ran, proven
+//! Runs the farm lost: a daemon that restarted while its lease ran, proven
 //! by its successor's drivers, and a run the node reported lost (fenced, or a
 //! whole-machine action whose result the restart took). Each runs again, preferring a
 //! node it was not lost on, from one budget shared with busy-node memory kills

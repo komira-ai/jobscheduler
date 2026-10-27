@@ -69,7 +69,7 @@ pub struct WorkerPlan {
     /// With the instance id the new process draws.
     pub crash_at: Option<(u64, &'static str)>,
     /// Whether the restarted daemon ends the runs its predecessor left before its
-    /// `Hello` (issue #155). Off only to show the sim catches its absence.
+    /// `Hello`. Off only to show the sim catches its absence.
     pub sweep_on_restart: bool,
 }
 
@@ -664,8 +664,8 @@ impl Worker {
 
     /// The daemon process dies and is started again at once, on a new stream. What it
     /// held in memory is gone: which leases it runs, results not yet acknowledged, the
-    /// lease epoch and the contact clock. With the start-up sweep (as `kbf-daemon` does
-    /// since issue #155) every run it left ends before the new `Hello`; without it the
+    /// lease epoch and the contact clock. With the start-up sweep (as `kbf-daemon` does)
+    /// every run it left ends before the new `Hello`; without it the
     /// runs go on, listed, reported and fenced by no daemon.
     fn crash(&mut self, now: FarmTime) {
         self.stats.crashes += 1;

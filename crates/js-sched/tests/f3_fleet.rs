@@ -1,6 +1,6 @@
 //! Simulation family F3, the scheduler's half: platform routing, cordon and drain
 //! together, including the last worker of a class (`docs/design/simulation.md`
-//! section 5, F3; the catalog is komira-ai/kbf#139).
+//! section 5, F3).
 //!
 //! The world (`f3_fleet/world.rs`): four workers in name order, `arm` (the only Linux
 //! arm64 machine), `mac` (the only Mac, four cores, one Xcode build), `x86-a` and

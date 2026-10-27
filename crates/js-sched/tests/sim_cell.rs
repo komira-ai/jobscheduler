@@ -23,7 +23,7 @@
 //! - worker-1 reboots (its runs die) and worker-2's daemon restarts and re-adopts its
 //!   runs, each registering again well inside G. Re-adopting is the planned daemon's,
 //!   not `kbf-daemon`'s: a restarted `kbf-daemon` ends the runs it left before its
-//!   `Hello` (issue #155), which the scheduler sees as this run's reboot;
+//!   `Hello`, which the scheduler sees as this run's reboot;
 //! - worker-1 never receives one `Start`, while its session stays up;
 //! - worker-1 runs one hermetic lease but leaves it out of every heartbeat's running
 //!   set, and reports it late.
@@ -211,7 +211,7 @@ enum Fault {
     /// At this many milliseconds the daemon restarts: its runs keep going and are
     /// re-adopted, listed in its first heartbeat. This is the planned re-adopting
     /// daemon, not `kbf-daemon`, which ends every run it left before its `Hello`
-    /// (issue #155; the F2.14 crash). It registers again at once.
+    /// (the F2.14 crash). It registers again at once.
     Restart(u64),
     /// Every copy of the first `Start` sent to this worker is lost.
     DropFirstStart,
@@ -849,7 +849,7 @@ fn a_seed_replays_exactly() {
 /// (worker-1 rebooted, so their runs are gone: the operations are never answered and
 /// the bookings leak), a re-registration that waits for more than the handover grace
 /// before letting them go, or for less (the scheduler cannot tell a rebooted daemon from
-/// a second one still running them, issue #140), and one that drops the leases a
+/// a second one still running them), and one that drops the leases a
 /// restarted daemon re-adopted and still runs (they would run twice), as a registration
 /// fed the running set the wire's `Hello` lacks would. The re-adopting daemon is the
 /// planned one ([`Fault::Restart`]).

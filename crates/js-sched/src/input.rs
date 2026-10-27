@@ -126,19 +126,19 @@ pub enum Event {
     /// on the earlier stream, never on the new one. A heartbeat from an earlier stream
     /// that arrives after this input is not fed. `kbf-server` holds both: a resent
     /// `Hello` becomes [`Event::Capacity`], and a stream replaced by a newer one has its
-    /// heartbeats dropped (issue #25).
+    /// heartbeats dropped, so a stale heartbeat never decides a lease.
     ///
     /// A registration names the daemon process that made it (`instance`). The new
     /// session's first heartbeat decides at once only about leases whose `Start` went
     /// to an earlier session of the same process, or to the process this one replaces
     /// when `predecessor_stopped`; leases whose `Start` went to another process are
-    /// kept until that process has fenced (issue #140). See [`Event::Heartbeat`].
+    /// kept until that process has fenced. See [`Event::Heartbeat`].
     ///
     /// `predecessor_stopped` is the caller's proof that the process the worker's
     /// previous session came from has stopped, every run of it killed: the new daemon
     /// named that process as its predecessor, whose runs its drivers swept before its
-    /// `Hello`, and the previous session's stream has closed (`kbf-server` checks both;
-    /// issue #22). Ignored unless the process changes.
+    /// `Hello`, and the previous session's stream has closed (`kbf-server` checks both).
+    /// Ignored unless the process changes.
     WorkerUp {
         /// The worker.
         worker: WorkerId,
@@ -156,7 +156,7 @@ pub enum Event {
     /// A registered worker's capacity or capabilities changed without a new registration: the daemon
     /// resent `Hello` on the same stream because its node report changed. Counts as
     /// hearing from it. Opens no session, so it requeues nothing and leaves every
-    /// `Start` counted against the session it was sent to (issue #25). Ignored for a
+    /// `Start` counted against the session it was sent to. Ignored for a
     /// worker that never registered.
     Capacity {
         /// The worker.
@@ -175,12 +175,12 @@ pub enum Event {
     ///   that holds this one (the daemon either received it before registering again,
     ///   and then lists it, or never will);
     /// - at once, as a farm fault, if its `Start` was sent to the process a
-    ///   registration proved stopped (`predecessor_stopped`; issue #22): the lease runs
+    ///   registration proved stopped (`predecessor_stopped`): the lease runs
     ///   again while the operation's farm reruns last, and past them its result is
     ///   proposed, so the effects are that result's commit;
     /// - if its `Start` was sent to a session of another daemon process, once
     ///   [`HANDOVER_GRACE`] has passed since the scheduler last heard the worker before
-    ///   the newest change of process (issue #140). Only the process that ran a lease
+    ///   the newest change of process. Only the process that ran a lease
     ///   can say it no longer runs it. The other one may still be running (two daemons
     ///   share the node's certificate), but its stream has not been acknowledged since
     ///   then, so it has fenced by the end of that grace;
@@ -196,8 +196,10 @@ pub enum Event {
     /// A restarted daemon is another process: a lease it does not list is given up
     /// after the handover grace, not at once, unless the registration proved its
     /// predecessor stopped. The set must also include leases that
-    /// ended with a result not yet acknowledged (issue #26); the server side of the
-    /// session boundary is issue #25.
+    /// ended with a result not yet acknowledged, or the scheduler would requeue a run
+    /// whose result is on its way; the server side of the session boundary is to feed
+    /// no heartbeat from a replaced stream and to send each `Start` on the stream of
+    /// the session it counts against.
     ///
     /// [`START_GRACE`]: crate::fence::START_GRACE
     /// [`HANDOVER_GRACE`]: crate::fence::HANDOVER_GRACE

@@ -1,4 +1,4 @@
-//! Farm faults (failure classes, 6.5; issue #22): runs that ended as the farm's fault
+//! Farm faults (failure classes, 6.5): runs that ended as the farm's fault
 //! and are run again by the scheduler, from one budget per operation.
 //!
 //! Five kinds of run are charged, each recorded as a [`FarmRun`]:
@@ -35,8 +35,9 @@
 //! after the give-up finds the operation no longer holding the lease, and is not
 //! charged either, so that one run is free and the bound of `1 + FARM_RERUNS` runs is
 //! exact only without that race. (Pinned by
-//! `a_farm_fault_result_committed_after_the_give_up_is_not_charged`; whether it should
-//! be charged is the lead's decision.) [`Scheduler::reconcile`] skips such a lease
+//! `a_farm_fault_result_committed_after_the_give_up_is_not_charged`. The budget is
+//! charged only through the lease the operation holds when the result commits, and
+//! after the give-up it holds none.) [`Scheduler::reconcile`] skips such a lease
 //! instead.
 //!
 //! Leases given up for reconnection or a session switch are charged to no budget: those
@@ -53,7 +54,7 @@
 //! is the scheduler's own, its commit is not run again as a farm fault. Infra reruns
 //! spend none of the not-started budget.
 //!
-//! Accepted gap (the lead's decision): a worker's farm-fault result committed after
+//! Accepted gap, for the reason above: a worker's farm-fault result committed after
 //! silence gave its lease up is not charged, so that operation gets one free rerun; the
 //! log order still decides.
 

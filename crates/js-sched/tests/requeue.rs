@@ -1,4 +1,4 @@
-//! The requeues the scheduler records for the log (issue #166): one per lease it gives
+//! The requeues the scheduler records for the log: one per lease it gives
 //! up, naming the operation, the lease, the worker and the reason, and none unless the
 //! caller asked for them.
 
@@ -190,7 +190,7 @@ fn report(grant: &LeaseGrant) -> Event {
     }
 }
 
-/// Catches (issues #165 and #166 together): a requeue record that keeps its
+/// Catches: a requeue record that keeps its
 /// operation alive past the finished retention (memory then grows with every requeued
 /// operation), a record dropped or changed when its operation is, and a late report
 /// under the given-up lease (or the one that finished) that brings the dropped

@@ -45,7 +45,7 @@ fn unfinished_lists_the_operations_not_done_and_no_other() {
     );
 }
 
-/// Catches (issue #165): finished operations kept forever, so the scheduler's memory
+/// Catches: finished operations kept forever, so the scheduler's memory
 /// grows with every operation it ever ran; one dropped before the retention is up, so
 /// a WaitExecution right after a broken stream finds nothing; and a drop that takes
 /// only one expired operation per input, which falls behind a burst.

@@ -433,7 +433,7 @@ fn a_whole_memory_action_waits_for_a_node_to_empty_and_holds_none() {
     assert_eq!(h.held("a"), 1, "the whole-host action runs alone");
 }
 
-/// A known limit, which `docs/design/scheduler.md` states (issue #169): an action that
+/// A known limit, which `docs/design/scheduler.md` states: an action that
 /// asks for most of a worker's cores holds no worker, and spreading leaves no worker
 /// with the cores. Eight one-core leases on two workers of eight cores split four and
 /// four, so a six-core action waits; first fit packed all eight on the first worker and

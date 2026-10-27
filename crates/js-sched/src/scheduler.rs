@@ -56,7 +56,7 @@ pub const UNSERVABLE_WAIT: Duration = Duration::from_secs(300);
 
 /// How long a finished operation is kept after its waiters are answered, so that a
 /// caller whose `Execute` stream broke can still `WaitExecution` on it and get its
-/// result; after that the operation is gone (issue #165). The default of
+/// result; after that the operation is gone. The default of
 /// [`Scheduler::new`]; see [`Scheduler::with_finished_retention`].
 ///
 /// A client reconnects after a broken stream within seconds (its retries back off to

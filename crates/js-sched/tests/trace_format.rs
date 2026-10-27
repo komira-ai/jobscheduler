@@ -219,3 +219,18 @@ fn the_hash_changes_when_one_trace_line_changes() {
     assert_eq!(hash_of(1_000), hash_of(1_000));
     assert_ne!(hash_of(1_000), hash_of(1_001));
 }
+
+/// Catches: a stand-in digest that reads a size kbf's digest refuses. The text form has
+/// one spelling, so a leading `+` (which `u64::from_str` accepts), an empty size and a
+/// non-digit size are errors, and the plain form reads back as written.
+#[test]
+fn a_digest_size_has_one_text_form() {
+    let hex = "ab".repeat(32);
+    let parse = |size: &str| Digest::parse(DigestFunction::Sha256, &format!("{hex}/{size}"));
+    assert_eq!(parse("5").unwrap().to_string(), format!("{hex}/5"));
+    assert!(parse("+5").is_err());
+    assert!(parse("").is_err());
+    assert!(parse("-5").is_err());
+    assert!(parse("5x").is_err());
+    assert!(parse("18446744073709551616").is_err());
+}

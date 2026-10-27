@@ -1,5 +1,5 @@
 //! Scenario family F2 of the scheduler's simulation catalog
-//! (`docs/design/simulation.md`, added in komira-ai/kbf#139): failures of
+//! (`docs/design/simulation.md`): failures of
 //! workers, networks, clocks and servers, on the simulated cell of `sim/cell` (a leader
 //! running the scheduler as `kbf-server` does, a log that commits after a random
 //! delay, and workers that follow the daemon's rules).
@@ -12,12 +12,12 @@
 //! | F2.4 | a `Start` delayed beyond W; heartbeats at `START_GRACE` - 1 ms, exactly and + 1 ms | `f2_4_*` |
 //! | F2.6 | a worker suspended below T, between T and G, and above G | `f2_6_*` |
 //! | F2.7 | the leader's clock paused with its process | `f2_7_*` |
-//! | F2.9 | a server restart (issue #137) | `f2_9_*` |
+//! | F2.9 | a server restart | `f2_9_*` |
 //! | F2.10 | stale, duplicated and reordered session messages | `f2_10_*` |
 //! | F2.11 | lost and repeated results and acknowledgements | `f2_11_*` |
-//! | F2.12 | two daemons claiming one node id (issue #140) | `f2_12_*` |
+//! | F2.12 | two daemons claiming one node id | `f2_12_*` |
 //! | F2.13 | leases of another term, and of other workers, listed | `f2_13_*` |
-//! | F2.14 | a daemon crash and its restart (issue #155) | `f2_14_*` |
+//! | F2.14 | a daemon crash and its restart | `f2_14_*` |
 //!
 //! F2.5 (a `Start` lost on a live session) and F2.8 (a reboot and a daemon restart inside
 //! G) are in `sim_cell.rs`.
@@ -650,7 +650,7 @@ fn f2_7_a_paused_leader_requeues_only_after_g_of_its_own_time() {
     reached("F2.7", "a pause long enough for workers to fence", fences);
 }
 
-/// F2.9. Catches (issue #137): a restarted server that grants a lease id an old
+/// F2.9. Catches: a restarted server that grants a lease id an old
 /// process granted to the same worker, and accepts the old run's result for the new
 /// operation (I5). Before the fix every process granted leases of term 1, and seed 0
 /// already failed I5. The sweep must reach a worker that held a lease of the old
@@ -722,7 +722,7 @@ fn f2_11_lost_and_repeated_results_are_proposed_once() {
 }
 
 /// F2.12. Catches: `Start`s or acknowledgements going to a replaced stream, and the
-/// replaced daemon's work running beside its retry (issue #140): a lease whose `Start`
+/// replaced daemon's work running beside its retry: a lease whose `Start`
 /// went to the other daemon requeued on the newer daemon's first heartbeat that leaves
 /// it out, while the older one, no longer acknowledged, runs it until its fence (I12),
 /// or kept past the handover grace (R).
@@ -772,7 +772,7 @@ fn f2_13_leases_of_other_terms_are_never_cancelled() {
     );
 }
 
-/// F2.14. Catches (issue #155): the work of a crashed daemon's runs running twice at
+/// F2.14. Catches: the work of a crashed daemon's runs running twice at
 /// once (I12). The restarted daemon is a new process (a new instance id) whose first
 /// heartbeat leaves those leases out, so the scheduler requeues them once the handover
 /// grace has passed. The grace assumes the old process fenced, which a killed one never
@@ -819,7 +819,7 @@ fn f2_14_a_crashed_daemon_s_runs_end_before_its_work_is_retried() {
 }
 
 /// F2.14 without the start-up sweep (a defect of the daemon model, as it was before
-/// issue #155): the crashed daemon's runs go on unlisted while their retries run. The
+/// the daemon swept its predecessor's runs at start-up): the crashed daemon's runs go on unlisted while their retries run. The
 /// end-of-run check must catch it on some seed as I12, or F2.14 proves nothing.
 #[test]
 fn f2_14_without_the_sweep_a_crash_runs_work_twice() {

@@ -17,7 +17,7 @@
 //!   before the same daemon process registered again, or to the daemon process the
 //!   current one was proven to replace (its successor killed its runs before
 //!   registering: a farm fault, below), after the handover grace if it went to another
-//!   daemon process registered as the worker (issue #140), else once its `Start` has
+//!   daemon process registered as the worker, else once its `Start` has
 //!   been out for G;
 //! - placement of a CPU, memory and GPU request onto worker capacity, GPUs whole and
 //!   held by one lease each until it ends, on workers whose node report lists a driver
@@ -52,7 +52,7 @@
 //!   only cordoned workers could run waits, naming them, and is not refused for it; an
 //!   uncordon places queued work at once;
 //! - a finished operation is kept for [`FINISHED_RETENTION`] after its waiters are
-//!   answered, then dropped (issue #165);
+//!   answered, then dropped;
 //! - memory kills (failure classes, 6.1): an action that passed its own memory limit
 //!   runs again one rung up a fixed [`MemoryLadder`] (4, 16, 32 GiB, then a whole host,
 //!   the largest node that could run it), and its action key keeps the raised booking
@@ -60,7 +60,7 @@
 //!   own limit runs it again with the same booking, at most [`FARM_RERUNS`] times, and
 //!   counts against the node ([`Scheduler::memory_pressure`]). See
 //!   [`js_types::sched::MemoryRun`].
-//! - farm faults (failure classes, 6.5; issue #22): a busy node's memory kill, a run the
+//! - farm faults (failure classes, 6.5): a busy node's memory kill, a run the
 //!   worker reports lost ([`js_types::sched::Failure::Lost`]), a run the farm could not do
 //!   ([`js_types::sched::Failure::Infra`]), a lease of a daemon proven stopped, and a lease
 //!   whose `Start` was sent and that was given up for silence or replacement run again
@@ -74,7 +74,7 @@
 //!   through the log.
 //!
 //! Not yet: placement scoring beyond the spread (alignment, best fit), a reservation for
-//! a large `action` request (issue #169), reclaimed room and preemption, a budget for the
+//! a large `action` request (an action asking for most of a worker's cores waits, because spreading leaves no worker with the cores), reclaimed room and preemption, a budget for the
 //! leases given up for reconnection, and committing submissions so that a new leader
 //! inherits the queue. In v0 the scheduler runs on the leader only.
 //!

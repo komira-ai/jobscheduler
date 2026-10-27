@@ -59,7 +59,7 @@ struct Worker {
     last_heard: u64,
     session: u64,
     /// The daemon process of the current session, how many times it changed, and until
-    /// when the leases of an earlier one are kept (issue #140).
+    /// when the leases of an earlier one are kept.
     instance: DaemonInstance,
     process: u64,
     handover_ends: u64,
@@ -435,7 +435,7 @@ impl Checker {
             if listed.contains(lease) || op.proposed {
                 continue;
             }
-            // Another daemon process may still run it until its fence (issue #140).
+            // Another daemon process may still run it until its fence.
             let (why, charged) = if sent_process != process {
                 if now < handover_ends {
                     kept_for_handover += 1;

@@ -720,7 +720,7 @@ fn a_heartbeat_after_registering_again_requeues_at_once_only_what_the_worker_los
     assert!(h.report(&lost, ok(2)).is_empty(), "late result proposed");
 }
 
-/// Catches (issue #140): a lease whose `Start` went to a replaced daemon process requeued
+/// Catches: a lease whose `Start` went to a replaced daemon process requeued
 /// on the first heartbeat of another process registered as the same node (the replaced
 /// one, when two daemons hold one certificate, runs it until it fences: twice at once),
 /// or kept past the handover grace; the grace counted from the new registration instead
@@ -787,7 +787,7 @@ fn a_lease_of_a_replaced_daemon_process_is_kept_until_that_process_has_fenced() 
     assert!(h.running(&fourth), "two unnamed processes taken for one");
 }
 
-/// Catches (issue #25): a resent `Hello` treated as a registration, which would count
+/// Catches: a resent `Hello` treated as a registration, which would count
 /// every `Start` already sent as sent to an earlier session and requeue it on the next
 /// heartbeat that has not listed it yet (an unfenced second run for self-fenced work);
 /// a capacity change that placement does not see; a resend that does not count as
@@ -849,7 +849,7 @@ fn a_capacity_change_counts_as_hearing_from_the_worker() {
     assert_eq!(grant.worker, w("a"), "a resend did not count as hearing");
 }
 
-/// Catches (issue #23): a lease the worker lists that the scheduler gave up, granted
+/// Catches: a lease the worker lists that the scheduler gave up, granted
 /// to another worker, or finished, not named for cancelling (its run goes on beside
 /// the retry); a lease the worker holds named (its only run would be killed), even
 /// while its retry's grant is not committed yet; and a lease this scheduler never

@@ -19,7 +19,7 @@
 //!   silent for G (and then at that tick, not later); on a heartbeat of its worker that
 //!   leaves it out, once its `Start` went to an earlier session of the same daemon
 //!   process, to another daemon process and the handover grace has passed since the
-//!   worker was last heard before the newest change of process (issue #140), or to this
+//!   worker was last heard before the newest change of process, or to this
 //!   session and has been out for `START_GRACE`, and only if no result of it was
 //!   proposed. A registration or a resent `Hello` gives up nothing.
 //! - **P** a result is proposed at most once per holding.

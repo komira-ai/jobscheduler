@@ -1,5 +1,5 @@
 //! Requeues as the scheduler reports them for the log: which lease it gave up, on
-//! which worker, and why (issue #166). A lease that ended killed for memory and is run
+//! which worker, and why. A lease that ended killed for memory and is run
 //! again is one too (failure classes, 6.1).
 //!
 //! A requeue changes no state outside the scheduler, so it is not an
