@@ -281,3 +281,30 @@ fn lost_retention_is_validated() {
     advance(&fx, 1);
     assert!(fx.registry.hosts().is_empty());
 }
+
+/// Asserts the pool-level limit of the heartbeat check, as documented: a heartbeat is
+/// checked against the bound credential and the epoch only, so a holder of the pool token
+/// can heartbeat for another host, instance-bound or not. It keeps a silent host live,
+/// revives a lost one and sets its phase, until per-host tokens or session secrets land.
+/// A credential outside the pool is still refused.
+#[test]
+fn heartbeat_from_a_peer_with_the_same_token_is_accepted_pool_level_limit() {
+    let fx = fixture(4);
+    let epoch = fx
+        .registry
+        .hello(&on("a", "i-1"), &cred("pool"))
+        .unwrap()
+        .epoch;
+    fx.pass_grace();
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Lost);
+    let mut peer = heartbeat("a", epoch);
+    peer.phase = js_agent_wire::Phase::Draining;
+    fx.registry.heartbeat(&peer, &cred("pool")).unwrap();
+    let view = &fx.registry.hosts()[0];
+    assert_eq!(view.state, HostState::Live);
+    assert_eq!(view.phase, js_agent_wire::Phase::Draining);
+    assert_eq!(
+        fx.registry.heartbeat(&peer, &cred("outside")).unwrap_err(),
+        Refusal::HostBound
+    );
+}

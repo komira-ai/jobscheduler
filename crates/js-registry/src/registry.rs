@@ -291,6 +291,11 @@ impl Registry {
     /// is a small counter and no proof of a session), or when it
     /// names an epoch that is not the current one. The agent answers the first and last by
     /// saying hello again.
+    ///
+    /// A heartbeat is checked against the bound credential and the epoch only; it carries
+    /// no instance identity. A holder of the pool token can therefore heartbeat for another
+    /// host, instance-bound or not: that keeps it live, revives it when lost and sets its
+    /// phase, until per-host tokens or session secrets (design D18) land.
     pub fn heartbeat(&self, heartbeat: &Heartbeat, credential: &Credential) -> Result<(), Refusal> {
         let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHeartbeatHostId)?;
         heartbeat.validate().map_err(Refusal::Invalid)?;

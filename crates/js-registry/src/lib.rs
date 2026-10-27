@@ -23,7 +23,9 @@
 //!   host-bound. Without an instance identity the binding is at the level of the pool
 //!   credential only: all hosts of a pool share the join token, so a holder of the pool
 //!   token can say hello for an unbound-instance host id once that host is lost, and
-//!   takes over its booking. Per-host tokens or client certificates close that later
+//!   takes over its booking. A heartbeat is checked against the credential and the epoch
+//!   only, so the same token holder can also keep any host live and set its phase,
+//!   instance-bound or not. Per-host tokens or client certificates close that later
 //!   (design D18). [`Credential`] equality is on a digest; the constant-time compare of
 //!   the token belongs to the transport.
 //! - **Retention.** A lost host with no booking is forgotten, binding included, after
