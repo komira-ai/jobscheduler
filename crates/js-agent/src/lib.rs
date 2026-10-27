@@ -25,6 +25,12 @@
 //! | `--allow-host-jobs` | not available yet: refused at start, because a host job taints the host and the record of that does not exist; without it a start with `isolation = host` creates nothing and is refused |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits) |
+//! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; any named network gives a job egress to whatever it reaches, the host's metadata endpoint included, and the agent warns at start; needs `--container-bin` |
+//! | `--container-user <uid:gid>` | the user containers run as, both above zero; by default `65534:65534`; an agent that runs as root gives each run's scratch directory to this user, any other agent refuses to start unless this is its own `uid:gid`; needs `--container-bin` |
+//! | `--container-host <uri>` | the engine to talk to (`unix:///<path>`, `tcp://<address>`, `ssh://<address>`), passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; an `ssh://` host is accepted but not supported (the engine gets no `SSH_AUTH_SOCK` and no `HOME`); needs `--container-bin` |
+//! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
+//! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
 //! What they configure is the [`lifecycle`], which no change has connected to the session
@@ -91,6 +97,7 @@
 
 mod backoff;
 mod cli;
+pub mod cli_runtime;
 mod container;
 mod facts;
 mod host;
@@ -109,6 +116,7 @@ use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
+use cli_runtime::Settings;
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
     Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
@@ -223,7 +231,11 @@ fn execute(
     checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
     // The job flags are checked now so a wrong one stops the agent before it registers.
     // The change that runs jobs builds the lifecycle from them.
-    Local::from_cli(&cli).map_err(Failure::Usage)?;
+    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    let container = local.container.iter();
+    container.flat_map(Settings::warnings).for_each(|warning| {
+        let _ = writeln!(err, "js-agent: warning: {warning}");
+    });
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

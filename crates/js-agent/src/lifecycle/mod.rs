@@ -17,7 +17,8 @@
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
-//!   (`host-jobs-not-allowed`), a job larger than the machine or naming a GPU index it
+//!   (`host-jobs-not-allowed`), a job that names a GPU where the runtime's containers
+//!   cannot use one (`gpu-unsupported`), a job larger than the machine or naming a GPU index it
 //!   does not offer (`limits-exceed-shape`), one that does not fit what is free or
 //!   names a booked GPU (`no-capacity`), and a mount that names no root, does not exist
 //!   or leaves its root (`invalid-mount`).
@@ -58,8 +59,12 @@
 //!   out until the taint of design 5.12 exists; it is the integrity-check change's to add.
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
-//!   flag. A job that holds a read-write mount can write in its root, which is why the
-//!   backend must open mounts by descriptor (see [`MountRoots`]).
+//!   flag. A job that holds a read-write mount can write in its root, so it can swap a
+//!   directory of the root for a link while another job's mount is being set up. A
+//!   container daemon binds by path and cannot use a descriptor the agent opened, so the
+//!   backend reads back where each mount was bound and refuses a container whose mounts
+//!   differ; the time between the agent's resolution and the daemon's bind stays open (see
+//!   [`MountRoots`]).
 //! - **Held and retired state is in memory.** After a restart an unacknowledged result
 //!   whose container was removed is lost, and the agent forgets which run ids it was told
 //!   to stop; a late `Start` for one of them runs. Containers that still exist are
@@ -103,6 +108,7 @@ use std::time::Duration;
 use js_agent_wire::Hello;
 
 use crate::cli::Cli;
+use crate::cli_runtime::{Flags, Settings};
 
 pub use machine::{Lifecycle, RETIRED_CAP};
 pub use mounts::{MountError, MountRoots};
@@ -118,6 +124,9 @@ pub mod detail {
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// The runtime could not create or start the container.
     pub const RUNTIME_FAILED: &str = "runtime-failed";
+    /// The job names a GPU and the runtime's containers cannot use one (a container on a
+    /// Mac cannot reach the Apple GPU). Nothing is created.
+    pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
 }
 
 /// The codes of a [`Finding`].
@@ -372,12 +381,16 @@ pub struct Local {
     pub mounts: MountRoots,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
+    /// `--container-bin`, `--container-network` and `--container-user`, when containers
+    /// are enabled by `--container-bin`.
+    pub container: Option<Settings>,
 }
 
 impl Local {
     /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (a host job taints the
     /// host, and the record of that taint does not exist yet), every mount root exists and
-    /// is canonicalised, the scratch root is private to the user running the agent.
+    /// is canonicalised, the scratch root is private to the user running the agent, the
+    /// container runtime is an absolute path to an executable file.
     ///
     /// # Errors
     ///
@@ -396,6 +409,21 @@ impl Local {
                 .as_deref()
                 .map(ScratchRoot::open)
                 .transpose()?,
+            container: Settings::from_flags(
+                &Flags {
+                    bin: cli.container_bin.as_deref(),
+                    network: cli.container_network.as_deref(),
+                    user: cli.container_user.as_deref(),
+                    host: cli.container_host.as_deref(),
+                    pull: cli.container_pull.as_deref(),
+                    tmp_size: cli.container_tmp_size.as_deref(),
+                },
+                (
+                    rustix::process::geteuid().as_raw(),
+                    rustix::process::getegid().as_raw(),
+                ),
+            )
+            .map_err(|why| why.to_string())?,
         })
     }
 }

@@ -1,5 +1,6 @@
-//! The container runtime the lifecycle drives: what a backend (Docker or Podman, in a
-//! later change) must do, and the plain data that crosses the seam.
+//! The container runtime the lifecycle drives: what a backend (Docker or Podman, see
+//! [`CliRuntime`](crate::cli_runtime::CliRuntime)) must do, and the plain data that
+//! crosses the seam.
 //!
 //! The trait is small on purpose. Every call is blocking and idempotent where it can be
 //! (`stop` and `remove` of a container that is already gone succeed), and a call that
@@ -34,6 +35,13 @@ pub mod label {
     pub const GPUS: &str = "jobscheduler.dev/gpus";
     /// The wall-time limit in milliseconds.
     pub const WALL_MS: &str = "jobscheduler.dev/wall-ms";
+    /// The id the agent registered under. A runtime puts it on every container it makes
+    /// and lists only the containers that carry it, so two agents sharing one runtime
+    /// never adopt each other's jobs.
+    pub const AGENT: &str = "jobscheduler.dev/agent";
+    /// When a runtime made the container, in milliseconds since the Unix epoch; a
+    /// runtime that can read it back reports a restarted container's age from it.
+    pub const CREATED_MS: &str = "jobscheduler.dev/created-ms";
 }
 
 /// A container's id as the runtime names it. Opaque to the agent.
@@ -44,9 +52,11 @@ pub struct ContainerId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMount {
     /// The canonical host path, below the root the mount names, as it was when the agent
-    /// resolved it. A backend must not trust it to be the same path at the moment it binds:
-    /// it opens the path by file descriptor, beneath the root, and binds that (see
-    /// [`MountRoots`](super::MountRoots)).
+    /// resolved it. A backend must not trust it to be the same path at the moment it binds.
+    /// A container daemon binds by path and cannot use a descriptor the agent opened, so a
+    /// backend of that kind reads back where the daemon bound each mount and refuses the
+    /// container when it differs; the time between the resolution and the bind stays open
+    /// (see [`MountRoots`](super::MountRoots)).
     pub host: PathBuf,
     /// The path inside the container: `/mnt/<root name>/<rel>`.
     pub target: String,
@@ -94,12 +104,15 @@ pub struct Exit {
 /// What a poll found of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// It runs, or it is created and about to: there is no state between a created
-    /// container and a running one, so a backend reports a created container as running.
+    /// It runs, or it is created and about to: the agent polls only a container it has
+    /// started, so a backend reports a created one as running. (One that was created and
+    /// never started, found after a restart, is no job: see
+    /// [`ContainerRuntime::list_labelled`].)
     Running,
     /// It has exited.
     Exited(Exit),
-    /// The runtime no longer has it: it was removed from outside, or the host lost it. The
+    /// The runtime no longer has it: it was removed from outside, or the host lost it, or
+    /// it holds only what the runtime could not remove and no exit status to trust. The
     /// job ends as failed (or as stopped or timed out, when the agent was ending it).
     Gone,
 }
@@ -115,6 +128,10 @@ pub struct Found {
     /// How long it has been running, in milliseconds, as the runtime reports it; counted
     /// against the job's wall-time limit.
     pub running_ms: u64,
+    /// It was created and never started (Docker: `created`, Podman: `configured`): no job
+    /// ever ran in it, whatever its labels say, so it is never adopted. The lifecycle
+    /// evicts it like any container it cannot adopt.
+    pub never_started: bool,
 }
 
 /// A runtime call that failed. The text is the runtime's own and stays on the host.
@@ -155,16 +172,23 @@ pub trait ContainerRuntime {
     /// The runtime cannot remove it.
     fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError>;
 
-    /// Every container carrying the agent's run label ([`label::RUN`]), running or
-    /// exited.
-    ///
-    /// One agent owns a runtime: nothing scopes the label to an agent instance, so every
-    /// container carrying it is treated as this agent's own, and the agent may adopt it or
-    /// stop and remove it. Do not point two agents, or another tool that sets the label,
-    /// at one runtime.
+    /// Every container carrying the run label ([`label::RUN`]) and this agent's label
+    /// ([`label::AGENT`], the host id the backend puts on every container it makes), running
+    /// or exited. The agent label scopes the list: two agents sharing one runtime never see
+    /// each other's containers, and the agent may adopt, stop and remove every one it is
+    /// given. A container that was created and never started holds no job, whatever its
+    /// labels say; a backend lists it too, marked [`Found::never_started`], and removes
+    /// nothing: listing is a read, so one container that cannot be removed never makes the
+    /// whole list fail.
     ///
     /// # Errors
     ///
     /// The runtime cannot list.
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError>;
+
+    /// Whether a container made here can use a GPU. A start that names a GPU where this
+    /// is false is refused (`gpu-unsupported`) and creates nothing.
+    fn supports_gpus(&self) -> bool {
+        true
+    }
 }

@@ -301,7 +301,7 @@ fn the_scratch_root_must_be_private() {
 
     let scratch = ScratchRoot::open(&root).unwrap();
     let made = scratch.create("r1").unwrap();
-    assert_eq!(made, root.join("r1"));
+    assert_eq!(made, fs::canonicalize(&root).unwrap().join("r1"));
     let bits = fs::metadata(&made).unwrap().permissions().mode() & 0o777;
     assert_eq!(bits, 0o700);
     fs::write(made.join("leftover"), "x").unwrap();
@@ -321,4 +321,27 @@ fn the_scratch_root_must_be_private() {
     fs::write(root.join("blocked"), "x").unwrap();
     assert!(scratch.remove("blocked").is_err());
     assert!(scratch.create("blocked").is_err());
+}
+
+/// Asserts that a scratch root reached through a link in its path is kept by its
+/// canonical path, and that a run's directory is then below that path: the engine reports
+/// the source of a bind mount the way the agent gave it, so the agent can compare the two
+/// when it reads the mounts back, and the path cannot be redirected by changing a link
+/// above the root afterwards. It catches a scratch directory that is bound by a path
+/// that can later lead somewhere else.
+#[test]
+fn the_scratch_root_is_kept_by_its_canonical_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Scratch::new("scratch-root-canonical");
+    let real = dir.path("real");
+    fs::create_dir(&real).unwrap();
+    let root = real.join("root");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let alias = dir.path("alias");
+    symlink(&real, &alias).unwrap();
+    let scratch = ScratchRoot::open(&alias.join("root")).unwrap();
+    let expected = fs::canonicalize(&root).unwrap().join("r1");
+    assert_eq!(scratch.of("r1"), expected);
+    assert!(!scratch.of("r1").starts_with(&alias));
 }
