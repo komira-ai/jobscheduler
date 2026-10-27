@@ -123,6 +123,19 @@
 //! older build refuse the file; that field is a follow-up and does not exist yet, so
 //! such a change cannot be made before it.
 //!
+//! # Reservation records
+//!
+//! The file also holds a ledger of reservation records ([`ReservationRecord`]) beside
+//! the leases, as `[[reservation]]` tables counted by `reservation_count` (written only
+//! when above zero; a file with fewer rows than it counts is refused like a cut lease
+//! list). They are written in the same atomic replace as the leases, so a record never
+//! outlives a crash without the leases it was saved with. The table keeps the ledger
+//! whole and decides nothing about it: [`LeaseTable::set_reservations`] replaces it (the
+//! next tick writes it) and [`LeaseTable::reservations`] reads it. An open returns each
+//! held deadline extended by [`Settings::boot_grace`] and stamps every record with
+//! `claim_by`, the boot plus [`Settings::regain_grace`]. A file without the rows loads
+//! an empty ledger; fields of a later version in a row are kept on rewrite.
+//!
 //! # Id limits
 //!
 //! A term and a sequence are written as TOML integers, so each stops at `i64::MAX`. The
@@ -134,6 +147,7 @@
 mod book;
 mod clock;
 mod error;
+mod reservations;
 mod state;
 mod store;
 mod table;
@@ -143,4 +157,7 @@ pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
-pub use types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+pub use types::{
+    Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
+    ReservationRecord, Settings, TickReport,
+};
