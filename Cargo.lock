@@ -558,7 +558,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "js-lease",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "js-conformance"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "js-pool-static",
  "js-provider",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "js-coverage"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "thiserror",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "js-lease"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "js-pool-static",
  "js-provider",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "js-lease-server"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "js-pool-static"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "js-provider",
  "js-types",
@@ -646,14 +646,14 @@ dependencies = [
 
 [[package]]
 name = "js-provider"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "js-types",
 ]
 
 [[package]]
 name = "js-provider-fake"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "js-provider",
  "js-types",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "js-types"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "thiserror",
 ]
@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
