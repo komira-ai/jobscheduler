@@ -436,7 +436,8 @@ impl Registry {
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
-        let kept_exclusive = known.map_or(Exclusive::Free, |record| record.exclusive.after_hello());
+        let kept_exclusive =
+            known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
