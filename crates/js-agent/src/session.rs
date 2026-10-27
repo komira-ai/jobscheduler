@@ -80,15 +80,15 @@ pub struct Fatal {
 
 impl fmt::Display for Fatal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let majors = self
+            .supported
+            .map(|range| format!("; it speaks majors {} to {}", range.min, range.max))
+            .unwrap_or_default();
         write!(
             f,
-            "the server refused the {} with status {} ({}",
+            "the server refused the {} with status {} ({}{majors}); not retrying",
             self.what, self.status, self.code
-        )?;
-        if let Some(range) = &self.supported {
-            write!(f, "; it speaks majors {} to {}", range.min, range.max)?;
-        }
-        f.write_str("); not retrying")
+        )
     }
 }
 
