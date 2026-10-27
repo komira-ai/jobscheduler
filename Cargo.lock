@@ -585,6 +585,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-caps"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "js-cli"
 version = "0.1.0"
 dependencies = [
