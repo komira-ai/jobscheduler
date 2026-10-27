@@ -67,6 +67,35 @@ pub struct HostView {
     /// is sent no start and takes no new run. It is kept across a restart and is not
     /// cleared by anything in this crate.
     pub taint: Option<Taint>,
+    /// How the host is set aside for a whole-node request, if it is.
+    pub mark: Option<HostMark>,
+    /// The request a reserved host is set aside for; `None` unless `mark` is
+    /// [`HostMark::Reserved`].
+    pub reserved_for: Option<RequestId>,
+    /// When a reservation that drains a busy host is given up if the host is still not
+    /// quiet; `None` unless the host is reserved and was busy when it was set aside.
+    pub drain_deadline: Option<Timestamp>,
+}
+
+/// How a host is set aside for whole-node use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostMark {
+    /// Set aside for a waiting request: it takes no start but that request's.
+    Reserved,
+    /// A whole-node lease is committed on it.
+    Held,
+}
+
+/// How many hosts are reserved, how many are held whole, and how many requests wait
+/// ([`Registry::whole_counts`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WholeCounts {
+    /// Hosts set aside for a waiting request.
+    pub reserved: usize,
+    /// Hosts with a whole-node lease committed.
+    pub held: usize,
+    /// Whole-node requests on the wait list.
+    pub queued: usize,
 }
 
 #[derive(Debug)]
@@ -470,6 +499,33 @@ impl Registry {
     /// its lease on the host it holds; until then the host takes no other start.
     pub fn reservations(&self) -> Vec<Reservation> {
         self.lock().marks.reservations()
+    }
+
+    /// Whether `host` is set aside for a waiting request.
+    pub fn is_reserved(&self, host: &HostId) -> bool {
+        self.lock().marks.holder(host).is_some()
+    }
+
+    /// The host `lease` is booked on, if it is booked on one.
+    pub fn host_of(&self, lease: &LeaseId) -> Option<HostId> {
+        match self.lock().book.read(lease) {
+            Observed::Present { host } => Some(host),
+            Observed::Absent | Observed::Unknown => None,
+        }
+    }
+
+    /// The hosts reserved and held, and the requests waiting, now.
+    pub fn whole_counts(&self) -> WholeCounts {
+        let state = self.lock();
+        let held = state
+            .records
+            .values()
+            .filter(|r| r.exclusive.held_since().is_some());
+        WholeCounts {
+            reserved: state.marks.reservations().len(),
+            held: held.count(),
+            queued: state.waiting.waiting().count(),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -879,6 +935,8 @@ impl Registry {
         let state = self.lock_at(now);
         let booked = state.book.booked();
         let shape = self.shared.config.shape();
+        let marks = state.marks.reservations();
+        let set_aside = |id: &HostId| marks.iter().find(|mark| mark.host == *id);
         let views = state.records.iter().map(|(id, record)| HostView {
             id: id.clone(),
             state: record.state(now, self.grace_ms()),
@@ -891,6 +949,15 @@ impl Registry {
             releasing: !booked.contains_key(id)
                 & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
             taint: record.taint.clone(),
+            mark: match (set_aside(id), record.exclusive.held_since()) {
+                (Some(_), _) => Some(HostMark::Reserved),
+                (None, Some(_)) => Some(HostMark::Held),
+                (None, None) => None,
+            },
+            reserved_for: set_aside(id).map(|mark| mark.request.clone()),
+            drain_deadline: set_aside(id)
+                .filter(|mark| !mark.assigned)
+                .map(|mark| mark.deadline),
         });
         views.collect()
     }
