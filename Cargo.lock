@@ -842,6 +842,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-sched"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-sim",
+ "js-sizing",
+ "js-types",
+]
+
+[[package]]
 name = "js-sim"
 version = "0.1.0"
 dependencies = [
