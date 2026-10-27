@@ -2,8 +2,8 @@
 //! leases on whole GPU hosts, and runs a command while it holds one.
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print
-//! to and the [`Services`] (the waiter and the signal source), and `main` calls
-//! [`main`], which supplies the program's own.
+//! to and the [`Services`] (the waiter, the clock and the signal source), and `main`
+//! calls [`main`], which supplies the program's own.
 //!
 //! # Flags
 //!
@@ -41,13 +41,35 @@
 //! pass. A lease still pending then is released, so it is not held later with nobody to
 //! renew it.
 //!
-//! `run` acquires like `acquire` and starts the command as a child process with
-//! `JS_LEASE_ID` and `JS_LEASE_HOST` set in its environment. Those are outputs of `js`
-//! to the command; `js` itself reads no environment variable. It renews every
-//! `--renew-every` (a third of `--ttl`, or 200s without `--ttl`: a third of the
-//! server's default ttl) until the command exits, then releases the lease, whatever
-//! happened, and exits with the command's status (128 plus the signal for a command a
-//! signal ended). The held-lease line goes to stderr, so stdout is the command's.
+//! A start is sent once. When its answer is lost (the connection fails, the server
+//! answers 5xx or something this client does not know, or the body is unusable) the
+//! lease may exist, and `js` exits 1 saying so and telling you to run `js lease list`
+//! before trying again (the JSON kind is `acquire-unconfirmed`). `acquire` does no more.
+//!
+//! `run` acquires like `acquire`, with one more label, `js-run=<128 random bits in hex>`,
+//! and starts the command as a child process with `JS_LEASE_ID` and `JS_LEASE_HOST` set
+//! in its environment. Those are outputs of `js` to the command; `js` itself reads no
+//! environment variable. When the answer to its start is lost, `run` lists the leases,
+//! releases the one that has its label, says so on stderr and exits 1 as `acquire` does
+//! (once: it does not retry the list, so a start the server only finishes afterwards
+//! stays held until its ttl).
+//!
+//! # Renewal and the deadline
+//!
+//! `run` knows how long the lease lasts from the server's answers, not from what was
+//! asked for: every answer to a start or a renewal carries the expiry (`expires_at_ms`),
+//! and the time left is that less the [`Clock`] (the system's wall clock, which is
+//! assumed to agree with the server's to within a few seconds). A renewal is tried when
+//! a third of the time left has passed (`--renew-every`, when given, is the longest
+//! wait), so a ttl the server clamps or defaults is followed. The renewal runs on a
+//! thread of its own: a slow one blocks neither a signal nor the command's exit. A
+//! renewal that fails for a reason other than the server saying the lease is gone (404 or
+//! 409) is reported on stderr and tried again; the lease is given up at the deadline, one
+//! such period before the server would expire it, and the command is stopped (below)
+//! while the lease is still the server's to release. A request is limited to 30 seconds,
+//! and a renewal to the time left before the deadline when that is shorter.
+//!
+//! # Signals and what the command leaves behind
 //!
 //! `run` installs its SIGINT, SIGTERM and SIGHUP handlers before it asks for the lease.
 //! A signal while a start is pending releases the pending lease and ends `js` with 128
@@ -55,29 +77,45 @@
 //! signal is forwarded to the command, which ends the run the usual way. The command
 //! runs in a process group of its own, so a forwarded signal reaches what it started as
 //! well, and a command that reads a terminal is not in the terminal's foreground group
-//! (use `acquire` and `release` around an interactive program). If a renewal finds the
-//! lease gone (404 or 409), or none has succeeded for as long as the ttl (a renewal that
-//! fails for another reason, the server unreachable say, is reported on stderr and
-//! tried again at the next period, and the periods without a success are counted), `js`
-//! sends the command's group SIGTERM, and SIGKILL when the command is still running
-//! `--stop-grace` later (default 30s, asked of the waiter like every other pause), then
-//! exits 7; signals sent to `js` meanwhile are still forwarded. If a status poll of a
-//! pending start fails, that lease is released too. A panic of `js` kills the command
-//! and releases the lease. A command that cannot be started gives exit 127, and the
-//! lease is released.
+//! (use `acquire` and `release` around an interactive program).
+//!
+//! However the run ends (the command exits, a signal ends it, the lease is lost) `js`
+//! then ends the whole process group before it releases the lease, so that nothing the
+//! command started keeps running on a host the server may lease again: if any process of
+//! the group is left, it is sent SIGTERM, and SIGKILL when one is still there
+//! `--stop-grace` later (default 30s, looked at in steps of 100ms, every step asked of
+//! the waiter like every other pause; a signal sent to `js` meanwhile ends the wait at
+//! once). A lost lease sends the group SIGTERM at once, and SIGKILL after the grace
+//! period when the command is still running; `js` then exits 7, and signals sent to it
+//! meanwhile are still forwarded. On Linux the command is also killed (SIGKILL) if `js`
+//! itself is killed, as it could not forward a SIGKILL (`PR_SET_PDEATHSIG`: it takes the
+//! command only, not what the command started, and holds for as long as the thread that
+//! started the command lives). If a status poll of a pending start fails, that lease is
+//! released too. A panic of `js` kills the command's group and releases the lease. A
+//! command that cannot be started gives exit 127, and the lease is released.
+//!
+//! The release is tried up to three times, with 3 seconds (asked of the waiter) between
+//! tries, when the server cannot be reached or fails; a refusal ("not held", the lease
+//! has expired) is the answer and is not tried again, and a 202 (the server retries the
+//! stop) is reported and kept. If no try is answered, `run` says so, and what the
+//! command's status was, and exits 8 in its place: the lease may stay held until its ttl.
+//!
+//! Text the server sends in an error or a reason is printed without its control
+//! characters.
 //!
 //! # Exit status
 //!
 //! | status | meaning |
 //! |---|---|
 //! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
-//! | 1 | the server or the network failed, or the token was refused (401) |
+//! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
 //! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
 //! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
-//! | 7 | `run`: the lease was lost (gone from the server, or not renewed for its whole ttl); the command was stopped |
+//! | 7 | `run`: the lease was lost (gone from the server, or not renewed before the deadline short of its expiry); the command was stopped |
+//! | 8 | `run`: the release of the lease could not be confirmed after three tries, so it may stay held until its ttl; replaces the command's own status, which is said on stderr |
 //! | 127 | `run`: the command could not be started |
 //! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status) |
 //!
@@ -86,13 +124,16 @@
 mod api;
 mod cli;
 mod client;
+mod command;
 mod events;
 mod failure;
 mod leases;
 mod render;
+mod renewals;
 mod run;
 mod server_url;
 mod signals;
+mod tag;
 mod token;
 
 use std::ffi::OsString;
@@ -106,7 +147,9 @@ use client::Client;
 use failure::Failure;
 use render::Render;
 
-pub use events::{ForwardedSignal, Services, SignalSource, Signaller, ThreadWaiter, Waiter};
+pub use events::{
+    Clock, ForwardedSignal, Services, SignalSource, Signaller, SystemClock, ThreadWaiter, Waiter,
+};
 pub use failure::exit;
 
 /// The program: runs with the process's arguments and standard streams, and the
@@ -166,7 +209,8 @@ fn dispatch(
 ) -> Result<u8, Failure> {
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
-    let client = Client::connect(server, token_file, cli.ca_cert.as_deref())?;
+    let limit = services.request_limit;
+    let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), limit)?;
     let Command::Lease(action) = cli.command;
     match action {
         Action::Acquire(args) => leases::acquire(&client, render, &args, &*services.waiter, out),

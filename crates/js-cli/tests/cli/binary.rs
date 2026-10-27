@@ -1,9 +1,12 @@
 //! The program itself, run as a child process against the server of the test: the real
 //! waiter, the real signal handlers and the process's own exit status.
 
-use std::process::{Command, Output};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Output, Stdio};
 
-use crate::support::Harness;
+use crate::procs::{fifo, path_str};
+use crate::support::{Harness, run_words};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js");
 
@@ -50,6 +53,7 @@ fn the_program_prints_help_and_lists() {
 #[test]
 fn the_program_forwards_sigterm_and_releases() {
     let h = Harness::new("binary_run");
+    at_wall_time(&h);
     let script = "kill -TERM $PPID; exec sleep 600";
     let ran = program(
         &h,
@@ -84,4 +88,44 @@ fn the_program_forwards_sigterm_and_releases() {
             .starts_with("lease 1-1 host gpu-01 ")
     );
     assert!(h.listed().is_empty());
+}
+
+/// Asserts that a `js` that is killed (SIGKILL, which no handler can see) takes its
+/// command with it: the command, a shell that would leave a mark after twenty seconds,
+/// is killed with `js`, and the pipe it held open reaches its end with no mark left.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_js_takes_its_command_with_it() {
+    let h = Harness::new("binary_killed");
+    at_wall_time(&h);
+    let ready = fifo(&h.scratch, "ready");
+    let mark = h.scratch.path("survived");
+    let script = r#"exec 3> "$0"; echo up >&3; sleep 20 3>&-; echo survived > "$1""#;
+    let words = run_words(
+        &["--ttl", "60s"],
+        &["sh", "-c", script, path_str(&ready), path_str(&mark)],
+    );
+    let mut js = Command::new(PROGRAM)
+        .args(["--server", &h.js.server])
+        .arg("--token-file")
+        .arg(&h.js.token_file)
+        .args(words)
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut pipe = BufReader::new(File::open(&ready).unwrap());
+    let mut up = String::new();
+    pipe.read_line(&mut up).unwrap();
+    js.kill().unwrap();
+    js.wait().unwrap();
+    let mut rest = String::new();
+    pipe.read_to_string(&mut rest).unwrap();
+    assert_eq!((up.as_str(), rest.as_str()), ("up\n", ""));
+    assert!(!mark.exists());
+}
+
+/// Sets the clock of the test server to the system's, which the program reads: the
+/// expiry times the server answers with are read against the program's own clock.
+fn at_wall_time(h: &Harness) {
+    h.clock.set(js_lease::Clock::now(&js_lease::SystemClock));
 }

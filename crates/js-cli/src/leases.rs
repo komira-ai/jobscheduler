@@ -9,6 +9,7 @@ use crate::client::Client;
 use crate::events::{ForwardedSignal, Waiter};
 use crate::failure::{Failure, exit};
 use crate::render::Render;
+use crate::tag::RunTag;
 
 /// How often a pending start is looked at. The server settles pending starts on its
 /// ticks (5s unless configured), so a tighter poll gains nothing.
@@ -22,9 +23,26 @@ pub(crate) fn acquire(
     waiter: &dyn Waiter,
     out: &mut dyn Write,
 ) -> Result<u8, Failure> {
-    let lease = obtain(client, args, waiter, &|| None)?;
+    let lease = obtain(client, args, waiter, &|| None, None)?;
     let _ = out.write_all(render.held(&lease).as_bytes());
     Ok(exit::OK)
+}
+
+/// Finds the leases that carry `tag` in the server's list and releases them: the way
+/// back from a start whose answer was lost, when the start may have created a lease
+/// nobody knows the id of. Returns the ids it released. One list and one release per
+/// lease found, each as long as the client's limit at most; the first failure ends it.
+pub(crate) fn recover(client: &Client, tag: &RunTag) -> Result<Vec<String>, Failure> {
+    let listed = entries(&client.list()?)?;
+    let marked: Vec<String> = listed
+        .into_iter()
+        .filter(|entry| tag.marks(entry))
+        .map(|entry| entry.id)
+        .collect();
+    marked
+        .iter()
+        .try_for_each(|id| client.release(id).map(drop))?;
+    Ok(marked)
 }
 
 /// Asks for a lease and, when the provider has not confirmed the start (202), looks at
@@ -34,14 +52,16 @@ pub(crate) fn acquire(
 /// held later with nobody to renew it) and the failure is exit 5. So is a pending lease
 /// whose poll fails, and one that `interrupt` reports a signal for before a poll (the
 /// failure is then the signal's: 128 plus its number). A lease that is already held is
-/// returned whatever `interrupt` says: the caller has the signal and acts on it.
+/// returned whatever `interrupt` says: the caller has the signal and acts on it. The
+/// start is sent once, with `tag` (when given) among its labels.
 pub(crate) fn obtain(
     client: &Client,
     args: &AcquireArgs,
     waiter: &dyn Waiter,
     interrupt: Interrupt,
+    tag: Option<&RunTag>,
 ) -> Result<Lease, Failure> {
-    match client.acquire(&args.body())? {
+    match client.acquire(&args.body(tag))? {
         Granted::Held(lease) => Ok(lease),
         Granted::Pending(id) => settle(client, id, args.wait_pending, waiter, interrupt),
     }

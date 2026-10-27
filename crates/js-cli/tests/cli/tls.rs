@@ -59,6 +59,7 @@ fn another_certificate_is_not_trusted_and_http_ignores_it() {
     let js = Js {
         server: plain.js.server.clone(),
         token_file: plain.js.token_file.clone(),
+        ..plain.js.clone()
     };
     let ignored = js.go(&["--ca-cert", ca.to_str().unwrap(), "lease", "list"]);
     assert_eq!(ignored.code, 0, "{}", ignored.err);

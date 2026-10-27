@@ -139,3 +139,38 @@ fn an_oversized_reply_is_a_failure() {
     let url = canned(&reply("200 OK", &body));
     fails_with(&url, &scratch, &["lease", "list"], "cannot talk to");
 }
+
+/// Asserts that control characters in the error and reason a server sends (an escape
+/// sequence a terminal would act on, a bell, a carriage return, a line feed) are left
+/// out of what `js` prints, for a refusal, a rejection and an unexpected status, and that
+/// the text around them is kept.
+#[test]
+fn control_characters_in_a_server_error_are_not_printed() {
+    let scratch = Scratch::new("failures_control");
+    let renew: &[&str] = &["lease", "renew", "1-1"];
+    let cases: [(&str, &str, &[&str], &str); 3] = [
+        (
+            "409 Conflict",
+            r#"{"error":"no\u001b[2Jcap"}"#,
+            renew,
+            "js: refused: no[2Jcap\n",
+        ),
+        (
+            "422 Unprocessable Entity",
+            r#"{"error":"bad\u001b]0;x\u0007","reason":"a\nb\r\u007fc"}"#,
+            renew,
+            "js: rejected: bad]0;x: abc\n",
+        ),
+        (
+            "500 Internal Server Error",
+            r#"{"error":"x\u001by"}"#,
+            &["lease", "list"],
+            "js: unexpected answer 500 (xy)\n",
+        ),
+    ];
+    for (status, body, words, printed) in cases {
+        let url = canned(&reply(status, body));
+        let got = against(&url, &scratch).go(words);
+        assert_eq!(got.err, printed, "{status}");
+    }
+}

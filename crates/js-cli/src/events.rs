@@ -4,10 +4,12 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::process::Signal;
 
+use crate::client::REQUEST_LIMIT;
+use crate::failure::Failure;
 use crate::signals;
 
 /// How the client lets time pass. Nothing in `js` reads a clock or sleeps on its own: a
@@ -25,6 +27,28 @@ pub struct ThreadWaiter;
 impl Waiter for ThreadWaiter {
     fn wait(&self, interval: Duration) {
         std::thread::sleep(interval);
+    }
+}
+
+/// What time it is, on the clock the server's expiry times are read against. `lease run`
+/// turns the `expires_at_ms` of every reply into the time that is left by asking this,
+/// and nothing else in `js` reads a clock.
+pub trait Clock: Send + Sync + 'static {
+    /// Milliseconds since the Unix epoch.
+    fn now_ms(&self) -> u64;
+}
+
+/// The clock of the program: the system's wall clock (the server's expiry times are wall
+/// times too, so the two machines' clocks are assumed to agree to within a few seconds).
+#[derive(Debug, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        let since = SystemTime::now().duration_since(UNIX_EPOCH);
+        since.map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
     }
 }
 
@@ -71,8 +95,10 @@ impl ForwardedSignal {
 /// What the supervising loop of `lease run` reads.
 #[derive(Debug)]
 pub(crate) enum Event {
-    /// The renewal period has passed.
-    Renew,
+    /// A renewal came back: the lease's new expiry, or why it failed.
+    Renewed(Result<u64, Failure>),
+    /// The deadline short of the lease's expiry has come with no renewal in flight.
+    Deadline,
     /// The command has exited (it is not reaped yet).
     Exited,
     /// `js` itself was sent a signal.
@@ -142,17 +168,52 @@ pub type SignalSource = Box<dyn FnOnce(Signaller) -> io::Result<()> + Send>;
 /// The effects a command has beyond HTTP, injected so a test drives them.
 pub struct Services {
     pub(crate) waiter: Arc<dyn Waiter>,
+    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
+    pub(crate) request_limit: Duration,
 }
 
 impl Services {
-    /// Services over this waiter and signal source.
-    pub fn new(waiter: Arc<dyn Waiter>, signals: SignalSource) -> Self {
-        Self { waiter, signals }
+    /// Services over this waiter, clock and signal source, with the default limit of 30
+    /// seconds on a request.
+    pub fn new(waiter: Arc<dyn Waiter>, clock: Arc<dyn Clock>, signals: SignalSource) -> Self {
+        Self {
+            waiter,
+            clock,
+            signals,
+            request_limit: REQUEST_LIMIT,
+        }
     }
 
-    /// The program's own: a sleeping thread, and tokio's signal handlers.
+    /// These services with `limit` as the longest a request may take from first byte to
+    /// last, connect and TLS included (30 seconds unless set).
+    #[must_use]
+    pub fn with_request_limit(mut self, limit: Duration) -> Self {
+        self.request_limit = limit;
+        self
+    }
+
+    /// The program's own: a sleeping thread, the system clock and tokio's signal
+    /// handlers.
     pub fn system() -> Self {
-        Self::new(Arc::new(ThreadWaiter), Box::new(signals::install))
+        Self::new(
+            Arc::new(ThreadWaiter),
+            Arc::new(SystemClock),
+            Box::new(signals::install),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that the system clock reads milliseconds since the epoch (a count of
+    /// seconds would be a thousand times smaller), and does not go back between reads.
+    #[test]
+    fn the_system_clock_reads_wall_time_in_milliseconds() {
+        let first = SystemClock.now_ms();
+        assert!(first > 1_000_000_000_000, "{first}");
+        assert!(SystemClock.now_ms() >= first);
     }
 }

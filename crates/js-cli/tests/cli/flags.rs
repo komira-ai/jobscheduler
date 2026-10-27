@@ -185,6 +185,7 @@ fn a_bad_token_file_is_refused() {
         let js = Js {
             server: h.js.server.clone(),
             token_file: path.clone(),
+            ..h.js.clone()
         };
         let got = js.go(&["lease", "list"]);
         assert_eq!(got.code, 2, "{path:?}: {}", got.err);
@@ -207,6 +208,7 @@ fn a_linked_or_read_only_token_file_works() {
     let js = Js {
         server: h.js.server.clone(),
         token_file: link,
+        ..h.js.clone()
     };
     assert_eq!(js.go(&["lease", "list"]).code, 0);
 }
@@ -220,6 +222,7 @@ fn a_wrong_token_is_a_server_failure() {
     let js = Js {
         server: h.js.server.clone(),
         token_file: other,
+        ..h.js.clone()
     };
     let got = js.go(&["lease", "list"]);
     assert_eq!(

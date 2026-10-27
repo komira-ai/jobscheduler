@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 
 use crate::failure::Failure;
+use crate::tag::{self, RunTag};
 
 /// The default for `--wait-pending`.
 const WAIT_PENDING: &str = "60s";
@@ -83,12 +84,15 @@ pub(crate) enum Action {
     ///
     /// The command is a child process with JS_LEASE_ID and JS_LEASE_HOST set in its
     /// environment: they are outputs of `js` to the command, not configuration of `js`,
-    /// which reads no environment variable. js renews every --renew-every, forwards
-    /// SIGINT and SIGTERM to the command, releases the lease however the command ends
-    /// and exits with the command's status (128 plus the signal for a command a signal
-    /// ended). If a renewal finds the lease gone it stops the command (SIGTERM, then
-    /// waits for it) and exits 7; a command that cannot be started exits 127. The
-    /// held-lease line is printed on stderr, so the command owns stdout.
+    /// which reads no environment variable. js renews the lease at a third of the time
+    /// the server's last answer left (at most --renew-every apart), forwards SIGINT,
+    /// SIGTERM and SIGHUP to the command's process group, and when the command ends
+    /// stops what it left running (SIGTERM, then SIGKILL after --stop-grace), releases
+    /// the lease and exits with the command's status (128 plus the signal for a command
+    /// a signal ended). If a renewal finds the lease gone, or none has succeeded before
+    /// the deadline short of the server's expiry, it stops the command the same way and
+    /// exits 7; a command that cannot be started exits 127. The held-lease line is
+    /// printed on stderr, so the command owns stdout.
     Run(RunArgs),
 }
 
@@ -128,13 +132,14 @@ pub(crate) struct AcquireArgs {
 }
 
 impl AcquireArgs {
-    /// The body of `POST /v1/leases`.
-    pub(crate) fn body(&self) -> Value {
-        let labels: serde_json::Map<String, Value> = self
+    /// The body of `POST /v1/leases`; `lease run` adds its tag to the labels.
+    pub(crate) fn body(&self, tag: Option<&RunTag>) -> Value {
+        let mut labels: serde_json::Map<String, Value> = self
             .labels
             .iter()
             .map(|(key, value)| (key.clone(), json!(value)))
             .collect();
+        labels.extend(tag.map(|tag| (tag::KEY.to_owned(), json!(tag.value()))));
         json!({
             "class": self.class,
             "resources": {
@@ -175,12 +180,12 @@ pub(crate) struct IdArgs {
 pub(crate) struct RunArgs {
     #[command(flatten)]
     pub(crate) acquire: AcquireArgs,
-    /// How often to renew; a third of --ttl, or 200s when --ttl is absent (a third of
-    /// the server's default ttl of 10 minutes).
+    /// The longest to wait between renewals. Without it, and in any case, a renewal is
+    /// tried when a third of the time the server's last answer left is gone.
     #[arg(long, value_parser = parse_duration)]
     pub(crate) renew_every: Option<Duration>,
-    /// How long the command gets to end after SIGTERM when the lease is lost, before it
-    /// is killed (SIGKILL).
+    /// How long what the command started gets to end after SIGTERM (when the command
+    /// ends, or its lease is lost), before it is killed (SIGKILL).
     #[arg(long, default_value = STOP_GRACE, value_parser = parse_duration)]
     pub(crate) stop_grace: Duration,
     /// The command and its arguments, after `--`.

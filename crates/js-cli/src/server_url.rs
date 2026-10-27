@@ -7,7 +7,7 @@ use ureq::http::Uri;
 use crate::failure::Failure;
 
 /// A checked server address: the scheme and authority to put in front of a route.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServerUrl {
     /// `http://host:port` or `https://host:port`, with no trailing slash.
     pub(crate) base: String,

@@ -16,7 +16,7 @@ use crate::server_url::ServerUrl;
 use crate::token;
 
 /// The longest a request may take from first byte to last, connect and TLS included.
-const REQUEST_LIMIT: Duration = Duration::from_secs(30);
+pub(crate) const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 
 /// The largest reply read; the server's answers are small.
 const REPLY_LIMIT: u64 = 1024 * 1024;
@@ -31,10 +31,12 @@ pub(crate) struct Reply {
 
 /// A connection to one lease server. It holds the token and never prints it: it has no
 /// `Debug`.
+#[derive(Clone)]
 pub(crate) struct Client {
     agent: Agent,
     server: ServerUrl,
     bearer: String,
+    limit: Duration,
 }
 
 impl Client {
@@ -46,6 +48,7 @@ impl Client {
         server: &str,
         token_file: &Path,
         ca_cert: Option<&Path>,
+        limit: Duration,
     ) -> Result<Self, Failure> {
         let server = ServerUrl::parse(server)?;
         let bearer = token::bearer(token_file)?;
@@ -60,7 +63,11 @@ impl Client {
             .max_redirects(0)
             .http_status_as_error(false)
             .https_only(server.https)
-            .timeout_global(Some(REQUEST_LIMIT))
+            .timeout_global(Some(limit))
+            // A connection that sat idle between two requests (a renewal is minutes
+            // apart) may have been closed by the other side, and a request sent on a dead
+            // one fails; every request opens its own.
+            .max_idle_connections(0)
             .tls_config(tls)
             .build()
             .into();
@@ -68,6 +75,7 @@ impl Client {
             agent,
             server,
             bearer,
+            limit,
         })
     }
 
@@ -86,9 +94,23 @@ impl Client {
 
     /// `POST path` with a JSON body.
     pub(crate) fn post(&self, path: &str, body: &Value) -> Result<Reply, Failure> {
+        self.post_within(path, body, self.limit)
+    }
+
+    /// `POST path` with a JSON body that must be answered within `limit` (or the client's
+    /// own limit, if that is shorter).
+    pub(crate) fn post_within(
+        &self,
+        path: &str,
+        body: &Value,
+        limit: Duration,
+    ) -> Result<Reply, Failure> {
         let request = self
             .agent
             .post(self.url(path))
+            .config()
+            .timeout_global(Some(limit.min(self.limit)))
+            .build()
             .header("authorization", &self.bearer)
             .content_type("application/json");
         self.reply(request.send(body.to_string()))

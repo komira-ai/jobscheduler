@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-rustix = { workspace = true, features = ["fs", "process"] }
+rustix = { workspace = true, features = ["fs", "process", "rand"] }
 rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -28,6 +28,7 @@ js-provider = { path = "../js-provider" }
 js-provider-fake = { path = "../js-provider-fake" }
 js-types = { path = "../js-types" }
 rcgen.workspace = true
+rustix = { workspace = true, features = ["event"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 
 [lints]

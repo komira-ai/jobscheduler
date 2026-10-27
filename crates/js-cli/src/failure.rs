@@ -22,9 +22,13 @@ pub mod exit {
     pub const UNRESOLVED: u8 = 5;
     /// A release was accepted but the stop is not confirmed yet; the server retries it.
     pub const RELEASING: u8 = 6;
-    /// `lease run` lost its lease: a renewal found it gone, or none succeeded for as long as
-    /// its ttl, and the command was stopped.
+    /// `lease run` lost its lease: a renewal found it gone, or none succeeded before the
+    /// deadline short of the server's expiry, and the command was stopped.
     pub const LEASE_LOST: u8 = 7;
+    /// `lease run` ended, but the release of the lease could not be confirmed after every
+    /// attempt: the lease may stay held until its ttl runs out. It replaces the command's
+    /// own status, which is said on stderr.
+    pub const RELEASE_UNCONFIRMED: u8 = 8;
     /// `lease run` could not start its command.
     pub const NOT_STARTED: u8 = 127;
 }
@@ -61,12 +65,17 @@ pub(crate) enum Failure {
         /// The system's reason.
         why: String,
     },
+    /// The answer to a start was lost or unusable (the connection failed, the server
+    /// answered 5xx or a status this client does not know, or the body lacks a field), so
+    /// the start may have created a lease. It is not repeated.
+    #[error("{0}; the request may have created a lease: run \"js lease list\" before trying again")]
+    Unconfirmed(String),
     /// The lease is gone from the server.
     #[error("lease {0} is gone from the server; stopped the command")]
     LeaseLost(String),
-    /// The lease could not be renewed for as long as its ttl, so the server has expired
-    /// it or is about to.
-    #[error("lease {0} could not be renewed for its whole ttl; stopped the command")]
+    /// No renewal succeeded before the deadline short of the lease's expiry, so the
+    /// server is about to expire it.
+    #[error("lease {0} could not be renewed before its deadline; stopped the command")]
     LeaseUnrenewed(String),
     /// A signal ended `lease run` while it waited for the lease; nothing was started.
     #[error("interrupted by {} before the lease was held; asked the server to release it", .0.name())]
@@ -84,6 +93,7 @@ impl Failure {
         match self {
             Self::Usage(_) => (exit::USAGE, "usage"),
             Self::Server(_) => (exit::SERVER, "server"),
+            Self::Unconfirmed(_) => (exit::SERVER, "acquire-unconfirmed"),
             Self::Refused(_) => (exit::REFUSED, "refused"),
             Self::Contract(_) => (exit::CONTRACT, "rejected"),
             Self::Unresolved { .. } => (exit::UNRESOLVED, "unresolved"),

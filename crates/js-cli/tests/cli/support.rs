@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
-use js_cli::{ForwardedSignal, Services, SignalSource, Signaller, Waiter};
+use js_cli::{Clock, ForwardedSignal, Services, SignalSource, Signaller, Waiter};
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli as ServerCli, Config, Running, Seated, SharedClock, StartupError,
@@ -100,9 +100,48 @@ impl Outcome {
 pub struct Js {
     pub server: String,
     pub token_file: PathBuf,
+    /// The clock the CLI reads: the server's, when it is a test server.
+    pub clock: Arc<dyn Clock>,
+}
+
+/// The clock of a test server, read by the CLI.
+pub struct ServerClock(pub ManualClock);
+
+impl Clock for ServerClock {
+    fn now_ms(&self) -> u64 {
+        js_lease::Clock::now(&self.0).millis()
+    }
+}
+
+/// A clock that always reads the same time.
+pub struct FixedClock(pub u64);
+
+impl Clock for FixedClock {
+    fn now_ms(&self) -> u64 {
+        self.0
+    }
 }
 
 impl Js {
+    /// Services over `waiter`, this server's clock and no signals.
+    pub fn services(&self, waiter: Arc<dyn Waiter>) -> Services {
+        Services::new(waiter, self.clock.clone(), Box::new(|_| Ok(())))
+    }
+
+    /// Services over `waiter` and this server's clock whose signal source hands its
+    /// `Signaller` to the test.
+    pub fn services_with_signals(
+        &self,
+        waiter: Arc<dyn Waiter>,
+    ) -> (Services, std::sync::mpsc::Receiver<Signaller>) {
+        let (handed, receiver) = std::sync::mpsc::channel();
+        let source: SignalSource = Box::new(move |signaller| {
+            handed.send(signaller).unwrap();
+            Ok(())
+        });
+        (Services::new(waiter, self.clock.clone(), source), receiver)
+    }
+
     /// The arguments of a command against this server, program name first.
     pub fn args(&self, extra: &[&str]) -> Vec<OsString> {
         let mut args: Vec<OsString> =
@@ -124,17 +163,17 @@ impl Js {
         args.extend(extra.iter().map(OsString::from));
         args.extend(["--server".into(), self.server.clone().into()]);
         args.extend(["--token-file".into(), self.token_file.clone().into()]);
-        run(args, services(Arc::new(Never)))
+        run(args, self.services(Arc::new(Never)))
     }
 
     /// Runs `extra` with a waiter that must not be asked to wait.
     pub fn go(&self, extra: &[&str]) -> Outcome {
-        self.with(extra, services(Arc::new(Never)))
+        self.with(extra, self.services(Arc::new(Never)))
     }
 
     /// Runs `extra` with this waiter.
     pub fn waiting(&self, extra: &[&str], waiter: Arc<dyn Waiter>) -> Outcome {
-        self.with(extra, services(waiter))
+        self.with(extra, self.services(waiter))
     }
 }
 
@@ -148,21 +187,10 @@ pub fn run(args: Vec<OsString>, services: Services) -> Outcome {
     Outcome { code, out, err }
 }
 
-/// Services over `waiter` and a signal source that reports nothing.
+/// Services over `waiter`, a clock that reads [`T0`] and a signal source that reports
+/// nothing.
 pub fn services(waiter: Arc<dyn Waiter>) -> Services {
-    Services::new(waiter, Box::new(|_| Ok(())))
-}
-
-/// Services over `waiter` whose signal source hands its `Signaller` to the test.
-pub fn services_with_signals(
-    waiter: Arc<dyn Waiter>,
-) -> (Services, std::sync::mpsc::Receiver<Signaller>) {
-    let (handed, receiver) = std::sync::mpsc::channel();
-    let source: SignalSource = Box::new(move |signaller| {
-        handed.send(signaller).unwrap();
-        Ok(())
-    });
-    (Services::new(waiter, source), receiver)
+    Services::new(waiter, Arc::new(FixedClock(T0)), Box::new(|_| Ok(())))
 }
 
 /// A waiter that fails the test when it is asked to wait.
@@ -201,12 +229,18 @@ impl Waiter for Driven {
     }
 }
 
+/// The waits that return at once, whatever the test does, and are kept apart from the
+/// periods the test steps: the 100 ms looks at a group that is ending, and the 3 s between
+/// two tries of a release.
+pub const INSTANT: [Duration; 2] = [Duration::from_millis(100), Duration::from_secs(3)];
+
 /// A waiter the test steps: each wait blocks until the test calls [`Manual::step`], and a
 /// step returns once the CLI has handled that period's renewal and waits again.
 pub struct Manual {
     state: Mutex<(u64, u64)>,
     changed: Condvar,
     intervals: Mutex<Vec<Duration>>,
+    instant: Mutex<Vec<Duration>>,
 }
 
 /// The longest a test blocks on the CLI before it calls the CLI hung. Only a hang
@@ -221,12 +255,18 @@ impl Manual {
             state: Mutex::new((0, 0)),
             changed: Condvar::new(),
             intervals: Mutex::new(Vec::new()),
+            instant: Mutex::new(Vec::new()),
         })
     }
 
     /// The intervals the CLI asked to wait, in order.
     pub fn intervals(&self) -> Vec<Duration> {
         self.intervals.lock().unwrap().clone()
+    }
+
+    /// The [`INSTANT`] waits the CLI asked for, in order.
+    pub fn instant(&self) -> Vec<Duration> {
+        self.instant.lock().unwrap().clone()
     }
 
     fn until<'a>(&self, mut guard: Guard<'a>, ready: impl Fn(&(u64, u64)) -> bool) -> Guard<'a> {
@@ -266,6 +306,10 @@ impl Manual {
 
 impl Waiter for Manual {
     fn wait(&self, interval: Duration) {
+        if INSTANT.contains(&interval) {
+            self.instant.lock().unwrap().push(interval);
+            return;
+        }
         self.intervals.lock().unwrap().push(interval);
         let mut guard = self.state.lock().unwrap();
         guard.0 += 1;
@@ -370,13 +414,18 @@ impl Harness {
             "http"
         };
         let server = format!("{scheme}://{}", running.addr());
+        let read_clock = clock.clone();
         Self {
             rt,
             running: Some(running),
             clock,
             ticks,
             scratch,
-            js: Js { server, token_file },
+            js: Js {
+                server,
+                token_file,
+                clock: Arc::new(ServerClock(read_clock)),
+            },
         }
     }
 
@@ -504,6 +553,7 @@ pub fn against(server: &str, scratch: &Scratch) -> Js {
     Js {
         server: server.to_owned(),
         token_file: scratch.write("token", TOKEN, 0o600),
+        clock: Arc::new(FixedClock(T0)),
     }
 }
 

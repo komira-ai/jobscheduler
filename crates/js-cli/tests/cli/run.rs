@@ -4,48 +4,22 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread::scope;
 use std::time::Duration;
 
 use js_cli::{ForwardedSignal, Services, Signaller, Waiter};
 use js_provider::Call;
-use rustix::io::Errno;
-use rustix::process::{Pid, test_kill_process};
 
+use crate::procs::{assert_reaped, fifo, path_str, secs};
 use crate::support::{
-    EndsRun, Harness, Manual, Never, Outcome, Scratch, T0, acquire_words, against, http, run_words,
-    sequence, services, services_with_signals,
+    EndsRun, FixedClock, Harness, Manual, Never, Outcome, Scratch, T0, acquire_words, against,
+    http, run_words, sequence, services,
 };
-
-fn secs(n: u64) -> Duration {
-    Duration::from_secs(n)
-}
 
 /// Runs `lease run` with `extra` flags and `command`, with a waiter nobody steps.
 fn run_idle(h: &Harness, extra: &[&str], command: &[&str]) -> Outcome {
     h.js.waiting(&run_words(extra, command), Manual::new())
-}
-
-/// Makes a named pipe in `scratch`: a command that writes to it tells the test it is
-/// ready, and the test blocks on reading it, so nothing polls or sleeps.
-fn fifo(scratch: &Scratch, name: &str) -> PathBuf {
-    let path = scratch.path(name);
-    let made = Command::new("mkfifo").arg(&path).status().unwrap();
-    assert!(made.success());
-    path
-}
-
-/// Asserts that no process has this id any more: it ended and its parent reaped it.
-fn assert_reaped(pid: &str) {
-    let pid = Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
-    assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
-}
-
-fn path_str(path: &Path) -> &str {
-    path.to_str().unwrap()
 }
 
 /// Asserts that the command is a child of `js` with `JS_LEASE_ID` and `JS_LEASE_HOST` in
@@ -140,7 +114,7 @@ fn a_refused_start_runs_no_command() {
 fn the_lease_is_renewed_every_period_until_a_signal_ends_the_run() {
     let h = Harness::new("run_renews");
     let waiter = Manual::new();
-    let (services, signals) = services_with_signals(waiter.clone());
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
     let words = run_words(&["--ttl", "60s"], &["sleep", "30"]);
     let (got, listed) = scope(|s| {
         let run = s.spawn(|| h.js.with(&words, services));
@@ -164,7 +138,7 @@ fn the_lease_is_renewed_every_period_until_a_signal_ends_the_run() {
 fn sigint_is_forwarded_and_the_period_can_be_set() {
     let h = Harness::new("run_sigint");
     let waiter = Manual::new();
-    let (services, signals) = services_with_signals(waiter.clone());
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
     let words = run_words(&["--ttl", "60s", "--renew-every", "7s"], &["sleep", "30"]);
     let got = scope(|s| {
         let run = s.spawn(|| h.js.with(&words, services));
@@ -185,7 +159,7 @@ fn sigint_is_forwarded_and_the_period_can_be_set() {
 fn a_lost_lease_stops_the_command_and_exits_seven() {
     let h = Harness::new("run_lost");
     let waiter = Manual::new();
-    let (services, signals) = services_with_signals(waiter.clone());
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
     let ready = fifo(&h.scratch, "ready");
     let stopped = h.scratch.path("stopped");
     let script = r#"trap 'echo stopped > "$1"; exit 0' TERM; echo $$ > "$0"; sleep 30 & wait"#;
@@ -247,7 +221,7 @@ fn a_command_that_ignores_sigterm_is_killed_after_the_grace_period() {
             grace: secs(grace),
             manual: manual.clone(),
         });
-        let (services, _signals) = services_with_signals(waiter);
+        let (services, _signals) = h.js.services_with_signals(waiter);
         let pipe = fifo(&h.scratch, "pipe");
         let script = r#"trap "" TERM; sh -c 'echo $PPID; sleep 30; echo survived' > "$0" & wait"#;
         let mut options = vec!["--ttl", "60s", "--renew-every", "7s"];
@@ -275,12 +249,14 @@ fn a_command_that_ignores_sigterm_is_killed_after_the_grace_period() {
 
 /// Asserts that a renewal that fails for another reason (the server is gone) is
 /// reported and tried again at the next period instead of stopping the command, and
-/// that failing to release at the end is reported without changing the status.
+/// that a release that fails every try is reported, after the pauses between the tries
+/// went through the waiter, and makes the status 8 in place of the command's own
+/// (here 143), which is said.
 #[test]
 fn a_renewal_that_cannot_reach_the_server_is_retried() {
     let mut h = Harness::new("run_unreachable");
     let waiter = Manual::new();
-    let (services, signals) = services_with_signals(waiter.clone());
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
     let words = run_words(&["--ttl", "60s"], &["sleep", "30"]);
     let js = h.js.clone();
     let got = scope(|s| {
@@ -293,7 +269,7 @@ fn a_renewal_that_cannot_reach_the_server_is_retried() {
         drop(ends);
         run.join().unwrap()
     });
-    assert_eq!(got.code, 143, "{}", got.err);
+    assert_eq!(got.code, 8, "{}", got.err);
     assert_eq!(
         got.err
             .matches("js: could not renew lease 1-1: cannot talk to")
@@ -308,51 +284,11 @@ fn a_renewal_that_cannot_reach_the_server_is_retried() {
         "{}",
         got.err
     );
-}
-
-/// Asserts that a server that stays unreachable for as long as the ttl (three periods
-/// of a third of it, counted in the waits asked of the waiter) loses the lease like a
-/// refusal does: the command is stopped, `js` exits 7 and says the lease could not be
-/// renewed, and it still tries to release.
-#[test]
-fn a_lease_that_cannot_be_renewed_for_its_ttl_is_lost() {
-    let mut h = Harness::new("run_outage");
-    let waiter = Manual::new();
-    let (services, signals) = services_with_signals(waiter.clone());
-    let words = run_words(&["--ttl", "60s"], &["sleep", "30"]);
-    let js = h.js.clone();
-    let got = scope(|s| {
-        let run = s.spawn(|| js.with(&words, services));
-        let _ends = EndsRun(signals.recv().unwrap(), ForwardedSignal::Terminate);
-        waiter.running();
-        h.stop();
-        waiter.step();
-        waiter.step();
-        waiter.release();
-        run.join().unwrap()
-    });
-    assert_eq!(got.code, 7, "{}", got.err);
-    assert_eq!(
-        got.err
-            .matches("js: could not renew lease 1-1: cannot talk to")
-            .count(),
-        3,
-        "{}",
-        got.err
-    );
-    assert!(
-        got.err.contains(
-            "js: lease 1-1 could not be renewed for its whole ttl; stopped the command\n"
-        ),
-        "{}",
-        got.err
-    );
-    assert!(
-        got.err
-            .contains("js: could not release lease 1-1: cannot talk to"),
-        "{}",
-        got.err
-    );
+    assert!(got.err.contains("; gave up after 3 tries\n"), "{}", got.err);
+    let said =
+        "js: the command ended with status 143; exiting 8 because the lease may still be held\n";
+    assert!(got.err.ends_with(said), "{}", got.err);
+    assert_eq!(waiter.instant(), vec![secs(3), secs(3)]);
 }
 
 /// A stream that fails (by panic) when `js` reports a failed renewal on it.
@@ -381,7 +317,10 @@ fn a_panic_kills_the_command_and_releases_the_lease() {
     let (url, log) = sequence(vec![
         http(
             "201 Created",
-            r#"{"id":"1-1","host":"gpu-01","expires_at_ms":5}"#,
+            &format!(
+                r#"{{"id":"1-1","host":"gpu-01","expires_at_ms":{}}}"#,
+                T0 + 600_000
+            ),
         ),
         http("500 Internal Server Error", r#"{"error":"boom"}"#),
         http("200 OK", "{}"),
@@ -431,6 +370,7 @@ fn a_signal_source_that_fails_ends_the_run_before_any_lease() {
     let words = run_words(&[], &["sh", "-c", script, path_str(&file)]);
     let failing = Services::new(
         Manual::new(),
+        Arc::new(FixedClock(T0)),
         Box::new(|_| Err(io::Error::other("no handlers today"))),
     );
     let got = h.js.with(&words, failing);
@@ -445,6 +385,7 @@ fn a_signal_source_that_fails_ends_the_run_before_any_lease() {
 fn signalled_at_install(waiter: Arc<dyn Waiter>, signal: ForwardedSignal) -> Services {
     Services::new(
         waiter,
+        Arc::new(FixedClock(T0)),
         Box::new(move |signaller| {
             signaller.deliver(signal);
             Ok(())
@@ -518,7 +459,10 @@ fn a_signal_during_the_pending_pause_releases_the_lease() {
     let file = h.scratch.path("ran");
     let script = r#"echo ran > "$0""#;
     let words = run_words(&[], &["sh", "-c", script, path_str(&file)]);
-    let got = h.js.with(&words, Services::new(waiter, source));
+    let got = h.js.with(
+        &words,
+        Services::new(waiter, Arc::new(FixedClock(T0)), source),
+    );
     assert_eq!(got.code, 143, "{}", got.err);
     assert!(
         got.err.contains("interrupted by SIGTERM before the lease"),
