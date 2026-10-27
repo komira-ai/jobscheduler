@@ -63,3 +63,25 @@ async fn initialise_over_an_existing_file_loads_it() {
         vec!["1-1"]
     );
 }
+
+/// Asserts that a server whose lease file has used its last sequence answers an acquire
+/// 503 `ids-exhausted`, books nothing and leaves the file as it was: the table can issue
+/// no lease until the operator restores the state file.
+#[tokio::test]
+async fn an_acquire_after_the_last_lease_id_is_503() {
+    let scratch = Scratch::new("ids_exhausted");
+    let head = format!(
+        "version = 1\nterm = 1\nnext_sequence = {}\nlease_count = 0\n",
+        i64::MAX
+    );
+    std::fs::write(scratch.state(), &head).unwrap();
+    let args = replace(base_args(&scratch), "--boot", "resume");
+    let h = Harness::with(scratch, args, None).await;
+    let refused = h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert_eq!(refused.json(), json!({ "error": "ids-exhausted" }));
+    assert_eq!(
+        ids(&h.call("GET", "/v1/leases", None).await),
+        Vec::<String>::new()
+    );
+}

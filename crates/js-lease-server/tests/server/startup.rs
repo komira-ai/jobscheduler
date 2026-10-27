@@ -335,3 +335,20 @@ fn connection_limits_are_flags() {
     assert_eq!(cli.header_timeout.as_secs(), 120);
     assert_eq!(cli.drain_timeout.as_secs(), 3600);
 }
+
+/// Asserts that a lease file whose term is the last one (the next boot cannot take a new
+/// term) refuses the start naming `--state-file`, and the file is left as it was.
+#[tokio::test]
+async fn a_lease_file_at_its_last_term_is_refused() {
+    let scratch = Scratch::new("term_exhausted");
+    let head = format!(
+        "version = 1\nterm = {}\nnext_sequence = 1\nlease_count = 0\n",
+        i64::MAX
+    );
+    std::fs::write(scratch.state(), &head).unwrap();
+    let args = replace(base_args(&scratch), "--boot", "resume");
+    let (_, ticker) = channel_ticker();
+    let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
+    assert_eq!(flag_of(started), "--state-file");
+    assert_eq!(std::fs::read_to_string(scratch.state()).unwrap(), head);
+}

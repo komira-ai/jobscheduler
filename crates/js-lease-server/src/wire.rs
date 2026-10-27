@@ -209,6 +209,11 @@ impl From<AcquireError> for ApiError {
         match err {
             AcquireError::TtlNotPositive => Self::bad_request("ttl_seconds must be positive"),
             AcquireError::Refused(code) => Self::coded(refusal_status(code), code.as_str()),
+            // The table has issued its last lease id; nothing was booked. The server can
+            // issue no lease until the operator restores the state file (js-lease docs).
+            AcquireError::IdsExhausted => {
+                Self::coded(StatusCode::SERVICE_UNAVAILABLE, "ids-exhausted")
+            }
             // A pending start is answered by the caller before this conversion; the arm
             // is shared so that no path invents an answer for it.
             AcquireError::Unconfirmed(_) | AcquireError::Save(_) => Self::state_write(&err),
