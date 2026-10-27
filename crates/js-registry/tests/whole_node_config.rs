@@ -32,7 +32,7 @@ fn a_dedicated_pool_keeps_its_settings_and_reports_the_surplus() {
 }
 
 /// A mixed pool (class `Book`) fits when `max_whole_node + keep_for_ordinary` is at most
-/// `max_machines` and is refused one over; a dedicated pool refuses a kept host; a class
+/// `max_machines` and is refused one over; a dedicated pool refuses a kept host and a `max_whole_node` above `max_machines`; a class
 /// that books all without the whole-node lease refuses the settings; a zero names its
 /// key. Each is the refusal the design names, so a loosened comparison fails.
 #[test]
@@ -53,6 +53,8 @@ fn settings_are_checked_against_the_pool() {
     };
     let dedicated = pool_of(Admission::Whole, 3).with_whole_node(kept);
     assert_eq!(dedicated.unwrap_err(), ConfigError::DedicatedKeep);
+    let above = pool_of(Admission::Whole, 3).with_whole_node(WholeNodeConfig::dedicated(4));
+    assert_eq!(above.unwrap_err(), ConfigError::WholeAboveMachines);
     let all = config(3).with_whole_node(WholeNodeConfig::dedicated(3));
     assert_eq!(all.unwrap_err(), ConfigError::WholeNodeClass);
     let zero = WholeNodeConfig {

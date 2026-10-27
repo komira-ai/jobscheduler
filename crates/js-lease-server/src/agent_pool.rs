@@ -1,5 +1,12 @@
 //! The pool file of `--agent-pool-config`: what an operator decides about the hosts that
 //! register themselves.
+//!
+//! The whole-node keys are parsed, checked and carried on the loaded [`PoolConfig`], but
+//! nothing consumes them yet: the lease server still runs on its built-in defaults (a
+//! 600 s prepare timeout, for one), so an operator's `prepare_timeout = "20m"` acts as
+//! ten minutes until plan step M3-i wires the loaded settings into the server. The keys
+//! are accepted only for class `whole-node`; `gpu-host` books a whole host (`BookAll`)
+//! and refuses them.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -310,22 +317,56 @@ mod tests {
         assert_eq!(timed, full);
     }
 
-    /// Asserts the class names: `whole-node` and `gpu-host` load as the shipped classes
-    /// (`whole-node` is `Whole`; `gpu-host` is still `BookAll`, with its GPU minimum), and
-    /// any other id loads as `BookAll` with no minimum. A defect that dropped a shipped
-    /// name would load it with no minimum, or `whole-node` as BookAll.
+    /// A file in the temp directory that is removed when the guard drops, so a failing
+    /// assertion does not leave it behind.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(key: &str, text: &str) -> Self {
+            let name = format!("js-pool-{key}-{}.toml", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            std::fs::write(&path, text).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Asserts the class names: `whole-node` loads as the shipped whole-node class
+    /// (`Whole`) and `gpu-host` as the shipped GPU class (`BookAll`, one GPU minimum),
+    /// and any other id loads as `BookAll` with no minimum. It also asserts that a pool
+    /// file naming each class parses to a pool that leases exactly that class. A defect
+    /// that dropped a shipped name would load it as `BookAll` with no minimum, and one
+    /// that swapped the two would change the admission.
     #[test]
     fn class_names_load_the_shipped_classes() {
-        assert_eq!(class("whole-node").unwrap(), ResourceClass::whole_node());
-        assert_eq!(class("whole-node").unwrap().admission(), &Admission::Whole);
-        assert_eq!(class("gpu-host").unwrap(), ResourceClass::gpu_host());
-        assert_eq!(class("gpu-host").unwrap().admission(), &Admission::BookAll);
+        let whole = class("whole-node").unwrap();
+        assert_eq!(whole, ResourceClass::whole_node());
+        assert_eq!(whole.admission(), &Admission::Whole);
+        let gpu = class("gpu-host").unwrap();
+        assert_eq!(gpu, ResourceClass::gpu_host());
+        assert_eq!(gpu.admission(), &Admission::BookAll);
+        assert_eq!(gpu.min_gpus(), 1);
         let other = class("mac-host").unwrap();
         assert_eq!(other.admission(), &Admission::BookAll);
         assert_eq!(other.min_gpus(), 0);
-        let loaded = parse(&MINIMAL.replace("mac-host", "whole-node")).unwrap();
-        let named = parse(&MINIMAL.replace("mac-host", "gpu-host")).unwrap();
-        assert_ne!(loaded, named);
+        for (name, expected) in [("whole-node", whole), ("gpu-host", gpu)] {
+            let shape = Shape::new(
+                Resources::new(4000, 8_589_934_592, 0, None).unwrap(),
+                BTreeMap::new(),
+            );
+            let pool = PoolConfig::new(ProviderId::new("mac").unwrap(), expected, shape, 4);
+            // A `Whole` class takes the dedicated defaults; a `BookAll` one takes none.
+            let pool = match name {
+                "whole-node" => pool.with_whole_node(WholeNodeConfig::dedicated(4)).unwrap(),
+                _ => pool,
+            };
+            assert_eq!(parse(&MINIMAL.replace("mac-host", name)).unwrap(), pool);
+        }
     }
 
     /// Every mistake is refused with a reason that names the setting: an unknown key, a
@@ -489,16 +530,12 @@ mod tests {
                 .with_writer(std::io::sink)
                 .finish(),
         );
-        let dir = std::env::temp_dir();
         for (key, text) in [
             ("surplus", whole("max_whole_node = 1")),
             ("full", whole("")),
         ] {
-            let path = dir.join(format!("js-pool-{key}-{}.toml", std::process::id()));
-            std::fs::write(&path, &text).unwrap();
-            let read_back = read(&path);
-            std::fs::remove_file(&path).unwrap();
-            assert_eq!(read_back.unwrap(), parse(&text).unwrap());
+            let file = TempFile::new(key, &text);
+            assert_eq!(read(&file.0).unwrap(), parse(&text).unwrap());
         }
         drop(scope);
     }
@@ -516,12 +553,10 @@ mod tests {
             err.to_string().contains(&*missing.to_string_lossy()),
             "{err}"
         );
-        let bad = dir.join(format!("js-pool-bad-{}.toml", std::process::id()));
-        std::fs::write(&bad, "speed = 1\n").unwrap();
-        let err = read(&bad).unwrap_err();
-        std::fs::remove_file(&bad).unwrap();
+        let bad = TempFile::new("bad", "speed = 1\n");
+        let err = read(&bad.0).unwrap_err();
         let shown = err.to_string();
-        assert!(shown.contains(&*bad.to_string_lossy()), "{shown}");
+        assert!(shown.contains(&*bad.0.to_string_lossy()), "{shown}");
         assert!(shown.contains("speed"), "{shown}");
     }
 
@@ -555,11 +590,16 @@ mod tests {
                 "max_draining_fraction",
             ),
             (with("max_draining = 2"), "whole-node class"),
+            (whole("max_whole_node = 5"), "max_whole_node"),
         ];
         for (text, names) in cases {
             let reason = parse(&text).unwrap_err();
             assert!(reason.contains(names), "{names}: {reason}");
         }
+        let above = parse(&whole("max_whole_node = 5")).unwrap_err();
+        assert!(above.contains("max_whole_node"), "{above}");
+        assert!(above.contains("max_machines"), "{above}");
+        assert!(parse(&whole("max_whole_node = 4")).is_ok());
         for zero in ["0", "0s", "0m", "0h"] {
             let pool = parse(&whole(&format!("drain_after = \"{zero}\""))).unwrap();
             assert_eq!(pool.whole_node().unwrap().drain_after_ms, 0);

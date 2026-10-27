@@ -2,6 +2,9 @@
 //! timing keys of sections 3 to 5): plain data with the defaults of the design's table.
 //! Nothing here reads a clock or a file; [`crate::PoolConfig::with_whole_node`] checks a
 //! value against its pool.
+//!
+//! A pool file's values are loaded into this type but not consumed yet: the lease server
+//! still runs on its built-in defaults until plan step M3-i wires them in.
 
 /// How long a host stays excluded for a request after a give-up or a failed prepare:
 /// five minutes.
