@@ -94,15 +94,14 @@ pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
         .map_err(|err| format!("lost_retention: {err}"))
 }
 
-/// The class a name stands for: the shipped GPU class, or a class that books a whole
-/// host and asks nothing of the request beyond what the pool's shape offers.
+/// The class a name stands for: a shipped class (`whole-node`, or `gpu-host`, kept as
+/// an alias), or a class that books a whole host and asks nothing of the request
+/// beyond what the pool's shape offers.
 fn class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| format!("class: {err}"))?;
-    let shipped = ResourceClass::gpu_host();
-    Ok(match id == *shipped.id() {
-        true => shipped,
-        false => ResourceClass::new(id, Admission::BookAll, 0),
-    })
+    let shipped = [ResourceClass::whole_node(), ResourceClass::gpu_host()];
+    let found = shipped.into_iter().find(|class| *class.id() == id);
+    Ok(found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0)))
 }
 
 /// Refuses a `value` above `max`: a floor no hello could meet (the wire refuses a hello
@@ -179,6 +178,34 @@ mod tests {
         assert_eq!(retained, full);
         let timed = full.clone().with_timing(10_000, 60_000).unwrap();
         assert_eq!(timed, full);
+    }
+
+    /// Asserts the class names: `whole-node` loads as the shipped whole-node class
+    /// (`Whole`) and `gpu-host` as the shipped GPU class (`BookAll`, one GPU minimum),
+    /// and any other id loads as `BookAll` with no minimum. It also asserts that a pool
+    /// file naming each class parses to a pool that leases exactly that class. A defect
+    /// that dropped a shipped name would load it as `BookAll` with no minimum, and one
+    /// that swapped the two would change the admission.
+    #[test]
+    fn class_names_load_the_shipped_classes() {
+        let whole = class("whole-node").unwrap();
+        assert_eq!(whole, ResourceClass::whole_node());
+        assert_eq!(whole.admission(), &Admission::Whole);
+        let gpu = class("gpu-host").unwrap();
+        assert_eq!(gpu, ResourceClass::gpu_host());
+        assert_eq!(gpu.admission(), &Admission::BookAll);
+        assert_eq!(gpu.min_gpus(), 1);
+        let other = class("mac-host").unwrap();
+        assert_eq!(other.admission(), &Admission::BookAll);
+        assert_eq!(other.min_gpus(), 0);
+        for (name, expected) in [("whole-node", whole), ("gpu-host", gpu)] {
+            let shape = Shape::new(
+                Resources::new(4000, 8_589_934_592, 0, None).unwrap(),
+                BTreeMap::new(),
+            );
+            let pool = PoolConfig::new(ProviderId::new("mac").unwrap(), expected, shape, 4);
+            assert_eq!(parse(&MINIMAL.replace("mac-host", name)).unwrap(), pool);
+        }
     }
 
     /// Every mistake is refused with a reason that names the setting: an unknown key, a

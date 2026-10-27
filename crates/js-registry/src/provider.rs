@@ -41,8 +41,8 @@ impl RegisteredProvider {
     }
 
     /// The same provider serving `classes` instead of the pool's one. As for the static
-    /// pool, `start` refuses, with `UnsupportedClass`, a class whose admission is not
-    /// `BookAll`, because every lease holds a whole host.
+    /// pool, `start` refuses, with `UnsupportedClass`, a class whose admission does
+    /// not book a whole host (`BookAll` or `Whole`), because every lease holds one.
     pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
         self.classes = classes;
         self
