@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_kbf-guest");
+const BIN: &str = env!("CARGO_BIN_EXE_js-guest");
 
 /// Stops a test run as the runner's user, where every check below would fail for the
 /// wrong reason. Asks the kernel, not the code under test.

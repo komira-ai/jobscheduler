@@ -11,7 +11,7 @@ use common::{Shares, TOKEN, program};
 use js_guest::client::Client;
 use js_guest::wire::End;
 
-const BIN: &str = env!("CARGO_BIN_EXE_kbf-guest");
+const BIN: &str = env!("CARGO_BIN_EXE_js-guest");
 
 struct Killed(Child);
 
