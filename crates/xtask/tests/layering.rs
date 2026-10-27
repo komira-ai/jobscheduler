@@ -195,8 +195,8 @@ fn planned_names_need_no_crate() {
     let copy = Copy::new("planned");
     copy.edit(
         "layers.toml",
-        "planned = [\"js-caps\",",
-        "planned = [\"js-types\", \"js-caps\",",
+        "planned = [\"js-sim\",",
+        "planned = [\"js-types\", \"js-sim\",",
     );
     // `js-types` is listed by two layers now: planned in `pure`, a crate of `types`.
     assert_eq!(
