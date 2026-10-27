@@ -7,8 +7,8 @@ use common::{broken, expect, heartbeat, long, result, welcome};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeldRun, HeldState, HelloReply, Outcome, ProtocolRange, Refused, Rule, RunResult,
-    Taint, ValidationError, Welcome,
+    ExclusiveRefusal, Heartbeat, HeldRun, HeldState, HelloReply, Outcome, ProtocolRange,
+    RefusalReason, Refused, Rule, RunResult, Taint, ValidationError, Welcome,
 };
 
 fn check(edit: impl FnOnce(&mut Heartbeat)) -> ValidationError {
@@ -399,5 +399,177 @@ fn heartbeat_debug_does_not_print_the_session_secret() {
     assert!(
         text.contains("mac-01") && text.contains("session: \"..\""),
         "{text}"
+    );
+}
+
+fn refusal_with(lease: &str, detail: &str) -> ExclusiveRefusal {
+    ExclusiveRefusal {
+        lease_id: lease.into(),
+        code: RefusalReason::NotQuiet,
+        detail: detail.into(),
+    }
+}
+
+fn refused_check(refusal: ExclusiveRefusal) -> ValidationError {
+    check(|b| b.exclusive_refused = Some(refusal))
+}
+
+/// The refusal detail is held to its cap in bytes: 256 pass, 257 fail, and a multi-byte
+/// character that straddles the cap makes the text over it, so it is refused whole and
+/// never cut. It catches a character count in place of a byte count and a silent cut.
+#[test]
+fn refusal_detail_is_bounded_in_bytes() {
+    assert_eq!(MAX_REFUSAL_DETAIL, 256);
+    let ok = |detail: String| {
+        let mut b = heartbeat();
+        b.exclusive_refused = Some(refusal_with("1-1", &detail));
+        b.validate()
+    };
+    assert_eq!(ok(String::new()), Ok(()));
+    assert_eq!(ok(long(MAX_REFUSAL_DETAIL - 1)), Ok(()));
+    assert_eq!(ok(long(MAX_REFUSAL_DETAIL)), Ok(()));
+    let above = refused_check(refusal_with("1-1", &long(MAX_REFUSAL_DETAIL + 1)));
+    expect(
+        above,
+        "exclusive_refused.detail",
+        Rule::TooLong,
+        refusal::INVALID_HEARTBEAT,
+    );
+    // 255 ASCII bytes and a two-byte character end at byte 257.
+    let straddle = format!("{}\u{e9}", long(MAX_REFUSAL_DETAIL - 1));
+    assert_eq!(straddle.len(), MAX_REFUSAL_DETAIL + 1);
+    let err = refused_check(refusal_with("1-1", &straddle));
+    expect(
+        err,
+        "exclusive_refused.detail",
+        Rule::TooLong,
+        refusal::INVALID_HEARTBEAT,
+    );
+    // The same character ending exactly at the cap passes.
+    let fits = format!("{}\u{e9}", long(MAX_REFUSAL_DETAIL - 2));
+    assert_eq!(ok(fits), Ok(()));
+}
+
+/// A control or format character in the refusal detail is refused. It catches a detail
+/// that could forge a log line or reorder the text around it.
+#[test]
+fn refusal_detail_refuses_hidden_characters() {
+    for bad in ["a\nb", "a\u{0}b", "a\u{1b}[31m", "a\u{202e}b", "a\u{200b}b"] {
+        let err = refused_check(refusal_with("1-1", bad));
+        expect(
+            err,
+            "exclusive_refused.detail",
+            Rule::BadChars,
+            refusal::INVALID_HEARTBEAT,
+        );
+    }
+}
+
+/// Lease ids of both reports use the id alphabet and length; an empty one is refused.
+/// It catches a lease id outside the alphabet reaching the scheduler's records.
+#[test]
+fn exclusive_lease_ids_are_bounded() {
+    let good = [long(1), long(MAX_ID_LEN), "7-1".to_string()];
+    for id in &good {
+        let mut b = heartbeat();
+        b.exclusive_ready = Some(id.clone());
+        assert_eq!(b.validate(), Ok(()));
+        let mut b = heartbeat();
+        b.exclusive_refused = Some(refusal_with(id, "x"));
+        assert_eq!(b.validate(), Ok(()));
+    }
+    let bad = [
+        ("", Rule::Empty),
+        ("../x", Rule::BadChars),
+        (".a", Rule::BadChars),
+        (&long(MAX_ID_LEN + 1), Rule::TooLong),
+    ];
+    for (id, rule) in bad {
+        let err = check(|b| b.exclusive_ready = Some(id.to_string()));
+        expect(err, "exclusive_ready", rule, refusal::INVALID_HEARTBEAT);
+        let err = refused_check(refusal_with(id, "x"));
+        expect(
+            err,
+            "exclusive_refused.lease_id",
+            rule,
+            refusal::INVALID_HEARTBEAT,
+        );
+    }
+}
+
+/// A heartbeat that reports ready and refused at once is refused, whichever lease each
+/// names. It catches the scheduler being given two contradictory reports.
+#[test]
+fn ready_and_refused_together_are_refused() {
+    for ready in ["1-1", "2-2"] {
+        let err = check(|b| {
+            b.exclusive_ready = Some(ready.into());
+            b.exclusive_refused = Some(refusal_with("1-1", "x"));
+        });
+        expect(
+            err,
+            "exclusive_refused",
+            Rule::Inconsistent,
+            refusal::INVALID_HEARTBEAT,
+        );
+    }
+}
+
+/// No error text of the exclusive fields repeats what the peer sent. It catches an
+/// error built from the value.
+#[test]
+fn exclusive_errors_do_not_repeat_peer_input() {
+    let marker = "PEER-MARKER-\u{1b}";
+    let errors = [
+        check(|b| b.exclusive_ready = Some(marker.into())),
+        refused_check(refusal_with(marker, "x")),
+        refused_check(refusal_with("1-1", marker)),
+        refused_check(refusal_with("1-1", &format!("PEER-MARKER-{}", long(300)))),
+        check(|b| {
+            b.exclusive_ready = Some("PEER-MARKER-1".into());
+            b.exclusive_refused = Some(refusal_with("PEER-MARKER-1", "x"));
+        }),
+    ];
+    for err in errors {
+        let text = format!("{err} {err:?} {}", err.code());
+        assert!(!text.contains("PEER-MARKER"), "{text}");
+    }
+}
+
+/// The exclusive reports show in the heartbeat's Debug text while the session stays
+/// hidden. It catches the new fields dropped from Debug, or the secret leaking with them.
+#[test]
+fn heartbeat_debug_shows_exclusive_and_hides_session() {
+    let mut value = heartbeat();
+    value.session = SECRET.into();
+    value.exclusive_ready = Some("lease-ready-7".into());
+    value.exclusive_refused = Some(refusal_with("lease-refused-8", "why"));
+    let text = format!("{value:?}");
+    assert!(!text.contains(SECRET), "{text}");
+    assert!(
+        text.contains("lease-ready-7") && text.contains("lease-refused-8"),
+        "{text}"
+    );
+}
+
+/// A refusal checked on its own carries the heartbeat code and names the field it
+/// broke. It catches the public check being dropped from a refusal read outside a
+/// heartbeat.
+#[test]
+fn a_single_refusal_is_checked() {
+    assert_eq!(refusal_with("1-1", "x").validate(), Ok(()));
+    let err = refusal_with("", "x").validate().unwrap_err();
+    expect(
+        err,
+        "exclusive_refused.lease_id",
+        Rule::Empty,
+        refusal::INVALID_HEARTBEAT,
+    );
+    let err = refusal_with("1-1", "a\nb").validate().unwrap_err();
+    expect(
+        err,
+        "exclusive_refused.detail",
+        Rule::BadChars,
+        refusal::INVALID_HEARTBEAT,
     );
 }

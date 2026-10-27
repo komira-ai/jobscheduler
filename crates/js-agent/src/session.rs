@@ -348,6 +348,8 @@ impl<'a> Session<'a> {
             held: Vec::new(),
             results: Vec::new(),
             taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
