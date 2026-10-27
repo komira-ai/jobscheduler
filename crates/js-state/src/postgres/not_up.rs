@@ -51,7 +51,10 @@ impl OpenError {
 impl From<Fail> for OpenError {
     fn from(fail: Fail) -> OpenError {
         let not_up = match &fail {
-            Fail::Pg(err) => err.code().map_or_else(|| io_cause(err), starting_up),
+            Fail::Pg(err) => match err.code() {
+                Some(code) => starting_up(code),
+                None => io_cause(err),
+            },
             // A schema or durability refusal came from a server that answered.
             Fail::Refused(_) => false,
         };
@@ -110,7 +113,8 @@ mod tests {
     use js_testkit::dir::TestDir;
     use postgres::error::SqlState;
 
-    use super::{OpenError, not_listening, starting_up};
+    use super::{Fail, OpenError, not_listening, starting_up};
+    use crate::StoreError;
     use crate::postgres::PostgresConfig;
     use crate::postgres::PostgresStore;
 
@@ -180,5 +184,54 @@ mod tests {
         let url = format!("postgres:///kbf?host={}", dir.path().display());
         let got = open(&url);
         assert!(got.is_not_up(), "{got:?}");
+    }
+
+    /// An error with no SQLSTATE whose cause is not an I/O error (a server that asks for a
+    /// password the configuration does not have) is not a server that is not up yet: waiting
+    /// does not change it.
+    #[test]
+    fn a_failure_with_no_io_cause_is_refused() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
+        let port = listener.local_addr().expect("an address").port();
+        let server = std::thread::spawn(move || {
+            let (mut client, _) = listener.accept().expect("a client");
+            let mut startup = [0_u8; 1024];
+            let _ = client.read(&mut startup).expect("the startup message");
+            // AuthenticationCleartextPassword: 'R', length 8, code 3.
+            client
+                .write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3])
+                .expect("the request");
+            // Held until the client has given up.
+            let _ = client.read(&mut startup);
+        });
+        let got = open(&format!("postgres://someone@127.0.0.1:{port}/kbf"));
+        server.join().expect("the server thread");
+        assert!(!got.is_not_up(), "{got:?}");
+    }
+
+    /// A server that answers with a SQLSTATE other than "starting up" (here: no such database,
+    /// 3D000) is a refusal: the answer came from a server that is up.
+    #[test]
+    fn a_server_answer_that_is_not_starting_up_is_refused() {
+        let url = js_testkit::database::with_database(
+            &js_testkit::database::server_url(),
+            "js_state_not_up_no_such_database",
+        );
+        let got = open(&url);
+        assert!(!got.is_not_up(), "{got:?}");
+    }
+
+    /// A schema or durability refusal came from a server that answered, so it is a refusal
+    /// whatever its text says, and the error is the one the open reports.
+    #[test]
+    fn a_refusal_of_the_schema_is_refused() {
+        let got = OpenError::from(Fail::Refused("the server is starting up".to_owned()));
+        assert!(!got.is_not_up(), "{got:?}");
+        assert_eq!(
+            got.into_store(),
+            StoreError::Failed("the server is starting up".to_owned())
+        );
     }
 }

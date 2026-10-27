@@ -344,6 +344,26 @@ fn only_postgres_urls_are_accepted() {
         PostgresConfig::parse("postgres:///kbf").unwrap_err(),
         ConfigError::NoHost
     );
+    // A Postgres URL the client cannot read is its own error, not a missing host.
+    assert!(matches!(
+        PostgresConfig::parse("postgres://h/kbf?sslmode=bogus").unwrap_err(),
+        ConfigError::Invalid(_)
+    ));
+}
+
+// Catches a schema name longer than Postgres allows (63 bytes) taken as it is: it would be
+// cut off by the server, and two stores whose names share a prefix would share tables.
+#[test]
+fn a_schema_name_over_the_limit_is_refused() {
+    let config = PostgresConfig::parse("postgres://u@db.example/kbf").expect("parses");
+    let long = "a".repeat(64);
+    assert_eq!(
+        config.clone().with_schema(&long).unwrap_err(),
+        ConfigError::BadSchema(long)
+    );
+    config
+        .with_schema(&"a".repeat(63))
+        .expect("63 bytes is the longest");
 }
 
 // Catches a TLS request quietly downgraded to a plain connection.

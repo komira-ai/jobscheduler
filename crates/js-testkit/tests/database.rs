@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use js_testkit::database::{
-    CATALOG_RACE_TRIES, URL_VAR, retry_catalog_race, server_or_fail, server_url, with_database,
+    CATALOG_RACE_TRIES, URL_VAR, ddl, retry_catalog_race, server_or_fail, server_url, with_database,
 };
 use postgres::error::SqlState;
 
@@ -28,6 +28,17 @@ fn a_missing_server_fails_the_test_with_how_to_set_it() {
 fn a_named_server_is_used_as_it_is() {
     let url = "postgres://u:p@h:5432/postgres";
     assert_eq!(server_or_fail(Some(url.to_owned())), url);
+}
+
+/// Asserts that `ddl` runs its statements on the server, and that a statement the server
+/// refuses comes back as the server's error at once (the retry is for one SQLSTATE only).
+#[test]
+fn ddl_runs_the_statements_and_returns_the_servers_refusal() {
+    let server = server_url();
+    ddl(&server, "SELECT 1").expect("valid statements");
+    let refused = ddl(&server, "SELECT * FROM js_testkit_no_such_table")
+        .expect_err("a table the server does not have");
+    assert_eq!(refused.code(), Some(&SqlState::UNDEFINED_TABLE));
 }
 
 /// Asserts that only the database of a URL is replaced: the user, password, host, port and
@@ -59,30 +70,33 @@ fn raced() -> Failure {
     Failure(Some(SqlState::INTERNAL_ERROR))
 }
 
-/// Asserts that a run that succeeds is not repeated, and gives its value.
-#[test]
-fn a_run_that_succeeds_is_not_repeated() {
+/// `retry_catalog_race` over `script` (one result per run; running past its end fails the
+/// test), and how many runs it made. Every test goes through this one call, so the one instance
+/// of the retry that they share meets every case.
+fn run_script(script: Vec<Result<u32, Failure>>) -> (Result<u32, Failure>, u32) {
+    let mut script = script.into_iter();
     let mut runs = 0;
     let result = retry_catalog_race(Duration::ZERO, code_of, || {
         runs += 1;
-        Ok::<_, Failure>("done")
+        script.next().expect("no more runs than the script has")
     });
-    assert_eq!(result, Ok("done"));
-    assert_eq!(runs, 1);
+    (result, runs)
+}
+
+/// Asserts that a run that succeeds is not repeated, and gives its value.
+#[test]
+fn a_run_that_succeeds_is_not_repeated() {
+    assert_eq!(run_script(vec![Ok(5), Ok(6)]), (Ok(5), 1));
 }
 
 /// Asserts that "tuple concurrently updated" (XX000) is retried: two runs that meet it and a
 /// third that succeeds give the third's value, after exactly three runs.
 #[test]
 fn a_tuple_concurrently_updated_is_retried_until_the_run_succeeds() {
-    let mut script = vec![Err(raced()), Err(raced()), Ok(7)].into_iter();
-    let mut runs = 0;
-    let result = retry_catalog_race(Duration::ZERO, code_of, || {
-        runs += 1;
-        script.next().expect("no more runs than the script has")
-    });
-    assert_eq!(result, Ok(7));
-    assert_eq!(runs, 3);
+    assert_eq!(
+        run_script(vec![Err(raced()), Err(raced()), Ok(7)]),
+        (Ok(7), 3)
+    );
 }
 
 /// Asserts that any other error is returned at once, not retried: an error with another
@@ -91,14 +105,8 @@ fn a_tuple_concurrently_updated_is_retried_until_the_run_succeeds() {
 #[test]
 fn any_other_error_is_returned_at_once() {
     for other in [Some(SqlState::UNIQUE_VIOLATION), None] {
-        let mut script = vec![Err(Failure(other.clone())), Ok(1)].into_iter();
-        let mut runs = 0;
-        let result = retry_catalog_race(Duration::ZERO, code_of, || {
-            runs += 1;
-            script.next().expect("no more runs than the script has")
-        });
-        assert_eq!(result, Err(Failure(other)));
-        assert_eq!(runs, 1);
+        let script = vec![Err(Failure(other.clone())), Ok(1)];
+        assert_eq!(run_script(script), (Err(Failure(other)), 1));
     }
 }
 
@@ -106,13 +114,8 @@ fn any_other_error_is_returned_at_once() {
 /// that error after exactly `CATALOG_RACE_TRIES` runs.
 #[test]
 fn a_tuple_concurrently_updated_every_time_gives_up_after_the_bound() {
-    let mut runs = 0;
-    let result = retry_catalog_race(Duration::ZERO, code_of, || {
-        runs += 1;
-        Err::<(), _>(raced())
-    });
-    assert_eq!(result, Err(raced()));
-    assert_eq!(runs, CATALOG_RACE_TRIES);
+    let script = (0..CATALOG_RACE_TRIES + 3).map(|_| Err(raced())).collect();
+    assert_eq!(run_script(script), (Err(raced()), CATALOG_RACE_TRIES));
 }
 
 /// This test binary, to be run again as a child that runs only `asks_for_server`.

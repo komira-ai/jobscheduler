@@ -208,20 +208,17 @@ fn owner(prefix: &str, count: u32, hold: Duration) -> Result<(), Error> {
     // exists: a test that ends this process once the names are there cannot reach a
     // tracker that would die on the signal and unlink nothing. (Python's tracker is told
     // of a name only once it runs, too.)
-    let mut child = std::env::current_exe()
+    let (out, writer) = std::io::pipe().map_err(failed("pipe"))?;
+    let child = std::env::current_exe()
         .and_then(|exe| {
             Command::new(exe)
                 .arg0(crate::act::NAME)
                 .args(["shm-tracker", prefix, &count.to_string()])
                 .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
+                .stdout(writer)
                 .spawn()
         })
         .map_err(failed("start the tracker"))?;
-    let out = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Failed("no pipe from the tracker".to_owned()))?;
     let mut said = String::new();
     BufReader::new(out)
         .read_line(&mut said)

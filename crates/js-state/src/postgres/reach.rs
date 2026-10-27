@@ -70,6 +70,18 @@ mod tests {
         }
     }
 
+    /// Catches a server's answer that never reaches the classifier: the failure of a login to a
+    /// database the server does not have is `NoDatabase`, not `NoServer`.
+    #[test]
+    fn a_server_that_answers_with_a_missing_database_is_no_database() {
+        let url = js_testkit::database::with_database(
+            &js_testkit::database::server_url(),
+            "js_state_no_such_database",
+        );
+        let config = PostgresConfig::parse(&url).expect("parses");
+        assert_eq!(reach(&config).unwrap_err(), Unreached::NoDatabase);
+    }
+
     /// Catches an SQLSTATE sent to the wrong recipe: authorization failures (class 28) and a
     /// missing CONNECT privilege are a login refusal, a missing database is told apart, and
     /// any other code is passed on as the code alone.

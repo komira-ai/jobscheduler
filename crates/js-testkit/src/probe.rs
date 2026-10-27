@@ -72,11 +72,13 @@ fn io(path: &Path, e: &std::io::Error) -> String {
 
 /// The entries of `dir`; a missing `dir` is an error (a probe on a wrong path must not pass).
 pub fn read_dir(dir: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(|e| io(dir, &e))? {
-        out.push(entry.map_err(|e| io(dir, &e))?);
-    }
-    Ok(out)
+    listing(dir).map_err(|e| io(dir, &e))
+}
+
+/// The entries of `dir`, read whole, so that one failure (the directory, or an entry of it) is
+/// one error to name.
+fn listing(dir: &Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    std::fs::read_dir(dir)?.collect()
 }
 
 fn entry_of(path: &Path) -> Result<Option<Entry>, String> {
@@ -120,13 +122,12 @@ pub fn walk_pruned(
     }
     let mut todo = vec![root.to_owned()];
     while let Some(dir) = todo.pop() {
-        let listing = match std::fs::read_dir(&dir) {
+        let entries = match listing(&dir) {
             Ok(l) => l,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(io(&dir, &e)),
         };
-        for item in listing {
-            let item = item.map_err(|e| io(&dir, &e))?;
+        for item in entries {
             let path = item.path();
             let Some(entry) = entry_of(&path)? else {
                 continue;
@@ -198,7 +199,8 @@ impl Snapshot {
         let scratch = node.scratch();
         let files = walk_pruned(&scratch, &|abs| {
             abs.strip_prefix(&scratch).is_ok_and(|rel| node.kept(rel))
-        })?;
+        });
+        let files = files?;
         let mut kept = 0;
         for (rel, entry) in &files {
             if node.kept(rel) && entry.kind != Kind::Link {
@@ -229,10 +231,11 @@ impl Snapshot {
         let around = walk_pruned(&around_root, &|abs| {
             abs.strip_prefix(&around_root)
                 .is_ok_and(|rel| node.surroundings_exempt(rel))
-        })?
-        .into_iter()
-        .filter(|(rel, _)| !node.surroundings_exempt(rel))
-        .collect::<BTreeMap<_, _>>();
+        });
+        let around = around?
+            .into_iter()
+            .filter(|(rel, _)| !node.surroundings_exempt(rel))
+            .collect::<BTreeMap<_, _>>();
         let unexpected = around
             .keys()
             .filter(|rel| !node.surroundings_expected(rel))

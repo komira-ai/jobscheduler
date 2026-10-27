@@ -361,16 +361,12 @@ mod tests {
     /// when the guard is dropped.
     #[test]
     fn dropping_the_guard_kills_a_child_that_ignores_sigterm() {
-        let mut command = Command::new("sleep");
-        command.arg("30");
-        // SAFETY: the hook only calls `signal`, which is async-signal-safe.
-        unsafe {
-            command.pre_exec(|| {
-                libc::signal(libc::SIGTERM, libc::SIG_IGN);
-                Ok(())
-            });
-        }
-        let child = spawn(&mut command, 3).expect("spawn");
+        // The shell ignores SIGTERM (an ignored disposition survives the `exec`) and says so
+        // only once it does, so the guard cannot signal it before.
+        let mut child = piped("sh", &["-c", "trap '' TERM; echo ready; exec sleep 30"]);
+        let out = child.stdout.take().expect("stdout");
+        let (line, _reader) = first_line(out, Duration::from_secs(10)).expect("ready");
+        assert_eq!(line, "ready\n");
         let pid = child.id().cast_signed();
         drop(child);
         // SAFETY: signal 0 only probes; the pid was reaped by the guard.

@@ -651,7 +651,7 @@ impl Store for PostgresStore {
         let sequence = self.flaw == Flaw::SequenceRevisions;
         let after_i = i64::try_from(after.0).unwrap_or(i64::MAX);
         let take = i64::try_from(limit).unwrap_or(i64::MAX);
-        let (head, rows) = self.read(|s| {
+        let read = self.read(|s| {
             // The head first: every revision up to it has committed, so the rows read
             // next include all of them.
             let head: i64 = if sequence {
@@ -661,7 +661,8 @@ impl Store for PostgresStore {
             };
             let rows = s.client.query(&s.st.changes, &[&after_i, &head, &take])?;
             Ok((head, rows))
-        })?;
+        });
+        let (head, rows) = read?;
         let mut out = Vec::with_capacity(rows.len());
         let mut last = after;
         for row in &rows {

@@ -119,6 +119,28 @@ fn a_walk_lists_every_path_by_kind_and_fails_on_what_it_cannot_read() {
     }
 }
 
+/// Catches a walk that fails, or loops, on a directory that is gone by the time it is entered:
+/// the prune hook of `gone` removes it itself, so the listing that follows always finds it
+/// missing; the walk keeps the entry it saw and the rest of the tree.
+#[test]
+fn a_walk_skips_a_directory_that_vanished_before_it_was_entered() {
+    let scratch = dir("walk-vanished");
+    let root = scratch.path();
+    put(&root.join("gone/inside"), "x");
+    put(&root.join("kept/file"), "x");
+    let found = walk_pruned(root, &|abs| {
+        if abs.ends_with("gone") {
+            std::fs::remove_dir_all(abs).expect("remove");
+        }
+        false
+    })
+    .expect("a walk of a tree that changes");
+    let seen = names(&found);
+    assert!(seen.contains(&"gone".to_owned()), "{seen:?}");
+    assert!(seen.contains(&"kept/file".to_owned()), "{seen:?}");
+    assert!(!seen.contains(&"gone/inside".to_owned()), "{seen:?}");
+}
+
 /// Catches: a byte count that counts a hard link twice, ignores a directory's files, or
 /// passes a missing path.
 #[test]

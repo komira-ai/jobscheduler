@@ -213,28 +213,28 @@ fn ps_sees(marker: &str) -> Outcome {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
-    let out = match ran {
-        Ok(out) => out,
-        Err(e) => return outcome::<()>(&Err(e)),
-    };
-    let listing = String::from_utf8_lossy(&out.stdout);
+    let listing = ran
+        .as_ref()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
     let (pid, uid) = (std::process::id(), rustix::process::getuid().as_raw());
-    ps_verdict(
-        marker_seen(&listing, marker, pid, uid),
-        out.status.success(),
-    )
+    let ps_ran = ran.as_ref().is_ok_and(|out| out.status.success());
+    // No branch of its own: a `ps` that could not even start reports the OS error it died of.
+    let not_started = ran.err().as_ref().and_then(std::io::Error::raw_os_error);
+    ps_verdict(marker_seen(&listing, marker, pid, uid), ps_ran, not_started)
 }
 
 /// What `ps-sees` reports: `ok` when the marker was seen, `ESRCH` when `ps` listed the
-/// processes and the marker was not among them, `EIO` when `ps` itself failed (so a
-/// listing that could not be had never reads as "not seen").
-pub(crate) fn ps_verdict(seen: bool, ps_ran: bool) -> Outcome {
+/// processes and the marker was not among them, and when `ps` itself failed (so a listing that
+/// could not be had never reads as "not seen") the OS error it could not start with
+/// (`not_started`), else `EIO`.
+pub(crate) fn ps_verdict(seen: bool, ps_ran: bool, not_started: Option<i32>) -> Outcome {
     if seen {
         Outcome::Ok
     } else if ps_ran {
         Outcome::Errno(libc::ESRCH)
     } else {
-        Outcome::Errno(libc::EIO)
+        Outcome::Errno(not_started.unwrap_or(libc::EIO))
     }
 }
 
@@ -365,7 +365,9 @@ mod tests {
             line("tcp-connect", Outcome::Errno(61)),
             "PROBE tcp-connect errno=61"
         );
-        assert_eq!(outcome(&Ok(7)), Outcome::Ok);
+        // One result type for every case, so that one instance of `outcome` meets them all.
+        let fine: std::io::Result<()> = Ok(());
+        assert_eq!(outcome(&fine), Outcome::Ok);
         let eperm: std::io::Result<()> = Err(std::io::Error::from_raw_os_error(libc::EPERM));
         assert_eq!(outcome(&eperm), Outcome::Errno(libc::EPERM));
         let timed: std::io::Result<()> = Err(std::io::ErrorKind::TimedOut.into());
@@ -380,10 +382,16 @@ mod tests {
     /// Catches: the `ps` failure mapped to `ESRCH`; `seen` ignored.
     #[test]
     fn ps_sees_reports_seen_not_seen_and_a_failed_ps_apart() {
-        assert_eq!(ps_verdict(true, true), Outcome::Ok);
-        assert_eq!(ps_verdict(true, false), Outcome::Ok);
-        assert_eq!(ps_verdict(false, true), Outcome::Errno(libc::ESRCH));
-        assert_eq!(ps_verdict(false, false), Outcome::Errno(libc::EIO));
+        assert_eq!(ps_verdict(true, true, None), Outcome::Ok);
+        assert_eq!(ps_verdict(true, false, None), Outcome::Ok);
+        assert_eq!(ps_verdict(false, true, None), Outcome::Errno(libc::ESRCH));
+        assert_eq!(ps_verdict(false, false, None), Outcome::Errno(libc::EIO));
+        // A `ps` that could not start says why; a seen marker still wins.
+        assert_eq!(
+            ps_verdict(false, false, Some(libc::ENOENT)),
+            Outcome::Errno(libc::ENOENT)
+        );
+        assert_eq!(ps_verdict(true, false, Some(libc::ENOENT)), Outcome::Ok);
     }
 
     /// Catches: `ps-sees` with an empty marker taken as a probe (every line would hold
