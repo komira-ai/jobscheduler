@@ -9,7 +9,7 @@ use js_agent_wire::Mount;
 
 use super::runtime::ResolvedMount;
 
-/// Why a mount was not resolved. The wire code is the same for all three
+/// Why a mount was not resolved. The wire code is the same for all of them
 /// ([`js_agent_wire::refusal::INVALID_MOUNT`]); the variant is for the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MountError {
@@ -22,6 +22,11 @@ pub enum MountError {
     /// The path leads out of the root, by `..`, an absolute part or a symbolic link.
     #[error("the mount path leaves its root")]
     Escapes,
+    /// The canonical host path holds a character that a runtime's mount option cannot
+    /// carry safely: a comma, a colon or a control character. A link inside a root can
+    /// lead to such a path even though the message's text cannot name one.
+    #[error("the mount path holds a character a mount option cannot carry")]
+    BadPath,
 }
 
 /// The mount roots of this agent: names to canonical directories.
@@ -32,9 +37,21 @@ pub enum MountError {
 /// leads out is refused whatever the wire validator already said about the text. The
 /// canonical path is what the runtime mounts, never the message's text.
 ///
-/// A path that is swapped for a link between the resolution and the runtime's mount is
-/// not defended against: the roots are directories the operator owns, and anyone who can
-/// write inside one can already change what a job sees.
+/// The canonical path must also be one a runtime's mount option can carry: no comma, no
+/// colon, no control character (see [`MountError::BadPath`]). A job with a read-write mount
+/// can create such a directory name, and a link to it, inside a root.
+///
+/// # What this does not defend against
+///
+/// The resolution is a check at one moment; the runtime binds the path at a later one. A
+/// job that holds a read-write mount inside a root can write in that root while another
+/// job's mount is being set up: it can replace `shared/x`, checked as a directory of the
+/// root, by a link to `/` between the check and the bind. Roots are read-write today, so
+/// the window is real, not only the operator's to open. The backend must close it by
+/// opening each mount by file descriptor and handing the runtime that descriptor's path
+/// (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, or an equivalent that cannot
+/// follow a link out of the root), or by re-verifying the mount after the bind. Until the
+/// backend does, a root shared by jobs of different trust is shared at their risk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MountRoots {
     roots: BTreeMap<String, PathBuf>,
@@ -62,6 +79,11 @@ impl MountRoots {
                 .ok()
                 .filter(|path| path.is_dir())
                 .ok_or_else(|| format!("--mount-root {name}: not an existing directory"))?;
+            if !carries(&canonical) {
+                return Err(format!(
+                    "--mount-root {name}: the path holds a comma, a colon or a control character"
+                ));
+            }
             if roots.insert(name.clone(), canonical).is_some() {
                 return Err(format!("--mount-root {name}: given twice"));
             }
@@ -82,13 +104,24 @@ impl MountRoots {
     pub fn resolve(&self, mount: &Mount) -> Result<ResolvedMount, MountError> {
         let root = self.root(&mount.root_name).ok_or(MountError::UnknownRoot)?;
         let host = fs::canonicalize(root.join(&mount.rel)).map_err(|_| MountError::Unresolvable)?;
-        match host.starts_with(root) {
-            true => Ok(ResolvedMount {
-                host,
-                target: format!("/mnt/{}/{}", mount.root_name, mount.rel),
-                ro: mount.ro,
-            }),
-            false => Err(MountError::Escapes),
+        if !host.starts_with(root) {
+            return Err(MountError::Escapes);
         }
+        if !carries(&host) {
+            return Err(MountError::BadPath);
+        }
+        Ok(ResolvedMount {
+            host,
+            target: format!("/mnt/{}/{}", mount.root_name, mount.rel),
+            ro: mount.ro,
+        })
     }
+}
+
+/// Whether a runtime's mount option can carry `path` as it is: text with no comma (the
+/// option separator), no colon (the separator of the short mount form) and no control
+/// character. A path that is not text cannot be.
+fn carries(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|text| !text.chars().any(|c| c == ',' || c == ':' || c.is_control()))
 }

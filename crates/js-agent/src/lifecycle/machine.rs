@@ -12,9 +12,9 @@ use super::runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, Status,
 };
 use super::{
-    Capacity, CheckHook, Clock, Config, Event, Finding, RuntimeError, Skip, code, detail, label,
+    Capacity, CheckFinding, CheckHook, Clock, Config, Event, Finding, RuntimeError, Skip, code,
+    detail, label,
 };
-
 /// How many finished or stopped run ids the agent remembers, so a late or repeated start
 /// for one of them runs nothing. The oldest is forgotten first; a start for a run older
 /// than the last [`RETIRED_CAP`] is the server's to stop sending.
@@ -42,7 +42,9 @@ enum Stage {
     Freed,
 }
 
-/// Why the agent is ending a job.
+/// Why the agent is ending a job. It decides the result only when the agent's stop is what
+/// ended the container (or the container is gone); a container that exited before a stop
+/// reached it is reported as it exited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cause {
     /// A `Stop` or `Cancel`.
@@ -57,6 +59,22 @@ struct Booking {
     cpu_millis: u64,
     memory_bytes: u64,
     gpus: Vec<u32>,
+}
+
+impl Booking {
+    /// Whether this booking fits beside `used` in what `offered` has: the CPU and memory
+    /// within what is left, and every GPU offered and not used.
+    fn fits(&self, offered: &Capacity, used: &Capacity) -> bool {
+        [
+            self.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
+            self.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            self.gpus
+                .iter()
+                .all(|gpu| offered.gpus.contains(gpu) && !used.gpus.contains(gpu)),
+        ]
+        .into_iter()
+        .all(|ok| ok)
+    }
 }
 
 struct Job {
@@ -166,8 +184,11 @@ pub struct Lifecycle {
 impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
     /// containers it finds so that they are held, first, from the very first heartbeat. A
-    /// container whose labels do not say what it booked, or that repeats a run id, is
-    /// left alone and recorded as a finding.
+    /// container that no job can stand for is stopped and removed by its own id, and
+    /// recorded as a finding: one whose labels do not say what it booked, one that repeats
+    /// a run id, one whose booking does not fit the machine's offer beside the containers
+    /// taken over before it (a GPU not offered, or one already booked), and any beyond the
+    /// number of runs a heartbeat can list. Nothing is left running without a booking.
     ///
     /// # Errors
     ///
@@ -191,22 +212,64 @@ impl Lifecycle {
         let mut events = Vec::new();
         for container in found {
             let now = this.clock.now_ms();
-            let taken: Vec<String> = this.jobs.iter().map(|job| job.run_id.clone()).collect();
-            match Job::adopted(&container, now).filter(|job| !taken.contains(&job.run_id)) {
-                Some(job) => {
+            match this.adoptable(&container, now) {
+                Ok(job) => {
                     events.push(Event::Adopted {
                         run_id: job.run_id.clone(),
                     });
                     this.jobs.push(job);
                 }
-                None => events.push(Event::Finding(Finding {
-                    run_id: None,
-                    code: code::UNADOPTABLE,
-                    message: format!("container {}", container.id.0),
-                })),
+                Err(why) => this.evict(&container.id, why, &mut events),
             }
         }
         Ok((this, events))
+    }
+
+    /// The job a labelled container stands for, or why it cannot be one: its labels do not
+    /// say what it booked, its run id is held already, the agent holds as many runs as it
+    /// may, or its booking does not fit what the machine offers beside the jobs taken over
+    /// before it.
+    fn adoptable(&self, found: &Found, now: u64) -> Result<Job, &'static str> {
+        let job = Job::adopted(found, now).ok_or("its labels do not say what it booked")?;
+        let used = self.booked();
+        let refusals = [
+            (
+                self.jobs.iter().any(|held| held.run_id == job.run_id),
+                "its run id is held already",
+            ),
+            (
+                self.jobs.len() >= MAX_JOBS,
+                "the agent holds as many runs as a heartbeat can list",
+            ),
+            (
+                !job.booking.fits(&self.config.capacity, &used),
+                "its booking does not fit the machine beside the jobs taken over",
+            ),
+        ];
+        match refusals.into_iter().find(|(refused, _)| *refused) {
+            Some((_, why)) => Err(why),
+            None => Ok(job),
+        }
+    }
+
+    /// Stops and removes a container no job stands for, so that nothing runs on the host
+    /// unbooked, and records it. A stop that fails does not keep the removal from being
+    /// tried (removal takes a running container too); a removal that fails is the louder
+    /// finding, because the container is then still there.
+    fn evict(&mut self, id: &ContainerId, why: &str, events: &mut Vec<Event>) {
+        let _ = self.runtime.stop(id, self.config.stop_grace);
+        let (code, fate) = match self.runtime.remove(id) {
+            Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned()),
+            Err(failed) => (
+                code::UNADOPTABLE_KEPT,
+                format!("not removed, still on the host: {failed}"),
+            ),
+        };
+        events.push(Event::Finding(Finding {
+            run_id: None,
+            code,
+            message: format!("container {}: {why}; {fate}", id.0),
+        }));
     }
 
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be
@@ -495,7 +558,13 @@ impl Lifecycle {
                     Status::Exited(exit) => Some(exit),
                     _ => None,
                 };
-                let (how, status) = outcome(job.cause, exit);
+                // What ended the job is what happened, not what the agent meant to do: an
+                // exit that came before any stop was sent is the job's own, whether the
+                // stop was merely asked for (a `Stop` applied since the last step) or
+                // failed (the runtime refused it). A container that is gone has nothing to
+                // tell, so the cause stands.
+                let cause = job.cause.filter(|_| exit.is_none() || job.stop_sent);
+                let (how, status) = outcome(cause, exit);
                 if !job.silent {
                     job.result = Some(job.report(how, status, None));
                     events.push(Event::ResultReady {
@@ -557,8 +626,14 @@ impl Lifecycle {
                             run_id: run_id.clone(),
                         });
                     }
-                    Err(why) => {
-                        job.note(code::CHECK_FAILED, why, events);
+                    Err(found) => {
+                        let message = match &found {
+                            CheckFinding::Residue { detail, .. } => detail.clone(),
+                            CheckFinding::Unchecked { detail, .. } => {
+                                format!("the check could not run: {detail}")
+                            }
+                        };
+                        job.note(found.code(), message, events);
                         job.stage = Stage::Blocked;
                         return;
                     }
@@ -608,6 +683,9 @@ impl Job {
             .filter(|index| !index.is_empty())
             .map(|index| index.parse::<u32>().ok())
             .collect::<Option<Vec<_>>>()?;
+        // A device named twice is not a booking the agent ever wrote.
+        let distinct: BTreeSet<&u32> = gpus.iter().collect();
+        (distinct.len() == gpus.len()).then_some(())?;
         let wall_ms = number(label::WALL_MS)?;
         let booking = Booking {
             cpu_millis: number(label::CPU_MILLIS)?,

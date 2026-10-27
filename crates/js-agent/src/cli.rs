@@ -56,8 +56,10 @@ pub struct Cli {
     /// Allowed only when at least one GPU is offered.
     #[arg(long, value_name = "CLASS")]
     pub gpu_class: Option<String>,
-    /// Accept a start whose job is not confined to a container (`isolation = host`).
-    /// Without this flag such a start creates nothing and is refused.
+    /// Accept a start whose job is not confined to a container (`isolation = host`). Not
+    /// available yet: a host job taints the host, the record of that taint does not exist,
+    /// and the agent refuses this flag at start. Without it such a start creates nothing
+    /// and is refused.
     #[arg(long)]
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
