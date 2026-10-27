@@ -193,7 +193,7 @@ fn host_unsafe_taints_the_host_and_requeues_on_another() {
 }
 
 /// Asserts the `unsupported` row: the host is left out for the rest of the request's
-/// life (ten back-offs later it is still refused, and another request takes it), and the
+/// life (two back-offs later it is still refused, and another request takes it), and the
 /// request counts one failure and goes to another host at once.
 #[test]
 fn unsupported_excludes_the_host_for_good_and_requeues_on_another() {
@@ -210,7 +210,7 @@ fn unsupported_excludes_the_host_for_good_and_requeues_on_another() {
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(2)));
     provider.stop(&lease(2));
     restore(&fx, &hosts);
-    wait(&fx, &hosts, 10 * BACKOFF);
+    wait(&fx, &hosts, 2 * BACKOFF);
     assert_eq!(provider.start(whole_spec(3)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(3)));
     let mut other = whole_request();

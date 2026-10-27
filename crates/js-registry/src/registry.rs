@@ -202,6 +202,7 @@ impl Ending<'_> {
         let backoff = Duration::from_millis(self.rules.reserve_backoff_ms);
         let failure = Failure {
             host,
+            now: self.now,
             backoff_end: self.now.plus(backoff),
             max_replace: self.rules.max_replace,
         };
@@ -316,6 +317,8 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
         state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        let horizon = Rules::of(config).idle_horizon_ms();
+        state.requests.sweep(now, horizon);
         state.waiting.expire(now, Rules::of(config).regain_grace_ms);
         state
     }
@@ -365,9 +368,13 @@ impl Registry {
         self.lock().requests.record(&key.into()).cloned()
     }
 
-    /// Why a request fails `exclusive-not-ready`: the last code and detail reported,
-    /// once it has used up `max_replace` prepare failures; `None` before. A start of such
-    /// a request is refused [`RefusalCode::ExclusiveNotReady`]. Ask as
+    /// Why a request will not be placed: the last code and detail reported, once it has
+    /// used up `max_replace` prepare failures; `None` before, and after the refusal has
+    /// been delivered to a start (the record is then removed, see the `requests` module)
+    /// or the record has gone idle. A start of such a request answers
+    /// `Refused(NoCapacity)`, which callers treat as wait: the typed
+    /// `exclusive-not-ready` refusal is added by a later change, so until then no consumer
+    /// sees it. A restart forgets the record and resets `max_replace`. Ask as
     /// [`Registry::request_record`] does.
     pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
         let record = self.request_record(key);
@@ -458,7 +465,8 @@ impl Registry {
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
-        let kept_exclusive = known.map_or(Exclusive::Free, |record| record.exclusive.after_hello());
+        let kept_exclusive =
+            known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -815,7 +823,8 @@ impl Registry {
     /// committed, not granted: the booking is made only on a host that is bookable (live,
     /// serving, clean), quiet (no held run, none live here) and clear of another
     /// whole-node lease or a restore, and the answer is `Unknown` so the lease stays
-    /// pending. It reads `Present` once the agent reports the host ready
+    /// pending. A request that used up its tries is answered `Refused(NoCapacity)` once
+    /// (see [`Registry::not_ready`]). It reads `Present` once the agent reports the host ready
     /// ([`Registry::heartbeat`]), and a repeated start answers `Unknown` until then and
     /// `Started` after.
     pub(crate) fn start(&self, classes: &[ResourceClass], spec: &StartSpec) -> StartAck {
@@ -843,9 +852,8 @@ impl Registry {
             return StartAck::Unknown;
         }
         // A request that used up its tries is not placed again.
-        let spent = requests.record(&key).is_some_and(|record| record.terminal);
-        if spent {
-            return StartAck::Refused(RefusalCode::ExclusiveNotReady);
+        if requests.start(&key, now) {
+            return StartAck::Refused(RefusalCode::NoCapacity);
         }
         let gate = HostBook::class_gate(classes, spec);
         let eligible = |id: &HostId, _: &Shape| {
@@ -993,7 +1001,8 @@ impl Registry {
         // A restored whole-node booking is committed and not ready: the agent's
         // preparation is in memory only, so it must report ready for this lease again
         // before the lease reads present, a run is queued or the host books to anyone.
-        // A host that lists held runs is ready: only the ready lease could have runs.
+        // A host that lists held runs is ready: only the ready lease could have runs
+        // (see `RegisteredProvider::seat` for where that fails).
         let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
         if let (Ok(()), true) = (&seated, whole) {
             let record = records.get_mut(host);

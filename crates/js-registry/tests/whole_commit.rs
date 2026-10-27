@@ -187,6 +187,24 @@ fn only_the_named_lease_reported_ready_by_a_clean_host_is_confirmed() {
     assert_eq!(later.unwrap().exclusive.as_deref(), Some("1-1"));
 }
 
+/// Asserts that a host tainted in an earlier heartbeat does not take the ready report for
+/// its committed lease in a later one, and that the lease stays unobserved. It catches a
+/// ready report taken without the check that the host is clean.
+#[test]
+fn a_host_tainted_earlier_does_not_become_ready() {
+    let (fx, mut provider, epoch) = committed();
+    let tainted = beat_with(&fx, "a", epoch, |b| {
+        b.taint = Some(Taint {
+            reason: "check".into(),
+            run_id: None,
+            check: None,
+        });
+    });
+    assert!(tainted.taint_ack);
+    report_ready(&fx, epoch, &lease(1).to_string());
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+}
+
 /// Asserts the run gate on the queue: before the report a run is refused `NotReady`
 /// (code `not-ready`), not `NoCapacity` even when the host announced `preparing`; after
 /// it the run is queued and the next reply starts it. It catches a run queued on a host
