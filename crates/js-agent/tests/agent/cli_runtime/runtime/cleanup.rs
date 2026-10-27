@@ -5,7 +5,10 @@ use js_agent::cli_runtime::CliRuntime;
 use js_agent::lifecycle::{ContainerRuntime, label};
 
 use super::super::scripted::Scripted;
-use super::super::{HOST, docker, made_at, open, platform, sees_the_engines_pid, settings, spec};
+use super::super::{
+    HOST, docker, in_another_pid_namespace, made_at, no_file, open, platform, sees_the_engines_pid,
+    settings, spec,
+};
 use super::{start, strings};
 
 /// Asserts that a `create` whose outcome is not known leaves nothing behind: the call is
@@ -84,6 +87,7 @@ pub(super) fn other_agent(world: &Scripted) -> CliRuntime {
     CliRuntime::open(settings(), OTHER, &platform("linux"), made_at, runner)
         .unwrap()
         .with_pid_seen(sees_the_engines_pid)
+        .with_proc_files(no_file, in_another_pid_namespace)
 }
 
 /// The host id of the other agent.

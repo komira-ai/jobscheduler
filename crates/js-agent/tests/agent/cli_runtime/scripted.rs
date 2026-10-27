@@ -4,7 +4,7 @@
 //! records every call with the environment it was given. No process starts.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use js_agent::CommandRunner;
@@ -50,6 +50,9 @@ struct State {
     pid_says: Option<String>,
     /// How many more looks at the process of a container fail.
     pid_fails: u32,
+    /// What the next looks at the process of a container print, one each, before the
+    /// others: `None` is a call that exits with status 1.
+    pid_queue: VecDeque<Option<String>>,
 }
 
 /// The runner. Clones share one world, so a test keeps a handle after it has handed the
@@ -105,6 +108,13 @@ impl Scripted {
     /// Makes every look at a container's process (`inspect` of `State.Pid`) print `text`.
     pub fn pid_says(&self, text: &str) {
         self.0.borrow_mut().pid_says = Some(text.to_owned());
+    }
+
+    /// Makes the next looks at a container's process (`inspect` of `State.Pid`) print
+    /// `answers` in order (`None`: exit with status 1); later looks are answered as usual.
+    pub fn pid_looks(&self, answers: &[Option<&str>]) {
+        let queue = answers.iter().map(|a| a.map(str::to_owned)).collect();
+        self.0.borrow_mut().pid_queue = queue;
     }
 
     /// Makes the next look at a container's process (`inspect` of `State.Pid`) exit with
@@ -402,6 +412,9 @@ impl Scripted {
         if looks_at_pid && state.pid_fails > 0 {
             state.pid_fails -= 1;
             return failed(program);
+        }
+        if let Some(answer) = looks_at_pid.then(|| state.pid_queue.pop_front()).flatten() {
+            return answer.ok_or_else(|| format!("{program}: exit status: 1"));
         }
         if let Some(left) = state.failing.get_mut(sub).filter(|left| **left > 0) {
             *left -= 1;

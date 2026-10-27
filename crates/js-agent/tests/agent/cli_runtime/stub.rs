@@ -12,7 +12,10 @@ use std::time::Duration;
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, system_runner};
 use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
 
-use super::{HOST, NAME_R1, made_at, mount, platform, sees_the_engines_pid, spec};
+use super::{
+    HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform,
+    sees_the_engines_pid, spec,
+};
 use crate::support::Scratch;
 
 const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -82,7 +85,8 @@ fn cli_runtime_argv_snapshot() {
     let mut rt = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner)
         .ok()
         .unwrap()
-        .with_pid_seen(sees_the_engines_pid);
+        .with_pid_seen(sees_the_engines_pid)
+        .with_proc_files(no_file, in_another_pid_namespace);
 
     let mut job = spec("r1");
     job.gpu_indices = vec![1];

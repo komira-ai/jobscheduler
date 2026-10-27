@@ -29,8 +29,12 @@
 //! ```
 //!
 //! After `start` the agent asks for the process id the engine gives the container
-//! (`State.Pid`) and requires that process in the agent's own `/proc`. A pid that is not
-//! there means the agent is in a container, or a pid namespace of its own, while its jobs
+//! (`State.Pid`) and requires that process in the agent's own `/proc`, and to be the
+//! container's: its `/proc/<pid>/cgroup` names the container's id, or its
+//! `/proc/<pid>/ns/pid` differs from the agent's. A quick job can end between the answer
+//! and the look, so a miss is looked at once more: a container that is over by then (or
+//! gone) is let through, and only one that still runs with its process still missing is
+//! blind. A pid that is not there means the agent is in a container, or a pid namespace of its own, while its jobs
 //! run on the host through the engine's socket: the post-job checks would read the wrong
 //! host. The container is then removed, the start fails (`failed_to_start`, detail
 //! `runtime-failed`) and the lifecycle taints the host as unchecked
@@ -389,6 +393,35 @@ pub fn pid_in_proc(pid: u32) -> bool {
     Path::new(&format!("/proc/{pid}")).exists()
 }
 
+/// The text of a file of the agent's `/proc`, `None` when it cannot be read.
+pub type ProcRead = fn(&str) -> Option<String>;
+
+/// The target of a symbolic link of the agent's `/proc`, `None` when it cannot be read.
+pub type ProcLink = fn(&str) -> Option<String>;
+
+/// The text of the file at `path`.
+pub fn read_proc(path: &str) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The target of the link at `path`.
+pub fn read_proc_link(path: &str) -> Option<String> {
+    let target = std::fs::read_link(path).ok()?;
+    Some(target.to_string_lossy().into_owned())
+}
+
+/// What one look at a started container showed.
+enum Look {
+    /// Its process is in the agent's `/proc` and is the container's.
+    Seen,
+    /// It is over (exited, stopped or dead): there is no process left to look for.
+    Ended,
+    /// The engine no longer has it.
+    Gone,
+    /// It runs, and `pid` is not in the agent's `/proc` or is not the container's.
+    Missing(u32),
+}
+
 /// The container runtime of the lifecycle, over the `docker` or `podman` command line.
 pub struct CliRuntime {
     settings: Settings,
@@ -400,6 +433,8 @@ pub struct CliRuntime {
     runner: Box<dyn CommandRunner>,
     chown: Chown,
     pid_seen: PidSeen,
+    proc_read: ProcRead,
+    proc_link: ProcLink,
     warnings: Vec<String>,
 }
 
@@ -436,6 +471,8 @@ impl CliRuntime {
             runner,
             chown: hand_over,
             pid_seen: pid_in_proc,
+            proc_read: read_proc,
+            proc_link: read_proc_link,
             warnings: Vec::new(),
         };
         runtime.warnings = runtime.swap_warning().into_iter().collect();
@@ -454,6 +491,18 @@ impl CliRuntime {
     #[must_use]
     pub fn with_pid_seen(self, pid_seen: PidSeen) -> Self {
         Self { pid_seen, ..self }
+    }
+
+    /// The same runtime reading the files and links of the agent's `/proc` that tell whose
+    /// a process is (`cgroup`, `ns/pid`) with `read` and `link` instead of the file system:
+    /// a test's seam.
+    #[must_use]
+    pub fn with_proc_files(self, proc_read: ProcRead, proc_link: ProcLink) -> Self {
+        Self {
+            proc_read,
+            proc_link,
+            ..self
+        }
     }
 
     /// What the operator should know about the engine, found when the runtime was opened.
@@ -533,18 +582,55 @@ impl CliRuntime {
     /// host that is not the one the job ran on. A container that has exited already has no
     /// process (pid 0) to look for and is let through: its processes are gone, and the
     /// checks still run after it.
+    ///
+    /// A job that is quick (`true`) can end and be reaped between the engine's answer and
+    /// the look at `/proc`, so a miss is looked at once more: a container that is over by
+    /// then (or gone) is let through like one that was over at the first look, and only a
+    /// container that still runs with its process still missing is blind. A process that
+    /// is in `/proc` must also be the container's: its control group names the container's
+    /// id, or its pid namespace is not the agent's.
     fn verify_seen(&self, id: &ContainerId) -> Result<(), CliError> {
-        let unreadable = || CliError::Unreadable { call: "inspect" };
-        let text = self
-            .inspect(id, "{{.State.Pid}} {{.State.Status}}")?
-            .ok_or_else(unreadable)?;
-        match parse_pid(&text).ok_or_else(unreadable)? {
-            (0, true) => Ok(()),
-            (0, false) => Err(unreadable()),
-            (pid, _) => (self.pid_seen)(pid)
-                .then_some(())
-                .ok_or(CliError::Blind { pid }),
+        match self.look(id)? {
+            Look::Seen | Look::Ended => Ok(()),
+            Look::Gone => Err(CliError::Unreadable { call: "inspect" }),
+            Look::Missing(_) => match self.look(id)? {
+                Look::Missing(pid) => Err(CliError::Blind { pid }),
+                Look::Seen | Look::Ended | Look::Gone => Ok(()),
+            },
         }
+    }
+
+    /// One `inspect` of the process and state of a started container, and what `/proc`
+    /// shows of that process.
+    fn look(&self, id: &ContainerId) -> Result<Look, CliError> {
+        let unreadable = || CliError::Unreadable { call: "inspect" };
+        let Some(text) = self.inspect(id, "{{.State.Pid}} {{.State.Status}}")? else {
+            return Ok(Look::Gone);
+        };
+        match parse_pid(&text).ok_or_else(unreadable)? {
+            (_, true) => Ok(Look::Ended),
+            (0, false) => Err(unreadable()),
+            (pid, false) => Ok(match self.is_its_process(pid, id) {
+                true => Look::Seen,
+                false => Look::Missing(pid),
+            }),
+        }
+    }
+
+    /// Whether `pid` is in the agent's `/proc` and is a process of the container `id`: its
+    /// control group holds the id, or its pid namespace is another than the agent's (both
+    /// links must be readable).
+    fn is_its_process(&self, pid: u32, id: &ContainerId) -> bool {
+        if !(self.pid_seen)(pid) {
+            return false;
+        }
+        let cgroup = (self.proc_read)(&format!("/proc/{pid}/cgroup"));
+        if cgroup.is_some_and(|text| text.contains(&id.0)) {
+            return true;
+        }
+        let theirs = (self.proc_link)(&format!("/proc/{pid}/ns/pid"));
+        let own = (self.proc_link)("/proc/self/ns/pid");
+        matches!((theirs, own), (Some(theirs), Some(own)) if theirs != own)
     }
 
     /// Gives the run's scratch directory to the container's user, when the agent is root.
