@@ -43,6 +43,9 @@ fn refusal_codes_snapshot() {
         refusal::HOST_BOUND,
         refusal::SESSION_MISMATCH,
         refusal::SESSION_UNAVAILABLE,
+        refusal::HOST_LISTED,
+        refusal::RATE_LIMITED,
+        refusal::BODY_TOO_LARGE,
     ];
     assert_eq!(
         codes.join(" "),
@@ -50,7 +53,8 @@ fn refusal_codes_snapshot() {
          invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
-         shape-not-accepted pool-full host-bound session-mismatch session-unavailable"
+         shape-not-accepted pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
+         body-too-large"
     );
 }
 

@@ -388,3 +388,35 @@ fn the_sequential_source_counts_from_one() {
     assert_eq!((first[31], second[31]), (1, 2));
     assert_eq!(first[..24], [0; 24]);
 }
+
+/// Asserts that `bindings` lists what each known host id is bound to (the credential and
+/// the instance of its first hello), that a seated booking shows the binding it was
+/// seated with, and that a seat without one shows none until the first hello binds the
+/// id. It catches a caller that persists bindings getting a list that is empty, that
+/// leaves out an awaiting host's binding (so a second restart would lose it), or that
+/// invents one.
+#[test]
+fn bindings_list_what_each_host_is_bound_to() {
+    let fx = fixture(4);
+    assert!(fx.registry.bindings().is_empty());
+    fx.registry.hello(&on("a", "i-1"), &cred("t")).unwrap();
+    fx.registry.hello(&hello("b"), &cred("u")).unwrap();
+    let listed = fx.registry.bindings();
+    let a = &listed[&host("a")];
+    assert_eq!(a.credential(), &cred("t"));
+    assert_eq!(a.instance(), Some(&instance("i-1")));
+    let b = &listed[&host("b")];
+    assert_eq!(b.credential(), &cred("u"));
+    assert_eq!(b.instance(), None);
+
+    let restarted = fixture(4);
+    let kept = Binding::new(cred("t"), Some(instance("i-9")));
+    restarted
+        .provider
+        .seat(&host("c"), lease(1), Some(kept.clone()))
+        .unwrap();
+    restarted.provider.seat(&host("d"), lease(2), None).unwrap();
+    let awaiting = restarted.registry.bindings();
+    assert_eq!(awaiting.len(), 1);
+    assert_eq!(awaiting[&host("c")], kept);
+}

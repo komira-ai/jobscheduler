@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{Heartbeat, Hello, Phase, Welcome};
@@ -101,6 +101,8 @@ impl Record {
 struct State {
     book: HostBook,
     records: BTreeMap<HostId, Record>,
+    /// Ids another source of hosts owns; a hello for one is refused.
+    reserved: BTreeSet<HostId>,
 }
 
 impl State {
@@ -174,6 +176,7 @@ impl Registry {
         let state = State {
             book: HostBook::new(),
             records: BTreeMap::new(),
+            reserved: BTreeSet::new(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -221,7 +224,8 @@ impl Registry {
     ///
     /// The hello is checked as the wire rules say first ([`Hello::negotiate`] and
     /// [`Hello::validate`], which include the reserved label prefix), then in this
-    /// order: the pool is this one; the host id is not bound to another credential, nor
+    /// order: the pool is this one; the host id is not reserved to another source
+    /// ([`Registry::reserve`]); the host id is not bound to another credential, nor
     /// to another instance when its binding names one; the host id is not live; the
     /// shape claimed offers at least the pool's shape; the pool has room for a host it
     /// does not know (hosts forgotten after the lost-host retention do not count); a
@@ -260,6 +264,9 @@ impl Registry {
         }
         let now = self.shared.clock.now();
         let mut state = self.lock_at(now);
+        if state.reserved.contains(&host) {
+            return Err(Refusal::HostListed);
+        }
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
         let instance = hello.instance.as_ref();
@@ -375,6 +382,29 @@ impl Registry {
         Ok(())
     }
 
+    /// Reserves `ids` to another source of hosts: a hello for one is refused as
+    /// host-listed, whoever sends it. A host id then belongs to one source only, which
+    /// keeps a consumer from being offered two hosts of one name. The reservation is in
+    /// memory and adds to what was reserved before; the caller makes it again at every
+    /// start, before the registry takes a hello.
+    pub fn reserve(&self, ids: impl IntoIterator<Item = HostId>) {
+        self.lock().reserved.extend(ids);
+    }
+
+    /// The ids reserved so far, in id order ([`Registry::reserve`]).
+    pub fn reserved(&self) -> BTreeSet<HostId> {
+        self.lock().reserved.clone()
+    }
+
+    /// What every known host id is bound to, in id order. A caller that persists bindings
+    /// writes this, so that a restart can hand them to [`crate::RegisteredProvider::seat`].
+    pub fn bindings(&self) -> BTreeMap<HostId, Binding> {
+        let state = self.lock();
+        let bound = state.records.iter();
+        let bound = bound.filter_map(|(id, record)| Some((id.clone(), record.binding.clone()?)));
+        bound.collect()
+    }
+
     /// Every host the registry holds, in id order.
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
@@ -398,7 +428,7 @@ impl Registry {
         let now = self.shared.clock.now();
         let grace = self.grace_ms();
         let mut guard = self.lock_at(now);
-        let State { book, records } = &mut *guard;
+        let State { book, records, .. } = &mut *guard;
         let gate = HostBook::class_gate(classes, spec);
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
@@ -461,7 +491,7 @@ impl Registry {
         binding: Option<Binding>,
     ) -> Result<(), SeatError> {
         let mut guard = self.lock();
-        let State { book, records } = &mut *guard;
+        let State { book, records, .. } = &mut *guard;
         match book.seat(host, lease) {
             Err(SeatError::Unlisted(_)) => {
                 book.insert_host(host.clone(), self.shared.config.shape().clone());
