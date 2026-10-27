@@ -52,6 +52,17 @@ pub(crate) struct StoredLease {
     pub validation_run: Option<String>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Whether the lease is of a whole-node class, whose ttl and maximum wall time
+    /// count from the moment it is observed ready. Absent in a file written before the
+    /// field existed, which loads as not whole.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole: bool,
+    /// The ttl granted at acquire, kept while a whole lease is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    /// The maximum wall time of the request, kept while a whole lease is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_ms: Option<u64>,
     /// Fields of a later version, kept as read.
     #[serde(flatten)]
     pub extra: toml::Table,

@@ -47,7 +47,8 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         };
         for id in table.book.held_ids() {
             let seen = table.provider.observe(&id);
-            table.book.settle_observe(&id, seen);
+            let now = table.clock.now();
+            table.book.settle_observe(&id, seen, now);
         }
         table.save()?;
         Ok(table)
@@ -61,6 +62,11 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// the lease pending and is an [`AcquireError::Unconfirmed`]; [`Self::tick`]
     /// resolves it. The lease expires at the earlier of `now + ttl` and `now` plus the
     /// request's maximum wall time.
+    ///
+    /// A lease of a whole-node class (admission `Whole`) is different while it waits:
+    /// pending, it expires after the settings' prepare timeout (600 s unless set), and its ttl and maximum
+    /// wall time count from the moment the provider is seen to have it ready (a start
+    /// answered `Started`, or a later observation of `Present`), not from this call.
     pub fn acquire(
         &mut self,
         request: Request,
@@ -132,7 +138,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
                 }
                 Step::Resolve => {
                     let seen = self.provider.observe(&id);
-                    match self.book.settle_observe(&id, seen) {
+                    match self.book.settle_observe(&id, seen, now) {
                         Seen::Confirmed => report.confirmed.push(id),
                         Seen::Gone => report.dropped.push(id),
                         Seen::Unsure => {}
