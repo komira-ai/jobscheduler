@@ -1,0 +1,41 @@
+[package]
+name = "js-guest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The agent inside a macOS VM guest. No async runtime and no network crate: it speaks one
+# framed protocol (`js-guest-wire`) over one byte stream and runs one command.
+#
+# The executable keeps the name `kbf-guest`: image setup copies a file of that name onto
+# the guest's disk, the guest's launch daemons run it by that path, and the release
+# tooling signs and archives it by that name. Renaming it is a change to all of them,
+# and to guest images already built, so it is not done here.
+[[bin]]
+name = "kbf-guest"
+path = "src/main.rs"
+
+# The program the tests run as the command (see `src/bin/js-guest-act.rs`). It has its
+# own name because Cargo sets `CARGO_BIN_EXE_<name>` only for the bins of the package
+# under test, and two packages with a bin of the same name collide in `target/`.
+[[bin]]
+name = "js-guest-act"
+path = "src/bin/js-guest-act.rs"
+test = false
+
+[dependencies]
+base64.workspace = true
+clap.workspace = true
+hex.workspace = true
+js-guest-wire = { path = "../js-guest-wire" }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
