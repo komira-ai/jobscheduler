@@ -723,6 +723,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-sizing"
+version = "0.1.0"
+
+[[package]]
 name = "js-types"
 version = "0.1.0"
 dependencies = [
