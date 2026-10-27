@@ -10,7 +10,7 @@ use crate::agents_support::{
     JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
     post_raw, session, start_agents,
 };
-use crate::support::{Harness, TOKEN, guard, ids, lease_body, request};
+use crate::support::{Harness, LogCapture, TOKEN, guard, ids, lease_body, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -555,6 +555,38 @@ async fn hello_rate_limit_holds_a_credential_not_the_others() {
     let still = post_raw(&h, "/v1/agent/hello", JOIN, b"{}", None).await;
     assert!(still.head.contains("retry-after: 7"), "{}", still.head);
     assert_eq!(session(&other, "burst-2").epoch, 1);
+}
+
+/// Asserts that a token holder who keeps saying hello past its limit gets a 429 each
+/// time but is logged once per interval, not once per request: many refusals in one
+/// interval leave one line, and the first refusal of the next interval leaves another.
+/// It catches a warning per refusal, which lets a holder of a join token fill the log at
+/// the speed of its requests, and a limiter that never says so.
+#[tokio::test]
+async fn refusals_for_the_hello_limit_are_logged_once_per_interval() {
+    let logs = LogCapture::start();
+    let scratch = crate::support::Scratch::new("agents_rate_log");
+    let mut args = crate::agents_support::agent_args(&scratch, false);
+    args.extend(["--agent-hello-burst", "1", "--agent-hello-interval", "10s"].map(Into::into));
+    let h = Harness::with(scratch, args, None).await;
+    let held = "held to the rate limit";
+    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
+    for _ in 0..5 {
+        assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
+    }
+    assert_eq!(logs.text().matches(held).count(), 1, "{}", logs.text());
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 200);
+    for _ in 0..3 {
+        assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 429);
+    }
+    assert_eq!(logs.text().matches(held).count(), 2, "{}", logs.text());
+
+    h.clock.advance(secs(10));
+    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 409);
+    for _ in 0..3 {
+        assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
+    }
+    assert_eq!(logs.text().matches(held).count(), 3, "{}", logs.text());
 }
 
 /// Asserts that a static source supplied by the caller (a provider of its own, as the

@@ -15,6 +15,7 @@ js-provider = { path = "../js-provider" }
 js-provider-fake = { path = "../js-provider-fake" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-lease = { path = "../js-lease" }
+js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
 js-registry = { path = "../js-registry" }
 

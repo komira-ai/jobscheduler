@@ -16,6 +16,7 @@ use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::util::blocking;
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
 /// nothing else of the server's: the lease table's lock is taken before the registry's
@@ -84,22 +85,31 @@ impl Agents {
         self.errors.load(Ordering::SeqCst)
     }
 
-    /// What every tick does for the agent side: read the join tokens again, and make the
-    /// file of bindings current (a write that failed earlier is tried again here). A
-    /// token file that cannot be read keeps the tokens in force.
-    pub(crate) fn refresh(&self) {
-        if let Err(err) = self.tokens.reload() {
-            self.errors.fetch_add(1, Ordering::SeqCst);
-            warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
+    /// What every tick does for the agent side: read the join tokens again and drop the
+    /// hello limits of those that left the file, and make the file of bindings current
+    /// (a write that failed earlier is tried again here; so is the removal of a host the
+    /// registry has forgotten). A token file that cannot be read keeps the tokens in
+    /// force, and their limits.
+    pub(crate) async fn refresh(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        match blocking(move || this.tokens.reload()).await {
+            Ok(()) => self.limiter.retain(&self.tokens.credentials()),
+            Err(err) => {
+                self.errors.fetch_add(1, Ordering::SeqCst);
+                warn!(error = %err, "cannot read the agent token file again; the tokens in force stay");
+            }
         }
-        self.save_bindings();
+        self.save_bindings().await;
     }
 
-    /// Makes the file of bindings hold what the registry has bound. A host that was
-    /// admitted stays admitted when this fails; the lease on it would then survive a
-    /// restart without its binding, until the next tick writes it.
-    pub(crate) fn save_bindings(&self) {
-        if let Err(err) = self.store.save(|| self.registry.bindings()) {
+    /// Makes the file of bindings hold what the registry has bound, on the pool for
+    /// blocking calls: the write is synced to disk. A host that was admitted stays
+    /// admitted when this fails; the lease on it would then survive a restart without
+    /// its binding, until the next tick writes it.
+    pub(crate) async fn save_bindings(self: &Arc<Self>) {
+        let this = Arc::clone(self);
+        let saved = blocking(move || this.store.save(|| this.registry.bindings())).await;
+        if let Err(err) = saved {
             self.errors.fetch_add(1, Ordering::SeqCst);
             error!(error = %err, "cannot write the agent state file");
         }

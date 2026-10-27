@@ -54,18 +54,22 @@ struct Record {
     session: Option<SessionDigest>,
     phase: Phase,
     heard: Option<Timestamp>,
+    /// When a booking was put back for the host after a restart; `None` for a host that
+    /// has said hello. It is what an awaiting host's retention counts from.
+    seated: Option<Timestamp>,
     agent_version: Option<String>,
     labels: BTreeMap<String, String>,
 }
 
 impl Record {
-    fn awaiting(binding: Option<Binding>) -> Self {
+    fn awaiting(binding: Option<Binding>, seated: Timestamp) -> Self {
         Self {
             binding,
             epoch: 0,
             session: None,
             phase: Phase::Quarantined,
             heard: None,
+            seated: Some(seated),
             agent_version: None,
             labels: BTreeMap::new(),
         }
@@ -90,11 +94,13 @@ impl Record {
     }
 
     /// Whether the host has been silent for longer than the grace period and the
-    /// retention together. A host never heard (awaiting) is not.
+    /// retention together, counted from when it was last heard or, for a host never heard
+    /// (awaiting), from when it was seated.
     fn out_of_retention(&self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> bool {
         let kept_for = grace_ms.saturating_add(retention_ms);
         self.heard
-            .is_some_and(|heard| now.millis().saturating_sub(heard.millis()) > kept_for)
+            .or(self.seated)
+            .is_some_and(|since| now.millis().saturating_sub(since.millis()) > kept_for)
     }
 }
 
@@ -143,8 +149,9 @@ struct Shared {
 /// lost-host retention ([`PoolConfig::with_lost_retention`]), also computed when asked:
 /// every call forgets such hosts first, so they stop counting toward the pool's limit.
 /// A host that holds a booking is never forgotten. An awaiting host (seated after a
-/// restart, never heard) has no time to count from, so it is kept, even after its lease
-/// is stopped, until its agent says hello.
+/// restart, never heard) is counted from the time it was seated: once its lease has
+/// ended, it is forgotten after the grace period and the retention have passed since
+/// then, so an agent that never returns does not hold a place until the next restart.
 ///
 /// A call that panics while it holds the mutex leaves the state as the panic left it: a
 /// poisoned mutex is recovered, not propagated.
@@ -313,6 +320,7 @@ impl Registry {
                 session: Some(SessionDigest::of(&secret)),
                 phase: hello.phase,
                 heard: Some(now),
+                seated: None,
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
             },
@@ -490,12 +498,13 @@ impl Registry {
         lease: LeaseId,
         binding: Option<Binding>,
     ) -> Result<(), SeatError> {
-        let mut guard = self.lock();
+        let now = self.shared.clock.now();
+        let mut guard = self.lock_at(now);
         let State { book, records, .. } = &mut *guard;
         match book.seat(host, lease) {
             Err(SeatError::Unlisted(_)) => {
                 book.insert_host(host.clone(), self.shared.config.shape().clone());
-                records.insert(host.clone(), Record::awaiting(binding));
+                records.insert(host.clone(), Record::awaiting(binding, now));
                 book.seat(host, lease)
             }
             settled => settled,

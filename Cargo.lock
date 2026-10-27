@@ -603,6 +603,7 @@ version = "0.1.0"
 dependencies = [
  "js-agent-wire",
  "js-lease",
+ "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",

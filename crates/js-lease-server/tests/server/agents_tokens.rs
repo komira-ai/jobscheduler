@@ -292,3 +292,42 @@ async fn a_token_file_that_cannot_be_read_keeps_the_tokens_in_force() {
     assert!(!text.contains(JOIN), "{text}");
     assert!(!text.contains(JOIN_B), "{text}");
 }
+
+/// Asserts that the hello limit of a token follows the token file: a tick that cannot
+/// read the file keeps every limit, a tick that reads a file without the token drops
+/// its limit, and the token, put back, starts with a full burst while a token that
+/// stayed in the file is still held. It catches a limiter that keeps the bucket of a
+/// rotated-out token for good, one that drops buckets on a failed read, and one that
+/// drops the buckets of tokens still in the file.
+#[tokio::test]
+async fn the_hello_limit_of_a_token_that_left_the_file_is_dropped() {
+    let scratch = Scratch::new("agents_rate_rotation");
+    let mut args = agent_args(&scratch, false);
+    args.extend(
+        [
+            "--agent-hello-burst",
+            "1",
+            "--agent-hello-interval",
+            "3600s",
+        ]
+        .map(Into::into),
+    );
+    let h = Harness::with(scratch, args, None).await;
+    let path = h.scratch.path("agent-tokens");
+    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 200);
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 429);
+
+    fs::write(&path, "\n").unwrap();
+    h.ticks.step().await;
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 429);
+
+    h.scratch.write("agent-tokens", &format!("{JOIN}\n"), 0o600);
+    h.ticks.step().await;
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 401);
+    h.scratch
+        .write("agent-tokens", &format!("{JOIN}\n{JOIN_B}\n"), 0o600);
+    h.ticks.step().await;
+    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 429);
+    assert_eq!(hello_with(&h, JOIN_B, "burst-2").await.status, 409);
+}

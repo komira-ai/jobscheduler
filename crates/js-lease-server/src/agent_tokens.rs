@@ -57,6 +57,15 @@ impl AgentTokens {
         Ok(())
     }
 
+    /// The credentials of the tokens in force.
+    pub(crate) fn credentials(&self) -> Vec<Credential> {
+        let accepted = self.accepted.read().unwrap_or_else(PoisonError::into_inner);
+        accepted
+            .iter()
+            .map(|each| each.credential.clone())
+            .collect()
+    }
+
     /// The credential of the accepted token that `given` is, if it is one. Every accepted
     /// token is compared, in constant time each, whichever matches first.
     pub(crate) fn identify(&self, given: &str) -> Option<Credential> {

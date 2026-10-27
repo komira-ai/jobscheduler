@@ -4,18 +4,23 @@
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use js_lease_server::{SharedClock, StartupError, channel_ticker, start};
 use js_registry::Credential;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, JOIN_B, agent_args, beat, entry, hello_body, hello_with, hosts, join, post, restarted,
-    start_agents,
+    JOIN, JOIN_B, agent_args, beat, entry, hello_body, hello_with, hosts, join, listed, post,
+    restarted, start_agents,
 };
 use crate::support::{
     Harness, LogCapture, Scratch, base_args, config, ids, lease_body, lease_file, replace,
 };
+
+fn secs(n: u64) -> Duration {
+    Duration::from_secs(n)
+}
 
 /// The file of bindings beside the lease file.
 fn agent_file(scratch: &Scratch) -> PathBuf {
@@ -121,6 +126,35 @@ async fn restart_keeps_the_instance_of_a_binding() {
     }
     let own = post(&h, "/v1/agent/hello", Some(JOIN), &body).await;
     assert_eq!(own.status, 200, "{}", own.body);
+}
+
+/// Asserts that an awaiting host whose agent never returns is forgotten once its lease
+/// has ended and a grace period and the retention have passed since the restart that
+/// seated it: it leaves the listing, its binding leaves the agent file at the tick, and
+/// its place in the pool is free for new hosts. Before that it is still listed, bound and
+/// counted. It catches an awaiting host that keeps its record, binding and `max_machines`
+/// slot until the next restart.
+#[tokio::test]
+async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding() {
+    let first = start_agents("agents_awaiting_forgotten", false).await;
+    join(&first, "burst-1").await;
+    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+
+    let h = restarted(first, false).await;
+    let path = agent_file(&h.scratch);
+    h.clock.advance(secs(601));
+    h.ticks.step().await;
+    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
+    assert_eq!(listed(&hosts(&h).await), ["burst-1"]);
+    assert!(fs::read_to_string(&path).unwrap().contains("burst-1"));
+
+    h.clock.advance(secs(86_400));
+    h.ticks.step().await;
+    assert!(listed(&hosts(&h).await).is_empty());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("burst-1"), "{text}");
+    join(&h, "burst-2").await;
+    join(&h, "burst-3").await;
 }
 
 /// Asserts what the file of bindings is: written when a hello admits a host, mode 0600,
