@@ -5,9 +5,10 @@
 //! `BookAll`) unless [`StaticPool::with_classes`] names others, such as `whole-node`
 //! ([`js_types::ResourceClass::whole_node`], admitted `Whole`). In both a lease holds
 //! a whole host, so nothing else runs on it. The pool refuses an admission mode that
-//! does not book a whole host with `UnsupportedClass` rather than leasing a whole host
-//! anyway. A static pool has no agent, so a `Whole` lease is held at once: the table
-//! shows the host quiet and there is nothing to wait for. Its rules, in design terms:
+//! does not book a whole host with `UnsupportedClass` rather than leasing a whole
+//! host anyway. A static pool has no agent, so a `Whole` lease is held at once: the
+//! table shows the host quiet and there is nothing to wait for. Its rules, in design
+//! terms:
 //!
 //! - **Fit (6.1).** A host fits when its shape offers at least the requested
 //!   resources, with the requested GPU class, and reports every required capability.

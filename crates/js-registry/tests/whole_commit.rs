@@ -250,6 +250,71 @@ fn a_restored_whole_booking_is_committed_until_the_agent_reports_ready() {
     assert_eq!(reply.unwrap().exclusive, None);
 }
 
+/// Asserts that a whole-node booking put back on a host that lists held runs is ready,
+/// not committed: the lease reads `Present` and its consumer's run is queued (not
+/// refused `not-ready`), because only a ready lease could have runs on the host. A
+/// host that lists none is committed (the tests above and below). It catches a restart
+/// that refuses the consumer of a ready lease until its runs end.
+#[test]
+fn a_restored_whole_booking_with_live_runs_is_ready() {
+    let fx = whole_fixture();
+    let mut provider = fx.provider.clone();
+    let epoch = fx.join("a", "t");
+    beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
+    provider.seat(&host("a"), lease(1), None).unwrap();
+    let seen = Observed::Present { host: host("a") };
+    assert_eq!(provider.observe(&lease(1)), seen);
+    let reply = beat_with(&fx, "a", epoch, |b| b.held = vec![running("r0")]);
+    assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
+    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+    assert_eq!(queued.unwrap().state, RunState::Queued);
+
+    // The same restore on a host that lists no run is committed.
+    let fx = whole_fixture();
+    let mut provider = fx.provider.clone();
+    let epoch = fx.join("a", "t");
+    beat_with(&fx, "a", epoch, |_| {});
+    provider.seat(&host("a"), lease(1), None).unwrap();
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    let refused = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+    assert_eq!(refused.unwrap_err(), RunRefusal::NotReady);
+}
+
+/// Asserts that a ready report moves only a committed host: a report from a host that
+/// holds no lease (naming another host's lease), a report for a lease that already
+/// reads ready (the same or another id), and a report for a lease that ended each
+/// change nothing, and each heartbeat is answered, not refused. It catches a report
+/// taken for a lease the reporting host does not hold.
+#[test]
+fn a_ready_report_moves_only_a_committed_host() {
+    let (fx, mut provider, epoch) = committed();
+    let other = fx.join("b", "t");
+    let reply = beat_with(&fx, "b", other, |b| {
+        b.exclusive_ready = Some(lease(1).to_string());
+    });
+    assert_eq!(reply.exclusive, None);
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    assert!(!provider.booked().contains_key(&host("b")));
+
+    // Reported again, and for another lease, after it is ready: still ready.
+    report_ready(&fx, epoch, &lease(1).to_string());
+    let seen = Observed::Present { host: host("a") };
+    assert_eq!(provider.observe(&lease(1)), seen);
+    report_ready(&fx, epoch, &lease(1).to_string());
+    let reply = report_ready(&fx, epoch, &lease(9).to_string());
+    assert_eq!(reply.exclusive.as_deref(), Some("1-1"));
+    assert_eq!(provider.observe(&lease(1)), seen);
+
+    // Reported for a lease that ended: the host is restoring, never ready again.
+    provider.stop(&lease(1));
+    let reply = report_ready(&fx, epoch, &lease(1).to_string());
+    assert_eq!(reply.exclusive, None);
+    assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+    let reply = report_ready(&fx, epoch, &lease(1).to_string());
+    assert_eq!(reply.exclusive, None);
+    assert!(provider.booked().is_empty());
+}
+
 /// Asserts that stopping a lease the registry never booked (a whole-node request that
 /// was refused, then released) reads `Absent` and leaves the hosts as they were.
 #[test]

@@ -939,11 +939,13 @@ impl Registry {
         // A restored whole-node booking is committed and not ready: the agent's
         // preparation is in memory only, so it must report ready for this lease again
         // before the lease reads present, a run is queued or the host books to anyone.
+        // A host that lists held runs is ready: only the ready lease could have runs.
         let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
         if let (Ok(()), true) = (&seated, whole) {
             let record = records.get_mut(host);
             record.into_iter().for_each(|record| {
-                record.exclusive = Exclusive::Committed { lease, at: now };
+                let resumed = !record.held.is_empty();
+                record.exclusive = Exclusive::seated(lease, now, resumed);
             });
         }
         seated
