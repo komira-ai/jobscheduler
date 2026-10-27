@@ -1,0 +1,162 @@
+# Decisions D1 to D41
+
+Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and the open ones in full.
+Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
+marked settled. The ids run D1 to D41 with no gaps. D26 and D35 are open. Superseded decisions are marked and say by which decision.
+
+- **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
+  move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
+- **D2. Wire strategy.** (a) dual stack in the daemon; (b) a server-side adapter and a new package with negotiation; (c) edit v1 in
+  place. (c) breaks R3. Recommend (b), daemon switched last and only after the server advertises the package. Registration rides the same
+  package (10.3).
+- **D3. Durable leases across agent restart.** (a) required in v1; (b) not in v1, an agent capability flag. Recommend (b); kbf kills
+  leases with the daemon today. An instance that terminates takes its leases with it, so "leases die with the host" is now the normal case.
+- **D4. Sizing rule for seen work, and the ladder.** R1 says last peak plus buffer; the shipped estimator is a long-window maximum plus 20%
+  and 128 MiB, and `on` mode applies only the kill-driven floor. Options: (a) implement R1 as `SeenRule::LastPeakPlusBuffer` and replay
+  it; (b) keep the shipped estimator behind the generic API and amend R1; (c) both selectable per class. Where "a lease is a node or
+  half a node" lives is settled: it is a level-1 machine lease (9.1). Second part: R1's "next rung above" is implemented as above the *booking*,
+  not above the limit just used (7.4). Options: keep (current behaviour) or move to above-the-limit, which is a behaviour change with its
+  own replay proof and not part of the extraction. Recommend (c) with (a) as the default after a replay supports it, and keeping the
+  ladder as it ships.
+- **D5. ucdk role.** (a) launcher only; (b) infrastructure provider only; (c) both. Recommend (c), launcher first, as an optional
+  realization beside ucdk's direct launcher (11.1).
+- **D6. Fence.** (a) self-fence for everything; (b) the class declares a default (self-fence unless the definition declares hermetic or
+  idempotent) and every request resolves and records its fence at submit, so no default is silent. Recommend (b).
+- **D7. Memory booking for non-kbf classes.** (a) same as kbf; (b) `BookAll` for ucdk job classes, with the declared size as booking and
+  ceiling and history advisory only. Recommend (b); kbf actions keep today's rule.
+- **D8. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
+  (12.3). Recommend yes.
+- **D9. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
+  cloud scheduler role node is dropped in that realization and kept in the direct one (11.2). Recommend yes.
+- **D10. Resources and capability schema.** Named resource vector in v1 with the lease-count cap separate; whole-device GPUs, no fractional
+  GPUs. Capability schema: provider-registered, namespaced keys, unknown request keys refused, unknown report keys skipped. Recommend yes.
+- **D11. Consensus.** The generic core relies on the state store's conditional writes for who places (`crates/kbf-sched/src/scheduler/handoff.rs`), not on a
+  consensus log. `crates/kbf-raft` exists in kbf. Options: (a) the core requires only the store; (b) the core also supports a replicated
+  log. Recommend (a); `kbf-raft` stays in kbf until a second user asks.
+- **D12. Name collision.** jobscheduler's *capacity provider* and ucdk's *Provider* trait are different. Options: rename ours to *source*
+  or *backend*; or keep and always qualify. The ucdk-side adapter lives in ucdk (11.1) and no jobscheduler code names ucdk's trait, so the
+  clash is confined to prose. Recommend keeping "capacity provider" here and writing "infrastructure provider" for the ucdk side; the
+  rename is the owner's option if the prose proves confusing. Inside this repository the merged trait `Provider` is renamed (D16).
+- **D13. Where the state store lives.** `kbf-state` is general (thirteen kbf crates use it, 4.2). Options: (a) move it all into
+  jobscheduler, which widens "kbf depends on jobscheduler" to installer, enrollment and history; (b) move only the trait, fake and
+  conformance suite as `js-state` and keep the SQLite and Postgres backends in kbf; (c) keep it all in kbf behind a neutral crate.
+  Recommend (b).
+- **D14. Fleet scaling (reverses N2). Amended by D38 (no minimum).** Settled by the project owner; recorded here with its reason. N2
+  excluded fleet autoscaling. With no provider that scales its own fleet, nothing else scales a pool: a machine count held by hand is wrong
+  whenever demand moves. So where a pool's hierarchy has an elastic provider, the scheduler has it get and give machines up to the pool's
+  `max_machines` (5.8). What does not change: `crates/kbf-coordinator` still only sets desired versions, and no cost guardrail is added (N4).
+- **D15. Scope of the extracted core.** (a) The core is level 1 only: machines, small, with no per-request placement. (b) Level 1 is the
+  base and per-request placement (`js-sched`, steps 3 to 18) is a consumer of it; kbf is a consumer too. (c) Per-request only, with level 1
+  a client of it. Recommend (b): level 1 is merged and small, ucdk needs per-request launch, status and retries (11), and kbf keeps
+  `kbf-sched` inside its leases until `js-sched` is proven. Steps 3 to 18 are conditional on this.
+- **D16. Names.** (a) Rename the merged `Provider` to `Pool` and `ProviderId` to `PoolId`, delete `Flavour`, and add `CapacityProvider`;
+  (b) keep `Provider` and add `CapacityProvider` beside it. Recommend (a): "provider" now means a capacity provider (3, D12), and two
+  traits that differ by a prefix would be misread.
+- **D17. Scaling policy.** Demand is the leases in `acquiring`, or that plus a look-ahead. `max_step`, `cooldown`, `idle_timeout` and `boot_timeout` are
+  per-pool configuration, unset meaning none (`max_step` defaults to 2). Recommend the simple form of 5.8 and no look-ahead until a trace shows a need.
+- **D18. Self-registration auth.** (a) A per-pool join token; (b) a client certificate per pool, reusing the identity path of
+  `crates/kbf-auth` and `crates/kbf-oidc`; (c) both, chosen per provider. Recommend (a) now, (b) added later without a wire change
+  (R3). For a launched machine, the cloud's signed instance identity (aws), never a secret in the launch template.
+- **D19. Acquire and the table lock.** The merged server calls the provider with the table lock held, so a slow call stalls every
+  request. (a) Asynchronous acquire: the table records `acquiring` and returns, the scaler calls outside the lock, and the result is an
+  event. (b) Keep the synchronous call with a timeout and answer every slow launch Unknown. Recommend (a).
+- **D20. Config format and validation.** One TOML file, `deny_unknown_fields`, validated whole at load, secrets as paths, no reload in
+  the first slice (a restart re-reads it). Alternatives: one file per provider, or YAML. Recommend one TOML file, as `js-pool-static` does.
+- **D21. Who pays cold start. SUPERSEDED by D38.** It offered (a) the queue pays, or (b) `min_machines` idle hosts per pool. There is no
+  `min_machines`: the queue pays, and the wait counts toward `UNSERVABLE_WAIT` (8.2).
+- **D22. Work-session topology.** (a) The agent dials the consumer; (b) the consumer dials the agent; (c) the scheduler relays. Recommend
+  (a): agents only dial out, as the kbf daemon does today (4.4), and the scheduler stays out of the data path.
+- **D23. Machine reuse and release. Option (c) SUPERSEDED by D38.** (a) One machine per job, terminated after it; (b) a machine serves jobs
+  back to back and is released after `idle_timeout`; (c) b plus a floor of idle hosts, which D38 removes. Recommend (b). Reuse is safe because
+  the agent removes the container and scratch and checks the host after every job (5.10, 5.12).
+- **D24. Caps.** (a) `max_machines` only; (b) `max_machines` plus a per-tick `max_step`, bounded to real queued demand; (c) b plus a
+  consumer cap. Recommend (c); the consumer cap is the consumer's own and is not read by the scheduler. This is overload protection, not
+  a cost guardrail, and the earlier ruling against cost guardrails (N4) stands (5.11). D39 adds the per-provider share of `max_machines`.
+- **D25. Isolation and taint.** (a) Every job contained, no host jobs; (b) a job declares `contained` or `host`, a host job taints its
+  machine, the agent checks after every job and taints on any finding, and a tainted machine is replaced or cordoned, never cleared on
+  the agent's word; (c) b, and the scheduler also records the taint itself when it grants a `host_jobs` lease or sends a host `Start`,
+  before the job runs. Recommend (c), host jobs off by default and needing consumer, pool and agent consent (5.12). The scheduler's record is of what it granted, not a check of the host, so it does not depend on an agent that may be compromised; the agent's report is the second path.
+- **D26. macOS VM sizing: fixed or dynamic CPU and memory. OPEN; another engineer is answering it, and the answer is folded in here.**
+  Facts: the virtualization framework fixes a VM's CPU count and memory at creation; a memory balloon can only reclaim memory and give it
+  back, never grow a VM past its configured size; a VM is cloned and booted for each run, so any size can be chosen when the run starts;
+  booted VM memory is committed in full (5.15). (A) **Fixed size classes** declared by the agent; a lease names a class; bookings are a
+  few quantized vectors; a job larger than the largest class cannot use a VM and a small job pays for a class. (B) **Sizing per run**: the
+  lease states CPUs and memory and each run's VM is created at the size it needs, within the lease's booking; bookings are arbitrary, so
+  packing matters more (6.5). The trade-off is the boot cost per run, which neither option changes. The wire carries the VM's size under
+  both, and the lifecycle, the channel and the integrity rules do not change; only the size fields (step 43) wait. No recommendation
+  until the answer arrives; detail in [vm-backend.md](vm-backend.md).
+- **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
+  `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
+  scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
+- **D28. Runtime traits for VMs.** (a) Widen `ContainerRuntime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
+  internal `Sandbox` seam; (c) a second lifecycle. Recommend (b): the stages, channel, destroy and restart rules differ, (a) forces optional
+  parts on every backend and changes merged code, and (c) writes the cleanup order, results and slot accounting twice (5.14).
+- **D29. VM reuse. Settled by the project owner:** a fresh VM for each run, cloned from its base image and destroyed after the run; a lease
+  may hold several runs and never reuses a VM between them. Rejected: reverting a used VM to a snapshot or cleaning it in place, because
+  what remains of a guest after a job cannot be shown to be clean; destroying it can. The cost is a boot per run, which D26 weighs.
+- **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has confirmed
+  that no VM is running and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test
+  start beside a booted VM, and the token gate needs no change in an older client (5.15).
+- **D31. Matching what is inside an image.** (a) The consumer names the image and constrains `base_images has <name>`; (b) each image has a
+  profile and a `guest` scope matches when one image meets all the guest constraints. Recommend (b), with (a) always available: Xcode and
+  runtimes are properties of the image the VM boots, and a consumer should ask for what it needs, not memorise image names (5.13).
+- **D32. GPU placement. Settled by the project owner; amended by D35.** GPUs exist only on the Mac Studio machines of the GPU pool (two
+  today). Their shape declares `gpu_class = "apple-m"` and `gpus = 1`; a GPU request (`gpus > 0` or a `gpu_class` constraint) is
+  satisfiable only by that pool. It queues when its registered hosts are busy, with no acquire made for it, and (D35) is refused with
+  `no-capable-host` when no registered GPU host could ever serve it. The whole-host GPU lease service (class `gpu-host`, `BookAll`) is the
+  only GPU path; its hosts register through `js-agent` (D36); a VM gets no GPU; container GPU jobs on Linux are not a current use
+  ([capabilities.md](capabilities.md)).
+- **D33. Deployment shape and state store. Direction settled by the project owner; the store is chosen here.** The target is one service in
+  Kubernetes (scheduler, lease API, agent API) with kbf as a client and `js-agent` registering with it; the single-host `js-lease-server`
+  is the stepping stone. State: (a) the lease file and the binding file on a volume, one writer; (b) an external store with conditional
+  writes. Recommend (a): it is the merged persistence with its crash-safety rules (atomic replace, commit before act, the lock, fail-closed
+  boot, observe once) unchanged; the table is small; there is nothing more to operate. (b) when the service must survive a node or zone
+  loss without a minutes-long outage, when the rewrite shows (K29), or when a second replica is wanted. One replica under `Recreate`
+  (5.16, [deployment.md](deployment.md)).
+- **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
+  (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
+  Recommend (b), the grace set to the default TTL (step 49).
+- **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. OPEN, for the project owner.**
+  The question is what a `DefaultProvider` pool does with a request its registered hosts cannot serve right now. (a) **Refuse only when no
+  registered host could ever satisfy the request's constraints and shape** (a host that exists, is not tainted and is merely busy, lost or
+  cordoned is capable); the request is refused at submit with `no-capable-host` unless an elastic provider of the pool could launch a
+  machine that meets it; when a capable host exists but is busy, the request waits in the queue. (b) **Refuse whenever no host is free
+  now.** Recommend (a): (b) turns an ordinary busy fleet into errors and moves the queue into every caller (two requests for the one GPU
+  host would refuse the second), while (a) refuses exactly the requests that no amount of waiting serves. A queued request whose last
+  capable host leaves keeps waiting for `regain_grace` before it is refused (D41). The owner's answer picks (a) or (b); under (b) the
+  `no-capable-host` check is replaced by "no free capable host and nothing in flight or launchable" and `regain_grace` goes away. Text in
+  [providers.md](providers.md).
+- **D36. The static pool is for testing only. Settled by the project owner.** Operator-listed hosts are a test provider: `js-pool-static`
+  stays for tests and conformance, a production configuration declares none (`--allow-test-providers` gates it), and every production host
+  registers through `js-agent`. The single-host GPU lease service's operator-listed pool (`--pool-config`) is the stepping stone: its two
+  machines move to running `js-agent` and registering with a `default` provider (step 54), after which the file is retired. Until then it
+  keeps working unchanged.
+- **D37. The default provider and elastic registration. Direction settled by the project owner; the details are chosen here.** (a) The
+  `default` kind (`DefaultProvider`) is the hosts that registered themselves; it never creates or destroys compute, has no acquire and no
+  release, and its core is the merged `RegisteredProvider`. (b) An elastic provider's `acquire` boots a machine running `js-agent`, which
+  registers itself with the cloud's signed identity; the provider's job ends at boot plus registration (or failure or timeout), and
+  `release` terminates. A registered elastic host is an ordinary host. Alternative for (b): the provider hands the scheduler a ready host
+  and registers it on the agent's behalf; rejected, because the agent's own hello is the one proof that it is up and reachable, and the same
+  admission then holds for every host. Recommend (a) and (b) as stated.
+- **D38. No minimum machines, anywhere. Settled by the project owner; supersedes D21 and D23(c).** `min_machines` is removed: from the
+  schema, validation, scaling rules, the simulation invariants, the examples and the risk mitigations. A pool specifies `max_machines`
+  only; nothing is kept warm; the queue pays the cold start, and a pool of elastic entries is empty when idle. A file that names `min_machines`
+  or `min` is refused with a message saying so (5.7).
+- **D39. A provider hierarchy. Direction settled by the project owner; the rules are chosen here.** A pool lists providers in order and takes
+  capacity from the first that can satisfy; the default order is `default`, then the elastic provider. Options for "can satisfy now": (a) a
+  free capable host, else (for an elastic entry) an acquire possible under its caps; (b) as (a) but a busy earlier host makes the request
+  wait for it rather than fall through. Recommend (a), as the owner described: "falling through only when the earlier ones cannot
+  satisfy" with a busy host not satisfying now; (b) would make a burst wait behind a long job while cloud capacity is available. Two passes
+  (free host anywhere first, then acquire in the first entry that can) so no machine idles while another is launched. The hierarchy is
+  per pool, and a class that needs one order across shapes gives its pools the same list. `max_machines` is the pool's total; an optional
+  `provider_max_machines.<name>` bounds one provider's share. Text in [providers.md](providers.md).
+- **D40. A host frees while a later entry's machine is booting.** (a) Release the booting machine; (b) keep it and let the idle rule
+  release it. Recommend (b): the acquire was recorded before the call and is already paid for, a terminate mid-boot can read back Unknown,
+  and the next burst would launch again after a `cooldown`; keeping it bounds the waste to one boot plus one `idle_timeout`, and
+  requests queued meanwhile use it. The waiting request goes to the freed host at once (providers.md).
+- **D41. What counts as capable, and queued requests when capability goes.** Capable: in the host table, not tainted, not denied, not
+  draining, not `releasing`, total shape and facts meeting the request. Busy, lost (inside the retention window), cordoned and quarantined
+  hosts are capable; **tainted hosts are not**, because a taint ends only by an operator reimaging the machine, an unbounded human wait. A
+  queued request whose last capable host leaves (and no elastic provider could serve it) waits `regain_grace` (default 5 minutes on the
+  injected clock) and is then refused with `no-capable-host`; a new submission gets no grace. Alternatives: refuse at once (a routine agent
+  restart would refuse every queued request), or wait for ever (a wait nobody can end). Recommend the grace.

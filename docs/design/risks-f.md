@@ -1,4 +1,4 @@
-# Risks K19 to K31
+# Risks K19 to K34
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -31,3 +31,14 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   and a Secret volume's files are owned by root. Mitigated by dropping every capability, no privilege escalation, a read-only root
   filesystem, a runtime-default seccomp profile, user namespaces where the cluster has them, and no service account token. A change to
   the server that accepts a root-owned file on a read-only mount would remove the exposure; it is not proposed here.
+- **K32. A refusal turns a flapping host into an error.** `no-capable-host` (D35) is final for the caller. A registered host that restarts
+  or is briefly tainted could, with no grace, refuse requests that a moment later would have served. Mitigated by counting lost and busy
+  hosts as capable, `regain_grace` for requests already queued (D41), and a plain constant code so a caller can retry. Residual: a new
+  submission during a restart of the only capable host is refused. If the owner chooses the other reading of D35, this risk becomes the
+  opposite one: a busy fleet refuses work.
+- **K33. A booting machine is kept after the demand that launched it went.** A host freed while a later entry's machine boots (D40) leaves a
+  machine nobody asked for. The waste is bounded to one boot plus one `idle_timeout`, and `cooldown` stops a loop of launching. Mitigated by
+  the idle rule, `max_machines` and the shares in `provider_max_machines`.
+- **K34. The test provider reaches production.** A `static` provider lists hosts by hand and holds no join credential. Mitigated by the
+  `--allow-test-providers` flag, which a production deployment does not set, and by a layering test that no production example names the
+  kind; the merged `--pool-config` path is the stepping stone until step 54.

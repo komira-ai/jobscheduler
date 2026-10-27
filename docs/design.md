@@ -45,11 +45,13 @@ The decisions, in one place:
 2. **One kind of thing runs work: an agent on a machine.** `js-agent` is the generic half of the kbf daemon: it says hello with
    capacity, labels and GPUs, heartbeats, and runs and stops containers. Capacity providers do not run work; they get machines, and a
    machine runs `js-agent`. There is one call shape (5.2).
-3. **Providers get machines; pools are declared in configuration.** A capacity provider (static, aws, later others) offers
-   `acquire(shape)`, `release`, `list` and `observe`. The scheduler's configuration declares providers and pools (provider, shape,
-   `min_machines`, `max_machines`, labels); a consumer picks pools by class and labels; a new provider is a new crate behind the trait (5.5, 5.7).
-4. **Scaling a pool is the provider's job.** The scheduler asks a pool's provider for machines between the pool's `min_machines` and `max_machines` and gives
-   them back after an idle time (5.8). This reverses the former non-goal of fleet autoscaling (D14).
+3. **Providers get machines; pools are declared in configuration.** A capacity provider (`default`, aws, later others; `static` for tests
+   only) offers `acquire(shape)`, `release`, `list` and `observe`. The configuration declares providers and pools (an ordered list of
+   providers, shape, `max_machines`, labels); a consumer picks pools by class and labels; a new provider is a new crate (5.5, 5.7).
+4. **Machines register themselves; capacity comes from an ordered hierarchy.** Every host runs `js-agent` and registers: the
+   `DefaultProvider` is the hosts that registered and never creates or destroys compute; an elastic provider boots a machine whose agent
+   then registers like any other. A pool lists providers in order and takes capacity from the first that can satisfy; it specifies only
+   `max_machines`, and nothing is kept warm (5.8, [design/providers.md](design/providers.md)). Scaling reverses the former non-goal (D14).
 5. **Two-level leasing.** The scheduler leases machines to a consumer for a TTL; the consumer places its work inside its leases and makes
    no scheduler call per action (9.1).
 6. **Absence has three answers, not two.** A thing is present, absent (observed gone) or unknown (could not be observed). Only "absent"
@@ -83,6 +85,9 @@ The decisions, in one place:
     satisfiable only there (D32, [design/capabilities.md](design/capabilities.md)).
 18. **One service in Kubernetes.** The target is one jobscheduler service (scheduler, lease API, agent API) with a single writer on a
     volume; kbf is a client and `js-agent` registers with it. The single-host `js-lease-server` is the stepping stone (5.16, D33).
+19. **The operator-listed pool is for testing; a request no host could ever serve is refused.** Production hosts register. A request
+    that no registered host (and no elastic provider) could ever satisfy is refused with `no-capable-host`; one a busy host could serve
+    waits (D35, open; [design/providers.md](design/providers.md)).
 
 ### 1.1 What this amendment deletes and adds
 
@@ -95,10 +100,10 @@ standing cloud credential" rule of 11.1, and D1 as an open question; the kbf his
 Added: the capacity-provider interface and the `static` and `aws` kinds (5.5); standing cloud access for the aws provider, the role it
 assumes (K7, 12.4); `js-agent` as the one runner, with self-registration, per-pool join credentials and admission (5.4, 5.8, D18), and
 `kbf-executor` beside it (9.2); two-level leasing and the `acquiring` state (9.1); config-driven providers and pools (5.7); pool scaling
-between `min_machines` and `max_machines` (5.8); machine reuse, `max_machines` caps with a per-tick `max_step` and a consumer's own cap, and
+up to `max_machines` (5.8); machine reuse, `max_machines` caps with a per-tick `max_step` and a consumer's own cap, and
 the `contained`/`host` isolation with post-job checks and taint (5.10 to 5.12, [design/machines.md](design/machines.md)); the mapping of
 the merged crates (5.9); the fake aws and the fake agent's taint paths (13.1); steps 27 to 35 (with 30b and 31b), decisions D14 to D25
-and risks K8 to K18. The pool keys `min` and `max` are renamed `min_machines` and `max_machines`.
+and risks K8 to K18. (That amendment named the pool keys `min_machines` and `max_machines`; the last amendment below keeps only `max_machines`.)
 
 Added by the capabilities amendment: typed capabilities, a constraint language and refusal codes (5.13,
 [design/capabilities.md](design/capabilities.md)); a VM backend in `js-agent` with a fresh VM per run, the guest channel and VM integrity
@@ -108,6 +113,15 @@ decisions D26 to D31 (D26 open); risks K19 to K27. Text moved to companions to k
 Added by the refinement that followed: a fresh VM per run, the warm pool left as future work in [design/vm-backend.md](design/vm-backend.md);
 GPUs only on the GPU pool (D32); one service in Kubernetes: objects, state store, high availability, upgrades and the move from the single
 host (5.16, [design/deployment.md](design/deployment.md)); step 45 (now several runs per lease) and steps 48 to 53; D32 to D34; K28 to K31.
+
+Added by the amendment after that (the owner's review of this design), text in [design/providers.md](design/providers.md): the `static`
+pool, whose hosts the operator lists, is **for testing only**, and the GPU machines move to registering through `js-agent` (5.5, 5.9); a
+`default` provider (the `DefaultProvider`: hosts that register themselves, never creating or destroying compute), with admission against
+registered hosts that refuses a request no host could ever serve with `no-capable-host` and queues one a busy host could serve (D35,
+open); elastic providers whose launched machine runs `js-agent` and registers itself, the provider's job ending at boot plus registration;
+a per-pool **provider hierarchy**, an ordered list that falls through only when an earlier entry cannot satisfy now (5.8); steps 30c, 31c and
+54; D35 to D41; K32 to K34. Deleted: `min_machines` everywhere (the key, its validation, the scaling rule that kept a floor, the floor
+choice of D21 and D23(c), the mitigation in K11): pools specify `max_machines` only, and nothing is kept warm. The `register = true` provider flag becomes the `default` kind.
 
 ## 2. Goals and non-goals
 
@@ -122,7 +136,7 @@ Goals:
 - G5. A request history that sizes repeat work and survives kills without hiding them.
 - G6. A durable run record for every submitted job before the submit call returns.
 - G7. Lease limits that make a runaway job bounded in time (a required wall time and a fence), without changing kbf farm work.
-- G8. A pool's machine count is its provider's job: the scheduler scales it between the pool's `min_machines` and `max_machines` (5.8).
+- G8. A pool's machine count, where its providers can launch, is the scheduler's to scale up to `max_machines`, with no floor (5.8).
 - G9. Providers and pools are configuration; a new provider is a new crate behind the trait (5.7).
 
 Non-goals:
@@ -151,11 +165,15 @@ Non-goals:
 - **Agent.** The process on a machine that runs work: `js-agent`. It dials out, says hello, heartbeats, and runs and stops containers
   (5.2, 5.4). The kbf daemon is the model.
 - **Host.** A machine with an agent, belonging to one pool.
-- **Capacity provider.** A driver that gets machines for a pool: it launches and terminates them, or lists ones an operator owns. Kinds:
-  `static`, `aws`, later `gcp`, `k8s`, `vsphere`, `proxmox`, bare metal (5.5). It never runs work. Plain "provider" in this document
-  means a capacity provider.
+- **Capacity provider.** A driver that supplies a pool's machines. Kinds: `default` (hosts that registered themselves; creates nothing),
+  the elastic kinds that launch and terminate machines (`aws`, later `gcp`, `k8s`, `vsphere`, `proxmox`), and `static` (listed hosts, for
+  tests only) (5.5). It never runs work. Plain "provider" in this document means a capacity provider.
+- **DefaultProvider.** The `default` kind: the hosts that registered themselves with the scheduler. It never creates or destroys compute.
+  **Elastic provider:** a kind whose `acquire` boots a machine that runs `js-agent` and registers itself.
+  **Hierarchy:** a pool's ordered list of providers; capacity is taken from the first that can satisfy (5.8).
+  **Capable host:** a registered host that could serve a request once free (providers.md).
 - **Shape.** What one host offers: a resource vector plus capabilities (and GPU facts). A pool has one shape.
-- **Pool.** Declared in configuration: a provider, a shape, `min_machines` and `max_machines` hosts, and labels (5.7). The scheduler books hosts from pools.
+- **Pool.** Declared in configuration: an ordered list of providers, a shape, a `max_machines` count of hosts, and labels (5.7). The scheduler books hosts from pools.
 - **Isolation.** What a job declares in `StartSpec`: `contained` (a container with the message's limits; the default) or `host` (it may
   change the machine). **Tainted:** a host that ran a host job or failed a post-job check; it takes no new work and is replaced (5.12).
   **Idle time:** how long a host holds no lease and no job before it is released (`idle_timeout`, 5.10).
@@ -206,7 +224,8 @@ Three things take part, and each has one job.
 
 - The **agent** (`js-agent`) runs on a machine. It dials out, says hello, heartbeats, and runs and stops containers. It is the only thing
   that runs work (5.2, 5.4).
-- A **capacity provider** gets machines: it launches and terminates them, or lists the ones an operator owns. It never runs work (5.5).
+- A **capacity provider** supplies machines: the `default` provider is the hosts that registered themselves, an elastic one launches and
+  terminates them and the machine registers itself. It never runs work (5.5).
 - A **pool** is the scheduler's view of the machines of one provider that fit one shape: its hosts are the machines whose agents have said
   hello. The lease table books hosts from pools (5.9).
 
@@ -330,12 +349,14 @@ What the agent trusts, and who trusts it:
   (which feeds sizing). It cannot obtain another host's lease token, join another pool or hold storage credentials.
 
 ### 5.5 Capacity providers
-A capacity provider gets machines for a pool. It does not run work and never sees a request. A sketch, not a final signature; calls are
-async at the edge:
+A capacity provider supplies machines for a pool. It does not run work and never sees a request. A sketch, not a final signature; calls
+are async at the edge:
 
 ```rust
 trait CapacityProvider {
     fn id(&self) -> ProviderId;                              // stable value; the scheduler never branches on its kind
+    fn can_launch(&self) -> bool;                            // false for `default` and `static`: the scheduler never calls acquire on them
+    fn verify_instance(&self, hello: &Hello) -> Option<InstanceId>; // elastic kinds: match a hello to a launched instance (5.8)
     async fn acquire(&self, a: AcquireSpec) -> AcquireAck;   // Accepted{instance} | Refused(code) | Unknown
     async fn release(&self, i: &InstanceId) -> ReleaseAck;   // terminate, then read back
     async fn list(&self, scope: Scope) -> Vec<Instance>;     // by pool or labels; for reaping and re-adoption
@@ -350,8 +371,9 @@ Semantics, each with a conformance case (13.2):
 
 - **Idempotent on the acquire id.** A second `acquire` with the same id answers `Accepted` with the same instance and launches nothing.
   The instance carries the acquire id as a tag.
-- **`Accepted` means launched, not ready.** The host joins its pool when its agent says hello (5.8). Until then the instance is
-  `registering` (5.3) and counts toward the pool's `max_machines` from the moment its intent is recorded (5.11).
+- **`Accepted` means launched, not ready.** The machine's own `js-agent` registers it: the host joins its pool when the agent says hello
+  with proof that matches the acquire (`verify_instance`, 5.8). The provider's job ends at that hello, or at failure or timeout. Until
+  then the instance is `registering` (5.3) and counts toward the pool's `max_machines` from the moment its intent is recorded (5.11).
 - **`Refused(code)`** is a plain constant: `quota`, `capacity`, `shape`, `denied`. It is an answer. A cloud's quota error is reported
   here and is the platform's limit speaking; jobscheduler adds none (N4).
 - **`Unknown`** is no answer (timeout, reset, throttle). It never launches a second instance and never frees one (5.6).
@@ -373,15 +395,17 @@ Semantics, each with a conformance case (13.2):
 | `observe` | `Present(state)`; `Absent`; `Unknown` | Absent of an instance that held a lease is host-lost (5.6). Unknown changes nothing. |
 | `list` | instances, or an error | An error is not an empty list: the reaper does nothing on an error. |
 
-**Kinds.** The first two:
+**Kinds.** Three, fully in [design/providers.md](design/providers.md):
 
 | Kind | `acquire` | `release` | `list` / `observe` | Identity of an instance |
 |---|---|---|---|---|
-| `static` | Claims a free host of the inventory that fits the shape: a host the operator lists, or one that registered itself (5.8). Launches nothing and answers at once. | Returns the host to the inventory. The machine is untouched. | The inventory. `observe`: Present while heard; Unknown on silence; Absent only on operator removal or an explicit deregister. | the host id |
+| `default` | `Refused(capacity)`: it creates nothing and is never asked. Hosts register themselves (5.8); the `DefaultProvider` is the core of the merged `js-registry` (5.9). | Terminates nothing; a host leaves by deregistering, removal or age-out. | The host table. `observe`: Present while heard; Unknown on silence; Absent only on explicit deregister or operator removal. | the host id |
+| `static` (**testing only**) | As `default`, over hosts the operator lists in the file. Production configurations declare none. | As `default`. | The listed hosts; the same observe rule. | the host id |
 | `aws` | `RunInstances` from a launch template with the shape's instance type, in the pool's subnets, with the acquire id as the idempotency token and the tags of 12.3. The role's scope is in 12.4. | `TerminateInstances`, then `DescribeInstances` by id. | `DescribeInstances` filtered by tag; by id. A not-found or a terminated state is `Absent`; a throttle or an API error is `Unknown`. A spot reclaim is `Absent` with a reason. | the instance id and its tags |
 
-Later kinds are named only, each a crate behind the trait: `gcp`, `k8s` (pods as machines, or nodes through a cluster autoscaler),
-`vsphere`, `proxmox`, and bare metal (a static inventory with power control). None is designed here.
+`aws` is an elastic provider: it boots a machine that runs `js-agent`, which registers itself, and the machine is then an ordinary host of
+the pool (5.8). Later elastic kinds are named only, each a crate behind the trait: `gcp`, `k8s` (pods as machines, or nodes through a
+cluster autoscaler), `vsphere`, `proxmox`, and bare metal with power control. None is designed here.
 
 ### 5.6 Failure and absence semantics
 Text in [design/absence.md](design/absence.md). A thing the scheduler holds (a lease on an agent, derived from the heartbeat stream; an
@@ -395,19 +419,20 @@ The scheduler is configured by one file named by a flag (`--config`; R4), in the
 unique names). Every value is configuration; none is compiled in. A secret is a path to a file, never a value. The one environment
 exception is the cloud's own credential chain (`AWS_*`, ambient role credentials), which R4 permits as a provider-standard variable.
 
-A full example (shapes, a static provider with listed hosts, a registering one, an aws provider, and pools of each) and the section of
+A full example (shapes, a `default` provider, an aws provider, pools with a hierarchy, and a test-only static provider) and the section of
 kbf's own file that maps its classes to pool selectors are in [design/configuration.md](design/configuration.md). A consumer picks pools
-in its own configuration, never the scheduler's. A pool is `name`, `provider`, `shape`, `class`, `labels`, `min_machines`, `max_machines`,
-`max_step`, `idle_timeout`, `cooldown`, `boot_timeout`, `max_boot_failures`, `max_taints_in_a_row`, `allow_host_jobs` (default false) and,
-for a registering pool, `join_token_file`.
+in its own configuration, never the scheduler's. A pool is `name`, `providers` (the ordered hierarchy; `provider` is shorthand, 5.8),
+`shape`, `class`, `labels`, `max_machines`, `provider_max_machines`, `max_step`, `idle_timeout`, `cooldown`, `boot_timeout`,
+`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
 
 Rules, enforced when the file loads and refused with the key and the line:
 
-- Unknown keys are refused. Provider, shape and pool names are unique. A pool names an existing provider and shape. `min_machines <= max_machines`;
-  `min_machines` defaults to 0 and `max_step` to 2 (at least 1, at most `max_machines`). A pool of a launching provider (aws and later
-  kinds) or of a self-registering one must set `max_machines`, which is at least 1; a pool of a static provider that lists hosts defaults it
-  to the hosts listed and may not exceed them. A
-  provider of a kind the binary lacks is refused. The old keys `min` and `max` are refused with a message naming the new keys.
+- Unknown keys are refused. Provider, shape and pool names are unique. A pool names existing providers (each at most once) and an existing
+  shape. **There is no `min_machines`:** the key, and `min`, are refused with a message saying a pool specifies `max_machines` only. A
+  pool must set `max_machines`, at least 1, unless its providers are all `static` (test only), when it defaults to the hosts listed and may
+  not exceed them. `provider_max_machines` names providers of the pool, each at most `max_machines`. `max_step` defaults to 2 (at least 1,
+  at most `max_machines`). A `static` provider in a file without the `--allow-test-providers` flag is refused. A
+  provider of a kind the binary lacks is refused.
 - A provider with `enabled = false` loads, and its pools take no leases. A key that holds a secret (`token`, `secret`, `password`) takes a
   path; an inline value is refused.
 - **The core names no provider kind.** A kind registers a constructor (`kind` string to a function that builds a `CapacityProvider` from its
@@ -415,44 +440,63 @@ Rules, enforced when the file loads and refused with the key and the line:
   below the binary names `aws` or any other kind (10.1).
 - Adding a key is additive (R3). A scheduler reads an older file unchanged.
 
-The merged `--pool-config` file keeps working: it is a configuration with one implicit `static` provider, one pool of class `gpu-host` and
-the listed hosts, until a `--config` file is given (5.9).
+The merged `--pool-config` file keeps working as a **stepping stone**: it is a configuration with one implicit `static` provider, one pool
+of class `gpu-host` and the listed hosts, until a `--config` file is given (5.9). It is the operator-listed pool of the test provider, and
+it goes away when the GPU machines run `js-agent` and register (step 54). The `--allow-test-providers` gate applies to a `--config`
+file; the merged `--pool-config` path needs no new flag until then.
 
 ### 5.8 Pools: scaling and registration
 **Membership.** A host belongs to exactly one pool. It joins when its agent's hello is admitted (registration.md) and leaves only by `release`
-reading back Absent (5.6), or, for a static host, when the operator removes it.
+reading back Absent (5.6), or, for a `default` host, when its agent deregisters or the operator removes or denies it.
 
-**Scaling.** Scaling the machine count of a pool is its provider's job; the scheduler decides when to ask. The pool scaler runs in `tick`
-(12.1) with an injected clock (13.5), so a seeded run scales deterministically. Per pool, each tick:
+**The hierarchy.** A pool has an ordered list of providers, `providers`, and takes capacity from the first that can satisfy. The default
+is the `default` provider (registered hosts), then the elastic provider. The scheduler first uses any free capable host, in hierarchy
+order; only when none exists and none is booting does it ask the first elastic entry that *can satisfy by acquiring* (an acquire is
+possible under its `provider_max_machines` share and the pool's `max_machines`, and it is enabled and not cooling down) to launch a machine.
+"Cannot satisfy now" means exactly: no free capable host, and no acquire possible. A busy registered host does not satisfy a request now,
+so the request falls through to the elastic entry; with every entry exhausted it waits (8.2). If a host frees while a later entry's
+machine is booting, the request goes to the freed host and the booting machine is kept and released by the idle rule. The rules, the
+caps, the admission of a request against registered hosts (D35) and the elastic-registration flow are in
+[design/providers.md](design/providers.md).
 
-- *Acquire.* Let `demand` be the leases in `acquiring` that no free host, no host about to be freed and no `registering` instance can
-  serve (queued work that fits is placed first, 5.10), and `have` the hosts plus the instances in flight. Acquire
-  `max(min_machines - have, demand - inflight)` instances, at most `max_step`, and never beyond `max_machines`, which counts every machine
-  the pool owns including in-flight acquires and tainted hosts (5.11); every acquire has a fresh acquire id. Demand is in machines' worth
-  of the shape (once share leases land, in shape-fits, not instances). A `Refused` starts a `cooldown` for the pool.
+**Scaling.** Scaling a pool that has an elastic entry is the scheduler's decision and the provider's act; a pool of `default` hosts only
+is not scaled (it creates and destroys nothing). **Nothing is kept warm: there is no minimum, and a pool holds zero machines of an elastic
+entry when idle.** The pool scaler runs in `tick` (12.1) with an injected clock (13.5), so a seeded run scales deterministically. Per
+pool, each tick:
+
+- *Acquire.* Let `demand` be the leases in `acquiring` that no free capable host in any entry, no host about to be freed and no `registering`
+  instance can serve (queued work that fits is placed first, 5.10), and `inflight` the instances being launched. Acquire
+  `demand - inflight` instances, in the entry chosen by the hierarchy, at most `max_step`, and never beyond `max_machines`, which counts
+  every machine the pool owns including in-flight acquires and tainted hosts (5.11); every acquire has a fresh acquire id. Demand is in
+  machines' worth of the shape (once share leases land, in shape-fits, not instances). A `Refused` starts a `cooldown` for that entry.
 - *Boot timeout.* An instance still `registering` after `boot_timeout`, or lost before its first hello, is released and reaped, and
   counts as an acquire failure: the pool backs off exponentially from `cooldown` and, after `max_boot_failures` in a row, stops acquiring
   and raises an alert until the owner clears it (a failure brake, not a cost limit). Its leases, if any, stay `acquiring`.
-- *Release.* A host with no lease and no running job, not cordoned, not draining and not tainted, idle for `idle_timeout` (the one idle
-  delay, 5.10), while the pool holds more than `min_machines`, is released, and is not re-acquired within `cooldown`. A tainted host
-  with no lease is released at once (cloud) or stays cordoned (static, 5.12). Selecting it moves it to `releasing` under the table lock in the same step; a
+- *Release.* An **elastic** host with no lease and no running job, not cordoned, not draining and not tainted, idle for `idle_timeout`
+  (the one idle delay, 5.10), is released, and its entry is not re-acquired within `cooldown`. A registered `default` host is never
+  released: the scheduler did not create it. A tainted elastic host with no lease is released at once; a tainted `default` host is
+  refused at hello and stays out until an operator clears it (5.12). Selecting an elastic host moves it to `releasing` under the table lock in the same step; a
   `releasing` host takes no new leases, and a host with a lease committed first is not selected. A failed or Unknown release leaves it
   `releasing` and is retried; it serves again only if a read-back says Present after a `Refused`. Ranking packs onto the fewest hosts
   (`FirstFit`, 6.5) so that idle hosts exist.
-- *Static pools* do not launch. `min_machines` and `max_machines` then bound how many inventory hosts the pool claims; an idle claimed host is returned to the inventory by the Release rule, above `min_machines`.
+- *`default` and `static` providers* launch nothing; they have no acquire and no release. The `static` kind is for tests only.
 
 `max_machines` and `max_step` are overload protection, not cost guardrails (5.11). A pool at `max_machines` with a request no host can fit
-is unservable (8.2). Cold start is paid by the queue unless the owner sets `min_machines` above zero (D21). Reuse, caps and taint: 5.10 to 5.12.
+is unservable (8.2). Cold start is paid by the queue (D38). Reuse, caps and taint: 5.10 to 5.12.
 
-**Registration.** A machine may join a pool by saying hello, so that nothing needs listing in advance. The rules (identity, admission
-with the tainted-set check, join credentials and the deny file, aws instance identity, lifecycle, and the registered-agent source) are in
+**Registration.** Every host registers: a machine says hello, so that nothing needs listing in advance, and a machine an elastic provider
+launched registers itself the same way, with the cloud's signed identity instead of a join token. The rules (identity, admission with the
+tainted-set check, join credentials and the deny file, instance identity, lifecycle, and the `default` provider's source) are in
 [design/registration.md](design/registration.md). Proof of admission travels with the hello in message metadata, never in a log line.
 
 ### 5.9 The merged code and what it becomes
 The merged slice is a GPU-host lease service: the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
 on a TTL, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
 on `main` launches or terminates a machine, and there is no agent wire. The GPU-host service keeps working through every follow-up; each
-change below is additive and leaves the `--pool-config` file, the routes and the lease file readable.
+change below is additive and leaves the `--pool-config` file, the routes and the lease file readable. The operator-listed pool behind that
+file is a stepping stone: `js-pool-static` stays as the `static` test provider, and the GPU machines move to running `js-agent` and
+registering with a `default` provider (step 54). `RegisteredProvider` (`js-registry`) is the core of the `DefaultProvider`, and
+`LayeredProvider`'s fixed order (static, then registered) becomes the configured hierarchy ([design/merged-code.md](design/merged-code.md)).
 
 The map of each merged item to what it becomes, with the follow-up step, is in [design/merged-code.md](design/merged-code.md).
 
@@ -584,7 +628,8 @@ account is in [design/retries-and-runs.md](design/retries-and-runs.md).
 Before a lease a request is *Queued* (waiting for capacity or fit). For a pool that scales, Queued includes waiting for a host to boot: the
 lease table shows the machine lease as `acquiring`, and no separate request phase exists for it. Then Leased, Running, and Completed,
 Failed or Refused (4.1). Queued time, boot included, counts toward `UNSERVABLE_WAIT`; a pool at `max_machines` with no host that fits the request
-is unservable. There is no Held phase: it would exist only for tenant caps and budgets, which jobscheduler does
+is unservable. A request no host of the pool (and no elastic entry) could ever serve is not queued at all: it is refused with
+`no-capable-host` (D35). There is no Held phase: it would exist only for tenant caps and budgets, which jobscheduler does
 not have (N4). A start-contract failure (12.1) is a refusal at submit, and the request is never queued.
 
 ### 8.3 Run records
@@ -673,11 +718,12 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 |---|---|---|
 | `js-types` (merged) | generic half of `crates/kbf-types` | `Resources` as a named vector plus the separate lease-count cap, ids, `ResourceClass`, `Shape`, labels; later farm time, `Qos`, `NodePhase`, `StateMachine`, `Effect`, control record |
 | `js-provider` (merged) | new | merged as `Provider`; becomes `Pool` and gains `CapacityProvider` at step 23 (5.5, 5.9); `StartSpec` and its rules |
-| `js-pool-static` (merged) | new | the static pool of listed hosts; becomes the `static` capacity provider and gains registered hosts (5.7, 5.8) |
+| `js-pool-static` (merged) | new | the pool of operator-listed hosts; kept as the `static` capacity provider, **for tests only**, and as the stepping stone of the GPU lease service (5.7, 5.9) |
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
 | `js-lease` (merged) | new | the lease table: states, TTL, reaper, lease file; gains `acquiring` and the pool name (5.9) |
-| `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; gains registration and the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
+| `js-registry` (merged) | new | the registered hosts: `RegisteredProvider` is the core of the `DefaultProvider` (5.5, providers.md) |
+| `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; `LayeredProvider` (static, then registered) becomes the configured hierarchy; gains the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
@@ -768,7 +814,9 @@ A test checks the policy document the provider documents against it.
 ### 13.1 Fake providers
 The merged `js-provider-fake` becomes the fake capacity provider, a fake aws in memory with a controllable clock and scripted outcomes:
 launch failure, slow boot, an `acquire` accepted but answered Unknown, a `release` answered Unknown, an instance that disappears
-(reclaim), a leaked instance in `list`, a quota refusal, and a duplicate acquire id. A fake agent (in `js-sim`) models the agent
+(reclaim), a leaked instance in `list`, a quota refusal, and a duplicate acquire id; a launched machine whose fake agent registers late, never, or
+with a wrong proof; and a fake `default` provider whose hosts register, go lost, deregister and taint on script (the fake aws is elastic, the
+fake default is not; a hierarchy test runs both). A fake agent (in `js-sim`) models the agent
 side: loss, fence, out-of-memory kill, node pressure, phase changes, unknown observations and slow starts, and the taint paths: a host
 job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. A fake
 VM runtime (in memory, scripted: clone failure, a boot that never says ready, hostile guest frames, an unannounced exit, a failed destroy,
@@ -782,7 +830,9 @@ ucdk (`ucdk/crates/ucdk-provider-fake`).
 in and never skips it silently) and runs two suites, each over every implementation including the fakes.
 
 *Capacity-provider suite:* in [design/invariants.md](design/invariants.md): `acquire` idempotent on the acquire id, `release` read back,
-`list` tagged and never an empty list on error, and the pool never above `max_machines`.
+`list` tagged and never an empty list on error, and the pool never above `max_machines`; the `default` kind answers `Refused(capacity)` to
+`acquire` and terminates nothing on `release`. The admission and hierarchy cases (refusal when no host could ever serve, queueing when a
+busy host could, fall-through, the booting machine kept) are in [design/invariants.md](design/invariants.md).
 
 *Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
 results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
@@ -830,126 +880,47 @@ only if D15 keeps per-request placement in the core. The merged slice was built 
 step 16a; `js-provider` and `js-provider-fake` are the host-booking part of step 23 and the fake of step 12; `js-conformance` is step
 20b's machinery; `js-lease`, `js-lease-server` and `js-cli` are level 1 (9.1), which the ladder did not anticipate.
 
-Steps 23 to 35 (Phase D, new capability; Phase E, capacity providers and pools) and **Phase F, steps 36 to 47 (capabilities as data
+Steps 23 to 35 (Phase D, new capability; Phase E, capacity providers and pools, with steps 30c and 31c for the `default` provider
+and the hierarchy) and **Phase F, steps 36 to 47 (capabilities as data
 and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
 (38), needs and matching (39), kbf's table (40), the `Sandbox` seam (41), `VmRuntime` and its fake (42), the VM lifecycle (43), mixed-host
 accounting (44), several runs per lease (45), whole-node readiness (46), the first real driver (47); the size fields of step 43 wait for D26.
 **Phase G, steps 48 to 53 (one service in Kubernetes)**: readiness (48), the boot grace (49), the state check (50), manifests and image
-(51), the client side (52), the move from the single host (53). All are in [design/extraction-steps-d.md](design/extraction-steps-d.md).
+(51), the client side (52), the move from the single host (53). Step 54 (the GPU machines register through `js-agent`, retiring the operator-listed
+pool) closes the stepping stone. All are in [design/extraction-steps-d.md](design/extraction-steps-d.md).
 
 ## 15. Decisions
 
-Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to D34 with no gaps; D26 is open and has no recommendation yet.
+The full text of every decision, D1 to D41, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
+the open ones. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
+D41 with no gaps; D26 (no recommendation yet) and D35 are open. A superseded decision says by which.
 
-- **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
-  move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
-- **D2. Wire strategy.** (a) dual stack in the daemon; (b) a server-side adapter and a new package with negotiation; (c) edit v1 in
-  place. (c) breaks R3. Recommend (b), daemon switched last and only after the server advertises the package. Registration rides the same
-package (10.3).
-- **D3. Durable leases across agent restart.** (a) required in v1; (b) not in v1, an agent capability flag. Recommend (b); kbf kills
-  leases with the daemon today. An instance that terminates takes its leases with it, so "leases die with the host" is now the normal case.
-- **D4. Sizing rule for seen work, and the ladder.** R1 says last peak plus buffer; the shipped estimator is a long-window maximum plus 20%
-  and 128 MiB, and `on` mode applies only the kill-driven floor. Options: (a) implement R1 as `SeenRule::LastPeakPlusBuffer` and replay
-  it; (b) keep the shipped estimator behind the generic API and amend R1; (c) both selectable per class. Where "a lease is a node or
-  half a node" lives is settled: it is a level-1 machine lease (9.1). Second part: R1's "next rung above" is implemented as above the *booking*,
-  not above the limit just used (7.4). Options: keep (current behaviour) or move to above-the-limit, which is a behaviour change with its
-  own replay proof and not part of the extraction. Recommend (c) with (a) as the default after a replay supports it, and keeping the
-  ladder as it ships.
-- **D5. ucdk role.** (a) launcher only; (b) infrastructure provider only; (c) both. Recommend (c), launcher first, as an optional
-  realization beside ucdk's direct launcher (11.1).
-- **D6. Fence.** (a) self-fence for everything; (b) the class declares a default (self-fence unless the definition declares hermetic or
-  idempotent) and every request resolves and records its fence at submit, so no default is silent. Recommend (b).
-- **D7. Memory booking for non-kbf classes.** (a) same as kbf; (b) `BookAll` for ucdk job classes, with the declared size as booking and
-  ceiling and history advisory only. Recommend (b); kbf actions keep today's rule.
-- **D8. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
-  (12.3). Recommend yes.
-- **D9. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
-  cloud scheduler role node is dropped in that realization and kept in the direct one (11.2). Recommend yes.
-- **D10. Resources and capability schema.** Named resource vector in v1 with the lease-count cap separate; whole-device GPUs, no fractional
-  GPUs. Capability schema: provider-registered, namespaced keys, unknown request keys refused, unknown report keys skipped. Recommend yes.
-- **D11. Consensus.** The generic core relies on the state store's conditional writes for who places (`crates/kbf-sched/src/scheduler/handoff.rs`), not on a
-  consensus log. `crates/kbf-raft` exists in kbf. Options: (a) the core requires only the store; (b) the core also supports a replicated
-  log. Recommend (a); `kbf-raft` stays in kbf until a second user asks.
-- **D12. Name collision.** jobscheduler's *capacity provider* and ucdk's *Provider* trait are different. Options: rename ours to *source*
-  or *backend*; or keep and always qualify. The ucdk-side adapter lives in ucdk (11.1) and no jobscheduler code names ucdk's trait, so the
-  clash is confined to prose. Recommend keeping "capacity provider" here and writing "infrastructure provider" for the ucdk side; the
-  rename is the owner's option if the prose proves confusing. Inside this repository the merged trait `Provider` is renamed (D16).
-- **D13. Where the state store lives.** `kbf-state` is general (thirteen kbf crates use it, 4.2). Options: (a) move it all into
-  jobscheduler, which widens "kbf depends on jobscheduler" to installer, enrollment and history; (b) move only the trait, fake and
-  conformance suite as `js-state` and keep the SQLite and Postgres backends in kbf; (c) keep it all in kbf behind a neutral crate.
-  Recommend (b).
-- **D14. Fleet scaling (reverses N2).** Settled by the project owner; recorded here with its reason. N2 excluded fleet autoscaling. With no
-  provider that scales its own fleet, nothing else scales a pool: a machine count held by hand is wrong whenever demand moves. So a pool's provider gets and gives machines between the pool's `min_machines` and
-  `max_machines` (5.8). What does not change: `crates/kbf-coordinator` still only sets desired versions, and no cost guardrail is added (N4).
-- **D15. Scope of the extracted core.** (a) The core is level 1 only: machines, small, with no per-request placement. (b) Level 1 is the
-  base and per-request placement (`js-sched`, steps 3 to 18) is a consumer of it; kbf is a consumer too. (c) Per-request only, with level 1
-  a client of it. Recommend (b): level 1 is merged and small, ucdk needs per-request launch, status and retries (11), and kbf keeps
-  `kbf-sched` inside its leases until `js-sched` is proven. Steps 3 to 18 are conditional on this.
-- **D16. Names.** (a) Rename the merged `Provider` to `Pool` and `ProviderId` to `PoolId`, delete `Flavour`, and add `CapacityProvider`;
-  (b) keep `Provider` and add `CapacityProvider` beside it. Recommend (a): "provider" now means a capacity provider (3, D12), and two
-  traits that differ by a prefix would be misread.
-- **D17. Scaling policy.** Demand is the leases in `acquiring`, or that plus a look-ahead. `max_step`, `cooldown`, `idle_timeout` and `boot_timeout` are
-  per-pool configuration, unset meaning none (`max_step` defaults to 2). Recommend the simple form of 5.8 and no look-ahead until a trace shows a need.
-- **D18. Self-registration auth.** (a) A per-pool join token; (b) a client certificate per pool, reusing the identity path of
-  `crates/kbf-auth` and `crates/kbf-oidc`; (c) both, chosen per provider. Recommend (a) now, (b) added later without a wire change
-  (R3). For aws, the cloud's signed instance identity, never a secret in the launch template.
-- **D19. Acquire and the table lock.** The merged server calls the provider with the table lock held, so a slow call stalls every
-  request. (a) Asynchronous acquire: the table records `acquiring` and returns, the scaler calls outside the lock, and the result is an
-  event. (b) Keep the synchronous call with a timeout and answer every slow launch Unknown. Recommend (a).
-- **D20. Config format and validation.** One TOML file, `deny_unknown_fields`, validated whole at load, secrets as paths, no reload in
-  the first slice (a restart re-reads it). Alternatives: one file per provider, or YAML. Recommend one TOML file, as `js-pool-static` does.
-- **D21. Who pays cold start.** (a) The queue: a request waits while an instance boots; (b) `min_machines` idle hosts per pool. Recommend (a) as the
-  default and `min_machines` as the owner's per-pool choice; the wait counts toward `UNSERVABLE_WAIT` (8.2).
-- **D22. Work-session topology.** (a) The agent dials the consumer; (b) the consumer dials the agent; (c) the scheduler relays. Recommend
-  (a): agents only dial out, as the kbf daemon does today (4.4), and the scheduler stays out of the data path.
-- **D23. Machine reuse and release.** (a) One machine per job, terminated after it; (b) a machine serves jobs back to back and is
-  released after `idle_timeout`; (c) b plus a floor of idle hosts (`min_machines`). Recommend (b), (c) per pool at the owner's choice (D21). Reuse
-  is safe because the agent removes the container and scratch and checks the host after every job (5.10, 5.12).
-- **D24. Caps.** (a) `max_machines` only; (b) `max_machines` plus a per-tick `max_step`, bounded to real queued demand; (c) b plus a
-  consumer cap. Recommend (c); the consumer cap is the consumer's own and is not read by the scheduler. This is overload protection, not
-  a cost guardrail, and the earlier ruling against cost guardrails (N4) stands (5.11).
-- **D25. Isolation and taint.** (a) Every job contained, no host jobs; (b) a job declares `contained` or `host`, a host job taints its
-  machine, the agent checks after every job and taints on any finding, and a tainted machine is replaced or cordoned, never cleared on
-  the agent's word; (c) b, and the scheduler also records the taint itself when it grants a `host_jobs` lease or sends a host `Start`,
-  before the job runs. Recommend (c), host jobs off by default and needing consumer, pool and agent consent (5.12). The scheduler's record is of what it granted, not a check of the host, so it does not depend on an agent that may be compromised; the agent's report is the second path.
-- **D26. macOS VM sizing: fixed or dynamic CPU and memory. OPEN; another engineer is answering it, and the answer is folded in here.**
-  Facts: the virtualization framework fixes a VM's CPU count and memory at creation; a memory balloon can only reclaim memory and give it
-  back, never grow a VM past its configured size; a VM is cloned and booted for each run, so any size can be chosen when the run starts;
-  booted VM memory is committed in full (5.15). (A) **Fixed size classes** declared by the agent; a lease names a class; bookings are a
-  few quantized vectors; a job larger than the largest class cannot use a VM and a small job pays for a class. (B) **Sizing per run**: the
-  lease states CPUs and memory and each run's VM is created at the size it needs, within the lease's booking; bookings are arbitrary, so
-  packing matters more (6.5). The trade-off is the boot cost per run, which neither option changes. The wire carries the VM's size under
-  both, and the lifecycle, the channel and the integrity rules do not change; only the size fields (step 43) wait. No recommendation
-  until the answer arrives; detail in [design/vm-backend.md](design/vm-backend.md).
-- **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
-  `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
-  scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
-- **D28. Runtime traits for VMs.** (a) Widen `ContainerRuntime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
-  internal `Sandbox` seam; (c) a second lifecycle. Recommend (b): the stages, channel, destroy and restart rules differ, (a) forces optional
-  parts on every backend and changes merged code, and (c) writes the cleanup order, results and slot accounting twice (5.14).
-- **D29. VM reuse. Settled by the project owner:** a fresh VM for each run, cloned from its base image and destroyed after the run; a lease
-  may hold several runs and never reuses a VM between them. Rejected: reverting a used VM to a snapshot or cleaning it in place, because
-  what remains of a guest after a job cannot be shown to be clean; destroying it can. The cost is a boot per run, which D26 weighs.
-- **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has confirmed
-  that no VM is running and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test
-  start beside a booted VM, and the token gate needs no change in an older client (5.15).
-- **D31. Matching what is inside an image.** (a) The consumer names the image and constrains `base_images has <name>`; (b) each image has a
-  profile and a `guest` scope matches when one image meets all the guest constraints. Recommend (b), with (a) always available: Xcode and
-  runtimes are properties of the image the VM boots, and a consumer should ask for what it needs, not memorise image names (5.13).
-- **D32. GPU placement. Settled by the project owner:** GPUs exist only on the Mac Studio machines of the GPU pool (two today). Their shape
-  declares `gpu_class = "apple-m"` and `gpus = 1`; a GPU request (`gpus > 0` or a `gpu_class` constraint) is satisfiable only by that pool
-  and queues when its hosts are busy, with no acquire made for it. The whole-host GPU lease service (class `gpu-host`, `BookAll`) is the
-  only GPU path; a VM gets no GPU; container GPU jobs on Linux are not a current use ([design/capabilities.md](design/capabilities.md)).
-- **D33. Deployment shape and state store. Direction settled by the project owner; the store is chosen here.** The target is one service in
-  Kubernetes (scheduler, lease API, agent API) with kbf as a client and `js-agent` registering with it; the single-host `js-lease-server`
-  is the stepping stone. State: (a) the lease file and the binding file on a volume, one writer; (b) an external store with conditional
-  writes. Recommend (a): it is the merged persistence with its crash-safety rules (atomic replace, commit before act, the lock, fail-closed
-  boot, observe once) unchanged; the table is small; there is nothing more to operate. (b) when the service must survive a node or zone
-  loss without a minutes-long outage, when the rewrite shows (K29), or when a second replica is wanted. One replica under `Recreate`
-  (5.16, [design/deployment.md](design/deployment.md)).
-- **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
-  (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
-  Recommend (b), the grace set to the default TTL (step 49).
+- D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
+  restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
+  label key. D9 triggers. D10 resources and capability schema. D11 consensus (the store's conditional writes). D12 name collision. D13 where
+  the state store lives (the trait in `js-state`).
+- D14 fleet scaling, reversing N2 (settled; amended by D38: no minimum). D15 scope of the core (level 1 as base). D16 names (`Pool`,
+  `CapacityProvider`). D17 scaling policy (simple demand, `max_step`, `cooldown`). D18 self-registration auth (a join token per pool;
+  signed instance identity for a launched machine). D19 acquire off the table lock. D20 config format (one TOML file).
+- D21 who pays cold start: **superseded by D38** (the queue pays; no minimum). D22 work-session topology (the agent dials out). D23
+  machine reuse (b; option (c), a floor of idle hosts, **superseded by D38**). D24 caps (`max_machines`, `max_step`, a consumer cap; D39 adds
+  a per-provider share). D25 isolation and taint.
+- D26 macOS VM sizing (**open**). D27 how sets and counters ride the wire. D28 runtime traits for VMs. D29 a fresh VM per run (settled). D30
+  readiness of a whole-node lease. D31 matching what is inside an image. D32 GPU placement (settled; amended by D35 and D36). D33
+  deployment shape and state store. D34 leases across a restart.
+- D36 the static pool is for testing only (settled): the operator-listed pool is a test provider; production hosts register through
+  `js-agent`; the GPU lease service's listed pool is the stepping stone (step 54). D37 the default provider never creates or destroys
+  compute, and an elastic provider boots a machine whose agent registers itself (direction settled). D38 no minimum machines anywhere
+  (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
+  cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the
+  booting machine is kept and released by the idle rule. D41 what is capable and what happens to queued requests when capability goes.
+- **D35. Admission against registered hosts. OPEN, for the project owner.** What does a pool of registered hosts do with a request they
+  cannot serve right now? (a) **Refuse only when no registered host could ever satisfy the request's constraints and shape** (a host that
+  exists, is not tainted and is busy, lost or cordoned is capable): `no-capable-host`, at submit, unless an elastic provider of the pool
+  could launch a machine that meets it; when a capable host exists but is busy, the request waits in the queue. (b) **Refuse whenever no
+  host is free now.** The recommendation is (a): (b) turns a busy fleet into errors and puts a queue in every caller, while (a) refuses only
+  what no wait serves. A queued request whose last capable host leaves waits `regain_grace` before it is refused (D41). If the owner picks
+  (b), the check becomes "no free capable host and nothing launchable" and `regain_grace` goes. Text in [design/providers.md](design/providers.md).
 
 ## 16. Risks
 
@@ -976,9 +947,10 @@ package (10.3).
   tag on every instance, `list`, the reaper and re-adoption after restart (5.5, 12.1).
 - **K9. Launch storms and thrash.** Scaling up and down in quick succession wastes instance-hours. Mitigated by idle timeout, cooldown (also
   after a boot failure and after a release), `max_step`, the boot-failure brake and `max_machines` (5.8, 5.11).
-- **K10. Registration abuse.** A rogue agent joins a static pool and receives work. Mitigated by a per-pool credential, pinned scheduler identity, shape check, host
+- **K10. Registration abuse.** A rogue agent joins a pool and receives work. Mitigated by a per-pool credential, pinned scheduler identity, shape check, host
   limit, id binding, a deny file with eviction (5.8), and by the lease token that binds an agent to one consumer (5.4).
-- **K11. Cold start stalls consumers.** A request may wait minutes for an instance. Mitigated by `min_machines` and the unservable wait (D21).
+- **K11. Cold start stalls consumers.** A request may wait minutes for an instance, since nothing is kept warm. Accepted (D38); bounded by the unservable wait (8.2),
+  and a consumer that cannot wait queues its own work or uses registered hosts first, which the hierarchy does by default (5.8).
 - **K12. Instance reclaim mid-lease.** The lease is given up, the work reruns against the platform-fault budget (8.1), and the consumer
   re-leases (9.1).
 - **K13. Time.** Scaling that reads a clock outside `tick` is not reproducible; it runs only in `tick` with an injected clock (12.1, 13.5).
@@ -995,5 +967,7 @@ package (10.3).
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,
   `cooldown` and `max_machines`, and by `max_taints_in_a_row` stopping replacement with an alert (5.12).
-- **K19 to K31** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), and for the
-  service one pod as one point of outage (K28), the whole-file rewrite (K29), the volume as the state (K30), root for secrets (K31).
+- **K19 to K34** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), for the
+  service one pod as one point of outage (K28), the whole-file rewrite (K29), the volume as the state (K30), root for secrets (K31), and
+  for providers a refusal that a flapping host turns into an error (K32), a booting machine kept after its demand went (K33) and the test
+  provider reaching production (K34).

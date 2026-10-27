@@ -24,19 +24,9 @@ gpus = 0
 os = "linux"
 arch = "x86_64"
 
-[[provider]]                                # operator-listed machines (the merged --pool-config hosts)
-name = "lab"
-kind = "static"
-
-[[host]]                                    # the merged fields (id, gpu_class, resources, capabilities) plus the provider;
-provider = "lab"                            # `shape`, when given, supplies resources and capabilities
-id = "gpu-01"
-shape = "mac-studio-gpu"
-
-[[provider]]                                # machines that register themselves (5.8)
-name = "edge"
-kind = "static"
-register = true
+[[provider]]                                # the DefaultProvider: hosts that register themselves (5.8); it creates and destroys nothing
+name = "registered"
+kind = "default"
 deny_hosts_file = "<path-to-deny-file>"     # host ids refused and evicted (5.8)
 
 [[provider]]                                # launches and terminates instances
@@ -50,28 +40,24 @@ subnets = ["<subnet-a>", "<subnet-b>"]
 [provider.instance_types]                   # shape name to instance type
 linux-x86-16 = "<instance-type>"           # a cloud provider offers no GPU shape (D32)
 
-[[pool]]                                    # provider + shape + min_machines/max_machines + labels
-name = "gpu-lab"
-provider = "lab"
-shape = "mac-studio-gpu"
-class = "gpu-host"
-labels = { tier = "gpu", site = "lab" }
-
-[[pool]]
-name = "gpu-edge"
-provider = "edge"
+[[pool]]                                    # providers (in order) + shape + max_machines + labels; there is no minimum (D38)
+name = "gpu"                                # the GPU machines run js-agent and register (D32, D36); no elastic provider has a GPU shape
+providers = ["registered"]                  # one entry: nothing to fall through to
 shape = "mac-studio-gpu"
 class = "gpu-host"
 max_machines = 8                            # never exceeded, in-flight and tainted hosts counted (5.11)
-join_token_file = "<path-to-token-file>"    # one file per registering pool; may hold several tokens, so rotation overlaps
+regain_grace = "5m"                         # a queued request waits this long after its last capable host left (D41); default 5m
+join_token_file = "<path-to-token-file>"    # one file per pool that admits registering hosts; may hold several tokens, so rotation overlaps
+labels = { tier = "gpu" }
 
 [[pool]]
 name = "cpu-burst"
-provider = "cloud"
+providers = ["registered", "cloud"]         # the hierarchy: registered hosts first, an aws machine only when none can serve now (5.8)
 shape = "linux-x86-16"
 class = "action"
-min_machines = 0
-max_machines = 4                            # the provider never exceeds it (5.11)
+max_machines = 24                           # the pool's total over every provider, registered hosts included (5.11)
+provider_max_machines = { cloud = 4 }       # at most 4 of the 24 are aws machines; the provider never exceeds it
+join_token_file = "<path-to-token-file>"    # the registered hosts of this pool (a machine aws launches presents its instance identity instead)
 max_step = 2                                # most machines acquired in one tick; default 2
 idle_timeout = "10m"                        # a host idle this long is released (5.10); the one idle delay
 cooldown = "2m"                             # no re-acquire after a refusal, a boot failure or a release
@@ -106,8 +92,8 @@ kind = "count"                              # text | version | set_text | set_ve
 
 [[pool]]
 name = "mac-vms"
-provider = "lab"
 shape = "mac-arm64"
+providers = ["registered"]
 class = "vm"                                # runtime_tag vm (6.2)
 prepare_timeout = "10m"                     # a whole-node lease gives up when its host is not ready this soon (5.15)
 base_images = ["macos15-xcode16-a"]         # what an elastic host of this pool is launched with; the scaler counts a guest constraint as demand only if one of these can meet it
@@ -123,4 +109,25 @@ js-agent --vms 2 --vm-driver <absolute-path> --vm-store <dir> --vm-network none 
   --cap acme.metal=1 --facts-interval 5m
 ```
 
-Pool keys are `min_machines` and `max_machines` (not `min` and `max`); the loader refuses the old names and names the new ones (5.7).
+A pool specifies `max_machines` and no minimum: `min_machines` and `min` are refused with a message saying so (5.7, D38). `provider = "x"` is
+shorthand for a one-entry `providers`, except that an elastic `x` gets the `default` provider in front of it (5.8).
+
+**Test provider.** The operator-listed pool exists for tests and conformance and for the single-host stepping stone. A file that declares
+it is refused unless the scheduler runs with `--allow-test-providers`; no production example uses it. Its shape is:
+
+```toml
+[[provider]]                                # TESTS ONLY: hosts the operator lists (the merged --pool-config hosts)
+name = "listed"
+kind = "static"
+
+[[host]]                                    # the merged fields (id, gpu_class, resources, capabilities) plus the provider
+provider = "listed"
+id = "test-host-01"
+shape = "linux-x86-16"
+
+[[pool]]
+name = "test-pool"
+providers = ["listed"]                      # max_machines defaults to the hosts listed
+shape = "linux-x86-16"
+class = "action"
+```

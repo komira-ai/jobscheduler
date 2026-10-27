@@ -187,8 +187,11 @@ GPUs exist only on the Mac Studio machines of the GPU pool (two today). Nothing 
   registered host's other facts).
 - **A GPU request is satisfiable only by that pool.** A request is a GPU request when its booking asks `gpus > 0` or it constrains
   `gpu_class`. It can match only hosts whose shape has a GPU, so only the GPU pool; selecting pools by class and labels (6.2) is
-  unchanged. A GPU request that no host can meet queues and counts toward the unservable wait (8.2). An elastic pool never covers it,
-  because no capacity provider has a GPU shape; a pool at `max_machines` is not the reason it waits.
+  unchanged. The GPU machines register themselves through `js-agent` with a `default` provider (the operator-listed pool is the
+  stepping stone, step 54). A GPU request that a registered GPU host could serve once free queues when the hosts are busy, and counts toward
+  the unservable wait (8.2); a GPU request that **no** registered host could ever serve (no GPU host registered, or every one tainted
+  after the grace) is refused with `no-capable-host` (D35, [providers.md](providers.md)). An elastic provider never covers it,
+  because none has a GPU shape; a pool at `max_machines` is not the reason it waits.
 - **Classes.** The class that serves it today is `gpu-host`, admitted `BookAll`: one whole host per lease, GPU included. That
   whole-host GPU lease service is the merged path and stays the only GPU path. Whole-device GPUs only (D10), and with one GPU per
   machine there is nothing to assign among devices (`assignments` carries the device id as before).

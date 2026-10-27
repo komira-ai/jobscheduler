@@ -14,8 +14,8 @@ TTL has passed, and retries a start, a stop, an acquire or a release whose outco
 observed without it (5.6). So a client that disappears loses its lease at the end of its TTL, never later than its max wall time. The
 lease table in this repository (`js-lease`) implements this.
 
-The reaper also owns the machines. In the same tick it (a) releases a host that has been idle past its pool's `idle_timeout` (5.10) while
-the pool is above `min_machines`, and a tainted host with no lease (5.12), through `release`, and (b) releases a leaked instance: one that `list` returns, that carries this scheduler's tags,
+The reaper also owns the machines. In the same tick it (a) releases an elastic host that has been idle past its pool's `idle_timeout` (5.10) (a registered `default` host is never
+released, and no minimum is kept), and a tainted elastic host with no lease (5.12), through `release`, and (b) releases a leaked instance: one that `list` returns, that carries this scheduler's tags,
 and that no pool host or acquire record accounts for after a grace of ticks. A `list` that fails reaps nothing. The reaper acts on
 nothing in its first N ticks after start, and never releases an instance whose agent is connected and holding leases: that instance is
 adopted as a pool host from its tags and its hello, or alerts. Pool scaling (5.8) also runs only in `tick`, so `js-lease` stays the one place time acts and scaling is deterministic under an injected clock.

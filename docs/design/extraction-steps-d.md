@@ -1,4 +1,4 @@
-# Extraction steps 23 to 53
+# Extraction steps 23 to 54
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
 data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
@@ -19,25 +19,39 @@ numbers refer to design.md.
 
 **Phase E. Capacity providers and pools.** Steps 27 to 29 need no agent. Step 30 needs steps 20 and 21a. Step 31 is tested on fake agents.
 
-27. `js-config`: the schema of 5.7, the loader and its validation; the merged `--pool-config` file loads as one implicit provider.
-    *Proves:* each rule of 5.7 refuses with the key and line; an old file loads unchanged; the layering test: no crate below the binary
-    names a provider kind.
+27. `js-config`: the schema of 5.7, the loader and its validation; the merged `--pool-config` file loads as one implicit provider (the
+    test-only `static` kind, a stepping stone). *Proves:* each rule of 5.7 refuses with the key and line, including `min_machines` and `min`
+    (a pool specifies `max_machines` only) and a `static` provider without `--allow-test-providers`; an old file loads unchanged; the
+    layering test: no crate below the binary names a provider kind.
 28. The fake capacity provider (13.1) and the capacity suite with its broken providers (13.2); `js-conformance` re-keyed. *Proves:* the
-    suite is green on `static` and the fake and red on each broken provider.
+    suite is green on `default`, the test `static` and the fake aws, and red on each broken provider.
 29. The lease table: the `acquiring` state, the acquire record committed before the call, acquire off the table lock (D19), the pool
     name in the lease file, and share leases under `Book` admission. *Proves:* a crash between the record and the call resolves by `list`;
     a lease file written before the change loads; the GPU-host tests pass unchanged.
 30. Agent registration in `js-agent` and the server: hello with identity and shape, admission, join credentials, deny file,
-    `RegisteredAgentSource`. *Proves:* a host with a wrong credential, an unknown pool, a duplicate id, a rebinding or a shape that does
+    `RegisteredAgentSource` (the source of the `default` provider). *Proves:* a host with a wrong credential, an unknown pool, a duplicate id, a rebinding or a shape that does
     not satisfy is refused; a denied host's stream closes at the next tick; a lost host's leases are given up once.
 30b. Reuse and integrity in `js-agent` and the server: post-job removal and slot freeing, the `isolation` field and its three consents,
     the post-job checks, the taint report and the durable tainted set, `js-cli host clear-taint`. *Proves:* the taint paths of 13.1 on
     the fake agent; a `host` start without any one consent is refused; a taint is not cleared by a clean hello; a tainted id is refused.
-31. The pool scaler in `tick`: `min_machines`, `max_machines`, `max_step`, cooldown, idle and boot timeouts, the boot-failure brake,
-    `releasing`, replacement of tainted hosts. *Proves:* the invariants of 13.3 over seeds, with an injected clock and no elapsed-time assertion.
+30c. The `default` provider ([providers.md](providers.md)): `RegisteredProvider` (`js-registry`) becomes the `default` kind
+    (`can_launch` false, `acquire` `Refused(capacity)`, `release` a no-op), with the capable-host check, the `no-capable-host` refusal at
+    submit, `regain_grace` for queued requests, `pool-full`, and a fake default provider. *Proves:* a request no host could ever serve is
+    refused while the same request against a busy, a lost and a cordoned host is queued; a tainted, a denied and a draining host do not make
+    it capable; a queued request survives a last-host restart inside `regain_grace` and is refused after it; the GPU-host tests pass unchanged.
+31. The pool scaler in `tick`: `max_machines`, `max_step`, cooldown, idle and boot timeouts, the boot-failure brake,
+    `releasing`, replacement of tainted hosts; no minimum anywhere. *Proves:* the invariants of 13.3 over seeds, with an injected clock and no
+    elapsed-time assertion, and that an idle pool holds no elastic machine once `idle_timeout` has passed.
+31c. The provider hierarchy in the scaler: an ordered `providers` list per pool, free-host-first placement, acquire in the first entry that
+    can satisfy, `provider_max_machines`, and the booting machine kept when a host frees. *Proves:* the cases of
+    [invariants.md](invariants.md): fall-through only when an earlier entry cannot satisfy now; a pool of `default` hosts only waits; a
+    freed host takes the waiting request while a later machine boots and that machine is released by the idle rule; the pool and share
+    caps hold with a registered host admitted at the cap refused `pool-full`; the merged `LayeredProvider` tests pass over a two-entry
+    hierarchy of the test `static` and `default` kinds.
 31b. Placement reuse: a freed slot places queued work that fits before any acquire. *Proves:* a burst that fits idle machines acquires
     nothing; the same seeded run is identical with the scaler on or off when no demand exceeds capacity.
-32. `js-provider-aws` against a fake cloud client, disabled by default; seating becomes re-adoption by tag; the IAM scope of 12.4.
+32. `js-provider-aws`, an elastic provider, against a fake cloud client, disabled by default: `acquire` boots a machine whose agent
+    registers itself with the instance identity (`verify_instance`), and the provider's job ends at registration, failure or timeout; seating becomes re-adoption by tag; the IAM scope of 12.4.
     *Proves:* tags on every created instance; an Unknown `acquire` never launches twice; a restart re-adopts and reaps; the documented
     policy passes the check of 12.4.
 33. Consumer pool selection: class and label selectors in the lease request, and `--pool`, `--class`, `--label` in `js-cli`. *Proves:*
@@ -45,8 +59,8 @@ numbers refer to design.md.
 34. `kbf-executor` beside `js-agent`, with host mounts for the input cache (9.2). *Proves:* the action container holds no storage
     credential; a container that reads the executor's credential path, the metadata endpoint or a mount outside the roots fails, and
     the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
-34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a static pool of kbf's own hosts, a node
-    lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
+34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a pool of kbf's own hosts, which register
+    through `js-agent` into a `default` provider; a node lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
     floor of whole-node leases, more on queue depth, drained before release); each frontend leases only for the hosts it owns, as
     today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside the TTL
     changes no placement; the cross-version matrix with a frontend pair.
@@ -131,3 +145,12 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     of [deployment.md](deployment.md). *Proves:* leases held before the move are held after it; every agent re-hellos without a new join
     token; a pod deleted under load loses no lease and no binding; a node drained under load comes back with the volume and the same
     state; it is not run on shared CI.
+
+**Phase H. Closing the stepping stone.**
+
+54. The GPU machines register. `js-agent` runs on each GPU machine with the pool's join credential and registers with a `default` provider
+    in a pool of class `gpu-host`; the operator-listed pool behind `--pool-config` is retired and the file is no longer read. *Proves:*
+    on fakes, the GPU-host service tests pass against registered hosts exactly as against listed ones; a GPU request is queued when the
+    registered GPU hosts are busy and refused with `no-capable-host` when none is registered (D35); no production example declares the
+    `static` kind. Installing the agent on the real machines and switching the service is an operational change that needs the owner's go
+    for that action (R7); until then the listed pool keeps serving.

@@ -9,13 +9,30 @@ Moved from design.md sections 13.2 and 13.3 to keep that file under its size lim
 - `list` returns only tagged instances, and a `list` error is not an empty list; tags are present on every created instance (the
   follow-up named in the `js-conformance` crate doc); a quota or capacity error maps to `Refused`;
 - the pool never exceeds `max_machines` with acquires in flight, Unknown or tainted hosts counted, and a tainted instance is released and
-  replaced only after its release reads back Absent; a tainted static host is cordoned and a tainted registered id is refused at hello.
+  replaced only after its release reads back Absent; a tainted test-static host is cordoned and a tainted registered id is refused at hello.
+- the `default` kind answers `Refused(capacity)` to `acquire`, terminates nothing on `release`, and is never asked to launch; an elastic
+  kind's `verify_instance` matches a hello to a pending acquire once and rejects a hello with a wrong, reused or missing proof.
+
+## Admission and hierarchy cases (providers.md)
+
+- A request no host of the pool (and no elastic entry) could ever serve is refused with `no-capable-host`; the same request is queued
+  when a capable host exists and is busy, lost, or cordoned; a tainted, denied or draining host does not make a request capable. Each
+  case names the host state it uses.
+- A queued request whose last capable host leaves is still queued until `regain_grace` has passed on the injected clock, is served if a
+  capable host registers inside it, and is refused with `no-capable-host` after it; a new submission in the same state is refused at once.
+- Placement uses a free capable host of the first entry that has one; an entry is asked to acquire only when no entry has a free capable
+  host and nothing in flight can serve; an entry at its share of `max_machines`, disabled, cooling down or braked is passed over, and the
+  next one is asked; with every entry exhausted the request waits.
+- When a host frees while a later entry's machine is booting, the waiting request is placed on the freed host in the same tick; the
+  booting machine is not released, registers, and is released only after `idle_timeout` with nothing to do.
+- A registered `default` host is never selected for release. No test sets a minimum, and a file that names `min_machines` or `min` is refused.
 
 ## New invariants of the simulation (13.3)
 
 An Unknown observation never frees a booking; an Absent observation frees it exactly once; a pool never launches two instances for one
 acquire id; a pool never exceeds `max_machines` (in-flight acquires and tainted hosts counted), never acquires more than `max_step` in a
-tick, and keeps `min_machines` hosts whether or not there is demand (never released at or below it); queued work that fits a freed slot is
+tick, never exceeds a provider's share of it, holds no machine of an elastic entry without demand or an idle period still running (no
+minimum); queued work that fits a freed slot is
 placed on that host before any acquire; a tainted host takes no lease and is never untainted by a hello, a heartbeat or a Result, even when
 the agent reports no taint after a host job (the scheduler tainted it itself); a tainted host id is refused at admission; a pool stops
 replacing after `max_taints_in_a_row`; a host holding a lease is never released, including when a lease commits between selection and

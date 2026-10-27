@@ -31,8 +31,8 @@ release and placing work on it both run under the table lock, and whichever comm
 no placed job (run service, ucdk), and a host that has taken one is not chosen.
 
 **A machine is released only after it has been idle.** A host is idle from the moment it has no lease and no running job. After
-`idle_timeout` of continuous idleness, while the pool holds more than `min_machines`, the scaler releases it (terminates it, for a cloud
-provider; returns it to the inventory, for a static one). A job or lease arriving before then restarts nothing: the host simply serves
+`idle_timeout` of continuous idleness the scaler releases an elastic host (terminates it). A registered `default` host is never released,
+because the scheduler did not create it; it stays registered until its agent deregisters or an operator removes it. A job or lease arriving before then restarts nothing: the host simply serves
 it. Reuse across consumers is allowed because the checks of 5.12 run after every job and the scratch is gone; a host that cannot show that
 is tainted instead.
 
@@ -46,9 +46,11 @@ pool.
 Every pool has `max_machines`, a count the provider never exceeds. The count includes every machine the pool owns in any state:
 serving, `registering`, in-flight `acquire` (an intent recorded but not yet answered, or answered Unknown), `releasing` and tainted. The
 check is made under the table lock when the intent is recorded, so two scaler ticks cannot both pass it. A restart counts what `list`
-returns plus the open intents. A pool at `max_machines` leaves the demand queued (8.2).
+returns plus the open intents. A pool at `max_machines` leaves the demand queued (8.2). A provider's share (`provider_max_machines`) is a further bound on the machines of
+one provider within the pool, counted the same way; registered `default` hosts count toward the pool's total and are never refused by a
+share, only by the total (`pool-full`, registration.md).
 
-`min_machines` is the floor the scaler keeps whether or not there is demand (a floor of idle hosts, D21), and defaults to 0. It is never released below.
+There is no minimum: a pool specifies `max_machines` only, and nothing is kept warm (D38). A pool's elastic entries hold zero machines when idle.
 
 **Growth is bounded and follows real demand.** Each tick the scaler acquires at most `max_step` machines (default 2). It acquires only for
 queued demand that does not fit existing capacity: leases in `acquiring` that no free host, no host about to be freed and no
@@ -119,9 +121,9 @@ taint changes nothing; only the provider path below, or an operator, ends it.
 
 | Kind | Tainted host |
 |---|---|
-| `aws` and later launching kinds | Once its leases are gone, `release` it (terminate, read back Absent), then acquire a replacement under the usual caps. A tainted machine counts toward `max_machines` until it reads back Absent, so at the cap the terminate comes first. The instance id is never reused. |
-| `static`, listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `js-cli host clear-taint`, which is an audited operator action. |
-| `static`, self-registered | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
+| `aws` and later elastic kinds (a registered elastic host is ordinary, but it has an instance id) | Once its leases are gone, `release` it (terminate, read back Absent), then acquire a replacement under the usual caps. A tainted machine counts toward `max_machines` until it reads back Absent, so at the cap the terminate comes first. The instance id is never reused. |
+| `static` (tests only), listed | Cordoned. It stays listed and takes no work until an operator reimages it and runs `js-cli host clear-taint`, which is an audited operator action. |
+| `default` (registered) | The host id enters the tainted set and any hello from it is refused with a constant code, even with a valid join credential, until an operator reimages the machine and clears the id. Clearing also drops the binding of the id to its first credential (5.8). |
 
 A tainted host id cannot rejoin: it is checked at admission before the credential. The tainted set survives a scheduler restart (it is in
 the lease file), and an operator's clear is the only way out.

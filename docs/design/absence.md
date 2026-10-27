@@ -22,7 +22,7 @@ Rules:
   outcome is an event.
 - **Agent silence is not absence.** Silence past the grace period triggers the fence rules of 4.1. An agent silent while its instance is
   `Present` at the provider is a partition and the agent self-fences. Silence while the instance is `Absent` means the host is gone. For
-  a static host silence is Unknown, never Absent (5.5), and a run-on lease is given up only when the host is proven stopped (5.8).
+  a `default` (or test `static`) host silence is Unknown, never Absent (5.5), and a run-on lease is given up only when the host is proven stopped (5.8).
 - **A host leaves a pool only after `release` reads back Absent.** An instance gone underneath (reclaim, an operator terminating it) is
   `Absent` on `observe` or missing from `list`, and is treated as host-lost: its machine leases are given up and the consumer reruns its
   placements (8.1).

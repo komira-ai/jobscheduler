@@ -9,7 +9,7 @@ decisions are D33 and D34 and the risks K28 to K31 ([risks-f.md](risks-f.md)). W
 jobscheduler runs as **one service** in a Kubernetes cluster: one process, one workload, the scheduler and both of its APIs.
 
 ```
-  kbf frontend ──(lease API, TLS)──┐                       ┌── static / aws capacity providers
+  kbf frontend ──(lease API, TLS)──┐                       ┌── default / aws capacity providers
   js-cli       ──(lease API, TLS)──┤                       │   (standing access of the service, K7)
                                    ▼                       │
                            ┌───────────────────────────────┴───┐        ┌──────────────────────────────┐

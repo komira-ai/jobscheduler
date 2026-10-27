@@ -11,21 +11,24 @@ hello in message metadata, never in a log line.
   is refused.
 - *Admission.* The pool exists; the host id is not in the tainted set (5.12), checked before the credential; the host id is not held by a live stream (a second stream for the same id replaces the first only after
   the first has been silent past the grace of 4.1); the reported shape satisfies the pool's shape (`Shape::satisfies`); the pool holds
-  fewer than `max_machines` hosts, not counting an in-flight instance this hello completes; and either (a) the provider has `register = true` and
-  the hello carries the pool's join credential, or (b) the provider launched the instance and the hello carries its signed identity,
-  matching a pending acquire (below). A host id is bound at first admission to the credential or instance id it first presented; a
+  fewer than `max_machines` hosts, not counting an in-flight instance this hello completes (a refusal is `pool-full`); and either (a) the pool
+  has a `join_token_file`, the pool's hierarchy includes the `default` provider, and the hello carries the pool's join credential, or (b) an
+  elastic provider of the pool launched the instance and the hello carries its signed identity, matching a pending acquire (below).
+  The first path admits a `default` host, the second an elastic one; after admission both are ordinary hosts of the pool. A host id is bound at first admission to the credential or instance id it first presented; a
   later hello with another binding is refused. A refusal is a `Welcome` with a constant code and no host is created.
 - *Join credential.* One `join_token_file` per registering pool (D18), possibly holding several tokens so that rotation overlaps,
   compared in constant time and re-read every tick. A token admits to one pool. A host id in the provider's `deny_hosts_file`, or a
   removed token, closes any live stream of the host at the next tick: its lease token is revoked, it is quarantined, and its leases are
   given up under 5.6. Cordon and drain is for orderly removal, not revocation. A client certificate per pool is the alternative (D18).
-- *Aws instances.* The launch template holds no secret (K6) and requires IMDSv2 with hop limit 1. The host presents the signed instance
-  identity document in place of the token; the aws provider verifies signature, account, region and instance id, matches it to an
-  acquire record of this pool still `registering`, and accepts it once. A second hello for that instance needs the live-stream rule.
+- *Launched instances (elastic providers).* The machine's own `js-agent` registers it, so the provider's job ends at boot plus
+  registration. The launch template holds no secret (K6) and requires IMDSv2 with hop limit 1. For aws the host presents the signed instance
+  identity document in place of the token; the provider's `verify_instance` checks signature, account, region and instance id, matches it
+  to an acquire record of this pool still `registering`, and accepts it once. Another elastic kind supplies its own proof of the same
+  shape, or it cannot be elastic. A second hello for that instance needs the live-stream rule.
 - *Lifecycle.* A host that stops heartbeating is Unknown, its leases stay and the agent self-fences. Past the grace its self-fence
   leases are given up, since the agent has fenced itself (5.4); a run-on lease is given up only when the host is proven stopped
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention
   window. A restarted agent registers again with the same id and re-announces its leases; the announcement is reconciled against the
   table, and a lease id not committed to this host id is answered `Cancel` and never adopted.
-- *Source.* A `RegisteredAgentSource` of `CapacitySource` (5.9) answers from admitted agents and ignores the bookings it is given: the lease
+- *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
   file records leases and agents re-announce them.
