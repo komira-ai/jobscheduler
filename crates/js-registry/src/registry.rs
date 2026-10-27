@@ -242,6 +242,13 @@ impl Registry {
     /// certificates close that later (design D18). A binding is not upgraded by a later
     /// hello that names an instance.
     ///
+    /// The pool-full check does not stop a holder of the pool token from locking the pool
+    /// out: retention bounds only silent squatters. Such a holder can say hello for
+    /// `max_machines` made-up ids and keep them live with the sessions it was issued, or
+    /// refill the pool every grace plus retention, and every real new host then gets
+    /// pool-full. The transport must rate-limit hellos per credential, and per-host
+    /// credentials (design D18) close it; there is no per-credential cap here.
+    ///
     /// The runs a hello lists as held are not looked at yet.
     pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
         let host = HostId::new(&hello.host_id).map_err(Refusal::BadHostId)?;

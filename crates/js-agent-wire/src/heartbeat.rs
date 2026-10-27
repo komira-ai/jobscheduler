@@ -2,6 +2,7 @@
 //! ride in the heartbeat until the server acknowledges them.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -92,7 +93,7 @@ pub struct Taint {
 }
 
 /// The periodic message, agent to server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// The host's id.
     pub host_id: String,
@@ -226,6 +227,22 @@ impl Taint {
             self.check.as_ref(),
             limits::MAX_TAINT_TEXT_LEN,
         )
+    }
+}
+
+/// Every field but `session`, which prints as `".."`: the secret never reaches a log or a
+/// panic message.
+impl fmt::Debug for Heartbeat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heartbeat")
+            .field("host_id", &self.host_id)
+            .field("epoch", &self.epoch)
+            .field("session", &"..")
+            .field("phase", &self.phase)
+            .field("held", &self.held)
+            .field("results", &self.results)
+            .field("taint", &self.taint)
+            .finish()
     }
 }
 

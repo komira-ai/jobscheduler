@@ -358,3 +358,46 @@ fn refusal_and_hello_reply_are_checked() {
     assert!(HelloReply::Welcome(bad).validate().is_err());
     assert!(HelloReply::Refused(refused("", None)).validate().is_err());
 }
+
+const SECRET: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+/// `{:?}` of a welcome printed the session secret, so a log line of a `Result<Welcome, _>`
+/// or a panic message handed the secret to anyone who reads the log. The other fields
+/// still print, and the secret does not.
+#[test]
+fn welcome_debug_does_not_print_the_session_secret() {
+    let mut value = welcome();
+    value.session = SECRET.into();
+    let text = format!("{value:?}");
+    assert!(!text.contains(SECRET), "{text}");
+    assert!(
+        text.contains("builders") && text.contains("session: \"..\""),
+        "{text}"
+    );
+}
+
+/// `{:?}` of a hello reply carrying a welcome printed the session secret through the
+/// derived `Debug` of the inner welcome; the reply must print the redacted form.
+#[test]
+fn hello_reply_debug_does_not_print_the_session_secret() {
+    let mut value = welcome();
+    value.session = SECRET.into();
+    let text = format!("{:?}", HelloReply::Welcome(value));
+    assert!(!text.contains(SECRET), "{text}");
+    assert!(text.contains("session: \"..\""), "{text}");
+}
+
+/// `{:?}` of a heartbeat printed the session secret, so a logged heartbeat or an
+/// `unwrap_err()` panic let a reader of the log keep the host live. The other fields
+/// still print, and the secret does not.
+#[test]
+fn heartbeat_debug_does_not_print_the_session_secret() {
+    let mut value = heartbeat();
+    value.session = SECRET.into();
+    let text = format!("{value:?}");
+    assert!(!text.contains(SECRET), "{text}");
+    assert!(
+        text.contains("mac-01") && text.contains("session: \"..\""),
+        "{text}"
+    );
+}

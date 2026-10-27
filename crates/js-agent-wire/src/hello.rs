@@ -2,6 +2,7 @@
 //! and the parts they share with the heartbeat ([`Phase`]).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use js_types::{HostId, ProviderId, Resources, Shape, TypeError};
 use serde::{Deserialize, Serialize};
@@ -289,7 +290,7 @@ pub(crate) fn check_host_id(at: At, value: &str) -> Result<(), ValidationError> 
 }
 
 /// The server's answer to an accepted [`Hello`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Welcome {
     /// The protocol major both sides speak from here on. Absent means major 1.
     #[serde(default = "protocol::first_major")]
@@ -314,6 +315,21 @@ pub struct Welcome {
     /// refuses: such an agent cannot keep a session with a server that checks it.
     #[serde(default)]
     pub session: String,
+}
+
+/// Every field but `session`, which prints as `".."`: the secret never reaches a log or a
+/// panic message, also through a type that holds a welcome ([`HelloReply`]).
+impl fmt::Debug for Welcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Welcome")
+            .field("protocol", &self.protocol)
+            .field("epoch", &self.epoch)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
+            .field("grace_ms", &self.grace_ms)
+            .field("pool", &self.pool)
+            .field("session", &"..")
+            .finish()
+    }
 }
 
 impl Welcome {

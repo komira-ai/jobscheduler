@@ -34,9 +34,15 @@
 //!   who also knows the host id and epoch, cannot keep a host live, revive it or set its
 //!   phase. A new hello replaces the secret. The one way in for a pool-token holder is a
 //!   hello, and only for an id that is not instance-bound and is lost, as above.
-//! - **Retention.** A lost host with no booking is forgotten, binding included, after
-//!   [`PoolConfig::with_lost_retention`], so ids made up by a token holder stop filling
-//!   the pool. A booked host is never forgotten.
+//! - **Retention, and what it does not do.** A lost host with no booking is forgotten,
+//!   binding included, after [`PoolConfig::with_lost_retention`], so ids made up by a
+//!   token holder who then goes silent stop filling the pool. That is all it bounds:
+//!   silent squatters. A holder of the pool token can still lock the pool out, because
+//!   it can say hello for `max_machines` made-up ids and keep them live with the
+//!   sessions it was issued, or refill the pool every grace plus retention. The
+//!   transport must rate-limit hellos per credential, and per-host credentials (design
+//!   D18) close it; the registry has no per-credential cap. A booked host is never
+//!   forgotten.
 //! - **Booked shape.** A host is booked as the pool's configured shape
 //!   ([`PoolConfig::new`]), and the host's claim only has to offer at least that. A
 //!   claim bigger than the pool's shape is never leased out, so an agent cannot inflate

@@ -44,6 +44,12 @@
 //!
 //! # Compatibility rule
 //!
+//! `Welcome::session` is required, so a new server with an old agent gives
+//! `session-mismatch` and a new agent with an old server gives `invalid-welcome`, both
+//! within protocol major 1. That is accepted and the major stays 1: no agent or server
+//! of major 1 has been released before the session field. From the first release on,
+//! fields are additive, as follows.
+//!
 //! Within a major every field is additive. A receiver ignores fields it does not know, in
 //! both directions, so a newer peer never breaks an older one: no body here uses
 //! `deny_unknown_fields`, and a field a sender may leave out has a default on decode. An
@@ -66,8 +72,9 @@
 //!   and environment by reference: the run-delivery change, which is where a start is
 //!   first sent (and where the server fills `valid_for_ms`);
 //! - the sum of several jobs' limits against one shape, and checks against pool state
-//!   (the pool's shape, `max_machines`, the tainted set, the credential binding): the
-//!   server's registry;
+//!   (the pool's shape, `max_machines`, the tainted set): the server's registry. The
+//!   credential binding is there now, in `js-registry` (`Binding`, checked by
+//!   `Registry::hello` and `Registry::heartbeat`);
 //! - the `Usage` message (what a run measurably used, with the `basis` of the
 //!   measurement) and the per-message extension slot design 5.2 and 10.3 describe: the
 //!   run-delivery change, the first that has a measured run to report and a field a
