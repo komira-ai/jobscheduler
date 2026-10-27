@@ -36,6 +36,15 @@ pub struct Entry {
     pub size: u64,
     /// The modification time: seconds and nanoseconds since the epoch.
     pub mtime: (i64, i64),
+    /// The status change time: seconds and nanoseconds since the epoch. A job cannot set
+    /// it, so it moves when the contents are rewritten and the modification time put back.
+    pub ctime: (i64, i64),
+    /// The inode number: a file replaced by another has a different one.
+    pub ino: u64,
+    /// The owning user.
+    pub uid: u32,
+    /// The owning group.
+    pub gid: u32,
     /// The type and permission bits.
     pub mode: u32,
 }
@@ -94,6 +103,12 @@ fn entry_of(item: &fs::DirEntry) -> Entry {
         mtime: meta
             .as_ref()
             .map_or((i64::MAX, 0), |meta| (meta.mtime(), meta.mtime_nsec())),
+        ctime: meta
+            .as_ref()
+            .map_or((i64::MAX, 0), |meta| (meta.ctime(), meta.ctime_nsec())),
+        ino: meta.as_ref().map_or(u64::MAX, MetadataExt::ino),
+        uid: meta.as_ref().map_or(u32::MAX, MetadataExt::uid),
+        gid: meta.as_ref().map_or(u32::MAX, MetadataExt::gid),
         mode: meta.as_ref().map_or(u32::MAX, MetadataExt::mode),
     }
 }
@@ -294,10 +309,10 @@ fn digest(mut entries: Vec<Entry>) -> String {
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     let mut hash = Sha256::new();
     for entry in &entries {
-        let (seconds, nanos) = entry.mtime;
+        let ((seconds, nanos), (c_seconds, c_nanos)) = (entry.mtime, entry.ctime);
         hash.update(format!(
-            "{}\0{}\0{seconds}\0{nanos}\0{}\0",
-            entry.name, entry.size, entry.mode
+            "{}\0{}\0{seconds}\0{nanos}\0{c_seconds}\0{c_nanos}\0{}\0{}\0{}\0{}\0",
+            entry.name, entry.size, entry.ino, entry.uid, entry.gid, entry.mode
         ));
     }
     hex::encode(hash.finalize())

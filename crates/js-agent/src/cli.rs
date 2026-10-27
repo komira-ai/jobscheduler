@@ -75,15 +75,20 @@ pub struct Cli {
     /// The directory the agent keeps its taint marker in: it must be owned by the user
     /// running the agent, with no permission for group or others. Required with
     /// `--container-bin`. A host that a post-job check found unclean is tainted for good:
-    /// the marker survives a restart, and no code of the agent removes it.
+    /// the marker survives a restart, and no code of the agent removes it. It may not be,
+    /// or lie in, a mount root or the scratch root (a job with a read-write mount could
+    /// delete the marker).
     #[arg(long, value_name = "PATH")]
     pub state_root: Option<PathBuf>,
-    /// A directory whose listing (names, sizes, modification times and modes of its
-    /// entries, not its subdirectories' contents) the post-job checks compare with the
+    /// A directory whose listing (names, sizes, modification and status change times,
+    /// inodes, owners and modes of its entries) the post-job checks compare with the
     /// listing taken when the host was last known clean; a change taints the host. May be
     /// given more than once. An absolute path to an existing directory that holds no mount
     /// root, scratch root or state root and lies in none. A directory with more than 4096
-    /// entries cannot be checked and taints the host. Needs `--container-bin`.
+    /// entries cannot be checked and taints the host. Only the directory's own entries are
+    /// listed: a write to an existing file inside a subdirectory is not seen, and only a
+    /// name added to, removed from or renamed in the subdirectory moves its modification
+    /// time. Needs `--container-bin`.
     #[arg(long = "watch-dir", value_name = "PATH")]
     pub watch_dirs: Vec<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.

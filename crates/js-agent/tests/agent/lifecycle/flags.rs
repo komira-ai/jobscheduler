@@ -218,6 +218,51 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
     assert_eq!(status, code(0), "a state root needs no containers: {err}");
 }
 
+/// Asserts that a state root that is, or lies in, a mount root or the scratch root ends the
+/// agent with status 2 before anything is sent and names `--state-root`, and that a state
+/// root that holds a mount root or the scratch root starts it (a job sees only the subtree
+/// it is given). It catches a taint marker in a directory that a job with a read-write
+/// mount can delete or overwrite.
+#[test]
+fn a_state_root_inside_a_directory_a_job_can_write_is_refused() {
+    let dir = Scratch::new("life-flags-state-inside");
+    let (data, inner, scratch, held) = (
+        dir.path("data"),
+        dir.path("data/state"),
+        dir.path("scratch"),
+        dir.path("held"),
+    );
+    for path in [&data, &inner, &scratch, &held, &held.join("data")] {
+        fs::create_dir(path).unwrap();
+    }
+    fs::create_dir(scratch.join("state")).unwrap();
+    for path in [&data, &inner, &scratch, &scratch.join("state"), &held] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let s = |path: &std::path::Path| path.display().to_string();
+    let (data_s, scratch_s) = (s(&data), s(&scratch));
+    let (mount, inside) = (format!("data={data_s}"), s(&inner));
+    let (below_scratch, held_s) = (s(&scratch.join("state")), s(&held));
+    let held_mount = format!("data={}", held.join("data").display());
+    let refused: Vec<Vec<&str>> = vec![
+        vec!["--mount-root", &mount, "--state-root", &data_s],
+        vec!["--mount-root", &mount, "--state-root", &inside],
+        vec!["--scratch-root", &scratch_s, "--state-root", &scratch_s],
+        vec!["--scratch-root", &scratch_s, "--state-root", &below_scratch],
+    ];
+    for extra in refused {
+        let (status, err, sent) = start(&extra);
+        assert_eq!(status, code(2), "{extra:?}");
+        assert!(
+            err.contains("--state-root: lies in a --mount-root or the --scratch-root"),
+            "{extra:?}: {err}"
+        );
+        assert_eq!(sent, 0, "{extra:?}");
+    }
+    let (status, err, _) = start(&["--mount-root", &held_mount, "--state-root", &held_s]);
+    assert_eq!(status, code(0), "a state root may hold a mount root: {err}");
+}
+
 /// Asserts that a Mac refuses `--container-bin` when it starts, with status 2 and nothing
 /// sent, saying why (the checks read `/proc`), and that the same flags start the agent on a
 /// Linux host. It catches a Mac agent that would run container jobs with no post-job check.

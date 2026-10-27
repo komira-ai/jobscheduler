@@ -23,7 +23,7 @@
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
 //! | `new-kernel-module` | a module in `/proc/modules` that was not there at the baseline | residue |
-//! | `watch-dir-changed` | the names, sizes, modification times or modes of the entries of a `--watch-dir` differ | residue |
+//! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
 //! | `processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable` | an input could not be read or understood | unchecked |
 //! | `watch-over-bound` | a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested | unchecked |
 //!
@@ -40,9 +40,16 @@
 //!   `init`: a host where operators log in and services restart while jobs run has such
 //!   processes, and the agent does not call every one of them the job's.
 //! - **Files outside the watched directories**, and the contents of any file. A watched
-//!   directory is listed one level deep: a change inside a subdirectory shows only as a
-//!   change to the subdirectory's own modification time, which is how a file created in it
-//!   shows.
+//!   directory is listed one level deep, and a file is judged by its metadata: a rewrite
+//!   of a file in the directory with its modification time put back is still seen, because
+//!   the status change time (which a job cannot set) moves. In a subdirectory only a name
+//!   added, removed or renamed moves the subdirectory's own modification time; a write to
+//!   a file that already exists in it changes nothing the listing reads, and is not seen.
+//! - **A job that the agent did not see end.** The baseline is taken when the agent
+//!   starts, and nothing records that a check is owed. If the agent stops after a job's
+//!   container is removed and before the check has run, or while an adopted job's
+//!   processes are on the host, what the job left behind is part of the next baseline and
+//!   is never a finding.
 //! - **A mount's options**, remounts, and mounts that disappeared: only a new mount is a
 //!   finding. The same holds for modules.
 //! - **What a job does inside its container** (a container can fill its own file system),
@@ -55,9 +62,14 @@
 //! The agent runs several jobs at once, so the host at the end of one job holds the
 //! containers of the others. [`Finished::live`] lists their ids; a process whose control
 //! group path holds one of them, and a mount whose root, mount point or source does, are
-//! not counted against the finished job. An engine that names its mounts with something
-//! other than the container id (Podman's overlay layers) shows those mounts as new; run
-//! one job at a time there, or accept that such a host is tainted.
+//! not counted against the finished job. An engine that names its mounts or places its
+//! helper processes without the container id does not match, and the neighbour then shows
+//! as a finding: Podman's overlay layers, and with Docker the overlay mount (named by its
+//! layer id) and the container's `containerd-shim` process (whose parent is `init` and
+//! whose control group is the containerd service's), so two jobs at once on a Docker or
+//! Podman host can taint it when the first of them ends. Run one job at a time there, or
+//! accept that such a host is tainted. This is stated from how the engines work, not from
+//! a measurement on a host.
 //!
 //! A container user that is the agent's own user (`--container-user` for an agent that
 //! does not run as root) makes every process of the agent's user that is not in the

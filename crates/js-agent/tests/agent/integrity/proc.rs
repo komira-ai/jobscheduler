@@ -4,7 +4,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -66,6 +66,10 @@ fn entry(name: &str, size: u64, mtime: i64, mode: u32) -> Entry {
         name: name.to_owned(),
         size,
         mtime: (mtime, 0),
+        ctime: (mtime, 0),
+        ino: 7,
+        uid: 1000,
+        gid: 1000,
         mode,
     }
 }
@@ -363,7 +367,17 @@ fn the_digest_of_a_directory_follows_every_field() {
     assert_eq!(digest_of(reordered), reference);
     let mut nanos = base.clone();
     nanos[0].mtime = (10, 1);
+    let with = |change: &dyn Fn(&mut Entry)| {
+        let mut entries = base.clone();
+        change(&mut entries[0]);
+        entries
+    };
     let changed: Vec<Vec<Entry>> = vec![
+        with(&|e| e.ctime.0 += 1),
+        with(&|e| e.ctime.1 += 1),
+        with(&|e| e.ino += 1),
+        with(&|e| e.uid += 1),
+        with(&|e| e.gid += 1),
         vec![entry("c", 1, 10, 0o100644), base[1].clone()],
         vec![entry("a", 3, 10, 0o100644), base[1].clone()],
         vec![entry("a", 1, 11, 0o100644), base[1].clone()],
@@ -394,6 +408,32 @@ fn the_digest_of_a_directory_follows_every_field() {
     );
 }
 
+/// Asserts that the machine's host sees a file replaced by another of the same size, the
+/// same modification time and the same mode, which is what a job that restores the time
+/// leaves behind. It catches a digest of the fields a job can set and nothing else.
+#[test]
+fn a_replaced_file_with_the_same_stamp_changes_the_digest() {
+    let dir = Scratch::new("integrity-replaced");
+    let stamp = UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let write = |name: &str, text: &str| {
+        let path = dir.path(name);
+        fs::write(&path, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        path
+    };
+    let target = write("target", "aa");
+    let host = ProcHost::system();
+    let before = host.watched(&dir.path("")).unwrap();
+    let other = write("other", "bb");
+    fs::rename(other, target).unwrap();
+    assert_ne!(host.watched(&dir.path("")).unwrap(), before);
+}
+
 /// Asserts that the machine's directory lister reports names, sizes, modification times
 /// and modes of a real directory without following a link, stops at the cap and says there
 /// is more only when there is, and names the directory when it cannot list it. It catches
@@ -422,6 +462,12 @@ fn the_system_lister_reads_a_real_directory() {
     let by = |name: &str| entries.iter().find(|e| e.name == name).unwrap();
     assert_eq!((by("one").size, by("three").size), (1, 3));
     assert_eq!(by("one").mtime.0, 1_000_000);
+    let meta = fs::metadata(dir.path("one")).unwrap();
+    assert_eq!(by("one").ctime, (meta.ctime(), meta.ctime_nsec()));
+    assert_eq!(
+        (by("one").ino, by("one").uid, by("one").gid),
+        (meta.ino(), meta.uid(), meta.gid())
+    );
     assert_eq!(by("sub").mode & 0o170_000, 0o040_000, "a directory");
     assert_eq!(by("link").mode & 0o170_000, 0o120_000, "the link itself");
 

@@ -46,7 +46,8 @@ pub struct Mount {
 /// What a watched directory looks like.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Watched {
-    /// A digest of the names, sizes, modification times and modes of its entries.
+    /// A digest of the names, sizes, modification and status change times, inodes, owners
+    /// and modes of its entries.
     Digest(String),
     /// It holds more entries than the checks read, so there is no digest.
     TooMany,

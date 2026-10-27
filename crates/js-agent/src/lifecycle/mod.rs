@@ -433,7 +433,8 @@ impl Local {
     /// not record a host job's taint yet), every mount root exists and is canonicalised,
     /// the scratch root and the state root are private to the user running the agent, the
     /// container runtime is an absolute path to an executable file, containers need a state
-    /// root (the taint marker is kept there), and every watched directory is an absolute
+    /// root (the taint marker is kept there) that is not, and does not lie in, a mount root
+    /// or the scratch root (a job with a read-write mount could delete the marker), and every watched directory is an absolute
     /// path to an existing directory that no mount root, scratch root or state root lies in
     /// or holds (those change with every job).
     ///
@@ -479,6 +480,16 @@ impl Local {
                         kept there"
                     .to_owned(),
             );
+        }
+        if let Some(state) = &state {
+            let mut writable = mounts.paths().chain(scratch.iter().map(ScratchRoot::path));
+            if writable.any(|root| state.path().starts_with(root)) {
+                return Err(
+                    "--state-root: lies in a --mount-root or the --scratch-root, where a \
+                     job can delete or overwrite the taint marker"
+                        .to_owned(),
+                );
+            }
         }
         let busy: Vec<&Path> = mounts
             .paths()
