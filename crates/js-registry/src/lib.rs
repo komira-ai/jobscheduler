@@ -73,6 +73,19 @@
 //!   is sent no start, takes no new run and no new lease (a lease already on it is left
 //!   alone until it ends), and is never forgotten for being silent; its
 //!   live runs finish and are acknowledged. The registry never clears a taint.
+//! - **Whole-node commit.** A lease of a `Whole` class is committed, not granted
+//!   (design `whole-node.md` sections 5 and 8): the registry books it only on a
+//!   host that is live, serving, clean, quiet and clear of another whole-node lease or a
+//!   restore, and answers `Unknown`, so the lease stays pending. The host's heartbeat
+//!   replies name the lease in `exclusive`; the lease reads `Unknown` until the agent
+//!   reports `exclusive_ready` for exactly that lease, then `Present`, which is when a
+//!   consumer is given its token. Until then no run is queued
+//!   ([`RunRefusal::NotReady`]) or started. A new session (hello) voids the
+//!   preparation. When the lease ends the host stays unbookable until two heartbeats
+//!   have followed the stop and the last shows it serving with nothing held. A `BookAll`
+//!   lease is granted at once and none of this applies; neither does it to a static
+//!   pool, which has no agent to wait for and holds a `Whole` lease at once. The state
+//!   is in memory only.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
 //!   that the agent's next hello completes. The seat takes the binding the caller
@@ -87,7 +100,7 @@ mod refusal;
 mod registry;
 mod runs;
 mod session;
-pub mod whole;
+mod whole;
 mod whole_config;
 
 pub use config::{

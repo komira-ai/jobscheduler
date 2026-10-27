@@ -52,7 +52,7 @@ pub fn reserve_deadline(attempts_given_up: u32, cfg: &WholeNodeConfig, max_wall_
     if attempts_given_up >= cfg.max_reserve_attempts {
         max_wall_ms
     } else {
-        cfg.drain_deadline_ms.unwrap_or(max_wall_ms)
+        cfg.drain_deadline_ms(max_wall_ms)
     }
 }
 
@@ -120,6 +120,23 @@ mod tests {
         // Kills: plain subtraction (panics in debug, wraps in release).
         let hosts = [load("a", 1, &[5])];
         assert_eq!(drain_cost(&hosts, 100)[0].wait_ms, 0);
+    }
+
+    #[test]
+    fn full_ties_across_many_hosts_order_by_lease_count_then_id() {
+        // Five hosts share one bound; the order is fewest leases, then lowest id, whatever
+        // order they arrive in.
+        let hosts = [
+            load("e", 2, &[400]),
+            load("c", 1, &[400]),
+            load("d", 2, &[400]),
+            load("b", 1, &[400]),
+            load("a", 3, &[400]),
+        ];
+        assert_eq!(ids(&drain_cost(&hosts, 0)), ["b", "c", "d", "e", "a"]);
+        let mut reversed = hosts.clone();
+        reversed.reverse();
+        assert_eq!(ids(&drain_cost(&reversed, 0)), ["b", "c", "d", "e", "a"]);
     }
 
     #[test]

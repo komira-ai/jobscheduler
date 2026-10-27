@@ -77,9 +77,11 @@ pub fn may_reserve(counts: Counts, limits: Limits) -> Result<(), Blocked> {
         return Err(Blocked::Ceiling);
     }
     if counts.whole
-        >= limits
-            .capable_hosts
-            .saturating_sub(limits.keep_for_ordinary)
+        >= ceiling(
+            limits.max_whole_node,
+            limits.capable_hosts,
+            limits.keep_for_ordinary,
+        )
     {
         return Err(if limits.keep_for_ordinary == 0 {
             Blocked::Ceiling
@@ -120,6 +122,10 @@ pub struct Mark {
 /// greater request id), so that whole hosts fall to the `ceiling`. A held mark is never
 /// returned: when held marks alone exceed the ceiling, every reservation is dropped and
 /// the held ones stay.
+///
+/// `marks` must hold ALL the whole marks of the pool, reserved and held, not just the
+/// reservations: the excess is the count of every mark over the ceiling, and a partial
+/// list undercounts it and drops too few.
 pub fn ceiling_excess(marks: &[Mark], ceiling: usize) -> Vec<String> {
     let whole = marks.len();
     let mut reserved: Vec<&Mark> = marks
@@ -235,6 +241,22 @@ mod tests {
             Err(Blocked::KeepForOrdinary)
         );
         assert_eq!(may_reserve(counts(2, 0, 0), l), Ok(()));
+    }
+
+    #[test]
+    fn keeping_more_than_the_capable_hosts_blocks_everything_as_keep_for_ordinary() {
+        // capable 1, keep 3: the ceiling saturates at zero, so even the first whole host
+        // is refused, and the cap named is the keep.
+        let l = Limits {
+            max_whole_node: 10,
+            capable_hosts: 1,
+            keep_for_ordinary: 3,
+            ..limits()
+        };
+        assert_eq!(
+            may_reserve(counts(0, 0, 0), l),
+            Err(Blocked::KeepForOrdinary)
+        );
     }
 
     #[test]

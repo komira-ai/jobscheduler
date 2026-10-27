@@ -77,3 +77,16 @@ pub const HOST_LISTED: &str = "host-listed";
 pub const RATE_LIMITED: &str = "rate-limited";
 /// A request body over the transport's cap, refused before it is read in full.
 pub const BODY_TOO_LARGE: &str = "body-too-large";
+
+/// A whole-node lease request that failed after the host could not be prepared within the
+/// allowed number of replacements; its detail names the last reason code and detail the
+/// agent reported. Used by the scheduler, not by the agent.
+pub const EXCLUSIVE_NOT_READY: &str = "exclusive-not-ready";
+/// A whole-node lease request for which no host is capable of it.
+pub const NO_CAPABLE_HOST: &str = "no-capable-host";
+/// A whole-node lease request that matches no pool.
+pub const NO_MATCHING_POOL: &str = "no-matching-pool";
+/// A run for a whole-node lease whose agent has not reported `exclusive_ready` for it:
+/// the lease holds the host, but the host is still being prepared. Used by the server,
+/// not by the agent.
+pub const NOT_READY: &str = "not-ready";
