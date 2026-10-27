@@ -525,21 +525,6 @@ where
 /// does not know, or a start whose isolation it cannot classify) reads as
 /// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
 /// the one it cannot classify.
-fn cut_detail<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let mut text = String::deserialize(deserializer)?;
-    if text.len() > limits::MAX_REFUSAL_DETAIL {
-        let mut end = limits::MAX_REFUSAL_DETAIL;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
-    Ok(text)
-}
-
 fn commands_or_unknown<'de, D>(deserializer: D) -> Result<Vec<Command>, D::Error>
 where
     D: Deserializer<'de>,
