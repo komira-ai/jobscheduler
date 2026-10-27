@@ -7,7 +7,7 @@ use js_lease_server::BODY_LIMIT;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
+    JOIN, JOIN_B, Session, beat, entry, grant, hello_body, hello_with, hosts, join, listed, post,
     post_raw, session, start_agents,
 };
 use crate::support::{Harness, LogCapture, TOKEN, guard, ids, lease_body, request};
@@ -41,10 +41,9 @@ async fn registered_host_is_leasable_through_post_leases() {
     assert_eq!(heard.status, 200, "{}", heard.body);
     assert_eq!(heard.json(), empty_reply());
 
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    assert_eq!(granted.json()["host"], "burst-1");
-    let id = granted.json()["id"].as_str().unwrap().to_string();
+    let granted = grant(&h, &[&me]).await;
+    assert_eq!(granted["host"], "burst-1");
+    let id = granted["id"].as_str().unwrap().to_string();
     assert_eq!(entry(&hosts(&h).await, "burst-1")["lease"], id);
 
     let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
@@ -57,9 +56,11 @@ async fn registered_host_is_leasable_through_post_leases() {
     assert_eq!(released.json(), json!({ "state": "freed" }));
     assert!(entry(&hosts(&h).await, "burst-1").get("lease").is_none());
 
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.status, 201, "{}", again.body);
-    assert_eq!(again.json()["host"], "burst-1");
+    // The freed host books again after two heartbeats that follow the release.
+    beat(&h, &me).await;
+    beat(&h, &me).await;
+    let again = grant(&h, &[&me]).await;
+    assert_eq!(again["host"], "burst-1");
 }
 
 /// Asserts the layer's order: the two static hosts are taken first, then the registered
@@ -69,12 +70,11 @@ async fn registered_host_is_leasable_through_post_leases() {
 #[tokio::test]
 async fn static_preferred_then_registered_when_static_full() {
     let h = start_agents("agents_layered", true).await;
-    join(&h, "burst-1").await;
+    let me = join(&h, "burst-1").await;
     let mut taken = Vec::new();
     for _ in 0..3 {
-        let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        taken.push(granted.json()["host"].as_str().unwrap().to_string());
+        let granted = grant(&h, &[&me]).await;
+        taken.push(granted["host"].as_str().unwrap().to_string());
     }
     assert_eq!(taken, ["gpu-01", "gpu-02", "burst-1"]);
     let full = h.call("POST", "/v1/leases", Some(&lease_body())).await;
@@ -436,12 +436,9 @@ async fn hosts_lists_registered_hosts_with_their_state() {
 #[tokio::test]
 async fn lost_registered_host_lease_expires_by_ttl() {
     let h = start_agents("agents_lost", false).await;
-    join(&h, "burst-1").await;
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(
-        granted.json()["expires_at_ms"],
-        crate::support::T0 + 600_000
-    );
+    let me = join(&h, "burst-1").await;
+    let granted = grant(&h, &[&me]).await;
+    assert_eq!(granted["expires_at_ms"], crate::support::T0 + 600_000);
 
     h.clock.advance(secs(30));
     h.ticks.step().await;
@@ -457,8 +454,10 @@ async fn lost_registered_host_lease_expires_by_ttl() {
 
     let back = join(&h, "burst-1").await;
     assert_eq!(back.epoch, 2);
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.status, 201, "{}", again.body);
+    // A host books again after two heartbeats that follow the end of its lease.
+    beat(&h, &back).await;
+    beat(&h, &back).await;
+    grant(&h, &[&back]).await;
 }
 
 /// Asserts that heartbeats from several agents and lease calls and listings that take
@@ -486,14 +485,18 @@ async fn heartbeats_hammered_during_lease_calls_complete() {
         for _ in 0..30 {
             let body = lease_body().to_string().into_bytes();
             let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
-            assert_eq!(made.status, 201, "{}", made.body);
+            // A whole-node lease is pending until its agent reports ready (none does
+            // here), and a host freed by a release books again only after heartbeats
+            // that follow it, which race with this loop: 409 is a legitimate answer.
+            if made.status == 409 {
+                assert_eq!(made.json(), json!({ "error": "no-capacity" }));
+                continue;
+            }
+            assert_eq!(made.status, 202, "{}", made.body);
             let id = made.json()["id"].as_str().unwrap().to_string();
-            let renew = format!("/v1/leases/{id}/renew");
-            let renewed = request(addr, "POST", &renew, Some(TOKEN), None).await;
-            assert_eq!(renewed.status, 200);
             let path = format!("/v1/leases/{id}");
             let freed = request(addr, "DELETE", &path, Some(TOKEN), None).await;
-            assert_eq!(freed.status, 200);
+            assert!(matches!(freed.status, 200 | 202), "{}", freed.body);
         }
     }));
     tasks.push(tokio::spawn(async move {
@@ -599,12 +602,11 @@ async fn a_supplied_static_source_is_layered_like_the_pool_file() {
     let args = crate::agents_support::agent_args(&scratch, false);
     let supplied = Box::new(crate::support::SharedPool::new());
     let h = Harness::with(scratch, args, Some(supplied)).await;
-    join(&h, "burst-1").await;
+    let me = join(&h, "burst-1").await;
     let mut taken = Vec::new();
     for _ in 0..3 {
-        let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-        assert_eq!(granted.status, 201, "{}", granted.body);
-        taken.push(granted.json()["host"].as_str().unwrap().to_string());
+        let granted = grant(&h, &[&me]).await;
+        taken.push(granted["host"].as_str().unwrap().to_string());
     }
     assert_eq!(taken, ["gpu-01", "gpu-02", "burst-1"]);
     let clash = hello_with(&h, JOIN, "gpu-02").await;

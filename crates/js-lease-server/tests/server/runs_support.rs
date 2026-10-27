@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, Session, post};
-use crate::support::{Harness, Reply, lease_body};
+use crate::agents_support::{JOIN, Session, grant, post};
+use crate::support::{Harness, Reply};
 
 /// A job of `cpu` thousandths of a core and 1 MiB, with every other field left to its
 /// default.
@@ -19,11 +19,11 @@ pub fn run_body(cpu: u64) -> Value {
     })
 }
 
-/// A lease on the one registered host, expected to be granted. Returns its id.
-pub async fn lease(h: &Harness) -> String {
-    let granted = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.status, 201, "{}", granted.body);
-    granted.json()["id"].as_str().unwrap().to_string()
+/// A lease on a registered host of `sessions`, granted once its agent has reported ready.
+/// Returns its id.
+pub async fn lease(h: &Harness, sessions: &[&Session]) -> String {
+    let granted = grant(h, sessions).await;
+    granted["id"].as_str().unwrap().to_string()
 }
 
 /// `POST /v1/leases/{lease}/runs` with `body`.

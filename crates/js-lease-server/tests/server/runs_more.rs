@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, entry, hello_body, hosts, join, post, restarted, start_agents,
+    JOIN, Session, entry, grant_with, hello_body, hosts, join, post, report_ready, restarted,
+    session, start_agents,
 };
 use crate::runs_support::{beat, held, lease, queue, queued, run_body, runs, state, stop, words};
 use crate::support::{Harness, lease_body};
@@ -47,14 +48,14 @@ fn agent_file(h: &Harness) -> PathBuf {
 async fn a_run_id_of_an_earlier_boot_is_gone() {
     let first = start_agents("runs_forgotten", false).await;
     let old = join(&first, "burst-1").await;
-    let lease = lease(&first).await;
+    let lease = lease(&first, &[&old]).await;
     let run = queued(&first, &lease, 1000).await;
     assert_eq!(show(&first, &lease, &run).await.status, 200);
     beat(&first, &old, &[held(&run, "running")], &[]).await;
 
     let h = restarted(first, false).await;
     let welcome = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("burst-1")).await;
-    assert_eq!(welcome.status, 200, "{}", welcome.body);
+    let me = session(&welcome, "burst-1");
     let gone = json!({ "error": "run-forgotten" });
     let read = show(&h, &lease, &run).await;
     assert_eq!((read.status, read.json()), (410, gone.clone()));
@@ -67,6 +68,7 @@ async fn a_run_id_of_an_earlier_boot_is_gone() {
     );
     let odd = show(&h, &lease, "ghost").await;
     assert_eq!(odd.status, 404, "{}", odd.body);
+    report_ready(&h, &me, &lease).await;
     let fresh = queued(&h, &lease, 1000).await;
     assert_eq!(fresh, "run-2-1");
     let read = show(&h, &lease, &fresh).await;
@@ -84,8 +86,8 @@ async fn one_lease_cannot_reach_another_leases_run() {
     let h = start_agents("runs_cross_lease", false).await;
     let a = join(&h, "burst-1").await;
     let _b = join(&h, "burst-2").await;
-    let first = lease(&h).await;
-    let second = lease(&h).await;
+    let first = lease(&h, &[&a, &_b]).await;
+    let second = lease(&h, &[&a, &_b]).await;
     assert_ne!(first, second);
     let run = queued(&h, &first, 1000).await;
 
@@ -120,8 +122,8 @@ async fn a_run_is_bounded_by_the_lease_time_it_was_queued_with() {
     let me = join(&h, "burst-1").await;
     let mut ask = lease_body();
     ask["ttl_seconds"] = json!(100);
-    let granted = h.call("POST", "/v1/leases", Some(&ask)).await;
-    let lease = granted.json()["id"].as_str().unwrap().to_string();
+    let granted = grant_with(&h, &[&me], &ask).await;
+    let lease = granted["id"].as_str().unwrap().to_string();
     let run = queued(&h, &lease, 8000).await;
 
     let mut reply = beat(&h, &me, &[], &[]).await;
@@ -158,7 +160,7 @@ async fn a_run_is_bounded_by_the_lease_time_it_was_queued_with() {
 async fn a_tainted_host_is_shown_acknowledged_and_sent_no_start() {
     let h = start_agents("runs_taint", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h).await;
+    let lease = lease(&h, &[&me]).await;
     let run = queued(&h, &lease, 1000).await;
     assert_eq!(entry(&hosts(&h).await, "burst-1").get("taint"), None);
 
@@ -194,7 +196,7 @@ async fn a_tainted_host_is_shown_acknowledged_and_sent_no_start() {
 async fn a_taint_is_not_acknowledged_before_it_can_be_written() {
     let h = start_agents("runs_taint_write", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h).await;
+    let lease = lease(&h, &[&me]).await;
     queued(&h, &lease, 1000).await;
     let blocker = h.scratch.path("leases.toml.agents.tmp");
     fs::create_dir(&blocker).unwrap();
@@ -226,7 +228,7 @@ async fn a_taint_survives_a_restart() {
     let first = start_agents("runs_taint_restart", false).await;
     let a = join(&first, "burst-1").await;
     let b = join(&first, "burst-2").await;
-    let lease = lease(&first).await;
+    let lease = lease(&first, &[&a, &b]).await;
     let taint = json!({ "taint": { "reason": "residue" } });
     let on_a = entry(&hosts(&first).await, "burst-1")["lease"].is_string();
     let (leased, idle) = if on_a { (a, b) } else { (b, a) };
@@ -260,7 +262,7 @@ async fn a_taint_survives_a_restart() {
 async fn a_start_refused_as_host_tainted_taints_the_host() {
     let h = start_agents("runs_taint_refused", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h).await;
+    let lease = lease(&h, &[&me]).await;
     let run = queued(&h, &lease, 4000).await;
     let waiting = queued(&h, &lease, 1000).await;
     let reply = beat(&h, &me, &[], &[]).await;

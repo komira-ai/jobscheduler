@@ -149,7 +149,7 @@ impl RunRefusal {
             Self::HostJobsNotAllowed => refusal::HOST_JOBS_NOT_ALLOWED,
             Self::NoCapacity => refusal::NO_CAPACITY,
             Self::HostTainted => refusal::HOST_TAINTED,
-            Self::NotReady => "not-ready",
+            Self::NotReady => refusal::NOT_READY,
             Self::RunExists => "run-exists",
             Self::UnknownRun => "unknown-run",
         }

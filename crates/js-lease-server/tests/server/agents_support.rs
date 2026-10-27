@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::support::{Harness, Reply, Scratch, base_args, replace, request};
+use crate::support::{Harness, Reply, Scratch, base_args, lease_body, replace, request};
 
 /// The join token in the token file at the start.
 pub const JOIN: &str = "join-token-A-0123456789-abcdefghijklmnop";
@@ -206,4 +206,38 @@ pub async fn post_raw(
         head: head.to_ascii_lowercase(),
         body: body.to_string(),
     }
+}
+
+/// The heartbeat of `session` that reports its host ready for the whole-node lease `id`.
+pub async fn report_ready(h: &Harness, session: &Session, id: &str) {
+    let mut message = session.beat();
+    message["exclusive_ready"] = json!(id);
+    let ready = post(h, "/v1/agent/heartbeat", Some(JOIN), &message).await;
+    assert_eq!(ready.status, 200, "{}", ready.body);
+}
+
+/// A request for a lease, answered by a registered host as the commit gate has it: 202
+/// pending until the agent of its host (one of `sessions`) has reported the host ready for
+/// exactly this lease, then the lease is granted at the next tick. A static host answers
+/// 201 at once. Returns the entry of the lease in the list, which has the host it holds.
+pub async fn grant(h: &Harness, sessions: &[&Session]) -> Value {
+    grant_with(h, sessions, &lease_body()).await
+}
+
+/// As [`grant`], for the request `body`.
+pub async fn grant_with(h: &Harness, sessions: &[&Session], body: &Value) -> Value {
+    let asked = h.call("POST", "/v1/leases", Some(body)).await;
+    assert!(matches!(asked.status, 201 | 202), "{}", asked.body);
+    let id = asked.json()["id"].as_str().unwrap().to_string();
+    if asked.status == 202 {
+        for session in sessions {
+            report_ready(h, session, &id).await;
+        }
+        h.ticks.step().await;
+    }
+    let listed = h.call("GET", "/v1/leases", None).await.json();
+    let leases = listed["leases"].as_array().unwrap();
+    let held = leases.iter().find(|lease| lease["id"] == id);
+    held.unwrap_or_else(|| panic!("{id} is not listed: {listed}"))
+        .clone()
 }

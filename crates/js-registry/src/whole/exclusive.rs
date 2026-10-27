@@ -16,6 +16,9 @@
 //!   host then books is the ordinary rule, read from the last heartbeat at the start:
 //!   phase `serving`, no held run, no live run.
 //!
+//! A whole-node booking restored by a restart (`seat`) starts `Committed`, never `Free`:
+//! the preparation was in memory only, so the agent reports ready for it again.
+//!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
 //! falls back to `Committed` (the same lease and commit time) until it reports again.
 

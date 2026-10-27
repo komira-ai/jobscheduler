@@ -198,6 +198,50 @@ fn no_run_is_queued_before_ready() {
     assert_eq!(starts(&reply), 1);
 }
 
+/// Asserts the restore of a whole-node booking after a restart: a lease seated on a host
+/// that is not known yet (an awaiting host) and one seated on a joined host are both
+/// committed, never free. They read `Unknown` and are named in `exclusive` once the host
+/// speaks, no run is queued before the agent reports ready for exactly that lease, and the
+/// report makes the lease `Present`. It catches a restored booking that reads `Present`
+/// with no ready report, or a restored host that other leases or runs could use.
+#[test]
+fn a_restored_whole_booking_is_committed_until_the_agent_reports_ready() {
+    let fx = whole_fixture();
+    let mut provider = fx.provider.clone();
+    provider.seat(&host("a"), lease(1), None).unwrap();
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    let epoch = fx.join("a", "t");
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    let reply = fx.registry.heartbeat(&fx.heartbeat("a", epoch), &cred("t"));
+    assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-1"));
+    let queue = |run: &str| fx.registry.queue_run(&host("a"), &lease(1), job(run));
+    assert_eq!(queue("r1").unwrap_err(), RunRefusal::NotReady);
+    report_ready(&fx, epoch, &lease(1).to_string());
+    let seen = Observed::Present { host: host("a") };
+    assert_eq!(provider.observe(&lease(1)), seen);
+    assert_eq!(queue("r1").unwrap().state, RunState::Queued);
+
+    // A host that already joined takes the restored lease the same way.
+    let fx = whole_fixture();
+    let mut provider = fx.provider.clone();
+    let epoch = fx.join("b", "t");
+    provider.seat(&host("b"), lease(2), None).unwrap();
+    assert_eq!(provider.observe(&lease(2)), Observed::Unknown);
+    let reply = fx.registry.heartbeat(&fx.heartbeat("b", epoch), &cred("t"));
+    assert_eq!(reply.unwrap().exclusive.as_deref(), Some("1-2"));
+
+    // A pool that books the whole host without the commit gate restores its leases as
+    // they were: present, with nothing to prepare.
+    let fx = fixture(2);
+    let mut provider = fx.provider.clone();
+    let epoch = fx.join("c", "t");
+    provider.seat(&host("c"), lease(3), None).unwrap();
+    let seen = Observed::Present { host: host("c") };
+    assert_eq!(provider.observe(&lease(3)), seen);
+    let reply = fx.registry.heartbeat(&fx.heartbeat("c", epoch), &cred("t"));
+    assert_eq!(reply.unwrap().exclusive, None);
+}
+
 /// Asserts that stopping a lease the registry never booked (a whole-node request that
 /// was refused, then released) reads `Absent` and leaves the hosts as they were.
 #[test]

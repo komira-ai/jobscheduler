@@ -11,8 +11,8 @@ use js_registry::Credential;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, JOIN_B, agent_args, beat, entry, hello_body, hello_with, hosts, join, listed, post,
-    restarted, start_agents,
+    JOIN, JOIN_B, agent_args, beat, entry, grant, hello_body, hello_with, hosts, join, listed,
+    post, restarted, session, start_agents,
 };
 use crate::support::{
     Harness, LogCapture, Scratch, base_args, config, ids, lease_body, lease_file, replace,
@@ -40,8 +40,8 @@ fn agent_file(scratch: &Scratch) -> PathBuf {
 async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello() {
     let first = start_agents("agents_restart_lease", false).await;
     let old = join(&first, "burst-1").await;
-    let granted = first.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(granted.json()["host"], "burst-1");
+    let granted = grant(&first, &[&old]).await;
+    assert_eq!(granted["host"], "burst-1");
 
     let h = restarted(first, false).await;
     let leases = h.call("GET", "/v1/leases", None).await.json();
@@ -76,8 +76,11 @@ async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello() {
     assert_eq!(renewed.status, 200, "{}", renewed.body);
     let released = h.call("DELETE", "/v1/leases/1-1", None).await;
     assert_eq!(released.json(), json!({ "state": "freed" }));
-    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
-    assert_eq!(again.json()["host"], "burst-1");
+    // The host books again after two heartbeats that follow the release.
+    beat(&h, &back).await;
+    beat(&h, &back).await;
+    let again = grant(&h, &[&back]).await;
+    assert_eq!(again["host"], "burst-1");
 }
 
 /// Asserts that a lease on a registered host keeps its binding across a restart: after
@@ -88,8 +91,8 @@ async fn restart_keeps_lease_on_registered_host_as_unknown_until_rehello() {
 #[tokio::test]
 async fn restart_keeps_the_binding_so_another_token_cannot_take_the_lease() {
     let first = start_agents("agents_restart_binding", false).await;
-    join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let me = join(&first, "burst-1").await;
+    grant(&first, &[&me]).await;
 
     let h = restarted(first, false).await;
     let intruder = hello_with(&h, JOIN_B, "burst-1").await;
@@ -113,8 +116,8 @@ async fn restart_keeps_the_instance_of_a_binding() {
     let mut body = hello_body("burst-1");
     body["instance"] = json!({ "provider": "aws", "instance_id": "i-0abc" });
     let admitted = post(&first, "/v1/agent/hello", Some(JOIN), &body).await;
-    assert_eq!(admitted.status, 200, "{}", admitted.body);
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let me = session(&admitted, "burst-1");
+    grant(&first, &[&me]).await;
 
     let h = restarted(first, false).await;
     let mut other = body.clone();
@@ -137,8 +140,8 @@ async fn restart_keeps_the_instance_of_a_binding() {
 #[tokio::test]
 async fn an_awaiting_host_that_never_returns_is_forgotten_with_its_binding() {
     let first = start_agents("agents_awaiting_forgotten", false).await;
-    join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let me = join(&first, "burst-1").await;
+    grant(&first, &[&me]).await;
 
     let h = restarted(first, false).await;
     let path = agent_file(&h.scratch);
@@ -289,8 +292,8 @@ async fn a_binding_file_that_cannot_be_trusted_refuses_the_start() {
 #[tokio::test]
 async fn the_lease_file_is_unchanged_by_agents_in_both_directions() {
     let first = start_agents("agents_compat", false).await;
-    join(&first, "burst-1").await;
-    first.call("POST", "/v1/leases", Some(&lease_body())).await;
+    let me = join(&first, "burst-1").await;
+    grant(&first, &[&me]).await;
     let lease_text = fs::read_to_string(first.scratch.state()).unwrap();
     assert!(lease_text.contains("version = 1"), "{lease_text}");
     assert!(lease_text.contains("host = \"burst-1\""), "{lease_text}");

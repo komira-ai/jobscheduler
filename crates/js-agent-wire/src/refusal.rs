@@ -86,3 +86,7 @@ pub const EXCLUSIVE_NOT_READY: &str = "exclusive-not-ready";
 pub const NO_CAPABLE_HOST: &str = "no-capable-host";
 /// A whole-node lease request that matches no pool.
 pub const NO_MATCHING_POOL: &str = "no-matching-pool";
+/// A run for a whole-node lease whose agent has not reported `exclusive_ready` for it:
+/// the lease holds the host, but the host is still being prepared. Used by the server,
+/// not by the agent.
+pub const NOT_READY: &str = "not-ready";

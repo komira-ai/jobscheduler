@@ -787,13 +787,24 @@ impl Registry {
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State { book, records, .. } = &mut *guard;
-        match book.seat(host, lease) {
+        let seated = match book.seat(host, lease) {
             Err(SeatError::Unlisted(_)) => {
                 book.insert_host(host.clone(), self.shared.config.shape().clone());
                 records.insert(host.clone(), Record::awaiting(binding, now));
                 book.seat(host, lease)
             }
             settled => settled,
+        };
+        // A restored whole-node booking is committed and not ready: the agent's
+        // preparation is in memory only, so it must report ready for this lease again
+        // before the lease reads present, a run is queued or the host books to anyone.
+        let whole = matches!(self.shared.config.class().admission(), Admission::Whole);
+        if let (Ok(()), true) = (&seated, whole) {
+            let record = records.get_mut(host);
+            record.into_iter().for_each(|record| {
+                record.exclusive = Exclusive::Committed { lease, at: now };
+            });
         }
+        seated
     }
 }
