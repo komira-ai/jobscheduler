@@ -45,7 +45,8 @@ impl StaticPool {
 
     /// The same pool serving `classes` instead of the shipped one. The pool leases a
     /// whole host whatever the class says, so `start` refuses, with `UnsupportedClass`,
-    /// a class whose admission is not `BookAll` instead of leasing it a whole host.
+    /// a class whose admission does not book a whole host (`BookAll` or `Whole`) instead
+    /// of leasing it a whole host.
     pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
         self.classes = classes;
         self
