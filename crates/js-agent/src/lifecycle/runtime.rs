@@ -141,7 +141,27 @@ pub struct Found {
 /// A runtime call that failed. The text is the runtime's own and stays on the host.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct RuntimeError(pub String);
+pub struct RuntimeError(pub String, bool);
+
+impl RuntimeError {
+    /// A failure of the call.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into(), false)
+    }
+
+    /// A start that failed because the agent cannot see the host: the container started,
+    /// and the process the runtime names for it is not in the agent's `/proc`, so the
+    /// post-job checks would read a host that is not the one the job runs on. The backend
+    /// has removed the container; the lifecycle taints the host as unchecked.
+    pub fn blind(text: impl Into<String>) -> Self {
+        Self(text.into(), true)
+    }
+
+    /// Whether the failure is that the agent cannot see the host ([`RuntimeError::blind`]).
+    pub fn is_blind(&self) -> bool {
+        self.1
+    }
+}
 
 /// What the lifecycle needs of a container runtime.
 pub trait ContainerRuntime {

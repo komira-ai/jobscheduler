@@ -53,6 +53,8 @@ struct State {
     creates: Vec<ContainerSpec>,
     /// When set, the log notes whether this file exists at each call.
     marker: Option<PathBuf>,
+    /// Whether the next create fails as a start that shows the host is not seen.
+    blind: bool,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -65,7 +67,7 @@ pub struct FakeRuntime {
 }
 
 fn err(call: &str) -> RuntimeError {
-    RuntimeError(format!("{call} failed"))
+    RuntimeError::new(format!("{call} failed"))
 }
 
 impl FakeRuntime {
@@ -85,6 +87,12 @@ impl FakeRuntime {
     /// `list`) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// The next `create_and_start` fails as a start does when the agent cannot see the host
+    /// its containers run on (the container is not made).
+    pub fn blind_next_create(&self) {
+        self.state.borrow_mut().blind = true;
     }
 
     /// Whether a stop makes the container exit. On by default.
@@ -212,6 +220,11 @@ impl ContainerRuntime for FakeRuntime {
         self.clock.advance(self.state.borrow().create_takes_ms);
         if self.fails("create") {
             return Err(err("create"));
+        }
+        if std::mem::take(&mut self.state.borrow_mut().blind) {
+            return Err(RuntimeError::blind(
+                "create: the agent does not see the host",
+            ));
         }
         let mut state = self.state.borrow_mut();
         state.next += 1;

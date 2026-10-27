@@ -42,28 +42,25 @@ fn poll_maps_every_state() {
         ("exited -1 false", ok(-1, false)),
         (
             "dead x false",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
+            Err(RuntimeError::new("inspect: unreadable output")),
         ),
         (
             "exited x false",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
+            Err(RuntimeError::new("inspect: unreadable output")),
         ),
         (
             "exited 1",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
+            Err(RuntimeError::new("inspect: unreadable output")),
         ),
         (
             "exited 1 false extra",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
+            Err(RuntimeError::new("inspect: unreadable output")),
         ),
         (
             "weird 0 false",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
+            Err(RuntimeError::new("inspect: unreadable output")),
         ),
-        (
-            "",
-            Err(RuntimeError("inspect: unreadable output".to_owned())),
-        ),
+        ("", Err(RuntimeError::new("inspect: unreadable output"))),
     ];
     for (printed, expected) in table {
         world.say("inspect", printed);

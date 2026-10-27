@@ -243,6 +243,10 @@ impl HostView for ProcHost {
     fn link(&self, path: &str) -> Result<String, String> {
         self.files.link(path)
     }
+
+    fn file(&self, path: &str) -> Result<String, String> {
+        self.files.read(path)
+    }
 }
 
 /// The process `pid` from the text of its `stat`, `status` and `cgroup` files. The name in

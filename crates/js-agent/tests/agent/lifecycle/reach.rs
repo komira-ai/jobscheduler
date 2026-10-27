@@ -98,6 +98,42 @@ fn an_agent_that_cannot_see_the_host_does_not_start_with_containers() {
     }
 }
 
+/// Asserts that an agent whose namespace links match `init`'s but whose `/proc` is a
+/// container's (no pid 2, or a pid 1 in a container's control group) does not start with
+/// containers: exit 2, nothing sent, the flag and the reason named; and that it starts when
+/// it runs no containers. It catches an agent in a container, or under `PrivatePIDs` with a
+/// `/proc` of its own, that runs its jobs on the host through a socket and checks the
+/// wrong machine.
+#[test]
+fn an_agent_with_a_container_proc_does_not_start_with_containers() {
+    let dir = Scratch::new("reach-container-proc");
+    let state = private(&dir, "state");
+    let owned = containers(&dir, &state);
+    let mut hosts = Vec::new();
+    let mut host = linux_host();
+    host.files = host.files.without("/proc/2/stat");
+    hosts.push(("no pid 2", host, "pid 2 cannot be read"));
+    let mut host = linux_host();
+    host.files = host.files.with("/proc/2/stat", "2 (sh) S 0 0");
+    hosts.push(("pid 2 is a shell", host, "pid 2 is \"sh\""));
+    let mut host = linux_host();
+    host.files = host.files.with("/proc/1/cgroup", "0::/docker/4f3a9c\n");
+    hosts.push(("a container cgroup", host, "pid 1 is in the control group"));
+    for (name, host, why) in hosts {
+        let (status, err, sent) = start_on(&host, &args(&owned));
+        assert_eq!(status, code(2), "{name}");
+        assert!(
+            err.contains("--container-bin: the agent's /proc is not the host's:")
+                && err.contains(why),
+            "{name}: {err}"
+        );
+        assert_eq!(sent, 0, "{name}");
+
+        let (status, err, _) = start_on(&host, &["--state-root", &state.display().to_string()]);
+        assert_eq!(status, code(0), "{name}: no containers: {err}");
+    }
+}
+
 /// Asserts that a state root on the same file system as a mount root, or as the scratch
 /// root, ends the agent with status 2 before anything is sent, naming the flags; that a
 /// root that cannot be looked at ends it too (the check fails closed); and that roots on
@@ -154,6 +190,54 @@ fn a_state_root_on_a_file_system_a_job_can_fill_is_refused() {
         assert!(err.contains("Permission denied"), "{unlooked:?}: {err}");
         assert_eq!(sent, 0, "{unlooked:?}");
     }
+}
+
+/// Asserts that every mount root is compared with the state root, not only the first: with
+/// two mount roots of which only the second is on the state root's device, the agent
+/// refuses to start and names the second; with neither on it, it starts. It catches a
+/// comparison that stops after the first root.
+#[test]
+fn a_second_mount_root_on_the_state_roots_device_is_refused() {
+    let dir = Scratch::new("reach-two-roots");
+    let (state, first, second) = (
+        private(&dir, "state"),
+        private(&dir, "first"),
+        private(&dir, "second"),
+    );
+    let state_s = state.display().to_string();
+    let (mount_a, mount_b) = (
+        format!("a={}", first.display()),
+        format!("b={}", second.display()),
+    );
+    let flags = [
+        "--state-root",
+        &state_s,
+        "--mount-root",
+        &mount_a,
+        "--mount-root",
+        &mount_b,
+    ];
+    let (status, err, _) = start_on(&linux_host(), &flags);
+    assert_eq!(status, code(0), "other file systems: {err}");
+
+    let (state_c, second_c) = (
+        fs::canonicalize(&state).unwrap(),
+        fs::canonicalize(&second).unwrap(),
+    );
+    let mut host = linux_host();
+    host.files = host
+        .files
+        .with_device_under(&state_c, 7)
+        .with_device_under(&second_c, 7);
+    let (status, err, sent) = start_on(&host, &flags);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--state-root: on the same file system as the --mount-root")
+            && err.contains(&second_c.display().to_string())
+            && !err.contains(&fs::canonicalize(&first).unwrap().display().to_string()),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
 }
 
 /// Asserts that an agent with containers and no `--watch-dir` says so when it starts and

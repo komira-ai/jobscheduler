@@ -387,6 +387,60 @@ fn host_job_taints_on_every_outcome() {
     }
 }
 
+/// Asserts that a start the runtime reports as showing that the agent cannot see the host
+/// taints the host as unchecked, with the run and the code `host-not-visible`, before
+/// anything else of the failure (taint, then the finding, then the result); that the marker
+/// is on disk and the taint is reported; that the result is `failed_to_start` with the
+/// detail `runtime-failed`; that every later start is refused as `host-tainted`; and that a
+/// start that fails for any other reason taints nothing. It catches an agent that cannot
+/// see its jobs and goes on accepting them, and a plain failed create that taints a host.
+#[test]
+fn a_start_that_shows_the_host_is_not_seen_taints_it_as_unchecked() {
+    let mut h = Harness::with(
+        "blind-start",
+        Options {
+            watch_marker: true,
+            ..Options::default()
+        },
+    );
+    h.fake.fail("create", 1);
+    assert_eq!(
+        names(&h.start(job("plain"))),
+        ["finding plain start-failed", "result plain"]
+    );
+    assert!(!h.marker().exists(), "a failed create taints nothing");
+    assert!(!h.life.is_tainted());
+
+    h.fake.blind_next_create();
+    assert_eq!(
+        names(&h.start(job("r1"))),
+        [
+            "tainted r1 unchecked",
+            "finding r1 start-failed",
+            "result r1"
+        ]
+    );
+    assert!(h.marker().exists());
+    assert_eq!(
+        h.life.pending_taint(),
+        Some(Taint {
+            reason: reason::UNCHECKED.to_owned(),
+            run_id: Some("r1".to_owned()),
+            check: Some(code::HOST_NOT_VISIBLE.to_owned()),
+        })
+    );
+    let result = &h.life.results()[1];
+    assert_eq!(
+        (
+            result.run_id.as_str(),
+            result.outcome,
+            result.detail.as_deref()
+        ),
+        ("r1", Outcome::FailedToStart, Some("runtime-failed"))
+    );
+    assert_eq!(names(&h.start(job("r2"))), ["refused r2 host-tainted"]);
+}
+
 /// Asserts that a host job's container is marked so that a restarted agent knows it ran
 /// one: an agent that is found with a marker lost (a new state root) and a host job still
 /// running taints the host when it adopts the container. It catches a host job that

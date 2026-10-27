@@ -509,6 +509,23 @@ fn the_system_host_digests_a_real_directory() {
     assert_ne!(before, after);
 }
 
+/// Asserts that the Linux host reads a file (`/proc/2/stat`, `/proc/1/cgroup`) through the
+/// file seam, and that a file that cannot be read is an error naming it. It catches a
+/// host that answers whether `/proc` is the host's from anything but the file.
+#[test]
+fn a_file_is_read_through_the_file_seam() {
+    let mut recorded = Recorded::default();
+    recorded
+        .files
+        .insert("/proc/2/stat".to_owned(), "2 (kthreadd) S 0".to_owned());
+    let view = host(recorded);
+    assert_eq!(view.file("/proc/2/stat"), Ok("2 (kthreadd) S 0".to_owned()));
+    assert_eq!(
+        view.file("/proc/1/cgroup"),
+        Err("/proc/1/cgroup: No such file or directory".to_owned())
+    );
+}
+
 /// Asserts that the Linux host reads a namespace link through the file seam, and that a
 /// link that cannot be read is an error naming it. It catches a host that answers the
 /// namespace question from anything but the link.

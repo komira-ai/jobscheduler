@@ -104,6 +104,14 @@ pub trait HostView {
     ///
     /// It cannot be read.
     fn link(&self, path: &str) -> Result<String, String>;
+
+    /// The text of the file at `path` (`/proc/2/stat` and `/proc/1/cgroup`, which tell a
+    /// host's `/proc` from a container's).
+    ///
+    /// # Errors
+    ///
+    /// It cannot be read.
+    fn file(&self, path: &str) -> Result<String, String>;
 }
 
 /// The inputs of a [`FakeHost`], for [`FakeHost::fail`].
@@ -131,6 +139,7 @@ struct FakeState {
     modules: BTreeSet<String>,
     watched: BTreeMap<PathBuf, Watched>,
     links: BTreeMap<String, String>,
+    files: BTreeMap<String, String>,
     failing: BTreeSet<&'static str>,
 }
 
@@ -184,8 +193,28 @@ impl FakeHost {
                 .into_iter()
                 .flat_map(|kind| ["self", "1"].map(|who| (namespace_path(who, kind), shared(kind))))
                 .collect();
+            state.files = BTreeMap::from([
+                (
+                    "/proc/2/stat".to_owned(),
+                    "2 (kthreadd) S 0 0 0 0".to_owned(),
+                ),
+                ("/proc/1/cgroup".to_owned(), "0::/init.scope\n".to_owned()),
+            ]);
         }
         host
+    }
+
+    /// The file at `path` reads as `text` from now on.
+    pub fn set_file(&self, path: &str, text: &str) {
+        self.state
+            .borrow_mut()
+            .files
+            .insert(path.to_owned(), text.to_owned());
+    }
+
+    /// The file at `path` cannot be read from now on.
+    pub fn remove_file(&self, path: &str) {
+        self.state.borrow_mut().files.remove(path);
     }
 
     /// A process of the agent's own is in the namespace `target` from now on:
@@ -315,6 +344,11 @@ impl HostView for FakeHost {
     fn link(&self, path: &str) -> Result<String, String> {
         let target = self.state.borrow().links.get(path).cloned();
         target.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn file(&self, path: &str) -> Result<String, String> {
+        let text = self.state.borrow().files.get(path).cloned();
+        text.ok_or_else(|| format!("{path}: No such file or directory"))
     }
 }
 

@@ -24,16 +24,31 @@
 //!   system that is lost at a reboot (a `tmpfs`) do not know of it, and a taint ends
 //!   silently for them. Run one agent, with one state root on a disk of its own, for each
 //!   machine.
-//! - **The state root shares no file system with anything a job can fill.** A job that
-//!   fills the disk makes the next write of the marker fail with `ENOSPC`; the agent is
-//!   then tainted in memory only, and a crash or reboot would lose the taint. The agent
-//!   refuses to start when the state root is on the same file system (`st_dev`) as a mount
-//!   root or the scratch root ([`Local::check_filesystems`](super::Local::check_filesystems)).
+//! - **The state root must be on a disk of its own.** A job that fills a disk the state
+//!   root shares makes the next write of the marker fail with `ENOSPC`; the agent is then
+//!   tainted in memory only, and a crash or reboot would lose the taint. The agent refuses
+//!   to start when the device number (`st_dev`) of the state root equals that of any mount
+//!   root or of the scratch root ([`Local::check_filesystems`](super::Local::check_filesystems)).
+//!   That is a **best-effort guard, not the guarantee**: `st_dev` does not say what shares
+//!   free space (btrfs subvolumes have distinct device numbers on one pool), and the
+//!   container engine's data root and the layers of its containers are not compared at
+//!   all. The disk of its own is the operator's to provide.
 //!
 //! The state root holds one more kind of file: `owed-<run id>`, the record that a job's
 //! post-job checks are owed (see [`StateRoot::owe`]). It is written, synced, before the
 //! first step of the job's cleanup and removed once the checks have run; one found when the
 //! agent starts taints the host with the reason [`reason::CHECK_OWED`].
+//!
+//! **A restart or a `SIGTERM` inside the cleanup window leaves an `owed-*` record, and so
+//! taints the host at the next start.** The window runs from before the first step of a
+//! job's cleanup (the container's removal) until its checks have run, and it is not short:
+//! it holds a container removal and the checks. An agent that is stopped, restarted or
+//! killed in it, a stop on `SIGTERM` included, leaves the record behind, and the next
+//! process finds it and taints the host (`check-owed`): the agent cannot tell what the job
+//! left behind before the new baseline was taken. Nothing clears that taint yet. When a
+//! flow to clear a taint is added, it **must remove the `owed-*` records as well as
+//! `taint.json`**: clearing the marker alone leaves the records, and the very next start
+//! taints the host again.
 //!
 //! # What the lifecycle does with it
 //!

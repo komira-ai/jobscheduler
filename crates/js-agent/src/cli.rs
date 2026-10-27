@@ -77,12 +77,16 @@ pub struct Cli {
     /// `--container-bin`. A host that a post-job check found unclean is tainted for good:
     /// the marker survives a restart, and no code of the agent removes it. It may not be,
     /// or lie in, a mount root or the scratch root (a job with a read-write mount could
-    /// delete the marker), and it must be on another file system than every mount root and
-    /// the scratch root (a job could fill the file system and the marker could not be
-    /// written). The taint belongs to this directory, not to the machine: a second agent,
-    /// another state root, or a state root on a file system that is lost at a reboot (a
-    /// `tmpfs`) does not know of it, so keep the state root on a disk of its own, and give
-    /// each machine one agent and one state root.
+    /// delete the marker). It must be on a disk of its own: a job that fills a disk the
+    /// state root shares makes the marker unwritable. The agent compares the device number
+    /// (`st_dev`) of the state root with that of every mount root and the scratch root and
+    /// refuses to start when one is equal. That is a best-effort guard, not a guarantee: the
+    /// engine's data root and the container layers are not compared, and file systems that
+    /// share free space under distinct device numbers (btrfs subvolumes, for one) pass it.
+    /// The operator provides the separate disk. The taint belongs to this directory, not to
+    /// the machine: a second agent, another state root, or a state root on a file system
+    /// that is lost at a reboot (a `tmpfs`) does not know of it, so give each machine one
+    /// agent and one state root.
     #[arg(long, value_name = "PATH")]
     pub state_root: Option<PathBuf>,
     /// A directory whose listing (names, sizes, modification and status change times,

@@ -43,7 +43,18 @@
 //! [`require_host_namespaces`]), which is what an agent in a container, or under a service
 //! manager's `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`, looks like; and an agent
 //! that cannot read those links (they need root, or `CAP_SYS_PTRACE`) does not start
-//! either. `--container-host` takes only a socket on this machine, for the same reason. An
+//! either. Matching links do not prove it: in a container, or under `PrivatePIDs` with a
+//! `/proc` of its own, `/proc/1` is that namespace's own `init` and the links match while
+//! the jobs run on the host through the engine's socket. So the agent also requires what
+//! only a host's `/proc` shows, when it starts: pid 2 is `kthreadd` with parent 0
+//! (`/proc/2/stat`), and pid 1 is in the root control group or the init scope
+//! (`/proc/1/cgroup`, `0::/` or `0::/init.scope`), not in a container's. And after each
+//! container is started, the process the engine reports for it (`State.Pid`) must be in the
+//! agent's `/proc`: when it is not, the container is removed, the start fails and the host
+//! is tainted as unchecked (see [`CliRuntime`](crate::cli_runtime::CliRuntime)). A
+//! container that has already exited when the agent looks has no process left to find and
+//! is not checked this way. `--container-host` takes only a socket on this machine, for the
+//! same reason. An
 //! engine with user-namespace remapping (`userns-remap`) is not supported: the container
 //! user shows as another uid on the host, and `process-as-job-user` would miss it.
 //!
@@ -179,33 +190,100 @@ impl Problem {
     }
 }
 
-/// Checks that the agent sees the host's processes and mounts: it must be in the pid and
-/// mount namespaces of `init`. `link` reads a symbolic link (the namespace links of `/proc`).
-/// An agent in a namespace of its own (in a container, or under a service manager's
-/// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`) cannot see its jobs' processes or the
-/// overlay mounts of their containers, and every check would pass. Reading `/proc/1/ns`
-/// takes the privilege to trace `init` (root, or `CAP_SYS_PTRACE`): an agent without it
-/// cannot tell and does not start.
+/// The control groups of `init` that only a host's `/proc` shows: the root, or the scope a
+/// service manager gives `init`.
+const INIT_CGROUPS: [&str; 2] = ["/", "/init.scope"];
+
+/// Checks that the agent sees the host's processes and mounts. `link` reads a symbolic
+/// link (the namespace links of `/proc`) and `read` a file.
+///
+/// The agent must be in the pid and mount namespaces of `init`. An agent in a namespace of
+/// its own (in a container, or under a service manager's `PrivatePIDs`, `PrivateMounts` or
+/// `ProtectSystem`) cannot see its jobs' processes or the overlay mounts of their
+/// containers, and every check would pass. Reading `/proc/1/ns` takes the privilege to
+/// trace `init` (root, or `CAP_SYS_PTRACE`): an agent without it cannot tell and does not
+/// start.
+///
+/// The namespace links are not enough: in a container, and under `PrivatePIDs` with a
+/// `/proc` of its own, `/proc/1` is that namespace's own `init` and the links match. So
+/// two more things that only a host's `/proc` shows are required: pid 2 is `kthreadd`
+/// with parent 0 (`/proc/2/stat`), and pid 1 is in the root control group or the init
+/// scope (`/proc/1/cgroup`), not in a container's.
 ///
 /// # Errors
 ///
-/// The text says which namespace differs, or which link could not be read.
+/// The text says which namespace differs, which link could not be read, or which of the
+/// two files shows a `/proc` that is not the host's.
 pub fn require_host_namespaces(
     link: &dyn Fn(&str) -> Result<String, String>,
+    read: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<(), String> {
     for kind in ["pid", "mnt"] {
-        let read = |who: &str| {
+        let namespace = |who: &str| {
             link(&format!("/proc/{who}/ns/{kind}"))
                 .map_err(|why| format!("cannot tell whether the agent sees the host: {why}"))
         };
-        let (own, init) = (read("self")?, read("1")?);
+        let (own, init) = (namespace("self")?, namespace("1")?);
         if own != init {
             return Err(format!(
                 "the agent is in a {kind} namespace of its own ({own}; init is in {init}): it cannot see the processes and mounts of its jobs"
             ));
         }
     }
-    Ok(())
+    let not_the_hosts = |why: String| format!("the agent's /proc is not the host's: {why}");
+    kthreadd_is_pid_2(read).map_err(not_the_hosts)?;
+    init_is_in_the_root_cgroup(read).map_err(not_the_hosts)
+}
+
+/// Pid 2 is `kthreadd`, whose parent is 0: what a host's `/proc` shows and a container's,
+/// which holds no kernel threads, does not.
+fn kthreadd_is_pid_2(read: &dyn Fn(&str) -> Result<String, String>) -> Result<(), String> {
+    let stat = read("/proc/2/stat").map_err(|why| format!("pid 2 cannot be read ({why})"))?;
+    match stat_of(&stat) {
+        Some(("kthreadd", 0)) => Ok(()),
+        Some((name, parent)) => Err(format!(
+            "pid 2 is {name:?} with parent {parent}, not kthreadd with parent 0"
+        )),
+        None => Err("the stat entry of pid 2 cannot be understood".to_owned()),
+    }
+}
+
+/// The name and the parent in the text of a `stat` file. The name is in parentheses and may
+/// hold spaces and parentheses, so the fields are counted from the last parenthesis.
+fn stat_of(stat: &str) -> Option<(&str, u32)> {
+    stat.find('(')
+        .zip(stat.rfind(')'))
+        .and_then(|(open, close)| {
+            let name = stat.get(open + 1..close);
+            let parent = stat
+                .get(close + 1..)
+                .and_then(|rest| rest.split_whitespace().nth(1))
+                .and_then(|field| field.parse().ok());
+            name.zip(parent)
+        })
+}
+
+/// Every control group of pid 1 is the root or the init scope (`0::/` or `0::/init.scope`
+/// on a unified hierarchy). A container's pid 1 is in a control group of the container's.
+fn init_is_in_the_root_cgroup(read: &dyn Fn(&str) -> Result<String, String>) -> Result<(), String> {
+    let text = read("/proc/1/cgroup")
+        .map_err(|why| format!("pid 1's control groups cannot be read ({why})"))?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let outside = lines.iter().find(|line| {
+        let path = line.splitn(3, ':').nth(2);
+        !path.is_some_and(|path| INIT_CGROUPS.contains(&path))
+    });
+    match (lines.is_empty(), outside) {
+        (true, _) => Err("pid 1 has no control group".to_owned()),
+        (false, Some(line)) => Err(format!(
+            "pid 1 is in the control group {line:?}, not the root or the init scope"
+        )),
+        (false, None) => Ok(()),
+    }
 }
 
 /// The host at one moment.
@@ -259,7 +337,7 @@ impl Integrity {
     /// The host cannot be read whole, so there is nothing to compare with later: the text
     /// says which input failed.
     pub fn start(view: Box<dyn HostView>, uid: u32, watch: Vec<PathBuf>) -> Result<Self, String> {
-        require_host_namespaces(&|path| view.link(path))?;
+        require_host_namespaces(&|path| view.link(path), &|path| view.file(path))?;
         let mut this = Self {
             view,
             uid,

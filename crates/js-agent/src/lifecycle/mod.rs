@@ -78,13 +78,21 @@
 //!   starts, and the host is tainted (`check-owed`): what the job left behind may be part
 //!   of the baseline the new process took. A record that cannot be written holds the
 //!   cleanup where it is, the container included; one that cannot be removed holds the
-//!   slot.
-//! - **A `host-tainted` refusal is final for that `Start`.** The run did not start on this
-//!   host and will not; the server must not send it to this host again (see
-//!   `refusal::HOST_TAINTED`). `taint_ack` acknowledges the taint this process reported:
-//!   the server answers it only to the session that carried the taint, an
-//!   acknowledgement that arrives before the taint was reportable counts for nothing, and a
-//!   restarted process reports the taint again.
+//!   slot. **A restart or a `SIGTERM` inside the cleanup window therefore taints the host
+//!   at the next start**, and until a flow to clear a taint exists nothing ends it; that
+//!   flow must remove the `owed-*` records as well as `taint.json`, or the next start
+//!   taints the host again (see [`taint`]).
+//! - **A `host-tainted` refusal is final for that `Start`, and the host's.** The run did
+//!   not start on this host and will not; the server must not send it to this host again
+//!   (see `refusal::HOST_TAINTED`), and must treat a `Start` refused with it as the host's
+//!   taint even when the heartbeat carries none (the marker may be unwritable, and a taint
+//!   that is not on disk is not reported), and must not count the refusal against the
+//!   run's retries. `taint_ack` acknowledges the taint this process reported: an
+//!   acknowledgement that arrives before the taint was reportable (not on disk) counts for
+//!   nothing, and a restarted process reports the taint again. **The agent does not
+//!   check which session an acknowledgement belongs to**: that the server answers
+//!   `taint_ack` only to the session that carried the taint is the server's rule, and the
+//!   agent takes any `taint_ack` of a reply it accepts once its taint is on disk.
 //!
 //! # What this change does not do
 //!
@@ -195,6 +203,10 @@ pub mod code {
     /// A container that could not be accounted for could not be removed either, so it is
     /// still on the host, unbooked.
     pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
+    /// A started container's process is not in the agent's `/proc`: the agent does not see
+    /// the host its jobs run on. The container was removed and the host is tainted as
+    /// unchecked.
+    pub const HOST_NOT_VISIBLE: &str = "host-not-visible";
     /// The taint marker could not be written. The host is tainted in memory all the same.
     pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
     /// The record that a job's checks are owed could not be written or removed. While it
@@ -545,9 +557,12 @@ impl Local {
 }
 
 impl Local {
-    /// Refuses a state root on the same file system as a mount root or the scratch root. A
-    /// job with a read-write mount, or its own scratch directory, can fill that file system,
-    /// and the taint marker could then not be written.
+    /// Refuses a state root whose device number (`st_dev`) equals that of a mount root or
+    /// the scratch root. A job with a read-write mount, or its own scratch directory, can
+    /// fill that file system, and the taint marker could then not be written. This is a
+    /// best-effort guard: the state root is to be on a disk of its own, which `st_dev` does
+    /// not prove (subvolumes sharing free space have distinct device numbers), and the
+    /// engine's data root and container layers are not compared.
     ///
     /// # Errors
     ///

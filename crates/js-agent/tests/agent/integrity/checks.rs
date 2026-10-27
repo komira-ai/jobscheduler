@@ -224,6 +224,9 @@ impl HostView for Mixed {
     fn link(&self, path: &str) -> Result<String, String> {
         self.fake.link(path)
     }
+    fn file(&self, path: &str) -> Result<String, String> {
+        self.fake.file(path)
+    }
 }
 
 /// Real directories, the first watched, the second not.

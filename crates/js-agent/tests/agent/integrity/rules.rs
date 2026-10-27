@@ -182,3 +182,124 @@ fn the_checks_need_the_pid_and_mount_namespaces_of_init() {
         );
     }
 }
+
+/// The text of the refusal when `host` is started on.
+fn refusal(host: &FakeHost) -> String {
+    Integrity::start(Box::new(host.clone()), JOB_UID, vec![])
+        .err()
+        .unwrap()
+}
+
+/// Asserts that a `/proc` that is a container's is refused although the namespace links
+/// match (in a container, and under `PrivatePIDs` with a `/proc` of its own, `/proc/1` is
+/// that namespace's own `init`): pid 2 missing, pid 2 not `kthreadd`, pid 2 with a parent,
+/// a stat entry that cannot be understood, and a file that cannot be read are each refused
+/// with the text saying the `/proc` is not the host's; a name with parentheses and spaces
+/// is counted from the last parenthesis. It catches a check that trusts the links alone.
+#[test]
+fn a_proc_without_kthreadd_is_not_the_hosts_although_the_links_match() {
+    for (name, stat, expected) in [
+        (
+            "missing",
+            None,
+            "pid 2 cannot be read (/proc/2/stat: No such",
+        ),
+        (
+            "another name",
+            Some("2 (bash) S 0 0"),
+            "pid 2 is \"bash\" with parent 0, not kthreadd with parent 0",
+        ),
+        (
+            "a parent",
+            Some("2 (kthreadd) S 1 0"),
+            "pid 2 is \"kthreadd\" with parent 1, not kthreadd with parent 0",
+        ),
+        (
+            "parentheses in the name",
+            Some("2 (kthreadd) (x) S 0 0"),
+            "pid 2 is \"kthreadd) (x\" with parent 0",
+        ),
+        (
+            "no parentheses",
+            Some("2 kthreadd S 0"),
+            "cannot be understood",
+        ),
+        ("no parent", Some("2 (kthreadd) S"), "cannot be understood"),
+        (
+            "parent not a number",
+            Some("2 (kthreadd) S x"),
+            "cannot be understood",
+        ),
+        (
+            "closing before opening",
+            Some(") ("),
+            "cannot be understood",
+        ),
+    ] {
+        let host = FakeHost::quiet();
+        match stat {
+            Some(text) => host.set_file("/proc/2/stat", text),
+            None => host.remove_file("/proc/2/stat"),
+        }
+        let why = refusal(&host);
+        assert!(
+            why.starts_with("the agent's /proc is not the host's: ") && why.contains(expected),
+            "{name}: {why}"
+        );
+    }
+}
+
+/// Asserts that a pid 1 in a container's control group is refused although the namespace
+/// links match and pid 2 is `kthreadd`: a container's group on a unified hierarchy, on a
+/// hybrid one (any one of several lines), a line that is no entry, no lines at all, and a
+/// file that cannot be read. The root and the init scope, alone or on every line of a
+/// hybrid hierarchy, start. It catches a check that takes any `/proc/1/cgroup`.
+#[test]
+fn a_container_cgroup_for_pid_1_is_not_the_hosts() {
+    for text in [
+        "0::/\n",
+        "0::/init.scope\n",
+        "12:cpu:/\n1:name=systemd:/init.scope\n0::/init.scope\n",
+        "0::/init.scope",
+    ] {
+        let host = FakeHost::quiet();
+        host.set_file("/proc/1/cgroup", text);
+        assert!(
+            Integrity::start(Box::new(host), JOB_UID, vec![]).is_ok(),
+            "{text:?}"
+        );
+    }
+    for (text, expected) in [
+        (
+            Some("0::/docker/4f3a9c\n"),
+            "pid 1 is in the control group \"0::/docker/4f3a9c\", not the root or the init scope",
+        ),
+        (
+            Some("0::/system.slice/docker-4f3a9c.scope\n"),
+            "not the root or the init scope",
+        ),
+        (
+            Some("12:cpu:/\n11:pids:/docker/4f3a9c\n"),
+            "\"11:pids:/docker/4f3a9c\"",
+        ),
+        (Some("garbage\n"), "\"garbage\""),
+        (Some("0::/init.scope.d\n"), "not the root or the init scope"),
+        (Some(" \n\n"), "pid 1 has no control group"),
+        (Some(""), "pid 1 has no control group"),
+        (
+            None,
+            "pid 1's control groups cannot be read (/proc/1/cgroup: No such",
+        ),
+    ] {
+        let host = FakeHost::quiet();
+        match text {
+            Some(text) => host.set_file("/proc/1/cgroup", text),
+            None => host.remove_file("/proc/1/cgroup"),
+        }
+        let why = refusal(&host);
+        assert!(
+            why.starts_with("the agent's /proc is not the host's: ") && why.contains(expected),
+            "{text:?}: {why}"
+        );
+    }
+}

@@ -135,7 +135,7 @@ fn create_builds_the_documented_argv() {
     assert_eq!(world.calls_of("create"), [expected]);
     assert_eq!(
         subs(&world),
-        ["--version", "info", "create", "inspect", "start"]
+        ["--version", "info", "create", "inspect", "start", "inspect"]
     );
 }
 
@@ -145,15 +145,7 @@ fn create_builds_the_documented_argv() {
 #[test]
 fn podman_gets_cdi_devices_and_the_rest_alike() {
     let podman = Scripted::new("podman version 5.2.1");
-    let mut rt = CliRuntime::open(
-        settings(),
-        HOST,
-        &platform("linux"),
-        made_at,
-        Box::new(podman.clone()),
-    )
-    .ok()
-    .unwrap();
+    let mut rt = open_with(&podman, "linux", settings());
     let mut job = spec("r1");
     job.gpu_indices = vec![3];
     job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
@@ -166,7 +158,10 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     let at = args.iter().position(|a| a == "--pid").unwrap();
     assert_eq!(args[at + 1], "private");
     assert!(args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly".to_owned()));
-    assert_eq!(subs(&podman), ["--version", "create", "inspect", "start"]);
+    assert_eq!(
+        subs(&podman),
+        ["--version", "create", "inspect", "start", "inspect"]
+    );
 }
 
 /// Asserts that the recursive read-only option is passed only to a Docker that takes it
@@ -305,15 +300,7 @@ fn a_configured_network_and_user_are_used() {
     .unwrap()
     .with_tmp_size(Some("1g"))
     .unwrap();
-    let mut rt = CliRuntime::open(
-        set,
-        HOST,
-        &platform("linux"),
-        made_at,
-        Box::new(world.clone()),
-    )
-    .ok()
-    .unwrap();
+    let mut rt = open_with(&world, "linux", set);
     rt.create_and_start(&spec("r1")).unwrap();
     let args = created(&world, "r1");
     let value = |flag: &str| {

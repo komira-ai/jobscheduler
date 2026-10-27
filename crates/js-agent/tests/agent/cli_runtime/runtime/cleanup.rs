@@ -5,7 +5,7 @@ use js_agent::cli_runtime::CliRuntime;
 use js_agent::lifecycle::{ContainerRuntime, label};
 
 use super::super::scripted::Scripted;
-use super::super::{HOST, docker, made_at, open, platform, settings, spec};
+use super::super::{HOST, docker, made_at, open, platform, sees_the_engines_pid, settings, spec};
 use super::{start, strings};
 
 /// Asserts that a `create` whose outcome is not known leaves nothing behind: the call is
@@ -81,7 +81,9 @@ fn a_cleanup_that_fails_is_reported() {
 /// A runtime of another agent (another host id) over the same `world`.
 pub(super) fn other_agent(world: &Scripted) -> CliRuntime {
     let runner = Box::new(world.clone());
-    CliRuntime::open(settings(), OTHER, &platform("linux"), made_at, runner).unwrap()
+    CliRuntime::open(settings(), OTHER, &platform("linux"), made_at, runner)
+        .unwrap()
+        .with_pid_seen(sees_the_engines_pid)
 }
 
 /// The host id of the other agent.

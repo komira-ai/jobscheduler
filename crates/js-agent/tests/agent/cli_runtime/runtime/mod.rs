@@ -9,6 +9,7 @@ mod engine;
 mod list;
 mod mounts;
 mod poll;
+mod seen;
 
 use js_agent::cli_runtime::CliRuntime;
 use js_agent::lifecycle::{ContainerId, ContainerRuntime};

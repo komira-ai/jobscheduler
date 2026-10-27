@@ -15,7 +15,7 @@ use js_agent_wire::{
     RunResult, Taint, limits, refusal,
 };
 
-use self::job::{Job, Retired, Stage, Stuck, container_spec, host_taint};
+use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
 use super::runtime::{ContainerRuntime, ResolvedMount};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
@@ -315,13 +315,19 @@ impl Lifecycle {
                 detail::SCRATCH_FAILED,
                 code::SCRATCH_FAILED,
                 why.to_string(),
+                false,
             )
         });
         let started = started.and_then(|scratch| {
             let container = container_spec(spec, mounts, scratch);
-            self.runtime
-                .create_and_start(&container)
-                .map_err(|why| (detail::RUNTIME_FAILED, code::START_FAILED, why.to_string()))
+            self.runtime.create_and_start(&container).map_err(|why| {
+                (
+                    detail::RUNTIME_FAILED,
+                    code::START_FAILED,
+                    why.to_string(),
+                    why.is_blind(),
+                )
+            })
         });
         match started {
             Ok(id) => {
@@ -331,8 +337,13 @@ impl Lifecycle {
                     run_id: run_id.clone(),
                 });
             }
-            Err((why, finding, message)) => {
+            Err((why, finding, message, blind)) => {
                 let mut job = Job::of(spec, Stage::Scratch, 0);
+                // A host the agent cannot see is not known to be checkable: tainted as
+                // unchecked, before the finding that follows from it.
+                if blind {
+                    job.taint(&mut self.taint, blind_taint(run_id), events);
+                }
                 job.result = Some(job.report(Outcome::FailedToStart, None, Some(why)));
                 job.note(finding, message, events);
                 events.push(Event::ResultReady {

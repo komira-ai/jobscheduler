@@ -196,6 +196,12 @@ impl FakeFiles {
         self
     }
 
+    /// The file at `path` does not exist.
+    pub fn without(mut self, path: &str) -> Self {
+        self.files.remove(path);
+        self
+    }
+
     /// The link at `path` points at `target`.
     pub fn with_link(mut self, path: &str, target: &str) -> Self {
         self.links.insert(path.to_owned(), target.to_owned());
@@ -281,6 +287,8 @@ pub fn linux_host() -> Host {
         files: FakeFiles::default()
             .with("/proc/meminfo", MEMINFO)
             .with("/etc/machine-id", &format!("{MACHINE_ID}\n"))
+            .with("/proc/2/stat", "2 (kthreadd) S 0 0 0 0")
+            .with("/proc/1/cgroup", "0::/init.scope\n")
             .with_link("/proc/self/ns/pid", "pid:[4026531836]")
             .with_link("/proc/1/ns/pid", "pid:[4026531836]")
             .with_link("/proc/self/ns/mnt", "mnt:[4026531841]")

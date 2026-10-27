@@ -60,6 +60,16 @@ pub(super) fn check_taint(run_id: &str, found: &CheckFinding) -> Taint {
     }
 }
 
+/// The taint of a start that showed the agent cannot see the host its jobs run on: the
+/// host is not known to be checkable.
+pub(super) fn blind_taint(run_id: &str) -> Taint {
+    Taint {
+        reason: reason::UNCHECKED.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: Some(code::HOST_NOT_VISIBLE.to_owned()),
+    }
+}
+
 /// Why the agent is ending a job. It decides the result only when the agent's stop is what
 /// ended the container (or the container is gone); a container that exited before a stop
 /// reached it is reported as it exited.
