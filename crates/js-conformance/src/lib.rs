@@ -42,6 +42,7 @@
 
 pub mod agent;
 mod checks;
+pub mod core;
 
 use std::collections::BTreeMap;
 

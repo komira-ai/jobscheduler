@@ -8,8 +8,13 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-caps = { path = "../js-caps" }
 js-types = { path = "../js-types" }
 js-provider = { path = "../js-provider" }
+js-sched = { path = "../js-sched" }
+# The in-memory store the reference core runs on (`core` module); test-only by nature, like
+# this crate.
+js-state = { path = "../js-state", features = ["test-support"] }
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
