@@ -18,6 +18,10 @@
 //! - **Absence (5.6).** The pool owns its state, so it knows absence exactly:
 //!   [`js_provider::Provider::observe`] answers `Present` or `Absent`, never
 //!   `Unknown`, and a stop frees the host at once.
+//! - **Seating.** The pool's bookings live in memory and a restart loses them.
+//!   [`StaticPool::seat`] books a named host for a named lease without a start, so a
+//!   caller that has the bookings elsewhere (a lease file) can put them back; it refuses
+//!   a host the pool does not list or another lease holds ([`SeatError`]).
 //!
 //! # Configuration
 //!
@@ -32,4 +36,4 @@ mod config;
 mod pool;
 
 pub use config::{ConfigError, EXAMPLE_CONFIG};
-pub use pool::StaticPool;
+pub use pool::{SeatError, StaticPool};
