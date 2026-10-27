@@ -414,9 +414,9 @@ fn refused_check(refusal: ExclusiveRefusal) -> ValidationError {
     check(|b| b.exclusive_refused = Some(refusal))
 }
 
-/// The refusal detail is held to its cap in bytes: 256 pass, 257 fail, and a multi-byte
-/// character that straddles the cap makes the text over it, so it is refused whole and
-/// never cut. It catches a character count in place of a byte count and a silent cut.
+/// `validate` (a sender's own check) holds the refusal detail to its cap in bytes: 256
+/// pass, 257 fail, and a multi-byte character that straddles the cap makes the text over
+/// it. It catches a character count in place of a byte count.
 #[test]
 fn refusal_detail_is_bounded_in_bytes() {
     assert_eq!(MAX_REFUSAL_DETAIL, 256);
@@ -572,4 +572,50 @@ fn a_single_refusal_is_checked() {
         Rule::BadChars,
         refusal::INVALID_HEARTBEAT,
     );
+}
+
+fn decode_with_detail(detail: &str) -> Heartbeat {
+    let mut b = heartbeat();
+    b.exclusive_refused = Some(refusal_with("1-1", "x"));
+    let mut value = serde_json::to_value(&b).unwrap();
+    value["exclusive_refused"]["detail"] = detail.into();
+    serde_json::from_value(value).unwrap()
+}
+
+/// A refusal detail of exactly the cap decodes verbatim. It catches a cut that is off by
+/// one.
+#[test]
+fn decoded_refusal_detail_at_the_cap_is_kept() {
+    let detail = long(MAX_REFUSAL_DETAIL);
+    let got = decode_with_detail(&detail);
+    assert_eq!(got.exclusive_refused.unwrap().detail, detail);
+}
+
+/// A refusal detail over the cap is cut on decode to the longest prefix within the cap
+/// that ends on a character boundary, and the rest of the heartbeat survives: the code,
+/// the results and the held list. A two-byte character straddling the cap is dropped
+/// whole. It catches a refusal of the whole heartbeat, a cut inside a character, and a
+/// cut that loses the rest of the beat.
+#[test]
+fn decoded_refusal_detail_over_the_cap_is_cut_and_the_beat_survives() {
+    let over = long(MAX_REFUSAL_DETAIL + 50);
+    let got = decode_with_detail(&over);
+    let refusal = got.exclusive_refused.clone().unwrap();
+    assert_eq!(refusal.detail, over[..MAX_REFUSAL_DETAIL]);
+    assert_eq!(refusal.code, RefusalReason::NotQuiet);
+    assert_eq!(got.results, heartbeat().results);
+    assert_eq!(got.held, heartbeat().held);
+    assert_eq!(got.validate(), Ok(()));
+
+    let straddle = format!("{}\u{e9}tail", long(MAX_REFUSAL_DETAIL - 1));
+    let cut = decode_with_detail(&straddle)
+        .exclusive_refused
+        .unwrap()
+        .detail;
+    assert_eq!(cut, long(MAX_REFUSAL_DETAIL - 1));
+
+    let fits = format!("{}\u{e9}tail", long(MAX_REFUSAL_DETAIL - 2));
+    let cut = decode_with_detail(&fits).exclusive_refused.unwrap().detail;
+    assert_eq!(cut.len(), MAX_REFUSAL_DETAIL);
+    assert!(cut.ends_with('\u{e9}'));
 }
