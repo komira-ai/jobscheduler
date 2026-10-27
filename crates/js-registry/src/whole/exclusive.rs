@@ -19,6 +19,9 @@
 //! A whole-node booking restored by a restart (`seat`) starts `Committed`, never `Free`:
 //! the preparation was in memory only, so the agent reports ready for it again.
 //!
+//! A committed lease that is not reported ready within `prepare_timeout` of its commit
+//! is overdue ([`Exclusive::overdue`]); the registry then ends it as a failed prepare.
+//!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
 //! falls back to `Committed` (the same lease and commit time) until it reports again.
 
@@ -58,6 +61,32 @@ impl Exclusive {
     /// lease id is compared here.
     pub(crate) fn awaits_ready(&self) -> bool {
         matches!(self, Self::Committed { .. })
+    }
+
+    /// The lease committed to the host and not yet reported ready.
+    pub(crate) fn committed(&self) -> Option<LeaseId> {
+        match self {
+            Self::Committed { lease, .. } => Some(*lease),
+            Self::Free | Self::Ready { .. } | Self::Restoring { .. } => None,
+        }
+    }
+
+    /// The lease the agent reported ready.
+    pub(crate) fn ready_lease(&self) -> Option<LeaseId> {
+        match self {
+            Self::Ready { lease, .. } => Some(*lease),
+            Self::Free | Self::Committed { .. } | Self::Restoring { .. } => None,
+        }
+    }
+
+    /// The committed lease that has waited `timeout_ms` or more since its commit: the
+    /// deadline is the same for a slow agent, a silent one and a host that went lost.
+    pub(crate) fn overdue(&self, now: Timestamp, timeout_ms: u64) -> Option<LeaseId> {
+        let waited = |at: &Timestamp| now.millis().saturating_sub(at.millis());
+        match self {
+            Self::Committed { lease, at } if waited(at) >= timeout_ms => Some(*lease),
+            _ => None,
+        }
     }
 
     /// The state after the agent reported `reported` ready, on a host that is `clean`
