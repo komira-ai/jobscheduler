@@ -1,0 +1,181 @@
+//! A restart: taking over the containers the agent labelled, evicting the ones no job can
+//! stand for, and trying again to remove the ones that could not be removed.
+
+use std::cmp::Reverse;
+
+use super::job::{Booking, Job, Retired, Stuck, cleanup_taint, host_taint};
+use super::{Lifecycle, MAX_JOBS};
+use crate::lifecycle::runtime::{ContainerRuntime, Found, RuntimeError, Status};
+use crate::lifecycle::taint::TaintState;
+use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code};
+
+impl Lifecycle {
+    /// Starts the lifecycle of an agent that has just started, taking over the labelled
+    /// containers it finds so that they are held, first, from the very first heartbeat. A
+    /// container that no job can stand for is stopped and removed by its own id, and
+    /// recorded as a finding: one that was created and never started, one whose labels do
+    /// not say what it booked, one that repeats
+    /// a run id, one whose booking does not fit the machine's offer beside the containers
+    /// taken over before it (a GPU not offered, or one already booked), and any beyond the
+    /// number of runs a heartbeat can list. One that cannot be removed is not left
+    /// unbooked: it holds what its labels say it booked (the whole offer when they do not
+    /// say), and the stop and removal are tried again at every [`Lifecycle::step`] until
+    /// the removal succeeds. It is not a held run, and it never costs a running job its
+    /// place.
+    ///
+    /// The containers are taken over in the order of their age: those that have exited
+    /// (their results are held) first, then the rest, the longest running first, whatever
+    /// order the runtime lists them in. When the offer is lower than at the last start,
+    /// the jobs that no longer fit are therefore the newest, and they are evicted.
+    ///
+    /// What the runtime lists is the agent's own ([`ContainerRuntime::list_labelled`] is
+    /// scoped by the agent label); the listing removes nothing, so a container that was
+    /// created and never started is evicted here like one whose labels are unreadable.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot list its containers. The caller must not say hello with an
+    /// empty held list then: it does not know what it holds.
+    pub fn adopt(
+        config: Config,
+        mut runtime: Box<dyn ContainerRuntime>,
+        checks: Box<dyn CheckHook>,
+        clock: Box<dyn Clock>,
+    ) -> Result<(Self, Vec<Event>), RuntimeError> {
+        let mut found: Vec<(bool, Found)> = runtime
+            .list_labelled()?
+            .into_iter()
+            .map(|container| {
+                let exited = matches!(runtime.poll(&container.id), Ok(Status::Exited(_)));
+                (exited, container)
+            })
+            .collect();
+        found.sort_by_key(|(exited, container)| (!exited, Reverse(container.running_ms)));
+        let taint = TaintState::load(config.state.clone());
+        let mut this = Self {
+            config,
+            runtime,
+            checks,
+            clock,
+            jobs: Vec::new(),
+            stuck: Vec::new(),
+            retired: Retired::default(),
+            taint,
+        };
+        let mut events = Vec::new();
+        let mut stuck = Vec::new();
+        for (_, container) in found {
+            let now = this.clock.now_ms();
+            match this.adoptable(&container, now) {
+                Ok(mut job) => {
+                    // A host job that outlived the agent changed the host, and a marker
+                    // written when it started may be all that was lost.
+                    if job.host {
+                        job.taint(&mut this.taint, host_taint(&job.run_id), &mut events);
+                    }
+                    events.push(Event::Adopted {
+                        run_id: job.run_id.clone(),
+                    });
+                    this.jobs.push(job);
+                }
+                Err(why) => stuck.extend(this.evict(&container, why, &mut events)),
+            }
+        }
+        // Booked only now, so that a container that cannot be removed never makes a
+        // container that runs look like one that does not fit.
+        this.stuck = stuck;
+        Ok((this, events))
+    }
+
+    /// The job a labelled container stands for, or why it cannot be one: it never started,
+    /// its labels do not say what it booked, its run id is held already, the agent holds as many runs as it
+    /// may, or its booking does not fit what the machine offers beside the jobs taken over
+    /// before it.
+    fn adoptable(&self, found: &Found, now: u64) -> Result<Job, &'static str> {
+        if found.never_started {
+            return Err("it was created and never started");
+        }
+        let job = Job::adopted(found, now).ok_or("its labels do not say what it booked")?;
+        let used = self.booked();
+        let refusals = [
+            (
+                self.jobs.iter().any(|held| held.run_id == job.run_id),
+                "its run id is held already",
+            ),
+            (
+                self.jobs.len() >= MAX_JOBS,
+                "the agent holds as many runs as a heartbeat can list",
+            ),
+            (
+                !job.booking.fits(&self.config.capacity, &used),
+                "its booking does not fit the machine beside the jobs taken over",
+            ),
+        ];
+        match refusals.into_iter().find(|(refused, _)| *refused) {
+            Some((_, why)) => Err(why),
+            None => Ok(job),
+        }
+    }
+
+    /// Stops and removes a container no job stands for, so that nothing runs on the host
+    /// unbooked, and records it. A stop that fails does not keep the removal from being
+    /// tried (removal takes a running container too); a removal that fails is the louder
+    /// finding, because the container is then still there, and it is returned to be booked
+    /// and tried again.
+    fn evict(&mut self, found: &Found, why: &str, events: &mut Vec<Event>) -> Option<Stuck> {
+        let id = &found.id;
+        let _ = self.runtime.stop(id, self.config.stop_grace);
+        let (code, fate, stuck) = match self.runtime.remove(id) {
+            Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned(), None),
+            Err(failed) => {
+                // A container that stays on the host is a cleanup that failed.
+                let taint = cleanup_taint(None, code::UNADOPTABLE_KEPT);
+                if let Err(why) = self.taint.seal(taint, events) {
+                    events.push(Event::Finding(Finding {
+                        run_id: None,
+                        code: code::TAINT_WRITE_FAILED,
+                        message: why.to_string(),
+                    }));
+                }
+                (
+                    code::UNADOPTABLE_KEPT,
+                    format!("not removed, still on the host and booked: {failed}"),
+                    Some(Stuck {
+                        id: id.clone(),
+                        booking: Booking::from_labels(found)
+                            .unwrap_or_else(|| Booking::everything(&self.config.capacity)),
+                    }),
+                )
+            }
+        };
+        events.push(Event::Finding(Finding {
+            run_id: None,
+            code,
+            message: format!("container {}: {why}; {fate}", id.0),
+        }));
+        stuck
+    }
+
+    /// Tries again to stop and remove the containers that could not be removed; the
+    /// booking of one that is gone is freed.
+    pub(super) fn retry_stuck(&mut self, events: &mut Vec<Event>) {
+        let Self {
+            stuck,
+            runtime,
+            config,
+            ..
+        } = self;
+        stuck.retain(|held| {
+            let _ = runtime.stop(&held.id, config.stop_grace);
+            let gone = runtime.remove(&held.id).is_ok();
+            if gone {
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::UNADOPTABLE,
+                    message: format!("container {}: removed on a later attempt", held.id.0),
+                }));
+            }
+            !gone
+        });
+    }
+}

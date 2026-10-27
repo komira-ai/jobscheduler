@@ -1,0 +1,345 @@
+//! What the machine keeps for each run: its [`Job`] and the stage it is in, what it books,
+//! how it ended, the run ids that must not start again, and the taints and the container
+//! spec that follow from a job.
+
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
+
+use super::RETIRED_CAP;
+use crate::lifecycle::runtime::{ContainerId, ContainerSpec, Exit, Found, ResolvedMount};
+use crate::lifecycle::taint::{TaintState, reason};
+use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
+
+/// Where a job is. The container's id travels with the stages that need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Stage {
+    /// The container runs.
+    Running(ContainerId),
+    /// The container has exited; it is to be removed.
+    Removing(ContainerId),
+    /// The scratch directory is to be removed.
+    Scratch,
+    /// The post-job checks are to run.
+    Checks,
+    /// A check found something: the slot stays booked.
+    Blocked,
+    /// The slot is free; the job is kept only for its unacknowledged result.
+    Freed,
+}
+
+impl Stage {
+    /// The container of a job that is still on the host.
+    pub(super) fn container(&self) -> Option<&ContainerId> {
+        match self {
+            Self::Running(id) | Self::Removing(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// The taint of a failed cleanup step: `code` is the finding's.
+pub(super) fn cleanup_taint(run_id: Option<&str>, code: &str) -> Taint {
+    Taint {
+        reason: reason::CLEANUP_FAILED.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        check: Some(code.to_owned()),
+    }
+}
+
+/// The taint of a post-job check that found something or could not run.
+pub(super) fn check_taint(run_id: &str, found: &CheckFinding) -> Taint {
+    let why = match found {
+        CheckFinding::Residue { .. } => reason::RESIDUE,
+        CheckFinding::Unchecked { .. } => reason::UNCHECKED,
+    };
+    Taint {
+        reason: why.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: Some(found.code().to_owned()),
+    }
+}
+
+/// Why the agent is ending a job. It decides the result only when the agent's stop is what
+/// ended the container (or the container is gone); a container that exited before a stop
+/// reached it is reported as it exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Cause {
+    /// A `Stop` or `Cancel`.
+    Stopped,
+    /// The wall-time limit.
+    TimedOut,
+}
+
+/// What a job holds of the host while its slot is booked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Booking {
+    pub(super) cpu_millis: u64,
+    pub(super) memory_bytes: u64,
+    pub(super) gpus: Vec<u32>,
+}
+
+impl Booking {
+    /// Whether this booking fits beside `used` in what `offered` has: the CPU and memory
+    /// within what is left, and every GPU offered and not used.
+    pub(super) fn fits(&self, offered: &Capacity, used: &Capacity) -> bool {
+        [
+            self.cpu_millis <= offered.cpu_millis.saturating_sub(used.cpu_millis),
+            self.memory_bytes <= offered.memory_bytes.saturating_sub(used.memory_bytes),
+            self.gpus
+                .iter()
+                .all(|gpu| offered.gpus.contains(gpu) && !used.gpus.contains(gpu)),
+        ]
+        .into_iter()
+        .all(|ok| ok)
+    }
+
+    /// What the labels of a container say it booked: all three are numbers and no GPU is
+    /// named twice (the agent never writes such a booking).
+    pub(super) fn from_labels(found: &Found) -> Option<Self> {
+        let gpus = found
+            .labels
+            .get(label::GPUS)?
+            .split(',')
+            .filter(|index| !index.is_empty())
+            .map(|index| index.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        let distinct: BTreeSet<&u32> = gpus.iter().collect();
+        (distinct.len() == gpus.len()).then_some(())?;
+        Some(Self {
+            cpu_millis: label_number(found, label::CPU_MILLIS)?,
+            memory_bytes: label_number(found, label::MEMORY_BYTES)?,
+            gpus,
+        })
+    }
+
+    /// All that `offered` has: what is held for a container whose booking is not known.
+    pub(super) fn everything(offered: &Capacity) -> Self {
+        Self {
+            cpu_millis: offered.cpu_millis,
+            memory_bytes: offered.memory_bytes,
+            gpus: offered.gpus.iter().copied().collect(),
+        }
+    }
+}
+
+/// The label `key` of a found container, as a number.
+fn label_number(found: &Found, key: &str) -> Option<u64> {
+    found.labels.get(key)?.parse().ok()
+}
+
+/// A container the agent could not remove: it may still run, so what it booked, or the
+/// whole offer when that is not known, stays booked until a removal succeeds.
+pub(super) struct Stuck {
+    pub(super) id: ContainerId,
+    pub(super) booking: Booking,
+}
+
+pub(super) struct Job {
+    pub(super) run_id: String,
+    pub(super) lease_id: String,
+    pub(super) booking: Booking,
+    /// On the agent's clock.
+    pub(super) deadline_ms: u64,
+    pub(super) stage: Stage,
+    pub(super) cause: Option<Cause>,
+    /// A cancelled job reports nothing.
+    pub(super) silent: bool,
+    pub(super) stop_sent: bool,
+    /// The job may change the host (`isolation = host`).
+    pub(super) host: bool,
+    pub(super) result: Option<RunResult>,
+    pub(super) findings: Vec<Finding>,
+}
+
+impl Job {
+    pub(super) fn report(
+        &self,
+        outcome: Outcome,
+        exit_code: Option<i32>,
+        detail: Option<&str>,
+    ) -> RunResult {
+        RunResult {
+            run_id: self.run_id.clone(),
+            lease_id: self.lease_id.clone(),
+            outcome,
+            exit_code,
+            detail: detail.map(str::to_owned),
+        }
+    }
+
+    /// Records a finding unless the job already has one of this code.
+    pub(super) fn note(&mut self, code: &'static str, message: String, events: &mut Vec<Event>) {
+        if self.findings.iter().all(|found| found.code != code) {
+            let finding = Finding {
+                run_id: Some(self.run_id.clone()),
+                code,
+                message,
+            };
+            self.findings.push(finding.clone());
+            events.push(Event::Finding(finding));
+        }
+    }
+
+    /// Taints the host for this job (the first taint stays) and writes the marker. A marker
+    /// that cannot be written is a finding of the job; the host is tainted all the same.
+    pub(super) fn taint(&mut self, state: &mut TaintState, taint: Taint, events: &mut Vec<Event>) {
+        if let Err(why) = state.seal(taint, events) {
+            self.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
+        }
+    }
+
+    /// Asks a running job to stop; a job past its exit has nothing to stop.
+    pub(super) fn request_stop(&mut self, silent: bool) {
+        if matches!(self.stage, Stage::Running(_)) {
+            self.cause.get_or_insert(Cause::Stopped);
+            self.silent |= silent;
+        }
+    }
+}
+
+/// The outcome of a container that exited (`Some`) or vanished (`None`), and the exit
+/// status when the job's own exit is what ended it.
+pub(super) fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
+    match (cause, exit) {
+        (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
+        (Some(Cause::Stopped), _) => (Outcome::Killed, None),
+        (
+            None,
+            Some(Exit {
+                code,
+                oom_killed: true,
+            }),
+        ) => (Outcome::OutOfMemory, Some(code)),
+        (None, Some(Exit { code: 0, .. })) => (Outcome::Succeeded, Some(0)),
+        (None, Some(Exit { code, .. })) => (Outcome::Failed, Some(code)),
+        (None, None) => (Outcome::Failed, None),
+    }
+}
+
+/// The run ids that must never start again, oldest first.
+#[derive(Default)]
+pub(super) struct Retired {
+    order: VecDeque<String>,
+    seen: BTreeSet<String>,
+}
+
+impl Retired {
+    pub(super) fn insert(&mut self, run_id: &str) {
+        if self.seen.insert(run_id.to_owned()) {
+            self.order.push_back(run_id.to_owned());
+        }
+        if self.order.len() > RETIRED_CAP {
+            self.order.pop_front().iter().for_each(|old| {
+                self.seen.remove(old);
+            });
+        }
+    }
+
+    pub(super) fn contains(&self, run_id: &str) -> bool {
+        self.seen.contains(run_id)
+    }
+}
+
+impl Job {
+    /// A job for `spec` in `stage`, booking what the spec asks.
+    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64) -> Self {
+        Self {
+            run_id: spec.run_id.clone(),
+            lease_id: spec.lease_id.clone(),
+            booking: Booking {
+                cpu_millis: spec.limits.cpu_millis,
+                memory_bytes: spec.limits.memory_bytes,
+                gpus: spec.gpu_indices.clone(),
+            },
+            deadline_ms,
+            stage,
+            cause: None,
+            silent: false,
+            stop_sent: false,
+            host: spec.isolation == Isolation::Host,
+            result: None,
+            findings: Vec::new(),
+        }
+    }
+
+    /// The job a labelled container stands for, when its labels say what it is.
+    pub(super) fn adopted(found: &Found, now: u64) -> Option<Self> {
+        let id = |key: &str| {
+            found.labels.get(key).filter(|value| {
+                let held = HeldRun {
+                    run_id: (*value).clone(),
+                    state: HeldState::Running,
+                };
+                held.validate().is_ok()
+            })
+        };
+        let booking = Booking::from_labels(found)?;
+        let wall_ms = label_number(found, label::WALL_MS)?;
+        let remaining = wall_ms.saturating_sub(found.running_ms);
+        Some(Self {
+            run_id: id(label::RUN)?.clone(),
+            lease_id: id(label::LEASE)?.clone(),
+            booking,
+            deadline_ms: now.saturating_add(remaining),
+            stage: Stage::Running(found.id.clone()),
+            cause: None,
+            silent: false,
+            stop_sent: false,
+            host: found.labels.get(label::ISOLATION).map(String::as_str) == Some(HOST_LABEL),
+            result: None,
+            findings: Vec::new(),
+        })
+    }
+}
+
+/// The value of the isolation label of a container that runs a host job.
+const HOST_LABEL: &str = "host";
+
+/// The taint of a host job's start.
+pub(super) fn host_taint(run_id: &str) -> Taint {
+    Taint {
+        reason: reason::HOST_JOB.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: None,
+    }
+}
+
+/// The container of a start: the spec's own labels with the agent's over them.
+pub(super) fn container_spec(
+    spec: &JobSpec,
+    mounts: Vec<ResolvedMount>,
+    scratch: std::path::PathBuf,
+) -> ContainerSpec {
+    let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
+    let own = [
+        (label::RUN, spec.run_id.clone()),
+        (label::LEASE, spec.lease_id.clone()),
+        (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
+        (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
+        (label::GPUS, gpus.join(",")),
+        (label::WALL_MS, spec.limits.wall_ms.to_string()),
+        (
+            label::ISOLATION,
+            match spec.isolation {
+                Isolation::Host => HOST_LABEL.to_owned(),
+                Isolation::Contained => "contained".to_owned(),
+            },
+        ),
+    ];
+    let mut labels: BTreeMap<String, String> = spec.labels.clone();
+    labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
+    ContainerSpec {
+        run_id: spec.run_id.clone(),
+        image: spec.image.clone(),
+        args: spec.args.clone(),
+        cpu_millis: spec.limits.cpu_millis,
+        memory_bytes: spec.limits.memory_bytes,
+        pids: spec.limits.pids,
+        gpu_indices: spec.gpu_indices.clone(),
+        mounts,
+        scratch,
+        isolation: spec.isolation,
+        labels,
+    }
+}
