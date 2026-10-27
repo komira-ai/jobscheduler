@@ -62,7 +62,12 @@ fn labels_are_bounded() {
     let key = long(MAX_LABEL_KEY_LEN + 1);
     let err = check(|j| j.labels = map(&[(key.as_str(), "v")]));
     expect(err, "labels", Rule::TooLong, refusal::INVALID_JOB);
-    let key = long(MAX_LABEL_KEY_LEN);
+    let key = format!(
+        "{}.{}/{}",
+        long(MAX_DNS_LABEL_LEN),
+        long(2),
+        long(MAX_LABEL_KEY_LEN - MAX_DNS_LABEL_LEN - 4)
+    );
     let mut spec = job();
     spec.labels = map(&[(key.as_str(), &long(MAX_LABEL_VALUE_LEN))]);
     assert_eq!(spec.validate(), Ok(()));

@@ -31,7 +31,8 @@ const MAX_TAG_LEN: usize = 128;
 /// The fewest hex digits of a digest.
 const MIN_DIGEST_HEX: usize = 32;
 
-/// A non-empty reference of at most [`limits::MAX_IMAGE_LEN`] bytes that follows the
+/// A non-empty reference of at most [`limits::MAX_IMAGE_LEN`] bytes in all (name, tag and
+/// digest together; not docker's 255-character name limit) that follows the
 /// grammar and names no transport.
 pub(crate) fn image(at: At, value: &str) -> Result<(), ValidationError> {
     if value.is_empty() {

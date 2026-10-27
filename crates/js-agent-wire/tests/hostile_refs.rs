@@ -227,7 +227,12 @@ fn label_key_edges_and_the_reserved_prefix() {
 /// it refuses ordinary labels.
 #[test]
 fn ordinary_label_keys_pass() {
-    let at_cap = format!("example.com/{}", long(MAX_LABEL_KEY_LEN - 12));
+    let at_cap = format!(
+        "{}.{}/{}",
+        long(MAX_DNS_LABEL_LEN),
+        long(2),
+        long(MAX_LABEL_KEY_LEN - MAX_DNS_LABEL_LEN - 4)
+    );
     let mut keys = vec![
         "team",
         "example.com/team",
@@ -317,4 +322,51 @@ fn duplicate_mounts_are_refused() {
         place("cache", "y", false),
     ];
     assert_eq!(spec.validate(), Ok(()));
+}
+
+/// A label name of exactly 63 bytes passes and one of 64 is too long, with or without a
+/// prefix. It catches a name bounded only by the 128-byte whole-key cap, which would let a
+/// 100-character name through to a cloud that limits a label name to 63.
+#[test]
+fn a_label_name_is_at_most_63_bytes() {
+    let mut spec = job();
+    spec.labels = map(&[
+        (&long(MAX_LABEL_NAME_LEN), "v"),
+        (&format!("p/{}", long(MAX_LABEL_NAME_LEN)), "v"),
+    ]);
+    assert_eq!(spec.validate(), Ok(()));
+    for key in [
+        long(MAX_LABEL_NAME_LEN + 1),
+        format!("p/{}", long(MAX_LABEL_NAME_LEN + 1)),
+    ] {
+        expect(
+            label_error(&key),
+            "labels",
+            Rule::TooLong,
+            refusal::INVALID_JOB,
+        );
+    }
+}
+
+/// A prefix label of exactly 63 bytes passes and one of 64 is too long, in the first or a
+/// later label. It catches a DNS-name prefix with no per-label cap, so that
+/// `<64 x a>.example/n` is accepted though it is not a DNS name.
+#[test]
+fn each_dns_label_of_a_prefix_is_at_most_63_bytes() {
+    let ok = long(MAX_DNS_LABEL_LEN);
+    let over = long(MAX_DNS_LABEL_LEN + 1);
+    let mut spec = job();
+    spec.labels = map(&[
+        (&format!("{ok}.example/n"), "v"),
+        (&format!("example.{ok}/n"), "v"),
+    ]);
+    assert_eq!(spec.validate(), Ok(()));
+    for key in [format!("{over}.example/n"), format!("example.{over}/n")] {
+        expect(
+            label_error(&key),
+            "labels",
+            Rule::TooLong,
+            refusal::INVALID_JOB,
+        );
+    }
 }

@@ -185,7 +185,13 @@ fn label_key(at: At, key: &str) -> Result<(), ValidationError> {
     let (prefix, name) = key
         .split_once('/')
         .map_or((None, key), |(prefix, name)| (Some(prefix), name));
-    token(at, name, limits::MAX_LABEL_KEY_LEN, label_name_byte)?;
+    token(at, name, limits::MAX_LABEL_NAME_LEN, label_name_byte)?;
+    if prefix.is_some_and(|p| {
+        p.split('.')
+            .any(|part| part.len() > limits::MAX_DNS_LABEL_LEN)
+    }) {
+        return Err(at.fail(Rule::TooLong));
+    }
     if !prefix.is_none_or(is_dns_name) {
         return Err(at.fail(Rule::BadChars));
     }
