@@ -1,0 +1,327 @@
+//! A container runtime that lives in memory, and a clock a test moves. Nothing here
+//! starts a process or waits.
+
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::Duration;
+
+use js_agent::lifecycle::{
+    CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found,
+    RuntimeError, Status, label,
+};
+
+/// A clock that moves only when a test says so. Clones share one reading.
+#[derive(Clone, Default)]
+pub struct ManualClock(Rc<Cell<u64>>);
+
+impl ManualClock {
+    pub fn advance(&self, ms: u64) {
+        self.0.set(self.0.get() + ms);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// The calls the tests compare in order, shared by the runtime and the check hook.
+pub type Log = Rc<RefCell<Vec<String>>>;
+
+struct Container {
+    run_id: String,
+    scratch: PathBuf,
+    labels: BTreeMap<String, String>,
+    running_ms: u64,
+    exit: Option<Exit>,
+}
+
+#[derive(Default)]
+struct State {
+    containers: BTreeMap<String, Container>,
+    next: u32,
+    /// Calls to fail: name of the call, how many more times it fails.
+    failing: BTreeMap<&'static str, u32>,
+    /// Whether a stop makes the container exit (with 137).
+    stop_exits: bool,
+    /// Milliseconds a `create_and_start` takes on the test's clock.
+    create_takes_ms: u64,
+    stops: Vec<(String, Duration)>,
+    creates: Vec<ContainerSpec>,
+}
+
+/// A runtime whose containers exit when a test says so, whose calls fail when a test
+/// says so, and which records the order of its calls in the shared [`Log`].
+#[derive(Clone)]
+pub struct FakeRuntime {
+    state: Rc<RefCell<State>>,
+    log: Log,
+    clock: ManualClock,
+}
+
+fn err(call: &str) -> RuntimeError {
+    RuntimeError(format!("{call} failed"))
+}
+
+impl FakeRuntime {
+    pub fn new(log: &Log, clock: &ManualClock) -> Self {
+        let state = State {
+            stop_exits: true,
+            ..State::default()
+        };
+        Self {
+            state: Rc::new(RefCell::new(state)),
+            log: Rc::clone(log),
+            clock: clock.clone(),
+        }
+    }
+
+    /// Makes the next `times` calls named `call` (`create`, `poll`, `stop`, `remove` or
+    /// `list`) fail; `u32::MAX` for as long as the test wants.
+    pub fn fail(&self, call: &'static str, times: u32) {
+        self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// Whether a stop makes the container exit. On by default.
+    pub fn stop_exits(&self, on: bool) {
+        self.state.borrow_mut().stop_exits = on;
+    }
+
+    /// Every `create_and_start` takes `ms` on the test's clock.
+    pub fn create_takes(&self, ms: u64) {
+        self.state.borrow_mut().create_takes_ms = ms;
+    }
+
+    /// The container of `run_id` exits with `code`.
+    pub fn exit(&self, run_id: &str, code: i32) {
+        self.set_exit(
+            run_id,
+            Exit {
+                code,
+                oom_killed: false,
+            },
+        );
+    }
+
+    /// The container of `run_id` is killed by the memory controller.
+    pub fn exit_oom(&self, run_id: &str) {
+        self.set_exit(
+            run_id,
+            Exit {
+                code: 137,
+                oom_killed: true,
+            },
+        );
+    }
+
+    fn set_exit(&self, run_id: &str, exit: Exit) {
+        let mut state = self.state.borrow_mut();
+        let found = state.containers.values_mut().find(|c| c.run_id == run_id);
+        found.expect("no such container").exit = Some(exit);
+    }
+
+    /// The container of `run_id` disappears while it runs, as if removed from outside.
+    pub fn vanish(&self, run_id: &str) {
+        self.state
+            .borrow_mut()
+            .containers
+            .retain(|_, c| c.run_id != run_id);
+    }
+
+    /// Adds a container that was there before the agent, with exactly these labels.
+    pub fn leak(&self, labels: &[(&str, &str)], running_ms: u64) -> String {
+        let mut state = self.state.borrow_mut();
+        state.next += 1;
+        let id = format!("leaked-{}", state.next);
+        let labels: BTreeMap<String, String> = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let run_id = labels.get(label::RUN).cloned().unwrap_or_default();
+        state.containers.insert(
+            id.clone(),
+            Container {
+                run_id,
+                scratch: PathBuf::new(),
+                labels,
+                running_ms,
+                exit: None,
+            },
+        );
+        id
+    }
+
+    /// The ids of the containers that exist.
+    pub fn existing(&self) -> Vec<String> {
+        self.state.borrow().containers.keys().cloned().collect()
+    }
+
+    /// Every container created, in order.
+    pub fn created(&self) -> Vec<ContainerSpec> {
+        self.state.borrow().creates.clone()
+    }
+
+    /// How long each stop gave the container, by container id.
+    pub fn stops(&self) -> Vec<(String, Duration)> {
+        self.state.borrow().stops.clone()
+    }
+
+    /// Whether the container of `run_id` is gone.
+    pub fn gone(&self, run_id: &str) -> bool {
+        let state = self.state.borrow();
+        state.containers.values().all(|c| c.run_id != run_id)
+    }
+
+    fn fails(&self, call: &'static str) -> bool {
+        let mut state = self.state.borrow_mut();
+        match state.failing.get_mut(call) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl ContainerRuntime for FakeRuntime {
+    fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
+        self.log
+            .borrow_mut()
+            .push(format!("create {}", spec.run_id));
+        self.clock.advance(self.state.borrow().create_takes_ms);
+        if self.fails("create") {
+            return Err(err("create"));
+        }
+        let mut state = self.state.borrow_mut();
+        state.next += 1;
+        let id = format!("c{}", state.next);
+        state.creates.push(spec.clone());
+        state.containers.insert(
+            id.clone(),
+            Container {
+                run_id: spec.run_id.clone(),
+                scratch: spec.scratch.clone(),
+                labels: spec.labels.clone(),
+                running_ms: 0,
+                exit: None,
+            },
+        );
+        Ok(ContainerId(id))
+    }
+
+    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
+        if self.fails("poll") {
+            return Err(err("poll"));
+        }
+        let state = self.state.borrow();
+        Ok(match state.containers.get(&id.0) {
+            None => Status::Gone,
+            Some(c) => c.exit.map_or(Status::Running, Status::Exited),
+        })
+    }
+
+    fn stop(&mut self, id: &ContainerId, grace: Duration) -> Result<(), RuntimeError> {
+        self.log.borrow_mut().push(format!("stop {}", id.0));
+        if self.fails("stop") {
+            return Err(err("stop"));
+        }
+        let mut state = self.state.borrow_mut();
+        state.stops.push((id.0.clone(), grace));
+        let exits = state.stop_exits;
+        let container = state.containers.get_mut(&id.0);
+        container.into_iter().for_each(|c| {
+            if exits && c.exit.is_none() {
+                c.exit = Some(Exit {
+                    code: 137,
+                    oom_killed: false,
+                });
+            }
+        });
+        Ok(())
+    }
+
+    fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError> {
+        let scratch = self
+            .state
+            .borrow()
+            .containers
+            .get(&id.0)
+            .map(|c| c.scratch.exists());
+        let seen = match scratch {
+            Some(true) => "scratch present",
+            _ => "scratch absent",
+        };
+        self.log
+            .borrow_mut()
+            .push(format!("remove {} ({seen})", id.0));
+        if self.fails("remove") {
+            return Err(err("remove"));
+        }
+        self.state.borrow_mut().containers.remove(&id.0);
+        Ok(())
+    }
+
+    fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
+        if self.fails("list") {
+            return Err(err("list"));
+        }
+        let state = self.state.borrow();
+        Ok(state
+            .containers
+            .iter()
+            .map(|(id, c)| Found {
+                id: ContainerId(id.clone()),
+                labels: c.labels.clone(),
+                running_ms: c.running_ms,
+            })
+            .collect())
+    }
+}
+
+/// Post-job checks that pass until a test makes one find something, and record when
+/// they ran and what the host looked like then.
+pub struct ScriptedChecks {
+    log: Log,
+    runtime: FakeRuntime,
+    scratch_root: PathBuf,
+    findings: BTreeMap<String, CheckFinding>,
+}
+
+impl ScriptedChecks {
+    pub fn new(log: &Log, runtime: &FakeRuntime, scratch_root: &Path) -> Self {
+        Self {
+            log: Rc::clone(log),
+            runtime: runtime.clone(),
+            scratch_root: scratch_root.to_path_buf(),
+            findings: BTreeMap::new(),
+        }
+    }
+
+    pub fn find(mut self, run_id: &str, finding: CheckFinding) -> Self {
+        self.findings.insert(run_id.to_owned(), finding);
+        self
+    }
+}
+
+impl CheckHook for ScriptedChecks {
+    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding> {
+        let container = match self.runtime.gone(run_id) {
+            true => "container gone",
+            false => "container present",
+        };
+        let scratch = match self.scratch_root.join(run_id).exists() {
+            true => "scratch present",
+            false => "scratch gone",
+        };
+        self.log
+            .borrow_mut()
+            .push(format!("check {run_id} ({container}, {scratch})"));
+        self.findings
+            .get(run_id)
+            .map_or(Ok(()), |finding| Err(finding.clone()))
+    }
+}

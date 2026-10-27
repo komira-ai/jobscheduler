@@ -56,6 +56,27 @@ pub struct Cli {
     /// Allowed only when at least one GPU is offered.
     #[arg(long, value_name = "CLASS")]
     pub gpu_class: Option<String>,
+    /// Accept a start whose job is not confined to a container (`isolation = host`). Not
+    /// available yet: a host job taints the host, the record of that taint does not exist,
+    /// and the agent refuses this flag at start. Without it such a start creates nothing
+    /// and is refused.
+    #[arg(long)]
+    pub allow_host_jobs: bool,
+    /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
+    /// start refers to. May be given more than once. The path must be an existing
+    /// directory; it is canonicalised when the agent starts. No root, no mount.
+    #[arg(long = "mount-root", value_name = "NAME=PATH", value_parser = named_path)]
+    pub mount_roots: Vec<(String, PathBuf)>,
+    /// The directory under which every run gets a private scratch directory (`0700`). It
+    /// must be owned by the user running the agent, with no permission for group or
+    /// others.
+    #[arg(long, value_name = "PATH")]
+    pub scratch_root: Option<PathBuf>,
+}
+
+/// `name=path` split at the first `=`.
+fn named_path(text: &str) -> Result<(String, PathBuf), String> {
+    key_value(text).map(|(name, path)| (name, PathBuf::from(path)))
 }
 
 /// `key=value` split at the first `=`.
