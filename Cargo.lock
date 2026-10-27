@@ -631,6 +631,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-contain"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "js-coverage"
 version = "0.1.0"
 dependencies = [
