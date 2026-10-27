@@ -2,7 +2,7 @@
 //! run on a thread of its own whose waits the test opens one at a time.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -150,7 +150,9 @@ impl Server {
             pool,
             ..
         } = self;
-        runtime.block_on(running.shutdown()).unwrap();
+        let stopped =
+            runtime.block_on(async { tokio::time::timeout(HANG_GUARD, running.shutdown()).await });
+        stopped.expect("the server did not shut down").unwrap();
         launch(runtime, scratch, clock, "resume", extra, pool)
     }
 
@@ -212,10 +214,22 @@ struct Gate {
     go: Receiver<Wake>,
 }
 
+/// How long a test waits for the agent, and the agent's gate for the test, before the
+/// test fails. It is a guard against a hang (a regression that leaves one side waiting
+/// for ever would otherwise stall the whole run), never an expectation: a healthy side
+/// answers within milliseconds and the tests assert on what was said, not on how soon.
+const HANG_GUARD: Duration = Duration::from_secs(120);
+
 impl Sleeper for Gate {
     fn sleep(&mut self, duration: Duration) -> Wake {
         let _ = self.slept.send(duration);
-        self.go.recv().unwrap_or(Wake::Stop)
+        match self.go.recv_timeout(HANG_GUARD) {
+            Ok(wake) => wake,
+            Err(RecvTimeoutError::Disconnected) => Wake::Stop,
+            Err(RecvTimeoutError::Timeout) => {
+                panic!("the test never opened the agent's wait of {duration:?}")
+            }
+        }
     }
 }
 
@@ -264,7 +278,9 @@ impl Agent {
 
     /// Waits until the agent has done its next exchange and returns the wait it asks for.
     pub fn next_wait(&self) -> Duration {
-        self.slept.recv().expect("the agent ended before it waited")
+        self.slept
+            .recv_timeout(HANG_GUARD)
+            .expect("the agent ended, or said nothing for a long time, before it waited")
     }
 
     /// Lets the agent's current wait pass.

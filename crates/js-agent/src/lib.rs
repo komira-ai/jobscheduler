@@ -30,19 +30,42 @@
 //! the GPUs: `nvidia-smi` on Linux (class derived from the model name, for example
 //! `nvidia-a100-sxm4-80gb`; every GPU must be of one model), and
 //! `system_profiler SPDisplaysDataType -json` on a Mac, where each Apple GPU counts as
-//! one and the class is `apple-m`. A GPU probe that fails or prints something
-//! unreadable offers no GPU and says why on stderr; a GPU is never invented. The
-//! capabilities `os` and `arch` are the platform's. `--gpus 0` offers none.
+//! one and the class is `apple-m`. A GPU probe that fails, hangs, prints too much or
+//! prints something unreadable offers no GPU and says why on stderr; so do GPU texts the
+//! wire refuses (a model or UUID that is too long or holds a control character). A GPU
+//! is never invented. The capabilities `os` and `arch` are the platform's. `--gpus 0`
+//! offers none.
+//!
+//! On Linux the CPU count and memory are the lowest of the machine's total and what the
+//! process may use: the CPU quota and memory limit of its cgroup (version 2) and of the
+//! cgroups above it, and the CPUs it is allowed to run on (`taskset`, a cpuset). An agent
+//! in a container offers the container's share and not the node's. On a Mac the totals are
+//! offered. The flags above lower the result further and never raise it.
+//!
+//! Every helper program is started by its absolute path (`/usr/bin/getconf`,
+//! `/usr/bin/nvidia-smi`, `/usr/sbin/sysctl`, `/usr/sbin/system_profiler`,
+//! `/usr/sbin/ioreg`), never by a name looked up on the inherited `PATH`. The trust
+//! assumption is that those system directories are writable by root only. Each helper is
+//! waited for at most [`PROBE_LIMIT`] (and as long again for its exit), at most
+//! [`PROBE_OUTPUT_CAP`] bytes of its output are read, and a helper that overruns is killed
+//! by its pid and collected. SIGTERM and SIGINT that arrive meanwhile are kept: the agent
+//! stops at its first wait after the probes.
 //!
 //! # The session
 //!
 //! See [`Session`]. The agent says hello, heartbeats at the interval the server names
 //! and sends the session secret the server issued in every heartbeat. A server that lost
-//! the session (it restarted) gets one hello at once; a refusal that asking again cannot
-//! change (401, 403 and the other 4xx) ends the agent with exit status 2 and the server's
-//! code on stderr. Everything else waits with a capped, jittered backoff
-//! ([`Backoff`](crate::Backoff)), longer when the server sent `Retry-After`, up to a
-//! bound.
+//! the session (it restarted) gets one hello at once.
+//!
+//! A refusal that asking again cannot change ends the agent with exit status 2 and the
+//! server's code on stderr: 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
+//! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
+//! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
+//! has room again when a host leaves, so the agent waits and asks again. Everything else
+//! (409 `host-live`, 408, 429, 5xx, a server that cannot be reached) waits with a capped,
+//! jittered backoff ([`Backoff`](crate::Backoff)), longer when the server sent
+//! `Retry-After`, up to a bound.
 //!
 //! SIGTERM and SIGINT make the agent send one last heartbeat with the phase `draining`
 //! and exit 0, so the server leases the host no more.
@@ -61,6 +84,7 @@
 
 mod backoff;
 mod cli;
+mod container;
 mod facts;
 mod host;
 mod run;
@@ -78,8 +102,8 @@ use clap::Parser;
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
 pub use facts::{
-    APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, Platform, SystemCommands,
-    SystemFiles, detect, host_id, machine_id,
+    APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
+    Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
 pub use run::{Exit, Sleeper, Wake, drive};
@@ -147,7 +171,7 @@ pub fn main_with(
         Ok(mut sleeper) => {
             let services = &mut Services {
                 platform: Platform::current(),
-                commands: &SystemCommands,
+                commands: &SystemCommands::default(),
                 files: &SystemFiles,
                 connector: &Dialer,
                 jitter: &mut SystemJitter,

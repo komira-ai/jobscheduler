@@ -1,13 +1,18 @@
 //! What the agent reads from the host, through recorded program output.
 
+use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
 use js_agent::{
     APPLE_GPU_CLASS, CommandRunner, FileReader, Platform, SystemCommands, SystemFiles, detect,
     host_id, machine_id,
 };
+use rustix::process::{Pid, test_kill_process};
 
 use crate::support::{
     AMD_MAC, CPU_CMD, IOREG_CMD, MACHINE_ID, MEMSIZE_CMD, NVIDIA_CMD, NVIDIA_MIXED, PLATFORM_UUID,
-    PROFILER_CMD, linux_host, mac_host, platform, run_scripted,
+    PROFILER_CMD, Scratch, linux_host, mac_host, platform, run_scripted,
 };
 
 /// Asserts that the recorded `nvidia-smi` output of a two-A100 host gives two GPUs, a
@@ -111,7 +116,127 @@ fn an_apple_gpu_is_one_gpu_of_class_apple_m() {
     assert!(found.gpus.devices.is_empty());
     assert!(found.warnings.is_empty());
     let ran = host.commands.ran.borrow();
-    assert!(!ran.iter().any(|line| line.starts_with("nvidia-smi")));
+    assert!(!ran.iter().any(|line| line.contains("nvidia-smi")));
+}
+
+/// Asserts that every helper program the agent starts is named by an absolute path in a
+/// system directory, on both platforms, for the facts and for the machine id: none is
+/// looked up on the `PATH` the agent inherited, where a directory the operator does not
+/// control could put a program of the same name first. It catches a bare program name.
+#[test]
+fn helpers_are_started_by_absolute_path() {
+    for host in [linux_host(), mac_host()] {
+        detect(&host.platform, &host.commands, &host.files).unwrap();
+        machine_id(&host.platform, &host.commands, &host.files).ok();
+        let ran = host.commands.ran.borrow();
+        assert!(!ran.is_empty());
+        for line in ran.iter() {
+            let program = line.split(' ').next().unwrap();
+            let system = program.starts_with("/usr/bin/") || program.starts_with("/usr/sbin/");
+            assert!(system, "{line}");
+        }
+    }
+}
+
+/// Asserts that a probe the runner gave up on (it never answered, or printed more than
+/// the cap) is a failed GPU probe like any other: no GPU, one warning that says so, and
+/// the start goes on. The runner's own bounds are tested against real processes below.
+#[test]
+fn a_probe_the_runner_gave_up_on_offers_no_gpu() {
+    for why in [
+        "/usr/bin/nvidia-smi: timed out after 10s",
+        "/usr/bin/nvidia-smi: printed more than 16384 bytes",
+    ] {
+        let mut host = linux_host();
+        host.commands = host.commands.with(NVIDIA_CMD, Err(why));
+        let found = detect(&host.platform, &host.commands, &host.files).unwrap();
+        assert_eq!(found.gpus, js_agent::Gpus::none(), "{why}");
+        assert_eq!(found.warnings.len(), 1, "{why}");
+        assert!(found.warnings[0].contains(why), "{why}");
+    }
+}
+
+/// Asserts that a stop request that comes while a probe is hung is not lost: the probe
+/// gives up, the agent warns and says hello, and the first wait ends with the stop, so the
+/// agent announces the drain and exits 0. It catches a start that ignores a stop request
+/// until the server has been reached for good.
+#[test]
+fn a_stop_after_a_probe_that_gave_up_still_stops_the_agent() {
+    let mut host = linux_host();
+    host.commands = host
+        .commands
+        .with(NVIDIA_CMD, Err("/usr/bin/nvidia-smi: timed out after 10s"));
+    let replies = vec![crate::support::welcome(1), crate::support::beat_ok()];
+    let (ran, sent, waits) = run_scripted(&["--host-id", "wedged"], &host, replies, 1);
+    assert_eq!(ran.status(), crate::support::code(0), "{}", ran.err);
+    assert!(ran.err.contains("warning: GPU probe failed"), "{}", ran.err);
+    assert!(ran.err.contains("draining: the server was told"));
+    assert_eq!(waits.len(), 1);
+    assert_eq!(sent.borrow().len(), 2);
+}
+
+/// Asserts that GPU text the wire would refuse (a model or uuid over the cap, a control
+/// character) drops the GPUs with one warning instead of ending the agent with status 2:
+/// the hello offers no GPU, no device and no class, keeps the CPU and memory, and stderr
+/// says the GPU facts were not acceptable. It catches a host that cannot register because
+/// its driver printed a long or odd name.
+#[test]
+fn gpu_text_the_wire_refuses_drops_the_gpus_with_a_warning() {
+    let long = "x".repeat(129);
+    let cases = [
+        ("long model", format!("0, GPU-1, NVIDIA {long}, 81920\n")),
+        (
+            "long uuid",
+            format!("0, GPU-{long}, NVIDIA A100-SXM4-80GB, 81920\n"),
+        ),
+        (
+            "control character",
+            "0, GPU-\u{1b}[2J, NVIDIA A100-SXM4-80GB, 81920\n".to_owned(),
+        ),
+    ];
+    for (why, output) in cases {
+        let mut host = linux_host();
+        host.commands = host.commands.with(NVIDIA_CMD, Ok(&output));
+        let replies = vec![crate::support::welcome(1)];
+        let (ran, sent, _) = run_scripted(&["--host-id", "odd-gpu"], &host, replies, 1);
+        assert_eq!(ran.status(), crate::support::code(0), "{why}: {}", ran.err);
+        let warning = "js-agent: warning: GPU probe failed (the wire refuses the GPU facts: ";
+        assert!(ran.err.contains(warning), "{why}: {}", ran.err);
+        assert!(ran.err.contains("offering no GPU"), "{why}: {}", ran.err);
+        assert!(!ran.err.contains('\u{1b}') && !ran.err.contains(&long));
+        let hello = &sent.borrow()[0].1;
+        assert_eq!(hello["shape"]["gpus"], 0, "{why}");
+        assert_eq!(hello["gpu_devices"], serde_json::json!([]), "{why}");
+        assert!(hello["shape"].get("gpu_class").is_none(), "{why}");
+        assert_eq!(hello["shape"]["cpu_millis"], 8000, "{why}");
+    }
+}
+
+/// Asserts that dropping the GPUs is only for GPU facts the driver printed: a hello that
+/// is refused for another reason (the host id, or the class the operator named with
+/// `--gpu-class`) still ends the agent with status 2 and that reason, and says nothing
+/// about dropping GPUs; GPU facts the wire accepts are kept. It catches a check that
+/// swallows a mistake of the operator's as a warning.
+#[test]
+fn gpus_are_dropped_only_when_they_are_the_fault() {
+    let (ran, sent, _) = run_scripted(&["--host-id", "Not Valid"], &linux_host(), vec![], 1);
+    assert_eq!(ran.status(), crate::support::code(2), "{}", ran.err);
+    assert!(ran.err.contains("host_id"), "{}", ran.err);
+    assert!(!ran.err.contains("GPU"), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+
+    let flags = ["--host-id", "fine", "--gpu-class", "Not A Class"];
+    let (ran, sent, _) = run_scripted(&flags, &linux_host(), vec![], 1);
+    assert_eq!(ran.status(), crate::support::code(2), "{}", ran.err);
+    assert!(ran.err.contains("shape.gpu_class"), "{}", ran.err);
+    assert!(!ran.err.contains("GPU"), "{}", ran.err);
+    assert!(sent.borrow().is_empty());
+
+    let replies = vec![crate::support::welcome(1)];
+    let (ran, sent, _) = run_scripted(&["--host-id", "fine"], &linux_host(), replies, 1);
+    assert_eq!(ran.status(), crate::support::code(0), "{}", ran.err);
+    assert!(!ran.err.contains("GPU"), "{}", ran.err);
+    assert_eq!(sent.borrow()[0].1["shape"]["gpus"], 2);
 }
 
 /// Asserts that a Mac whose only GPU is another vendor's offers none, without a warning:
@@ -245,19 +370,88 @@ fn host_id_is_hashed_not_raw() {
 /// names it and prints none of its output.
 #[test]
 fn the_system_runner_and_reader_report_success_and_failure() {
-    let printed = SystemCommands.run("echo", &["recorded"]).unwrap();
+    let runner = SystemCommands::default();
+    let printed = runner.run("echo", &["recorded"]).unwrap();
     assert_eq!(printed, "recorded\n");
-    let failed = SystemCommands.run("false", &[]).unwrap_err();
+    let failed = runner.run("false", &[]).unwrap_err();
     assert!(failed.starts_with("false: "), "{failed}");
-    let absent = SystemCommands
-        .run("js-agent-no-such-program", &[])
-        .unwrap_err();
+    let absent = runner.run("js-agent-no-such-program", &[]).unwrap_err();
     assert!(absent.starts_with("js-agent-no-such-program: "), "{absent}");
 
     let own = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
     assert!(SystemFiles.read(own).unwrap().contains("js-agent"));
     let said = SystemFiles.read("/nonexistent/js-agent").unwrap_err();
     assert!(said.starts_with("/nonexistent/js-agent: "), "{said}");
+}
+
+/// The pid a probe script wrote to `file` before it blocked.
+fn pid_in(file: &Path) -> Pid {
+    let text = fs::read_to_string(file).unwrap();
+    Pid::from_raw(text.trim().parse().unwrap()).unwrap()
+}
+
+/// Runs `script` under `sh` with `file` as `$0`, so the script can say its pid.
+fn run_script(runner: &SystemCommands, script: &str, file: &Path) -> Result<String, String> {
+    runner.run("sh", &["-c", script, file.to_str().unwrap()])
+}
+
+/// Asserts that a probe that never exits is given up on: the runner reports that it timed
+/// out (the agent then offers no GPU), and the process is gone when it returns, killed by
+/// its pid and collected, so no wedged helper is left behind. The probe is a shell that
+/// says its pid and then sleeps for much longer than the test runs. It catches a runner
+/// that waits for ever, and one that stops waiting but leaves the process running.
+#[test]
+fn a_probe_that_never_answers_is_killed_and_collected() {
+    let dir = Scratch::new("probe_timeout");
+    let file = dir.path("pid");
+    let runner = SystemCommands::bounded(Duration::from_secs(1), 4096);
+    let said = run_script(&runner, "echo $$ > \"$0\"; exec sleep 30", &file).unwrap_err();
+    assert_eq!(said, "sh: timed out after 1s");
+    assert!(test_kill_process(pid_in(&file)).is_err(), "still running");
+}
+
+/// The same for a probe that closes its output and then hangs: the output is complete
+/// but the exit never comes.
+#[test]
+fn a_probe_that_prints_and_then_hangs_is_killed_and_collected() {
+    let dir = Scratch::new("probe_hang");
+    let file = dir.path("pid");
+    let runner = SystemCommands::bounded(Duration::from_secs(1), 4096);
+    let script = "echo $$ > \"$0\"; echo partial; exec >&-; exec sleep 30";
+    let said = run_script(&runner, script, &file).unwrap_err();
+    assert_eq!(said, "sh: timed out after 1s");
+    assert!(test_kill_process(pid_in(&file)).is_err(), "still running");
+}
+
+/// Asserts that output over the cap ends the probe at once and is a failure: the error
+/// says how much was allowed, the process (which would otherwise block on a full pipe or
+/// run on) is killed and collected, and not more than the cap plus one byte is ever read
+/// into memory. It also pins the edge: exactly the cap is accepted. The limit is an hour,
+/// so the outcome does not depend on time.
+#[test]
+fn a_probe_that_prints_too_much_is_killed_and_collected() {
+    let dir = Scratch::new("probe_oversize");
+    let file = dir.path("pid");
+    let runner = SystemCommands::bounded(Duration::from_secs(3600), 1024);
+    let script = "echo $$ > \"$0\"; head -c 100000 /dev/zero; exec sleep 30";
+    let said = run_script(&runner, script, &file).unwrap_err();
+    assert_eq!(said, "sh: printed more than 1024 bytes");
+    assert!(test_kill_process(pid_in(&file)).is_err(), "still running");
+
+    let edge = SystemCommands::bounded(Duration::from_secs(3600), 5);
+    assert_eq!(edge.run("printf", &["abcde"]).unwrap(), "abcde");
+    let said = edge.run("printf", &["abcdef"]).unwrap_err();
+    assert_eq!(said, "printf: printed more than 5 bytes");
+}
+
+/// The runner the program uses is bounded by default: a program that prints a megabyte
+/// is refused instead of read into memory.
+#[test]
+fn the_default_runner_caps_what_a_probe_may_print() {
+    let said = SystemCommands::default()
+        .run("head", &["-c", "1000000", "/dev/zero"])
+        .unwrap_err();
+    assert_eq!(said, "head: printed more than 16384 bytes");
 }
 
 /// The platform of this build names a non-empty OS and architecture.

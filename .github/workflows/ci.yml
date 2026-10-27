@@ -26,6 +26,7 @@ env:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -55,6 +56,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -85,6 +87,7 @@ jobs:
   # the release binary, checked against its SHA-256 before use.
   deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
@@ -111,6 +114,7 @@ jobs:
   # its SHA-256 before use.
   coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     env:

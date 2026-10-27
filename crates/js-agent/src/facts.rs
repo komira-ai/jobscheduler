@@ -5,16 +5,62 @@
 //! Nothing here is invented: a probe that fails or prints something unreadable is an
 //! error, and for the GPU probe (which is allowed to fail) the caller reports no GPU and
 //! says why.
+//!
+//! # Helper programs
+//!
+//! Every helper (`getconf`, `nvidia-smi`, `sysctl`, `system_profiler`, `ioreg`) is started
+//! by its absolute path in a system directory (`/usr/bin`, `/usr/sbin`), never by a bare
+//! name looked up on the `PATH` the agent inherited. The agent runs on a machine whose
+//! environment it does not control, and what a helper prints becomes the host's offer. The
+//! trust assumption is that those directories are writable by root only, as on a stock
+//! Linux or macOS system; a host where an unprivileged user can replace `/usr/bin/nvidia-smi`
+//! has bigger problems than the agent can solve.
+//!
+//! # Bounds
+//!
+//! A helper can hang (a wedged GPU driver blocks `nvidia-smi` in the kernel) or print
+//! without end. [`SystemCommands`] therefore waits for each helper at most
+//! [`PROBE_LIMIT`] for its output and as long again for its exit, reads at most
+//! [`PROBE_OUTPUT_CAP`] bytes of output, and kills a helper that breaks either bound by
+//! its pid and collects it. A helper that was killed, printed too much or failed is an
+//! error like any other: no GPU for the GPU probe, no start for the CPU count. A stop
+//! request that arrives while a helper runs is kept and ends the agent at its first wait.
+//!
+//! # Containers
+//!
+//! The totals of `getconf` and `/proc/meminfo` are the whole machine's. On Linux the
+//! offer is the lowest of that total and what the process may use: the CPU quota
+//! (`cpu.max`) and memory limit (`memory.max`) of its own cgroup and of each cgroup above
+//! it (cgroup v2, found through `/proc/self/cgroup`), and the CPUs it may run on
+//! (`Cpus_allowed_list` of `/proc/self/status`: `taskset`, a cpuset, a container's
+//! `--cpuset-cpus`). A file that is absent or unreadable is no limit, as is cgroup v1.
+//! On macOS the totals are the offer. A flag can lower the result further and never
+//! raise it.
 
-use std::collections::BTreeSet;
-use std::process::{Command, Stdio};
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{self, PipeReader, Read};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::time::Duration;
 
-use js_agent_wire::GpuDevice;
+use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireShape};
+use rustix::process::{Pid, Signal, kill_process};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::container;
+
 /// The GPU class an Apple GPU is reported under.
 pub const APPLE_GPU_CLASS: &str = "apple-m";
+
+// The helper programs, each by the absolute path it has on a stock system, never by a bare
+// name looked up on the `PATH` the agent inherited (see the module documentation).
+const GETCONF: &str = "/usr/bin/getconf";
+const NVIDIA_SMI: &str = "/usr/bin/nvidia-smi";
+const SYSCTL: &str = "/usr/sbin/sysctl";
+const SYSTEM_PROFILER: &str = "/usr/sbin/system_profiler";
+const IOREG: &str = "/usr/sbin/ioreg";
 
 /// Runs a program and returns what it printed.
 pub trait CommandRunner {
@@ -29,23 +75,117 @@ pub trait FileReader {
     fn read(&self, path: &str) -> Result<String, String>;
 }
 
-/// The machine's own commands: the one place `std::process` runs.
+/// How long a helper may take to print its output, and again to exit once it has.
+pub const PROBE_LIMIT: Duration = Duration::from_secs(10);
+
+/// The most output of a helper that is accepted, in bytes. The longest real output (the
+/// `system_profiler` JSON of a Mac with several displays) is a few KiB.
+pub const PROBE_OUTPUT_CAP: usize = 16 * 1024;
+
+/// How long a killed helper is given to be collected before the runner reports its failure
+/// anyway: a process stuck inside the kernel does not die until the call returns.
+const COLLECT_WAIT: Duration = Duration::from_secs(5);
+
+/// The machine's own commands: the one place `std::process` runs. A helper is waited for
+/// at most `limit` for its output and `limit` again for its exit, and at most `cap` bytes
+/// of its output are accepted; a helper that breaks either bound is killed by its pid and
+/// collected, and the call fails (see the module documentation).
 #[derive(Debug, Clone, Copy)]
-pub struct SystemCommands;
+pub struct SystemCommands {
+    limit: Duration,
+    cap: usize,
+}
+
+impl SystemCommands {
+    /// A runner with its own bounds, for a test that must not wait [`PROBE_LIMIT`].
+    pub const fn bounded(limit: Duration, cap: usize) -> Self {
+        Self { limit, cap }
+    }
+
+    /// Waits for what `child` prints and for its exit, killing it when it overruns.
+    fn supervise(&self, program: &str, child: Child, reader: PipeReader) -> Result<String, String> {
+        let pid = child.id();
+        let (printed, output) = mpsc::channel();
+        let (exited, exit) = mpsc::channel();
+        let cap = self.cap;
+        // This thread owns the child from here on and always collects it, so the caller
+        // never blocks on a process that does not die.
+        thread::spawn(move || watch(child, reader, cap, &printed, &exited));
+        let give_up = |why: String| {
+            kill(pid);
+            let _ = exit.recv_timeout(COLLECT_WAIT);
+            format!("{program}: {why}")
+        };
+        let timed_out = || give_up(format!("timed out after {:?}", self.limit));
+        output
+            .recv_timeout(self.limit)
+            .map_err(|_| timed_out())
+            .and_then(|bytes| match bytes.len() > cap {
+                true => Err(give_up(format!("printed more than {cap} bytes"))),
+                false => Ok(bytes),
+            })
+            .and_then(|bytes| {
+                exit.recv_timeout(self.limit)
+                    .map_err(|_| timed_out())
+                    .and_then(|status| status.map_err(|why| format!("{program}: {why}")))
+                    .map(|()| String::from_utf8_lossy(&bytes).into_owned())
+            })
+    }
+}
+
+impl Default for SystemCommands {
+    /// The bounds the program runs with: [`PROBE_LIMIT`] and [`PROBE_OUTPUT_CAP`].
+    fn default() -> Self {
+        Self::bounded(PROBE_LIMIT, PROBE_OUTPUT_CAP)
+    }
+}
 
 impl CommandRunner for SystemCommands {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
-        Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|err| format!("{program}: {err}"))
-            .and_then(|output| match output.status.success() {
-                true => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
-                false => Err(format!("{program}: {}", output.status)),
-            })
+        let named = |err: io::Error| format!("{program}: {err}");
+        io::pipe().map_err(named).and_then(|(reader, writer)| {
+            // The command (and with it the parent's copy of the pipe's write end) is gone
+            // at the end of this statement, so the reader sees the end of the output.
+            let spawned = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(writer)
+                .stderr(Stdio::null())
+                .spawn();
+            spawned
+                .map_err(named)
+                .and_then(|child| self.supervise(program, child, reader))
+        })
     }
+}
+
+/// Reads at most `cap` and one more byte of the child's output, reports it, then waits for
+/// the child to exit and reports whether it succeeded (the text of the failure when not).
+/// It does both however the reads and the wait end, so the child is always collected.
+fn watch(
+    mut child: Child,
+    reader: PipeReader,
+    cap: usize,
+    printed: &Sender<Vec<u8>>,
+    exited: &Sender<Result<(), String>>,
+) {
+    let mut bytes = Vec::new();
+    let most = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
+    let _ = reader.take(most).read_to_end(&mut bytes);
+    let _ = printed.send(bytes);
+    let lost = (false, "could not be collected".to_owned());
+    let (success, text) = child
+        .wait()
+        .map_or(lost, |status| (status.success(), status.to_string()));
+    let _ = exited.send(success.then_some(()).ok_or(text));
+}
+
+/// Sends SIGKILL to the process `pid`. A process that is already gone is not an error.
+fn kill(pid: u32) {
+    let pid = i32::try_from(pid).ok().and_then(Pid::from_raw);
+    pid.into_iter().for_each(|pid| {
+        let _ = kill_process(pid, Signal::KILL);
+    });
 }
 
 /// The machine's own files.
@@ -129,9 +269,12 @@ pub fn detect(
     runner: &dyn CommandRunner,
     files: &dyn FileReader,
 ) -> Result<Detected, String> {
-    let cpu = cpu_millis(runner).map_err(|why| format!("cannot count the CPUs: {why}"));
-    let memory =
-        memory_bytes(platform, runner, files).map_err(|why| format!("cannot size memory: {why}"));
+    let cpu = cpu_millis(runner)
+        .map(|host| within(platform, host, || container::cpu_millis(files)))
+        .map_err(|why| format!("cannot count the CPUs: {why}"));
+    let memory = memory_bytes(platform, runner, files)
+        .map(|host| within(platform, host, || container::memory_bytes(files)))
+        .map_err(|why| format!("cannot size memory: {why}"));
     let probed = probe_gpus(platform, runner);
     let warnings = probed
         .as_ref()
@@ -149,6 +292,16 @@ pub fn detect(
     })
 }
 
+/// The host's `total` lowered to what the process may use, when `limit` finds that it is
+/// less. A Mac has no such limit the agent reads, and a limit above the total changes
+/// nothing.
+fn within(platform: &Platform, total: u64, limit: impl FnOnce() -> Option<u64>) -> u64 {
+    match platform.is_macos() {
+        true => total,
+        false => limit().map_or(total, |limit| total.min(limit)),
+    }
+}
+
 /// A number printed alone on a line.
 fn number(text: &str, what: &str) -> Result<u64, String> {
     text.trim()
@@ -159,7 +312,7 @@ fn number(text: &str, what: &str) -> Result<u64, String> {
 /// Online CPUs, as `getconf` counts them on Linux and macOS alike, in thousandths.
 fn cpu_millis(runner: &dyn CommandRunner) -> Result<u64, String> {
     runner
-        .run("getconf", &["_NPROCESSORS_ONLN"])
+        .run(GETCONF, &["_NPROCESSORS_ONLN"])
         .and_then(|text| number(&text, "getconf"))
         .map(|cpus| cpus.saturating_mul(1000))
 }
@@ -171,7 +324,7 @@ fn memory_bytes(
 ) -> Result<u64, String> {
     match platform.is_macos() {
         true => runner
-            .run("sysctl", &["-n", "hw.memsize"])
+            .run(SYSCTL, &["-n", "hw.memsize"])
             .and_then(|text| number(&text, "sysctl")),
         false => files
             .read("/proc/meminfo")
@@ -191,20 +344,51 @@ fn meminfo_total(text: &str) -> Result<u64, String> {
 /// The GPUs of the host: Apple's through `system_profiler` on a Mac, NVIDIA's through
 /// `nvidia-smi` anywhere else.
 fn probe_gpus(platform: &Platform, runner: &dyn CommandRunner) -> Result<Gpus, String> {
-    match platform.is_macos() {
+    let probed = match platform.is_macos() {
         true => runner
-            .run("system_profiler", &["SPDisplaysDataType", "-json"])
+            .run(SYSTEM_PROFILER, &["SPDisplaysDataType", "-json"])
             .and_then(|text| apple(&text)),
         false => runner
             .run(
-                "nvidia-smi",
+                NVIDIA_SMI,
                 &[
                     "--query-gpu=index,uuid,name,memory.total",
                     "--format=csv,noheader,nounits",
                 ],
             )
             .and_then(|text| nvidia(&text)),
-    }
+    };
+    probed.and_then(accepted)
+}
+
+/// The GPUs, when the wire accepts them: the texts a driver printed (a UUID, a model) are
+/// held to the wire's rules here, so a long or odd name costs the host its GPUs and a
+/// warning and not its registration. The check is a hello that is valid but for the GPU
+/// facts, so no rule is copied here and nothing the operator passed as a flag is judged.
+fn accepted(gpus: Gpus) -> Result<Gpus, String> {
+    let probe = Hello {
+        protocol: ProtocolRange::THIS,
+        host_id: "gpu-check".to_owned(),
+        pool: "gpu-check".to_owned(),
+        agent_version: "0".to_owned(),
+        instance: None,
+        shape: WireShape {
+            cpu_millis: 0,
+            memory_bytes: 0,
+            gpus: gpus.count,
+            gpu_class: gpus.class.clone(),
+            max_leases: None,
+        },
+        capabilities: BTreeMap::new(),
+        gpu_devices: gpus.devices.clone(),
+        labels: BTreeMap::new(),
+        phase: Phase::Serving,
+        held: Vec::new(),
+    };
+    probe
+        .validate()
+        .map(|()| gpus)
+        .map_err(|why| format!("the wire refuses the GPU facts: {why}"))
 }
 
 /// The Apple GPUs in `system_profiler SPDisplaysDataType -json`: one for each display
@@ -299,7 +483,7 @@ pub fn machine_id(
 ) -> Result<String, String> {
     match platform.is_macos() {
         true => runner
-            .run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"])
+            .run(IOREG, &["-rd1", "-c", "IOPlatformExpertDevice"])
             .and_then(|text| platform_uuid(&text)),
         false => files
             .read("/etc/machine-id")

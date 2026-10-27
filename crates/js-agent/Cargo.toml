@@ -16,7 +16,7 @@ js-agent-wire = { path = "../js-agent-wire" }
 js-client = { path = "../js-client" }
 clap.workspace = true
 hex.workspace = true
-rustix = { workspace = true, features = ["rand"] }
+rustix = { workspace = true, features = ["process", "rand"] }
 serde_json.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
@@ -27,7 +27,7 @@ js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
 clap.workspace = true
 rustix = { workspace = true, features = ["process"] }
-tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

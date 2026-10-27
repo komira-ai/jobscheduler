@@ -1,5 +1,6 @@
 //! How the agent reaches the server: one POST of a JSON body, one answer.
 
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,8 +11,10 @@ use serde_json::Value;
 /// close to the server's grace period anyway.
 pub const REQUEST_LIMIT: Duration = Duration::from_secs(10);
 
-/// What the server answered.
-#[derive(Debug, Clone, PartialEq)]
+/// What the server answered. Its `Debug` text leaves the body out: the body of a welcome
+/// holds the session secret, and a `{:?}` in a log line or a panic message must not print
+/// it.
+#[derive(Clone, PartialEq)]
 pub struct Answer {
     /// The HTTP status.
     pub status: u16,
@@ -19,6 +22,16 @@ pub struct Answer {
     pub body: Value,
     /// The wait a `Retry-After` header asked for, in whole seconds.
     pub retry_after: Option<Duration>,
+}
+
+impl fmt::Debug for Answer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Answer")
+            .field("status", &self.status)
+            .field("body", &format_args!("<redacted>"))
+            .field("retry_after", &self.retry_after)
+            .finish()
+    }
 }
 
 /// A carrier of the agent's two messages. The first implementation is HTTP/1.1 through

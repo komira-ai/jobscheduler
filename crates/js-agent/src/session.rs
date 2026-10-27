@@ -16,18 +16,32 @@
 //!
 //! - 200: the work went through. A welcome or a heartbeat reply that does not decode or
 //!   validate is treated as a failed exchange, not trusted.
-//! - 401, 403 and every other 4xx but 408, 409 and 429: the server will not have this
-//!   agent, and asking again changes nothing. The session ends with the status and the
-//!   server's code ([`Fatal`]); the program exits 2.
+//! - Fatal: 401, every 4xx but 408, 409 and 429, and every 403 but `session-mismatch` and
+//!   `pool-full`. The same message will be refused again however long the agent waits,
+//!   so the session ends with the status and the server's code ([`Fatal`]) and the
+//!   program exits 2. These are the refusals that name something only the operator can
+//!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
+//!   (`shape-not-accepted`), the credential the host id was admitted with (`host-bound`),
+//!   the pool's static host list (`host-listed`), and a message the server cannot read or
+//!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
+//!   `body-too-large`). The operator fixes the cause and restarts the agent.
 //! - 409 to a heartbeat (`stale-epoch`, `unknown-host`, `host-lost`), and 403
 //!   `session-mismatch` to one: the server no longer holds this session, as after its
 //!   restart. The agent says hello again at once, but only when its last heartbeat was
 //!   accepted: a heartbeat refused straight after a hello backs off like any failure, so
 //!   a server that welcomes and then refuses is not asked in a loop.
-//! - 409 to a hello (`host-live`: the old session of this host id is still within its
-//!   grace), 408, 429, 5xx, anything unexpected, and a server that cannot be reached:
-//!   wait ([`Backoff`]: doubling, capped, jittered, at least the `Retry-After` the server
-//!   gave, up to a bound) and try the same message again.
+//! - 403 `pool-full` to a hello, 409 to a hello (`host-live`: the old session of this
+//!   host id is still within its grace), 408, 429, 5xx, anything unexpected, and a server
+//!   that cannot be reached: wait ([`Backoff`]: doubling, capped, jittered, at least the
+//!   `Retry-After` the server gave, up to a bound) and try the same message again. A pool
+//!   is full until a host leaves it, so a full pool is a condition that passes, and the
+//!   agent joins when it does.
+//!
+//! The run of failures ends with an accepted heartbeat, and with a welcome, so the first
+//! heartbeat that fails after a long outage of the hello waits the shortest time and not
+//! longer than the grace the welcome set. The one exception is a welcome after a session
+//! that was lost before one heartbeat of it was accepted: that run goes on, so a server
+//! that welcomes and at once refuses is asked less and less often.
 //!
 //! The session secret is held in memory, goes into the body of every heartbeat and into
 //! nothing else: it is in no log line, no [`Note`] and no `Debug` output.
@@ -205,7 +219,7 @@ fn verdict(status: u16, code: &str) -> Verdict {
     match (status, code) {
         (200, _) => Verdict::Done,
         (403, refusal::SESSION_MISMATCH) | (409, _) => Verdict::Conflict,
-        (408 | 429, _) => Verdict::Retry,
+        (403, refusal::POOL_FULL) | (408 | 429, _) => Verdict::Retry,
         (400..=499, _) => Verdict::Fatal,
         _ => Verdict::Retry,
     }
@@ -273,6 +287,10 @@ pub struct Session<'a> {
     phase: Phase,
     backoff: Backoff,
     proven: bool,
+    /// The last session was lost before one heartbeat of it was accepted. A welcome then
+    /// does not end the run of failures: a server that welcomes and at once refuses is
+    /// backed off from more and more, not forgiven by each welcome.
+    lost_young: bool,
 }
 
 impl<'a> Session<'a> {
@@ -289,6 +307,7 @@ impl<'a> Session<'a> {
             live: None,
             backoff: Backoff::default(),
             proven: false,
+            lost_young: false,
         }
     }
 
@@ -376,6 +395,9 @@ impl<'a> Session<'a> {
             interval,
         });
         self.proven = false;
+        if !self.lost_young {
+            self.backoff.reset();
+        }
         Step::Wait {
             after: interval,
             note: Some(Note::Registered {
@@ -414,6 +436,7 @@ impl<'a> Session<'a> {
             Ok(commands) => {
                 self.backoff.reset();
                 self.proven = true;
+                self.lost_young = false;
                 Step::Wait {
                     after: interval,
                     note: (commands > 0).then_some(Note::Ignored { commands }),
@@ -428,6 +451,7 @@ impl<'a> Session<'a> {
     fn rehello(&mut self, code: String) -> Step {
         let proven = self.proven;
         self.proven = false;
+        self.lost_young = !proven;
         let after = match proven {
             true => Duration::ZERO,
             false => self.backoff.next(&mut *self.jitter, None),

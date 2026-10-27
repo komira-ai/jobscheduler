@@ -5,14 +5,14 @@
 use std::time::Duration;
 
 use js_agent::{
-    Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP, Reason, Session, Step,
+    Answer, Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP, Reason, Session, Step,
 };
 use js_agent_wire::ProtocolRange;
 use serde_json::{Value, json};
 
 use crate::support::{
     Reply, SECRET, Script, Sent, beat_ok, hello, limited, lowest, refused, reply, welcome,
-    welcome_with,
+    welcome_speaking, welcome_with,
 };
 
 fn ms(n: u64) -> Duration {
@@ -116,7 +116,6 @@ fn refused_hello_is_fatal_per_code() {
         (reply(401, Value::Null), 401, "unreadable"),
         (refused(403, "host-bound"), 403, "host-bound"),
         (refused(403, "unknown-pool"), 403, "unknown-pool"),
-        (refused(403, "pool-full"), 403, "pool-full"),
         (
             refused(403, "shape-not-accepted"),
             403,
@@ -334,6 +333,85 @@ fn host_live_on_hello_waits_and_asks_again() {
     ));
 }
 
+/// Asserts that a full pool (403 `pool-full`) is not the end of the agent: a pool is full
+/// until a host leaves it, so the hello is waited out with the capped backoff and asked
+/// again, and the agent registers when room appears. It catches an agent that exits for a
+/// condition that changes, and so never joins once the pool has room.
+#[test]
+fn a_full_pool_is_waited_out_and_asked_again() {
+    let asked_to_wait = Ok(Answer {
+        status: 403,
+        body: json!({ "error": "pool-full" }),
+        retry_after: Some(Duration::from_secs(20)),
+    });
+    let (mut transport, sent) = script(vec![
+        refused(403, "pool-full"),
+        refused(403, "pool-full"),
+        asked_to_wait,
+        welcome(1),
+    ]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    let steps = ticks(&mut session, 4);
+    assert_eq!(
+        note(&steps[0]),
+        Some(Note::Retrying {
+            what: "hello",
+            reason: Reason::Status {
+                status: 403,
+                code: "pool-full".to_owned()
+            }
+        })
+    );
+    let secs = Duration::from_secs;
+    assert_eq!((wait(&steps[0]), wait(&steps[1])), (ms(500), ms(1000)));
+    assert_eq!(wait(&steps[2]), secs(20));
+    assert_eq!(paths(&sent), [HELLO_PATH; 4]);
+    assert!(matches!(
+        note(&steps[3]),
+        Some(Note::Registered { epoch: 1, .. })
+    ));
+}
+
+/// Asserts that the admission refusals that do not change by asking again stay fatal
+/// while `pool-full` is not: each of them ends the agent after one request. A server that
+/// no longer lists the pool, a join token bound to another host, a shape the pool does not
+/// accept and a host id the operator lists will refuse the same hello tomorrow.
+#[test]
+fn only_the_admission_refusals_that_cannot_change_are_fatal() {
+    for code in [
+        "unknown-pool",
+        "host-bound",
+        "shape-not-accepted",
+        "host-listed",
+    ] {
+        let (mut transport, sent) = script(vec![refused(403, code), welcome(1)]);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        assert!(matches!(session.tick(), Step::Fatal(_)), "{code}");
+        assert_eq!(sent.borrow().len(), 1, "{code}");
+    }
+    let (mut transport, _) = script(vec![refused(403, "pool-full")]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    assert!(matches!(session.tick(), Step::Wait { .. }));
+}
+
+/// Asserts that an answer's `Debug` text holds its status and the wait but never its
+/// body, which carries the session secret of a welcome. It catches a derived `Debug` that
+/// would put the secret in a log line or a panic message the first time an answer is
+/// printed with `{:?}`.
+#[test]
+fn an_answer_does_not_print_its_body() {
+    let answer = welcome(3).unwrap();
+    assert!(answer.body.to_string().contains(SECRET));
+    let shown = format!("{answer:?}");
+    assert!(!shown.contains(SECRET), "{shown}");
+    assert!(shown.contains("200"), "{shown}");
+    assert!(shown.contains("redacted"), "{shown}");
+    let alternate = format!("{answer:#?}");
+    assert!(!alternate.contains(SECRET), "{alternate}");
+    let slow = limited(429, 7).unwrap();
+    assert!(format!("{slow:?}").contains("7s"));
+}
+
 /// Asserts that `Retry-After` raises the wait to what the server asked, bounded, and does
 /// not lower the backoff: 30 seconds is waited, 100000 is cut to the bound, an absent
 /// one leaves the doubling backoff, and a short one never shortens a long backoff. Each
@@ -393,7 +471,8 @@ fn transport_errors_back_off_and_keep_the_session() {
         })
     );
     assert_eq!(wait(&steps[0]), ms(500));
-    assert_eq!((wait(&steps[2]), wait(&steps[3])), (ms(1000), ms(2000)));
+    // The welcome ended the hello's one failure, so the heartbeat's run starts over.
+    assert_eq!((wait(&steps[2]), wait(&steps[3])), (ms(500), ms(1000)));
     assert_eq!(wait(&steps[5]), ms(500));
     let sent = sent.borrow();
     assert_eq!(sent[4].1["epoch"], 1);
@@ -434,8 +513,10 @@ fn server_errors_and_odd_statuses_are_retried() {
 }
 
 /// Asserts that a welcome that does not decode or does not validate (a zero interval, an
-/// empty session as an old server sends, a grace that does not cover the interval) is not
-/// trusted: no session is made and the next tick says hello again.
+/// empty session as an old server sends, a grace that does not cover the interval, a
+/// protocol major the agent does not speak, above its range or below it) is not trusted:
+/// no session is made and the next tick says hello again. It catches an agent that
+/// heartbeats a server speaking a protocol it cannot read.
 #[test]
 fn an_unusable_welcome_is_not_trusted() {
     let mut no_session = welcome(1).unwrap();
@@ -444,6 +525,8 @@ fn an_unusable_welcome_is_not_trusted() {
         (reply(200, json!({ "epoch": 1 })), "invalid-welcome"),
         (welcome_with(1, 0, 15_000), "invalid-welcome"),
         (welcome_with(1, 5_000, 6_000), "invalid-welcome"),
+        (welcome_speaking(1, 5_000, 15_000, 2), "invalid-welcome"),
+        (welcome_speaking(1, 5_000, 15_000, 0), "invalid-welcome"),
         (Ok(no_session), "invalid-welcome"),
         (reply(200, Value::Null), "invalid-welcome"),
     ];

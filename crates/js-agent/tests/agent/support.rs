@@ -60,12 +60,14 @@ impl Drop for Scratch {
     }
 }
 
-pub const NVIDIA_CMD: &str =
-    "nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits";
-pub const PROFILER_CMD: &str = "system_profiler SPDisplaysDataType -json";
-pub const CPU_CMD: &str = "getconf _NPROCESSORS_ONLN";
-pub const MEMSIZE_CMD: &str = "sysctl -n hw.memsize";
-pub const IOREG_CMD: &str = "ioreg -rd1 -c IOPlatformExpertDevice";
+/// The probes' command lines. Every program is named by its absolute path: the agent never
+/// looks a helper up on the `PATH` it inherited.
+pub const NVIDIA_CMD: &str = "/usr/bin/nvidia-smi --query-gpu=index,uuid,name,memory.total \
+     --format=csv,noheader,nounits";
+pub const PROFILER_CMD: &str = "/usr/sbin/system_profiler SPDisplaysDataType -json";
+pub const CPU_CMD: &str = "/usr/bin/getconf _NPROCESSORS_ONLN";
+pub const MEMSIZE_CMD: &str = "/usr/sbin/sysctl -n hw.memsize";
+pub const IOREG_CMD: &str = "/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice";
 
 /// `nvidia-smi --query-gpu=index,uuid,name,memory.total --format=csv,noheader,nounits` on
 /// a host with two A100s.
@@ -263,10 +265,15 @@ pub fn welcome(epoch: u64) -> Reply {
 }
 
 pub fn welcome_with(epoch: u64, interval_ms: u64, grace_ms: u64) -> Reply {
+    welcome_speaking(epoch, interval_ms, grace_ms, 1)
+}
+
+/// A welcome that names the protocol major `protocol`.
+pub fn welcome_speaking(epoch: u64, interval_ms: u64, grace_ms: u64, protocol: u64) -> Reply {
     reply(
         200,
         json!({
-            "protocol": 1,
+            "protocol": protocol,
             "epoch": epoch,
             "heartbeat_interval_ms": interval_ms,
             "grace_ms": grace_ms,
