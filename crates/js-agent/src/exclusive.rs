@@ -35,8 +35,9 @@
 //! A phase other than `serving` that the agent is in for its own reasons (a drain) is not
 //! overridden. Without a [`Quiesce`] the session ignores `exclusive`.
 //!
-//! The VM check of the design (5.1) and the readiness hook (5.5) are not here: no VM
-//! backend exists, and the hook is a later change.
+//! The VM check of the design (5.1) is not here: no VM backend exists. The readiness hook
+//! (5.5) is a [`Quiesce`] wrapper (`readiness::Hooked`): it answers [`Quiet::Refused`]
+//! when the hook refuses, and the session refuses the lease with that reason.
 
 use std::mem;
 use std::time::Duration;
@@ -207,6 +208,7 @@ impl<'a> Hold<'a> {
         match self.host.prepare() {
             Quiet::Ready => self.ready(lease),
             Quiet::Unsafe { detail } => self.refuse(&lease, RefusalReason::HostUnsafe, &detail),
+            Quiet::Refused { code, detail } => self.refuse(&lease, code, &detail),
             Quiet::Busy if self.clock.now_ms() >= deadline_ms => {
                 self.refuse(&lease, RefusalReason::NotQuiet, NOT_QUIET_DETAIL)
             }

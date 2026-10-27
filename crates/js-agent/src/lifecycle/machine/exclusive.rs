@@ -36,6 +36,14 @@ pub enum Quiet {
         /// What a person may read; at most [`crate::lifecycle::CHECK_DETAIL_MAX`] bytes.
         detail: String,
     },
+    /// The readiness hook of the operator refused the host (see
+    /// [`crate::ReadinessHook`]); the lifecycle itself never answers this.
+    Refused {
+        /// The typed reason.
+        code: js_agent_wire::RefusalReason,
+        /// What a person may read; at most `limits::MAX_REFUSAL_DETAIL` bytes.
+        detail: String,
+    },
 }
 
 /// What [`Lifecycle::restore`] found.
