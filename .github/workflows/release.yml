@@ -25,15 +25,23 @@
 # stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
 # committed.
 #
-# Order: plan, build, sums, attest, verify, publish. The tag is made last: `publish` makes
+# Order: plan, build, sums, attest, verify, publish, then gamma. The tag is made last: `publish` makes
 # a draft release, uploads the files built, attested and verified, and publishes it in
 # one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
 # continues the same draft and adds what is missing; a published release is never changed,
 # a draft that is stale or differs is replaced (see `publish`).
 #
-# Permissions are per job. Only `attest` holds id-token and attestations write, and only
-# `publish` holds contents write; neither runs repository code, only pinned actions,
-# `sha256sum`, `cmp` and `gh`.
+# gamma, the last step, sets the release as the desired version of the services js-server
+# and then js-agent on the update coordinator and waits for each to converge. It is off
+# (a notice, and the job passes) until the repository variable JS_COORDINATOR_URL is set
+# (docs/release.md, "The gamma step").
+#
+# Permissions are per job. Only `attest` and `gamma` hold id-token write, `attest` also
+# attestations write, and only `publish` holds contents write; none of the three runs
+# repository code: `attest` and `publish` run only pinned actions, `sha256sum`, `cmp` and
+# `gh`, and `gamma` runs the `xtask` binary that the permissionless `deploy-tool` job built
+# (so no build script ever sees the token service's address and key), after the pinned
+# actions. A test (crates/xtask/tests/release_workflow.rs) pins these rules.
 name: release
 
 on:
@@ -420,3 +428,71 @@ jobs:
             echo "::error::$TAG names $at, not $COMMIT"
             exit 1
           fi
+
+  # Builds the gamma step's client. A job of its own so that the build, whose scripts run
+  # code from the locked dependency set, is not in the job that holds id-token write.
+  deploy-tool:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: cargo build -p xtask --locked --release
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-tool
+          path: target/release/xtask
+          if-no-files-found: error
+          retention-days: 1
+
+  # The gamma step, the last of a release: tell the update coordinator "desired = this
+  # release" for the service js-server (the lease server), wait until its hosts run it, and
+  # only then do the same for js-agent: servers upgrade before agents. Off (a notice, and the
+  # job passes) while the repository variable JS_COORDINATOR_URL is empty: a fork, or a
+  # repository whose operator has not turned the step on. Each call carries a fresh OIDC token
+  # of this job whose audience is the coordinator; the coordinator's allow-list names this
+  # repository, this workflow on main and the two services, and refuses anything else.
+  #
+  # The version is the release's `X.Y.Z` (plan's `version`, not the tag): the text the
+  # services report in their heartbeats, because `--version` of each binary prints it
+  # (docs/release.md, "The gamma step").
+  gamma:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, publish, deploy-tool]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: deploy-tool
+          path: tool
+      # When the coordinator is reachable only on a Tailscale network: join it as an ephemeral
+      # node, using this run's OIDC token (workload identity federation), so the job holds no
+      # secret. The client id and the audience are the variables TS_CLIENT_ID and TS_AUDIENCE.
+      # With either that or JS_COORDINATOR_URL unset the step is skipped.
+      - name: Join the coordinator's Tailscale network
+        if: ${{ vars.TS_CLIENT_ID != '' && vars.JS_COORDINATOR_URL != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      - name: Set this release as the desired version of js-server, then js-agent, and wait for each
+        env:
+          COORDINATOR_URL: ${{ vars.JS_COORDINATOR_URL }}
+          # The CA certificate (public) the coordinator's certificate chains to.
+          COORDINATOR_CA: ${{ vars.JS_COORDINATOR_CA }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x tool/xtask
+          tool/xtask deploy --url "$COORDINATOR_URL" --ca-pem "$COORDINATOR_CA" --version "$VERSION" --service js-server --service js-agent

@@ -9,6 +9,10 @@
 //!   ([`release`]): whether a commit of main is released and as which version, and setting
 //!   that version in the CI checkout before the build (docs/release.md).
 //!
+//! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
+//!   step of a release, setting the version of each service on the update coordinator in
+//!   order and waiting for it to converge (docs/release.md).
+//!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
 
@@ -18,6 +22,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+pub mod deploy;
 pub mod fetch;
 pub mod release;
 
@@ -27,6 +32,9 @@ pub enum Error {
     /// A release verb failed.
     #[error(transparent)]
     Release(#[from] release::Error),
+    /// The deploy verb failed.
+    #[error(transparent)]
+    Deploy(#[from] deploy::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -64,6 +72,8 @@ enum Verb {
         #[arg(long)]
         member: Option<PathBuf>,
     },
+    /// Set the release's version for services on the update coordinator and wait for them.
+    Deploy(deploy::Args),
     /// The continuous release's decisions.
     Release {
         /// Which one.
@@ -95,6 +105,7 @@ fn run(cli: Cli) -> Result<String, Error> {
             let roots = fetch::host_roots();
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
+        Verb::Deploy(args) => Ok(deploy::run(&args)?),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
