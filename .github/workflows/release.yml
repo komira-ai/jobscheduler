@@ -1,79 +1,113 @@
-# Release: a pushed version tag builds js-lease-server and js, attests them and publishes
-# them as the assets of the GitHub release for that tag. GitHub-hosted runners only,
-# actions pinned to commit SHAs.
+# Continuous release: every push to main that passed `ci` and changed code that ships is
+# released as the next version, with no step by hand (docs/release.md). GitHub-hosted
+# runners only, actions pinned to commit SHAs.
 #
-# A pull request that changes this file, and a manual run, build the same assets and
-# write SHA256SUMS but never attest or publish: those jobs run only for a tag push.
-# Publishing needs no extra step: the owner pushes vX.Y.Z, which must equal the
-# workspace version.
+# What starts it. The completion of a `ci` run (`workflow_run`), and only one that
+# succeeded for a push to main of this repository: every job below tests the conclusion,
+# the event, the branch and the head repository of the run that started it, and works on
+# `workflow_run.head_sha`, the commit that passed `ci`. A pull request that changes this
+# file builds the same assets as a dry run (`plan` is told so with --dry-run) and never
+# attests, tags or publishes. No tag and no manual run starts a release.
+#
+# Which commit. A run started by `workflow_run` is at the tip of main (`github.sha`), and
+# that is the commit an attestation records. `plan` therefore releases the commit only
+# while main is still at it, read from the API when the job runs (a re-run keeps the
+# commit and `github.sha` of the run it repeats; a re-run of only the failed jobs keeps
+# the `plan` that succeeded and does not read main again, so `publish` and `verify`
+# check the tag and the attestations); if main has moved on, the newer push
+# releases its change too, since a release covers everything since the latest tag. The
+# one gap: a run skipped because main moved is not made up if the newer push then fails
+# `ci`; the next push that passes releases it.
+#
+# The decision and the version are `cargo xtask release plan` (crates/xtask): a release
+# only when a file that ships changed since the latest `v*` tag, as the next patch
+# version, or the workspace version when that is above the tag. `cargo xtask release
+# stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
+# committed.
+#
+# Order: plan, build, sums, attest, verify, publish. The tag is made last: `publish` makes
+# a draft release, uploads the files built, attested and verified, and publishes it in
+# one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
+# continues the same draft and adds what is missing; a published release is never changed,
+# a draft that is stale or differs is replaced (see `publish`).
 #
 # Permissions are per job. Only `attest` holds id-token and attestations write, and only
 # `publish` holds contents write; neither runs repository code, only pinned actions,
-# `sha256sum` and `gh`.
+# `sha256sum`, `cmp` and `gh`.
 name: release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   pull_request:
     paths: ['.github/workflows/release.yml']
-  workflow_dispatch:
 
 permissions: {}
 
+# One release at a time, none cancelled: a second waits for the first (GitHub keeps one
+# waiting run per group, and the newer replaces the older; the replaced push is released
+# by the newer one). Only a run that will release shares the group (the same test as the
+# jobs': a successful `ci` run of a push to main of this repository); any other (a `ci` run
+# that failed or was cancelled, a pull request, a fork's branch named `main`) takes a group
+# of its own so it cannot replace the waiting one.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # The commit that passed `ci` (not `github.sha`, which for `workflow_run` is the tip of
+  # main); for a pull request, its merge commit.
+  COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  # Reads the workspace version and, for a tag push, fails unless the tag is v<version>
-  # and its commit is on main.
-  version:
+  # Whether to release, and as which version (crates/xtask, `release plan`).
+  plan:
+    # The run that started this one succeeded, for a push to main of this repository; or a
+    # pull request (a dry run).
+    if: ${{ github.event_name == 'pull_request' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      tag_exists: ${{ steps.plan.outputs.tag_exists }}
     steps:
+      # The whole history and every tag: the files changed since the latest tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          ref: ${{ env.COMMIT }}
           fetch-depth: 0
-      - name: A tag must point at a commit on main
-        if: ${{ github.ref_type == 'tag' }}
-        run: |
-          set -euo pipefail
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::the tagged commit $GITHUB_SHA is not on main"
-            exit 1
-          fi
+          persist-credentials: false
       - run: rustup toolchain install
-      - id: version
+      - id: plan
+        name: Plan the release
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Every crate takes the workspace version; the two released crates must agree.
-          meta="$(cargo metadata --locked --no-deps --format-version 1)"
-          version="$(jq -r '[.packages[] | select(.name == "js-cli" or .name == "js-lease-server") | .version] | unique | if length == 1 then .[0] else "mismatch" end' <<<"$meta")"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::js-cli and js-lease-server must share one X.Y.Z version, got '$version'"
-            exit 1
+          flags=()
+          if [ "$EVENT" = pull_request ]; then
+            flags+=(--dry-run)
+            tip="$COMMIT"
+          else
+            # Main's tip now, from the API: a re-run keeps the commit and GITHUB_SHA of the
+            # run it repeats, which may be long past.
+            tip="$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)"
           fi
-          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$version" ]; then
-            echo "::error::tag '$REF_NAME' does not match the workspace version (expected v$version)"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "workspace version $version"
+          cargo xtask release plan --head "$COMMIT" --tip "$tip" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
 
   build:
-    needs: [version]
+    needs: [plan]
+    if: ${{ needs.plan.outputs.release == 'true' }}
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -89,13 +123,14 @@ jobs:
           # musl-tools.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            builds: js-lease-server:js-lease-server js-cli:js
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
     env:
       TARGET: ${{ matrix.target }}
-      VERSION: ${{ needs.version.outputs.version }}
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
       - name: Install musl tools
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
@@ -104,12 +139,20 @@ jobs:
           sudo apt-get install --yes --no-install-recommends musl-tools
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
+      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
+      # the binaries print it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: cargo xtask release stamp --to "$VERSION"
       - name: Build and package
         env:
           BUILDS: ${{ matrix.builds }}
         run: |
           set -euo pipefail
           mkdir dist
+          # Archives that depend only on the commit and the binaries: sorted names, the
+          # commit's time as the modification time, numeric owner 0/0, no name or time in
+          # the gzip header. A full re-run then makes the same files as the first run.
+          mtime="$(git log -1 --format=%ct "$COMMIT")"
           for entry in $BUILDS; do
             package="${entry%%:*}"
             bin="${entry##*:}"
@@ -118,7 +161,7 @@ jobs:
             mkdir "stage-$bin"
             mkdir "stage-$bin/$name"
             cp "target/$TARGET/release/$bin" LICENSE "stage-$bin/$name/"
-            tar -C "stage-$bin" -czf "dist/$name.tar.gz" "$name"
+            tar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
           ls -l dist
       - name: Check the binaries
@@ -140,10 +183,18 @@ jobs:
               done
               ;;
           esac
-          # Both binaries run on the build host and answer --version.
+          # Every binary runs on the build host and prints the release version.
           for entry in $BUILDS; do
             bin="${entry##*:}"
-            "target/$TARGET/release/$bin" --version
+            printed="$("target/$TARGET/release/$bin" --version)"
+            echo "$printed"
+            case "$printed" in
+              *" $VERSION") ;;
+              *)
+                echo "::error::$bin prints '$printed', not the release version $VERSION"
+                exit 1
+                ;;
+            esac
           done
         env:
           BUILDS: ${{ matrix.builds }}
@@ -156,7 +207,7 @@ jobs:
 
   # One SHA256SUMS over every asset, checked before anything is attested or published.
   sums:
-    needs: [version, build]
+    needs: [plan, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -168,11 +219,11 @@ jobs:
           path: dist
       - name: Write and check SHA256SUMS
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"
@@ -191,8 +242,8 @@ jobs:
 
   # Build provenance for every asset, from the checksums file. No repository code runs here.
   attest:
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
-    needs: [sums]
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, sums]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -207,10 +258,53 @@ jobs:
         with:
           subject-checksums: dist/SHA256SUMS
 
-  # Creates the release for the tag with the attested files. Nothing is rebuilt.
+  # The attestations as a user checks them (docs/release.md), before anything is tagged:
+  # made by this workflow, for the commit being released.
+  verify:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify every archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          for file in ./*.tar.gz; do
+            gh attestation verify "$file" --repo "$REPO" \
+              --signer-workflow "$REPO/.github/workflows/release.yml" \
+              --source-ref refs/heads/main \
+              --source-digest "$COMMIT"
+          done
+
+  # Creates the release with the attested files, then publishes it, which creates the tag.
+  # Nothing is rebuilt. The release starts as a draft for this version (tag_name and
+  # target_commitish the commit), every file is uploaded to it, and one last call
+  # publishes it: a failed upload leaves a draft and no tag, and a re-run continues the
+  # same draft. A published release is never changed: a file it has that differs from
+  # this run's is an error, and a tag that exists and does not name this commit is one
+  # too. A draft is unpublished and may be replaced: one that targets another commit, or
+  # holds a file that differs from this run's, is deleted and made again (else a failed
+  # publish of an older commit would block the version for good), and a file whose upload
+  # did not finish is deleted before it is uploaded again. The tag is read again right
+  # before the publishing call; one that names another commit stops the run.
+  #
+  # This shell is not in xtask on purpose: the job holds contents write and runs no
+  # repository code (see the top of this file), so its decisions stay in the few lines
+  # below. Nothing here is covered by a test; the dry run checks the file parses.
   publish:
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
-    needs: [version, sums, attest]
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, sums, verify]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -219,17 +313,110 @@ jobs:
         with:
           name: release-assets
           path: dist
-      - name: Check, then create the release
+      - name: Draft the release, add the files it lacks, publish it
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.version.outputs.version }}
           REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          TAG_EXISTS: ${{ needs.plan.outputs.tag_exists }}
         run: |
           set -euo pipefail
           cd dist
           sha256sum --check --strict SHA256SUMS
-          gh release create "$TAG" --repo "$REPO" --verify-tag \
-            --title "jobscheduler $VERSION" \
-            --notes "js-lease-server and js $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
-            ./*.tar.gz SHA256SUMS
+          api="repos/$REPO"
+          # The commit the tag names: nothing when there is no tag, a failure on any
+          # other error (a failed read is not "no tag").
+          tag_commit() {
+            local out
+            if out="$(gh api "$api/git/ref/tags/$TAG" --jq .object.sha 2>&1)"; then
+              echo "$out"
+            elif ! grep -q 'HTTP 404' <<< "$out"; then
+              echo "$out" >&2
+              return 1
+            fi
+          }
+          # A draft for this version at this commit (tag_name and target_commitish).
+          new_draft() {
+            gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
+              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -F draft=true -F generate_release_notes=true --jq .id
+          }
+          # `plan` found no tag for this version: one that exists now was made since, and
+          # publishing would attach the release to it.
+          if [ "$TAG_EXISTS" != true ] && [ -n "$(tag_commit)" ]; then
+            echo "::error::the tag $TAG exists now, which the plan did not see"
+            exit 1
+          fi
+          # The release of this version, draft or published (the list shows drafts; a
+          # lookup by tag does not).
+          ids="$(gh api --paginate "$api/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -z "$ids" ]; then
+            id="$(new_draft)"
+          elif [ "$(wc -l <<< "$ids")" -eq 1 ]; then
+            id="$ids"
+          else
+            echo "::error::more than one release is named $TAG: $ids"
+            exit 1
+          fi
+          draft="$(gh api "$api/releases/$id" --jq .draft)"
+          target="$(gh api "$api/releases/$id" --jq .target_commitish)"
+          # A file the release has must be this run's, byte for byte, or the files of two
+          # builds would be mixed. A file whose upload did not finish is not compared.
+          replace=""
+          differing=""
+          if [ "$draft" = true ] && [ "$target" != "$COMMIT" ]; then
+            replace="it targets $target, not $COMMIT"
+          fi
+          mkdir ../existing
+          assets="$(gh api "$api/releases/$id" --jq '.assets[] | "\(.id) \(.state) \(.name)"')"
+          while read -r asset_id state name; do
+            [ "$state" = uploaded ] || continue
+            gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$asset_id"
+            cmp -s -- "$name" "../existing/$asset_id" || differing="$name"
+          done <<< "$assets"
+          if [ -n "$differing" ]; then
+            if [ "$draft" != true ]; then
+              echo "::error::the published release $TAG holds a $differing that differs from this run's; a published release is never changed (docs/release.md)"
+              exit 1
+            fi
+            replace="$differing differs from this run's"
+          fi
+          if [ -n "$replace" ]; then
+            # A draft is unpublished and has no tag: delete it and start again.
+            echo "::notice::replacing the draft of $TAG: $replace"
+            gh api --method DELETE "$api/releases/$id" --silent
+            id="$(new_draft)"
+          elif [ "$draft" = true ]; then
+            while read -r asset_id state name; do
+              if [ -n "$asset_id" ] && [ "$state" != uploaded ]; then
+                echo "::notice::deleting $name, an upload that did not finish"
+                gh api --method DELETE "$api/releases/assets/$asset_id" --silent
+              fi
+            done <<< "$assets"
+          fi
+          # Add the files the release lacks.
+          present="$(gh api "$api/releases/$id" --jq '.assets[] | select(.state == "uploaded") | .name')"
+          for file in ./*.tar.gz SHA256SUMS; do
+            name="${file#./}"
+            if grep -Fxq -- "$name" <<< "$present"; then
+              echo "$name is on the release already: kept"
+            else
+              gh api --method POST -H "Content-Type: application/octet-stream" "https://uploads.github.com/$api/releases/$id/assets?name=$name" --input "$file" --silent
+            fi
+          done
+          # Publishing creates the tag, at the commit, when the release is a draft. A tag
+          # made since the check above would be published against; read it once more.
+          if [ "$(gh api "$api/releases/$id" --jq .draft)" = true ]; then
+            now="$(tag_commit)"
+            if [ -n "$now" ] && [ "$now" != "$COMMIT" ]; then
+              echo "::error::the tag $TAG appeared and names $now, not $COMMIT; nothing was published (docs/release.md)"
+              exit 1
+            fi
+            gh api --method PATCH "$api/releases/$id" -f tag_name="$TAG" -f target_commitish="$COMMIT" -F draft=false --silent
+          fi
+          at="$(gh api "$api/commits/$TAG" --jq .sha)"
+          if [ "$at" != "$COMMIT" ]; then
+            echo "::error::$TAG names $at, not $COMMIT"
+            exit 1
+          fi

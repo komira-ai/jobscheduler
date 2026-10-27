@@ -5,6 +5,10 @@
 //!   ([`fetch`]): a pinned tool, downloaded over HTTPS and refused unless its SHA-256
 //!   matches, before anything is unpacked or written.
 //!
+//! - `release plan --head <sha> --tip <sha>` and `release stamp --to <version>`
+//!   ([`release`]): whether a commit of main is released and as which version, and setting
+//!   that version in the CI checkout before the build (docs/release.md).
+//!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
 
@@ -15,10 +19,14 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 pub mod fetch;
+pub mod release;
 
 /// Why a verb failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    /// A release verb failed.
+    #[error(transparent)]
+    Release(#[from] release::Error),
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
@@ -56,6 +64,21 @@ enum Verb {
         #[arg(long)]
         member: Option<PathBuf>,
     },
+    /// The continuous release's decisions.
+    Release {
+        /// Which one.
+        #[command(subcommand)]
+        verb: ReleaseVerb,
+    },
+}
+
+/// The `release` verbs.
+#[derive(Subcommand)]
+enum ReleaseVerb {
+    /// Whether a commit of main is released, and as which version.
+    Plan(release::plan::PlanArgs),
+    /// Set the release version in this checkout (not committed).
+    Stamp(release::stamp::StampArgs),
 }
 
 /// Runs the verb `cli` names: the line to print when it passed.
@@ -72,6 +95,10 @@ fn run(cli: Cli) -> Result<String, Error> {
             let roots = fetch::host_roots();
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
+        Verb::Release { verb } => Ok(match verb {
+            ReleaseVerb::Plan(args) => release::plan::run(&args)?,
+            ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,
+        }),
     }
 }
 
