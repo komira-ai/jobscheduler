@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_provider::{Observed, StartAck, StartSpec, StopAck};
@@ -14,7 +14,7 @@ use crate::clock::Timestamp;
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::state::LeaseState;
 use crate::store::{self, Document, FORMAT_VERSION, StoredLease};
-use crate::types::{Boot, Lease, LeaseInfo, Settings};
+use crate::types::{Booking, Boot, Lease, LeaseInfo, Settings};
 
 /// What a tick does with one lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +127,48 @@ impl Record {
     }
 }
 
+/// The leases of `document`, checked: the count matches, every lease is valid, no id
+/// twice. Any failure is an [`OpenError::Corrupt`] naming `path`.
+fn restore_all(path: &Path, document: &Document) -> Result<BTreeMap<LeaseId, Record>, OpenError> {
+    let counted = u64::try_from(document.lease.len()).ok();
+    if counted != Some(document.lease_count) {
+        let reason = format!(
+            "the file counts {} leases and holds {}",
+            document.lease_count,
+            document.lease.len()
+        );
+        return Err(store::corrupt(path, reason));
+    }
+    let restored = document.lease.iter().map(Record::restore);
+    let restored = restored.collect::<Result<Vec<_>, _>>();
+    let restored = restored.map_err(|reason| store::corrupt(path, reason))?;
+    let mut leases = BTreeMap::new();
+    for record in restored {
+        let id = record.id;
+        if leases.insert(id, record).is_some() {
+            return Err(store::corrupt(path, format!("lease {id} is listed twice")));
+        }
+    }
+    Ok(leases)
+}
+
+/// The hosts the file at `path` says are booked, one per lease that names a host. A
+/// missing file books nothing. The file is read and checked as [`Book::load`] does and
+/// is not locked, written or changed.
+pub(crate) fn bookings(path: &Path) -> Result<Vec<Booking>, OpenError> {
+    let document = store::read(path)?;
+    let leases = document.map(|document| restore_all(path, &document));
+    let leases = leases.transpose()?.unwrap_or_default();
+    let named = leases.values().filter_map(|record| {
+        Some(Booking {
+            lease: record.id,
+            host: record.host.clone()?,
+            state: record.state,
+        })
+    });
+    Ok(named.collect())
+}
+
 #[derive(Debug)]
 pub(crate) struct Book {
     settings: Settings,
@@ -165,25 +207,7 @@ impl Book {
             (None, Boot::Initialise) => empty,
             (None, Boot::Resume) => return Err(OpenError::Missing { path }),
         };
-        let counted = u64::try_from(document.lease.len()).ok();
-        if counted != Some(document.lease_count) {
-            let reason = format!(
-                "the file counts {} leases and holds {}",
-                document.lease_count,
-                document.lease.len()
-            );
-            return Err(store::corrupt(&path, reason));
-        }
-        let restored = document.lease.iter().map(Record::restore);
-        let restored = restored.collect::<Result<Vec<_>, _>>();
-        let restored = restored.map_err(|reason| store::corrupt(&path, reason))?;
-        let mut leases = BTreeMap::new();
-        for record in restored {
-            let id = record.id;
-            if leases.insert(id, record).is_some() {
-                return Err(store::corrupt(&path, format!("lease {id} is listed twice")));
-            }
-        }
+        let leases = restore_all(&path, &document)?;
         let term = document.term.checked_add(1);
         let term = term.filter(|term| *term <= store::LARGEST);
         let term = term.ok_or_else(|| OpenError::TermExhausted { path: path.clone() })?;

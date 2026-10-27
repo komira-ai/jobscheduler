@@ -136,3 +136,18 @@ pub enum Boot {
     /// loaded as for [`Boot::Resume`].
     Initialise,
 }
+
+/// A host a lease file says is booked, as [`crate::read_bookings`] reports it.
+///
+/// A provider that keeps its bookings in memory (the static pool) loses them when the
+/// process ends; the file is the record from which a restart books them again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Booking {
+    /// The lease holding the host.
+    pub lease: LeaseId,
+    /// The host the file names for it.
+    pub host: HostId,
+    /// The state the file has the lease in: a host is named for a held lease and for a
+    /// releasing one, whose booking stays counted until the provider confirms the stop.
+    pub state: LeaseState,
+}

@@ -66,6 +66,11 @@
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
 //!
+//! A provider that keeps its bookings only in memory has forgotten every one after a
+//! restart, and would answer absent for all of them. [`read_bookings`] reads the hosts
+//! the file names (a lease with a host, whatever its state) without opening the table,
+//! so the caller can seat them in that provider first.
+//!
 //! # When a save fails
 //!
 //! A change is applied in memory first and written second, so after a [`SaveError`]
@@ -128,5 +133,5 @@ mod types;
 pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
-pub use table::LeaseTable;
-pub use types::{Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+pub use table::{LeaseTable, read_bookings};
+pub use types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
