@@ -269,6 +269,16 @@ impl Manual {
         self.instant.lock().unwrap().clone()
     }
 
+    /// The intervals the CLI asked to wait, once there are `count` of them. A wait that
+    /// is asked of the waiter from a thread of the CLI's own (the grace period of a
+    /// command told to stop) can be asked after `js` has returned; a test that checks
+    /// such a wait reads the intervals through this and not through [`Manual::intervals`].
+    pub fn intervals_reaching(&self, count: usize) -> Vec<Duration> {
+        let guard = self.state.lock().unwrap();
+        drop(self.until(guard, |_| self.intervals.lock().unwrap().len() >= count));
+        self.intervals()
+    }
+
     fn until<'a>(&self, mut guard: Guard<'a>, ready: impl Fn(&(u64, u64)) -> bool) -> Guard<'a> {
         while !ready(&guard) {
             let (next, timeout) = self.changed.wait_timeout(guard, HANG).unwrap();
@@ -310,8 +320,8 @@ impl Waiter for Manual {
             self.instant.lock().unwrap().push(interval);
             return;
         }
-        self.intervals.lock().unwrap().push(interval);
         let mut guard = self.state.lock().unwrap();
+        self.intervals.lock().unwrap().push(interval);
         guard.0 += 1;
         let mine = guard.0;
         self.changed.notify_all();
