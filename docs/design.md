@@ -52,10 +52,11 @@ The decisions, in one place:
    last, and only after the server advertises it (10.3).
 8. **ucdk Jobs may use jobscheduler as a second realization.** ucdk 1.0 launches directly against the cloud; jobscheduler is an
    optional realization of Job, bound to one (app, environment), with launch, status, logs and best-effort cancel mapped onto it (11).
-9. **Cost guardrails are split into always-on checks and opt-in policy.** Always on, and never touching kbf farm behaviour: the
-   start-contract checks (per-run caps such as wall time, fence, reserved label keys), resource-second accounting, and labels stamped
-   on every billable resource. Opt-in per class behind a flag, off by default: per-tenant concurrency caps. Budgets are v2. No dollar
-   ceilings until a provider reports a price.
+9. **Lease correctness is always on; quotas belong to the platform.** Every request passes the start-contract checks (a required
+   wall time, a stated fence, reserved label keys), which bound how long a lease can live, and a leftover sweep by label ends what a
+   lease leaves behind. jobscheduler has no tenant caps, budgets or spend limits: Kubernetes quotas and cloud-provider quotas already
+   enforce them, and a second copy here would only disagree with the first. The usage record and the labels stay because sizing,
+   cleanup and attribution need them (12).
 
 ## 2. Goals and non-goals
 
@@ -68,7 +69,7 @@ Goals:
 - G4. Placement that handles exclusive work, named devices and oversubscription as data.
 - G5. A request history that sizes repeat work and survives kills without hiding them.
 - G6. A durable run record for every submitted job before the submit call returns.
-- G7. Guardrails that make a runaway job or tenant bounded, without changing kbf farm work.
+- G7. Lease limits that make a runaway job bounded in time (a required wall time and a fence), without changing kbf farm work.
 
 Non-goals:
 
@@ -78,7 +79,8 @@ Non-goals:
   `crates/kbf-coordinator`, which sets desired versions for host updaters and is not a capacity scaler (`crates/kbf-coordinator/src/lib.rs`).
 - N3. Re-adoption of running leases across an agent restart as a scheduler feature. kbf kills leases with the daemon today; re-adoption
   is an optional provider capability for later (the heartbeat rules of 5.4 hold for any unit a daemon does re-adopt).
-- N4. A dollar-cost model. Money appears only where a provider returns a price.
+- N4. Quotas and cost limits (tenant caps, budgets, spend ceilings, a dollar-cost model). The platform enforces them: Kubernetes quotas
+  and cloud-provider quotas.
 - N5. Replacing REAPI, the CAS or the action cache in kbf. These stay in kbf.
 
 ## 3. Terms
@@ -111,10 +113,10 @@ Non-goals:
   failures. Keyed by a *sizing key* (class, variant, partition (the tenant), basis; 7.1).
 - **Fence.** The rule by which a lease ends when its provider cannot be heard. *Self-fence*: the agent stops the work after a fixed time
   without contact. *Run-on*: the work may continue through a lost connection.
-- **Tenant.** The party a request is billed and capped against. kbf has no tenant concept in the scheduler today (not found in
+- **Tenant.** The party a request is attributed to (labels, the sizing partition). kbf has no tenant concept in the scheduler today (not found in
   `crates/kbf-sched/src`).
-- **Held and Queued.** Two pre-lease phases of a request. *Held*: submitted but not admitted (per-tenant cap or budget).
-  *Queued*: admitted and waiting for capacity or fit. kbf has only Queued today (8.2).
+- **Queued.** The one pre-lease phase of a request: submitted and waiting for capacity or fit (8.2). There is no separate phase for a
+  request held back by a tenant cap or budget, because jobscheduler has none (N4).
 
 ## 4. What exists in kbf today
 
@@ -238,7 +240,7 @@ size, retries, timeout default 600 s, environment, secret environment, on-demand
 `Schedule` role node (field 11, role "schedule"; `ucdk/crates/ucdk-plan/src/catalog/`), which the clouds realize as their own scheduler
 service. ucdk keeps one state per environment (`ucdk/docs/architecture.md`): an environment is one provider, account and region with its
 own ledger. ucdk's `Provider` trait (`ucdk/crates/ucdk-provider/src/provider.rs`) creates, observes, updates and deletes
-*infrastructure objects*; it is a different thing from the jobscheduler provider (D14). Objects carry a `Stamp` (owner, node,
+*infrastructure objects*; it is a different thing from the jobscheduler provider (D12). Objects carry a `Stamp` (owner, node,
 scheme, and other fields, with an open `extra` map that only kinds with tags carry; a create asking a tagless kind for extras is refused,
 `ucdk/crates/ucdk-provider/src/stamp.rs`). The launcher, `run` verb, run records, real cloud providers and cost logic are not built.
 
@@ -277,7 +279,6 @@ trait Provider {
     async fn observe(&self, l: LeaseId) -> Observed;       // Present(state) | Absent | Unknown
     async fn list(&self, scope: Scope) -> Vec<Observed>;   // by label, for sweeps (delegated)
     fn events(&self) -> EventStream;   // Started | Result | Usage | PhaseChange | CapacityChange | NeverStarted | Lost
-    fn price(&self, r: &ResourceVector, d: Duration) -> Option<Price>;   // None when there is no price; never guessed
 }
 ```
 
@@ -298,8 +299,8 @@ receives one `device_id` (`worker.proto`); `limits`, `assignments`, `fence` and 
 
 **Start contract.** Before the first provider call for a request, the core refuses it unless: the wall-time limit is positive; the
 fence is stated (requests resolve it at submit from the definition or from a default the class declares as data; the resolved value is in
-the run record, so no default is silent; D6); labels are free of reserved keys (12.5); and retries are owned by the core and are never
-passed to a provider. These checks apply to every request of every class, kbf's included, and must change no kbf behaviour: the kbf adapter supplies a positive wall-time limit and no reserved labels, and the `action` class declares kbf's fence. They are not the opt-in policy of section 12. A provider may add refusals and may never relax these. Each rule has a conformance case (13.2).
+the run record, so no default is silent; D6); labels are free of reserved keys (12.3); and retries are owned by the core and are never
+passed to a provider. These checks apply to every request of every class, kbf's included, and must change no kbf behaviour: the kbf adapter supplies a positive wall-time limit and no reserved labels, and the `action` class declares kbf's fence. They are lease limits (12.1), not quota policy. A provider may add refusals and may never relax these. Each rule has a conformance case (13.2).
 
 ### 5.3 What each part generalises
 - **Capacity.** The Hello entries `cpus`, `mem_gib`, `gpu`, `vm.slots`, `action_slots` become `Resources` in
@@ -401,8 +402,7 @@ The pipeline is the one in `crates/kbf-sched/src/scheduler.rs`: a tick takes que
 eligible (provider, pool) pairs; *rank* picks one; the grant becomes a `Commit` effect. Three traits make each stage replaceable:
 
 - `Queue`: today a bare ordered set referenced from submit, requeue, unplace, forget_queued, refusal and result_committed. Wrapping it in
-  a type is step 4 because later policies (tenant caps, aging, fair turns) plug in there and nowhere else. A request a tenant cap or budget holds is
-  *Held*, outside the queue's ordered set of admitted requests; it becomes *Queued* when admitted (8.2).
+  a type is step 4 because later policies (aging, fair turns) plug in there and nowhere else. Quotas are not such a policy: the platform enforces them (N4).
 - `Fit`: eligibility and room for a request on a pool. Today `Servable::fit` and `Worker::has_room`.
 - `Rank`: a total order over eligible pairs. Today the least `Load`.
 
@@ -450,7 +450,7 @@ release on result acceptance or give-up; a re-sent report that drops the device 
 
 - At most one device lease per agent (`DEVICE_LEASES_PER_WORKER = 1`), because sandbox isolation between device leases is unproven. A
   class can raise this when its provider can prove isolation.
-- GPUs are whole-device only. Fractional GPUs are out of scope (D12).
+- GPUs are whole-device only. Fractional GPUs are out of scope (D10).
 
 A whole-machine request reserves a worker once queued, which stops small requests from starving it. Large non-whole requests have no
 reservation today (`docs/design/simulation.md`, scenario F1.5, documents this); R1 forbids adding reservation admission, so the design
@@ -534,14 +534,14 @@ The ladder and loss axes are extra capabilities, not part of the portable contra
 fails on a non-zero exit; step 24b adds the axis.
 
 ### 8.2 Phases of a request
-Before a lease: *Held* (submitted, not admitted: per-tenant cap or budget) and *Queued* (admitted, waiting for capacity or
-fit). Then Leased, Running, and Completed, Failed or Refused (4.1). Only Queued time counts toward `UNSERVABLE_WAIT`; a Held request
-is never refused as unservable. kbf uses Queued only, because its classes do not opt in to tenant caps. A per-run cap is a refusal at submit (12.1), never a Held reason.
+Before a lease a request is *Queued* (waiting for capacity or fit). Then Leased, Running, and Completed, Failed or Refused (4.1). Queued
+time counts toward `UNSERVABLE_WAIT`. There is no Held phase: it would exist only for tenant caps and budgets, which jobscheduler does
+not have (N4). A start-contract failure (12.1) is a refusal at submit, and the request is never queued.
 
 ### 8.3 Run records
 A submit returns only after a durable run record exists. kbf's store retention is short (a 60 s default in the scheduler, at least 600 s for done rows).
 Jobs need a configurable floor, with a default of days, and the state store holds it. Record fields: request id, definition reference,
-phase (Held or Queued before a lease), tenant, labels, the resolved fence, attempts (provider, lease, start, end, outcome, usage), final
+phase, tenant, labels, the resolved fence, attempts (provider, lease, start, end, outcome, usage), final
 outcome, log cursor. Log text itself is not in the record; the record holds a cursor and a `complete` flag. The record is written with
 additive fields (step 6).
 
@@ -592,7 +592,7 @@ core, 5.3), the key derivation from remote execution commands, and the platform-
 | `js-sched` | `crates/kbf-sched` | generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants |
 | `js-caps` | `crates/kbf-caps/src/matching.rs` | schema-driven; kbf keeps its key tables and host detection |
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
-| `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D15) |
+| `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
 | `js-agent` | generic half of `crates/kbf-daemon` | session, leases, acks, fence, drain, pressure |
 | `js-provider` | new | the trait of section 5, delegated skeleton, conformance suite with its deliberately broken providers |
@@ -633,7 +633,7 @@ variants, `Answer`). Splitting it into two modules with re-exports is step 3, be
 **One scheduler, one environment.** A jobscheduler instance is bound to exactly one (app, environment): that environment's account,
 region, pools and run store. It is deployed into the environment as an ordinary ucdk concept and shown as machinery in the plan. For a
 launch a caller makes, it holds no standing cloud credential and acts with the caller's launch identity. Scheduled triggers (11.2) and
-the leftover sweep (12.5) run with no caller present, so they use a delegated identity fixed when the definition or environment is
+the leftover sweep (12.3) run with no caller present, so they use a delegated identity fixed when the definition or environment is
 created, with permission limited to launching that definition's runs and sweeping by label; that standing access is a risk (K7). ucdk 1.0 keeps its direct launcher (`ucdk run` or the generated workflow, against the cloud). jobscheduler is an optional second realization of Job; it is offered as supported only after a
 conformance kit passes on a real cloud. Its run store is not the environment ledger; ledger entries name the scheduler instance and the
 Job definitions, and runs are not nodes.
@@ -676,46 +676,35 @@ catch-up) and zone (UJ3). The choice is in the lowering table, and UJ3 is writte
   mode, 7.2). Learned history only informs a warning or a suggested size and never raises it (D7).
 - **Tenant.** For ucdk the tenant is the (app, environment) pair, taken from the authenticated caller (K7).
 
-## 12. Cost guardrails
+## 12. Lease limits, usage and labels
 
-State today: kbf has no quota, budget or spend mechanism. Its "budgets" are retry and storage budgets. Per-lease usage accounting is
-planned (`docs/design/scheduler.md`, Accounting). ucdk has shape limits only (attempts, timeout, argument size, size), and its 1.0 plan
-does not include dollar cost control. The mechanisms below are therefore guardrails that bound a runaway job or tenant, not cost control.
+jobscheduler enforces no quota. Tenant caps, queue-depth caps, budgets, spend ceilings and dollar costs are not built here (N4): the
+platform (Kubernetes quotas, cloud-provider quotas) enforces them, and a delegated provider reports what its quota leaves as pool
+capacity (5.5). What this section keeps is lease correctness and the records that sizing and cleanup need. State today: kbf has no
+quota mechanism, and its "budgets" are retry and storage budgets. ucdk has shape limits only (attempts, timeout, argument size, size).
 
-R1 forbids reservation and per-category admission for kbf farm work. The mechanisms split in two. **Always on, for every class:** the
-per-run caps and other start-contract checks (12.1), accounting records (12.3) and labels (12.5); none changes how kbf places or runs
-work. **Off by default, per class opt-in, behind a named flag:** tenant concurrency and queue-depth caps (12.2) and budgets (12.4).
-kbf's `action` class does not opt in, so kbf placement does not change.
+R1 forbids reservation and per-category admission for kbf farm work. Everything below applies to every class, none of it changes how kbf
+places or runs work, and none of it is behind a flag.
 
-### 12.1 Per-run caps (v1, always on)
-Max wall time (required), max attempts, max resource size, max arguments size. Checked at submit, as part of the start contract (5.2),
-and refused there; a per-run cap is never a Held reason. A refusal carries a plain constant code; no central code table is introduced
-until a second consumer needs one.
+### 12.1 Lease limits (always on)
+Max wall time (required), max attempts, max resource size, max arguments size. These bound how long and how large one lease can be, so a
+lease always ends: the wall time is the deadline of the attempt, and the fence (5.2) ends the lease when its provider cannot be heard.
+Checked at submit, as part of the start contract (5.2), and refused there. A refusal carries a plain constant code; no central code table
+is introduced until a second consumer needs one.
 
-### 12.2 Concurrency and queue-depth caps (v1, opt-in)
-A per-tenant cap on concurrent leases and on queued requests, for opted-in classes. This is a `Queue` concern: a request at its tenant's
-cap is *Held*, not Queued, and the queue skips that tenant and leaves other tenants unaffected. It is not a `Fit` concern, so it cannot
-reduce the capacity a kbf lease sees. Caution: a per-tenant cap is per-category admission in a loose sense. D8 asks the owner to confirm
-it is acceptable for non-kbf classes.
-
-### 12.3 Resource-second accounting (v1, always on)
+### 12.2 Usage record (always on)
 One record per lease: CPU-seconds, GB-seconds, GPU-seconds, peak memory with basis, wall phases, queue time, and whether it ran, was cached
 or was joined. *Cached* (an action-cache hit) and *joined* (coalesced onto an in-flight run of the same key) are kbf-only record values;
-other classes record *ran*. Stored in the state store, queryable, and feeding the sizing history and any budget. This is the "Accounting" record
-planned in `docs/design/scheduler.md`. Attempts charged to the platform-fault budget (8.1) are recorded and flagged, not billed.
+other classes record *ran*. Stored in the state store, queryable, and feeding the sizing history (7). It is kept for sizing and for the
+run record (8.3), not for charging anyone. This is the "Accounting" record planned in `docs/design/scheduler.md`. Attempts charged to the
+platform-fault budget (8.1) are recorded and flagged.
 
-### 12.4 Budgets (v2, opt-in)
-Per tenant per period, in resource-seconds first. Money only where a provider returns `price()`. Checked at admission (a request over
-budget is Held), accrued from usage at lease end. Soft by default (warn), hard only when configured. Demoting a tenant's work to `Batch`
-after a soft limit needs the `Queue` seam and a QoS rewrite, which is queue policy and belongs with v2 and the fairness work this design
-does not build. v1 therefore has no demotion.
-
-### 12.5 Labels on billable resources (always on)
+### 12.3 Labels (always on)
 Every request carries labels. jobscheduler owns a small label schema and imports no ucdk type: a reserved prefix `jobscheduler.dev/`
 with the keys `tenant`, `run`, `validation-run`, `definition` and `instance`, each value at most 63 characters of `[a-z0-9._-]`. The
 caller mints the validation run id; the scheduler only carries and applies it. A user label under the reserved prefix is refused at
 submit. Labels flow request, lease, `Start`, provider. A delegated provider writes them as tags or labels onto each billable resource
-it creates, so cost reports and leak sweeps can find them. In ucdk, the adapter that lives in ucdk translates the label set into
+it creates, so leak sweeps and attribution can find them. In ucdk, the adapter that lives in ucdk translates the label set into
 `Stamp.extra`. The name-encoding fallback of the stamp (`encode_name`) does not carry `extra`, and a create that asks a tagless kind for
 extras is refused. So a class that carries a validation run id is refused at submit on a kind that cannot carry labels, unless that
 kind's adapter defines a name rule that includes the id.
@@ -724,7 +713,7 @@ Runs are not nodes in any ledger, so there is no node key to stamp. The sweep ke
 or the environment, cancels or drains its runs and sweeps billable leftovers by that label; the sweep is part of the closed-world
 delete, with a test on the fake.
 
-### 12.6 Spend needs a go
+### 12.4 Real accounts need a go
 A provider that bills a real account is registered disabled. Enabling it needs an explicit go for that action (R7). Conformance runs
 against billable accounts only in a dedicated sandbox account with a billing alarm. The fake provider covers everything else.
 
@@ -760,13 +749,12 @@ against the rule list so a new rule without one fails the build. These run on ev
 ### 13.3 Simulation
 The scheduler invariants I1 to I16 and L1 to L4 are checked after every input in seeded sweeps. For the kbf instantiation, the golden
 trace hashes (step 0) must be identical before and after each extraction PR. New invariants for providers: an Unknown observation never
-frees a booking; an Absent observation frees it exactly once; a delegated lease never has two live submissions. Once tenant caps exist (step 26), two more: a tenant cap is never exceeded, and a Held request never counts toward the unservable-wait refusal.
-
+frees a booking; an Absent observation frees it exactly once; a delegated lease never has two live submissions.
 ### 13.4 Request-history replay
 `kbf-estimator-replay` becomes the template: a generic trace of (arrival, need, duration, key, capacity) and a pluggable arm, run through the real scheduler in virtual time with null, floor and candidate arms and Wilson intervals, labelled an upper bound. Export and row shaping stay kbf glue.
 
 ### 13.5 No timing assertions
-(R2.) Quota windows, schedule ticks, timeouts, grace periods and budgets are tested with an injected clock that advances only when the
+(R2.) Quota windows (a delegated provider's), schedule ticks, timeouts, grace periods and retry budgets are tested with an injected clock that advances only when the
 test says so, and by counting events (progress events, ticks applied). No test asserts an elapsed time or sleeps against a timeout. The
 core already takes time as input (`Input{now, event}`), so the core needs no change. Adapters take a clock trait. A soak of real daemons
 counts explicit events (leases started, results acknowledged, zero unacknowledged) and asserts no elapsed time.
@@ -836,7 +824,7 @@ Steps 13 to 15 come before `js-types` moves at 16a, so each may use only types t
 dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector windows) or the capability schema needs a shared type, step
 14 or 15 states which type it takes and re-exports it, or the step is ordered after 16a.
 
-13. Move the `Store` trait, fake and conformance suite as `js-state`; the backends stay (D15). *Proves:* all three backends pass the suite
+13. Move the `Store` trait, fake and conformance suite as `js-state`; the backends stay (D13). *Proves:* all three backends pass the suite
     from the new path; the corpus is unchanged.
 14. Move `kbf-estimator` as `js-sizing` with `SizingPolicy`; kbf passes today's values. *Proves:* golden outputs identical on recorded
     input; the codec version is unchanged; `shadow_diff` passes.
@@ -869,22 +857,17 @@ dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector wi
 23. Create `js-provider`: the delegated-provider skeleton, built from the step 12 spike, with a fake cloud; the new `Stop` effect and
     its retained-intent row (5.1, 5.2). *Proves:* the three-way observation rules (5.6) in simulation; a stop of a held lease is
     resent until the lease leaves the heartbeat (agent) or read back (delegated).
-24. Accounting record per lease; labels. *Proves:* usage on failure; labels on every fake resource.
+24. Usage record per lease (12.2); labels (12.3). *Proves:* usage on failure; labels on every fake resource.
 24b. The *task failure* retry axis of 8.1 and the portable `max_retries` budget. *Proves:* a UJ1/UJ2 case on the fake in which a
     non-zero exit is retried up to `max_retries` and a kbf class with budget zero is not retried.
 25. Schedule triggers and run records; the launcher API. *Proves:* run record before return; missed ticks skipped; overlap rules, all
     with an injected clock.
-26. Tenant caps as `Queue` plug-ins, off by default behind a named flag (R4); per-run caps are start-contract refusals (12.1) already
-    in force. *Proves:* with the flag off, golden traces are unchanged; a frontend started without the flag next to one with it agree
-    on persisted state; with it on, the invariants "a tenant cap is never exceeded" and "a Held request never counts toward the
-    unservable-wait refusal" (13.3) hold across seeds.
-27. Budgets (v2).
-28. ucdk side: the launcher wiring and, later, the provider crate, in the ucdk repository.
-29. First real delegated provider, disabled by default; enabling it needs the go in R7.
+26. ucdk side: the launcher wiring and, later, the provider crate, in the ucdk repository.
+27. First real delegated provider, disabled by default; enabling it needs the go in R7.
 
 ## 15. Decisions
 
-Each has options and a recommendation. None is final until the owner answers. The ids run D1 to D15 with no gaps.
+Each has options and a recommendation. None is final until the owner answers. The ids run D1 to D13 with no gaps.
 
 - **D1. Home of the code.** This repository holds the design from the start; the question is where code lives. (a) Code in this
   repository now; (b) workspace crates inside kbf through step 21, split at step 22. Recommend (b): no cross-repository flag day while
@@ -906,23 +889,20 @@ Each has options and a recommendation. None is final until the owner answers. Th
   idempotent) and every request resolves and records its fence at submit, so no default is silent. Recommend (b).
 - **D7. Memory booking for non-kbf classes.** (a) same as kbf; (b) `BookAll` for ucdk job classes, with the declared size as booking and
   ceiling and history advisory only. Recommend (b); kbf actions keep today's rule.
-- **D8. Tenant concurrency caps.** Allowed as opt-in `Queue` behaviour for non-kbf classes? Options: (a) yes; (b) no caps in v1, per-run
-  caps only. Recommend (a), since without it one tenant can fill a delegated pool; kbf's class never opts in.
-- **D9. Guardrail scope.** (a) v1 = per-run caps, tenant concurrency cap, accounting, labels; (b) include budgets. Recommend (a).
-- **D10. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
-  (12.5). Recommend yes.
-- **D11. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
+- **D8. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
+  (12.3). Recommend yes.
+- **D9. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
   cloud scheduler role node is dropped in that realization and kept in the direct one (11.2). Recommend yes.
-- **D12. Resources and capability schema.** Named resource vector in v1 with the lease-count cap separate; whole-device GPUs, no fractional
+- **D10. Resources and capability schema.** Named resource vector in v1 with the lease-count cap separate; whole-device GPUs, no fractional
   GPUs. Capability schema: provider-registered, namespaced keys, unknown request keys refused, unknown report keys skipped. Recommend yes.
-- **D13. Consensus.** The generic core relies on the state store's conditional writes for who places (`crates/kbf-sched/src/scheduler/handoff.rs`), not on a
+- **D11. Consensus.** The generic core relies on the state store's conditional writes for who places (`crates/kbf-sched/src/scheduler/handoff.rs`), not on a
   consensus log. `crates/kbf-raft` exists in kbf. Options: (a) the core requires only the store; (b) the core also supports a replicated
   log. Recommend (a); `kbf-raft` stays in kbf until a second user asks.
-- **D14. Name collision.** jobscheduler's *provider* and ucdk's *Provider* trait are different. Options: rename ours to *runner* or
+- **D12. Name collision.** jobscheduler's *provider* and ucdk's *Provider* trait are different. Options: rename ours to *runner* or
   *backend*; or keep and always qualify. The ucdk-side adapter lives in ucdk (11.1) and no jobscheduler code names ucdk's trait, so the
   clash is confined to prose. Recommend keeping "provider" here and writing "infrastructure provider" for the ucdk side; the rename is the
   owner's option if the prose proves confusing.
-- **D15. Where the state store lives.** `kbf-state` is general (thirteen kbf crates use it, 4.2). Options: (a) move it all into
+- **D13. Where the state store lives.** `kbf-state` is general (thirteen kbf crates use it, 4.2). Options: (a) move it all into
   jobscheduler, which widens "kbf depends on jobscheduler" to installer, enrollment and history; (b) move only the trait, fake and
   conformance suite as `js-state` and keep the SQLite and Postgres backends in kbf; (c) keep it all in kbf behind a neutral crate.
   Recommend (b).
@@ -934,13 +914,13 @@ Each has options and a recommendation. None is final until the owner answers. Th
   list uncovered paths per step.
 - **K2. Delegated-provider absence handling is wrong.** Treating Unknown as Absent double-runs work and double-bills. Mitigated by the
   three-way rule, a durable start intent, the step 12 spike, simulation invariants and a conformance suite that reads real state.
-- **K3. A guardrail leaks into kbf farm work.** Mitigated by tenant caps being off by default and class opt-in, the cap living in `Queue`, not `Fit`, and the always-on checks (5.2) being
-  written so that kbf requests pass them unchanged. A
-  golden-trace check with the flag off is part of step 26.
+- **K3. A start-contract check changes kbf farm work.** Mitigated by the checks (5.2, 12.1) being written so that kbf requests pass them
+  unchanged, and by the golden traces and corpus (steps 0 and 1) staying identical.
 - **K4. Wire drift.** Two packages and an adapter can disagree. Mitigated by one conformance suite running through the adapter, by the
   negotiation rule and by the cross-version matrix at every wire step.
-- **K5. Rules in conflict.** A rule (R1) forbids per-category admission; D8 proposes opt-in tenant caps. The conflict is stated, not
-  hidden, and the owner decides.
+- **K5. One tenant fills a pool.** Without tenant caps in jobscheduler, one tenant's requests can fill a delegated pool or a node set.
+  This is the platform's quota to bound (N4): the pool a delegated provider reports is already what its quota allows (5.5), and the
+  platform refuses what exceeds it. jobscheduler does not add a second limit.
 - **K6. Secrets.** `secret_env` references must never reach the run record, labels or logs. The record stores references only; the
   provider resolves them.
 - **K7. Tenancy and identity.** The scheduler has no tenant concept (3, 4.1). A tenant must come from an authenticated caller, not a
