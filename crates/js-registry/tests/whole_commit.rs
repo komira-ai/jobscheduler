@@ -15,7 +15,7 @@ use support::*;
 
 /// The whole-node class of the pool under test.
 fn whole() -> ResourceClass {
-    ResourceClass::new(ClassId::new("mac-host").unwrap(), Admission::Whole, 0)
+    ResourceClass::whole_node()
 }
 
 /// A pool whose class is `Whole`.
@@ -24,8 +24,16 @@ fn whole_fixture() -> Fixture {
     fixture_of(PoolConfig::new(name, whole(), pool_shape(), 4))
 }
 
+/// A request for the whole-node class.
+fn whole_request() -> Request {
+    Request {
+        class: whole().id().clone(),
+        ..request()
+    }
+}
+
 fn whole_spec(sequence: u64) -> StartSpec {
-    StartSpec::new(lease(sequence), request(), &[whole()]).unwrap()
+    StartSpec::new(lease(sequence), whole_request(), &[whole()]).unwrap()
 }
 
 /// A provider that serves a `BookAll` class (`share`) next to the `Whole` one.
@@ -389,13 +397,14 @@ fn a_bookall_lease_is_unchanged() {
     assert_eq!(started_on(&provider.start(spec(2))), Some("a"));
 }
 
-/// Documents the static pool: it has no agent to wait for, so a `Whole` lease (its
-/// `gpu-host` class) is held at once and reads `Present` on its first look.
+/// Documents the static pool: it has no agent to wait for, so a `Whole` lease (the
+/// `whole-node` class) is held at once and reads `Present` on its first look.
 #[test]
 fn a_static_pool_holds_a_whole_lease_at_once() {
     let id = ProviderId::new("pool").unwrap();
-    let mut pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
-    let class = ResourceClass::gpu_host();
+    let class = ResourceClass::whole_node();
+    let pool = StaticPool::from_toml(id, EXAMPLE_CONFIG).unwrap();
+    let mut pool = pool.with_classes(vec![class.clone()]);
     assert_eq!(class.admission(), &Admission::Whole);
     let request = Request {
         class: class.id().clone(),
@@ -408,4 +417,38 @@ fn a_static_pool_holds_a_whole_lease_at_once() {
         panic!("a static pool grants a whole lease at once");
     };
     assert_eq!(pool.observe(&lease(1)), Observed::Present { host });
+}
+
+/// Asserts the regression the gate must not cause: `gpu-host` has not opted into the quiet
+/// gate (it is admitted `BookAll`), so on a registered host its start is `Started` at once
+/// and reads `Present`, no heartbeat reply names an `exclusive`, a run is queued without
+/// a report and started by the next reply. It fails if the gate is applied to `gpu-host`, which would
+/// leave every real gpu-host lease pending for want of an agent that reports ready.
+#[test]
+fn a_gpu_host_lease_is_started_at_once_without_the_gate() {
+    let class = ResourceClass::gpu_host();
+    let mut hello = hello("a");
+    hello.shape.gpus = 1;
+    hello.shape.gpu_class = Some("a100".into());
+    let floor = Resources::new(4000, 8 << 30, 1, Some("a100".into())).unwrap();
+    let shape = js_types::Shape::new(floor, [("os".to_string(), "macos".to_string())].into());
+    let name = ProviderId::new("builders").unwrap();
+    let fx = fixture_of(PoolConfig::new(name, class.clone(), shape, 4));
+    let epoch = fx.hello(&hello, &cred("t")).unwrap().epoch;
+    let request = Request {
+        class: class.id().clone(),
+        resources: Resources::new(1000, 1, 1, Some("a100".into())).unwrap(),
+        ..request()
+    };
+    let spec = StartSpec::new(lease(1), request, &[class]).unwrap();
+    let mut provider = fx.provider.clone();
+    assert_eq!(started_on(&provider.start(spec)), Some("a"));
+    let seen = Observed::Present { host: host("a") };
+    assert_eq!(provider.observe(&lease(1)), seen);
+    let reply = beat_with(&fx, "a", epoch, |_| {});
+    assert_eq!(reply.exclusive, None);
+    let queued = fx.registry.queue_run(&host("a"), &lease(1), job("r1"));
+    assert_eq!(queued.unwrap().state, RunState::Queued);
+    let reply = beat_with(&fx, "a", epoch, |_| {});
+    assert_eq!((starts(&reply), reply.exclusive), (1, None));
 }
