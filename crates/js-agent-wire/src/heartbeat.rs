@@ -503,6 +503,24 @@ impl<'a> Taken<'a> {
     }
 }
 
+/// Decodes a refusal detail, cutting it to the longest prefix within
+/// [`limits::MAX_REFUSAL_DETAIL`] bytes that ends on a character boundary, so a long
+/// detail is shortened instead of failing the heartbeat.
+fn cut_detail<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut text = String::deserialize(deserializer)?;
+    if text.len() > limits::MAX_REFUSAL_DETAIL {
+        let mut end = limits::MAX_REFUSAL_DETAIL;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(text)
+}
+
 /// Decodes the commands one by one. A command that does not decode (a kind this version
 /// does not know, or a start whose isolation it cannot classify) reads as
 /// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
