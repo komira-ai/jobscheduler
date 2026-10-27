@@ -118,6 +118,22 @@ mod tests {
         );
     }
 
+    /// Catches: a feature set that drops a `1` key, keeps a `0` key, or loses the
+    /// kernel-name aliases of a key.
+    #[test]
+    fn reads_features_and_aliases() {
+        let got = features(
+            "hw.optional.arm64: 1\nhw.optional.neon: 1\nhw.optional.arm.FEAT_AES: 1\n\
+             hw.optional.arm.FEAT_SME: 0\nhw.optional.unknown_key: 1\n",
+        )
+        .unwrap();
+        let want: BTreeSet<String> = ["arm64", "neon", "asimd", "FEAT_AES", "aes", "unknown_key"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(got, want);
+    }
+
     /// Catches: treating an Intel Mac (or a truncated capture) as arm64.
     #[test]
     fn requires_arm64() {
