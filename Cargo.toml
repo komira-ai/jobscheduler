@@ -15,7 +15,12 @@ publish = false
 # Cargo.lock only when a member first uses it.
 [workspace.dependencies]
 axum = { version = "0.8.9", default-features = false }
+base64 = "0.23.1"
+# macOS only (js-vmm): Virtualization.framework and the block and dispatch types its
+# completion handlers and queues use.
+block2 = "0.6.2"
 clap = { version = "4.6.7", features = ["derive"] }
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2.17"
 hex = "0.4.3"
@@ -26,6 +31,12 @@ hyper-util = { version = "0.1.21", default-features = false }
 # Calls rustix has no portable form of (js-testkit: mkfifo, and a
 # signal to ignore one).
 libc = "0.2.190"
+# macOS only (js-vmm): the Objective-C runtime and the Foundation and Virtualization bindings.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-virtualization = { version = "0.3.2", features = ["block2", "dispatch2", "bitflags"] }
+# macOS only (js-vmm): the property lists of the guest disk, as values, not through serde.
+plist = { version = "1.10.1", default-features = false }
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
 # no TLS (an `sslmode=require` URL is refused rather than downgraded).
 postgres = "0.19.10"

@@ -734,6 +734,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
 | `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend (5.14) |
 | `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs` of `kbf-driver-container` | node-local containment; `js-agent` depends on it |
+| `js-vmm` (binary `js-vmm`) | `crates/kbf-vmm` | the macOS VM helper: `vm-run`, the base-image builder, the probes and gates, the guest sink; moved by renaming only, macOS-only code stays gated; the binary name is pinned by kbf's helper allow-list (kbf-side change follows) |
 | `js-sim` | `crates/kbf-sim*` | invariants and replay |
 
 `kbf-executor` is kbf's, not a jobscheduler crate (9.2). Every crate not marked (merged) is not on `main` yet; a merged crate's note
