@@ -88,3 +88,19 @@ impl fmt::Debug for SessionDigest {
         f.write_str("SessionDigest(..)")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A digest never prints itself, and matches only the secret it was made from. It
+    /// catches a debug print of the registry's state that leaks the stored digest.
+    #[test]
+    fn a_digest_is_redacted_and_matches_only_its_secret() {
+        let digest = SessionDigest::of("secret");
+        assert_eq!(format!("{digest:?}"), "SessionDigest(..)");
+        assert!(digest.matches("secret"));
+        assert!(!digest.matches("secreT"));
+        assert!(!digest.matches(""));
+    }
+}
