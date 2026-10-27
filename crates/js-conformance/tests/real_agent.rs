@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{
     Capacity, Clock, Config, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, Lifecycle,
-    MountRoots, NoChecks, RuntimeError, ScratchRoot, Status,
+    MountRoots, NoChecks, RuntimeError, ScratchRoot, StateRoot, Status,
 };
 use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, Isolation, JobSpec, Limits, Outcome, Phase,
@@ -182,6 +182,10 @@ impl Agent {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let state = dir.with_file_name(format!("real-agent-{name}-state"));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let config = Config {
             capacity: Capacity {
                 cpu_millis: 4000,
@@ -191,6 +195,7 @@ impl Agent {
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(&dir).unwrap(),
+            state: StateRoot::open(&state).unwrap(),
             stop_grace: Duration::from_secs(1),
         };
         let fake = Fake::default();
