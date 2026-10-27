@@ -3,9 +3,10 @@
 use std::io::Write;
 use std::time::Duration;
 
-use crate::api::{Freed, Granted, Lease, Standing, entries};
+use js_client::Client;
+
+use crate::api::{Freed, Granted, Lease, Routes, Standing, entries};
 use crate::cli::{AcquireArgs, IdArgs, RenewArgs};
-use crate::client::Client;
 use crate::events::{ForwardedSignal, Waiter};
 use crate::failure::{Failure, exit};
 use crate::render::Render;

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::client::{Client, Reply};
+use js_client::{Client, Reply};
+
 use crate::failure::Failure;
 
 /// A lease that is held.
@@ -69,13 +70,40 @@ impl Entry {
     }
 }
 
-impl Client {
+/// The routes of the lease server as methods of the [`Client`].
+pub(crate) trait Routes {
     /// `POST /v1/leases`: 201 held, 202 pending, anything else a failure. The request is
     /// sent once. When its answer is lost or unusable the lease may exist, and the failure
     /// says so ([`Failure::Unconfirmed`]); a refusal the server meant (400, 401, 404, 409,
     /// 422) created nothing.
-    pub(crate) fn acquire(&self, body: &Value) -> Result<Granted, Failure> {
-        let reply = self.post("/v1/leases", body).map_err(unconfirmed)?;
+    fn acquire(&self, body: &Value) -> Result<Granted, Failure>;
+
+    /// `POST /v1/leases/{id}/renew`: the new expiry in milliseconds.
+    fn renew(&self, id: &str, ttl: Option<Duration>) -> Result<u64, Failure>;
+
+    /// `POST /v1/leases/{id}/renew` that must be answered within `limit`.
+    fn renew_within(
+        &self,
+        id: &str,
+        ttl: Option<Duration>,
+        limit: Duration,
+    ) -> Result<u64, Failure>;
+
+    /// `DELETE /v1/leases/{id}`.
+    fn release(&self, id: &str) -> Result<Freed, Failure>;
+
+    /// `GET /v1/leases`: the server's body.
+    fn list(&self) -> Result<Value, Failure>;
+
+    /// Where lease `id` stands now.
+    fn standing(&self, id: &str) -> Result<Standing, Failure>;
+}
+
+impl Routes for Client {
+    fn acquire(&self, body: &Value) -> Result<Granted, Failure> {
+        let reply = self
+            .post("/v1/leases", body)
+            .map_err(|err| unconfirmed(err.into()))?;
         match reply.status {
             201 => held(&reply.body).map(Granted::Held).map_err(unconfirmed),
             202 => text(&reply.body, "id")
@@ -86,28 +114,26 @@ impl Client {
         }
     }
 
-    /// `POST /v1/leases/{id}/renew`: the new expiry in milliseconds.
-    pub(crate) fn renew(&self, id: &str, ttl: Option<Duration>) -> Result<u64, Failure> {
+    fn renew(&self, id: &str, ttl: Option<Duration>) -> Result<u64, Failure> {
         self.renew_within(id, ttl, Duration::MAX)
     }
 
-    /// `POST /v1/leases/{id}/renew` that must be answered within `limit`.
-    pub(crate) fn renew_within(
+    fn renew_within(
         &self,
         id: &str,
         ttl: Option<Duration>,
         limit: Duration,
     ) -> Result<u64, Failure> {
         let body = json!({ "ttl_seconds": ttl.map(|ttl| ttl.as_secs()) });
-        let reply = self.post_within(&format!("/v1/leases/{id}/renew"), &body, limit)?;
+        let path = format!("/v1/leases/{id}/renew");
+        let reply = self.post_within(&path, &body, limit)?;
         match reply.status {
             200 => number(&reply.body, "expires_at_ms"),
             _ => Err(refusal(&reply)),
         }
     }
 
-    /// `DELETE /v1/leases/{id}`.
-    pub(crate) fn release(&self, id: &str) -> Result<Freed, Failure> {
+    fn release(&self, id: &str) -> Result<Freed, Failure> {
         let reply = self.delete(&format!("/v1/leases/{id}"))?;
         match reply.status {
             200 => Ok(Freed::Freed),
@@ -116,8 +142,7 @@ impl Client {
         }
     }
 
-    /// `GET /v1/leases`: the server's body.
-    pub(crate) fn list(&self) -> Result<Value, Failure> {
+    fn list(&self) -> Result<Value, Failure> {
         let reply = self.get("/v1/leases")?;
         match reply.status {
             200 => Ok(reply.body),
@@ -125,8 +150,7 @@ impl Client {
         }
     }
 
-    /// Where lease `id` stands now.
-    pub(crate) fn standing(&self, id: &str) -> Result<Standing, Failure> {
+    fn standing(&self, id: &str) -> Result<Standing, Failure> {
         let entries = entries(&self.list()?)?;
         let found = entries.into_iter().find(|entry| entry.id == id);
         Ok(found.map_or(Standing::Gone, Entry::standing))
