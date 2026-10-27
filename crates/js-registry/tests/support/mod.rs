@@ -143,6 +143,8 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         held: Vec::new(),
         results: Vec::new(),
         taint: None,
+        exclusive_ready: None,
+        exclusive_refused: None,
     }
 }
 
