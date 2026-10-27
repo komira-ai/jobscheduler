@@ -3,12 +3,7 @@
 
 use std::net::TcpListener;
 
-use crate::support::{Scratch, acquire_words, against, canned};
-
-/// A reply with this status line and body, ended by closing the connection.
-fn reply(status: &str, body: &str) -> String {
-    format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n{body}")
-}
+use crate::support::{Scratch, acquire_words, against, canned, http as reply};
 
 fn fails_with(url: &str, scratch: &Scratch, words: &[&str], message: &str) {
     let got = against(url, scratch).go(words);

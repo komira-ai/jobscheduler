@@ -12,6 +12,9 @@ use crate::failure::Failure;
 /// The default for `--wait-pending`.
 const WAIT_PENDING: &str = "60s";
 
+/// The default for `--stop-grace`.
+const STOP_GRACE: &str = "30s";
+
 /// The command line of `js`. The four global flags may stand before or after the
 /// subcommand.
 #[derive(Debug, Parser)]
@@ -31,7 +34,8 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) token_file: Option<PathBuf>,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
-    /// authority that issued it); without it the platform's roots are trusted.
+    /// authority that issued it). Required for `https://`: the platform's roots are not
+    /// read, because the places they are found can be redirected by the environment.
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) ca_cert: Option<PathBuf>,
     /// Print machine output (one JSON object per line, or the server's own JSON for
@@ -175,6 +179,10 @@ pub(crate) struct RunArgs {
     /// the server's default ttl of 10 minutes).
     #[arg(long, value_parser = parse_duration)]
     pub(crate) renew_every: Option<Duration>,
+    /// How long the command gets to end after SIGTERM when the lease is lost, before it
+    /// is killed (SIGKILL).
+    #[arg(long, default_value = STOP_GRACE, value_parser = parse_duration)]
+    pub(crate) stop_grace: Duration,
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub(crate) command: Vec<OsString>,

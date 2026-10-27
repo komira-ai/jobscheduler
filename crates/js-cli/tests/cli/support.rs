@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use clap::Parser;
-use js_cli::{Services, SignalSource, Signaller, Waiter};
+use js_cli::{ForwardedSignal, Services, SignalSource, Signaller, Waiter};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli as ServerCli, Config, Running, SharedClock, StartupError, TickHandle,
@@ -248,6 +248,20 @@ impl Manual {
         self.changed.notify_all();
         drop(self.until(guard, |s| s.0 >= target));
     }
+
+    /// Lets the CLI's pending wait return and does not wait for it to wait again: for
+    /// the period after which the CLI stops asking for more.
+    pub fn release(&self) {
+        let mut guard = self.until(self.state.lock().unwrap(), |s| s.0 > s.1);
+        guard.1 += 1;
+        self.changed.notify_all();
+    }
+
+    /// Returns once the CLI is waiting for a period to pass: the lease is held, the
+    /// command is running and the renewal clock has started.
+    pub fn running(&self) {
+        drop(self.until(self.state.lock().unwrap(), |s| s.0 > s.1));
+    }
 }
 
 impl Waiter for Manual {
@@ -423,6 +437,65 @@ pub fn canned(reply: &str) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+/// A reply with this status line and body, ended by closing the connection.
+pub fn http(status: &str, body: &str) -> String {
+    format!("HTTP/1.1 {status}\r\nConnection: close\r\n\r\n{body}")
+}
+
+/// A server that answers its requests one after the other with `replies` (the last one
+/// for any request beyond them), each on a connection of its own. Returns its URL and
+/// the request lines it has read, in order; a line is logged before its reply is sent.
+pub fn sequence(replies: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&log);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for (n, stream) in listener.incoming().enumerate() {
+            let mut stream = stream.unwrap();
+            let head = read_request(&mut stream);
+            log.lock()
+                .unwrap()
+                .push(head.lines().next().unwrap().to_owned());
+            let reply = replies.get(n).or(replies.last()).unwrap();
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// Reads a request up to the end of its body (the head, as text).
+fn read_request(stream: &mut impl Read) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let length = head
+        .lines()
+        .filter_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(str::to_owned)
+        })
+        .find_map(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    let _ = stream.read_exact(&mut body);
+    head
+}
+
+/// Ends a `lease run` when dropped, by delivering `signal` to it: a test that fails
+/// before it delivers the signal itself leaves no run behind to wait for.
+pub struct EndsRun(pub Signaller, pub ForwardedSignal);
+
+impl Drop for EndsRun {
+    fn drop(&mut self) {
+        self.0.deliver(self.1);
+    }
 }
 
 /// The CLI against `server` with the token of `scratch`'s file.

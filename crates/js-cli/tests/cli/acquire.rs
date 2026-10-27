@@ -5,7 +5,7 @@ use std::time::Duration;
 use js_provider::Call;
 use serde_json::json;
 
-use crate::support::{Driven, Harness, T0, acquire_words};
+use crate::support::{Driven, Harness, Never, Scratch, T0, acquire_words, against, http, sequence};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -181,4 +181,32 @@ fn a_pending_start_released_meanwhile_is_gone() {
     let got = h.js.waiting(&acquire_words(&[]), waiter);
     assert_eq!(got.code, 3, "{}", got.err);
     assert_eq!(got.err, "js: refused: pending-dropped\n");
+}
+
+/// Asserts that a pending start whose poll fails (the list answers 500) is released
+/// before the failure is reported: the server saw the start, the poll and then the
+/// release of lease 1-1, and the exit is 1 with the poll's error.
+#[test]
+fn a_poll_that_fails_releases_the_pending_lease() {
+    let scratch = Scratch::new("pending_poll_fails");
+    let (url, log) = sequence(vec![
+        http("202 Accepted", r#"{"id":"1-1"}"#),
+        http(
+            "500 Internal Server Error",
+            r#"{"error":"state-write-failed"}"#,
+        ),
+        http("200 OK", "{}"),
+    ]);
+    let got = against(&url, &scratch).waiting(&acquire_words(&[]), std::sync::Arc::new(Never));
+    assert_eq!((got.code, got.out.as_str()), (1, ""));
+    assert_eq!(got.err, "js: unexpected answer 500 (state-write-failed)\n");
+    let seen = log.lock().unwrap().clone();
+    let routes: Vec<&str> = seen
+        .iter()
+        .map(|line| line.trim_end_matches(" HTTP/1.1"))
+        .collect();
+    assert_eq!(
+        routes,
+        vec!["POST /v1/leases", "GET /v1/leases", "DELETE /v1/leases/1-1"]
+    );
 }

@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` (a bearer token never crosses a network in clear); no user, path or query |
 //! | `--token-file <path>` | required: a regular file owned by you, mode 0600 or 0400, holding one token of printable ASCII (the server checks its own token file the same way) |
-//! | `--ca-cert <path>` | optional: a PEM file with the certificate to trust for `https://`; without it the platform's roots are trusted; ignored for `http://` |
+//! | `--ca-cert <path>` | required for `https://`: a PEM file with the certificate to trust (the server's, or the authority that issued it; a system bundle such as `/etc/ssl/certs/ca-certificates.crt` works). The platform's roots are never read on their own, because the loaders find them through environment variables. Ignored for `http://` |
 //! | `--json` | machine output: one JSON object per line (for `list` the server's own body), errors on stderr as `{"error": kind, "message": text}` |
 //!
 //! No proxy setting is read, no redirect is followed and the token is sent to the one
@@ -29,7 +29,8 @@
 //! js lease renew <id> [--ttl <dur>]
 //! js lease release <id>
 //! js lease list
-//! js lease run  <the flags of acquire> [--renew-every <dur>] -- <command> [args...]
+//! js lease run  <the flags of acquire> [--renew-every <dur>] [--stop-grace <dur>]
+//!               -- <command> [args...]
 //! ```
 //!
 //! Durations are whole seconds: `90`, `90s`, `15m`, `2h`. `acquire` prints
@@ -46,14 +47,24 @@
 //! `--renew-every` (a third of `--ttl`, or 200s without `--ttl`: a third of the
 //! server's default ttl) until the command exits, then releases the lease, whatever
 //! happened, and exits with the command's status (128 plus the signal for a command a
-//! signal ended). The held-lease line goes to stderr, so stdout is the command's. A
-//! SIGINT or SIGTERM sent to `js` is forwarded to the command (from a terminal the
-//! command also gets the terminal's own SIGINT), which ends the run the
-//! usual way. If a renewal finds the lease gone (404 or 409) `js` sends the command
-//! SIGTERM, waits for it to end, and exits 7; a command that ignores SIGTERM is waited
-//! for. A renewal that fails for another reason (the server unreachable, say) is
-//! reported on stderr and tried again at the next period. A command that cannot be
-//! started gives exit 127, and the lease is released.
+//! signal ended). The held-lease line goes to stderr, so stdout is the command's.
+//!
+//! `run` installs its SIGINT, SIGTERM and SIGHUP handlers before it asks for the lease.
+//! A signal while a start is pending releases the pending lease and ends `js` with 128
+//! plus the signal's number, without starting the command; once the lease is held, a
+//! signal is forwarded to the command, which ends the run the usual way. The command
+//! runs in a process group of its own, so a forwarded signal reaches what it started as
+//! well, and a command that reads a terminal is not in the terminal's foreground group
+//! (use `acquire` and `release` around an interactive program). If a renewal finds the
+//! lease gone (404 or 409), or none has succeeded for as long as the ttl (a renewal that
+//! fails for another reason, the server unreachable say, is reported on stderr and
+//! tried again at the next period, and the periods without a success are counted), `js`
+//! sends the command's group SIGTERM, and SIGKILL when the command is still running
+//! `--stop-grace` later (default 30s, asked of the waiter like every other pause), then
+//! exits 7; signals sent to `js` meanwhile are still forwarded. If a status poll of a
+//! pending start fails, that lease is released too. A panic of `js` kills the command
+//! and releases the lease. A command that cannot be started gives exit 127, and the
+//! lease is released.
 //!
 //! # Exit status
 //!
@@ -66,8 +77,9 @@
 //! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |
-//! | 7 | `run`: the lease was lost; the command was stopped |
+//! | 7 | `run`: the lease was lost (gone from the server, or not renewed for its whole ttl); the command was stopped |
 //! | 127 | `run`: the command could not be started |
+//! | 129, 130, 143 | `run`: SIGHUP, SIGINT or SIGTERM ended `js` while the start was pending (after the command started, the command's own status) |
 //!
 //! The reason is on stderr (`js: refused: no-capacity`), and never holds the token.
 

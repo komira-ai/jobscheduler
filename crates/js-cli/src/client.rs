@@ -39,9 +39,9 @@ pub(crate) struct Client {
 
 impl Client {
     /// Checks the flags and builds the client: the URL, the owner-only token file and,
-    /// for `https://`, the roots to trust (the PEM file of `--ca-cert`, else the
-    /// platform's). The agent reads no proxy setting and follows no redirect, so the
-    /// token goes to the one host named and nowhere else.
+    /// for `https://`, the roots to trust (the PEM file of `--ca-cert`, which is required:
+    /// the platform's roots are not read). The agent reads no proxy setting and follows no
+    /// redirect, so the token goes to the one host named and nowhere else.
     pub(crate) fn connect(
         server: &str,
         token_file: &Path,
@@ -125,13 +125,20 @@ impl Client {
     }
 }
 
-/// The certificates to trust: none for plain http, the PEM file's for `--ca-cert`,
-/// otherwise the platform's.
+/// The certificates to trust: none for plain http, the PEM file's for `--ca-cert`. An
+/// `https://` server without `--ca-cert` is refused: the platform's roots are found
+/// through the environment (the loaders honour `SSL_CERT_FILE` and `SSL_CERT_DIR`), and
+/// `js` sends its token only to a server trusted by a flag.
 fn roots(https: bool, ca_cert: Option<&Path>) -> Result<Vec<Certificate<'static>>, Failure> {
     let der = match (https, ca_cert) {
         (false, _) => Vec::new(),
         (true, Some(path)) => pem_roots(path)?,
-        (true, None) => rustls_native_certs::load_native_certs().certs,
+        (true, None) => {
+            return Err(Failure::flag(
+                "--ca-cert",
+                "required for an https:// server",
+            ));
+        }
     };
     Ok(der
         .iter()

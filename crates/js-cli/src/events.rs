@@ -35,6 +35,8 @@ pub enum ForwardedSignal {
     Interrupt,
     /// SIGTERM.
     Terminate,
+    /// SIGHUP, which a terminal that closes sends.
+    Hangup,
 }
 
 impl ForwardedSignal {
@@ -42,6 +44,26 @@ impl ForwardedSignal {
         match self {
             Self::Interrupt => Signal::INT,
             Self::Terminate => Signal::TERM,
+            Self::Hangup => Signal::HUP,
+        }
+    }
+
+    /// The signal's number, which `js` adds to 128 for its own exit status when a signal
+    /// ends it before the command starts.
+    pub(crate) fn number(self) -> u8 {
+        match self {
+            Self::Hangup => 1,
+            Self::Interrupt => 2,
+            Self::Terminate => 15,
+        }
+    }
+
+    /// The signal's name, as a message shows it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Hangup => "SIGHUP",
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
         }
     }
 }
@@ -55,6 +77,9 @@ pub(crate) enum Event {
     Exited,
     /// `js` itself was sent a signal.
     Signal(ForwardedSignal),
+    /// The command was told to stop because its lease is lost, and its grace period to
+    /// end on its own has passed.
+    GraceOver,
 }
 
 /// The inbox of the supervising loop.
@@ -78,6 +103,16 @@ impl Events {
         Signaller(self.sender())
     }
 
+    /// The signal `js` was sent, if one has arrived, without blocking. Only the signal
+    /// source reports to the inbox until the command is started, so a delivered event is
+    /// a signal.
+    pub(crate) fn interrupted(&self) -> Option<ForwardedSignal> {
+        match self.receiver.try_recv() {
+            Ok(Event::Signal(signal)) => Some(signal),
+            _ => None,
+        }
+    }
+
     /// Blocks for the next event. This inbox holds a sender itself, so the channel never
     /// closes; the fallback only keeps the loop from spinning on an impossible error.
     pub(crate) fn next(&self) -> Event {
@@ -97,9 +132,11 @@ impl Signaller {
     }
 }
 
-/// How `lease run` learns of SIGINT and SIGTERM: called once, before the command starts,
-/// with the handle to report them to. The program's source installs the handlers (and
-/// only for `lease run`: the other commands keep the signals' default behaviour).
+/// How `lease run` learns of SIGINT, SIGTERM and SIGHUP: called once, before the lease
+/// is asked for, with the handle to report them to. The program's source installs the
+/// handlers (and only for `lease run`: the other commands keep the signals' default
+/// behaviour); a signal that arrives while the lease is being obtained is held until
+/// the run can act on it.
 pub type SignalSource = Box<dyn FnOnce(Signaller) -> io::Result<()> + Send>;
 
 /// The effects a command has beyond HTTP, injected so a test drives them.

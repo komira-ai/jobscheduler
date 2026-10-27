@@ -1,4 +1,4 @@
-//! The program's signal source: SIGINT and SIGTERM, read on a thread of their own.
+//! The program's signal source: SIGINT, SIGTERM and SIGHUP, read on a thread of their own.
 
 use std::io;
 use std::thread;
@@ -8,22 +8,31 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::events::{ForwardedSignal, Signaller};
 
-/// Installs handlers for SIGINT and SIGTERM and reports every delivery to `signaller`
-/// from a detached thread. The handlers stay installed for the life of the process,
-/// which is the life of one `lease run`.
+/// Installs handlers for SIGINT, SIGTERM and SIGHUP and reports every delivery to
+/// `signaller` from a detached thread. The handlers stay installed for the life of the
+/// process, which is the life of one `lease run`. A signal that arrives before the
+/// first report is read is held, not lost.
 pub(crate) fn install(signaller: Signaller) -> io::Result<()> {
+    let kinds = [
+        (SignalKind::terminate(), ForwardedSignal::Terminate),
+        (SignalKind::interrupt(), ForwardedSignal::Interrupt),
+        (SignalKind::hangup(), ForwardedSignal::Hangup),
+    ];
     Builder::new_current_thread()
         .enable_all()
         .build()
         .and_then(|runtime| {
             let streams = {
                 let _inside = runtime.enter();
-                signal(SignalKind::terminate())
-                    .and_then(|term| signal(SignalKind::interrupt()).map(|int| (term, int)))
+                kinds
+                    .into_iter()
+                    .map(|(kind, which)| signal(kind).map(|stream| (stream, which)))
+                    .collect::<io::Result<Vec<_>>>()
             };
-            streams.map(|(term, interrupt)| {
-                runtime.spawn(forward(term, ForwardedSignal::Terminate, signaller.clone()));
-                runtime.spawn(forward(interrupt, ForwardedSignal::Interrupt, signaller));
+            streams.map(|streams| {
+                for (stream, which) in streams {
+                    runtime.spawn(forward(stream, which, signaller.clone()));
+                }
                 thread::spawn(move || runtime.block_on(std::future::pending::<()>()));
             })
         })

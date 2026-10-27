@@ -1,5 +1,7 @@
 //! What ends a command without success, and the exit status each kind has.
 
+use crate::events::ForwardedSignal;
+
 /// The exit statuses of `js`.
 pub mod exit {
     /// Success: the lease is held, renewed, freed or listed, or the command of `lease run`
@@ -20,7 +22,8 @@ pub mod exit {
     pub const UNRESOLVED: u8 = 5;
     /// A release was accepted but the stop is not confirmed yet; the server retries it.
     pub const RELEASING: u8 = 6;
-    /// `lease run` lost its lease: a renewal found it gone, and the command was stopped.
+    /// `lease run` lost its lease: a renewal found it gone, or none succeeded for as long as
+    /// its ttl, and the command was stopped.
     pub const LEASE_LOST: u8 = 7;
     /// `lease run` could not start its command.
     pub const NOT_STARTED: u8 = 127;
@@ -61,6 +64,13 @@ pub(crate) enum Failure {
     /// The lease is gone from the server.
     #[error("lease {0} is gone from the server; stopped the command")]
     LeaseLost(String),
+    /// The lease could not be renewed for as long as its ttl, so the server has expired
+    /// it or is about to.
+    #[error("lease {0} could not be renewed for its whole ttl; stopped the command")]
+    LeaseUnrenewed(String),
+    /// A signal ended `lease run` while it waited for the lease; nothing was started.
+    #[error("interrupted by {} before the lease was held; asked the server to release it", .0.name())]
+    Interrupted(ForwardedSignal),
 }
 
 impl Failure {
@@ -78,7 +88,8 @@ impl Failure {
             Self::Contract(_) => (exit::CONTRACT, "rejected"),
             Self::Unresolved { .. } => (exit::UNRESOLVED, "unresolved"),
             Self::NotStarted { .. } => (exit::NOT_STARTED, "not-started"),
-            Self::LeaseLost(_) => (exit::LEASE_LOST, "lease-lost"),
+            Self::LeaseLost(_) | Self::LeaseUnrenewed(_) => (exit::LEASE_LOST, "lease-lost"),
+            Self::Interrupted(signal) => (128 + signal.number(), "interrupted"),
         }
     }
 }

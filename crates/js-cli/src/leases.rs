@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::api::{Freed, Granted, Lease, Standing, entries};
 use crate::cli::{AcquireArgs, IdArgs, RenewArgs};
 use crate::client::Client;
-use crate::events::Waiter;
+use crate::events::{ForwardedSignal, Waiter};
 use crate::failure::{Failure, exit};
 use crate::render::Render;
 
@@ -22,7 +22,7 @@ pub(crate) fn acquire(
     waiter: &dyn Waiter,
     out: &mut dyn Write,
 ) -> Result<u8, Failure> {
-    let lease = obtain(client, args, waiter)?;
+    let lease = obtain(client, args, waiter, &|| None)?;
     let _ = out.write_all(render.held(&lease).as_bytes());
     Ok(exit::OK)
 }
@@ -31,27 +31,42 @@ pub(crate) fn acquire(
 /// the list every [`POLL`] until the lease is held or gone, for at most
 /// `--wait-pending`. Time passes only through `waiter`: the wait is the sum of the
 /// intervals asked of it. A lease still pending at the end is released (it would be
-/// held later with nobody to renew it) and the failure is exit 5.
+/// held later with nobody to renew it) and the failure is exit 5. So is a pending lease
+/// whose poll fails, and one that `interrupt` reports a signal for before a poll (the
+/// failure is then the signal's: 128 plus its number). A lease that is already held is
+/// returned whatever `interrupt` says: the caller has the signal and acts on it.
 pub(crate) fn obtain(
     client: &Client,
     args: &AcquireArgs,
     waiter: &dyn Waiter,
+    interrupt: Interrupt,
 ) -> Result<Lease, Failure> {
     match client.acquire(&args.body())? {
         Granted::Held(lease) => Ok(lease),
-        Granted::Pending(id) => settle(client, id, args.wait_pending, waiter),
+        Granted::Pending(id) => settle(client, id, args.wait_pending, waiter, interrupt),
     }
 }
+
+/// Reports the signal `js` was sent, if one is waiting to be acted on.
+pub(crate) type Interrupt<'a> = &'a dyn Fn() -> Option<ForwardedSignal>;
 
 fn settle(
     client: &Client,
     id: String,
     limit: Duration,
     waiter: &dyn Waiter,
+    interrupt: Interrupt,
 ) -> Result<Lease, Failure> {
     let mut waited = Duration::ZERO;
     loop {
-        match client.standing(&id)? {
+        if let Some(signal) = interrupt() {
+            let _ = client.release(&id);
+            return Err(Failure::Interrupted(signal));
+        }
+        let standing = client.standing(&id).inspect_err(|_| {
+            let _ = client.release(&id);
+        })?;
+        match standing {
             Standing::Held(lease) => return Ok(lease),
             Standing::Gone => return Err(Failure::Refused("pending-dropped".to_owned())),
             Standing::Pending => {}
