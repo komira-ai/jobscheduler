@@ -139,16 +139,22 @@ impl BindingStore {
         }
     }
 
-    /// Makes the file hold `bindings`. Nothing is written when it already does; a failed
+    /// Makes the file hold what `current` returns, which is called with the store's lock
+    /// held so that the last save to write has read the newest bindings. Nothing is
+    /// written when the file already holds them; a failed
     /// write leaves the old file and is retried by the next call, which finds the
     /// bindings still different.
-    pub(crate) fn save(&self, bindings: &BTreeMap<HostId, Binding>) -> io::Result<()> {
+    pub(crate) fn save<F>(&self, current: F) -> io::Result<()>
+    where
+        F: FnOnce() -> BTreeMap<HostId, Binding>,
+    {
         let mut written = self.written.lock().unwrap_or_else(PoisonError::into_inner);
-        if *written == *bindings {
+        let bindings = current();
+        if *written == bindings {
             return Ok(());
         }
-        replace(&self.path, render(bindings)?.as_bytes())?;
-        written.clone_from(bindings);
+        replace(&self.path, render(&bindings)?.as_bytes())?;
+        *written = bindings;
         Ok(())
     }
 }
@@ -204,6 +210,29 @@ mod tests {
     }
 
     const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// The snapshot is taken while the store's lock is held, so of two saves the one that
+    /// writes last holds the newest bindings. It catches a save that reads the registry
+    /// first and locks after, which lets a slower save put an older snapshot over a newer
+    /// file; the closure runs in the place of that read and finds the lock taken or not.
+    #[test]
+    fn the_snapshot_is_taken_under_the_lock() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_state_unit");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("snapshot.agents");
+        let store = BindingStore::new(path.clone(), BTreeMap::new());
+        let mut bindings = BTreeMap::new();
+        bindings.insert(host("a"), bound("token-a", None));
+        let mut locked = false;
+        store
+            .save(|| {
+                locked = store.written.try_lock().is_err();
+                bindings.clone()
+            })
+            .unwrap();
+        assert!(locked, "the snapshot was read before the store's lock");
+        assert_eq!(load(&path).unwrap(), bindings);
+    }
 
     /// What is written reads back as the same bindings, with and without an instance, and
     /// the text holds a digest and no token. It catches a binding that comes back as

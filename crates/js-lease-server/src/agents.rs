@@ -99,7 +99,7 @@ impl Agents {
     /// admitted stays admitted when this fails; the lease on it would then survive a
     /// restart without its binding, until the next tick writes it.
     pub(crate) fn save_bindings(&self) {
-        if let Err(err) = self.store.save(&self.registry.bindings()) {
+        if let Err(err) = self.store.save(|| self.registry.bindings()) {
             self.errors.fetch_add(1, Ordering::SeqCst);
             error!(error = %err, "cannot write the agent state file");
         }
