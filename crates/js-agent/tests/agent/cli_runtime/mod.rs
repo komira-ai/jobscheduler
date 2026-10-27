@@ -34,6 +34,11 @@ pub fn thirty_seconds_on() -> u64 {
     1_030_000
 }
 
+/// The name of the container the agent `HOST` gives run `r1`: `js-`, the 16 digits of the
+/// FNV-1a hash of the host id, `-`, the run id. Pinned, so that a change of the hash (it
+/// would orphan nothing, but names are documented) shows.
+pub const NAME_R1: &str = "js-368fcd37c22ac926-r1";
+
 /// A program that exists and can be executed, for settings that are never run.
 pub const BIN: &str = "/bin/sh";
 

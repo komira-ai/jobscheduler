@@ -228,7 +228,8 @@ impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
     /// containers it finds so that they are held, first, from the very first heartbeat. A
     /// container that no job can stand for is stopped and removed by its own id, and
-    /// recorded as a finding: one whose labels do not say what it booked, one that repeats
+    /// recorded as a finding: one that was created and never started, one whose labels do
+    /// not say what it booked, one that repeats
     /// a run id, one whose booking does not fit the machine's offer beside the containers
     /// taken over before it (a GPU not offered, or one already booked), and any beyond the
     /// number of runs a heartbeat can list. One that cannot be removed is not left
@@ -243,7 +244,8 @@ impl Lifecycle {
     /// the jobs that no longer fit are therefore the newest, and they are evicted.
     ///
     /// What the runtime lists is the agent's own ([`ContainerRuntime::list_labelled`] is
-    /// scoped by the agent label), including the removal of those that cannot be adopted.
+    /// scoped by the agent label); the listing removes nothing, so a container that was
+    /// created and never started is evicted here like one whose labels are unreadable.
     ///
     /// # Errors
     ///
@@ -293,11 +295,14 @@ impl Lifecycle {
         Ok((this, events))
     }
 
-    /// The job a labelled container stands for, or why it cannot be one: its labels do not
-    /// say what it booked, its run id is held already, the agent holds as many runs as it
+    /// The job a labelled container stands for, or why it cannot be one: it never started,
+    /// its labels do not say what it booked, its run id is held already, the agent holds as many runs as it
     /// may, or its booking does not fit what the machine offers beside the jobs taken over
     /// before it.
     fn adoptable(&self, found: &Found, now: u64) -> Result<Job, &'static str> {
+        if found.never_started {
+            return Err("it was created and never started");
+        }
         let job = Job::adopted(found, now).ok_or("its labels do not say what it booked")?;
         let used = self.booked();
         let refusals = [

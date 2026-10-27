@@ -12,7 +12,7 @@ use std::time::Duration;
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, system_runner};
 use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
 
-use super::{HOST, made_at, mount, platform, spec};
+use super::{HOST, NAME_R1, made_at, mount, platform, spec};
 use crate::support::Scratch;
 
 const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -106,7 +106,7 @@ fn cli_runtime_argv_snapshot() {
         strings(&[
             "create",
             "--name",
-            "js-r1",
+            NAME_R1,
             "--label",
             "jobscheduler.dev/agent=h-0123456789abcdef",
             "--label",

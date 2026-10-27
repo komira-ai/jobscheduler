@@ -277,6 +277,7 @@ impl ContainerRuntime for FakeRuntime {
                 id: ContainerId(id.clone()),
                 labels: c.labels.clone(),
                 running_ms: c.running_ms,
+                never_started: false,
             })
             .collect())
     }

@@ -234,7 +234,7 @@ fn a_restart_does_not_adopt_what_a_killed_create_left() {
         Box::new(w.clock.clone()),
     )
     .unwrap();
-    assert_eq!(names(&events), Vec::<String>::new());
+    assert_eq!(names(&events), ["finding - unadoptable-container"]);
     assert!(w.docker.ids().is_empty(), "the orphan was removed");
     assert_eq!(life.free().cpu_millis, 4000, "nothing is booked for it");
 
@@ -243,6 +243,47 @@ fn a_restart_does_not_adopt_what_a_killed_create_left() {
     clean.start("r2");
     assert_eq!(clean.outcomes(), [Outcome::FailedToStart]);
     assert!(clean.docker.ids().is_empty(), "removed at once, by name");
+}
+
+/// Asserts that an orphan the engine cannot remove (a container created and never
+/// started, labelled as the agent's) does not stop a restarted agent from starting: the
+/// listing succeeds, the running job is adopted, the orphan is evicted, reported as kept
+/// and booked (its labels say what), and a later step that can remove it frees the
+/// booking. It catches one undeletable orphan that makes every restart fail to adopt.
+#[test]
+fn an_orphan_that_cannot_be_removed_is_booked_and_retried() {
+    let mut w = World::new("orphan-stuck", "linux");
+    w.start("r1");
+    let orphan = w.docker.leak_created(&[
+        (label::RUN, "o1"),
+        (label::LEASE, "lease-o"),
+        (label::AGENT, HOST),
+        (label::CPU_MILLIS, "1000"),
+        (label::MEMORY_BYTES, "1073741824"),
+        (label::GPUS, ""),
+        (label::WALL_MS, "60000"),
+        (label::CREATED_MS, "1000000"),
+    ]);
+    w.docker.fail("rm", 1000);
+    let (mut life, events) = Lifecycle::adopt(
+        w.config.clone(),
+        Box::new(open_at(&w.docker, "linux", thirty_seconds_on)),
+        Box::new(NoChecks),
+        Box::new(w.clock.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        names(&events),
+        ["adopted r1", "finding - unadoptable-container-kept"]
+    );
+    assert!(w.docker.ids().contains(&orphan));
+    assert_eq!(life.free().cpu_millis, 2000, "the orphan is booked");
+    assert_eq!(names(&life.step()), Vec::<String>::new(), "still stuck");
+
+    w.docker.fail("rm", 0);
+    assert_eq!(names(&life.step()), ["finding - unadoptable-container"]);
+    assert!(!w.docker.ids().contains(&orphan));
+    assert_eq!(life.free().cpu_millis, 3000, "the booking was freed");
 }
 
 /// Asserts that a container the engine calls `dead` (it failed to remove it) ends its job

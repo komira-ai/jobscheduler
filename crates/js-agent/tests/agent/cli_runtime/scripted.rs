@@ -180,12 +180,23 @@ impl Scripted {
         self.add(labels, false)
     }
 
+    /// Adds a running container called `name`, with exactly these labels: what an operator
+    /// (or another agent) left on the host under a name the agent might choose; returns
+    /// its id.
+    pub fn leak_named(&self, name: &str, labels: &[(&str, &str)]) -> String {
+        self.add_as(Some(name), labels, true)
+    }
+
     fn add(&self, labels: &[(&str, &str)], started: bool) -> String {
+        self.add_as(None, labels, started)
+    }
+
+    fn add_as(&self, name: Option<&str>, labels: &[(&str, &str)], started: bool) -> String {
         let mut state = self.0.borrow_mut();
         state.next += 1;
         let (id, name) = (
             format!("{:064x}", state.next),
-            format!("leaked-{}", state.next),
+            name.map_or_else(|| format!("leaked-{}", state.next), str::to_owned),
         );
         let labels = labels
             .iter()
@@ -216,6 +227,29 @@ fn values<'a>(args: &'a [&str], flag: &str) -> Vec<&'a str> {
         .filter(|pair| pair[0] == flag)
         .map(|pair| pair[1])
         .collect()
+}
+
+/// Whether the engine's `name` filter `pattern` (a regular expression) matches `name`,
+/// for the patterns the agent writes: anchored at both ends, `\.` a dot and a bare `.` any
+/// one character. An unanchored pattern matches nothing here, so a test that sends one
+/// finds no container.
+fn name_matches(pattern: &str, name: &str) -> bool {
+    let Some(body) = pattern
+        .strip_prefix('^')
+        .and_then(|rest| rest.strip_suffix('$'))
+    else {
+        return false;
+    };
+    let (mut wanted, mut have) = (body.chars(), name.chars());
+    loop {
+        match (wanted.next(), have.next()) {
+            (None, None) => return true,
+            (Some('\\'), Some(c)) if wanted.next() == Some(c) => {}
+            (Some('.'), Some(_)) => {}
+            (Some(p), Some(c)) if p == c => {}
+            _ => return false,
+        }
+    }
 }
 
 /// The bind mounts a `create` asks for: `--mount type=bind,src=..,dst=..[,readonly,..]`.
@@ -313,6 +347,7 @@ impl State {
         let matches = |id: &str, c: &Container| {
             wanted.iter().all(|filter| match filter.split_once('=') {
                 Some(("id", prefix)) => id.starts_with(prefix),
+                Some(("name", pattern)) => name_matches(pattern, &c.name),
                 Some(("label", rest)) => match rest.split_once('=') {
                     Some((k, v)) => c.labels.get(k).map(String::as_str) == Some(v),
                     None => c.labels.contains_key(rest),

@@ -128,6 +128,10 @@ pub struct Found {
     /// How long it has been running, in milliseconds, as the runtime reports it; counted
     /// against the job's wall-time limit.
     pub running_ms: u64,
+    /// It was created and never started (Docker: `created`, Podman: `configured`): no job
+    /// ever ran in it, whatever its labels say, so it is never adopted. The lifecycle
+    /// evicts it like any container it cannot adopt.
+    pub never_started: bool,
 }
 
 /// A runtime call that failed. The text is the runtime's own and stays on the host.
@@ -173,7 +177,9 @@ pub trait ContainerRuntime {
     /// or exited. The agent label scopes the list: two agents sharing one runtime never see
     /// each other's containers, and the agent may adopt, stop and remove every one it is
     /// given. A container that was created and never started holds no job, whatever its
-    /// labels say; a backend removes it and leaves it out.
+    /// labels say; a backend lists it too, marked [`Found::never_started`], and removes
+    /// nothing: listing is a read, so one container that cannot be removed never makes the
+    /// whole list fail.
     ///
     /// # Errors
     ///

@@ -14,7 +14,7 @@
 //! nothing behind.
 //!
 //! ```text
-//! <bin> create --name js-<run id> --label jobscheduler.dev/run-id=r1 ...
+//! <bin> create --name js-<agent tag>-<run id> --label jobscheduler.dev/run-id=r1 ...
 //!   --label jobscheduler.dev/agent=<host>
 //!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 4096
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
@@ -40,27 +40,40 @@
 //! when `--container-host` is given, `DOCKER_HOST` and `CONTAINER_HOST` set to it. Nothing
 //! the agent inherited (`LD_PRELOAD`, `DOCKER_CONFIG`, `DOCKER_CONTEXT`, `XDG_RUNTIME_DIR`,
 //! the agent's own `PATH`) reaches the engine, and the host is a flag, not a variable.
-//! Without `--container-host` the engine uses its own default (the system socket). A
-//! rootless Podman that finds its runtime directory through `XDG_RUNTIME_DIR` falls back
-//! to the one for the user's id; where that is not enough, `--container-host` names the
-//! socket.
+//! Without `--container-host` the engine uses its own default (the system socket).
+//!
+//! **Not supported:** rootless engines and `ssh://` hosts. A rootless Podman needs
+//! `XDG_RUNTIME_DIR`, `HOME` and the D-Bus session of its user, none of which it is
+//! given, and may then run a container without its limits; an `ssh://` engine host needs
+//! `SSH_AUTH_SOCK` (or the keys under `HOME`) to log in, and gets neither. They are not
+//! passed through: a rootless engine or an `ssh://` host is configured at the
+//! operator's own risk, and a rootful engine on a socket or `tcp://` address is the
+//! supported setup.
 //!
 //! # Names, and a create that may have worked
 //!
-//! A container is named `js-<run id>`. A run id is up to 128 bytes of `[A-Za-z0-9._-]`;
-//! the name has to fit in 128 bytes, so a run id of more than 125 bytes is refused as a
-//! start that cannot be named. The name exists so that a `create` whose outcome is not
-//! known can be cleaned up: when the call fails (the program was killed at its time limit
-//! while the daemon finished the pull and made the container) or exits 0 and prints
-//! something that is not an id, the agent removes the container by that name and the
-//! error is the create's, with a note when the removal failed too. A call that fails
-//! cleanly costs one more `rm` and, when that fails, a `ps` that finds nothing. A name that
-//! is taken (a container left by an earlier run of the same id) makes the create fail, and
-//! the cleanup then removes that container.
+//! A container is named `js-<agent tag>-<run id>`, where the agent tag is 16 hexadecimal
+//! digits, the FNV-1a hash of the host id (so two agents on one runtime never name a
+//! container alike, and the name stays in the grammar of container names whatever the
+//! host id holds). A run id is up to 128 bytes of `[A-Za-z0-9._-]`; the name has to fit in
+//! 128 bytes, so a run id of more than 108 bytes is refused as a start that cannot be
+//! named. The name exists so that a `create` whose outcome is not known can be cleaned
+//! up: when the call fails (the program was killed at its time limit while the daemon
+//! finished the pull and made the container) or exits 0 and prints something that is not
+//! an id, the agent looks for the container (`ps -a` with the exact name, this agent's
+//! label and the run's label, all three) and removes what it finds by its 64-digit id;
+//! the error is the create's, with a note when the lookup or the removal failed. The name
+//! alone is never enough to remove a container: an operator's container, or another
+//! agent's, that has the name of ours is left alone. A call that fails cleanly costs one
+//! `ps` that finds nothing. A name that is taken by such a container makes the `create`
+//! fail, and nothing is removed.
 //!
-//! A container that was created and never started is never taken for a running job: when
-//! the agent lists its containers after a restart, one in the state `created` (Podman:
-//! `configured`) is removed and left out of the list.
+//! A container that was created and never started is never taken for a running job:
+//! [`ContainerRuntime::list_labelled`] lists one in the state `created` (Podman:
+//! `configured`) marked [`Found::never_started`] and removes nothing, and the lifecycle
+//! evicts it like any container it cannot adopt (it books it while the removal fails, and
+//! tries again at every step). A listing therefore never fails because one container
+//! cannot be removed.
 //!
 //! # The mounts, and the window that stays
 //!
@@ -76,8 +89,15 @@
 //! (`failed_to_start`, detail `runtime-failed`; the finding the lifecycle keeps says the
 //! mounts differ). **The window that remains** is the time between the agent's resolution
 //! and the daemon's bind, and the read-back sees only where the daemon says it bound: a
-//! link swapped back after the bind, or a path the daemon reports as given, is not
-//! detected. Mount roots shared by jobs of different trust are still shared at their own
+//! link swapped back after the bind is not detected.
+//!
+//! **What the read-back catches depends on the engine.** The comparison is of the agent's
+//! resolved path with the source the engine echoes. Docker echoes the source as it was
+//! given in the `create`, not the path it resolved: on Docker a swapped link is *not*
+//! caught by the read-back, which there catches only a bind that is missing, extra, at
+//! another destination or with another access. The source comparison catches a swapped
+//! link only on an engine that reports the path it resolved, and which engines do that
+//! has not been checked here; do not rely on it. Mount roots shared by jobs of different trust are still shared at their own
 //! risk (see [`MountRoots`](crate::lifecycle::MountRoots)).
 //!
 //! # The scratch directory and the user
@@ -101,11 +121,27 @@
 //! read-only bind read-only, and the engine refuses the container on a kernel before 5.12
 //! instead of leaving it writable); older Docker and Podman get plain `readonly`, which
 //! leaves a mount below the bind writable on the engines that do not make it recursive.
+//! The choice is made from the version of the *client* (what `<bin> --version` prints),
+//! not of the daemon it talks to: a client of Docker 25 or later in front of an older
+//! daemon is still given `bind-recursive=readonly`, which that daemon may refuse.
 //! Podman's SELinux relabelling of bind mounts (`:Z`) is not applied: a host with SELinux
 //! enforcing needs the mount roots labelled by the operator. Swap limits: Docker is asked
 //! (`info --format {{.SwapLimit}}`) when the runtime opens, and a host without swap
 //! accounting is reported in [`CliRuntime::warnings`] (`--memory-swap` is ignored there);
-//! Podman reports no such flag, so nothing is said for it.
+//! Podman reports no such flag, so nothing is said for it. **Nothing calls
+//! [`CliRuntime::warnings`] yet**: the change that wires the runtime into the program
+//! brings the caller, and until then the swap warning (like the other warnings a runtime
+//! can have) is not shown to anyone.
+//!
+//! # Images
+//!
+//! Containers are created with `--pull never` unless `--container-pull missing` is given
+//! ([`Pull`]), so a job cannot make the host reach a registry of its choosing. The
+//! operator puts the images on the host before a job names one: `docker pull` (or
+//! `podman pull`) from a shell with the registry credentials, or `docker load` from an
+//! archive on a host with no registry access. A job whose image is not there fails at
+//! `create`: it ends as `failed_to_start` (detail `runtime-failed`), and nothing is left
+//! behind.
 //!
 //! # Calls that find the container gone
 //!
@@ -149,7 +185,8 @@
 //! # Not here
 //!
 //! Registry credentials (the agent holds none: an image is on the host, or pullable
-//! without one when `--container-pull missing` is given), and rootless setup.
+//! without one when `--container-pull missing` is given), and rootless engines (see
+//! above).
 
 mod args;
 mod settings;
@@ -191,6 +228,9 @@ const ENGINE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// What a container's name starts with; the run id follows.
 const NAME_PREFIX: &str = "js-";
+
+/// The digits of the agent tag in a container's name.
+const TAG_LEN: usize = 16;
 
 /// The longest container name made.
 const NAME_MAX: usize = 128;
@@ -419,7 +459,7 @@ impl CliRuntime {
         if !spec.gpu_indices.is_empty() && !self.gpus {
             return Err(CliError::GpuUnsupported);
         }
-        let name = container_name(&spec.run_id)?;
+        let name = container_name(&self.host_id, &spec.run_id)?;
         let args = self.create_args(spec, &name, (self.now_ms)())?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         self.hand_over_scratch(spec)?;
@@ -465,9 +505,12 @@ impl CliRuntime {
             .map(|ids| ids.lines().any(|line| line.trim() == id.0))
     }
 
-    /// Whether the runtime has any container of this agent for the run.
-    fn has_run(&self, run_id: &str) -> Result<bool, CliError> {
-        let (run, agent) = (
+    /// The ids of the containers that are called exactly `name` and carry both this
+    /// agent's label and the run label of `run_id`. The name filter is a regular
+    /// expression: anchored at both ends, with the dots of the name escaped.
+    fn named(&self, name: &str, run_id: &str) -> Result<Vec<ContainerId>, CliError> {
+        let (name, run, agent) = (
+            format!("name=^{}$", name.replace('.', "\\.")),
             format!("label={}={run_id}", label::RUN),
             format!("label={}={}", label::AGENT, self.host_id),
         );
@@ -477,12 +520,16 @@ impl CliRuntime {
             "-q",
             "--no-trunc",
             "--filter",
+            &name,
+            "--filter",
             &run,
             "--filter",
             &agent,
         ];
-        self.call("ps", &args)
-            .map(|ids| ids.lines().any(|line| !line.trim().is_empty()))
+        self.call("ps", &args).map(|printed| {
+            let lines = printed.lines().map(str::trim).filter(|line| is_id(line));
+            lines.map(|id| ContainerId(id.to_owned())).collect()
+        })
     }
 
     /// `Ok(())` for a failed call whose container is gone anyway, else the failure.
@@ -534,16 +581,15 @@ impl CliRuntime {
             .or_else(|failed| self.gone_or(id, failed))
     }
 
-    /// Removes the container called `name`, made for `run_id`, when there is one: a failed
-    /// `rm` is followed by a look at the run's containers, and none means there was nothing
-    /// to remove.
+    /// Removes the container called `name`, made by this agent for `run_id`, when there is
+    /// one. The name alone is never enough (an operator, or another agent, can have a
+    /// container of that name): the container is looked up with its name and both labels
+    /// ([`CliRuntime::named`]) and removed by the id found, so a container that does not
+    /// carry both labels is never touched.
     fn delete_named(&self, name: &str, run_id: &str) -> Result<(), CliError> {
-        self.call("rm", &["rm", "--force", "--volumes", "--", name])
-            .map(|_| ())
-            .or_else(|failed| match self.has_run(run_id)? {
-                true => Err(failed),
-                false => Ok(()),
-            })
+        self.named(name, run_id)?
+            .iter()
+            .try_for_each(|id| self.delete(id))
     }
 
     fn found(&self, id: &str) -> Result<Option<Found>, CliError> {
@@ -554,10 +600,7 @@ impl CliRuntime {
             return Ok(None);
         };
         let (state, labels) = text.trim().split_once(' ').ok_or_else(unreadable)?;
-        // Made and never started: no job ever ran in it, whatever its labels say.
-        if matches!(state, "created" | "configured") {
-            return self.delete(&id).map(|()| None);
-        }
+        let never_started = matches!(state, "created" | "configured");
         let labels: Option<BTreeMap<String, String>> =
             serde_json::from_str(labels).map_err(|_| unreadable())?;
         let labels = labels.unwrap_or_default();
@@ -570,6 +613,7 @@ impl CliRuntime {
             id,
             labels,
             running_ms,
+            never_started,
         }))
     }
 
@@ -618,14 +662,27 @@ fn major_of(text: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// `js-<run id>`, when that is a name the engines take.
-fn container_name(run_id: &str) -> Result<String, CliError> {
+/// `js-<agent tag>-<run id>`, when that is a name the engines take. The tag is the host
+/// id's hash ([`agent_tag`]), so two agents on one runtime never name a container alike.
+fn container_name(host_id: &str, run_id: &str) -> Result<String, CliError> {
     let word = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-');
     let fits = !run_id.is_empty()
-        && NAME_PREFIX.len() + run_id.len() <= NAME_MAX
+        && NAME_PREFIX.len() + TAG_LEN + 1 + run_id.len() <= NAME_MAX
         && run_id.bytes().all(word);
-    fits.then(|| format!("{NAME_PREFIX}{run_id}"))
+    fits.then(|| format!("{NAME_PREFIX}{}-{run_id}", agent_tag(host_id)))
         .ok_or(CliError::Name)
+}
+
+/// A host id as [`TAG_LEN`] hexadecimal digits (FNV-1a over its bytes): a short stable
+/// stand-in that is in the grammar of container names whatever the id holds. The labels
+/// still say whose a container is; the tag only keeps the names apart.
+fn agent_tag(host_id: &str) -> String {
+    let hash = host_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{hash:016x}")
 }
 
 /// The id `create` printed: its last line.

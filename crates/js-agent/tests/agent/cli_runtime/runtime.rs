@@ -14,8 +14,8 @@ use js_agent_wire::Isolation;
 
 use super::scripted::{Bind, Change, Env, Scripted};
 use super::{
-    BIN, HOST, created, docker, made_at, mount, open, open_at, open_with, platform, settings, spec,
-    thirty_seconds_on,
+    BIN, HOST, NAME_R1, created, docker, made_at, mount, open, open_at, open_with, platform,
+    settings, spec, thirty_seconds_on,
 };
 use crate::support::Scratch;
 
@@ -112,7 +112,7 @@ fn create_builds_the_documented_argv() {
     let expected = strings(&[
         "create",
         "--name",
-        "js-r1",
+        NAME_R1,
         "--label",
         "jobscheduler.dev/agent=h-0123456789abcdef",
         "--label",
@@ -383,26 +383,35 @@ fn refused_jobs_reach_the_runtime_not_at_all() {
     );
 }
 
-/// Asserts that a container is named after its run, `js-<run id>`, right after `create`:
-/// the name is what a failed create is cleaned up by. A run id with a character outside
+/// Asserts that a container is named after its agent and run, `js-<16 digits of the host
+/// id's hash>-<run id>`, right after `create`: the name is what a failed create is cleaned
+/// up by, and the agent part keeps two agents on one runtime from naming alike (another
+/// host id gives another name for the same run). A run id with a character outside
 /// `[A-Za-z0-9._-]`, an empty one, and one that would make the name longer than 128 bytes
-/// are refused before any call, while the longest that fits is taken. It catches a name
-/// the engine would refuse (a failure after the pull), and a name that is not derived from
-/// the run, which cannot be found again.
+/// (108 bytes of run id) are refused before any call, while the longest that fits is
+/// taken. It catches a name the engine would refuse (a failure after the pull), a name
+/// that is not derived from the run, which cannot be found again, and one that two
+/// agents share.
 #[test]
 fn a_container_is_named_after_its_run() {
     let world = docker();
     let mut rt = open(&world);
     rt.create_and_start(&spec("r1")).unwrap();
     let args = created(&world, "r1");
-    assert_eq!(args[..3], strings(&["create", "--name", "js-r1"])[..]);
-    let longest = "a".repeat(125);
+    assert_eq!(args[..3], strings(&["create", "--name", NAME_R1])[..]);
+    let tag = &NAME_R1[3..19];
+    let other = other_agent(&world).create_and_start(&spec("r1")).unwrap();
+    let other_name = world.create_of(&other.0)[2].clone();
+    assert_ne!(other_name, NAME_R1);
+    assert!(other_name.ends_with("-r1") && other_name.starts_with("js-"));
+    assert!(!other_name.contains(tag));
+    let longest = "a".repeat(108);
     for run in ["a.b_c-d", longest.as_str()] {
         rt.create_and_start(&spec(run)).unwrap();
-        assert!(world.names().contains(&format!("js-{run}")), "{run}");
+        assert!(world.names().contains(&format!("js-{tag}-{run}")), "{run}");
     }
     let creates = world.calls_of("create").len();
-    let too_long = "a".repeat(126);
+    let too_long = "a".repeat(109);
     for run in ["", "a b", "a/b", "a:b", "a=b", "\u{e9}", too_long.as_str()] {
         let said = rt.create_and_start(&spec(run)).unwrap_err();
         assert_eq!(
@@ -533,8 +542,14 @@ fn an_ambiguous_create_is_cleaned_up_by_name() {
         );
         assert_eq!(
             world.calls_of("rm"),
-            [strings(&["rm", "--force", "--volumes", "--", "js-r1"])],
-            "{outcome:?}"
+            [strings(&[
+                "rm",
+                "--force",
+                "--volumes",
+                "--",
+                &format!("{:064x}", 1)
+            ])],
+            "{outcome:?}: removed by the id the lookup found"
         );
         assert!(world.calls_of("start").is_empty(), "{outcome:?}");
         start(&mut rt, &world, "r1");
@@ -568,6 +583,117 @@ fn a_cleanup_that_fails_is_reported() {
         said.0,
         "create: unreadable output; the container could not be removed: ps: /bin/sh: exit status: 1"
     );
+}
+
+/// A runtime of another agent (another host id) over the same `world`.
+fn other_agent(world: &Scripted) -> CliRuntime {
+    let runner = Box::new(world.clone());
+    CliRuntime::open(settings(), OTHER, &platform("linux"), made_at, runner).unwrap()
+}
+
+/// The host id of the other agent.
+const OTHER: &str = "h-fedcba9876543210";
+
+/// The name this agent gives the container of `run_id`.
+fn our_name(run_id: &str) -> String {
+    let probe = docker();
+    start(&mut open(&probe), &probe, run_id);
+    probe.names().remove(0)
+}
+
+/// Asserts that a failed `create` of a run never removes another agent's container of
+/// the same run on the same runtime: the other agent's job is still there afterwards, no
+/// `rm` was made, and both agents can run the same run id side by side. It catches a
+/// cleanup that removes by a name any agent can have.
+#[test]
+fn a_failed_create_leaves_another_agents_container_of_the_same_run() {
+    let world = docker();
+    let their = start(&mut other_agent(&world), &world, "r1");
+    let mut rt = open(&world);
+    world.fail("create", 1);
+    let said = rt.create_and_start(&spec("r1")).unwrap_err();
+    assert_eq!(said.0, "create: /bin/sh: exit status: 1");
+    assert_eq!(world.ids(), std::slice::from_ref(&their.0));
+    assert!(world.calls_of("rm").is_empty());
+    let mine = rt.create_and_start(&spec("r1")).unwrap();
+    assert_eq!(world.ids().len(), 2, "the names do not collide");
+    assert!(world.ids().contains(&their.0) && world.ids().contains(&mine.0));
+}
+
+/// Asserts that a container with the name the agent would give a run, which is not the
+/// agent's container of that run, is never removed by the cleanup of a failed `create`
+/// (the name is taken, so the `create` fails): an operator's container without our
+/// labels, another agent's container of the run, the agent's own container of another
+/// run, and one with only the agent's label. No `rm` is made. It catches a removal by
+/// name alone.
+#[test]
+fn a_container_with_our_name_but_not_our_labels_is_never_removed() {
+    let name = our_name("r1");
+    let cases: [(&str, Vec<(&str, &str)>); 4] = [
+        ("an operator's", vec![("team", "ops")]),
+        (
+            "another agent's",
+            vec![(label::RUN, "r1"), (label::AGENT, OTHER)],
+        ),
+        (
+            "ours of another run",
+            vec![(label::RUN, "r2"), (label::AGENT, HOST)],
+        ),
+        ("ours without a run", vec![(label::AGENT, HOST)]),
+    ];
+    for (whose, labels) in cases {
+        let world = docker();
+        let decoy = world.leak_named(&name, &labels);
+        let mut rt = open(&world);
+        let said = rt.create_and_start(&spec("r1")).unwrap_err();
+        assert_eq!(said.0, "create: /bin/sh: exit status: 1", "{whose}");
+        assert_eq!(world.ids(), [decoy], "{whose} container was removed");
+        assert!(world.calls_of("rm").is_empty(), "{whose}");
+    }
+}
+
+/// Asserts that the cleanup looks the container up by its exact name and both labels,
+/// and removes what it finds by its 64-digit id: the `ps` filters are the anchored name
+/// (a dot of the run id escaped), the run label with its value and the agent label with
+/// its value. An answer line that is not an id is not passed to `rm`. It catches a
+/// name filter that matches a longer name, and a removal by name.
+#[test]
+fn the_cleanup_finds_the_container_by_name_and_both_labels() {
+    let world = docker();
+    let mut rt = open(&world);
+    world.ambiguous_create(Err(()));
+    rt.create_and_start(&spec("a.b")).unwrap_err();
+    let name = our_name("a.b");
+    let ps = world.calls_of("ps").remove(0);
+    assert_eq!(
+        ps,
+        strings(&[
+            "ps",
+            "-a",
+            "-q",
+            "--no-trunc",
+            "--filter",
+            &format!("name=^{}$", name.replace('.', "\\.")),
+            "--filter",
+            "label=jobscheduler.dev/run-id=a.b",
+            "--filter",
+            &format!("label=jobscheduler.dev/agent={HOST}"),
+        ])
+    );
+    let rm = world.calls_of("rm");
+    assert_eq!(rm.len(), 1);
+    assert_eq!(
+        rm[0][..4],
+        strings(&["rm", "--force", "--volumes", "--"])[..]
+    );
+    assert_eq!(rm[0][4].len(), 64, "removed by id, not by name");
+
+    let world = docker();
+    let mut rt = open(&world);
+    world.ambiguous_create(Err(()));
+    world.say("ps", "not an id\n\n");
+    rt.create_and_start(&spec("r1")).unwrap_err();
+    assert!(world.calls_of("rm").is_empty());
 }
 
 /// Asserts that the mounts are read back after `create` and before `start`: every bind
@@ -709,6 +835,24 @@ fn the_mount_read_back_and_its_failures() {
         said.0
     );
     assert_eq!(world.ids().len(), 1, "the leak is reported, not hidden");
+}
+
+/// Asserts that the read-back compares the binds as a set: an engine that lists them in
+/// another order than the agent asked for them (here the reverse, and also the order the
+/// agent asked in, which is not the sorted order) is no mismatch. It catches a comparison
+/// of two lists in the order they happen to come in.
+#[test]
+fn the_order_of_the_binds_does_not_matter() {
+    let reversed: [fn(&mut Vec<Bind>); 2] = [|binds| binds.reverse(), |_| ()];
+    for reorder in reversed {
+        let world = docker();
+        let mut rt = open(&world);
+        world.tamper(reorder);
+        let mut job = spec("r1");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        rt.create_and_start(&job).unwrap();
+        assert_eq!(world.calls_of("start").len(), 1);
+    }
 }
 
 /// Asserts what `poll` makes of each state the runtime prints, and what it does when it
@@ -982,15 +1126,14 @@ fn ps_filter_finds_only_labelled() {
     assert_eq!(inspect[4], "{{.State.Status}} {{json .Config.Labels}}");
 }
 
-/// Asserts that a container that was created and never started is removed when the agent
-/// lists its containers, and is not handed to the lifecycle: it holds no process and no
-/// job, but its labels say it is a running one, so taking it over would hold its booking
-/// until the wall time and report a job that never ran as timed out. That is what an
-/// ambiguous create whose cleanup failed leaves behind. A removal that fails is an error
-/// (the list is not complete), and Podman's own name for the state is treated the same.
-/// It catches an orphan adopted as running.
+/// Asserts that listing never removes anything: a container that was created and never
+/// started is listed beside the running ones, even while every removal fails, and no `rm`
+/// is made. (The lifecycle evicts it, which books it while the removal fails; see the
+/// lifecycle tests.) Podman's own name for the state is treated the same. It catches a
+/// listing that one container that cannot be removed makes fail, so that nothing is
+/// adopted at a restart.
 #[test]
-fn a_container_never_started_is_removed_on_adoption() {
+fn a_container_never_started_is_listed_and_not_removed() {
     let world = docker();
     let mut rt = open(&world);
     start(&mut rt, &world, "live");
@@ -999,30 +1142,27 @@ fn a_container_never_started_is_removed_on_adoption() {
         (label::AGENT, HOST),
         (label::CREATED_MS, "1000000"),
     ]);
+    world.fail("rm", 1000);
     let found = rt.list_labelled().unwrap();
-    assert_eq!(by_run(&found), [("live".to_owned(), 0)]);
-    assert!(!world.ids().contains(&orphan), "the orphan was removed");
     assert_eq!(
-        world.calls_of("rm"),
-        [strings(&["rm", "--force", "--volumes", "--", &orphan])]
+        by_run(&found),
+        [("live".to_owned(), 0), ("orphan".to_owned(), 0)]
     );
-
-    world.leak_created(&[(label::RUN, "again"), (label::AGENT, HOST)]);
-    world.fail("rm", 1);
-    let said = rt.list_labelled().unwrap_err();
-    assert_eq!(said.0, "rm: /bin/sh: exit status: 1");
-    assert_eq!(
-        rt.list_labelled().unwrap().len(),
-        1,
-        "removed at the next listing"
-    );
+    let marked = |run: &str| found.iter().find(|f| f.labels[label::RUN] == run);
+    assert!(!marked("live").unwrap().never_started);
+    assert!(marked("orphan").unwrap().never_started);
+    assert!(world.ids().contains(&orphan));
+    assert!(world.calls_of("rm").is_empty());
 
     let podman = Scripted::new("podman version 5.2.1");
     let mut rt = open_with(&podman, "linux", settings());
     let id = podman.leak(&[(label::RUN, "p"), (label::AGENT, HOST)]);
     podman.say("inspect", "configured {}\n");
-    assert_eq!(rt.list_labelled().unwrap(), []);
-    assert!(!podman.ids().contains(&id));
+    let listed = rt.list_labelled().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].never_started);
+    assert!(podman.ids().contains(&id));
+    assert!(podman.calls_of("rm").is_empty());
 }
 
 /// Asserts that the age of a listed container is the time since the agent made it, on
@@ -1257,6 +1397,10 @@ fn hand_over_changes_the_owner_of_the_directory_itself() {
     std::os::unix::fs::symlink(&run, &link).unwrap();
     hand_over(&link, uid, gid).unwrap();
     assert!(hand_over(&dir.path("absent"), uid, gid).is_err());
+    // A link to nothing has an owner of its own to change; following it would fail.
+    let dangling = dir.path("dangling");
+    std::os::unix::fs::symlink(dir.path("nothing-here"), &dangling).unwrap();
+    hand_over(&dangling, uid, gid).unwrap();
 }
 
 /// Asserts that a Docker engine that reports no swap limit support is warned about when
