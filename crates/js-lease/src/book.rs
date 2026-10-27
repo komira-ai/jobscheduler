@@ -128,7 +128,7 @@ impl Record {
     }
 
     /// The lease is ready at `now`: a whole lease's clock starts here, so it expires at
-    /// `now + ttl` (clamped to its wall time) and ends at `now + wall`. A lease with no
+    /// `now + ttl` (at most its wall time) and ends at `now + wall`. A lease with no
     /// token is left as it is.
     fn start_clock(&mut self, now: Timestamp) {
         let Some(token) = self.token.take() else {
@@ -360,10 +360,14 @@ impl Book {
         let request = spec.request();
         let ends_at = now.plus(request.max_wall);
         let whole = *spec.class().admission() == Admission::Whole;
-        // A whole lease waits, pending, for at most the prepare timeout; its own ttl and
-        // wall time start when it is ready.
-        let waits = now.plus(self.settings.prepare_timeout());
-        let expires_at = if whole { waits } else { now.plus(ttl) };
+        // A whole lease waits, pending, for at most the prepare timeout and is not charged
+        // for the wait: its own ttl and wall time start when it is ready, so its maximum
+        // wall time does not clamp the wait.
+        let expires_at = if whole {
+            now.plus(self.settings.prepare_timeout())
+        } else {
+            now.plus(ttl).min(ends_at)
+        };
         let token = whole.then_some(Token {
             ttl,
             wall: request.max_wall,
@@ -373,7 +377,7 @@ impl Book {
             state: LeaseState::Pending,
             host: None,
             acquired_at: now,
-            expires_at: expires_at.min(ends_at),
+            expires_at,
             ends_at,
             whole,
             token,

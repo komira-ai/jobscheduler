@@ -66,7 +66,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// request's maximum wall time.
     ///
     /// A lease of a whole-node class (admission `Whole`) is different while it waits:
-    /// pending, it expires after the settings' prepare timeout, and its ttl and maximum
+    /// pending, it expires after the settings' prepare timeout (600 s unless set), and its ttl and maximum
     /// wall time count from the moment the provider is seen to have it ready (a start
     /// answered `Started`, or a later observation of `Present`), not from this call.
     pub fn acquire(

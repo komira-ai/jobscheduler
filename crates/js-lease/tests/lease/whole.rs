@@ -122,15 +122,27 @@ fn a_whole_lease_never_ready_expires_at_the_prepare_timeout() {
     assert!(table.provider().booked().is_empty());
 }
 
-/// Asserts that the prepare timeout is a setting, and that a pending lease never waits
-/// past its maximum wall time even when the timeout is longer.
+/// Asserts that the prepare timeout is a setting, and that a pending whole lease whose
+/// maximum wall time is shorter than the timeout stays pending past that wall time; once
+/// it is ready its expiry is the ready time plus the lesser of ttl and wall time.
 #[test]
-fn the_prepare_timeout_is_a_setting_bounded_by_the_wall_time() {
+fn the_prepare_timeout_is_a_setting_and_the_wall_time_does_not_clamp_a_pending_lease() {
     let longer = settings().with_prepare_timeout(secs(1000)).unwrap();
     assert_eq!(longer.prepare_timeout(), secs(1000));
-    let (mut table, _clock, _scratch) = table("whole_prepare", longer);
-    pending_whole(&mut table, 100);
-    assert_eq!(info(&table).expires_at, at(T0 + 100_000));
+    let (mut table, clock, _scratch) = table("whole_prepare", longer);
+    pending_whole(&mut table, 40);
+    assert_eq!(info(&table).expires_at, at(T0 + 1_000_000));
+    clock.advance(secs(150));
+    table.provider_mut().script_unknown(Call::Observe, false);
+    let report = table.tick();
+    assert!(report.expired.is_empty());
+    assert_eq!(states(&table), vec![(id(), LeaseState::Pending)]);
+    clock.advance(secs(50));
+    assert_eq!(table.tick().confirmed, vec![id()]);
+    let held = info(&table);
+    assert_eq!(held.state, LeaseState::Held);
+    assert_eq!(held.expires_at, at(T0 + 200_000 + 40_000));
+    assert_eq!(held.ends_at, at(T0 + 200_000 + 40_000));
     let shorter = settings().with_prepare_timeout(secs(30)).unwrap();
     let (mut table, _clock, _scratch) = self::table("whole_prepare_short", shorter);
     pending_whole(&mut table, 3600);

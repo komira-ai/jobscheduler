@@ -22,7 +22,7 @@ pub struct Settings {
 }
 
 /// How long a whole-node lease may wait to be observed ready when nothing says
-/// otherwise.
+/// otherwise: 600 s, the default of [`Settings::prepare_timeout`].
 pub const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Settings {
@@ -47,7 +47,8 @@ impl Settings {
     /// The same settings with `prepare_timeout` as the longest a whole-node lease waits,
     /// pending, to be observed ready. A whole lease's ttl and maximum wall time count from
     /// the moment it is observed ready, so this is the only bound on the wait. It must be
-    /// positive.
+    /// positive; it defaults to [`DEFAULT_PREPARE_TIMEOUT`] (600 s). The request's maximum
+    /// wall time does not shorten the wait.
     pub fn with_prepare_timeout(
         mut self,
         prepare_timeout: Duration,
