@@ -1,4 +1,4 @@
-# Risks K19 to K34
+# Risks K19 to K36
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -34,11 +34,18 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K32. A refusal turns a flapping host into an error.** `no-capable-host` (D35) is final for the caller. A registered host that restarts
   or is briefly tainted could, with no grace, refuse requests that a moment later would have served. Mitigated by counting lost and busy
   hosts as capable, `regain_grace` for requests already queued (D41), and a plain constant code so a caller can retry. Residual: a new
-  submission during a restart of the only capable host is refused. If the owner chooses the other reading of D35, this risk becomes the
-  opposite one: a busy fleet refuses work.
+  submission during a restart of the only capable host is refused.
 - **K33. A booting machine is kept after the demand that launched it went.** A host freed while a later entry's machine boots (D40) leaves a
   machine nobody asked for. The waste is bounded to one boot plus one `idle_timeout`, and `cooldown` stops a loop of launching. Mitigated by
   the idle rule, `max_machines` and the shares in `provider_max_machines`.
 - **K34. The test provider reaches production.** A `static` provider lists hosts by hand and holds no join credential. Mitigated by the
   `--allow-test-providers` flag, which a production deployment does not set, and by a layering test that no production example names the
   kind; the merged `--pool-config` path is the stepping stone until step 54.
+- **K35. Agent fixes wait behind the kbf package.** With `js-agent` shipped in the kbf host package (D42), an urgent agent fix reaches
+  hosts only at the pace of a kbf host release and the coordinator's slots and gates, and a jobscheduler release faster than kbf's is held
+  back by kbf's. Accepted while every agent runs kbf. Mitigated by the server refusing an agent major it does not speak (D44), so a host
+  left behind fails closed and visibly; the triggers that end the coupling are in D45 and [rollout.md](rollout.md).
+- **K36. The host updater has one signer.** The kbf helper verifies a package against kbf's release signer only. A jobscheduler release
+  signed by another key is not installable by it, and widening the trust (a second signer, or one shared signer) widens who can put code
+  on every host. Not solved by this design: it is a security decision for the owner before any option that ships jobscheduler packages
+  through the helper (D45). Until then the agent ships only inside the kbf package.

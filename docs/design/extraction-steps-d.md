@@ -1,4 +1,4 @@
-# Extraction steps 23 to 54
+# Extraction steps 23 to 55
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
 data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
@@ -154,3 +154,13 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     registered GPU hosts are busy and refused with `no-capable-host` when none is registered (D35); no production example declares the
     `static` kind. Installing the agent on the real machines and switching the service is an operational change that needs the owner's go
     for that action (R7); until then the listed pool keeps serving.
+
+**Phase I. Rollout checks.**
+
+55. The compatibility checks of [rollout.md](rollout.md) (D44). The server refuses a `Hello` whose protocol major it does not speak with
+    a plain constant code and keeps the host out of the table; a kbf client reads the server's advertised version and features and fails
+    closed, naming what is missing, before it sends what the server would skip (the `needs` rule of 10.3 generalised to the lease and run
+    APIs). *Proves:* against a fake server, an agent of an unsupported major is refused and no host is registered; a client talking to a
+    server that lacks a feature does not send the request; a server that speaks majors 1 and 2 serves both at once; a cross-version
+    matrix row runs the previous release of each of server, agent and client against the current of the others. The version-pair check
+    between `js-agent` and `kbf-executor` is written only if they ever ship apart (D45); until then one package version covers both.

@@ -38,7 +38,7 @@ hosts are capable: both end without anyone replacing the machine. **Tainted host
 reimages the machine and clears it (machines.md, 5.12), so waiting for it would be an unbounded wait for an unplanned human action; the
 caller should be told. Draining hosts are not capable for a new request, because they are leaving.
 
-**Admission against registered hosts (open decision D35).** Let the *hierarchy* of the request's pool be its ordered providers (below).
+**Admission against registered hosts (D35, settled).** Let the *hierarchy* of the request's pool be its ordered providers (below).
 
 1. If some host of the pool is capable, the request is accepted and queued; it is placed when a capable host is free (6.1).
 2. Otherwise, if an elastic provider of the hierarchy *could launch* a machine that meets the request (the pool's shape holds the booking;
@@ -58,9 +58,7 @@ of 0 or is disabled, is refused with `no-capable-host`, because no acquire could
 selectors that match no pool is refused at selection, as today, with the existing code. The refusal covers the request's constraints, its
 shape and its class together: a GPU request (D32) in a pool without a registered GPU host is refused, not queued.
 
-*The alternative (the other reading of D35).* Refuse whenever no host is free now. It is simple, and a caller never waits, but a busy fleet
-then looks like a broken one: a burst against a single registered GPU host would be refused for every request after the first, and the
-caller would have to build the queue the scheduler exists to provide. The recommendation is the reading above.
+*Considered and rejected (D35).* Refusing whenever no host is free now: a busy fleet then looks like a broken one, and every caller would have to build the queue the scheduler exists to provide.
 
 **What happens to queued requests when capability goes.** A queued request is re-checked in the tick at which the table changes (a
 deregister, a removal, a taint, an eviction, an age-out). One whose last capable path has gone (no capable registered host, and no

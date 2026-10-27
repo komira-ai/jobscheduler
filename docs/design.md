@@ -87,7 +87,7 @@ The decisions, in one place:
     volume; kbf is a client and `js-agent` registers with it. The single-host `js-lease-server` is the stepping stone (5.16, D33).
 19. **The operator-listed pool is for testing; a request no host could ever serve is refused.** Production hosts register. A request
     that no registered host (and no elastic provider) could ever satisfy is refused with `no-capable-host`; one a busy host could serve
-    waits (D35, open; [design/providers.md](design/providers.md)).
+    waits (D35, settled; [design/providers.md](design/providers.md)).
 
 ### 1.1 What this amendment deletes and adds
 
@@ -118,10 +118,14 @@ Added by the amendment after that (the owner's review of this design), text in [
 pool, whose hosts the operator lists, is **for testing only**, and the GPU machines move to registering through `js-agent` (5.5, 5.9); a
 `default` provider (the `DefaultProvider`: hosts that register themselves, never creating or destroying compute), with admission against
 registered hosts that refuses a request no host could ever serve with `no-capable-host` and queues one a busy host could serve (D35,
-open); elastic providers whose launched machine runs `js-agent` and registers itself, the provider's job ending at boot plus registration;
+settled); elastic providers whose launched machine runs `js-agent` and registers itself, the provider's job ending at boot plus registration;
 a per-pool **provider hierarchy**, an ordered list that falls through only when an earlier entry cannot satisfy now (5.8); steps 30c, 31c and
-54; D35 to D41; K32 to K34. Deleted: `min_machines` everywhere (the key, its validation, the scaling rule that kept a floor, the floor
+54; D35 (settled by the owner; reading (a)) to D41; K32 to K34. Deleted: `min_machines` everywhere (the key, its validation, the scaling rule that kept a floor, the floor
 choice of D21 and D23(c), the mitigation in K11): pools specify `max_machines` only, and nothing is kept warm. The `register = true` provider flag becomes the `default` kind.
+
+Added by the rollout amendment: D35 settled by the owner (reading (a); the other reading is recorded as considered and rejected); section 17
+and [design/rollout.md](design/rollout.md), rolling out the server, the agents and kbf as two services without generalising kbf's update
+coordinator; D42 to D45; K35 and K36; step 55.
 
 ## 2. Goals and non-goals
 
@@ -887,13 +891,14 @@ and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
 accounting (44), several runs per lease (45), whole-node readiness (46), the first real driver (47); the size fields of step 43 wait for D26.
 **Phase G, steps 48 to 53 (one service in Kubernetes)**: readiness (48), the boot grace (49), the state check (50), manifests and image
 (51), the client side (52), the move from the single host (53). Step 54 (the GPU machines register through `js-agent`, retiring the operator-listed
-pool) closes the stepping stone. All are in [design/extraction-steps-d.md](design/extraction-steps-d.md).
+pool) closes the stepping stone. Step 55 (the rollout checks: the server's refusal of an agent major it does not speak, and the
+version-pair check) follows. All are in [design/extraction-steps-d.md](design/extraction-steps-d.md).
 
 ## 15. Decisions
 
-The full text of every decision, D1 to D41, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
-the open ones. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
-D41 with no gaps; D26 (no recommendation yet) and D35 are open. A superseded decision says by which.
+The full text of every decision, D1 to D45, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
+D35. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
+D45 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
 
 - D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
   restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
@@ -908,21 +913,24 @@ D41 with no gaps; D26 (no recommendation yet) and D35 are open. A superseded dec
 - D26 macOS VM sizing (**open**). D27 how sets and counters ride the wire. D28 runtime traits for VMs. D29 a fresh VM per run (settled). D30
   readiness of a whole-node lease. D31 matching what is inside an image. D32 GPU placement (settled; amended by D35 and D36). D33
   deployment shape and state store. D34 leases across a restart.
-- **D35. Admission against registered hosts. OPEN, for the project owner.** What does a pool of registered hosts do with a request they
-  cannot serve right now? (a) **Refuse only when no registered host could ever satisfy the request's constraints and shape** (a host that
-  exists, is not tainted and is busy, lost or cordoned is capable): `no-capable-host`, at submit, unless an elastic provider of the pool
-  could launch a machine that meets it (a launch counts as possible only once every slot that can free is counted as freed: tainted and
-  denied hosts hold their slot until an operator acts, and a disabled entry or one with a zero share launches nothing); when a capable
-  host exists but is busy, the request waits in the queue. (b) **Refuse whenever no host is free now.** The recommendation is (a): (b)
-  turns a busy fleet into errors and puts a queue in every caller, while (a) refuses only what no wait serves. A queued request whose last
-  capable path goes waits `regain_grace` before it is refused (D41). If the owner picks (b), the check becomes "no free capable host and
-  nothing launchable" and `regain_grace` goes. Text in [design/providers.md](design/providers.md).
+- **D35. Admission against registered hosts (settled by the project owner: reading (a)).** A request is refused with `no-capable-host`, at
+  submit, only when no registered host could ever satisfy its constraints and shape (a host that exists, is not tainted and is busy, lost
+  or cordoned is capable), unless an elastic provider of the pool could launch a machine that meets it (a launch counts as possible only
+  once every slot that can free is counted as freed: tainted and denied hosts hold their slot until an operator acts, and a disabled
+  entry or one with a zero share launches nothing). When a capable host exists but is busy, the request waits in the queue. A queued
+  request whose last capable path goes waits `regain_grace` before it is refused (D41). Refusing whenever no host is free now was
+  considered and rejected: it turns a busy fleet into errors and puts a queue in every caller. Text in [design/providers.md](design/providers.md).
 - D36 the static pool is for testing only (settled): the operator-listed pool is a test provider; production hosts register through
   `js-agent`; the GPU lease service's listed pool is the stepping stone (step 54). D37 the default provider never creates or destroys
   compute, and an elastic provider boots a machine whose agent registers itself (direction settled). D38 no minimum machines anywhere
   (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
   cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the
   booting machine is kept and released by the idle rule. D41 what is capable and what happens to queued requests when capability goes.
+- D42 kbf's update coordinator is not generalised: one version per host, js-agent and kbf-executor ship in the one kbf host package, and the
+  server updates by its own redeploy (settled; adopted from the coordinator's owner). D43 rollout order: server, then hosts, then kbf
+  frontends. D44 compatibility rules: majors, additive fields, the server refuses an agent major it does not speak, a version-pair check at
+  the agent if the two ever ship apart, frontends check the server's advertised version. D45 what would change the plan, and the signer
+  decision that comes before any option. Text in [design/rollout.md](design/rollout.md).
 
 ## 16. Risks
 
@@ -969,7 +977,21 @@ D41 with no gaps; D26 (no recommendation yet) and D35 are open. A superseded dec
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,
   `cooldown` and `max_machines`, and by `max_taints_in_a_row` stopping replacement with an alert (5.12).
-- **K19 to K34** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), for the
+- **K19 to K36** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), for the
   service one pod as one point of outage (K28), the whole-file rewrite (K29), the volume as the state (K30), root for secrets (K31), and
   for providers a refusal that a flapping host turns into an error (K32), a booting machine kept after its demand went (K33) and the test
-  provider reaching production (K34).
+  provider reaching production (K34), and for rollouts the agent fixes held behind the kbf package (K35) and the host updater's one signer
+  (K36).
+
+## 17. Rolling out two services
+
+jobscheduler is the distributed service (a server, and `js-agent` on every host); kbf is a frontend that talks to it, so a release touches
+two services. Detail, D42 to D45 and the risks: [design/rollout.md](design/rollout.md).
+- **Who updates what.** The server updates by its own Kubernetes redeploy ([design/deployment.md](design/deployment.md); an operator act
+  with the owner's go, R7). Hosts update through kbf's update coordinator, not generalised (D42): `js-agent` and `kbf-executor` ship
+  together in the one kbf host package it installs, so its one version per host covers both. kbf frontends update with kbf.
+- **Order (D43).** The jobscheduler server first, then hosts (the kbf coordinator, with its own slots and gates), then kbf frontends once
+  the server they call supports what they send. Elastic machines boot the current image, so scale-up is their update path.
+- **Compatibility (D44).** Protocol majors, with additive fields inside a major (R3, 10.3); the server speaks every major its agents and
+  kbf clients use and refuses an agent major it does not speak; kbf clients check the server's advertised version; a version-pair check
+  at the agent if `js-agent` and `kbf-executor` ever ship apart. D45 lists what would change the plan (K35, K36).

@@ -1,8 +1,8 @@
-# Decisions D1 to D41
+# Decisions D1 to D45
 
-Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and the open ones in full.
+Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D41 with no gaps. D26 and D35 are open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D45 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -116,16 +116,13 @@ marked settled. The ids run D1 to D41 with no gaps. D26 and D35 are open. Supers
 - **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
   (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
   Recommend (b), the grace set to the default TTL (step 49).
-- **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. OPEN, for the project owner.**
-  The question is what a `DefaultProvider` pool does with a request its registered hosts cannot serve right now. (a) **Refuse only when no
-  registered host could ever satisfy the request's constraints and shape** (a host that exists, is not tainted and is merely busy, lost or
-  cordoned is capable); the request is refused at submit with `no-capable-host` unless an elastic provider of the pool could launch a
-  machine that meets it; when a capable host exists but is busy, the request waits in the queue. (b) **Refuse whenever no host is free
-  now.** Recommend (a): (b) turns an ordinary busy fleet into errors and moves the queue into every caller (two requests for the one GPU
-  host would refuse the second), while (a) refuses exactly the requests that no amount of waiting serves. A queued request whose last
-  capable host leaves keeps waiting for `regain_grace` before it is refused (D41). The owner's answer picks (a) or (b); under (b) the
-  `no-capable-host` check is replaced by "no free capable host and nothing in flight or launchable" and `regain_grace` goes away. Text in
-  [providers.md](providers.md).
+- **D35. Admission against registered hosts: refuse when no host could ever serve, queue when one is busy. Settled by the project owner
+  (reading (a)).** A `DefaultProvider` pool refuses a request with `no-capable-host`, at submit, only when no registered host could ever
+  satisfy its constraints and shape (a host that exists, is not tainted and is merely busy, lost or cordoned is capable), unless an
+  elastic provider of the pool could launch a machine that meets it; when a capable host exists but is busy, the request waits in the
+  queue. A queued request whose last capable host leaves keeps waiting for `regain_grace` before it is refused (D41). Refusing whenever no
+  host is free now was considered and rejected: it turns an ordinary busy fleet into errors and moves the queue into every caller (two
+  requests for the one GPU host would refuse the second). Text in [providers.md](providers.md).
 - **D36. The static pool is for testing only. Settled by the project owner.** Operator-listed hosts are a test provider: `js-pool-static`
   stays for tests and conformance, a production configuration declares none (`--allow-test-providers` gates it), and every production host
   registers through `js-agent`. The single-host GPU lease service's operator-listed pool (`--pool-config`) is the stepping stone: its two
@@ -160,3 +157,25 @@ marked settled. The ids run D1 to D41 with no gaps. D26 and D35 are open. Supers
   queued request whose last capable host leaves (and no elastic provider could serve it) waits `regain_grace` (default 5 minutes on the
   injected clock) and is then refused with `no-capable-host`; a new submission gets no grace. Alternatives: refuse at once (a routine agent
   restart would refuse every queued request), or wait for ever (a wait nobody can end). Recommend the grace.
+- **D42. kbf's update coordinator is not generalised; one version per host. Settled by the project owner, on the advice of the owner of
+  kbf's update coordinator.** That coordinator is single-service today (one desired version per host, limits keyed by kbf's four roles, one
+  heartbeat version and health per host, a helper that installs one signed kbf package). Options: (a) generalise it to a service map now;
+  (b) leave it as it is. Adopted: (b). The jobscheduler server updates by its own Kubernetes redeploy ([deployment.md](deployment.md); an
+  operator act with the owner's go, R7). When kbf's daemon splits into `js-agent` plus `kbf-executor` (9.2), both ship in the one kbf host
+  package the updater already installs, so a host keeps one version and the coordinator needs no change. Rejected (a): it buys nothing
+  while every agent runs kbf, and it changes a working updater and its trust. Text in [rollout.md](rollout.md).
+- **D43. Rollout order. Settled by the project owner.** The jobscheduler server first; then hosts (`js-agent` with `kbf-executor` in the
+  kbf package, rolled by kbf's coordinator with its own slots and gates); then kbf frontends, as clients, once the server they call
+  supports what they send. Servers before agents is the wire rule (10.3). Elastic machines boot the current image at launch, so scale-up
+  is their update path. Text in [rollout.md](rollout.md).
+- **D44. Compatibility rules between server, agent and kbf. Settled by the project owner.** Protocol majors, with additive fields inside a
+  major (R3, 10.3); the server speaks every protocol major that its agents and kbf clients use, and refuses an agent major it does not
+  speak; kbf clients negotiate or check the server's advertised version and features before sending what an older server would skip; if
+  `js-agent` and `kbf-executor` ever ship apart, a version-pair check at the agent (it refuses a start it cannot pair) and not a service
+  map in the coordinator. Step 55.
+- **D45. What would change D42, and the decision that comes first. Direction settled; each trigger is decided when it happens.** (1) A
+  `js-agent` population that does not run kbf and must be updated: a second coordinator instance, or replace-not-update for elastic
+  machines. (2) `js-agent` and `kbf-executor` on different release cadences with a required order: the version-pair check at the agent
+  first, not a coordinator service map. (3) jobscheduler releasing faster than kbf with urgent agent fixes: package coupling hurts (K35),
+  and the options are reopened. (4) The kbf helper's single signer not extending to jobscheduler's release signer: a security decision
+  for the owner before any option (K36).
