@@ -4,10 +4,11 @@
 //!
 //! The library is the program: [`run_with`] takes the arguments, the streams to print to
 //! and the [`Services`] (the commands and files it reads the host from, the transport to
-//! the server, the sleeper and the jitter), and `main` calls [`main`], which supplies the
-//! machine's own. The usage sampler reads time only through [`usage::MonotonicClock`], which the
-//! caller hands it; apart from that and the runtime's own timestamps, time passes only
-//! in the sleeper.
+//! the server, the sleeper and the jitter, and the [`Machine`] its jobs run on), and `main`
+//! calls [`main`], which supplies the machine's own. The usage sampler reads time only
+//! through [`usage::MonotonicClock`], which the caller hands it; apart from that and the
+//! runtime's own timestamps, time passes only in the sleeper. The one clock of the jobs is
+//! the monotonic one the [`Machine`] gives, which the worker and the session share.
 //!
 //! # Flags
 //!
@@ -28,20 +29,41 @@
 //! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required with `--container-bin`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on a disk of its own (a job that fills a shared disk makes the marker unwritable). The agent refuses a state root whose `st_dev` equals that of any mount root or the scratch root; that is a best-effort guard, not the guarantee: subvolumes that share free space have distinct device numbers, and the engine's data root and container layers are not compared. The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it |
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
-//! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
+//! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); `userns-remap` is not supported either (the container user shows as another uid on the host); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; any named network gives a job egress to whatever it reaches, the host's metadata endpoint included, and the agent warns at start; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the user containers run as, both above zero; by default `65534:65534`; an agent that runs as root gives each run's scratch directory to this user, any other agent refuses to start unless this is its own `uid:gid`; needs `--container-bin` |
 //! | `--container-host <uri>` | the engine to talk to: a socket on this machine, `unix:///<path>`, passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; `tcp://` and `ssh://` are refused (the post-job checks read this machine, and a job on another one would pass them all); needs `--container-bin` |
 //! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
+//! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
+//! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
-//! What they configure is the [`lifecycle`] and the post-job [`integrity`] checks, which no
-//! change has connected to the session yet: today the flags are validated and nothing runs
-//! a job. A marker that is already in the state root is reported on stderr at start.
+//! A marker that is already in the state root is reported on stderr at start.
 //! Container jobs are Linux-only (the checks read `/proc`): `--container-bin` on a Mac ends
 //! the agent with exit status 2.
+//!
+//! # Jobs
+//!
+//! Without `--container-bin` the agent registers and heartbeats and starts nothing; a
+//! `Start` the server sends it is ignored (and counted in the log). With it, the agent
+//! builds the container runtime (Docker or Podman by their command line), takes the
+//! baseline of the host for the post-job checks, opens the taint marker, adopts the
+//! containers an earlier process of this agent left, and starts the [`Worker`], the thread
+//! that owns the [`lifecycle`]: it runs every call into the engine, so a slow engine never
+//! delays a heartbeat. The first hello lists what was adopted.
+//!
+//! From then on each heartbeat carries the runs the agent holds, the results the server has
+//! not acknowledged and the taint to report; each reply's commands go to the worker in
+//! order (a command it refuses is logged by its place in the reply), its result
+//! acknowledgements let the worker drop the results it sent, and its `taint_ack` counts
+//! only when the heartbeat it answers carried the taint. See [`Session`] and [`Worker`]
+//! for the details and [`lifecycle`] for what the agent guarantees per job.
+//!
+//! The agent that cannot start its jobs' half (the engine is not Docker or Podman or does
+//! not answer, the agent cannot see the host, the containers of an earlier run cannot be
+//! listed) ends with exit status 2 before it registers.
 //!
 //! # What is detected
 //!
@@ -87,8 +109,14 @@
 //! jittered backoff ([`Backoff`](crate::Backoff)), longer when the server sent
 //! `Retry-After`, up to a bound.
 //!
-//! SIGTERM and SIGINT make the agent send one last heartbeat with the phase `draining`
-//! and exit 0, so the server leases the host no more.
+//! SIGTERM and SIGINT make the agent send a heartbeat with the phase `draining` and exit
+//! 0, so the server leases the host no more. With jobs the agent first drains (see
+//! [`drive`] for the whole of it): it takes no new job, announces `draining` at once, lets
+//! the running jobs finish for `--drain-wait`, then stops them, and goes on heartbeating
+//! until the server has acknowledged every result and the host holds no run, or `--stop-grace`
+//! and [`DRAIN_SETTLE`] more have passed. A second signal ends it at once. A result that
+//! is not acknowledged is never dropped: its run stays listed, and a container that is
+//! still there is adopted by the next process.
 //!
 //! # A whole-node lease
 //!
@@ -97,9 +125,10 @@
 //! `exclusive_refused` (`host-unsafe` for a finding, `not-quiet` when a run is still held
 //! after `prepare_timeout`), then `restoring` when the reply stops naming the lease; see
 //! the `exclusive` module for the sequence and [`lifecycle::Lifecycle::prepare`] for what
-//! quiet means. The agent started by [`run_with`] does not run jobs yet, so it gives the
-//! session no host and ignores `exclusive`; the change that wires the lifecycle to the
-//! session implements [`Quiesce`] on its worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
+//! quiet means. The agent started by [`run_with`] gives the
+//! session no [`Quiesce`]: the job [`Worker`] does not implement it, so with `--container-bin`
+//! too an `exclusive` lease is ignored (the heartbeat names no phase for it) and jobs go on
+//! as before; a later change implements [`Quiesce`] on the worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
 //! until a flag sets it. The VM check of the design is a later change; the readiness hook
 //! (`--readiness-hook`, see `readiness`) wraps the host in [`Hooked`].
 //!
@@ -112,8 +141,9 @@
 //!
 //! # Exit status
 //!
-//! 0 after a stop request, 1 when the program cannot install its signal handlers, 2 for
-//! a flag or file that is wrong and for a server that refuses the host for good.
+//! 0 after a stop request, 1 when the program cannot install its signal handlers or its
+//! job worker stops, 2 for a flag or file that is wrong, a job engine that cannot be used
+//! and a server that refuses the host for good.
 
 mod backoff;
 mod cli;
@@ -123,18 +153,22 @@ mod exclusive;
 mod facts;
 mod host;
 pub mod integrity;
+mod jobs;
 pub mod lifecycle;
 mod readiness;
 mod run;
 mod session;
 mod signals;
+mod system;
 mod transport;
 pub mod usage;
+mod worker;
 
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 
@@ -147,15 +181,18 @@ pub use facts::{
     Platform, Ran, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
+pub use jobs::DRAIN_SETTLE;
 use lifecycle::{Local, StateRoot};
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
     ReadinessHook, Verdict, hook_runner,
 };
 pub use run::{Exit, Sleeper, Wake, drive};
-pub use session::{Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
+pub use session::{Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
 pub use signals::SystemSleeper;
+pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
+pub use worker::{Handle, LINES_CAP, Plan, QUEUE, STEP_EVERY, Snapshot, Worker};
 
 /// The exit statuses of `js-agent`.
 pub mod exit {
@@ -194,6 +231,11 @@ pub struct Services<'a> {
     pub jitter: &'a mut dyn Jitter,
     /// Lets time pass and reports stop requests.
     pub sleeper: &'a mut dyn Sleeper,
+    /// The clock, the container runtime and the host view of the jobs, when
+    /// `--container-bin` is given.
+    pub machine: Arc<dyn Machine>,
+    /// Told of the job worker once it has started (a test's way to wait for it).
+    pub worker_hook: Option<&'a dyn Fn(Handle)>,
 }
 
 /// Why the program ends without a stop request.
@@ -204,6 +246,8 @@ enum Failure {
     Usage(String),
     /// The server refused the host for good.
     Fatal(Fatal),
+    /// The job worker is gone.
+    Worker(String),
 }
 
 /// The program, with the machine's own services.
@@ -235,6 +279,8 @@ pub fn main_with(
                 connector: &Dialer,
                 jitter: &mut SystemJitter,
                 sleeper: &mut sleeper,
+                machine: Arc::new(System::new()),
+                worker_hook: None,
             };
             run_with(args, out, err, services)
         }
@@ -274,8 +320,8 @@ fn execute(
     // The hook is checked now for the same reason; the change that wires the lifecycle
     // to the session wraps its host in `Hooked`.
     ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
-    // The job flags are checked now so a wrong one stops the agent before it registers.
-    // The change that runs jobs builds the lifecycle from them.
+    // The job flags are checked now so a wrong one stops the agent before it registers;
+    // the worker is built from them below, before the first hello.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
     local
         .check_filesystems(services.files)
@@ -320,10 +366,17 @@ fn execute(
             SUGGESTED_WATCH_DIRS.join(", ")
         );
     }
+    let (machine, hook) = (&services.machine, services.worker_hook);
+    let started = jobs::start(local, &offer.hello, platform, machine, hook, err);
+    let jobs = started.map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
+    if let Some((worker, drain)) = &jobs {
+        session = session.with_jobs(worker, *drain);
+    }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),
         Exit::Fatal(fatal) => Err(Failure::Fatal(fatal)),
+        Exit::Failed(why) => Err(Failure::Worker(why)),
     }
 }
 
@@ -339,6 +392,7 @@ fn finish(result: Result<(), Failure>, out: &mut dyn Write, err: &mut dyn Write)
         }
         Err(Failure::Usage(why)) => fail(err, &why, exit::USAGE),
         Err(Failure::Fatal(fatal)) => fail(err, &fatal, exit::USAGE),
+        Err(Failure::Worker(why)) => fail(err, &why, exit::FAILED),
     }
 }
 

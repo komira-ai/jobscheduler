@@ -173,6 +173,17 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub readiness_hook_args: Vec<String>,
+    /// How many seconds a container gets to stop on its own before it is killed, whenever
+    /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
+    /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.
+    #[arg(long, value_name = "SECONDS")]
+    pub stop_grace: Option<u64>,
+    /// How many seconds SIGTERM and SIGINT let the running jobs finish before the agent
+    /// stops them. The agent announces that it drains at once, takes no new job, and sends
+    /// the results of the jobs as they end. By default the stop grace; at most 3600. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "SECONDS")]
+    pub drain_wait: Option<u64>,
 }
 
 /// `name=path` split at the first `=`.

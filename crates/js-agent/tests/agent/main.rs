@@ -17,6 +17,7 @@ mod exclusive;
 mod facts;
 mod flags;
 mod integrity;
+mod jobs;
 mod lifecycle;
 mod readiness;
 mod server;

@@ -1,0 +1,405 @@
+//! The lifecycle's own thread.
+//!
+//! Every call into the container runtime blocks: an image pull, the grace of a stop, a
+//! daemon that is slow to answer. The session must never wait for one, or a slow engine
+//! would make the agent miss its heartbeats and the server would give up the host. So the
+//! [`Lifecycle`] lives on a thread of its own, made by [`Worker::start`], and the session
+//! reaches it only through this module:
+//!
+//! - **Replies go in through a bounded queue** ([`QUEUE`] orders). [`Worker::try_deliver`]
+//!   never waits: when the worker is busy and the queue is full the reply is dropped and
+//!   the caller says so. Nothing is lost for good: the server resends a start until the
+//!   run is listed, a stop until it leaves the held list, a cancel for as long as the host
+//!   lists the run, the acknowledgement of every result the heartbeat still carries and
+//!   the acknowledgement of every heartbeat that carries the taint.
+//! - **State comes out as a snapshot.** After every order and every step the worker
+//!   publishes the held runs, the results not yet acknowledged and the taint to report
+//!   ([`Snapshot`]); [`Worker::snapshot`] copies it under a lock that is held only to
+//!   swap it, never across a runtime call.
+//! - **The worker steps by itself.** It calls [`Lifecycle::step`] after each order and
+//!   whenever it has had none for the step interval of its [`Plan`], so a container that
+//!   exited is found whether or not the server said anything.
+//! - **The runtime is made on the worker thread**, by the [`Machine`] of the plan, so it
+//!   needs no `Send` bound. The lifecycle is built (and the containers the previous
+//!   process left are adopted) before [`Worker::start`] returns, so the first hello can
+//!   list them.
+//! - **What the worker does is logged by the session thread**: the lifecycle's events
+//!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
+//!   counted and dropped) and the loop around the session prints them.
+//!
+//! A worker that dies (a panic in a runtime) is seen by [`Worker::ended`]; the session
+//! then ends the agent, because jobs nobody supervises must not go on being listed.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
+
+use js_agent_wire::{Command, HeartbeatReply, HeldRun, RunResult, Taint};
+
+use crate::cli_runtime::Settings;
+use crate::facts::Platform;
+use crate::integrity::Integrity;
+use crate::lifecycle::{Config, Event, Lifecycle};
+use crate::system::{Machine, RuntimeBuild, SharedClock};
+
+/// How many orders wait for the worker. Replies beyond it are dropped, see the module.
+pub const QUEUE: usize = 16;
+
+/// How long the worker waits for an order before it steps the lifecycle by itself.
+pub const STEP_EVERY: Duration = Duration::from_secs(1);
+
+/// The most log lines kept for the session thread to print.
+pub const LINES_CAP: usize = 256;
+
+/// What the worker is made from. Everything in it is handed to the worker thread.
+pub struct Plan {
+    /// How the lifecycle is set up.
+    pub config: Config,
+    /// The checked container flags.
+    pub settings: Settings,
+    /// The id the agent registered under.
+    pub host_id: String,
+    /// The platform the agent runs on.
+    pub platform: Platform,
+    /// The directories the post-job checks watch.
+    pub watch: Vec<PathBuf>,
+    /// The clock, the runtime and the host view.
+    pub machine: Arc<dyn Machine>,
+    /// How long the worker waits for an order before it steps by itself.
+    pub step_every: Duration,
+}
+
+/// What the next heartbeat carries of the jobs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Every run the agent holds.
+    pub held: Vec<HeldRun>,
+    /// The results the server has not acknowledged.
+    pub results: Vec<RunResult>,
+    /// The taint to report, until the server acknowledges it.
+    pub taint: Option<Taint>,
+}
+
+impl Snapshot {
+    fn of(life: &Lifecycle) -> Self {
+        Self {
+            held: life.held(),
+            results: life.results(),
+            taint: life.pending_taint(),
+        }
+    }
+
+    /// Whether the agent holds nothing and owes nothing.
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty() && self.results.is_empty()
+    }
+}
+
+/// What the session thread asks of the worker.
+enum Order {
+    /// A heartbeat reply, and when it arrived on the lifecycle's clock.
+    Reply {
+        reply: Box<HeartbeatReply>,
+        received_ms: u64,
+    },
+    /// Look at the flags and step: there is no other work.
+    Nudge,
+    /// Answer on `0` once every order before this one is done and one step more is.
+    Settle(SyncSender<()>),
+}
+
+/// The worker's side of the lock: what it published.
+#[derive(Default)]
+struct Published {
+    snapshot: Snapshot,
+    lines: VecDeque<String>,
+    lost: u64,
+}
+
+/// Everything both threads see.
+#[derive(Default)]
+struct Shared {
+    published: Mutex<Published>,
+    changed: Condvar,
+    /// The agent takes no new job: a `Start` is not acted on.
+    closed: AtomicBool,
+    /// Stop every run the agent holds, once.
+    stop_all: AtomicBool,
+    /// The worker thread has ended: it returned, or it panicked.
+    ended: AtomicBool,
+}
+
+/// Marks the worker as ended when the thread leaves, however it leaves. It is dropped
+/// before the thread's channel is, so a caller that finds its order unanswered because the
+/// thread is gone finds the mark set.
+struct Ending<'a>(&'a Shared);
+
+impl Drop for Ending<'_> {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::SeqCst);
+        self.0.changed.notify_all();
+    }
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Published> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn publish(&self, snapshot: Snapshot, lines: Vec<String>) {
+        let mut published = self.lock();
+        published.snapshot = snapshot;
+        for line in lines {
+            match published.lines.len() < LINES_CAP {
+                true => published.lines.push_back(line),
+                false => published.lost += 1,
+            }
+        }
+        drop(published);
+        self.changed.notify_all();
+    }
+}
+
+/// A way to talk to the worker that can be copied: for a test to wait for it.
+#[derive(Clone)]
+pub struct Handle {
+    orders: SyncSender<Order>,
+    shared: Arc<Shared>,
+}
+
+impl Handle {
+    /// Waits until the worker has done every order sent before this call and one step
+    /// more, and published. False when the worker ended first.
+    pub fn settle(&self) -> bool {
+        let (done, finished) = sync_channel(1);
+        // A worker that is gone drops the order, and with it `done`.
+        let _ = self.orders.send(Order::Settle(done));
+        finished.recv().is_ok()
+    }
+
+    /// Waits until `ready` holds of the published snapshot, for at most `guard`: a guard
+    /// against a hang, not a time the caller expects. False when the guard ran out.
+    pub fn wait_until(&self, ready: &dyn Fn(&Snapshot) -> bool, guard: Duration) -> bool {
+        let published = self.shared.lock();
+        let waited = self
+            .shared
+            .changed
+            .wait_timeout_while(published, guard, |published| !ready(&published.snapshot))
+            .unwrap_or_else(PoisonError::into_inner);
+        !waited.1.timed_out()
+    }
+
+    /// What the next heartbeat would carry.
+    pub fn snapshot(&self) -> Snapshot {
+        self.shared.lock().snapshot.clone()
+    }
+
+    /// Whether the worker thread has ended.
+    pub fn ended(&self) -> bool {
+        self.shared.ended.load(Ordering::SeqCst)
+    }
+}
+
+/// The session thread's end of the worker.
+pub struct Worker {
+    handle: Handle,
+    clock: SharedClock,
+}
+
+impl Worker {
+    /// Starts the worker thread, builds the lifecycle on it from `plan` and adopts the
+    /// containers the previous process left. Returns when that is done.
+    ///
+    /// # Errors
+    ///
+    /// The runtime or the checks cannot be made, the runtime cannot list its containers
+    /// (the agent must not say hello with a held list it does not know), or the thread
+    /// died while it built them. The text says why.
+    pub fn start(plan: Plan) -> Result<Self, String> {
+        let (orders, inbox) = sync_channel(QUEUE);
+        let (ready, built) = sync_channel(1);
+        let shared = Arc::new(Shared::default());
+        let clock = plan.machine.clock();
+        let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
+        // The thread is not joined: the agent ends with the process, and a container that
+        // is still there is adopted by the next one.
+        thread::spawn(move || {
+            let _ending = Ending(&own);
+            match build(plan, thread_clock) {
+                Err(why) => {
+                    let _ = ready.send(Err(why));
+                }
+                Ok((life, lines)) => {
+                    own.publish(Snapshot::of(&life), lines);
+                    let _ = ready.send(Ok(()));
+                    work(life, &inbox, &own, step_every);
+                }
+            }
+        });
+        let outcome = match built.recv() {
+            Ok(outcome) => outcome,
+            Err(_) => Err("the job worker stopped while it started".to_owned()),
+        };
+        outcome.map(|()| Self {
+            handle: Handle { orders, shared },
+            clock,
+        })
+    }
+
+    /// A copy of the handle, for waiting on the worker.
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    /// What the next heartbeat carries.
+    pub fn snapshot(&self) -> Snapshot {
+        self.handle.snapshot()
+    }
+
+    /// Hands a reply to the worker without waiting; false when the worker is busy and the
+    /// reply was dropped. The reply is stamped with the clock now, so a start that waits
+    /// in the queue has its `valid_for_ms` counted from the moment it arrived.
+    pub fn try_deliver(&self, reply: HeartbeatReply) -> bool {
+        let received_ms = self.clock.now_ms();
+        let reply = Box::new(reply);
+        let order = Order::Reply { reply, received_ms };
+        self.handle.orders.try_send(order).is_ok()
+    }
+
+    /// From now on a `Start` is not acted on. Stops, cancels and acknowledgements still
+    /// are.
+    pub fn close(&self) {
+        self.handle.shared.closed.store(true, Ordering::SeqCst);
+        let _ = self.handle.orders.try_send(Order::Nudge);
+    }
+
+    /// Stops every run the agent holds, once. Each result is sent and acknowledged as
+    /// for any stop.
+    pub fn stop_all(&self) {
+        self.handle.shared.stop_all.store(true, Ordering::SeqCst);
+        let _ = self.handle.orders.try_send(Order::Nudge);
+    }
+
+    /// The lines the worker wants printed since the last call; a first line says how many
+    /// were dropped when more than [`LINES_CAP`] piled up.
+    pub fn take_lines(&self) -> Vec<String> {
+        let mut published = self.handle.shared.lock();
+        let mut lines: Vec<String> = published.lines.drain(..).collect();
+        if published.lost > 0 {
+            lines.insert(0, format!("{} log line(s) were dropped", published.lost));
+            published.lost = 0;
+        }
+        lines
+    }
+
+    /// Whether the worker thread has ended.
+    pub fn ended(&self) -> bool {
+        self.handle.ended()
+    }
+}
+
+/// The lifecycle, built and with the previous process's containers adopted, and the lines
+/// to print about it.
+fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), String> {
+    let Plan {
+        config,
+        settings,
+        host_id,
+        platform,
+        watch,
+        machine,
+        ..
+    } = plan;
+    let stop_grace = config.stop_grace;
+    let wanted = RuntimeBuild {
+        settings: &settings,
+        host_id: &host_id,
+        platform: &platform,
+        stop_grace,
+    };
+    let (runtime, mut lines) = machine.runtime(&wanted)?;
+    let checks = Integrity::start(machine.view(), settings.uid(), watch)?;
+    let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
+        .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
+    lines.extend(describe(&events));
+    Ok((life, lines))
+}
+
+/// The worker's loop: an order or a step interval, then a step, then a publication.
+fn work(mut life: Lifecycle, inbox: &Receiver<Order>, shared: &Shared, step_every: Duration) {
+    loop {
+        let mut lines = Vec::new();
+        let mut settle = None;
+        match inbox.recv_timeout(step_every) {
+            Ok(Order::Reply { reply, received_ms }) => {
+                let closed = shared.closed.load(Ordering::SeqCst);
+                let (reply, skipped) = match closed {
+                    true => without_starts(*reply),
+                    false => (*reply, Vec::new()),
+                };
+                lines.extend(skipped);
+                lines.extend(describe(&life.apply_at(&reply, received_ms)));
+            }
+            Ok(Order::Settle(done)) => settle = Some(done),
+            Ok(Order::Nudge) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        if shared.stop_all.swap(false, Ordering::SeqCst) {
+            lines.extend(describe(&life.apply(&stops(&life))));
+        }
+        lines.extend(describe(&life.step()));
+        shared.publish(Snapshot::of(&life), lines);
+        settle.iter().for_each(|done| {
+            let _ = done.send(());
+        });
+    }
+}
+
+/// A reply that stops every run `life` holds.
+fn stops(life: &Lifecycle) -> HeartbeatReply {
+    let commands = life
+        .held()
+        .into_iter()
+        .map(|run| Command::Stop { run_id: run.run_id })
+        .collect();
+    HeartbeatReply {
+        commands,
+        ..HeartbeatReply::default()
+    }
+}
+
+/// `reply` with each `Start` made an unknown command (so the places of the others, which
+/// a refusal is logged by, stay), and a line for each.
+fn without_starts(mut reply: HeartbeatReply) -> (HeartbeatReply, Vec<String>) {
+    let mut lines = Vec::new();
+    reply.commands = reply
+        .commands
+        .into_iter()
+        .map(|command| match command {
+            Command::Start(spec) => {
+                lines.push(format!(
+                    "draining: the start of {} is not taken",
+                    spec.run_id
+                ));
+                Command::Unknown
+            }
+            other => other,
+        })
+        .collect();
+    (reply, lines)
+}
+
+/// One line for each event. The text stays on the host (a finding holds what the engine
+/// said), and no event holds a token, a session secret or a job's labels.
+fn describe(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .map(|event| format!("job: {event:?}"))
+        .collect()
+}
