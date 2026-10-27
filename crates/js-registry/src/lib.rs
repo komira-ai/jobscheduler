@@ -87,6 +87,7 @@ mod refusal;
 mod registry;
 mod runs;
 mod session;
+pub mod whole;
 mod whole_config;
 
 pub use config::{
