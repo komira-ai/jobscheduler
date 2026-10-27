@@ -33,6 +33,9 @@ pub enum ConfigError {
     /// A mixed pool whose whole-node hosts and ordinary floor do not fit its size.
     #[error("max_whole_node plus keep_for_ordinary must not exceed max_machines")]
     WholeCeiling,
+    /// A dedicated pool that allows more whole hosts than it has machines.
+    #[error("max_whole_node must not exceed max_machines")]
+    WholeAboveMachines,
 }
 
 /// What an operator decides about a pool of self-registering hosts.
@@ -113,8 +116,8 @@ impl PoolConfig {
     /// The same pool with the whole-node settings `whole`, checked against the pool: its
     /// class must be `Whole` (a dedicated pool) or `Book` (a mixed one); every maximum,
     /// count and time except `drain_after_ms` is at least 1; a dedicated pool keeps no
-    /// host for ordinary work; a mixed pool has `max_whole_node + keep_for_ordinary <=
-    /// max_machines`.
+    /// host for ordinary work and has `max_whole_node <= max_machines`; a mixed pool has
+    /// `max_whole_node + keep_for_ordinary <= max_machines`.
     pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Result<Self, ConfigError> {
         let mixed = match self.class.admission() {
             Admission::Whole => false,
@@ -126,6 +129,9 @@ impl PoolConfig {
         }
         match (mixed, whole.keep_for_ordinary) {
             (false, 1..) => return Err(ConfigError::DedicatedKeep),
+            (false, _) if whole.max_whole_node > self.max_machines => {
+                return Err(ConfigError::WholeAboveMachines);
+            }
             (true, _) if whole.max_whole_node + whole.keep_for_ordinary > self.max_machines => {
                 return Err(ConfigError::WholeCeiling);
             }
