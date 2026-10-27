@@ -143,6 +143,7 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::HostLost
             | RunRefusal::NotHeld
             | RunRefusal::HostTainted
+            | RunRefusal::NotReady
             | RunRefusal::NoCapacity
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };

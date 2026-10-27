@@ -49,6 +49,7 @@ fn refusal_codes_snapshot() {
         refusal::EXCLUSIVE_NOT_READY,
         refusal::NO_CAPABLE_HOST,
         refusal::NO_MATCHING_POOL,
+        refusal::NOT_READY,
     ];
     assert_eq!(
         codes.join(" "),
@@ -57,7 +58,7 @@ fn refusal_codes_snapshot() {
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
-         body-too-large exclusive-not-ready no-capable-host no-matching-pool"
+         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready"
     );
 }
 
