@@ -15,6 +15,7 @@ js-agent              0      0
 js-agent-wire         0      0
 js-caps               0      0
 js-cli                0      0
+js-guest              0      0
 js-client             0      0
 js-conformance        0      0
 js-coverage           0      0
