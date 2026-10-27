@@ -25,6 +25,10 @@ pub(crate) struct Agents {
     pub(crate) registry: Registry,
     pub(crate) tokens: AgentTokens,
     pub(crate) limiter: HelloLimiter,
+    /// The server's clock, which bounds a run by the time its lease has left.
+    pub(crate) clock: SharedClock,
+    /// How many run ids this boot has minted.
+    runs_minted: AtomicU64,
     store: BindingStore,
     errors: AtomicU64,
 }
@@ -69,6 +73,8 @@ pub(crate) fn assemble(
                 registry,
                 tokens,
                 limiter: HelloLimiter::new(hello_limit, clock.clone()),
+                clock: clock.clone(),
+                runs_minted: AtomicU64::new(0),
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
             };
@@ -78,6 +84,15 @@ pub(crate) fn assemble(
 }
 
 impl Agents {
+    /// A run id no earlier run has had, in this boot or any before it: the lease table's
+    /// term of this boot and a count that only grows. The term is persisted with the lease
+    /// file and rises at every boot, so ids stay unique across a restart although the run
+    /// records themselves are forgotten.
+    pub(crate) fn mint_run_id(&self, term: u64) -> String {
+        let count = self.runs_minted.fetch_add(1, Ordering::SeqCst);
+        format!("run-{term}-{}", count.saturating_add(1))
+    }
+
     /// How many times the agent side could not read or write one of its files since the
     /// server started: the join token file that could not be read again, and the file of
     /// bindings that could not be written.

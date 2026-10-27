@@ -125,13 +125,13 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    agents
+    // The reply carries the starts, stops and cancels for this host and the verdict on
+    // each result. The taint a heartbeat may carry is not acknowledged yet.
+    let reply = agents
         .registry
         .heartbeat(&heartbeat, &who)
         .map_err(|refusal| Refused::of(&refusal))?;
-    // No commands are sent yet, and the results and taint a heartbeat may carry are not
-    // acknowledged: nothing starts a run on a registered host.
-    Ok(Json(HeartbeatReply::default()))
+    Ok(Json(reply))
 }
 
 /// The body of a request, or the refusal for a body that is over the cap (413) or could

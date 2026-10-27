@@ -64,7 +64,7 @@
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms}`; 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase` and `agent_version` are those of a registered host |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version` and `releasing` (no lease, runs still to finish) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -113,7 +113,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands: [], result_acks: [], taint_ack: false}`; 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack: false}` (see "Runs"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
 //!
 //! A leasing client asks for a lease as ever and is given a static host first, a
 //! registered one when the static pool has none; it cannot tell which it got except by
@@ -150,9 +150,51 @@
 //! as trusted as the holders of its join tokens: a lease is a whole machine that the
 //! pool's holders run.
 //!
-//! **Not built.** Commands to hosts (a heartbeat is answered with none), results and
-//! taint reports in heartbeats (read and ignored), the agent itself, several pools,
-//! a deny list of host ids.
+//! **Not built.** Taint reports in heartbeats (read and ignored), the agent's side of the
+//! runs below, several pools, a deny list of host ids.
+//!
+//! # Runs
+//!
+//! With agents on, a client that holds a lease on a registered host can queue container
+//! runs on it. This API is interim: it is removed when the run service replaces it.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited`, `stopping`, `ended` or `never-started` |
+//! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run` |
+//!
+//! - **Delivery.** A run is carried to the host on its next heartbeat reply as a start, and
+//!   again on every reply until the host lists the run in its heartbeat. A stop is a
+//!   retained intent sent on every reply until the host no longer lists the run. A run the
+//!   host lists that the server holds no live record of is answered with a cancel and
+//!   never adopted. At most 1024 commands go in a reply, stops first, then cancels, then
+//!   starts.
+//! - **Results** ride in the heartbeat and each gets an acknowledgement: `ACCEPTED`,
+//!   `DUPLICATE`, `STALE` (the lease has moved on, or the server has no record of the
+//!   run), `UNKNOWN_LEASE`, or `MISMATCH` (a run of another host, or named under another
+//!   lease). An accepted result is shown by `GET`.
+//! - **Bounds.** The sum of the limits of a host's live runs fits the shape the lease
+//!   booked, and at most 256 runs are live at once; a run that does not fit is refused
+//!   `no-capacity`, not queued. A run is bounded by the lease: its wall limit is the one
+//!   asked for, cut to the time the lease has left (that, when none is asked), and the
+//!   agent may start it for no longer than that either. A renewal does not stretch a run
+//!   already queued. Host isolation is refused until the scheduler records the taint such
+//!   a job leaves.
+//! - **Reuse.** A run's limits return to the lease only when the host no longer lists the
+//!   run, which it does after cleanup. When a lease ends (a release or its expiry) with
+//!   live runs, the booking is free at once but the host takes no new lease, and shows
+//!   `releasing` in `GET /v1/hosts`, until a heartbeat lists none; each live run is sent a
+//!   stop meanwhile.
+//! - **Run ids** are minted by the server from the lease table's term and a counter, so
+//!   one is never reused, a restart included.
+//! - **Restart.** Runs are in memory only. A restart forgets them; a host that lists one
+//!   in its hello or heartbeat is told to cancel it, and takes no new lease until it
+//!   lists none. Persisting runs is later work, as are queueing and placement.
+//! - **A host that was lost** before it listed a queued run never starts it: the run
+//!   reads `never-started` once the host is heard again.
+//!
+//! A host out of the serving phase is sent no start, and takes no new run (`no-capacity`).
 //!
 //! # Limits
 //!
@@ -243,6 +285,7 @@ mod io_timeout;
 mod layered;
 mod listener;
 mod rate;
+mod run_api;
 mod server;
 mod ticker;
 mod tls;

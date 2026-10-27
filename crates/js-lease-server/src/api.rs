@@ -21,6 +21,7 @@ use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::Token;
 use crate::hosts::HostList;
+use crate::run_api;
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -52,6 +53,12 @@ impl Shared {
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
         }
+    }
+
+    /// The lease table behind its lock. A handler that also needs the registry takes this
+    /// first and the registry's lock second, as every caller does.
+    pub(crate) fn table(&self) -> &Mutex<Table> {
+        &self.table
     }
 
     /// How many times the agent side could not read or write its files; 0 without agents.
@@ -120,14 +127,20 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared.clone());
     let app = open.merge(guarded);
     match &shared.agents {
-        Some(agents) => app.merge(agent_api::router(agents.clone())),
+        Some(agents) => app
+            .merge(agent_api::router(agents.clone()))
+            .merge(run_api::router(shared.clone(), agents.clone())),
         None => app,
     }
 }
 
 /// Refuses a request that lacks `Authorization: Bearer <token>`, with a 401 that says
 /// nothing else.
-async fn authenticate(State(shared): State<Arc<Shared>>, request: Request, next: Next) -> Response {
+pub(crate) async fn authenticate(
+    State(shared): State<Arc<Shared>>,
+    request: Request,
+    next: Next,
+) -> Response {
     let given = request
         .headers()
         .get(header::AUTHORIZATION)

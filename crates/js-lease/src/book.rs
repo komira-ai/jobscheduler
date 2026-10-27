@@ -405,6 +405,10 @@ impl Book {
         all.filter(|record| record.state == state).count()
     }
 
+    pub(crate) fn term(&self) -> u64 {
+        self.term
+    }
+
     pub(crate) fn list(&self) -> Vec<LeaseInfo> {
         self.leases.values().map(Record::info).collect()
     }

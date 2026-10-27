@@ -1,7 +1,8 @@
 //! Behaviour of the lease server through its public interface and over real sockets on
 //! 127.0.0.1: the routes, the authentication, the refusals to start, the tick loop,
 //! TLS, and the program itself run as a child process; and, with agent registration on,
-//! the agent routes, the layering of the sources of hosts, and the restart.
+//! the agent routes, the layering of the sources of hosts, the restart, and the container
+//! runs a lease holder queues on a registered host.
 
 mod agents;
 mod agents_restart;
@@ -12,6 +13,9 @@ mod binary;
 mod limits;
 mod restart;
 mod routes;
+mod runs;
+mod runs_routes;
+mod runs_support;
 mod startup;
 mod support;
 mod ticks;

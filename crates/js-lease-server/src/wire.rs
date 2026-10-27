@@ -167,7 +167,7 @@ pub(crate) struct ApiError {
 }
 
 impl ApiError {
-    fn coded(status: StatusCode, code: &'static str) -> Self {
+    pub(crate) fn coded(status: StatusCode, code: &'static str) -> Self {
         Self {
             status,
             code,

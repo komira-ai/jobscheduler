@@ -52,6 +52,17 @@
 //!   until the host is heard again or the lease is stopped.
 //! - **Phase.** Only a serving host takes a new lease. A phase the wire does not know
 //!   reads as quarantined, which takes none.
+//! - **Runs.** [`Registry::queue_run`] queues a container run for the host a lease
+//!   holds, and [`Registry::heartbeat`] answers with it. A start is carried on every
+//!   reply until the host lists the run; a stop is a retained intent carried on every
+//!   reply until the host no longer lists it; a run the host lists that the registry
+//!   holds no live record of is answered with a cancel, never adopted. A result gets an
+//!   acknowledgement (accepted, duplicate, stale, unknown lease, or mismatch for a run
+//!   of another host). The limits of a run count against the booked shape until the run
+//!   leaves the host's held list, which the host does only after cleanup. When a lease is
+//!   stopped with live runs, the booking is freed at once but the host is not bookable
+//!   until a heartbeat lists none of them. Run records are in memory only: a restart
+//!   forgets them, and nothing here is persisted.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
 //!   that the agent's next hello completes. The seat takes the binding the caller
@@ -64,6 +75,7 @@ mod credential;
 mod provider;
 mod refusal;
 mod registry;
+mod runs;
 mod session;
 
 pub use config::{
@@ -74,4 +86,5 @@ pub use credential::{Binding, Credential};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{HostState, HostView, Registry};
+pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};

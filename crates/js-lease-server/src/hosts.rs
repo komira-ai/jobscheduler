@@ -43,6 +43,10 @@ struct HostEntry {
     labels: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_version: Option<String>,
+    /// Set for a registered host: it holds no lease but has runs to finish, so it takes
+    /// no new lease yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    releasing: Option<bool>,
 }
 
 fn shape_view(shape: &Shape) -> ShapeView {
@@ -72,6 +76,7 @@ impl HostEntry {
             capabilities: host.shape.capabilities().clone(),
             labels: BTreeMap::new(),
             agent_version: None,
+            releasing: None,
         }
     }
 
@@ -92,6 +97,7 @@ impl HostEntry {
             capabilities: host.shape.capabilities().clone(),
             labels: host.labels,
             agent_version: host.agent_version,
+            releasing: Some(host.releasing),
         }
     }
 }
