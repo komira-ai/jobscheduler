@@ -2,12 +2,15 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
-use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Hello, Phase, ProtocolRange, WireShape};
+use js_agent_wire::{DEFAULT_GRACE_MS, Heartbeat, Hello, Phase, ProtocolRange, Welcome, WireShape};
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{StartAck, StartSpec};
-use js_registry::{Credential, PoolConfig, RegisteredProvider, Registry};
+use js_registry::{
+    Credential, PoolConfig, Refusal, RegisteredProvider, Registry, SequentialSessions,
+};
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
@@ -40,20 +43,51 @@ pub struct Fixture {
     pub registry: Registry,
     pub provider: RegisteredProvider,
     pub clock: ManualClock,
+    sessions: Mutex<BTreeMap<String, String>>,
 }
 
 pub fn fixture(max_machines: usize) -> Fixture {
+    fixture_of(config(max_machines))
+}
+
+/// A fixture over `config`, with session secrets from a deterministic source.
+pub fn fixture_of(config: PoolConfig) -> Fixture {
     let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
-    let registry = Registry::new(config(max_machines), clock.clone());
+    let registry = Registry::with_sessions(config, clock.clone(), SequentialSessions::new());
     let provider = registry.provider();
     Fixture {
         registry,
         provider,
         clock,
+        sessions: Mutex::new(BTreeMap::new()),
     }
 }
 
 impl Fixture {
+    /// Says hello through the registry and remembers the session secret issued, so
+    /// [`Fixture::heartbeat`] and [`Fixture::beat`] can carry it.
+    pub fn hello(&self, hello: &Hello, credential: &Credential) -> Result<Welcome, Refusal> {
+        let welcome = self.registry.hello(hello, credential)?;
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(hello.host_id.clone(), welcome.session.clone());
+        Ok(welcome)
+    }
+
+    /// The session secret last issued to `host` through this fixture.
+    pub fn session(&self, host: &str) -> String {
+        self.sessions.lock().unwrap()[host].clone()
+    }
+
+    /// A heartbeat for `host` in `epoch` carrying the session last issued to it.
+    pub fn heartbeat(&self, host: &str, epoch: u64) -> Heartbeat {
+        Heartbeat {
+            session: self.session(host),
+            ..heartbeat(host, epoch)
+        }
+    }
+
     /// Moves the clock past the grace period, so every host not heard from since is lost.
     pub fn pass_grace(&self) {
         self.clock
@@ -62,13 +96,12 @@ impl Fixture {
 
     /// Admits `host` with `token`, expecting it to work.
     pub fn join(&self, host: &str, token: &str) -> u64 {
-        let welcome = self.registry.hello(&hello(host), &cred(token)).unwrap();
-        welcome.epoch
+        self.hello(&hello(host), &cred(token)).unwrap().epoch
     }
 
     pub fn beat(&self, host: &str, epoch: u64) {
         self.registry
-            .heartbeat(&heartbeat(host, epoch), &cred("t"))
+            .heartbeat(&self.heartbeat(host, epoch), &cred("t"))
             .unwrap();
     }
 }
@@ -105,6 +138,7 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
     Heartbeat {
         host_id: host.into(),
         epoch,
+        session: String::new(),
         phase: Phase::Serving,
         held: Vec::new(),
         results: Vec::new(),

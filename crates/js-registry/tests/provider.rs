@@ -93,7 +93,7 @@ fn draining_and_unknown_phase_take_no_lease() {
     assert_eq!(unknown, Phase::Quarantined);
     let mut first = hello("a");
     first.phase = unknown;
-    let epoch = fx.registry.hello(&first, &cred("t")).unwrap().epoch;
+    let epoch = fx.hello(&first, &cred("t")).unwrap().epoch;
     assert_eq!(
         fx.provider.start(spec(1)),
         StartAck::Refused(RefusalCode::NoCapacity)
@@ -106,7 +106,7 @@ fn draining_and_unknown_phase_take_no_lease() {
         Phase::MemoryPressure,
         Phase::Tainted,
     ] {
-        let mut beat = heartbeat("a", epoch);
+        let mut beat = fx.heartbeat("a", epoch);
         beat.phase = phase;
         fx.registry.heartbeat(&beat, &cred("t")).unwrap();
         assert_eq!(
@@ -116,7 +116,7 @@ fn draining_and_unknown_phase_take_no_lease() {
     }
     fx.beat("a", epoch);
     assert_eq!(started_on(&fx.provider.start(spec(1))), Some("a"));
-    let mut draining = heartbeat("a", epoch);
+    let mut draining = fx.heartbeat("a", epoch);
     draining.phase = Phase::Draining;
     fx.registry.heartbeat(&draining, &cred("t")).unwrap();
     assert_eq!(

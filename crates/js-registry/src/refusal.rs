@@ -36,6 +36,12 @@ pub enum Refusal {
     /// The heartbeat names a session that was replaced.
     #[error("the session epoch is not the current one")]
     StaleEpoch,
+    /// The heartbeat does not carry the session secret issued at the host's last hello.
+    #[error("the heartbeat does not carry the session secret")]
+    SessionMismatch,
+    /// No session secret could be made, so no host is admitted.
+    #[error("no session secret could be made")]
+    SessionUnavailable,
 }
 
 impl Refusal {
@@ -52,6 +58,8 @@ impl Refusal {
             Self::PoolFull => refusal::POOL_FULL,
             Self::UnknownHost => refusal::UNKNOWN_HOST,
             Self::StaleEpoch => refusal::STALE_EPOCH,
+            Self::SessionMismatch => refusal::SESSION_MISMATCH,
+            Self::SessionUnavailable => refusal::SESSION_UNAVAILABLE,
         }
     }
 }

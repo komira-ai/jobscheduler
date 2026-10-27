@@ -10,6 +10,7 @@ use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
+use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,9 @@ pub struct HostView {
 struct Record {
     binding: Option<Binding>,
     epoch: u64,
+    /// The digest of the secret issued at the hello that began this epoch; `None` for a
+    /// host that has not said hello since a restart.
+    session: Option<SessionDigest>,
     phase: Phase,
     heard: Option<Timestamp>,
     agent_version: Option<String>,
@@ -59,6 +63,7 @@ impl Record {
         Self {
             binding,
             epoch: 0,
+            session: None,
             phase: Phase::Quarantined,
             heard: None,
             agent_version: None,
@@ -119,6 +124,7 @@ impl State {
 struct Shared {
     config: PoolConfig,
     clock: Arc<dyn Clock + Send + Sync>,
+    sessions: Box<dyn SessionSource>,
     state: Mutex<State>,
 }
 
@@ -151,8 +157,20 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// An empty registry for the pool `config` describes, reading time from `clock`.
+    /// An empty registry for the pool `config` describes, reading time from `clock` and
+    /// session secrets from the operating system ([`OsSessions`]).
     pub fn new(config: PoolConfig, clock: impl Clock + Send + Sync + 'static) -> Self {
+        Self::with_sessions(config, clock, OsSessions)
+    }
+
+    /// As [`Registry::new`], drawing session secrets from `sessions`. A deterministic
+    /// source ([`crate::SequentialSessions`]) makes a test repeatable; production uses
+    /// [`Registry::new`].
+    pub fn with_sessions(
+        config: PoolConfig,
+        clock: impl Clock + Send + Sync + 'static,
+        sessions: impl SessionSource + 'static,
+    ) -> Self {
         let state = State {
             book: HostBook::new(),
             records: BTreeMap::new(),
@@ -161,6 +179,7 @@ impl Registry {
             shared: Arc::new(Shared {
                 config,
                 clock: Arc::new(clock),
+                sessions: Box::new(sessions),
                 state: Mutex::new(state),
             }),
         }
@@ -205,11 +224,16 @@ impl Registry {
     /// order: the pool is this one; the host id is not bound to another credential, nor
     /// to another instance when its binding names one; the host id is not live; the
     /// shape claimed offers at least the pool's shape; the pool has room for a host it
-    /// does not know (hosts forgotten after the lost-host retention do not count). A
+    /// does not know (hosts forgotten after the lost-host retention do not count); a
+    /// session secret can be made. A
     /// refused hello creates and changes nothing. An admitted one starts a new session:
     /// the epoch is one more than the host's last, the host is live, and the id is bound
     /// to `credential`, and to `Hello::instance` when the hello names one, if it was not
     /// bound yet. A host that is lost or only awaiting is replaced, keeping its booking.
+    /// The welcome carries a fresh session secret from the registry's
+    /// [`SessionSource`]; the registry keeps only its digest, and every heartbeat of the
+    /// session must carry it ([`Registry::heartbeat`]). The secret of the replaced
+    /// session stops working.
     ///
     /// The binding is as strong as what the first hello presented. With an instance
     /// identity it names the machine. Without one it holds at the level of the pool
@@ -257,6 +281,12 @@ impl Registry {
             return Err(Refusal::PoolFull);
         }
         let epoch = prior_epoch.unwrap_or(0).saturating_add(1);
+        let secret = self
+            .shared
+            .sessions
+            .fresh()
+            .map(|bytes| secret_text(&bytes))
+            .ok_or(Refusal::SessionUnavailable)?;
         state.book.insert_host(host.clone(), floor.clone());
         state.records.insert(
             host,
@@ -266,6 +296,7 @@ impl Registry {
                         .unwrap_or_else(|| Binding::new(credential.clone(), instance.cloned())),
                 ),
                 epoch,
+                session: Some(SessionDigest::of(&secret)),
                 phase: hello.phase,
                 heard: Some(now),
                 agent_version: Some(hello.agent_version.clone()),
@@ -278,6 +309,7 @@ impl Registry {
             heartbeat_interval_ms: config.heartbeat_interval_ms(),
             grace_ms: config.grace_ms(),
             pool: config.name().to_string(),
+            session: secret,
         })
     }
 
@@ -288,14 +320,22 @@ impl Registry {
     /// message breaks the wire rules, when the host has no session (the
     /// registry restarted, or the host only awaits its first hello after one), when the
     /// credential is not the one the host id is bound to (checked before the epoch, which
-    /// is a small counter and no proof of a session), or when it
-    /// names an epoch that is not the current one. The agent answers the first and last by
-    /// saying hello again.
+    /// is a small counter and no proof of a session), when it
+    /// names an epoch that is not the current one, or when it does not carry the session
+    /// secret ([`Heartbeat::session`]) issued at the host's last hello. The agent answers
+    /// the first and the epoch refusal by saying hello again.
     ///
-    /// A heartbeat is checked against the bound credential and the epoch only; it carries
-    /// no instance identity. A holder of the pool token can therefore heartbeat for another
-    /// host, instance-bound or not: that keeps it live, revives it when lost and sets its
-    /// phase, until per-host tokens or session secrets (design D18) land.
+    /// The session secret is what proves the sender is the host that was admitted: the
+    /// pool's join token is shared by every host of the pool, and the host id and epoch
+    /// are guessable, so neither names a session. The registry keeps only the SHA-256
+    /// digest of the secret and compares digests in constant time. A refusal for the
+    /// session (`session-mismatch`) is the last check and, like every refusal, changes
+    /// nothing: the host's last-heard time, phase and epoch stay as they were. A hello
+    /// replaces the secret, so the old one stops working at once.
+    ///
+    /// What this does not cover: the secret travels in the heartbeat, so it protects a
+    /// session only as far as the transport does, and a pool-token holder can still
+    /// take an id over with a hello, as [`Registry::hello`] says.
     pub fn heartbeat(&self, heartbeat: &Heartbeat, credential: &Credential) -> Result<(), Refusal> {
         let host = HostId::new(&heartbeat.host_id).map_err(Refusal::BadHeartbeatHostId)?;
         heartbeat.validate().map_err(Refusal::Invalid)?;
@@ -315,6 +355,13 @@ impl Registry {
         }
         if record.epoch != heartbeat.epoch {
             return Err(Refusal::StaleEpoch);
+        }
+        let issued = record
+            .session
+            .as_ref()
+            .is_some_and(|digest| digest.matches(&heartbeat.session));
+        if !issued {
+            return Err(Refusal::SessionMismatch);
         }
         record.heard = Some(now);
         record.phase = heartbeat.phase;

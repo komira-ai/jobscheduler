@@ -22,6 +22,60 @@ fn held(id: &str) -> HeldRun {
     }
 }
 
+/// A heartbeat session secret with a character outside `[A-Za-z0-9._-]`, a leading dot or
+/// more than the cap is refused as an invalid heartbeat; one at the cap and an empty one
+/// (an old agent's heartbeat, which the registry refuses by name) pass `validate`. It
+/// catches a megabyte or a newline-bearing secret reaching a comparison or a log.
+#[test]
+fn heartbeat_session_is_bounded() {
+    let code = refusal::INVALID_HEARTBEAT;
+    for bad in [
+        "a b",
+        "a\n",
+        ".lead",
+        "caf\u{e9}",
+        long(MAX_SESSION_LEN + 1).as_str(),
+    ] {
+        let err = check(|b| b.session = bad.into());
+        assert_eq!((err.field(), err.code()), ("session", code), "{bad:?}");
+    }
+    let mut ok = heartbeat();
+    ok.session = long(MAX_SESSION_LEN);
+    assert_eq!(ok.validate(), Ok(()));
+    ok.session = String::new();
+    assert_eq!(ok.validate(), Ok(()));
+}
+
+/// A welcome with no session, one with a character outside `[A-Za-z0-9._-]` and one over
+/// the cap are refused as an invalid welcome; one at the cap passes. It catches an agent
+/// that accepts a welcome it can never keep a session with, or holds a secret it cannot
+/// send back.
+#[test]
+fn welcome_session_is_required_and_bounded() {
+    let code = refusal::INVALID_WELCOME;
+    expect(
+        welcome_check(|w| w.session = String::new()),
+        "session",
+        Rule::Empty,
+        code,
+    );
+    expect(
+        welcome_check(|w| w.session = "a b".into()),
+        "session",
+        Rule::BadChars,
+        code,
+    );
+    expect(
+        welcome_check(|w| w.session = long(MAX_SESSION_LEN + 1)),
+        "session",
+        Rule::TooLong,
+        code,
+    );
+    let mut ok = welcome();
+    ok.session = long(MAX_SESSION_LEN);
+    assert_eq!(ok.validate(), Ok(()));
+}
+
 /// A heartbeat host id that is a path, upper case, empty or a megabyte is refused. It
 /// catches `A\u0000` or `../x` reaching a table or a log as a host key.
 #[test]

@@ -6,11 +6,11 @@ mod support;
 use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, InstanceIdentity, refusal};
-use js_lease::{ManualClock, Timestamp};
+use js_lease::ManualClock;
 use js_provider::{Observed, Provider, RefusalCode, StartAck};
 use js_registry::{
     Binding, ConfigError, DEFAULT_LOST_RETENTION_MS, HostState, MAX_LOST_RETENTION_MS,
-    MIN_LOST_RETENTION_MS, Refusal, Registry,
+    MIN_LOST_RETENTION_MS, Refusal, Registry, SequentialSessions, SessionSource,
 };
 use support::*;
 
@@ -31,17 +31,10 @@ fn on(host: &str, id: &str) -> js_agent_wire::Hello {
 
 /// A fixture whose pool forgets a lost, unbooked host after one minute.
 fn short_retention(max_machines: usize) -> Fixture {
-    let clock = ManualClock::new(Timestamp::from_millis(1_000_000));
     let config = config(max_machines)
         .with_lost_retention(RETENTION_MS)
         .unwrap();
-    let registry = Registry::new(config, clock.clone());
-    let provider = registry.provider();
-    Fixture {
-        registry,
-        provider,
-        clock,
-    }
+    fixture_of(config)
 }
 
 fn advance(fx: &Fixture, millis: u64) {
@@ -282,29 +275,116 @@ fn lost_retention_is_validated() {
     assert!(fx.registry.hosts().is_empty());
 }
 
-/// Asserts the pool-level limit of the heartbeat check, as documented: a heartbeat is
-/// checked against the bound credential and the epoch only, so a holder of the pool token
-/// can heartbeat for another host, instance-bound or not. It keeps a silent host live,
-/// revives a lost one and sets its phase, until per-host tokens or session secrets land.
-/// A credential outside the pool is still refused.
+/// Asserts that a peer holding the same pool token, and knowing the host id and the
+/// epoch (both guessable), cannot heartbeat for an instance-bound host: with no session
+/// secret, an empty one or a guessed one it is refused as `session-mismatch`, and the
+/// host's state, phase, epoch and last-heard time are exactly as before, so the dead
+/// host stays lost and takes no lease. The session the host was given at its hello still
+/// works and revives it. Without the session check the peer's first heartbeat is
+/// accepted: it keeps a dead host live and bookable, so leases land on a dead machine,
+/// and sets the host's phase.
 #[test]
-fn heartbeat_from_a_peer_with_the_same_token_is_accepted_pool_level_limit() {
-    let fx = fixture(4);
-    let epoch = fx
-        .registry
-        .hello(&on("a", "i-1"), &cred("pool"))
-        .unwrap()
-        .epoch;
+fn heartbeat_from_a_peer_with_the_same_token_but_no_session_is_refused_and_changes_nothing() {
+    let mut fx = fixture(4);
+    let welcome = fx.hello(&on("a", "i-1"), &cred("pool")).unwrap();
     fx.pass_grace();
-    assert_eq!(fx.registry.hosts()[0].state, HostState::Lost);
-    let mut peer = heartbeat("a", epoch);
+    let before = fx.registry.hosts();
+    assert_eq!(before[0].state, HostState::Lost);
+    let mut peer = heartbeat("a", welcome.epoch);
     peer.phase = js_agent_wire::Phase::Draining;
-    fx.registry.heartbeat(&peer, &cred("pool")).unwrap();
+    let same_length = "0".repeat(welcome.session.len());
+    for guess in ["", "guess", same_length.as_str()] {
+        peer.session = guess.into();
+        let refused = fx.registry.heartbeat(&peer, &cred("pool")).unwrap_err();
+        assert_eq!(refused, Refusal::SessionMismatch);
+        assert_eq!(refused.code(), refusal::SESSION_MISMATCH);
+        assert_eq!(fx.registry.hosts(), before);
+    }
+    assert_eq!(
+        fx.provider.start(spec(1)),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+    let mut real = fx.heartbeat("a", welcome.epoch);
+    real.phase = js_agent_wire::Phase::Draining;
+    fx.registry.heartbeat(&real, &cred("pool")).unwrap();
     let view = &fx.registry.hosts()[0];
     assert_eq!(view.state, HostState::Live);
     assert_eq!(view.phase, js_agent_wire::Phase::Draining);
+    assert_eq!(view.epoch, welcome.epoch);
     assert_eq!(
-        fx.registry.heartbeat(&peer, &cred("outside")).unwrap_err(),
+        fx.registry.heartbeat(&real, &cred("outside")).unwrap_err(),
         Refusal::HostBound
     );
+}
+
+/// Asserts that a hello replaces the session: after a host says hello again (once it is
+/// lost) a heartbeat carrying the old session is refused as `session-mismatch` even with
+/// the new epoch, the old session with the old epoch is a stale epoch, and the session
+/// of the new hello works. It catches a session that survives a hello, which would let
+/// the holder of an earlier secret (a previous run of the agent, or a copy of its
+/// memory) keep speaking for the new session.
+#[test]
+fn a_new_hello_invalidates_the_old_session() {
+    let fx = fixture(4);
+    let first = fx.hello(&hello("a"), &cred("t")).unwrap();
+    fx.pass_grace();
+    let second = fx.hello(&hello("a"), &cred("t")).unwrap();
+    assert_eq!(second.epoch, first.epoch + 1);
+    assert_ne!(second.session, first.session);
+    let mut old = heartbeat("a", second.epoch);
+    old.session = first.session.clone();
+    let refused = fx.registry.heartbeat(&old, &cred("t")).unwrap_err();
+    assert_eq!(refused, Refusal::SessionMismatch);
+    old.epoch = first.epoch;
+    let stale = fx.registry.heartbeat(&old, &cred("t")).unwrap_err();
+    assert_eq!(stale, Refusal::StaleEpoch);
+    fx.beat("a", second.epoch);
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Live);
+}
+
+/// Asserts the OS source issues a fresh, well-formed secret at every hello: two hosts
+/// get different ones, each inside the wire's session alphabet and cap (the agent's
+/// welcome check accepts it). It catches a constant or empty secret from the production source.
+#[test]
+fn the_os_source_issues_distinct_wire_valid_secrets() {
+    let registry = Registry::new(config(4), ManualClock::default());
+    let a = registry.hello(&hello("a"), &cred("t")).unwrap();
+    let b = registry.hello(&hello("b"), &cred("t")).unwrap();
+    assert_ne!(a.session, b.session);
+    for welcome in [&a, &b] {
+        assert_eq!(welcome.validate(), Ok(()));
+        assert_eq!(welcome.session.len(), 64);
+    }
+}
+
+/// A source that can make no bytes, as when the operating system's random source fails.
+struct NoRandomness;
+
+impl SessionSource for NoRandomness {
+    fn fresh(&self) -> Option<[u8; 32]> {
+        None
+    }
+}
+
+/// Asserts that when no session secret can be made the hello is refused as
+/// `session-unavailable` and the host is not admitted: nothing is created. It catches
+/// admitting a host with a guessable (zeroed or empty) secret on a failed random source.
+#[test]
+fn a_hello_is_refused_when_no_secret_can_be_made() {
+    let registry = Registry::with_sessions(config(4), ManualClock::default(), NoRandomness);
+    let refused = registry.hello(&hello("a"), &cred("t")).unwrap_err();
+    assert_eq!(refused, Refusal::SessionUnavailable);
+    assert_eq!(refused.code(), refusal::SESSION_UNAVAILABLE);
+    assert!(registry.hosts().is_empty());
+}
+
+/// Asserts the deterministic source counts from 1. It catches a test source that
+/// repeats, which would hide a session that survives a hello.
+#[test]
+fn the_sequential_source_counts_from_one() {
+    let source = SequentialSessions::new();
+    let first = source.fresh().unwrap();
+    let second = source.fresh().unwrap();
+    assert_eq!((first[31], second[31]), (1, 2));
+    assert_eq!(first[..24], [0; 24]);
 }

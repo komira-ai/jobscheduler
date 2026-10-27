@@ -305,6 +305,15 @@ pub struct Welcome {
     pub grace_ms: u64,
     /// The pool the host was admitted to.
     pub pool: String,
+    /// The session secret: an opaque token of at most [`limits::MAX_SESSION_LEN`] bytes
+    /// of `[A-Za-z0-9._-]`. The server issues a fresh one at every admitted hello, and
+    /// every heartbeat of the session must carry it ([`crate::Heartbeat::session`]);
+    /// a later hello replaces it, with the new epoch, so the old one stops working. It
+    /// is a secret the agent keeps in memory and never logs. A welcome without one (a
+    /// server of the first version) decodes as an empty text, which [`Welcome::validate`]
+    /// refuses: such an agent cannot keep a session with a server that checks it.
+    #[serde(default)]
+    pub session: String,
 }
 
 impl Welcome {
@@ -334,7 +343,8 @@ impl Welcome {
         if !crate::grace_covers_heartbeats(self.heartbeat_interval_ms, self.grace_ms) {
             return Err(grace.fail(Rule::Inconsistent));
         }
-        check::ident(at.field("pool"), &self.pool)
+        check::ident(at.field("pool"), &self.pool)?;
+        check::session(at.field("session"), &self.session)
     }
 }
 

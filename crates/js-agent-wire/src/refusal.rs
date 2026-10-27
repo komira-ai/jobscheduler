@@ -56,3 +56,8 @@ pub const SHAPE_NOT_ACCEPTED: &str = "shape-not-accepted";
 pub const POOL_FULL: &str = "pool-full";
 /// A hello for a host id that was first admitted with another credential.
 pub const HOST_BOUND: &str = "host-bound";
+/// A heartbeat that does not carry the session secret issued at the host's last hello:
+/// absent, or not the one issued. Nothing about the host changes.
+pub const SESSION_MISMATCH: &str = "session-mismatch";
+/// A hello the server cannot answer because it could not make a session secret.
+pub const SESSION_UNAVAILABLE: &str = "session-unavailable";

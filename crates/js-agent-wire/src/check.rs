@@ -70,6 +70,11 @@ pub(crate) fn ident(at: At, value: &str) -> Result<(), ValidationError> {
     token(at, value, limits::MAX_ID_LEN, ident_byte)
 }
 
+/// A session secret: [`token`] over `[A-Za-z0-9._-]`, at most [`limits::MAX_SESSION_LEN`].
+pub(crate) fn session(at: At, value: &str) -> Result<(), ValidationError> {
+    token(at, value, limits::MAX_SESSION_LEN, ident_byte)
+}
+
 /// A present id; an absent one passes.
 pub(crate) fn opt_ident(at: At, value: Option<&String>) -> Result<(), ValidationError> {
     value.map_or(Ok(()), |text| ident(at, text))

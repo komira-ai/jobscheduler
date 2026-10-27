@@ -23,11 +23,17 @@
 //!   host-bound. Without an instance identity the binding is at the level of the pool
 //!   credential only: all hosts of a pool share the join token, so a holder of the pool
 //!   token can say hello for an unbound-instance host id once that host is lost, and
-//!   takes over its booking. A heartbeat is checked against the credential and the epoch
-//!   only, so the same token holder can also keep any host live and set its phase,
-//!   instance-bound or not. Per-host tokens or client certificates close that later
+//!   takes over its booking. Per-host tokens or client certificates close that later
 //!   (design D18). [`Credential`] equality is on a digest; the constant-time compare of
 //!   the token belongs to the transport.
+//! - **Session secret.** Every admitted hello is answered with a fresh secret from the
+//!   registry's [`SessionSource`] ([`OsSessions`] in production); the registry keeps its
+//!   SHA-256 digest only. A heartbeat must carry the secret issued at that host's last
+//!   hello, compared as digests in constant time: one that lacks it or carries another is
+//!   refused as `session-mismatch` and changes nothing, so a holder of the pool token,
+//!   who also knows the host id and epoch, cannot keep a host live, revive it or set its
+//!   phase. A new hello replaces the secret. The one way in for a pool-token holder is a
+//!   hello, and only for an id that is not instance-bound and is lost, as above.
 //! - **Retention.** A lost host with no booking is forgotten, binding included, after
 //!   [`PoolConfig::with_lost_retention`], so ids made up by a token holder stop filling
 //!   the pool. A booked host is never forgotten.
@@ -52,6 +58,7 @@ mod credential;
 mod provider;
 mod refusal;
 mod registry;
+mod session;
 
 pub use config::{
     ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
@@ -61,3 +68,4 @@ pub use credential::{Binding, Credential};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
 pub use registry::{HostState, HostView, Registry};
+pub use session::{OsSessions, SequentialSessions, SessionSource};

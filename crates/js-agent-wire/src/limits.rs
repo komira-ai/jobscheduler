@@ -10,6 +10,7 @@
 //! | field | cap |
 //! |---|---|
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
+//! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
@@ -54,6 +55,9 @@ pub const MAX_CAPABILITIES: usize = 64;
 pub const MAX_CAPABILITY_KEY_LEN: usize = 64;
 /// Longest capability value, in bytes.
 pub const MAX_CAPABILITY_VALUE_LEN: usize = 128;
+/// Longest session secret, in bytes (see [`crate::Welcome::session`]). A secret the
+/// registry issues is far shorter; the cap only bounds what a peer can send.
+pub const MAX_SESSION_LEN: usize = 128;
 /// Longest `agent_version` text, in bytes.
 pub const MAX_VERSION_LEN: usize = 64;
 /// Longest taint reason or check text, in bytes.

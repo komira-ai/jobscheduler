@@ -676,6 +676,7 @@ dependencies = [
 name = "js-registry"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "js-agent-wire",
  "js-lease",
  "js-pool-static",
@@ -683,6 +684,7 @@ dependencies = [
  "js-types",
  "serde_json",
  "sha2",
+ "subtle",
  "thiserror",
 ]
 
