@@ -48,3 +48,11 @@ pub const INVALID_HEARTBEAT: &str = "invalid-heartbeat";
 pub const INVALID_WELCOME: &str = "invalid-welcome";
 /// A reply whose commands or acknowledgements are malformed.
 pub const INVALID_REPLY: &str = "invalid-reply";
+/// A hello naming a pool this server does not serve.
+pub const UNKNOWN_POOL: &str = "unknown-pool";
+/// A hello whose shape does not offer what the pool's shape promises.
+pub const SHAPE_NOT_ACCEPTED: &str = "shape-not-accepted";
+/// A hello from a new host id while the pool already holds as many hosts as it allows.
+pub const POOL_FULL: &str = "pool-full";
+/// A hello for a host id that was first admitted with another credential.
+pub const HOST_BOUND: &str = "host-bound";

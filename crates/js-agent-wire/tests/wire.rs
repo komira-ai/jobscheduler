@@ -37,13 +37,18 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_HEARTBEAT,
         refusal::INVALID_WELCOME,
         refusal::INVALID_REPLY,
+        refusal::UNKNOWN_POOL,
+        refusal::SHAPE_NOT_ACCEPTED,
+        refusal::POOL_FULL,
+        refusal::HOST_BOUND,
     ];
     assert_eq!(
         codes.join(" "),
         "invalid-hello reserved-label wall-time-not-positive invalid-job invalid-image \
          invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
-         unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply"
+         unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
+         shape-not-accepted pool-full host-bound"
     );
 }
 

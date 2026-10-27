@@ -32,8 +32,10 @@
 //!
 #![doc = concat!("```toml\n", include_str!("../example.toml"), "```")]
 
+mod book;
 mod config;
 mod pool;
 
+pub use book::{HostBook, SeatError};
 pub use config::{ConfigError, EXAMPLE_CONFIG};
-pub use pool::{SeatError, StaticPool};
+pub use pool::StaticPool;

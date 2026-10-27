@@ -1,0 +1,53 @@
+use js_agent_wire::{ValidationError, refusal};
+use js_types::IdError;
+
+/// Why the registry refused a hello or a heartbeat. Each has a constant code of
+/// [`js_agent_wire::refusal`] for the wire ([`Refusal::code`]); the text never repeats
+/// anything the peer sent.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// The message broke a rule of the wire: bounds, alphabets, protocol, reserved labels.
+    #[error("{0}")]
+    Invalid(ValidationError),
+    /// The host id is not a valid scheduler host id.
+    #[error("the host id is not a valid host id")]
+    BadHostId(IdError),
+    /// The hello names another pool.
+    #[error("the pool is not served here")]
+    UnknownPool,
+    /// The host id was admitted first with another credential.
+    #[error("the host id is bound to another credential")]
+    HostBound,
+    /// The host id has a live session.
+    #[error("the host id has a live session")]
+    HostLive,
+    /// The shape the host claims does not offer what the pool's shape promises.
+    #[error("the shape does not offer what the pool promises")]
+    ShapeNotAccepted,
+    /// The pool already holds as many hosts as it allows.
+    #[error("the pool is full")]
+    PoolFull,
+    /// The heartbeat comes from a host with no session.
+    #[error("the host has no session")]
+    UnknownHost,
+    /// The heartbeat names a session that was replaced.
+    #[error("the session epoch is not the current one")]
+    StaleEpoch,
+}
+
+impl Refusal {
+    /// The constant code that goes on the wire.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Invalid(err) => err.code(),
+            Self::BadHostId(_) => refusal::INVALID_HELLO,
+            Self::UnknownPool => refusal::UNKNOWN_POOL,
+            Self::HostBound => refusal::HOST_BOUND,
+            Self::HostLive => refusal::HOST_LIVE,
+            Self::ShapeNotAccepted => refusal::SHAPE_NOT_ACCEPTED,
+            Self::PoolFull => refusal::POOL_FULL,
+            Self::UnknownHost => refusal::UNKNOWN_HOST,
+            Self::StaleEpoch => refusal::STALE_EPOCH,
+        }
+    }
+}

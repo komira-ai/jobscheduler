@@ -590,9 +590,12 @@ dependencies = [
 name = "js-conformance"
 version = "0.1.0"
 dependencies = [
+ "js-agent-wire",
+ "js-lease",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-registry",
  "js-types",
 ]
 
@@ -667,6 +670,20 @@ version = "0.1.0"
 dependencies = [
  "js-provider",
  "js-types",
+]
+
+[[package]]
+name = "js-registry"
+version = "0.1.0"
+dependencies = [
+ "js-agent-wire",
+ "js-lease",
+ "js-pool-static",
+ "js-provider",
+ "js-types",
+ "serde_json",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]

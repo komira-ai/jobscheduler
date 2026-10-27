@@ -1,74 +1,36 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use js_provider::{
-    Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
-};
-use js_types::{Admission, HostId, LeaseId, ProviderId, ResourceClass, Shape};
+use js_provider::{Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
+use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
 
+use crate::book::{HostBook, SeatError};
 use crate::config::{self, ConfigError};
 
-/// Why [`StaticPool::seat`] booked nothing.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SeatError {
-    /// The pool does not list the host.
-    #[error("host {0} is not in the pool")]
-    Unlisted(HostId),
-    /// Another lease holds the host.
-    #[error("host {host} is held by lease {holder}")]
-    Taken {
-        /// The host asked for.
-        host: HostId,
-        /// The lease that holds it.
-        holder: LeaseId,
-    },
-    /// The lease already holds a different host.
-    #[error("lease {lease} already holds host {host}")]
-    Elsewhere {
-        /// The lease.
-        lease: LeaseId,
-        /// The host it holds.
-        host: HostId,
-    },
-    /// The lease was stopped, and a stopped lease never starts again.
-    #[error("lease {0} was stopped")]
-    Ended(LeaseId),
-}
-
-#[derive(Debug)]
-struct Host {
-    shape: Shape,
-    lease: Option<LeaseId>,
-}
-
 /// A provider over a fixed list of hosts, each leased whole. See the crate docs for
-/// the placement rules.
+/// the placement rules, which live in [`HostBook`].
 ///
-/// The pool remembers every lease id it has stopped, as an exact set, and refuses a
-/// start of one with `LeaseEnded`. A high-water mark per term would be smaller but
-/// would also refuse a lower sequence that was never started and arrives late behind
-/// a higher one that was stopped, so the pool keeps the set: 16 bytes per stopped lease
-/// for the life of the process. The memory is in-process only, as the pool is.
+/// The pool remembers every lease id it has stopped (see [`HostBook`]), in memory only,
+/// as the pool is.
 #[derive(Debug)]
 pub struct StaticPool {
     id: ProviderId,
     classes: Vec<ResourceClass>,
-    hosts: BTreeMap<HostId, Host>,
-    ended: BTreeSet<LeaseId>,
+    book: HostBook,
 }
 
 impl StaticPool {
     /// A pool over configuration text.
     pub fn from_toml(id: ProviderId, source: &str) -> Result<Self, ConfigError> {
         let hosts = config::parse(source)?;
-        let hosts = hosts
-            .into_iter()
-            .map(|(host, shape)| (host, Host { shape, lease: None }));
+        let mut book = HostBook::new();
+        for (host, shape) in hosts {
+            book.insert_host(host, shape);
+        }
         Ok(Self {
             id,
             classes: vec![ResourceClass::gpu_host()],
-            hosts: hosts.collect(),
-            ended: BTreeSet::new(),
+            book,
         })
     }
 
@@ -92,11 +54,7 @@ impl StaticPool {
     /// The hosts that are booked and the lease holding each, read from the pool's own
     /// table.
     pub fn booked(&self) -> BTreeMap<HostId, LeaseId> {
-        let held = self
-            .hosts
-            .iter()
-            .filter_map(|(id, host)| Some((id.clone(), host.lease?)));
-        held.collect()
+        self.book.booked()
     }
 
     /// Books `host` for `lease` without a start: the way to put back a booking the
@@ -108,38 +66,7 @@ impl StaticPool {
     /// The pool refuses, and books nothing, when `host` is not listed, when another
     /// lease holds it, when `lease` holds another host, or when `lease` was stopped.
     pub fn seat(&mut self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
-        if self.ended.contains(&lease) {
-            return Err(SeatError::Ended(lease));
-        }
-        if let Observed::Present { host: held } = self.read(&lease) {
-            return match held == *host {
-                true => Ok(()),
-                false => Err(SeatError::Elsewhere { lease, host: held }),
-            };
-        }
-        let listed = self.hosts.get_mut(host);
-        let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
-        match listed.lease {
-            Some(holder) => Err(SeatError::Taken {
-                host: host.clone(),
-                holder,
-            }),
-            None => {
-                listed.lease = Some(lease);
-                Ok(())
-            }
-        }
-    }
-
-    fn read(&self, lease: &LeaseId) -> Observed {
-        let holder = self
-            .hosts
-            .iter()
-            .find(|(_, host)| host.lease.as_ref() == Some(lease));
-        match holder {
-            Some((host, _)) => Observed::Present { host: host.clone() },
-            None => Observed::Absent,
-        }
+        self.book.seat(host, lease)
     }
 }
 
@@ -157,66 +84,21 @@ impl Provider for StaticPool {
     }
 
     fn start(&mut self, spec: StartSpec) -> StartAck {
-        if self.ended.contains(&spec.lease()) {
-            return StartAck::Refused(RefusalCode::LeaseEnded);
-        }
-        if let Observed::Present { host } = self.read(&spec.lease()) {
-            return StartAck::Started { host };
-        }
-        if !self.classes.contains(spec.class()) {
-            return StartAck::Refused(RefusalCode::UnsupportedClass);
-        }
-        let leases_whole_host = match spec.class().admission() {
-            Admission::BookAll => true,
-            Admission::Book(_) => false,
-        };
-        if !leases_whole_host {
-            return StartAck::Refused(RefusalCode::UnsupportedClass);
-        }
-        let wanted = spec.request();
-        let mut fits_somewhere = false;
-        for (id, host) in &mut self.hosts {
-            if !host
-                .shape
-                .satisfies(&wanted.resources, &wanted.capabilities)
-            {
-                continue;
-            }
-            fits_somewhere = true;
-            if host.lease.is_none() {
-                host.lease = Some(spec.lease());
-                return StartAck::Started { host: id.clone() };
-            }
-        }
-        match fits_somewhere {
-            true => StartAck::Refused(RefusalCode::NoCapacity),
-            false => StartAck::Refused(RefusalCode::NoFit),
-        }
+        let gate = HostBook::class_gate(&self.classes, &spec);
+        self.book.start_where(&spec, gate, &|_, _| true)
     }
 
     fn stop(&mut self, lease: &LeaseId) -> StopAck {
-        self.ended.insert(*lease);
-        for host in self.hosts.values_mut() {
-            if host.lease.as_ref() == Some(lease) {
-                host.lease = None;
-            }
-        }
         StopAck::Stopped {
-            read_back: self.read(lease),
+            read_back: self.book.stop(lease),
         }
     }
 
     fn observe(&mut self, lease: &LeaseId) -> Observed {
-        self.read(lease)
+        self.book.read(lease)
     }
 
     fn capacity(&self) -> Vec<HostCapacity> {
-        let listed = self.hosts.iter();
-        let listed = listed.map(|(id, host)| HostCapacity {
-            host: id.clone(),
-            shape: host.shape.clone(),
-            leased_to: host.lease,
-        });
-        listed.collect()
+        self.book.hosts()
     }
 }
