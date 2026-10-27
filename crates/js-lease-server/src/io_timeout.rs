@@ -130,7 +130,8 @@ mod tests {
     use super::*;
 
     /// A limit that runs out, and one that cannot within a test, for the direction a
-    /// test does not exercise.
+    /// test does not exercise. The tests run on a paused clock: a timer that is the only
+    /// thing left to wait for fires at once, so no test waits on real time.
     const SHORT: Duration = Duration::from_millis(20);
     const LONG: Duration = Duration::from_secs(3600);
 
@@ -147,7 +148,7 @@ mod tests {
     /// has run out, that the stream works again as soon as the other side reads (the
     /// clock was stopped by the write that went through), and that a flush and a
     /// vectored write that go through are not cut.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_write_without_progress_times_out_and_progress_stops_the_clock() {
         let (mut out, mut far) = small(LONG, SHORT);
         out.write_all(b"abcd").await.unwrap();
@@ -169,7 +170,7 @@ mod tests {
     /// has run out, that a read that goes through stops the clock (the same stream reads
     /// again, and the next stall times out afresh), and that the end of the stream is a
     /// read like any other, not a timeout.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_read_without_progress_times_out_and_progress_stops_the_clock() {
         let (mut near, mut far) = small(SHORT, LONG);
         let mut got = [0u8; 2];
@@ -192,7 +193,7 @@ mod tests {
     /// has timed out, writes and a shutdown that go through are not cut (the far end
     /// sees what was written and then the end), and after a write has timed out, a read
     /// that goes through is not cut.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_directions_are_timed_apart_and_shutdown_goes_through() {
         let (mut out, mut far) = small(SHORT, LONG);
         let mut got = [0u8; 2];

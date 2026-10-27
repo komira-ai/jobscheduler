@@ -50,9 +50,9 @@
 //! The server is single-tenant: there is one token, and so one trust domain. Whoever
 //! holds the token can list every lease, and renew or release any of them, whichever
 //! client acquired it. A lease has no owner the server checks. Share the token only with
-//! parties that trust each other with every host of the pool. Per-tenant leases, with a
-//! token of their own that sees and changes only its own leases (design K7), are a
-//! follow-up and not built here.
+//! parties that trust each other with every host of the pool. Per-tenant leases (each
+//! tenant with a token of its own that sees and changes only its own leases; the design
+//! document lists the shared token as a risk) are a follow-up and not built here.
 //!
 //! | request | answers |
 //! |---|---|
