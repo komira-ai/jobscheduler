@@ -10,12 +10,15 @@
 //!
 //! Every field is additive. A receiver ignores fields it does not know, in both
 //! directions, so a newer peer never breaks an older one: no body here uses
-//! `deny_unknown_fields`, and a field a sender may leave out has a default on decode. Two
+//! `deny_unknown_fields`, and a field a sender may leave out has a default on decode. An
+//! enum value this version does not know reads as an `Unknown` variant ([`Outcome`],
+//! [`Ack`], [`HeldState`], [`Command`]) and never fails the message around it. Two
 //! values are the deliberate exceptions, because skipping them would be unsafe:
 //!
 //! - an unknown [`Phase`] reads as [`Phase::Quarantined`], which takes no work;
-//! - an unknown [`Isolation`] value is a decode error, so an agent never runs a job it
-//!   cannot classify, while an absent one means [`Isolation::Contained`].
+//! - an unknown [`Isolation`] value is a decode error (inside a reply, that one start reads
+//!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
+//!   absent one means [`Isolation::Contained`].
 //!
 //! # Layout
 //!

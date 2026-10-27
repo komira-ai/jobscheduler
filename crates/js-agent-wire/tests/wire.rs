@@ -129,7 +129,8 @@ fn isolation_absent_is_contained() {
 }
 
 /// Asserts that an isolation value this version does not know fails to decode, alone
-/// and inside a reply, and does not read as contained. It catches an older agent that
+/// and, inside a reply, as an unknown command that leaves the commands beside it intact.
+/// It catches an older agent that
 /// would run a job it cannot classify.
 #[test]
 fn unknown_isolation_is_typed_error_not_contained() {
@@ -143,8 +144,13 @@ fn unknown_isolation_is_typed_error_not_contained() {
         .as_object_mut()
         .unwrap()
         .extend(body.as_object().unwrap().clone());
-    let reply = json!({"commands": [command]});
-    assert!(serde_json::from_value::<HeartbeatReply>(reply).is_err());
+    let stop = json!({"type": "stop", "run_id": "r"});
+    let reply = json!({"commands": [command, stop]});
+    let reply: HeartbeatReply = serde_json::from_value(reply).unwrap();
+    assert_eq!(
+        reply.commands,
+        vec![Command::Unknown, Command::Stop { run_id: "r".into() }]
+    );
 }
 
 /// Asserts that a phase text this version does not know reads as quarantined, an empty
@@ -438,7 +444,7 @@ fn round_trip_of_every_variant() {
     }
     assert_eq!(
         serde_json::to_string(&[Phase::MemoryPressure, Phase::Tainted]).unwrap(),
-        r#"["memory_pressure","tainted"]"#
+        r#"["memory-pressure","tainted"]"#
     );
     for state in [
         HeldState::Starting,
@@ -552,4 +558,63 @@ fn round_trip_of_every_message() {
         }],
         taint_ack: true,
     });
+}
+
+/// Asserts that an unknown command kind, an unknown ack verdict, an unknown outcome and
+/// an unknown held state each read as `Unknown` while the known entries beside them
+/// decode, and that the unknown values encode to text that decodes as unknown again. It
+/// catches a newer peer's new kind failing a whole reply or heartbeat, which would drop
+/// every stop and acknowledgement in it.
+#[test]
+fn unknown_enum_values_leave_known_entries_intact() {
+    let reply: HeartbeatReply = serde_json::from_value(json!({
+        "commands": [
+            {"type": "pause", "run_id": "a"},
+            {"type": "stop", "run_id": "b"},
+            {"type": "cancel", "run_id": "c"}
+        ],
+        "result_acks": [
+            {"run_id": "a", "ack": "REQUEUED"},
+            {"run_id": "b", "ack": "ACCEPTED"}
+        ]
+    }))
+    .unwrap();
+    assert_eq!(
+        reply.commands,
+        vec![
+            Command::Unknown,
+            Command::Stop { run_id: "b".into() },
+            Command::Cancel { run_id: "c".into() },
+        ]
+    );
+    assert_eq!(reply.result_acks[0].ack, Ack::Unknown);
+    assert_eq!(reply.result_acks[1].ack, Ack::Accepted);
+
+    let mut body = serde_json::to_value(heartbeat()).unwrap();
+    body["results"][0]["outcome"] = json!("preempted");
+    body["held"][0]["state"] = json!("paused");
+    let beat: Heartbeat = serde_json::from_value(body).unwrap();
+    assert_eq!(beat.results[0].outcome, Outcome::Unknown);
+    assert_eq!(beat.held[0].state, HeldState::Unknown);
+    assert_eq!(beat.results[0].run_id, heartbeat().results[0].run_id);
+
+    round_trip(&Command::Unknown);
+    round_trip(&Ack::Unknown);
+    round_trip(&Outcome::Unknown);
+    round_trip(&HeldState::Unknown);
+}
+
+/// Asserts that a hello decoded from the design's spelling `memory-pressure` reads as
+/// memory pressure, not quarantined. It catches a phase text that differs from the
+/// spelling the design table gives.
+#[test]
+fn memory_pressure_phase_uses_the_design_spelling() {
+    let phase = serde_json::from_value::<Phase>(json!("memory-pressure")).unwrap();
+    assert_eq!(phase, Phase::MemoryPressure);
+    assert_eq!(
+        serde_json::to_value(Phase::MemoryPressure).unwrap(),
+        json!("memory-pressure")
+    );
+    let old = serde_json::from_value::<Phase>(json!("memory_pressure")).unwrap();
+    assert_eq!(old, Phase::Quarantined);
 }

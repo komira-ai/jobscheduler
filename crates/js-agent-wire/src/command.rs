@@ -10,7 +10,8 @@ use crate::refusal;
 /// Whether a job is confined to a container or may change the machine (design 5.12).
 ///
 /// An absent value is [`Isolation::Contained`]. A value this version does not know fails
-/// to decode, so an agent refuses a job it cannot classify and never runs it.
+/// to decode, so an agent never runs a job it cannot classify; inside a reply that start
+/// reads as [`Command::Unknown`] and the other commands still arrive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Isolation {
@@ -192,4 +193,8 @@ pub enum Command {
         /// The run to cancel.
         run_id: String,
     },
+    /// A command this version cannot decode. The agent ignores it, so the commands
+    /// beside it still take effect.
+    #[serde(other)]
+    Unknown,
 }

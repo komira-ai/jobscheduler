@@ -1,7 +1,8 @@
 //! Keeping a session: [`Heartbeat`] up, [`HeartbeatReply`] down, and the results that
 //! ride in the heartbeat until the server acknowledges them.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::command::Command;
 use crate::hello::Phase;
@@ -16,6 +17,9 @@ pub enum HeldState {
     Running,
     /// The container has exited and its result is not yet acknowledged.
     ExitedUnacked,
+    /// A state this version does not know; kept so the rest of the message decodes.
+    #[serde(other)]
+    Unknown,
 }
 
 /// A run the agent holds. A run stays listed until its container and scratch are gone
@@ -45,6 +49,9 @@ pub enum Outcome {
     OutOfMemory,
     /// No container could be started; no job ran.
     FailedToStart,
+    /// An outcome this version does not know; kept so the rest of the message decodes.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The result of one run, resent in every heartbeat until a [`ResultAck`] names it.
@@ -112,6 +119,9 @@ pub enum Ack {
     UnknownLease,
     /// The result does not match the lease it names (another host's, or another run's).
     Mismatch,
+    /// A verdict this version does not know. The agent keeps the result and resends it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The server's acknowledgement of one result; the agent then drops it.
@@ -128,7 +138,7 @@ pub struct ResultAck {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeartbeatReply {
     /// What the agent is to do now.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "commands_or_unknown")]
     pub commands: Vec<Command>,
     /// The results the server has dealt with.
     #[serde(default)]
@@ -136,4 +146,19 @@ pub struct HeartbeatReply {
     /// Whether the taint report was recorded; the agent then stops sending it.
     #[serde(default)]
     pub taint_ack: bool,
+}
+
+/// Decodes the commands one by one. A command that does not decode (a kind this version
+/// does not know, or a start whose isolation it cannot classify) reads as
+/// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
+/// the one it cannot classify.
+fn commands_or_unknown<'de, D>(deserializer: D) -> Result<Vec<Command>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let items = Vec::<Value>::deserialize(deserializer)?;
+    Ok(items
+        .into_iter()
+        .map(|item| Command::deserialize(item).unwrap_or(Command::Unknown))
+        .collect())
 }
