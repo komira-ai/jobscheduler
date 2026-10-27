@@ -30,7 +30,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
 rcgen.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]
 workspace = true

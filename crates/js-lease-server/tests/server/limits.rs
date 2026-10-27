@@ -57,12 +57,17 @@ async fn a_connection_that_sends_nothing_is_closed_at_the_header_timeout() {
 /// Asserts that a keep-alive connection that has had its answer and then sends nothing
 /// is closed by the server when the header clock, which starts again after each
 /// response, runs out: the client reads the whole first answer, which did not say
-/// `Connection: close`, and then the end of the stream. The default header timeout is
-/// used so that the request and its answer cannot race the clock; the client drives
-/// nothing by time, it waits for the end of the stream.
+/// `Connection: close`, and then the end of the stream. The header timeout is short
+/// (200 ms); the request head is written as soon as the connection is made, so it is
+/// already waiting when the server's clock starts, and the client drives nothing by
+/// time: it reads the whole answer and then waits for the end of the stream.
 #[tokio::test]
 async fn an_idle_keep_alive_connection_is_closed_after_its_answer() {
-    let h = Harness::new("limit_idle").await;
+    let limits = Limits {
+        header_timeout: Duration::from_millis(200),
+        ..Limits::default()
+    };
+    let h = Harness::limited("limit_idle", limits).await;
     let mut stream = TcpStream::connect(h.addr()).await.unwrap();
     stream.write_all(HEALTH.as_bytes()).await.unwrap();
     let mut seen = Vec::new();
@@ -137,12 +142,14 @@ async fn a_cap_of_one_serves_connections_in_turn() {
 /// write to it has made no progress for `write_timeout`, and that its slot is given
 /// back: with a cap of one, a second client is served although the first never closed.
 /// The first client's own write fails when the server has closed it. Its receive buffer
-/// is tiny, so the server's answers back up after a few hundred requests.
+/// is tiny, so the server's answers back up after a few hundred requests. The request
+/// cap is lifted so that only the write timeout can end the connection.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_never_reads_is_cut_and_its_slot_returned() {
     let limits = Limits {
         max_connections: 1,
         write_timeout: Duration::from_millis(20),
+        max_requests: u32::MAX,
         ..Limits::default()
     };
     let h = Harness::limited("limit_write", limits).await;
