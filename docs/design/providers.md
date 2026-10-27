@@ -30,13 +30,15 @@ machines an elastic provider launched can join it.
 - Identity and admission are those of registration.md (join credential, pool exists, tainted set, shape satisfied, `max_machines`).
 
 **Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table and not tainted,
-not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` class needs the
+not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` or `Whole` class needs the
 host to exist; a `Book` class needs the total to hold the booking); and its latest facts satisfy every constraint of the request (5.13).
 Busy hosts are capable. Lost hosts (silent past the grace, inside the retention window) are capable: the agent registers again with the
 same id and the work waits for it, which is the same stance as 5.6 (silence is Unknown, not Absent). Cordoned and quarantined-by-pressure
 hosts are capable: both end without anyone replacing the machine. **Tainted hosts are not capable**: a taint ends only when an operator
 reimages the machine and clears it (machines.md, 5.12), so waiting for it would be an unbounded wait for an unplanned human action; the
-caller should be told. Draining hosts are not capable for a new request, because they are leaving.
+caller should be told. Draining hosts are not capable for a new request, because they are leaving. A host *reserved* for a whole-node request (5.17) is not
+draining in this sense: it is not leaving, it stays capable, and it is simply not available to a second reservation or to new work until
+the reservation ends. For a whole-node request, "could ever serve" also needs the pool to offer the class (whole-node.md).
 
 **Admission against registered hosts (D35, settled).** Let the *hierarchy* of the request's pool be its ordered providers (below).
 
