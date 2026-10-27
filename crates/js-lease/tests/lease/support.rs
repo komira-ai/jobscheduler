@@ -9,7 +9,9 @@ use std::time::Duration;
 use js_lease::{Boot, LeaseState, LeaseTable, ManualClock, OpenError, Settings, Timestamp};
 use js_provider::Provider;
 use js_provider_fake::FakeProvider;
-use js_types::{ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
+};
 
 pub const T0: u64 = 1_000_000;
 
@@ -134,4 +136,24 @@ pub fn open_err(path: &Path) -> OpenError {
 pub fn break_dir(scratch: &Scratch) {
     scratch.clear();
     fs::remove_dir(&scratch.dir).unwrap();
+}
+
+/// A class that is not whole-node: it books the host's every dimension but has none of
+/// the whole-node waiting rules.
+pub fn plain_class() -> ResourceClass {
+    let id = ClassId::new("plain").unwrap();
+    ResourceClass::new(id, Admission::BookAll, 0)
+}
+
+/// A fake that also serves [`plain_class`].
+pub fn fake_with_plain() -> FakeProvider {
+    fake().with_class(plain_class())
+}
+
+/// A request of the `plain` class.
+pub fn plain_request(max_wall_secs: u64) -> Request {
+    Request {
+        class: plain_class().id().clone(),
+        ..request(max_wall_secs)
+    }
 }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_provider::{Observed, StartAck, StartSpec, StopAck};
-use js_types::{HostId, LabelError, Labels, LeaseId, ReservedKey};
+use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey};
 
 use crate::clock::Timestamp;
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
@@ -40,6 +40,19 @@ pub(crate) enum Seen {
     Unsure,
 }
 
+/// What a pending whole-node lease keeps until it is observed ready: the ttl granted
+/// and the maximum wall time asked, both counted from that moment.
+#[derive(Debug, Clone, Copy)]
+struct Token {
+    ttl: Duration,
+    wall: Duration,
+}
+
+/// Millis of `duration` as the file holds them, saturating.
+fn millis_of(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Record {
     id: LeaseId,
@@ -48,6 +61,10 @@ pub(crate) struct Record {
     acquired_at: Timestamp,
     expires_at: Timestamp,
     ends_at: Timestamp,
+    /// Whether the lease is of a whole-node class.
+    whole: bool,
+    /// Set while a whole lease is pending: what its clock starts from when it is ready.
+    token: Option<Token>,
     request_labels: BTreeMap<String, String>,
     validation_run: Option<String>,
     labels: Labels,
@@ -72,6 +89,7 @@ impl Record {
         let host = host.map_err(|err| err.to_string())?;
         let labels = labels_of(&stored.labels, stored.validation_run.as_deref());
         let labels = labels.map_err(|err| err.to_string())?;
+        let token = Self::restore_token(stored)?;
         Ok(Self {
             id: LeaseId::new(stored.term, stored.sequence),
             state: stored.state,
@@ -79,11 +97,44 @@ impl Record {
             acquired_at: Timestamp::from_millis(stored.acquired_at_ms),
             expires_at: Timestamp::from_millis(stored.expires_at_ms),
             ends_at: Timestamp::from_millis(stored.ends_at_ms),
+            whole: stored.whole,
+            token,
             request_labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             labels,
             extra: stored.extra.clone(),
         })
+    }
+
+    /// The token of a pending whole lease: both of its fields are required, because a
+    /// pending lease without them could never start its clock.
+    fn restore_token(stored: &StoredLease) -> Result<Option<Token>, String> {
+        let waiting = stored.whole && stored.state == LeaseState::Pending;
+        if !waiting {
+            return Ok(None);
+        }
+        let (Some(ttl), Some(wall)) = (stored.ttl_ms, stored.wall_ms) else {
+            let reason = "a pending whole lease lacks ttl_ms or wall_ms";
+            return Err(format!(
+                "lease {}.{}: {reason}",
+                stored.term, stored.sequence
+            ));
+        };
+        Ok(Some(Token {
+            ttl: Duration::from_millis(ttl),
+            wall: Duration::from_millis(wall),
+        }))
+    }
+
+    /// The lease is ready at `now`: a whole lease's clock starts here, so it expires at
+    /// `now + ttl` (clamped to its wall time) and ends at `now + wall`. A lease with no
+    /// token is left as it is.
+    fn start_clock(&mut self, now: Timestamp) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        self.ends_at = now.plus(token.wall);
+        self.expires_at = now.plus(token.ttl).min(self.ends_at);
     }
 
     fn stored(&self) -> StoredLease {
@@ -95,6 +146,9 @@ impl Record {
             acquired_at_ms: self.acquired_at.millis(),
             expires_at_ms: self.expires_at.millis(),
             ends_at_ms: self.ends_at.millis(),
+            whole: self.whole,
+            ttl_ms: self.token.map(|token| millis_of(token.ttl)),
+            wall_ms: self.token.map(|token| millis_of(token.wall)),
             validation_run: self.validation_run.clone(),
             labels: self.request_labels.clone(),
             extra: self.extra.clone(),
@@ -268,13 +322,24 @@ impl Book {
     ) -> Record {
         let request = spec.request();
         let ends_at = now.plus(request.max_wall);
+        let whole = *spec.class().admission() == Admission::Whole;
+        // A whole lease waits, pending, for at most the prepare timeout; its own ttl and
+        // wall time start when it is ready.
+        let waits = now.plus(self.settings.prepare_timeout());
+        let expires_at = if whole { waits } else { now.plus(ttl) };
+        let token = whole.then_some(Token {
+            ttl,
+            wall: request.max_wall,
+        });
         let record = Record {
             id: spec.lease(),
             state: LeaseState::Pending,
             host: None,
             acquired_at: now,
-            expires_at: now.plus(ttl).min(ends_at),
+            expires_at: expires_at.min(ends_at),
             ends_at,
+            whole,
+            token,
             request_labels: request.labels.clone(),
             validation_run: request.validation_run.clone(),
             labels: spec.labels().clone(),
@@ -293,6 +358,7 @@ impl Book {
         match ack {
             StartAck::Started { host } => {
                 record.state = LeaseState::Held;
+                record.start_clock(record.acquired_at);
                 record.host = Some(host.clone());
                 let lease = Lease {
                     id: record.id,
@@ -361,14 +427,16 @@ impl Book {
     }
 
     /// Applies an observation of a pending or reloaded lease: present makes it held on
-    /// the host named, absent drops it, unknown keeps it as it was.
-    pub(crate) fn settle_observe(&mut self, id: &LeaseId, seen: Observed) -> Seen {
+    /// the host named (a whole lease's ttl and wall time start now), absent drops it,
+    /// unknown keeps it as it was.
+    pub(crate) fn settle_observe(&mut self, id: &LeaseId, seen: Observed, now: Timestamp) -> Seen {
         match seen {
             Observed::Present { host } => {
                 let record = self.leases.get_mut(id);
                 let _ = record.map(|record| {
                     record.state = LeaseState::Held;
                     record.host = Some(host);
+                    record.start_clock(now);
                 });
                 Seen::Confirmed
             }

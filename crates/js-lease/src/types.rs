@@ -16,7 +16,12 @@ use crate::state::LeaseState;
 pub struct Settings {
     default_ttl: Duration,
     max_ttl: Duration,
+    prepare_timeout: Duration,
 }
+
+/// How long a whole-node lease may wait to be observed ready when nothing says
+/// otherwise.
+pub const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Settings {
     /// Settings with these bounds. `default_ttl` must be positive and at most
@@ -31,7 +36,28 @@ impl Settings {
         Ok(Self {
             default_ttl,
             max_ttl,
+            prepare_timeout: DEFAULT_PREPARE_TIMEOUT,
         })
+    }
+
+    /// The same settings with `prepare_timeout` as the longest a whole-node lease waits,
+    /// pending, to be observed ready. A whole lease's ttl and maximum wall time count from
+    /// the moment it is observed ready, so this is the only bound on the wait. It must be
+    /// positive.
+    pub fn with_prepare_timeout(
+        mut self,
+        prepare_timeout: Duration,
+    ) -> Result<Self, SettingsError> {
+        if prepare_timeout.is_zero() {
+            return Err(SettingsError::PrepareNotPositive);
+        }
+        self.prepare_timeout = prepare_timeout;
+        Ok(self)
+    }
+
+    /// The longest a whole-node lease waits, pending, to be observed ready.
+    pub fn prepare_timeout(&self) -> Duration {
+        self.prepare_timeout
     }
 
     /// The ttl a client that names none gets.
