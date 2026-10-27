@@ -10,10 +10,10 @@
 //! | field | cap |
 //! |---|---|
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
-//! | `image` | at most [`MAX_IMAGE_LEN`] bytes of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
+//! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
-//! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes; value [`MAX_LABEL_VALUE_LEN`] bytes |
+//! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
@@ -23,7 +23,8 @@
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
 pub const MAX_ID_LEN: usize = 128;
-/// Longest container image reference, in bytes.
+/// Longest container image reference, in bytes: the whole `name[:tag][@digest]` string,
+/// not the 255-character limit docker puts on the name alone.
 pub const MAX_IMAGE_LEN: usize = 512;
 /// Most arguments after the image.
 pub const MAX_ARGS: usize = 1024;
@@ -41,6 +42,10 @@ pub const MAX_REL_LEN: usize = 4096;
 pub const MAX_LABELS: usize = 64;
 /// Longest label key, in bytes.
 pub const MAX_LABEL_KEY_LEN: usize = 128;
+/// Longest label name (the part after any `prefix/`), in bytes; the same 63 as a label value.
+pub const MAX_LABEL_NAME_LEN: usize = 63;
+/// Longest single dot-separated DNS label of a label-key prefix, in bytes (RFC 1035).
+pub const MAX_DNS_LABEL_LEN: usize = 63;
 /// Longest label value, in bytes; this is the limit `js-types` puts on a label value.
 pub const MAX_LABEL_VALUE_LEN: usize = 63;
 /// Most capabilities a hello may report.

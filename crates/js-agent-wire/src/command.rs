@@ -126,6 +126,8 @@ impl Mount {
         if self.rel.starts_with('/') || self.rel.split('/').any(|part| part == "..") {
             return Err(rel.fail(Rule::Escapes));
         }
+        // A `.` part is a no-op like an empty one, so both report `Empty`; only a part that
+        // can leave the root (`..`, a leading `/`) is `Escapes`.
         if self
             .rel
             .split('/')
