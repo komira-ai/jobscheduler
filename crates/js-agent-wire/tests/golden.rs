@@ -62,7 +62,8 @@ fn welcome_and_hello_reply_wire_forms() {
             "epoch": 9,
             "heartbeat_interval_ms": 5000,
             "grace_ms": 15000,
-            "pool": "builders"
+            "pool": "builders",
+            "session": "s3cret-0"
         })
     );
     assert_eq!(
@@ -73,7 +74,8 @@ fn welcome_and_hello_reply_wire_forms() {
             "epoch": 9,
             "heartbeat_interval_ms": 5000,
             "grace_ms": 15000,
-            "pool": "builders"
+            "pool": "builders",
+            "session": "s3cret-0"
         })
     );
     let refused = HelloReply::Refused(Refused {
@@ -139,6 +141,7 @@ fn heartbeat_with_result_wire_form() {
         json!({
             "host_id": "mac-01",
             "epoch": 3,
+            "session": "s3cret-0",
             "phase": "draining",
             "held": [{"run_id": "run-1", "state": "exited_unacked"}],
             "results": [{

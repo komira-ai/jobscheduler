@@ -95,8 +95,11 @@ fn minimal_hello_takes_defaults() {
 }
 
 /// Asserts that a welcome with no `protocol` field names major 1, and that a heartbeat,
-/// a reply and an empty reply decode from their required fields alone. It catches a
-/// server of the first version being read as speaking no version.
+/// a reply and an empty reply decode from their required fields alone, with an empty
+/// `session` on the welcome and the heartbeat (which the agent's welcome check and the
+/// registry then refuse). It catches a server of the first version being read as
+/// speaking no version, and an old body failing to decode instead of being refused by
+/// name.
 #[test]
 fn minimal_welcome_heartbeat_and_reply_take_defaults() {
     let welcome: Welcome = serde_json::from_value(json!({
@@ -104,9 +107,11 @@ fn minimal_welcome_heartbeat_and_reply_take_defaults() {
     }))
     .unwrap();
     assert_eq!(welcome.protocol, 1);
+    assert_eq!(welcome.session, "");
     let beat: Heartbeat =
         serde_json::from_value(json!({"host_id": "a", "epoch": 1, "phase": "serving"})).unwrap();
     assert!(beat.held.is_empty() && beat.results.is_empty() && beat.taint.is_none());
+    assert_eq!(beat.session, "");
     let reply: HeartbeatReply = serde_json::from_value(json!({"commands": []})).unwrap();
     assert_eq!(reply, HeartbeatReply::default());
     let reply: HeartbeatReply = serde_json::from_value(json!({})).unwrap();

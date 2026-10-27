@@ -2,6 +2,7 @@
 //! and the parts they share with the heartbeat ([`Phase`]).
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use js_types::{HostId, ProviderId, Resources, Shape, TypeError};
 use serde::{Deserialize, Serialize};
@@ -289,7 +290,7 @@ pub(crate) fn check_host_id(at: At, value: &str) -> Result<(), ValidationError> 
 }
 
 /// The server's answer to an accepted [`Hello`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Welcome {
     /// The protocol major both sides speak from here on. Absent means major 1.
     #[serde(default = "protocol::first_major")]
@@ -305,6 +306,30 @@ pub struct Welcome {
     pub grace_ms: u64,
     /// The pool the host was admitted to.
     pub pool: String,
+    /// The session secret: an opaque token of at most [`limits::MAX_SESSION_LEN`] bytes
+    /// of `[A-Za-z0-9._-]`. The server issues a fresh one at every admitted hello, and
+    /// every heartbeat of the session must carry it ([`crate::Heartbeat::session`]);
+    /// a later hello replaces it, with the new epoch, so the old one stops working. It
+    /// is a secret the agent keeps in memory and never logs. A welcome without one (a
+    /// server of the first version) decodes as an empty text, which [`Welcome::validate`]
+    /// refuses: such an agent cannot keep a session with a server that checks it.
+    #[serde(default)]
+    pub session: String,
+}
+
+/// Every field but `session`, which prints as `".."`: the secret never reaches a log or a
+/// panic message, also through a type that holds a welcome ([`HelloReply`]).
+impl fmt::Debug for Welcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Welcome")
+            .field("protocol", &self.protocol)
+            .field("epoch", &self.epoch)
+            .field("heartbeat_interval_ms", &self.heartbeat_interval_ms)
+            .field("grace_ms", &self.grace_ms)
+            .field("pool", &self.pool)
+            .field("session", &"..")
+            .finish()
+    }
 }
 
 impl Welcome {
@@ -334,7 +359,8 @@ impl Welcome {
         if !crate::grace_covers_heartbeats(self.heartbeat_interval_ms, self.grace_ms) {
             return Err(grace.fail(Rule::Inconsistent));
         }
-        check::ident(at.field("pool"), &self.pool)
+        check::ident(at.field("pool"), &self.pool)?;
+        check::session(at.field("session"), &self.session)
     }
 }
 

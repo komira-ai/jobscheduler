@@ -13,7 +13,10 @@ js-provider = { path = "../js-provider" }
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+js-agent-wire = { path = "../js-agent-wire" }
+js-lease = { path = "../js-lease" }
 js-pool-static = { path = "../js-pool-static" }
+js-registry = { path = "../js-registry" }
 
 [lints]
 workspace = true

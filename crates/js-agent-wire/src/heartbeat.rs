@@ -2,6 +2,7 @@
 //! ride in the heartbeat until the server acknowledges them.
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -92,12 +93,21 @@ pub struct Taint {
 }
 
 /// The periodic message, agent to server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// The host's id.
     pub host_id: String,
     /// The session epoch from [`crate::Welcome`].
     pub epoch: u64,
+    /// The session secret from [`crate::Welcome::session`], the one issued at the hello
+    /// that began this epoch. The server refuses a heartbeat without it, or with another,
+    /// as `session-mismatch` and changes nothing; the pool's join token is not proof of
+    /// a session. A heartbeat body with no `session` decodes as an empty text so the rest
+    /// of it can be read, and the server refuses it; [`Heartbeat::validate`] accepts an
+    /// empty text for that reason and holds a present one to
+    /// [`limits::MAX_SESSION_LEN`] and `[A-Za-z0-9._-]`.
+    #[serde(default)]
+    pub session: String,
     /// The host's phase.
     pub phase: Phase,
     /// Every run the agent holds, results not yet acknowledged included.
@@ -220,6 +230,22 @@ impl Taint {
     }
 }
 
+/// Every field but `session`, which prints as `".."`: the secret never reaches a log or a
+/// panic message.
+impl fmt::Debug for Heartbeat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heartbeat")
+            .field("host_id", &self.host_id)
+            .field("epoch", &self.epoch)
+            .field("session", &"..")
+            .field("phase", &self.phase)
+            .field("held", &self.held)
+            .field("results", &self.results)
+            .field("taint", &self.taint)
+            .finish()
+    }
+}
+
 impl Heartbeat {
     /// Checks the heartbeat against every bound of [`crate::limits`]: the host id, the
     /// held runs and results (no run id twice in either) and the taint. It reads no
@@ -228,6 +254,9 @@ impl Heartbeat {
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("heartbeat", refusal::INVALID_HEARTBEAT);
         crate::hello::check_host_id(at.field("host_id"), &self.host_id)?;
+        if !self.session.is_empty() {
+            check::session(at.field("session"), &self.session)?;
+        }
         check_held(at.field("held"), &self.held)?;
         let results = at.field("results");
         check::count(results, self.results.len(), limits::MAX_RESULTS)?;

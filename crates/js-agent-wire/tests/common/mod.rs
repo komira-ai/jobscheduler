@@ -88,6 +88,7 @@ pub fn heartbeat() -> Heartbeat {
     Heartbeat {
         host_id: "mac-01".into(),
         epoch: 3,
+        session: "s3cret-0".into(),
         phase: Phase::Draining,
         held: vec![HeldRun {
             run_id: "run-1".into(),
@@ -109,6 +110,7 @@ pub fn welcome() -> Welcome {
         heartbeat_interval_ms: 5000,
         grace_ms: 15_000,
         pool: "builders".into(),
+        session: "s3cret-0".into(),
     }
 }
 
