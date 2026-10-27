@@ -888,6 +888,30 @@ mod tests {
         );
     }
 
+    /// Catches a second guest that fails to start leaving the first guest's matrix
+    /// directories behind: they are scratch, and a failed run removes them.
+    #[test]
+    fn a_failed_second_start_removes_the_first_guests_matrix() {
+        let work = work_with_base("e1-fail-matrix");
+        let sys = FakeSystem::new();
+        // The first guest's bundle is cloned whole; the second one's first file is refused.
+        sys.clone_budget.set(Some(crate::bundle::FILES.len()));
+        let mut c = guest_ctx(&sys, &work);
+        c.matrix = true;
+        let r = e1(&c);
+        assert_eq!(r.status, Status::Error, "{r:?}");
+        assert_eq!(sys.cloned.borrow().len(), crate::bundle::FILES.len());
+        assert!(!work.join("e1-x").exists(), "the first clone is gone");
+        assert!(!work.join("kbf-e1-x-mx-base").exists());
+        assert!(
+            std::fs::read_dir(&*work)
+                .expect("work")
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains("-mx-")),
+            "no matrix directory is left"
+        );
+    }
+
     /// Catches a matrix that is not attached to both guests (each guest needs its own host
     /// directories), a manifest the guest cannot read, host listings missing from the
     /// report, scratch left in the work directory after a run without `--keep`, and
@@ -907,7 +931,8 @@ mod tests {
             // The main share and the probe share come first, then the matrix.
             assert_eq!(tagged[0].tag, guest::SHARE_TAG);
             assert_eq!(tagged[1].tag, guest::TAG);
-            assert!(tagged.len() > 2 && tagged[2..].iter().all(|t| t.tag.starts_with("kbfmx")));
+            assert!(tagged.len() > 2);
+            assert!(tagged[2..].iter().all(|t| t.tag.starts_with("kbfmx")));
             let manifest =
                 std::fs::read_to_string(work.join(format!("{name}-share")).join(matrix::MANIFEST))
                     .expect("manifest");
@@ -915,11 +940,8 @@ mod tests {
             assert_eq!(rows.as_array().expect("rows").len(), tagged.len() - 2);
             let listed = arm(&r, i)["matrix_host"].as_array().expect("listing");
             assert_eq!(listed.len(), 8, "every variant is listed, skipped or not");
-            assert!(
-                listed
-                    .iter()
-                    .any(|row| row["name"] == "base" && row["entries"] == json!([]))
-            );
+            let base = listed.iter().find(|row| row["name"] == "base");
+            assert_eq!(base.expect("base row")["entries"], json!([]));
         }
         // Kept: the work directories stay for inspection.
         assert!(work.join("kbf-e1-x-mx-base").is_dir());

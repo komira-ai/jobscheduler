@@ -102,6 +102,11 @@ pub struct Results {
     spent: Mutex<Spent>,
 }
 
+/// Names the path and the operation of a failed step: `<what> <path>: <error>`.
+fn at<T>(what: &str, path: &Path, step: io::Result<T>) -> Result<T, String> {
+    step.map_err(|e| format!("{what} {}: {e}", path.display()))
+}
+
 /// `openat(2)` of `name` under `dir`, without following a link at the leaf.
 fn open_at(dir: RawFd, name: &str, flags: libc::c_int) -> io::Result<File> {
     let name = CString::new(name).map_err(io::Error::other)?;
@@ -167,14 +172,15 @@ impl Results {
     /// # Errors
     /// It cannot be opened, is a link, or is not private.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let dir = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|e| format!("open the results directory {}: {e}", path.display()))?;
-        let meta = dir
-            .metadata()
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+        let dir = at(
+            "open the results directory",
+            path,
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(path),
+        )?;
+        let meta = at("stat", path, dir.metadata())?;
         // SAFETY: geteuid takes no arguments and cannot fail.
         let euid = unsafe { libc::geteuid() };
         check_private(path, meta.uid(), euid, meta.mode())?;
@@ -222,8 +228,11 @@ impl Results {
                 spent.admit(&frame.name, old, len)?;
                 let part = part_name(&frame.name);
                 let target = self.path.join(&frame.name);
-                let mut file = open_at(fd, &part, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
-                    .map_err(|e| format!("create {}: {e}", self.path.join(&part).display()))?;
+                let mut file = at(
+                    "create",
+                    &self.path.join(&part),
+                    open_at(fd, &part, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL),
+                )?;
                 let written = file
                     .write_all(frame.body.as_bytes())
                     .and_then(|()| rename_at(fd, &part, &frame.name));
@@ -245,20 +254,20 @@ impl Results {
                     ));
                 }
                 spent.admit_growth(&file_name, old, len)?;
-                let mut file = open_at(
-                    fd,
-                    &file_name,
-                    libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NONBLOCK,
-                )
-                .map_err(|e| format!("open {}: {e}", target.display()))?;
-                let meta = file
-                    .metadata()
-                    .map_err(|e| format!("stat {}: {e}", target.display()))?;
+                let mut file = at(
+                    "open",
+                    &target,
+                    open_at(
+                        fd,
+                        &file_name,
+                        libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NONBLOCK,
+                    ),
+                )?;
+                let meta = at("stat", &target, file.metadata())?;
                 if !meta.is_file() {
                     return Err(format!("{} is not a regular file", target.display()));
                 }
-                file.write_all(frame.body.as_bytes())
-                    .map_err(|e| format!("write {}: {e}", target.display()))?;
+                at("write", &target, file.write_all(frame.body.as_bytes()))?;
                 spent.files.insert(file_name, old.unwrap_or(0) + len);
                 spent.total += len;
                 Ok(target)
@@ -539,6 +548,14 @@ mod tests {
 
     fn dir(name: &str) -> js_testkit::dir::TestDir {
         js_testkit::dir::TestDir::under(std::env::temp_dir(), &format!("js-vmm-sink-{name}"))
+    }
+
+    /// Catches a results directory that names another path in messages.
+    #[test]
+    fn the_results_directory_reports_its_path() {
+        let d = dir("path");
+        let (path, r) = open(&d);
+        assert_eq!(r.path(), path);
     }
 
     /// A private results directory `results` under `d`, opened.

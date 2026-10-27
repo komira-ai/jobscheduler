@@ -174,19 +174,20 @@ fn copy_exclusive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// # Errors
 /// The path is not a regular file, is too large, or cannot be read.
 pub fn read_result(path: &Path) -> Result<String, String> {
+    let describe = |e: std::io::Error| e.to_string();
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-        .map_err(|e| e.to_string())?;
-    let meta = file.metadata().map_err(|e| e.to_string())?;
+        .map_err(describe)?;
+    let meta = file.metadata().map_err(describe)?;
     if !meta.is_file() {
         return Err("not a regular file".to_owned());
     }
     let mut text = String::new();
     file.take(MAX_RESULT_BYTES + 1)
         .read_to_string(&mut text)
-        .map_err(|e| e.to_string())?;
+        .map_err(describe)?;
     if text.len() as u64 > MAX_RESULT_BYTES {
         return Err(format!("larger than {MAX_RESULT_BYTES} bytes"));
     }

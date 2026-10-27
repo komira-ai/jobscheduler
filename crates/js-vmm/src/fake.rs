@@ -262,6 +262,8 @@ pub struct FakeSystem {
     pub clone_budget: Cell<Option<usize>>,
     /// Runs after each successful clone with the destination path.
     pub after_clone: RefCell<Option<CloneHook>>,
+    /// Runs after each offline write, to change the host between the write and what follows.
+    pub after_offline_write: RefCell<Option<Box<dyn Fn()>>>,
     pub cloned: RefCell<Vec<(PathBuf, PathBuf)>>,
     /// Every path `clear_immutable` was asked about, in order.
     pub unflagged: RefCell<Vec<PathBuf>>,
@@ -282,6 +284,8 @@ pub struct FakeSystem {
     pub table: RefCell<Result<String, String>>,
     pub fetch: RefCell<Result<(), String>>,
     pub fetch_body: RefCell<Vec<u8>>,
+    /// Makes a successful `fetch` leave a directory where the file should be.
+    pub fetch_leaves_dir: Cell<bool>,
     pub fetched: RefCell<Vec<String>>,
     pub install: RefCell<Result<Value, String>>,
     pub installs: RefCell<Vec<(PathBuf, PathBuf, Sizing)>>,
@@ -306,6 +310,7 @@ impl FakeSystem {
             clone_fails_on: RefCell::new(None),
             clone_budget: Cell::new(None),
             after_clone: RefCell::new(None),
+            after_offline_write: RefCell::new(None),
             cloned: RefCell::new(Vec::new()),
             unflagged: RefCell::new(Vec::new()),
             unflag_fails: Cell::new(false),
@@ -324,6 +329,7 @@ impl FakeSystem {
             table: RefCell::new(Ok(String::new())),
             fetch: RefCell::new(Ok(())),
             fetch_body: RefCell::new(b"ipsw-bytes".to_vec()),
+            fetch_leaves_dir: Cell::new(false),
             fetched: RefCell::new(Vec::new()),
             install: RefCell::new(Ok(
                 json!({"macos_version": "27.0.0", "cpus": 2, "memory_mib": 4096}),
@@ -475,6 +481,9 @@ impl System for FakeSystem {
             disk.to_owned(),
             files.iter().map(|f| f.path.clone()).collect(),
         ));
+        if let Some(hook) = &*self.after_offline_write.borrow() {
+            hook();
+        }
         self.offline.borrow().clone()
     }
     fn offline_stage(&self, disk: &Path, plan: &crate::stage::Plan) -> Result<Value, String> {
@@ -496,7 +505,12 @@ impl System for FakeSystem {
         self.fetched.borrow_mut().push(url.to_owned());
         let r = self.fetch.borrow().clone();
         if r.is_ok() {
-            std::fs::write(dest, &*self.fetch_body.borrow()).map_err(|e| e.to_string())?;
+            if self.fetch_leaves_dir.get() {
+                std::fs::create_dir(dest).expect("the fetched path is made");
+            } else {
+                std::fs::write(dest, &*self.fetch_body.borrow())
+                    .expect("the fetched body is written");
+            }
         }
         r
     }

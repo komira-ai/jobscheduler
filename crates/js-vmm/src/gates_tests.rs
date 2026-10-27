@@ -583,6 +583,30 @@ fn p0_writes_the_payload_into_a_clone_as_root() {
     assert_eq!(p0(&ctx(&sys, &work)).status, Status::Error);
 }
 
+/// Catches a P0 whose share cannot be made after the payload was written: it must be an
+/// error that names the copy, and leave no clone behind.
+#[test]
+fn p0_reports_a_share_that_cannot_be_made_and_removes_the_clone() {
+    let work = work_with_base("p0-noshare");
+    let bin = work.join("guest-bin");
+    std::fs::write(&bin, "x").expect("bin");
+    let sys = FakeSystem::new();
+    sys.uid.set(0);
+    let gone = bin.clone();
+    *sys.after_offline_write.borrow_mut() = Some(Box::new(move || {
+        std::fs::remove_file(&gone).expect("rm");
+    }));
+    let mut c = ctx(&sys, &work);
+    c.guest_binary = Some(bin);
+    let r = p0(&c);
+    assert_eq!(r.status, Status::Ok, "{r:?}");
+    let boot = &r.details["boot"];
+    assert_eq!(boot["attempted"], false, "{boot}");
+    assert!(boot["failure"].as_str().expect("why").contains("copy"));
+    assert!(sys.starts.borrow().is_empty());
+    assert!(!work.join("p0-vm").exists());
+}
+
 /// Catches P0 claiming the guest ran the payload when it was only written: the clone is
 /// booted only with a guest binary, `payload_ran` follows the launch-daemon marker, and
 /// without a binary the summary says the files were read back only.

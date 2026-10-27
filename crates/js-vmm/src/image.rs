@@ -161,16 +161,13 @@ pub(crate) fn stage_exact(src: &Path, dst: &Path, bytes: u64) -> Result<String, 
 fn copy_hashed(src: &Path, dst: &Path, planned: Option<u64>) -> Result<String, ImageError> {
     let io_err =
         |what: &str, p: &Path, e: io::Error| ImageError::Io(format!("{what} {}: {e}", p.display()));
+    let read_err = |e: io::Error| io_err("read", src, e);
     let from = File::options()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(src)
-        .map_err(|e| io_err("read", src, e))?;
-    if !from
-        .metadata()
-        .map_err(|e| io_err("read", src, e))?
-        .is_file()
-    {
+        .map_err(read_err)?;
+    if !from.metadata().map_err(read_err)?.is_file() {
         return Err(ImageError::Io(format!(
             "read {}: not a regular file",
             src.display()
@@ -762,6 +759,31 @@ mod tests {
         let mut a = args(&dir, "https://example/r.ipsw", HELLO);
         a.out = file.join("sub");
         assert!(base(&sys, &a).reason.expect("reason").contains("create"));
+    }
+
+    /// Catches a download that cannot be read back being installed or hashed as empty: it is
+    /// an error that names the file, and nothing is installed.
+    #[test]
+    fn a_download_that_cannot_be_read_back_is_an_error() {
+        let dir = tmp("image-url-unreadable");
+        let sys = FakeSystem::new();
+        sys.fetch_leaves_dir.set(true);
+        let r = base(&sys, &args(&dir, "https://example/r.ipsw", HELLO));
+        assert_eq!(r.status, Status::Error, "{r:?}");
+        assert!(r.reason.expect("reason").contains("read "));
+        assert!(sys.installs.borrow().is_empty());
+    }
+
+    /// Catches a read error in the middle of a copy being taken for the end of the file: it
+    /// is an error that names the copy. `/proc/self/mem` is a regular file whose read at
+    /// offset 0 fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_source_that_fails_to_read_is_an_error_not_a_short_copy() {
+        let dir = tmp("image-stage-readfail");
+        let e = copy_hashed(Path::new("/proc/self/mem"), &dir.join("copy"), None)
+            .expect_err("read fails");
+        assert!(e.to_string().contains("copy /proc/self/mem"), "{e}");
     }
 
     /// Catches a copy that is not byte-for-byte what was hashed, one that overwrites a

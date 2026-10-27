@@ -30,7 +30,7 @@ fn context<'a>(
     std::fs::create_dir_all(&common.work_dir)
         .map_err(|e| format!("create {}: {e}", common.work_dir.display()))?;
     // Absolute, because a helper started as another user need not share the directory.
-    let work = std::path::absolute(&common.work_dir).unwrap_or_else(|_| common.work_dir.clone());
+    let work = std::path::absolute(&common.work_dir).unwrap_or(common.work_dir.clone());
     let base = common.base.clone().unwrap_or_else(|| work.join("base"));
     Ok(Ctx {
         sys,
@@ -65,7 +65,7 @@ fn prime_cmd(
     deadline: Duration,
     timing: Timing,
 ) -> Report {
-    let work = std::path::absolute(base).unwrap_or_else(|_| base.to_owned());
+    let work = std::path::absolute(base).unwrap_or(base.to_owned());
     let ctx = Ctx {
         sys,
         work: work.clone(),

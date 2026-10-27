@@ -1705,3 +1705,14 @@ fn a_setup_without_runtimes_clears_the_earlier_ones() {
     let m: Value = serde_json::from_str(&manifest).expect("json");
     assert_eq!(m["runtimes"], serde_json::json!([]));
 }
+
+/// Catches a removal that treats every failure to examine a path as "nothing there": a path
+/// below a file cannot be examined and is an error, while a path that is not there is not.
+#[test]
+fn removing_a_path_below_a_file_is_an_error_and_a_missing_path_is_not() {
+    let dir = tmp("stage-remove-path");
+    std::fs::write(dir.join("plain"), "x").expect("plain");
+    remove_path(&dir.join("absent")).expect("nothing to remove");
+    remove_path(&dir.join("plain/child")).expect_err("a file is not a directory");
+    assert!(dir.join("plain").exists());
+}

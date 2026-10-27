@@ -463,6 +463,7 @@ mod tests {
         let shares = prepare(&ctx(&sys, &work), "vm");
         let base = shares.iter().find(|s| s.name == "base").expect("base");
         std::fs::write(base.dir.join("landed"), "abc").expect("file");
+        std::fs::write(base.dir.join("a-first"), "").expect("file");
         let rows = host_listing(&shares);
         let row = |n: &str| {
             rows.as_array()
@@ -472,8 +473,13 @@ mod tests {
                 .expect("row")
                 .clone()
         };
-        assert_eq!(row("base")["entries"][0]["name"], "landed");
-        assert_eq!(row("base")["entries"][0]["bytes"], 3);
+        assert_eq!(
+            row("base")["entries"][0]["name"],
+            "a-first",
+            "listed in name order"
+        );
+        assert_eq!(row("base")["entries"][1]["name"], "landed");
+        assert_eq!(row("base")["entries"][1]["bytes"], 3);
         assert_eq!(row("base")["dir"]["mode"], "777");
         assert!(row("base")["real_path"].is_string());
         assert_eq!(row("mode755")["entries"], json!([]));
