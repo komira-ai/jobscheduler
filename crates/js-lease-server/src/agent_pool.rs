@@ -310,22 +310,32 @@ mod tests {
         assert_eq!(timed, full);
     }
 
-    /// Asserts the class names: `whole-node` and `gpu-host` load as the shipped classes
-    /// (`whole-node` is `Whole`; `gpu-host` is still `BookAll`, with its GPU minimum), and
-    /// any other id loads as `BookAll` with no minimum. A defect that dropped a shipped
-    /// name would load it with no minimum, or `whole-node` as BookAll.
+    /// Asserts the class names: `whole-node` loads as the shipped whole-node class
+    /// (`Whole`) and `gpu-host` as the shipped GPU class (`BookAll`, one GPU minimum),
+    /// and any other id loads as `BookAll` with no minimum. It also asserts that a pool
+    /// file naming each class parses to a pool that leases exactly that class. A defect
+    /// that dropped a shipped name would load it as `BookAll` with no minimum, and one
+    /// that swapped the two would change the admission.
     #[test]
     fn class_names_load_the_shipped_classes() {
-        assert_eq!(class("whole-node").unwrap(), ResourceClass::whole_node());
-        assert_eq!(class("whole-node").unwrap().admission(), &Admission::Whole);
-        assert_eq!(class("gpu-host").unwrap(), ResourceClass::gpu_host());
-        assert_eq!(class("gpu-host").unwrap().admission(), &Admission::BookAll);
+        let whole = class("whole-node").unwrap();
+        assert_eq!(whole, ResourceClass::whole_node());
+        assert_eq!(whole.admission(), &Admission::Whole);
+        let gpu = class("gpu-host").unwrap();
+        assert_eq!(gpu, ResourceClass::gpu_host());
+        assert_eq!(gpu.admission(), &Admission::BookAll);
+        assert_eq!(gpu.min_gpus(), 1);
         let other = class("mac-host").unwrap();
         assert_eq!(other.admission(), &Admission::BookAll);
         assert_eq!(other.min_gpus(), 0);
-        let loaded = parse(&MINIMAL.replace("mac-host", "whole-node")).unwrap();
-        let named = parse(&MINIMAL.replace("mac-host", "gpu-host")).unwrap();
-        assert_ne!(loaded, named);
+        for (name, expected) in [("whole-node", whole), ("gpu-host", gpu)] {
+            let shape = Shape::new(
+                Resources::new(4000, 8_589_934_592, 0, None).unwrap(),
+                BTreeMap::new(),
+            );
+            let pool = PoolConfig::new(ProviderId::new("mac").unwrap(), expected, shape, 4);
+            assert_eq!(parse(&MINIMAL.replace("mac-host", name)).unwrap(), pool);
+        }
     }
 
     /// Every mistake is refused with a reason that names the setting: an unknown key, a
