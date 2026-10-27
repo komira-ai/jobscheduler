@@ -41,13 +41,20 @@ caller should be told. Draining hosts are not capable for a new request, because
 **Admission against registered hosts (open decision D35).** Let the *hierarchy* of the request's pool be its ordered providers (below).
 
 1. If some host of the pool is capable, the request is accepted and queued; it is placed when a capable host is free (6.1).
-2. Otherwise, if an elastic provider of the hierarchy could launch a machine that meets the request (the pool's shape holds the booking;
+2. Otherwise, if an elastic provider of the hierarchy *could launch* a machine that meets the request (the pool's shape holds the booking;
    for a guest constraint, one of the pool's `base_images` can meet it, 5.13), the request is accepted and its demand is served by an
-   acquire (below).
+   acquire (below). *Could launch* is a precise test, used here and in the `regain_grace` re-check: the entry is enabled and has a
+   provider share greater than 0, and a launch is possible once every slot that can free is counted as freed. Slots held by in-flight
+   acquires, busy hosts, lost hosts and elastic hosts count as freeable (each ends or is released by a rule that needs no human).
+   Slots held by tainted or denied registered hosts do not: they stay held until an operator acts (5.12). The pool's `max_machines`
+   (which counts every machine, tainted ones included, 5.11) and the entry's `provider_max_machines` must each leave room for the
+   booking after only the freeable slots are counted as free. If they cannot, the request has no capable path and is refused.
 3. Otherwise the request is refused at once with the plain constant `no-capable-host`. It is never queued: no registered host, now or
    after any bounded wait, could run it, and the caller can act (register a host, change the request, choose another pool).
 
-A pool at `max_machines` with elastic providers is not refused (it is capable in principle, and waits, 8.2). A request that names a pool or
+A pool at `max_machines` with elastic providers is not refused when the slots that can free would cover the booking (it is capable in
+principle, and waits, 8.2); a pool whose cap is held entirely by tainted or denied hosts, or whose only fitting elastic entry has a share
+of 0 or is disabled, is refused with `no-capable-host`, because no acquire could ever happen and the wait would never end. A request that names a pool or
 selectors that match no pool is refused at selection, as today, with the existing code. The refusal covers the request's constraints, its
 shape and its class together: a GPU request (D32) in a pool without a registered GPU host is refused, not queued.
 
@@ -56,8 +63,9 @@ then looks like a broken one: a burst against a single registered GPU host would
 caller would have to build the queue the scheduler exists to provide. The recommendation is the reading above.
 
 **What happens to queued requests when capability goes.** A queued request is re-checked in the tick at which the table changes (a
-deregister, a removal, a taint, an eviction, an age-out). One whose last capable host has gone, with no elastic provider able to
-serve it, is *not* refused at once: a host that restarts deregisters and registers again within moments, and refusing every queued
+deregister, a removal, a taint, an eviction, an age-out). One whose last capable path has gone (no capable registered host, and no
+elastic entry that *could launch*, as defined in admission step 2; a pool whose cap becomes held entirely by non-freeable hosts has lost
+its last path too), is *not* refused at once: a host that restarts deregisters and registers again within moments, and refusing every queued
 request across a restart would turn routine maintenance into failures. It stays queued for `regain_grace` (a pool key; default 5 minutes
 on the injected clock, counted from the tick the last capable host left). If a capable host registers within it, the request proceeds
 untouched. When the grace passes, the request ends as Refused with `no-capable-host` and the reason `capacity-left`, the same constant as

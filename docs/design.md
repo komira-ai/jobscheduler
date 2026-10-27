@@ -908,19 +908,21 @@ D41 with no gaps; D26 (no recommendation yet) and D35 are open. A superseded dec
 - D26 macOS VM sizing (**open**). D27 how sets and counters ride the wire. D28 runtime traits for VMs. D29 a fresh VM per run (settled). D30
   readiness of a whole-node lease. D31 matching what is inside an image. D32 GPU placement (settled; amended by D35 and D36). D33
   deployment shape and state store. D34 leases across a restart.
+- **D35. Admission against registered hosts. OPEN, for the project owner.** What does a pool of registered hosts do with a request they
+  cannot serve right now? (a) **Refuse only when no registered host could ever satisfy the request's constraints and shape** (a host that
+  exists, is not tainted and is busy, lost or cordoned is capable): `no-capable-host`, at submit, unless an elastic provider of the pool
+  could launch a machine that meets it (a launch counts as possible only once every slot that can free is counted as freed: tainted and
+  denied hosts hold their slot until an operator acts, and a disabled entry or one with a zero share launches nothing); when a capable
+  host exists but is busy, the request waits in the queue. (b) **Refuse whenever no host is free now.** The recommendation is (a): (b)
+  turns a busy fleet into errors and puts a queue in every caller, while (a) refuses only what no wait serves. A queued request whose last
+  capable path goes waits `regain_grace` before it is refused (D41). If the owner picks (b), the check becomes "no free capable host and
+  nothing launchable" and `regain_grace` goes. Text in [design/providers.md](design/providers.md).
 - D36 the static pool is for testing only (settled): the operator-listed pool is a test provider; production hosts register through
   `js-agent`; the GPU lease service's listed pool is the stepping stone (step 54). D37 the default provider never creates or destroys
   compute, and an elastic provider boots a machine whose agent registers itself (direction settled). D38 no minimum machines anywhere
   (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
   cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the
   booting machine is kept and released by the idle rule. D41 what is capable and what happens to queued requests when capability goes.
-- **D35. Admission against registered hosts. OPEN, for the project owner.** What does a pool of registered hosts do with a request they
-  cannot serve right now? (a) **Refuse only when no registered host could ever satisfy the request's constraints and shape** (a host that
-  exists, is not tainted and is busy, lost or cordoned is capable): `no-capable-host`, at submit, unless an elastic provider of the pool
-  could launch a machine that meets it; when a capable host exists but is busy, the request waits in the queue. (b) **Refuse whenever no
-  host is free now.** The recommendation is (a): (b) turns a busy fleet into errors and puts a queue in every caller, while (a) refuses only
-  what no wait serves. A queued request whose last capable host leaves waits `regain_grace` before it is refused (D41). If the owner picks
-  (b), the check becomes "no free capable host and nothing launchable" and `regain_grace` goes. Text in [design/providers.md](design/providers.md).
 
 ## 16. Risks
 

@@ -18,6 +18,10 @@ Moved from design.md sections 13.2 and 13.3 to keep that file under its size lim
 - A request no host of the pool (and no elastic entry) could ever serve is refused with `no-capable-host`; the same request is queued
   when a capable host exists and is busy, lost, or cordoned; a tainted, denied or draining host does not make a request capable. Each
   case names the host state it uses.
+- A pool whose `max_machines` is filled with tainted or denied hosts, with an enabled elastic entry, refuses a request with
+  `no-capable-host` (those slots never free); the same pool filled with busy, lost or elastic hosts queues it. An elastic entry that is
+  disabled or has a share of 0 does not count as able to launch. A queued request in a pool that reaches the first state starts
+  `regain_grace`, and is refused after it, so no accepted request waits for ever.
 - A queued request whose last capable host leaves is still queued until `regain_grace` has passed on the injected clock, is served if a
   capable host registers inside it, and is refused with `no-capable-host` after it; a new submission in the same state is refused at once.
 - Placement uses a free capable host of the first entry that has one; an entry is asked to acquire only when no entry has a free capable
