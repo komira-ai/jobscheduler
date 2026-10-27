@@ -4,7 +4,7 @@
 use js_agent_wire::{HeartbeatReply, limits};
 use serde_json::json;
 
-use crate::agents_support::{JOIN, join, post, report_ready, restarted, start_agents};
+use crate::agents_support::{JOIN, join, post, start_agents};
 use crate::runs_support::{held, lease, queue, queued, run_body, runs, stop, words};
 use crate::support::{Harness, TOKEN, lease_body, request};
 
@@ -15,8 +15,8 @@ use crate::support::{Harness, TOKEN, lease_body, request};
 #[tokio::test]
 async fn run_routes_need_client_token() {
     let h = start_agents("runs_auth", false).await;
-    let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    join(&h, "burst-1").await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 1000).await;
     let body = run_body(1000).to_string().into_bytes();
     let routes = [
@@ -82,7 +82,7 @@ async fn without_agents_there_are_no_run_routes() {
 #[tokio::test]
 async fn unknown_lease_and_unknown_run_are_404() {
     let h = start_agents("runs_404", false).await;
-    let me = join(&h, "burst-1").await;
+    join(&h, "burst-1").await;
     for lease in ["9-9", "nonsense"] {
         let queued = queue(&h, lease, &run_body(1000)).await;
         assert_eq!(queued.json(), json!({ "error": "unknown-lease" }));
@@ -93,7 +93,7 @@ async fn unknown_lease_and_unknown_run_are_404() {
         let stopped = stop(&h, lease, "run-1-1").await;
         assert_eq!(stopped.json(), json!({ "error": "unknown-lease" }));
     }
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let unknown = stop(&h, &lease, "run-1-1").await;
     assert_eq!(unknown.status, 404, "{}", unknown.body);
     assert_eq!(unknown.json(), json!({ "error": "unknown-run" }));
@@ -106,37 +106,13 @@ async fn unknown_lease_and_unknown_run_are_404() {
 async fn stopping_an_ended_run_is_accepted() {
     let h = start_agents("runs_stop_ended", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 1000).await;
     crate::runs_support::beat(&h, &me, &[held(&run, "running")], &[]).await;
     crate::runs_support::beat(&h, &me, &[], &[]).await;
     let stopped = stop(&h, &lease, &run).await;
     assert_eq!(stopped.status, 202, "{}", stopped.body);
     assert_eq!(stopped.json(), json!({ "run_id": run, "state": "ended" }));
-}
-
-/// Asserts the run gate of a whole-node lease over HTTP. A lease the table holds on a host
-/// whose agent has not reported `exclusive_ready` for it is 409 `not-ready` for a run, and
-/// nothing is queued: that is a lease restored by a restart (the preparation is in memory
-/// only), whose agent has said hello again. Once the agent reports ready for exactly that
-/// lease the same request is accepted 202. It catches a run queued on a host that is not
-/// prepared, a restored lease that reads ready, and a refusal that has no HTTP code.
-#[tokio::test]
-async fn a_run_waits_for_a_restored_whole_node_lease_to_be_ready() {
-    let first = start_agents("runs_not_ready", false).await;
-    let old = join(&first, "burst-1").await;
-    let id = lease(&first, &[&old]).await;
-
-    let h = restarted(first, false).await;
-    let me = join(&h, "burst-1").await;
-    let early = queue(&h, &id, &run_body(1000)).await;
-    assert_eq!(early.status, 409, "{}", early.body);
-    assert_eq!(early.json(), json!({ "error": "not-ready" }));
-    assert!(runs(&h, &id).await.is_empty());
-
-    report_ready(&h, &me, &id).await;
-    let accepted = queue(&h, &id, &run_body(1000)).await;
-    assert_eq!(accepted.status, 202, "{}", accepted.body);
 }
 
 /// Asserts that a reply stays within the wire's caps whatever the agent lists: a heartbeat

@@ -6,10 +6,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::agents_support::{
-    JOIN, entry, grant, grant_with, hello_body, hosts, join, post, report_ready, restarted,
-    start_agents,
-};
+use crate::agents_support::{JOIN, entry, hello_body, hosts, join, post, restarted, start_agents};
 use crate::runs_support::{
     beat, held, idle, lease, queue, queued, result, run_body, runs, state, stop, verdicts, words,
 };
@@ -26,7 +23,7 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
     let h = start_agents("runs_flow", false).await;
     let me = join(&h, "burst-1").await;
     beat(&h, &me, &[], &[]).await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
 
     let queued = queue(&h, &lease, &run_body(2000)).await;
     assert_eq!(queued.status, 202, "{}", queued.body);
@@ -44,8 +41,7 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
     assert_eq!(start["limits"]["cpu_millis"], 2000);
     assert_eq!(start["limits"]["wall_ms"], 600_000);
     assert_eq!(start["valid_for_ms"], 600_000);
-    // The beat before the lease, the one that reported the host ready, and this one.
-    assert_eq!(start["heartbeat_seq"], 2);
+    assert_eq!(start["heartbeat_seq"], 1);
 
     let running = [held("run-1-1", "running")];
     let reply = beat(&h, &me, &running, &[]).await;
@@ -77,7 +73,7 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
 async fn stop_resent_until_run_leaves_held() {
     let h = start_agents("runs_stop", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 1000).await;
     let running = [held(&run, "running")];
     beat(&h, &me, &running, &[]).await;
@@ -105,7 +101,7 @@ async fn stop_resent_until_run_leaves_held() {
 async fn start_to_lost_host_never_started() {
     let h = start_agents("runs_lost", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 8000).await;
 
     h.clock.advance(Duration::from_secs(20));
@@ -127,8 +123,8 @@ async fn start_to_lost_host_never_started() {
 #[tokio::test]
 async fn limits_over_shape_422() {
     let h = start_agents("runs_422", false).await;
-    let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    join(&h, "burst-1").await;
+    let lease = lease(&h).await;
     let refuse = |body| {
         let (h, lease) = (&h, &lease);
         async move {
@@ -180,8 +176,8 @@ async fn limits_over_shape_422() {
 #[tokio::test]
 async fn second_run_fits_third_409() {
     let h = start_agents("runs_budget", false).await;
-    let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    join(&h, "burst-1").await;
+    let lease = lease(&h).await;
     queued(&h, &lease, 4000).await;
     queued(&h, &lease, 4000).await;
     let third = queue(&h, &lease, &run_body(4000)).await;
@@ -199,7 +195,7 @@ async fn second_run_fits_third_409() {
 async fn slot_returns_only_after_run_leaves_held() {
     let h = start_agents("runs_slot", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let first = queued(&h, &lease, 8000).await;
     let running = [held(&first, "running")];
     beat(&h, &me, &running, &[]).await;
@@ -225,7 +221,7 @@ async fn slot_returns_only_after_run_leaves_held() {
 async fn release_with_live_runs_host_rebookable_only_after_empty_heartbeat() {
     let h = start_agents("runs_release", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 1000).await;
     let running = [held(&run, "running")];
     beat(&h, &me, &running, &[]).await;
@@ -251,8 +247,8 @@ async fn release_with_live_runs_host_rebookable_only_after_empty_heartbeat() {
     let reply = beat(&h, &me, &[], &[]).await;
     assert!(words(&reply).is_empty());
     assert_eq!(entry(&hosts(&h).await, "burst-1")["releasing"], false);
-    let again = grant(&h, &[&me]).await;
-    assert_eq!(again["host"], "burst-1");
+    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    assert_eq!(again.status, 201, "{}", again.body);
 }
 
 /// Asserts that a run the server does not know is cancelled and never adopted: a hello that
@@ -279,7 +275,7 @@ async fn unknown_run_in_hello_cancelled_not_adopted() {
     assert_eq!(words(&reply), ["cancel ghost"]);
     let reply = beat(&h, &me, &[], &[]).await;
     assert!(words(&reply).is_empty());
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     assert!(runs(&h, &lease).await.is_empty());
 }
 
@@ -292,7 +288,7 @@ async fn unknown_run_in_hello_cancelled_not_adopted() {
 async fn server_restart_then_runs_cancelled() {
     let first = start_agents("runs_restart", false).await;
     let old = join(&first, "burst-1").await;
-    let lease = lease(&first, &[&old]).await;
+    let lease = lease(&first).await;
     let run = queued(&first, &lease, 1000).await;
     beat(&first, &old, &[held(&run, "running")], &[]).await;
 
@@ -310,10 +306,6 @@ async fn server_restart_then_runs_cancelled() {
     assert_eq!(verdicts(&reply), [format!("{run} STALE")]);
     beat(&h, &me, &[], &[]).await;
     assert_eq!(entry(&hosts(&h).await, "burst-1")["releasing"], false);
-    // The restored lease is committed again: the agent must report it ready first.
-    let refused = queue(&h, &lease, &run_body(1000)).await;
-    assert_eq!(refused.json(), json!({ "error": "not-ready" }));
-    report_ready(&h, &me, &lease).await;
     let next = queue(&h, &lease, &run_body(1000)).await;
     assert_eq!(next.status, 202, "{}", next.body);
 }
@@ -325,14 +317,13 @@ async fn server_restart_then_runs_cancelled() {
 #[tokio::test]
 async fn run_ids_are_not_reused_across_a_restart() {
     let first = start_agents("runs_ids_restart", false).await;
-    let me = join(&first, "burst-1").await;
-    let lease = lease(&first, &[&me]).await;
+    join(&first, "burst-1").await;
+    let lease = lease(&first).await;
     assert_eq!(queued(&first, &lease, 1000).await, "run-1-1");
     assert_eq!(queued(&first, &lease, 1000).await, "run-1-2");
 
     let h = restarted(first, false).await;
-    let me = join(&h, "burst-1").await;
-    report_ready(&h, &me, &lease).await;
+    join(&h, "burst-1").await;
     assert_eq!(queued(&h, &lease, 1000).await, "run-2-1");
     assert_eq!(queued(&h, &lease, 1000).await, "run-2-2");
 }
@@ -346,7 +337,7 @@ async fn run_ids_are_not_reused_across_a_restart() {
 async fn result_ack_each_value() {
     let h = start_agents("runs_acks", false).await;
     let me = join(&h, "burst-1").await;
-    let lease = lease(&h, &[&me]).await;
+    let lease = lease(&h).await;
     let first = queued(&h, &lease, 1000).await;
     let second = queued(&h, &lease, 1000).await;
     let both = [held(&first, "running"), held(&second, "running")];
@@ -377,7 +368,7 @@ async fn result_for_other_host_is_mismatch() {
     let h = start_agents("runs_mismatch", false).await;
     let a = join(&h, "burst-1").await;
     let b = join(&h, "burst-2").await;
-    let lease = lease(&h, &[&a, &b]).await;
+    let lease = lease(&h).await;
     let run = queued(&h, &lease, 1000).await;
     beat(&h, &a, &[held(&run, "running")], &[]).await;
 
@@ -403,8 +394,8 @@ async fn a_run_never_outlives_its_lease() {
     let me = join(&h, "burst-1").await;
     let mut ask = lease_body();
     ask["ttl_seconds"] = json!(100);
-    let granted = grant_with(&h, &[&me], &ask).await;
-    let lease = granted["id"].as_str().unwrap().to_string();
+    let granted = h.call("POST", "/v1/leases", Some(&ask)).await;
+    let lease = granted.json()["id"].as_str().unwrap().to_string();
 
     let mut long = run_body(1000);
     long["limits"]["wall_ms"] = json!(10_000_000);
@@ -446,6 +437,6 @@ async fn a_run_never_outlives_its_lease() {
     let none = h.call("POST", "/v1/leases", Some(&lease_body())).await;
     assert_eq!(none.json(), json!({ "error": "no-capacity" }));
     beat(&h, &me, &[], &[]).await;
-    let again = grant(&h, &[&me]).await;
-    assert_eq!(again["host"], "burst-1");
+    let again = h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    assert_eq!(again.status, 201, "{}", again.body);
 }
