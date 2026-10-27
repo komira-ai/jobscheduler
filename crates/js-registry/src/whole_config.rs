@@ -3,8 +3,9 @@
 //! Nothing here reads a clock or a file; [`crate::PoolConfig::with_whole_node`] checks a
 //! value against its pool.
 //!
-//! A pool file's values are loaded into this type but not consumed yet: the lease server
-//! still runs on its built-in defaults until plan step M3-i wires them in.
+//! The registry reads `prepare_timeout`, `reserve_backoff` and `max_replace` (the prepare
+//! failure handling); the lease server also hands `prepare_timeout` to its lease table.
+//! The other keys are loaded into this type and not consumed yet.
 
 /// How long a host stays excluded for a request after a give-up or a failed prepare:
 /// five minutes.
