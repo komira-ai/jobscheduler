@@ -352,3 +352,62 @@ async fn a_lease_file_at_its_last_term_is_refused() {
     assert_eq!(flag_of(started), "--state-file");
     assert_eq!(std::fs::read_to_string(scratch.state()).unwrap(), head);
 }
+
+/// Asserts that a token of 31 bytes is refused at start naming `--token-file` and the
+/// length wanted (through the program's entry point it exits with status 2), that one of
+/// 32 bytes is accepted, and that the trailing newline an editor adds does not count
+/// towards the length.
+#[test]
+fn a_token_under_32_bytes_is_refused() {
+    let scratch = Scratch::new("token_short");
+    let args = base_args(&scratch);
+    let short = scratch.write("short", &"t".repeat(31), 0o600);
+    let err = config(replace(args.clone(), "--token-file", &short))
+        .err()
+        .unwrap();
+    assert_eq!(err.flag(), "--token-file");
+    assert!(err.reason().contains("31 bytes"), "{err}");
+    assert!(err.reason().contains("at least 32"), "{err}");
+
+    let padded = scratch.write("padded", &format!("{}\n\n", "t".repeat(31)), 0o600);
+    assert_eq!(
+        flag_of(config(replace(args.clone(), "--token-file", padded))),
+        "--token-file"
+    );
+
+    let (code, out, message) = run_captured(replace(args.clone(), "--token-file", short));
+    assert!(code == ExitCode::from(2));
+    assert!(out.is_empty());
+    assert!(
+        message.starts_with("js-lease-server: --token-file:"),
+        "{message}"
+    );
+
+    let enough = scratch.write("enough", &"t".repeat(32), 0o600);
+    assert!(config(replace(args, "--token-file", enough)).is_ok());
+}
+
+/// Asserts that the read and write timeouts and the request limit are flags: a zero is refused by
+/// the parser and the values given reach the limits.
+#[test]
+fn write_timeout_and_request_limit_are_flags() {
+    let scratch = Scratch::new("limit_flags_2");
+    for bad in [
+        "--read-timeout=0",
+        "--write-timeout=0",
+        "--max-requests=0",
+        "--max-requests=-1",
+    ] {
+        let args = args_with(&scratch, &[bad]);
+        assert!(js_lease_server::Cli::try_parse_from(args).is_err(), "{bad}");
+    }
+    let args = args_with(
+        &scratch,
+        &["--read-timeout=4", "--write-timeout=3", "--max-requests=7"],
+    );
+    let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
+    let limits = js_lease_server::Limits::from(&cli);
+    assert_eq!(limits.read_timeout.as_secs(), 4);
+    assert_eq!(limits.write_timeout.as_secs(), 3);
+    assert_eq!(limits.max_requests, 7);
+}

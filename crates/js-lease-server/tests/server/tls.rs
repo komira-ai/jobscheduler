@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 
 use crate::support::{
-    Harness, Scratch, TOKEN, args_with, config, exchange, lease_body, replace, request,
+    Harness, Scratch, TOKEN, args_with, config, exchange, guard, lease_body, replace, request,
 };
 use js_lease_server::{Limits, SharedClock, channel_ticker, start};
 
@@ -152,7 +152,7 @@ async fn bad_tls_files_are_refused() {
     let good_key = scratch.write("test-only-key.pem", &key, 0o600);
     let wrong_key = scratch.write("test-only-other-key.pem", &other_key, 0o600);
     let empty = scratch.write("empty.pem", "", 0o644);
-    let junk = scratch.write("junk.pem", "not pem at all", 0o644);
+    let junk = scratch.write("junk.pem", "not pem at all", 0o600);
     let absent = scratch.path("absent.pem");
 
     let cases = [
@@ -201,19 +201,61 @@ async fn a_stalled_handshake_delays_nobody() {
 
 /// Asserts that a connection that never finishes its handshake is closed by the server
 /// once `handshake_timeout` has passed: the client reads the end of the stream with no
-/// byte sent to it, and the server serves on.
+/// byte sent to it. The short timeout is this test's alone: a handshake of a good client
+/// is made on a server with the default limits (`a_stalled_handshake_delays_nobody`),
+/// since one that missed 20 ms on a loaded machine would fail this test for no reason.
 #[tokio::test]
 async fn a_stalled_handshake_is_dropped_at_its_timeout() {
     let limits = Limits {
         handshake_timeout: std::time::Duration::from_millis(20),
         ..Limits::default()
     };
-    let (h, cert) = tls_server_limited("tls_handshake_timeout", "127.0.0.1:0", Some(limits)).await;
+    let (h, _cert) = tls_server_limited("tls_handshake_timeout", "127.0.0.1:0", Some(limits)).await;
     let mut silent = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
     let mut seen = Vec::new();
-    silent.read_to_end(&mut seen).await.unwrap();
+    guard(silent.read_to_end(&mut seen)).await.unwrap();
     assert!(seen.is_empty());
+}
 
-    let health = tls_request(h.addr(), &connector(&cert), "GET", "/healthz", None, None).await;
-    assert_eq!(health.status, 200);
+/// Asserts that a key file anyone but its owner can use is refused naming `--tls-key`
+/// and the mode wanted, as a token file is, that an owner-only key is accepted, and
+/// that the certificate file may be world-readable.
+#[tokio::test]
+async fn a_loose_key_file_is_refused() {
+    let scratch = Scratch::new("tls_key_mode");
+    let (cert, key) = test_identity();
+    let cert_file = scratch.write("test-only-cert.pem", &cert, 0o644);
+    for mode in [0o644, 0o640, 0o660, 0o604, 0o700, 0o777] {
+        let key_file = scratch.write("test-only-key.pem", &key, mode);
+        let args = args_with(
+            &scratch,
+            &[
+                "--tls-cert",
+                cert_file.to_str().unwrap(),
+                "--tls-key",
+                key_file.to_str().unwrap(),
+            ],
+        );
+        let (_, ticker) = channel_ticker();
+        let clock = SharedClock::new(js_lease::ManualClock::default());
+        let err = start(config(args).unwrap(), clock, ticker)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.flag(), "--tls-key", "mode {mode:o}");
+        assert!(err.reason().contains("0600"), "mode {mode:o}: {err}");
+    }
+    let key_file = scratch.write("test-only-key.pem", &key, 0o400);
+    let args = args_with(
+        &scratch,
+        &[
+            "--tls-cert",
+            cert_file.to_str().unwrap(),
+            "--tls-key",
+            key_file.to_str().unwrap(),
+        ],
+    );
+    let (_, ticker) = channel_ticker();
+    let clock = SharedClock::new(js_lease::ManualClock::default());
+    assert!(start(config(args).unwrap(), clock, ticker).await.is_ok());
 }

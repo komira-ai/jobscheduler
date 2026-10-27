@@ -2,7 +2,10 @@
 
 use std::fs;
 
-use js_lease::{AcquireError, Boot, LeaseState, LeaseTable, OpenError, ReleaseError, RenewError};
+use js_lease::{
+    AcquireError, Booking, Boot, LeaseState, LeaseTable, OpenError, ReleaseError, RenewError,
+    read_bookings,
+};
 use js_provider::{Call, Flavour, HostCapacity, Observed, Provider, StartAck, StartSpec, StopAck};
 use js_provider_fake::FakeProvider;
 use js_types::{HostId, LeaseId, ProviderId, ResourceClass};
@@ -399,4 +402,68 @@ fn a_cut_off_stale_temp_file_is_ignored_and_replaced() {
     assert_eq!(next.id, LeaseId::new(2, 2));
     let text = fs::read_to_string(scratch.file()).unwrap();
     assert!(text.contains("lease_count = 2\n"));
+}
+
+/// Asserts that the bookings of a file are the hosts it names, for a held lease and a
+/// releasing one and not for a pending lease that has no host, in id order, and that
+/// reading them takes no lock (the table that wrote the file is still open), leaves
+/// the file byte for byte as it was and creates nothing.
+#[test]
+fn bookings_are_the_hosts_the_file_names() {
+    let (mut table, _clock, scratch) = fresh("bookings");
+    let held = table.acquire(request(3600), None).unwrap();
+    table.provider_mut().script_unknown(Call::Start, false);
+    table.acquire(request(3600), None).unwrap_err();
+    let doomed = table.acquire(request(3600), None).unwrap();
+    table.provider_mut().script_unknown(Call::Stop, false);
+    table.release(&doomed.id).unwrap();
+    let before = fs::read_to_string(scratch.file()).unwrap();
+
+    let bookings = read_bookings(scratch.file()).unwrap();
+    let expected = vec![
+        Booking {
+            lease: held.id,
+            host: held.host,
+            state: LeaseState::Held,
+        },
+        Booking {
+            lease: doomed.id,
+            host: doomed.host,
+            state: LeaseState::Releasing,
+        },
+    ];
+    assert_eq!(bookings, expected);
+    assert_eq!(fs::read_to_string(scratch.file()).unwrap(), before);
+    assert_eq!(table.list().len(), 3);
+}
+
+/// Asserts that a file that is not there books nothing and is not created, and that a
+/// file the table would refuse (not TOML, a wrong lease count, an id twice) or cannot
+/// read is the same error the open gives, naming the path.
+#[test]
+fn bookings_of_a_missing_file_are_none_and_of_a_bad_file_an_error() {
+    let scratch = Scratch::new("bookings_bad");
+    let path = scratch.file();
+    assert_eq!(read_bookings(&path).unwrap(), vec![]);
+    assert!(!path.exists());
+
+    let head = "version = 1\nterm = 1\nnext_sequence = 3\n";
+    let held = "\n[[lease]]\nterm = 1\nsequence = 1\nstate = \"held\"\nhost = \"h1\"\n\
+        acquired_at_ms = 1\nexpires_at_ms = 2\nends_at_ms = 3\n";
+    let cases = [
+        "this is { not toml".to_string(),
+        format!("{head}lease_count = 2\n{held}"),
+        format!("{head}lease_count = 2\n{held}{held}"),
+    ];
+    for text in cases {
+        fs::write(&path, &text).unwrap();
+        let err = read_bookings(&path).unwrap_err();
+        assert!(matches!(err, OpenError::Corrupt { .. }), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let err = read_bookings(&path).unwrap_err();
+    assert!(matches!(err, OpenError::Read { .. }), "{err}");
+    fs::remove_dir(&path).unwrap();
 }

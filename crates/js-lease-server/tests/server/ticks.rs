@@ -4,13 +4,16 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_lease_server::{CapacitySource, StartupError};
-use js_provider::{Call, Provider};
+use js_lease::Booking;
+use js_lease_server::{CapacitySource, Seated, SharedClock, StartupError, Tick, Ticker, start};
+use js_provider::Call;
 use js_provider_fake::FakeProvider;
 use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::json;
 
-use crate::support::{Gate, Harness, Scratch, SharedPool, T0, args_with, ids, lease_body};
+use crate::support::{
+    Gate, Harness, Scratch, SharedPool, T0, TOKEN, args_with, base_args, ids, lease_body, request,
+};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -20,7 +23,7 @@ fn secs(n: u64) -> Duration {
 struct Scripted(Vec<(Call, bool)>);
 
 impl CapacitySource for Scripted {
-    fn provider(&self) -> Result<Box<dyn Provider + Send>, StartupError> {
+    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
         let resources = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".into())).unwrap();
         let caps = BTreeMap::from([("isa".to_string(), "x86-64-v3".to_string())]);
         let shape = Shape::new(resources, caps);
@@ -29,7 +32,7 @@ impl CapacitySource for Scripted {
         for (call, landed) in &self.0 {
             fake.script_unknown(*call, *landed);
         }
-        Ok(Box::new(fake))
+        Ok(Seated::all(Box::new(fake)))
     }
 }
 
@@ -208,4 +211,77 @@ async fn shutdown_finishes_requests_in_flight() {
             .unwrap()
             .contains("lease_count = 1")
     );
+}
+
+/// A ticker that ticks once and then panics, and reports when it is dropped, which
+/// happens as the tick task unwinds.
+struct Dying {
+    ticked: bool,
+    gone: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Ticker for Dying {
+    async fn next(&mut self) -> Tick {
+        assert!(!self.ticked, "the ticker has failed");
+        self.ticked = true;
+        Tick::default()
+    }
+}
+
+impl Drop for Dying {
+    fn drop(&mut self) {
+        self.gone.take().into_iter().for_each(|gone| {
+            let _ = gone.send(());
+        });
+    }
+}
+
+/// Asserts that `/healthz` answers 503 once the tick loop has stopped (here its ticker
+/// panicked), while the routes that need no tick still answer: a server that no longer
+/// expires leases should be taken out of rotation, not just look alive.
+#[tokio::test]
+async fn health_fails_when_the_tick_loop_has_stopped() {
+    let scratch = Scratch::new("health_dead_loop");
+    let config = crate::support::config(base_args(&scratch)).unwrap();
+    let (gone, stopped) = tokio::sync::oneshot::channel();
+    let ticker = Dying {
+        ticked: false,
+        gone: Some(gone),
+    };
+    crate::support::quiet_logs();
+    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let running = start(config, clock, ticker).await.unwrap();
+    stopped.await.unwrap();
+
+    let health = request(running.addr(), "GET", "/healthz", None, None).await;
+    assert_eq!(health.status, 503, "{}", health.body);
+    let listed = request(running.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
+    assert_eq!(listed.status, 200);
+}
+
+/// Asserts that `/healthz` answers 200 `ok` while the tick loop runs.
+#[tokio::test]
+async fn health_is_ok_while_the_tick_loop_runs() {
+    let h = Harness::new("health_live_loop").await;
+    h.ticks.step().await;
+    let health = request(h.addr(), "GET", "/healthz", None, None).await;
+    assert_eq!((health.status, health.body.as_str()), (200, "ok"));
+}
+
+/// Asserts that a shutdown whose last tick cannot write the lease file is an error that
+/// says so and names the file, not a clean stop: the file is behind the table.
+#[tokio::test]
+async fn a_final_save_that_fails_is_an_error() {
+    let h = Harness::new("final_save").await;
+    h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    std::fs::create_dir(h.scratch.path("leases.toml.tmp")).unwrap();
+    h.clock.advance(secs(601));
+
+    let named = format!(
+        "the final tick could not write the lease file {}: ",
+        h.scratch.state().display()
+    );
+    let err = h.running.shutdown().await.unwrap_err();
+    let message = err.to_string();
+    assert!(message.starts_with(&named), "{message}");
 }

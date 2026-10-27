@@ -8,6 +8,33 @@ use js_types::{Admission, HostId, LeaseId, ProviderId, ResourceClass, Shape};
 
 use crate::config::{self, ConfigError};
 
+/// Why [`StaticPool::seat`] booked nothing.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SeatError {
+    /// The pool does not list the host.
+    #[error("host {0} is not in the pool")]
+    Unlisted(HostId),
+    /// Another lease holds the host.
+    #[error("host {host} is held by lease {holder}")]
+    Taken {
+        /// The host asked for.
+        host: HostId,
+        /// The lease that holds it.
+        holder: LeaseId,
+    },
+    /// The lease already holds a different host.
+    #[error("lease {lease} already holds host {host}")]
+    Elsewhere {
+        /// The lease.
+        lease: LeaseId,
+        /// The host it holds.
+        host: HostId,
+    },
+    /// The lease was stopped, and a stopped lease never starts again.
+    #[error("lease {0} was stopped")]
+    Ended(LeaseId),
+}
+
 #[derive(Debug)]
 struct Host {
     shape: Shape,
@@ -70,6 +97,38 @@ impl StaticPool {
             .iter()
             .filter_map(|(id, host)| Some((id.clone(), host.lease?)));
         held.collect()
+    }
+
+    /// Books `host` for `lease` without a start: the way to put back a booking the
+    /// pool lost with its process, when the lease file still records it. The booking is
+    /// what a start would have made, so the lease then observes `Present` on `host`
+    /// and a stop frees it. Seating a lease on the host it already holds changes
+    /// nothing.
+    ///
+    /// The pool refuses, and books nothing, when `host` is not listed, when another
+    /// lease holds it, when `lease` holds another host, or when `lease` was stopped.
+    pub fn seat(&mut self, host: &HostId, lease: LeaseId) -> Result<(), SeatError> {
+        if self.ended.contains(&lease) {
+            return Err(SeatError::Ended(lease));
+        }
+        if let Observed::Present { host: held } = self.read(&lease) {
+            return match held == *host {
+                true => Ok(()),
+                false => Err(SeatError::Elsewhere { lease, host: held }),
+            };
+        }
+        let listed = self.hosts.get_mut(host);
+        let listed = listed.ok_or_else(|| SeatError::Unlisted(host.clone()))?;
+        match listed.lease {
+            Some(holder) => Err(SeatError::Taken {
+                host: host.clone(),
+                holder,
+            }),
+            None => {
+                listed.lease = Some(lease);
+                Ok(())
+            }
+        }
     }
 
     fn read(&self, lease: &LeaseId) -> Observed {
