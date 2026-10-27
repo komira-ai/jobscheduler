@@ -36,7 +36,9 @@ use std::fmt;
 use std::time::Duration;
 
 use js_agent_wire::refusal;
-use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, Phase, Refused, ValidationError, Welcome};
+use js_agent_wire::{
+    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, Refused, ValidationError, Welcome,
+};
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
@@ -72,15 +74,21 @@ pub struct Fatal {
     pub status: u16,
     /// The server's code, such as `host-bound`, or `unreadable`.
     pub code: String,
+    /// The majors the server speaks, when it said so (`unsupported-protocol`).
+    pub supported: Option<ProtocolRange>,
 }
 
 impl fmt::Display for Fatal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the server refused the {} with status {} ({}); not retrying",
+            "the server refused the {} with status {} ({}",
             self.what, self.status, self.code
-        )
+        )?;
+        if let Some(range) = &self.supported {
+            write!(f, "; it speaks majors {} to {}", range.min, range.max)?;
+        }
+        f.write_str("); not retrying")
     }
 }
 
@@ -218,6 +226,19 @@ fn code_of(body: &Value) -> String {
         Ok(()) => refused.code,
         Err(_) => UNREADABLE_CODE.to_owned(),
     }
+}
+
+/// The majors a refusal body names under `supported` (the server sends them with
+/// `unsupported-protocol`), when they are a sane range and `code` is a plain code.
+fn supported_of(body: &Value, code: &str) -> Option<ProtocolRange> {
+    let supported = body
+        .get("supported")
+        .and_then(|range| serde_json::from_value::<ProtocolRange>(range.clone()).ok());
+    let refused = Refused {
+        code: code.to_owned(),
+        supported,
+    };
+    refused.validate().ok().and(refused.supported)
 }
 
 /// The welcome in an answer body, checked.
@@ -429,6 +450,7 @@ impl<'a> Session<'a> {
             Verdict::Fatal => Step::Fatal(Fatal {
                 what,
                 status: answer.status,
+                supported: supported_of(&answer.body, &code),
                 code,
             }),
             _ => {

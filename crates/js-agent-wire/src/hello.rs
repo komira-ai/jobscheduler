@@ -391,8 +391,12 @@ impl Refused {
     }
 }
 
-/// What the server answers a hello with: a welcome, or a refusal. The transport maps a
-/// refusal to its own status; the body is the same either way.
+/// What a hello is answered with, as one value: a welcome, or a refusal. This is the
+/// transport-neutral form. Over HTTP the lease server sends the welcome bare (status 200,
+/// the fields of [`Welcome`]) and a refusal as the error body every route of the API
+/// uses: a 4xx or 5xx status and `{"error": "<code>"}`, with `"supported"` (a
+/// [`ProtocolRange`]) beside it for [`refusal::UNSUPPORTED_PROTOCOL`]. [`Refused::code`]
+/// is that `error`. The agent reads that HTTP shape, not this tagged one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HelloReply {

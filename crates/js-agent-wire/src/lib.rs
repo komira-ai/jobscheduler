@@ -83,7 +83,9 @@
 //!
 //! # Layout
 //!
-//! [`Hello`] opens a session and is answered by a [`HelloReply`], [`Heartbeat`] and
+//! [`Hello`] opens a session and is answered by a [`Welcome`] or a [`Refused`] (together
+//! a [`HelloReply`]; over HTTP the welcome is bare and a refusal is the API's
+//! `{"error", "supported"}` body, see [`HelloReply`]), [`Heartbeat`] and
 //! [`HeartbeatReply`] keep it, and a reply carries [`Command`]s down while a heartbeat
 //! carries [`RunResult`]s up until each is acknowledged. [`refusal`] holds the codes a
 //! refusal carries.

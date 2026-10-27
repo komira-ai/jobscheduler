@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use js_agent::{Answer, Connector, Dialer, Sleeper, Transport, Wake};
+use js_agent_wire::ProtocolRange;
 use js_client::{Client, ClientError, Reply};
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_ticker, start};
@@ -314,6 +315,38 @@ impl Transport for Redirected {
             .connect(&url, &self.token_file, None)
             .map_err(|err| err.to_string())
             .and_then(|mut transport| transport.post(path, body))
+    }
+}
+
+/// Says in every hello that the agent speaks these majors instead of its own, as an agent
+/// of another version would, so a real server refuses it.
+pub struct OtherMajors(pub ProtocolRange);
+
+struct Rewriting {
+    inner: Box<dyn Transport>,
+    majors: ProtocolRange,
+}
+
+impl Connector for OtherMajors {
+    fn connect(
+        &self,
+        server: &str,
+        token_file: &Path,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn Transport>, ClientError> {
+        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        Ok(Box::new(Rewriting {
+            inner,
+            majors: self.0,
+        }))
+    }
+}
+
+impl Transport for Rewriting {
+    fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        let mut body = body.clone();
+        body["protocol"] = json!({ "min": self.majors.min, "max": self.majors.max });
+        self.inner.post(path, &body)
     }
 }
 

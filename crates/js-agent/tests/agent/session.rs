@@ -7,6 +7,7 @@ use std::time::Duration;
 use js_agent::{
     Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP, Reason, Session, Step,
 };
+use js_agent_wire::ProtocolRange;
 use serde_json::{Value, json};
 
 use crate::support::{
@@ -137,6 +138,7 @@ fn refused_hello_is_fatal_per_code() {
             what: "hello",
             status,
             code: code.to_owned(),
+            supported: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal), "{status} {code}");
         assert_eq!(paths(&sent), [HELLO_PATH], "{status} {code}");
@@ -153,10 +155,53 @@ fn refused_hello_is_fatal_per_code() {
             what: "heartbeat",
             status,
             code: code.to_owned(),
+            supported: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal));
         assert_eq!(sent.borrow().len(), 2);
     }
+}
+
+/// Asserts that an `unsupported-protocol` refusal reaches the caller with the majors the
+/// server named under `supported`, and prints them; that a range that is empty or starts
+/// below 1 is dropped (the code stays); and that a refusal without the field has none.
+/// It catches an agent that throws the majors away, so an operator cannot tell which
+/// agent version to install.
+#[test]
+fn an_unsupported_protocol_refusal_carries_the_servers_majors() {
+    let cases = [
+        (
+            json!({ "min": 2, "max": 3 }),
+            Some(ProtocolRange { min: 2, max: 3 }),
+        ),
+        (json!({ "min": 3, "max": 2 }), None),
+        (json!({ "min": 0, "max": 2 }), None),
+        (json!("1 to 2"), None),
+    ];
+    for (supported, expected) in cases {
+        let body = json!({ "error": "unsupported-protocol", "supported": supported });
+        let (mut transport, sent) = script(vec![reply(400, body)]);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        let Step::Fatal(fatal) = session.tick() else {
+            panic!("a 400 ends the agent");
+        };
+        assert_eq!(fatal.code, "unsupported-protocol", "{supported}");
+        assert_eq!(fatal.supported, expected, "{supported}");
+        assert_eq!(paths(&sent), [HELLO_PATH]);
+    }
+    let (mut transport, _) = script(vec![reply(
+        400,
+        json!({ "error": "unsupported-protocol", "supported": { "min": 2, "max": 3 } }),
+    )]);
+    let mut session = Session::new(hello("h1"), &mut transport, lowest());
+    let Step::Fatal(fatal) = session.tick() else {
+        panic!("a 400 ends the agent");
+    };
+    assert_eq!(
+        fatal.to_string(),
+        "the server refused the hello with status 400 (unsupported-protocol; \
+         it speaks majors 2 to 3); not retrying"
+    );
 }
 
 /// Asserts that the code of a refusal is shown only when it is a plain code: text with a

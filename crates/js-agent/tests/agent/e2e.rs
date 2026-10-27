@@ -4,11 +4,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_agent::Dialer;
+use js_agent::{Connector, Dialer, Session, Step};
+use js_agent_wire::ProtocolRange;
 use serde_json::json;
 
-use crate::server::{CLIENT_TOKEN, JOIN, Redirect, Server, Spy};
-use crate::support::{AMD_MAC, Host, PROFILER_CMD, Scratch, code, mac_host};
+use crate::server::{CLIENT_TOKEN, JOIN, OtherMajors, Redirect, Server, Spy};
+use crate::support::{AMD_MAC, Host, PROFILER_CMD, Scratch, code, hello, lowest, mac_host};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -301,6 +302,27 @@ fn a_rate_limited_hello_waits_for_retry_after() {
         ran.err
     );
     first.stop();
+}
+
+/// Asserts, against the real server, that its refusal of a hello from an agent of other
+/// majors is read as the server sends it: status 400, the code `unsupported-protocol` and
+/// the majors the server speaks under `supported`. The scripted tests of the session use
+/// bodies the agent's own authors wrote; this pins the shape to the server's type.
+#[test]
+fn the_servers_unsupported_protocol_refusal_reaches_the_session() {
+    let server = Server::start("e2e_majors", &[]);
+    let mut transport = OtherMajors(ProtocolRange { min: 2, max: 3 })
+        .connect(&server.url(), &server.join_file(), None)
+        .unwrap();
+    let mut session = Session::new(hello("mac-1"), &mut *transport, lowest());
+    let Step::Fatal(fatal) = session.tick() else {
+        panic!("the server refuses the hello for good");
+    };
+    assert_eq!(
+        (fatal.status, fatal.code.as_str()),
+        (400, "unsupported-protocol")
+    );
+    assert_eq!(fatal.supported, Some(ProtocolRange::THIS));
 }
 
 /// Asserts that neither the join token nor the session secret the server issued appears on
