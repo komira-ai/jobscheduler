@@ -369,10 +369,11 @@ impl<'a> Session<'a> {
 
     /// Announces that the host is draining, once: one heartbeat with the phase
     /// `draining`, answered or not. Nothing is sent, and `None` returned, when there is
-    /// no session.
+    /// no session. The lease is reported as already decided (see [`Hold::peek`]): the
+    /// host is not asked, and the lease's stage does not move.
     pub fn drain(&mut self) -> Option<Note> {
         self.phase = Phase::Draining;
-        let lease = self.hold.as_mut().map(Hold::fields).unwrap_or_default();
+        let lease = self.hold.as_ref().map(Hold::peek).unwrap_or_default();
         self.live.take().map(|live| {
             let message = self.heartbeat_message(&live, lease);
             let told = self.post(HEARTBEAT_PATH, message);

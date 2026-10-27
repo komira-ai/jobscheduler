@@ -534,6 +534,44 @@ fn a_drain_is_not_overridden_by_the_lease() {
     );
 }
 
+/// Asserts that a drain does not ask the host or move the lease: with the lease still
+/// preparing, the drain beat carries nothing of it and the host is not asked; with a
+/// refusal pending, the drain beat carries it and the stage keeps it for the next beat.
+/// It catches a drain that runs the lifecycle's checks during shutdown, or consumes a
+/// refusal or stage announcement on a beat that may be lost.
+#[test]
+fn a_drain_does_not_ask_the_host_or_move_the_lease() {
+    let (mut script, sent) = Script::new(vec![welcome(1), names(LEASE), names(LEASE)]);
+    let (mut probe, asked) = Probe::new(vec![Quiet::Ready], Vec::new());
+    let clock = ManualClock::default();
+    let mut session =
+        Session::new(hello("h1"), &mut script, lowest()).with_quiesce(&mut probe, &clock, TIMEOUT);
+    for _ in 0..3 {
+        session.tick();
+    }
+    assert_eq!(lines(&sent), ["serving", "preparing"]);
+    session.drain().unwrap();
+    assert_eq!(asked.borrow().prepared, 0, "the host was not asked");
+    assert_eq!(line(&sent.borrow().last().unwrap().1), "draining");
+
+    let (mut script, sent) =
+        Script::new(vec![welcome(1), names(LEASE), names(LEASE), names(LEASE)]);
+    let (mut probe, asked) = Probe::new(vec![unsafe_host("bad")], Vec::new());
+    let mut session =
+        Session::new(hello("h1"), &mut script, lowest()).with_quiesce(&mut probe, &clock, TIMEOUT);
+    for _ in 0..4 {
+        session.tick();
+    }
+    let before = asked.borrow().prepared;
+    session.drain().unwrap();
+    assert_eq!(asked.borrow().prepared, before);
+    let got = lines(&sent);
+    assert!(
+        got.last().unwrap().starts_with("draining refused="),
+        "{got:?}"
+    );
+}
+
 /// Asserts that a refusal always fits the wire: a finding's text with a control character
 /// is replaced by a fixed text (the heartbeat is still sent, with the code), a text over
 /// 256 bytes is cut at a character boundary and sent, and one that fits is sent as it is.

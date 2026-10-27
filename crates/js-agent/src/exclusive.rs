@@ -142,6 +142,25 @@ impl<'a> Hold<'a> {
         }
     }
 
+    /// What a heartbeat says about a verdict already reached, without asking the host or
+    /// moving the stage: the ready report or the refusal, nothing for a stage still
+    /// waiting on the host. The drain sends this, so a lost last beat consumes nothing.
+    pub(crate) fn peek(&self) -> Fields {
+        match &self.stage {
+            Stage::Ready { lease } => Fields {
+                phase: Some(Phase::Serving),
+                ready: Some(lease.clone()),
+                refused: None,
+            },
+            Stage::Refused(refused) => Fields {
+                phase: Some(Phase::Preparing),
+                ready: None,
+                refused: Some(refused.clone()),
+            },
+            Stage::Idle | Stage::Preparing { .. } | Stage::Restoring { .. } => Fields::default(),
+        }
+    }
+
     /// What the next heartbeat says, after asking the host what the stage needs.
     pub(crate) fn fields(&mut self) -> Fields {
         match mem::replace(&mut self.stage, Stage::Idle) {
