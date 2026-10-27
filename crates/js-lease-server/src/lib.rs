@@ -30,6 +30,7 @@
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
 //! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response (so also how long a keep-alive connection may idle), `10s` |
+//! | `--read-timeout` | how long a read from a client may make no progress before the connection is closed (a client that sends a head and stops in the body); keep it above `--header-timeout`, `30s` |
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
@@ -103,16 +104,16 @@
 //! accepted and kept until it closes), a TLS handshake that is not finished in
 //! `--handshake-timeout` is dropped, and a connection whose request head has not arrived
 //! in `--header-timeout` is closed; that clock starts again after each response, so it
-//! also closes a keep-alive connection that idles. Every connection is bounded in
-//! the other direction too: a write to the client that makes no progress for
+//! also closes a keep-alive connection that idles. A read from the client that makes no
+//! progress for `--read-timeout` closes the connection too. Writes are bounded as well: a write to the client that makes no progress for
 //! `--write-timeout` closes the connection (a client that sends requests and never reads
 //! the answers is cut and its slot is free again), and the answer to a connection's
 //! `--max-requests`th request says `Connection: close`, with later requests pipelined
 //! behind it unanswered. The server reads at most 64 KiB of a request head, so an
 //! unauthenticated client cannot make it buffer more before the token is checked (a
 //! larger head is a 431). A client that sends its head and then stalls on the
-//! body does so with a valid token, since the token is checked on the head; it holds a
-//! connection until it finishes or the server stops. A failed accept (descriptors used
+//! body does so with a valid token, since the token is checked on the head; it is cut
+//! by `--read-timeout`. Those two timeouts limit stalls, not total time. A failed accept (descriptors used
 //! up, say) is logged and retried after 100 ms.
 //!
 //! # Restart
@@ -150,13 +151,13 @@ mod api;
 mod capacity;
 mod config;
 mod error;
+mod io_timeout;
 mod listener;
 mod server;
 mod ticker;
 mod tls;
 mod util;
 mod wire;
-mod write_timeout;
 
 use std::ffi::OsString;
 use std::io::Write;

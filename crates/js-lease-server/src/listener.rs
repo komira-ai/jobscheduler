@@ -10,17 +10,25 @@
 //! dropped after [`Limits::header_timeout`], one that stalls its handshake after
 //! [`Limits::handshake_timeout`].
 //!
-//! A permit is held for the connection's whole life, so every connection is bounded:
+//! A permit is held for the connection's whole life, so what a client can do with a
+//! connection is bounded in these ways:
 //!
 //! - the request head must arrive within [`Limits::header_timeout`] of the connection's
 //!   start and of the end of each response, which also closes an idle keep-alive
 //!   connection;
+//! - a read that makes no progress for [`Limits::read_timeout`] closes the connection, so
+//!   a client that sends its head (with a valid token) and stops in the body is let go;
+//!   the read limit is above the head limit, so it acts in the middle of a request;
 //! - a write that makes no progress for [`Limits::write_timeout`] closes the connection,
 //!   so a client that sends requests and never reads the answers is let go;
 //! - the answer to the [`Limits::max_requests`]th request says `Connection: close`, and
 //!   requests pipelined behind it are not answered;
-//! - hyper's buffer is [`MAX_BUF`], so a client cannot make the server hold more than
-//!   that for a head before the token is checked.
+//! - hyper's buffer is [`MAX_BUF`] and a body is at most 64 KiB, so a client cannot make
+//!   the server hold more than that for a request.
+//!
+//! The read and write limits are limits on stalls, not on total time: a client that goes
+//! on making progress (a byte in each read period, say) is not cut by them, and what it
+//! can send is bounded by the sizes above and by `max_requests`.
 
 use std::future::Future;
 use std::io;
@@ -45,8 +53,8 @@ use tokio_rustls::TlsAcceptor;
 use tracing::warn;
 
 use crate::config::Limits;
+use crate::io_timeout::IoTimeout;
 use crate::util::or_pending;
-use crate::write_timeout::WriteTimeout;
 
 /// The most bytes hyper buffers for one connection when it reads: a head larger than
 /// this is refused (431) before any route or token sees it.
@@ -210,7 +218,7 @@ async fn handshake(stream: TcpStream, tls: Option<TlsAcceptor>, limit: Duration)
 /// An error on the connection (a reset, a head that did not arrive in time, a write
 /// that stalled) ends it.
 async fn talk(io: Io, app: Router, limits: Limits, mut stopping: watch::Receiver<()>) {
-    let io = WriteTimeout::new(io, limits.write_timeout);
+    let io = IoTimeout::new(io, limits.read_timeout, limits.write_timeout);
     let served = Arc::new(Served {
         count: AtomicU32::new(0),
         limit: limits.max_requests,

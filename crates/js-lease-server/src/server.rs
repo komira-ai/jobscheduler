@@ -2,6 +2,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use js_lease::{LeaseTable, read_bookings};
@@ -24,6 +25,7 @@ use crate::tls;
 /// it the orderly way (requests in flight finish, one last tick).
 pub struct Running {
     addr: SocketAddr,
+    state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
     slots: Arc<Slots>,
@@ -90,6 +92,7 @@ pub async fn start<T: Ticker>(
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
     Ok(Running {
         addr,
+        state_file: config.state_file,
         shared,
         stop,
         slots,
@@ -161,7 +164,8 @@ impl Running {
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;
         let saved = report.save_error.map_or(Ok(()), |err| {
-            let reason = format!("the final tick could not write the lease file: {err}");
+            let file = self.state_file.display();
+            let reason = format!("the final tick could not write the lease file {file}: {err}");
             Err(io::Error::other(reason))
         });
         served.and(saved)

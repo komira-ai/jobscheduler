@@ -277,11 +277,11 @@ async fn a_final_save_that_fails_is_an_error() {
     std::fs::create_dir(h.scratch.path("leases.toml.tmp")).unwrap();
     h.clock.advance(secs(601));
 
+    let named = format!(
+        "the final tick could not write the lease file {}: ",
+        h.scratch.state().display()
+    );
     let err = h.running.shutdown().await.unwrap_err();
     let message = err.to_string();
-    assert!(
-        message.starts_with("the final tick could not write the lease file"),
-        "{message}"
-    );
-    assert!(message.contains("leases.toml"), "{message}");
+    assert!(message.starts_with(&named), "{message}");
 }

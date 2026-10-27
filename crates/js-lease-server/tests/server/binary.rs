@@ -95,6 +95,10 @@ async fn the_program_exits_1_when_the_final_save_fails() {
     let renewed = request(addr, "POST", "/v1/leases/1-1/renew", Some(TOKEN), None).await;
     assert_eq!(renewed.status, 500, "{}", renewed.body);
 
+    let named = format!(
+        "js-lease-server: the final tick could not write the lease file {}: ",
+        scratch.state().display()
+    );
     let pid = Pid::from_child(&child.0);
     kill_process(pid, Signal::TERM).unwrap();
     let status = child.0.wait().unwrap();
@@ -107,10 +111,7 @@ async fn the_program_exits_1_when_the_final_save_fails() {
         .unwrap()
         .read_to_string(&mut message)
         .unwrap();
-    assert!(
-        message.contains("js-lease-server: the final tick could not write the lease file"),
-        "{message}"
-    );
+    assert!(message.contains(&named), "{message}");
 }
 
 /// Asserts that the real program exits 2 and names the flag when a start is refused.

@@ -69,6 +69,12 @@ pub struct Cli {
     /// connection may sit idle between requests.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub header_timeout: Duration,
+    /// How long a read from a client may make no progress before the connection is
+    /// closed: a client that sends a request head and stops cannot hold a connection
+    /// through the body. Keep it above `--header-timeout`, which is what closes an idle
+    /// connection.
+    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    pub read_timeout: Duration,
     /// How long a write to a client may make no progress before the connection is
     /// closed: a client that does not read its answers cannot hold a connection.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
@@ -93,6 +99,8 @@ pub struct Limits {
     /// How long the head of a request may take to arrive; also the idle time of a
     /// keep-alive connection between two requests.
     pub header_timeout: Duration,
+    /// How long a read from a client may make no progress.
+    pub read_timeout: Duration,
     /// How long a write to a client may make no progress.
     pub write_timeout: Duration,
     /// The most requests one connection serves.
@@ -107,6 +115,7 @@ impl Default for Limits {
             max_connections: 256,
             handshake_timeout: Duration::from_secs(10),
             header_timeout: Duration::from_secs(10),
+            read_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(10),
             max_requests: 100,
             drain_timeout: Duration::from_secs(10),
@@ -120,6 +129,7 @@ impl From<&Cli> for Limits {
             max_connections: cli.max_connections,
             handshake_timeout: cli.handshake_timeout,
             header_timeout: cli.header_timeout,
+            read_timeout: cli.read_timeout,
             write_timeout: cli.write_timeout,
             max_requests: cli.max_requests,
             drain_timeout: cli.drain_timeout,

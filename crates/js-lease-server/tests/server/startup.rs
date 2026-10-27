@@ -387,18 +387,27 @@ fn a_token_under_32_bytes_is_refused() {
     assert!(config(replace(args, "--token-file", enough)).is_ok());
 }
 
-/// Asserts that the write timeout and the request limit are flags: a zero is refused by
+/// Asserts that the read and write timeouts and the request limit are flags: a zero is refused by
 /// the parser and the values given reach the limits.
 #[test]
 fn write_timeout_and_request_limit_are_flags() {
     let scratch = Scratch::new("limit_flags_2");
-    for bad in ["--write-timeout=0", "--max-requests=0", "--max-requests=-1"] {
+    for bad in [
+        "--read-timeout=0",
+        "--write-timeout=0",
+        "--max-requests=0",
+        "--max-requests=-1",
+    ] {
         let args = args_with(&scratch, &[bad]);
         assert!(js_lease_server::Cli::try_parse_from(args).is_err(), "{bad}");
     }
-    let args = args_with(&scratch, &["--write-timeout=3", "--max-requests=7"]);
+    let args = args_with(
+        &scratch,
+        &["--read-timeout=4", "--write-timeout=3", "--max-requests=7"],
+    );
     let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
     let limits = js_lease_server::Limits::from(&cli);
+    assert_eq!(limits.read_timeout.as_secs(), 4);
     assert_eq!(limits.write_timeout.as_secs(), 3);
     assert_eq!(limits.max_requests, 7);
 }

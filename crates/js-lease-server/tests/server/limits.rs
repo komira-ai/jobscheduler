@@ -4,9 +4,10 @@
 //! A test about a timeout sets that one timeout small through [`Limits`] and nothing
 //! else, and only waits for the server to close a connection; it never sleeps and never
 //! asserts how long anything took. The few requests such a test needs besides the one
-//! the timeout acts on go to a server with the default limits, or are retried (the idle
-//! test) when a loaded machine let the short timeout run out first.
+//! the timeout acts on go to a server with the default limits or are sent after the
+//! connection under test has been seen to end.
 
+use std::io;
 use std::time::Duration;
 
 use js_lease_server::Limits;
@@ -38,41 +39,67 @@ async fn a_stalled_request_head_is_closed_at_its_timeout() {
     assert_eq!(parse_reply(&seen).status, 0);
 }
 
-/// Asserts that a keep-alive connection that has had its answer and then sends nothing
-/// is closed by the server once `header_timeout` has passed (the clock starts again
-/// after each response): the client has the whole first answer, which did not say
-/// `Connection: close`, and then reads the end of the stream. A machine so loaded that
-/// the first request missed the short timeout gets the attempt repeated.
+/// Asserts that a connection that sends nothing at all is closed by the server once
+/// `header_timeout` has passed: the client reads the end of the stream and no bytes.
 #[tokio::test]
-async fn an_idle_keep_alive_connection_is_closed_at_its_timeout() {
+async fn a_connection_that_sends_nothing_is_closed_at_the_header_timeout() {
     let limits = Limits {
         header_timeout: Duration::from_millis(20),
         ..Limits::default()
     };
-    let h = Harness::limited("limit_idle", limits).await;
-    for _ in 0..100 {
-        let mut stream = TcpStream::connect(h.addr()).await.unwrap();
-        let _ = stream.write_all(HEALTH.as_bytes()).await;
-        let mut seen = Vec::new();
-        let mut chunk = [0u8; 512];
-        while !String::from_utf8_lossy(&seen).contains("\r\n\r\nok") {
-            match stream.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => seen.extend_from_slice(&chunk[..n]),
-            }
-        }
-        let text = String::from_utf8_lossy(&seen).to_lowercase();
-        if !text.contains("\r\n\r\nok") {
-            continue;
-        }
-        assert!(text.starts_with("http/1.1 200"), "{text}");
-        assert!(!text.contains("connection: close"), "{text}");
-        let mut rest = Vec::new();
-        let _ = guard(stream.read_to_end(&mut rest)).await;
-        assert!(rest.is_empty());
-        return;
-    }
-    panic!("no first request made it in time on a 20 ms header timeout");
+    let h = Harness::limited("limit_nothing", limits).await;
+    let mut stream = TcpStream::connect(h.addr()).await.unwrap();
+    let mut seen = Vec::new();
+    guard(stream.read_to_end(&mut seen)).await.unwrap();
+    assert!(seen.is_empty());
+}
+
+/// Asserts that a keep-alive connection that has had its answer and then sends nothing
+/// is closed by the server when the header clock, which starts again after each
+/// response, runs out: the client reads the whole first answer, which did not say
+/// `Connection: close`, and then the end of the stream. The default header timeout is
+/// used so that the request and its answer cannot race the clock; the client drives
+/// nothing by time, it waits for the end of the stream.
+#[tokio::test]
+async fn an_idle_keep_alive_connection_is_closed_after_its_answer() {
+    let h = Harness::new("limit_idle").await;
+    let mut stream = TcpStream::connect(h.addr()).await.unwrap();
+    stream.write_all(HEALTH.as_bytes()).await.unwrap();
+    let mut seen = Vec::new();
+    guard(stream.read_to_end(&mut seen)).await.unwrap();
+    let text = String::from_utf8_lossy(&seen).to_lowercase();
+    assert!(text.starts_with("http/1.1 200"), "{text}");
+    assert!(text.ends_with("\r\n\r\nok"), "{text}");
+    assert!(!text.contains("connection: close"), "{text}");
+}
+
+/// Asserts that a client that sends a valid authenticated head with a body longer than
+/// it then sends, and stops, is cut by `read_timeout` and its slot returned: with a cap
+/// of one, the client sees the end of the stream (after at most a 400 for the body that
+/// did not arrive) and a second client is
+/// served although the first never closed. (The head is sent in one write with the ten
+/// bytes of body; a machine so loaded that the timeout ran out before they arrived
+/// cuts the connection earlier, which is the same observation.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_stops_in_the_body_is_cut_and_its_slot_returned() {
+    let limits = Limits {
+        max_connections: 1,
+        read_timeout: Duration::from_millis(20),
+        ..Limits::default()
+    };
+    let h = Harness::limited("limit_read", limits).await;
+    let mut stalled = TcpStream::connect(h.addr()).await.unwrap();
+    let head = format!(
+        "POST /v1/leases HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 100\r\n\r\n0123456789"
+    );
+    let _ = stalled.write_all(head.as_bytes()).await;
+
+    let mut seen = Vec::new();
+    let _ = guard(stalled.read_to_end(&mut seen)).await;
+    let status = parse_reply(&seen).status;
+    assert!(matches!(status, 0 | 400), "{status}");
+    let served = guard(request(h.addr(), "GET", "/healthz", None, None)).await;
+    assert_eq!(served.status, 200);
 }
 
 /// Asserts that a client that connects and sends nothing does not stop the server
@@ -135,7 +162,13 @@ async fn a_client_that_never_reads_is_cut_and_its_slot_returned() {
     let served = guard(request(h.addr(), "GET", "/healthz", None, None)).await;
     assert_eq!(served.status, 200);
     let cut = guard(flood).await.unwrap();
-    assert!(!cut.to_string().is_empty());
+    assert!(
+        matches!(
+            cut.kind(),
+            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+        ),
+        "{cut:?}"
+    );
 }
 
 /// Asserts that a connection serves `max_requests` requests and the answer to the last
@@ -189,13 +222,15 @@ async fn stall_in_body(addr: std::net::SocketAddr) -> TcpStream {
     stream
 }
 
-/// Asserts that a stop is bounded by the drain timeout: a request stalled in its body
+/// Asserts that a stop is bounded by the drain timeout (the read timeout is long, so it
+/// is not what ends the stall): a request stalled in its body
 /// is cut, the stop still returns and the last tick still runs (a lease that fell due
 /// is gone from the file), and the client sees the connection end with no answer.
 #[tokio::test]
 async fn a_stalled_request_cannot_hold_up_a_stop() {
     let limits = Limits {
         drain_timeout: Duration::from_millis(20),
+        read_timeout: Duration::from_secs(3600),
         ..Limits::default()
     };
     let h = Harness::limited("limit_drain", limits).await;
