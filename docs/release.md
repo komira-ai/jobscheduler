@@ -10,6 +10,7 @@ The project owner pushes a version tag; nothing else starts a release.
 The `release` workflow (`.github/workflows/release.yml`) then:
 
 - fails at once unless the tag is exactly `v` followed by the workspace version;
+- fails at once unless the tagged commit is on `main`;
 - builds the assets below with `cargo build --locked --release`, using the toolchain in `rust-toolchain.toml`;
 - writes one `SHA256SUMS` over all assets and checks it;
 - attests every asset with build provenance (`actions/attest-build-provenance`);

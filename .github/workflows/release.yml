@@ -30,7 +30,8 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # Reads the workspace version and, for a tag push, fails unless the tag is v<version>.
+  # Reads the workspace version and, for a tag push, fails unless the tag is v<version>
+  # and its commit is on main.
   version:
     runs-on: ubuntu-24.04
     permissions:
@@ -41,6 +42,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: A tag must point at a commit on main
+        if: ${{ github.ref_type == 'tag' }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::the tagged commit $GITHUB_SHA is not on main"
+            exit 1
+          fi
       - run: rustup toolchain install
       - id: version
         env:
