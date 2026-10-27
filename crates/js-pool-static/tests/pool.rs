@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use js_pool_static::{ConfigError, EXAMPLE_CONFIG, StaticPool};
+use js_pool_static::{ConfigError, EXAMPLE_CONFIG, SeatError, StaticPool};
 use js_provider::{Flavour, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources,
@@ -269,4 +269,66 @@ fn a_stopped_lease_never_starts_again() {
             host: host("gpu-01")
         }
     );
+}
+
+/// Asserts that a seated lease is booked as a start would have booked it: it observes
+/// `Present` on its host, `booked` lists it, a start places the next lease around it, a
+/// second seat of the same pair changes nothing, and a stop frees the host.
+#[test]
+fn a_seated_lease_is_booked_like_a_started_one() {
+    let mut p = example();
+    let lease = LeaseId::new(3, 7);
+    p.seat(&host("gpu-01"), lease).unwrap();
+    p.seat(&host("gpu-01"), lease).unwrap();
+    assert_eq!(
+        p.observe(&lease),
+        Observed::Present {
+            host: host("gpu-01")
+        }
+    );
+    assert_eq!(p.booked(), BTreeMap::from([(host("gpu-01"), lease)]));
+
+    let next = p.start(spec(1, request("nvidia-a100", 1000)));
+    assert_eq!(
+        next,
+        StartAck::Started {
+            host: host("gpu-02")
+        }
+    );
+    assert!(matches!(p.stop(&lease), StopAck::Stopped { .. }));
+    assert_eq!(p.observe(&lease), Observed::Absent);
+    assert_eq!(p.booked().len(), 1);
+}
+
+/// Asserts that a seat the pool cannot honour books nothing and says why: a host it
+/// does not list, a host another lease holds, a lease that holds another host, and a
+/// lease that was stopped.
+#[test]
+fn a_seat_that_cannot_be_honoured_is_refused() {
+    let mut p = example();
+    let (a, b) = (LeaseId::new(1, 1), LeaseId::new(1, 2));
+    p.seat(&host("gpu-01"), a).unwrap();
+
+    let unlisted = p.seat(&host("gpu-99"), b).unwrap_err();
+    assert_eq!(unlisted, SeatError::Unlisted(host("gpu-99")));
+    let taken = p.seat(&host("gpu-01"), b).unwrap_err();
+    let holder = SeatError::Taken {
+        host: host("gpu-01"),
+        holder: a,
+    };
+    assert_eq!(taken, holder);
+    let elsewhere = p.seat(&host("gpu-02"), a).unwrap_err();
+    let held = SeatError::Elsewhere {
+        lease: a,
+        host: host("gpu-01"),
+    };
+    assert_eq!(elsewhere, held);
+    p.stop(&b);
+    assert_eq!(p.seat(&host("gpu-02"), b).unwrap_err(), SeatError::Ended(b));
+
+    assert_eq!(p.booked(), BTreeMap::from([(host("gpu-01"), a)]));
+    for err in [unlisted, taken, elsewhere] {
+        assert!(!err.to_string().is_empty());
+    }
+    assert_eq!(SeatError::Ended(b).to_string(), "lease 1-2 was stopped");
 }

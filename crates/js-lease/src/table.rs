@@ -1,14 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_provider::{Provider, StartSpec};
 use js_types::{LeaseId, Request};
 
-use crate::book::{Book, Seen, Step};
+use crate::book::{self, Book, Seen, Step};
 use crate::clock::{Clock, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
-use crate::types::{Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+use crate::types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
 
 /// The lease table over one provider. See the crate docs for the rules.
 ///
@@ -190,4 +190,13 @@ impl<P, C> LeaseTable<P, C> {
     pub fn into_provider(self) -> P {
         self.provider
     }
+}
+
+/// The bookings the lease file at `path` records: every lease that names a host, in id
+/// order. A missing file has none. This reads the file as [`LeaseTable::open`] does
+/// (a file that is not valid is an [`OpenError::Corrupt`]) but takes no lock, calls no
+/// provider and writes nothing, so a caller can seat the bookings in a provider that
+/// forgot them before it opens the table over that provider.
+pub fn read_bookings(path: impl AsRef<Path>) -> Result<Vec<Booking>, OpenError> {
+    book::bookings(path.as_ref())
 }
