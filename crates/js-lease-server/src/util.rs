@@ -27,7 +27,7 @@ pub(crate) async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send 
 #[cfg(test)]
 mod tests {
     use std::future::Future;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::task::{Context, Poll, Waker};
     use std::thread::{self, ThreadId};
 
@@ -40,12 +40,20 @@ mod tests {
     /// panic.
     #[tokio::test]
     async fn work_runs_off_the_task_and_its_panic_is_raised() {
-        let ran_on: Arc<Mutex<Option<ThreadId>>> = Arc::new(Mutex::new(None));
-        let sink = ran_on.clone();
-        blocking(move || *sink.lock().unwrap() = Some(thread::current().id())).await;
-        assert_ne!(*ran_on.lock().unwrap(), Some(thread::current().id()));
-        assert!(ran_on.lock().unwrap().is_some());
-        let panicked = tokio::spawn(blocking::<()>(|| panic!("the work failed"))).await;
+        // Both jobs are plain functions, so one instantiation of the helper runs both.
+        static RAN_ON: Mutex<Option<ThreadId>> = Mutex::new(None);
+        fn record() {
+            *RAN_ON.lock().unwrap() = Some(thread::current().id());
+        }
+        fn fail() {
+            panic!("the work failed");
+        }
+        let jobs: [fn(); 2] = [record, fail];
+        blocking(jobs[0]).await;
+        let ran_on = *RAN_ON.lock().unwrap();
+        assert!(ran_on.is_some());
+        assert_ne!(ran_on, Some(thread::current().id()));
+        let panicked = tokio::spawn(blocking(jobs[1])).await;
         assert!(panicked.unwrap_err().is_panic());
     }
 
