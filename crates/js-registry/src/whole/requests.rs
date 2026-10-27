@@ -1,10 +1,28 @@
 //! What the registry remembers of a whole-node request between its placements: how many
-//! prepares failed, the hosts it must not be placed on, and the last failure. In memory
-//! only here; the lease file keeps the same record in a later change.
+//! prepares failed, the hosts it must not be placed on, and the last failure.
 //!
 //! The registry has no request id yet, so a request is told apart by its content (the
 //! whole [`Request`]): two equal requests share one record. A request id replaces the key
 //! and nothing else in this module changes.
+//!
+//! # How long a record lives
+//!
+//! - It is removed when the agent reports a lease of the request ready (`granted`).
+//! - A request that used up `max_replace` is *terminal*: its next start is refused
+//!   `NoCapacity`, and that refusal removes the record, so the start after it is a fresh
+//!   request. `NoCapacity` is what a caller waits on, so until a later change adds the
+//!   `exclusive-not-ready` refusal code a consumer sees a terminal request as capacity
+//!   that does not come, not as the typed refusal; [`Registry::not_ready`] holds the
+//!   reason until the refusal has been delivered.
+//! - A record with no committed lease whose request has not been started for
+//!   `Rules::idle_horizon_ms` is dropped, terminal or not, with its exclusions
+//!   (`ForLife` ones included): the consumer is gone, and the records stay bounded by the
+//!   requests in flight rather than by every request that ever failed.
+//!
+//! Records and exclusions are in memory only, so a restart forgets them and resets
+//! `max_replace` for every request; keeping them in the lease file is a later change.
+//!
+//! [`Registry::not_ready`]: crate::Registry::not_ready
 
 use std::collections::BTreeMap;
 
@@ -54,7 +72,8 @@ pub struct RequestRecord {
     pub exclusions: BTreeMap<HostId, Exclusion>,
     /// The last prepare failure, if there was one.
     pub last: Option<NotReady>,
-    /// Whether the request has used up `max_replace` and fails `exclusive-not-ready`.
+    /// Whether the request has used up `max_replace`. Its next start is refused
+    /// `NoCapacity` (see the module documentation) and removes the record.
     pub terminal: bool,
 }
 
@@ -63,7 +82,16 @@ pub struct RequestRecord {
 #[derive(Debug, Default)]
 pub(crate) struct Requests {
     placed: BTreeMap<LeaseId, Request>,
-    records: Vec<(Request, RequestRecord)>,
+    records: Vec<Entry>,
+}
+
+/// A record, the request it belongs to and when the request last asked for a host or
+/// failed one.
+#[derive(Debug)]
+struct Entry {
+    request: Request,
+    record: RequestRecord,
+    touched: Timestamp,
 }
 
 impl Requests {
@@ -82,14 +110,46 @@ impl Requests {
     pub(crate) fn granted(&mut self, lease: &LeaseId) {
         let request = self.placed.get(lease);
         request.into_iter().for_each(|request| {
-            self.records.retain(|(kept, _)| kept != request);
+            self.records.retain(|entry| entry.request != *request);
+        });
+    }
+
+    /// A start of `request` at `now`. A terminal request's record is removed and `true`
+    /// is returned, so the start is refused and the next start of the request is a fresh
+    /// one; any other record is marked as in use.
+    pub(crate) fn start(&mut self, request: &Request, now: Timestamp) -> bool {
+        let at = self
+            .records
+            .iter()
+            .position(|entry| entry.request == *request);
+        let Some(at) = at else {
+            return false;
+        };
+        let terminal = self.records[at].record.terminal;
+        match terminal {
+            true => {
+                self.records.remove(at);
+            }
+            false => self.records[at].touched = now,
+        }
+        terminal
+    }
+
+    /// Drops the records whose request has no committed lease and has not started or
+    /// failed for `horizon_ms`.
+    pub(crate) fn sweep(&mut self, now: Timestamp, horizon_ms: u64) {
+        let placed = &self.placed;
+        self.records.retain(|entry| {
+            let idle = now.millis().saturating_sub(entry.touched.millis());
+            let committed = placed.values().any(|request| *request == entry.request);
+            committed || idle < horizon_ms
         });
     }
 
     /// The record of `request`, if a prepare of it failed.
     pub(crate) fn record(&self, request: &Request) -> Option<&RequestRecord> {
-        let found = self.records.iter().find(|(kept, _)| kept == request);
-        found.map(|(_, record)| record)
+        let found = self.records.iter().find(|entry| entry.request == *request);
+        found.map(|entry| &entry.record)
     }
 
     /// Whether `host` is left out of `request`'s placements at `now`.
@@ -106,12 +166,20 @@ impl Requests {
         let Some(request) = self.placed.remove(lease) else {
             return;
         };
-        let at = self.records.iter().position(|(kept, _)| *kept == request);
+        let at = self
+            .records
+            .iter()
+            .position(|entry| entry.request == request);
         let at = at.unwrap_or_else(|| {
-            self.records.push((request, RequestRecord::default()));
+            self.records.push(Entry {
+                request,
+                record: RequestRecord::default(),
+                touched: ctx.now,
+            });
             self.records.len() - 1
         });
-        let record = &mut self.records[at].1;
+        self.records[at].touched = ctx.now;
+        let record = &mut self.records[at].record;
         let row = cause.row();
         match row.request {
             RequestEffect::Requeue => {
@@ -142,6 +210,7 @@ impl Requests {
 #[derive(Clone, Copy)]
 pub(crate) struct Failure<'a> {
     pub(crate) host: &'a HostId,
+    pub(crate) now: Timestamp,
     pub(crate) backoff_end: Timestamp,
     pub(crate) max_replace: u32,
 }
@@ -156,6 +225,17 @@ pub(crate) struct Rules {
 }
 
 impl Rules {
+    /// How long a request may go without a start before its record is dropped:
+    /// `reserve_backoff` for each of the `max_replace + 1` tries, so a record outlives
+    /// every exclusion it holds and the tries it can still make, but at least one
+    /// `prepare_timeout` (the settings are non-zero, and a short back-off must not make
+    /// the registry forget a failure the moment the lease ends).
+    pub(crate) fn idle_horizon_ms(&self) -> u64 {
+        let tries = u64::from(self.max_replace).saturating_add(1);
+        let backoffs = self.reserve_backoff_ms.saturating_mul(tries);
+        backoffs.max(self.prepare_timeout_ms)
+    }
+
     pub(crate) fn of(config: &PoolConfig) -> Self {
         let whole = config.whole_node().cloned();
         let whole = whole.unwrap_or_else(|| WholeNodeConfig::dedicated(config.max_machines()));

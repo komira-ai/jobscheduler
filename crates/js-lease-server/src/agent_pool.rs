@@ -1,11 +1,12 @@
 //! The pool file of `--agent-pool-config`: what an operator decides about the hosts that
 //! register themselves.
 //!
-//! The whole-node keys are parsed, checked and carried on the loaded [`PoolConfig`]. The
-//! registry reads `prepare_timeout`, `reserve_backoff` and `max_replace`; the lease table
-//! is given `prepare_timeout` as well (see `Config::from_cli`), so an operator's
-//! `prepare_timeout = "20m"` is how long a whole-node lease waits, pending, on both
-//! sides. The other keys are loaded and not consumed yet. The keys are accepted only for class
+//! The whole-node keys are parsed, checked and carried on the loaded [`PoolConfig`], which
+//! the agent registry is built from. The registry reads `prepare_timeout`,
+//! `reserve_backoff` and `max_replace` from it; the lease table is given `prepare_timeout`
+//! as well (see `Config::from_cli`), so an operator's `prepare_timeout = "20m"` is how
+//! long a whole-node lease waits, pending, on both sides. The other keys are not consumed
+//! yet, and the change that reserves hosts reads them. The keys are accepted only for class
 //! `whole-node`; `gpu-host` books a whole host (`BookAll`) and refuses them.
 
 use std::collections::BTreeMap;

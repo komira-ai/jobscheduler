@@ -283,6 +283,11 @@ impl TaintState {
         self.taint.is_some()
     }
 
+    /// The reason the host was tainted for, when it is.
+    pub(super) fn reason(&self) -> Option<&str> {
+        self.taint.as_ref().map(|taint| taint.reason.as_str())
+    }
+
     /// What the next heartbeat reports: the taint, once the marker holds it and until it is
     /// acknowledged. A taint that is not on disk is not reported: a crash would make the
     /// host forget a taint the server was told of. Until the marker is written the host is
