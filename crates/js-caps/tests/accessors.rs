@@ -29,6 +29,15 @@ fn a_request_reports_the_exact_value_it_names() {
     assert_eq!(request.exact("cpus"), None);
 }
 
+/// Catches: a malformed `sysctl` line accepted, or its error lost on the way out of the
+/// feature reader.
+#[test]
+fn a_malformed_sysctl_line_is_refused() {
+    let spoiled = format!("{SYSCTL}hw.optional.bogus 1\n");
+    assert!(CpuCaps::from_macos_sysctl(&spoiled).is_err());
+    assert!(js_caps::gpus_from_macos_sysctl(&spoiled).is_err());
+}
+
 /// Catches: blank lines in `sysctl` text refused, or read as an entry.
 #[test]
 fn blank_lines_in_sysctl_text_are_skipped() {
