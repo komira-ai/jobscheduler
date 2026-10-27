@@ -1,0 +1,18 @@
+# The merged code and what it becomes
+
+Moved from design.md section 5.9. Section numbers refer to design.md.
+
+| Merged item | Becomes | Follow-up |
+|---|---|---|
+| `js-provider::Provider` (`start`, `stop`, `observe`, `capacity`) | The host-booking surface of a pool, renamed `Pool` (and `ProviderId` to `PoolId`): book a free host for a lease, release it, observe it, and list its hosts (`hosts()`, D16). It is not a provider kind. | Rename PR (step 23) |
+| `Flavour`, `flavour()`, the doc "delegated flavour only" | Deleted. One kind of thing runs work. The doc is rewritten. | Same PR |
+| `StartAck`, `StopAck`, `Observed`, `StartSpec::new` | Stay: cloud calls can time out, so the three answers stay. `AcquireAck` and `ReleaseAck` are added beside them; the fence and no-retries rules are still to model. | Step 23 |
+| `HostCapacity` and `capacity()`; the `js-provider` crate | On `Pool`, `capacity()` is renamed `hosts()` (hosts and their leases). `CapacityProvider::list` (instances, with instance id and tags) is new, and the crate gains `CapacityProvider` beside `Pool`. | Step 23 |
+| `StaticPool` | Stays as the `static` capacity provider and its pool. Its listed hosts are one configuration source. `acquire` claims a free listed host; `release` returns it. It never launches. | Registered hosts: step 30 |
+| `pool.seat()`, `Seated`, `Unseated` | Stay for the in-memory static pool. For aws, instance tags are the record, so seating becomes re-adoption by tag. | Step 32 |
+| `CapacitySource` | The extension seam. Its one implementation for configured providers builds, from the kind registry of 5.7, a source over any `CapacityProvider`; `RegisteredAgentSource` serves registering hosts. Its lock-held, synchronous call becomes asynchronous, because acquire is slow (D19). | Steps 29, 30, 32 |
+| `js-provider-fake` | The merged fake becomes the fake capacity provider (fake aws), with scripted launch failure, slow boot, unknown acquire, unknown terminate, instance loss, leaked instances and quota refusal. | Step 28 |
+| `js-conformance` | The machinery stays: `Subject`, `Check::ALL`, `Verdict::NotApplicable`. Its checks are re-keyed to the capacity-provider and agent contracts; wording about flavours goes. The labels-on-created-resources follow-up named in its crate doc lands with the first provider that creates resources. | Steps 28, 32 |
+| `js-lease` | Stays. Adds an `acquiring` state before `pending`, `held` and `releasing`, the pool name in the lease file (additive), an acquire record, and the tainted-host set (5.12). | Steps 29, 30b |
+| `js-lease-server` | Stays. `POST /v1/leases` accepts a class and label selectors (additive); a registration endpoint serves agent hello; a pool-scaler tick runs beside the reaper. | Steps 29 to 33 |
+| `js-cli` | Gains `--pool`, `--class` and `--label` on `acquire`, and `host clear-taint`. | Steps 33, 30b |
