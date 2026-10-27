@@ -132,7 +132,9 @@
 //! outlives a crash without the leases it was saved with. The table keeps the ledger
 //! whole and decides nothing about it: [`LeaseTable::set_reservations`] replaces it (the
 //! next tick writes it) and [`LeaseTable::reservations`] reads it. An open returns each
-//! held deadline extended by [`Settings::boot_grace`] and stamps every record with
+//! held deadline raised to at least the boot plus [`Settings::boot_grace`] (never the
+//! stored deadline plus the grace, so repeated restarts do not accumulate it; lease
+//! records get no such grace here) and stamps every record with
 //! `claim_by`, the boot plus [`Settings::regain_grace`]. A file without the rows loads
 //! an empty ledger; fields of a later version in a row are kept on rewrite.
 //!

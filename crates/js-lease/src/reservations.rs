@@ -13,8 +13,10 @@ use crate::store::{self, Document, StoredExclusion, StoredReservation};
 use crate::types::{Exclusion, ExclusionEnd, Held, ReservationRecord, Settings};
 
 /// The records of `document`, checked, with the restart grace applied at `boot`: the
-/// count matches, no request twice, every row valid. Each held deadline moves out by
-/// the boot grace and every record may be claimed until `boot` plus the regain grace.
+/// count matches, no request twice, every row valid. Each held deadline becomes the
+/// later of the stored one and `boot` plus the boot grace (never the stored one plus
+/// the grace, which a restart loop would push out for ever), and every record may be
+/// claimed until `boot` plus the regain grace.
 /// Fields this build does not know are returned apart, by request id, to be written
 /// back. Any failure is an [`OpenError::Corrupt`] naming `path`.
 pub(crate) fn restore_all(
@@ -36,7 +38,8 @@ pub(crate) fn restore_all(
     let mut records = Vec::new();
     let mut kept = BTreeMap::new();
     for stored in &document.reservation {
-        let record = restore(stored, settings, claim_by).map_err(|r| store::corrupt(path, r))?;
+        let record =
+            restore(stored, settings, boot, claim_by).map_err(|r| store::corrupt(path, r))?;
         if kept
             .insert(stored.request_id.clone(), stored.extra.clone())
             .is_some()
@@ -52,6 +55,7 @@ pub(crate) fn restore_all(
 fn restore(
     stored: &StoredReservation,
     settings: &Settings,
+    boot: Timestamp,
     claim_by: Timestamp,
 ) -> Result<ReservationRecord, String> {
     let held = match (&stored.host, stored.reserved_at_ms, stored.deadline_ms) {
@@ -61,7 +65,7 @@ fn restore(
             Some(Held {
                 host,
                 reserved_at: Timestamp::from_millis(reserved_at),
-                deadline: Timestamp::from_millis(deadline).plus(settings.boot_grace()),
+                deadline: Timestamp::from_millis(deadline).max(boot.plus(settings.boot_grace())),
             })
         }
         _ => {

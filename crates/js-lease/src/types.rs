@@ -61,17 +61,23 @@ impl Settings {
     }
 
     /// The same settings with the restart grace of reservation records: on open, every
-    /// held record's deadline moves out by `boot_grace`, and every record may be
-    /// claimed until `regain_grace` after the boot ([`ReservationRecord::claim_by`]).
-    /// Both default to zero. Each restart grants one more `boot_grace`, because the
-    /// extended deadline is what the file then holds.
+    /// held record's deadline becomes the later of the stored deadline and the boot plus
+    /// `boot_grace`, and every record may be claimed until `regain_grace` after the boot
+    /// ([`ReservationRecord::claim_by`]). Both default to zero. A restart therefore
+    /// never moves a deadline past `boot + boot_grace`: a restart loop that rewrites the
+    /// file cannot push the drain bound out for ever.
+    ///
+    /// This grace applies to reservation records only. Lease records have no restart
+    /// grace in this crate; the lease-side grace is wired by the server step that
+    /// persists reservation marks and adds the boot-grace flag (plan step M3-n), and
+    /// that setting is separate from this one.
     pub fn with_restart_grace(mut self, boot_grace: Duration, regain_grace: Duration) -> Self {
         self.boot_grace = boot_grace;
         self.regain_grace = regain_grace;
         self
     }
 
-    /// How far a reservation's deadline moves out on open.
+    /// The floor of a restored reservation's deadline: the boot plus this.
     pub fn boot_grace(&self) -> Duration {
         self.boot_grace
     }

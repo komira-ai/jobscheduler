@@ -179,8 +179,8 @@ fn unknown_reservation_fields_are_kept_on_rewrite() {
 }
 
 /// Asserts the restart grace on a manual clock: after an open at the boot instant a held
-/// deadline is exactly the stored one plus the boot grace, the reserved instant and the
-/// counters are untouched, and `claim_by` is the boot plus the regain grace; a counters-only
+/// deadline is exactly the boot plus the boot grace (the stored one is earlier), the
+/// reserved instant and the counters are untouched, and `claim_by` is the boot plus the regain grace; a counters-only
 /// record gets `claim_by` too.
 #[test]
 fn the_restart_grace_extends_deadlines_exactly() {
@@ -195,11 +195,61 @@ fn the_restart_grace_extends_deadlines_exactly() {
         LeaseTable::open(fake(), clock.clone(), graced, scratch.file(), Boot::Resume).unwrap();
     let restored = table.reservations();
     let first = &restored[0];
-    assert_eq!(first.held, Some(held("h1", T0, T0 + 630_000)));
+    assert_eq!(first.held, Some(held("h1", T0, T0 + 1_030_000)));
     assert_eq!((first.give_ups, first.prepare_failures), (2, 1));
     assert_eq!(first.claim_by, Some(at(T0 + 1_090_500)));
     assert_eq!(restored[1].held, None);
     assert_eq!(restored[1].claim_by, Some(at(T0 + 1_090_500)));
+}
+
+/// Opens `scratch`'s file with `graced`, saves the restored ledger back and returns
+/// the first record's deadline.
+fn reopen_saving(
+    clock: &js_lease::ManualClock,
+    scratch: &Scratch,
+    graced: js_lease::Settings,
+) -> u64 {
+    let mut table =
+        LeaseTable::open(fake(), clock.clone(), graced, scratch.file(), Boot::Resume).unwrap();
+    let deadline = table.reservations()[0].held.as_ref().unwrap().deadline;
+    table.set_reservations(table.reservations());
+    assert!(table.tick().save_error.is_none());
+    deadline.millis()
+}
+
+/// Asserts that consecutive reopens, each saving the ledger back with the clock barely
+/// moved, leave the deadline at the boot plus the grace without growing it, and that a
+/// stored deadline already later than that is unchanged.
+#[test]
+fn repeated_reopens_do_not_accumulate_the_boot_grace() {
+    let (mut table, clock, scratch) = fresh("res_loop");
+    table.set_reservations(ledger());
+    table.tick();
+    drop(table);
+    let graced = settings().with_restart_grace(secs(30), secs(0));
+
+    clock.advance(secs(1000));
+    assert_eq!(reopen_saving(&clock, &scratch, graced), T0 + 1_030_000);
+    clock.advance(Duration::from_millis(10));
+    assert_eq!(reopen_saving(&clock, &scratch, graced), T0 + 1_030_010);
+    assert_eq!(reopen_saving(&clock, &scratch, graced), T0 + 1_030_010);
+    let later = settings().with_restart_grace(secs(1), secs(0));
+    assert_eq!(reopen_saving(&clock, &scratch, later), T0 + 1_030_010);
+}
+
+/// Asserts that a stored deadline later than the boot plus the grace is unchanged and
+/// one exactly at it stays there.
+#[test]
+fn a_deadline_beyond_the_grace_is_unchanged() {
+    let (mut table, clock, scratch) = fresh("res_late");
+    table.set_reservations(ledger());
+    table.tick();
+    drop(table);
+    clock.advance(secs(10));
+    let graced = settings().with_restart_grace(secs(30), secs(0));
+    assert_eq!(reopen_saving(&clock, &scratch, graced), T0 + 600_000);
+    let exact = settings().with_restart_grace(secs(590), secs(0));
+    assert_eq!(reopen_saving(&clock, &scratch, exact), T0 + 600_000);
 }
 
 /// Asserts that `set_reservations` marks the table unsaved: nothing is written until
