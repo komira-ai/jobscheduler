@@ -66,6 +66,12 @@ impl RegisteredProvider {
     /// The refusals are those of [`js_pool_static::StaticPool::seat`] except `Unlisted`,
     /// which this never returns.
     ///
+    /// For a whole-node pool the booking is put back `Committed`, unless the host lists
+    /// held runs, when it is put back `Ready`. That assumes the held runs are the
+    /// lease's own. Leftover runs of a lease that has ended, followed by a registry
+    /// restart, would seat `Ready` on a host that is not quiet; this is rare, and the
+    /// registry does not tell the two cases apart.
+    ///
     /// `binding` is what the awaiting host's hello must match: the caller passes the
     /// binding it persisted when it admitted the host, and a hello from another
     /// credential or instance is refused as host-bound. With `None` the first hello
