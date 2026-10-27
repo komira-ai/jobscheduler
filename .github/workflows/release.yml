@@ -11,8 +11,11 @@
 #
 # Which commit. A run started by `workflow_run` is at the tip of main (`github.sha`), and
 # that is the commit an attestation records. `plan` therefore releases the commit only
-# while main is still at it; if main has moved on, the newer push releases its change too,
-# since a release covers everything since the latest tag.
+# while main is still at it, read from the API when the job runs (a re-run keeps the
+# commit and `github.sha` of the run it repeats); if main has moved on, the newer push
+# releases its change too, since a release covers everything since the latest tag. The
+# one gap: a run skipped because main moved is not made up if the newer push then fails
+# `ci`; the next push that passes releases it.
 #
 # The decision and the version are `cargo xtask release plan` (crates/xtask): a release
 # only when a file that ships changed since the latest `v*` tag, as the next patch
@@ -20,9 +23,10 @@
 # stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
 # committed.
 #
-# Order: plan, build, sums, attest, verify, publish. The tag is made last, by `publish`,
-# once the files are built, attested and the attestations verified, so a failed run leaves
-# no tag. A re-run of a failed run adds what is missing and replaces nothing.
+# Order: plan, build, sums, attest, verify, publish. The tag is made last: `publish` makes
+# a draft release, uploads the files built, attested and verified, and publishes it in
+# one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
+# continues the same draft, adds what is missing and replaces nothing.
 #
 # Permissions are per job. Only `attest` holds id-token and attestations write, and only
 # `publish` holds contents write; neither runs repository code, only pinned actions,
@@ -83,13 +87,20 @@ jobs:
         name: Plan the release
         env:
           EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           flags=()
           if [ "$EVENT" = pull_request ]; then
             flags+=(--dry-run)
+            tip="$COMMIT"
+          else
+            # Main's tip now, from the API: a re-run keeps the commit and GITHUB_SHA of the
+            # run it repeats, which may be long past.
+            tip="$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)"
           fi
-          cargo xtask release plan --head "$COMMIT" --tip "$GITHUB_SHA" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
+          cargo xtask release plan --head "$COMMIT" --tip "$tip" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: [plan]
@@ -135,6 +146,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir dist
+          # Archives that depend only on the commit and the binaries: sorted names, the
+          # commit's time as the modification time, numeric owner 0/0, no name or time in
+          # the gzip header. A full re-run then makes the same files as the first run.
+          mtime="$(git log -1 --format=%ct "$COMMIT")"
           for entry in $BUILDS; do
             package="${entry%%:*}"
             bin="${entry##*:}"
@@ -143,7 +158,7 @@ jobs:
             mkdir "stage-$bin"
             mkdir "stage-$bin/$name"
             cp "target/$TARGET/release/$bin" LICENSE "stage-$bin/$name/"
-            tar -C "stage-$bin" -czf "dist/$name.tar.gz" "$name"
+            tar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
           ls -l dist
       - name: Check the binaries
@@ -265,13 +280,18 @@ jobs:
           for file in ./*.tar.gz; do
             gh attestation verify "$file" --repo "$REPO" \
               --signer-workflow "$REPO/.github/workflows/release.yml" \
+              --source-ref refs/heads/main \
               --source-digest "$COMMIT"
           done
 
-  # Tags the commit and creates the release with the attested files. Nothing is rebuilt.
-  # Create-only: the tag is made only when none names this commit, a release is created
-  # only when there is none, and a file is added only when the release lacks it. A file
-  # the release has that differs from this run's is an error, never replaced.
+  # Creates the release with the attested files, then publishes it, which creates the tag.
+  # Nothing is rebuilt. The release starts as a draft for this version (tag_name and
+  # target_commitish the commit), every file is uploaded to it, and one last call
+  # publishes it: a failed upload leaves a draft and no tag, and a re-run continues the
+  # same draft. Create-only: the draft is made only when there is no release for the
+  # version, a file is added only when the release lacks it, and a file the release has
+  # that differs from this run's is an error, never replaced. A tag that exists and does
+  # not name this commit is an error too.
   publish:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
     needs: [plan, sums, verify]
@@ -283,7 +303,7 @@ jobs:
         with:
           name: release-assets
           path: dist
-      - name: Check, tag, then create the release or add the files it lacks
+      - name: Draft the release, add the files it lacks, publish it
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -294,30 +314,47 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum --check --strict SHA256SUMS
-          if [ "$TAG_EXISTS" != true ]; then
-            # An annotated tag object, then the ref. The ref is created, never updated: a
-            # tag that exists makes this call fail.
-            tag_object="$(gh api "repos/$REPO/git/tags" -f tag="$TAG" -f message="jobscheduler $VERSION" -f object="$COMMIT" -f type=commit --jq .sha)"
-            gh api "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$tag_object" --silent
+          api="repos/$REPO"
+          # `plan` found no tag for this version: one that exists now was made since, and
+          # publishing would attach the release to it.
+          if [ "$TAG_EXISTS" != true ] && gh api "$api/git/ref/tags/$TAG" --silent 2> /dev/null; then
+            echo "::error::the tag $TAG exists now, which the plan did not see"
+            exit 1
           fi
-          if ! gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
-            gh release create "$TAG" --repo "$REPO" --verify-tag \
-              --title "jobscheduler $VERSION" --generate-notes \
-              --notes "js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
-              ./*.tar.gz SHA256SUMS
-            exit 0
+          # The release of this version, draft or published (the list shows drafts; a
+          # lookup by tag does not).
+          ids="$(gh api --paginate "$api/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
+          if [ -z "$ids" ]; then
+            id="$(gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
+              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -F draft=true -F generate_release_notes=true --jq .id)"
+          elif [ "$(wc -l <<< "$ids")" -eq 1 ]; then
+            id="$ids"
+          else
+            echo "::error::more than one release is named $TAG: $ids"
+            exit 1
           fi
-          # The release exists (a re-run): add the files it lacks. A file it has must be
-          # this run's, byte for byte, or the files of two builds would be mixed.
-          have="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
+          # Add the files the release lacks. A file it has must be this run's, byte for
+          # byte, or the files of two builds would be mixed.
+          assets="$(gh api "$api/releases/$id" --jq '.assets[] | "\(.id) \(.name)"')"
           mkdir ../existing
           for file in ./*.tar.gz SHA256SUMS; do
             name="${file#./}"
-            if grep -qxF -- "$name" <<<"$have"; then
-              gh release download "$TAG" --repo "$REPO" --pattern "$name" --dir ../existing
+            asset_id="$(awk -v name="$name" '$2 == name { print $1 }' <<< "$assets")"
+            if [ -n "$asset_id" ]; then
+              gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$name"
               cmp -- "$name" "../existing/$name"
               echo "$name is on the release already: kept"
             else
-              gh release upload "$TAG" --repo "$REPO" "$file"
+              gh api --method POST -H "Content-Type: application/octet-stream" "https://uploads.github.com/$api/releases/$id/assets?name=$name" --input "$file" --silent
             fi
           done
+          # Publishing creates the tag, at the commit, when the release is a draft.
+          if [ "$(gh api "$api/releases/$id" --jq .draft)" = true ]; then
+            gh api --method PATCH "$api/releases/$id" -f tag_name="$TAG" -f target_commitish="$COMMIT" -F draft=false --silent
+          fi
+          at="$(gh api "$api/commits/$TAG" --jq .sha)"
+          if [ "$at" != "$COMMIT" ]; then
+            echo "::error::$TAG names $at, not $COMMIT"
+            exit 1
+          fi

@@ -16,15 +16,29 @@ changes code that ships is released as the next version, after `ci` has passed o
    release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
-6. `publish` creates the annotated tag `vX.Y.Z` on the commit and the GitHub release with the archives
-   and `SHA256SUMS`.
+6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
+   commit), uploads the archives and `SHA256SUMS` to it, and publishes it in one call. Publishing
+   creates the tag `vX.Y.Z` on the commit.
 
-The tag is made last, so a run that fails earlier leaves no tag and no release. Re-run the failed
-run from its page: a tag that names the commit is kept, a release that exists gets the files it
-lacks, and no file already on a release is replaced (a differing file fails the run). If `main` has
-moved on since the commit passed `ci`, the run releases nothing: a build is attested with the commit
-the workflow runs at, which is the tip of `main`, and the push that moved it releases this change
-too.
+The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
+release: at worst a draft, which only people who can write to the repository see. Re-run the failed
+jobs from the run's page (below): the run continues the draft of the version, adds the files it
+lacks, and replaces none (a differing file fails the run).
+
+`plan` releases the commit only while `main` is still at it, as the GitHub API reports when the job
+runs. If `main` has moved on since the commit passed `ci`, the run releases nothing: a build is
+attested with the commit the workflow runs at, which is the tip of `main`, and the push that moved it
+releases this change too. The same rule stops a re-run of an old run: its commit is no longer the tip.
+`plan` also refuses a commit that a later `v*` tag is past (a tag at a descendant of the commit).
+
+The archives are made to be byte-identical when built again from the same commit: sorted file names,
+the commit's time as modification time, numeric owner 0, `gzip -n`. A full re-run therefore uploads
+the same files the first run did; if a build still came out different, the run fails at the
+comparison rather than mix two builds (see Recovery).
+
+A gap to know: a run skipped because `main` moved is made up by the newer push's run. If that newer
+push fails `ci` (or its release run fails), nothing releases the skipped change until the next push
+that passes `ci` and ships code. Nothing runs on a timer.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, sums and verify (plus
 `attestations: read` for verify), `id-token` and `attestations` write for `attest`, `contents`
@@ -40,6 +54,16 @@ dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.r
 configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
 so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
 
+A file in one of the excluded places still ships when a shipped source compiles it in. `plan` reads
+the `include_str!`, `include_bytes!` and `include!` calls of every shipped `.rs` file (not those
+under `tests/`, `benches/` or `examples/`), resolves each path from the source file, and counts that
+file as shipped wherever it is: an `include_str!("../help.md")` makes `help.md` release. The path must
+be a plain string literal; `concat!`, `env!`, a raw string or an escape in an include fails the plan
+(the run goes red) rather than guess what is compiled in.
+
+A change that moves a shipped file out of a shipped directory, or deletes one, releases: the old path
+is a change of the crate.
+
 These do not release: `docs/**` and every `*.md`, `.github/**`, a crate's `tests/`, benches and
 examples, and the crates that no shipped binary depends on (`xtask`, `js-coverage`, `js-conformance`)
 or that only their tests do (`js-provider-fake`). A push that changes only those ends the run at
@@ -48,8 +72,10 @@ earlier push left unreleased.
 
 ## Which version
 
-The next version is the latest `vX.Y.Z` tag (by version order) with its patch number raised by one.
-With no tag yet it is the workspace version.
+The next version is the latest `vX.Y.Z` tag (by version order) that is merged into the commit, with
+its patch number raised by one. A higher tag that is not an ancestor of the commit (on another
+branch, or pushed by mistake) is not a release of this history and is ignored. With no tag yet it is
+the workspace version.
 
 To release a minor or major version, merge a pull request that raises the workspace version in
 `Cargo.toml` (`[workspace.package] version`) above the latest tag, for example to `0.2.0`. The next
@@ -87,6 +113,7 @@ gh release download vX.Y.Z -R komira-ai/jobscheduler -p 'js-lease-server-*-x86_6
 sha256sum -c --ignore-missing SHA256SUMS
 gh attestation verify js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz -R komira-ai/jobscheduler \
   --signer-workflow komira-ai/jobscheduler/.github/workflows/release.yml \
+  --source-ref refs/heads/main \
   --source-digest "$(git rev-parse vX.Y.Z^{commit})"
 ```
 
@@ -96,5 +123,55 @@ for the tag. For the client, use `-p 'js-[0-9]*-x86_64-unknown-linux-musl.tar.gz
 `-p 'js-agent-*-x86_64-unknown-linux-musl.tar.gz'`.
 
 The checksum check proves the download is intact. The attestation check proves the file was built
-from this repository by the `release` workflow, from exactly that commit (`--source-digest`), which
-is the commit the tag `vX.Y.Z` names.
+from this repository by the `release` workflow, from `main` (`--source-ref`), at exactly that commit
+(`--source-digest`), which is the commit the tag `vX.Y.Z` names.
+
+## Configuration the project owner must set
+
+The workflow needs no secret and no environment. It does need repository settings that only the
+project owner can make. This section says what to set; it does not say what has been set. At the time
+of writing the repository has no ruleset and no branch protection, so none of the following holds
+until it is set.
+
+- **A tag ruleset for `v*`**: block update and deletion of the tags, and allow creation only for the
+  GitHub Actions identity (a bypass for GitHub Actions, and for nobody else). Without it anyone who
+  can write to the repository can move or delete a release tag, or push a `v*` tag by hand. A
+  hand-pushed tag starts nothing (below), but a tag merged into `main` is the base the next version
+  counts from.
+- **Branch protection for `main`**: require a pull request. A push to `main` that passes `ci` is a
+  release, so whoever can push to `main` can cut one. The workflow does not depend on this, but the
+  guarantee that a release is a reviewed change does.
+- **No environment** is used by `release`, so no environment needs approvers or secrets.
+
+Not proven until the first real run on `main`, and fixed there if it differs:
+
+- that creating the tag by publishing the release is allowed under the tag ruleset above;
+- the values of the attestation's source claims, `--source-ref refs/heads/main` and
+  `--source-digest <commit>`, for a run started by `workflow_run` (`verify` refuses the release
+  before anything is published if they differ);
+- the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
+  back to compare it).
+
+## Recovery
+
+Open the failed run on the Actions page and use "Re-run failed jobs", not "Re-run all jobs": the files
+that were built and verified are kept and nothing is built twice. The run keeps its commit, and
+`plan` checks again that `main` is still at it.
+
+| What happened | State | What to do |
+|---|---|---|
+| `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
+| `publish` failed before the release was published (an upload, the draft) | A draft release, no tag | Re-run failed jobs. The run finds the draft of the version, adds the files it lacks and publishes it. |
+| `publish` failed at the last call or after it | Possibly the tag and a published release | Re-run failed jobs: the tag stays, files the release lacks are added, the tag is checked to name the commit. |
+| `publish` says a file differs | The release holds a file that is not this run's | Never delete or replace assets of a published release. Cut a new version: push a change that ships (the next version counts from the tag). |
+| The run was green but released nothing | `plan` printed why | `main` moved on (the newer push releases this change), a later release exists past the commit, or nothing that ships changed. Nothing to do. |
+| "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files; `publish` compares each against the release and keeps them. If a file differs the run fails and nothing is changed. |
+
+Skipped runs: a release run for a commit that is not the tip of `main` is skipped on purpose (an
+attestation records the tip, and a build of an older commit must not be published as the newest). The
+push that moved `main` releases the change, unless it fails `ci`; then the next green push that ships
+code does.
+
+There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and
+`workflow_dispatch` does not exist. An old run that is re-run cannot publish its old commit, because
+`plan` finds `main` past it. To release by hand there is nothing to do but merge a change that ships.
