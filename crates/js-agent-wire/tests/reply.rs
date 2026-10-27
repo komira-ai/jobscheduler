@@ -54,7 +54,7 @@ fn a_refused_start_does_not_cost_the_stop_beside_it() {
     let mut over = job();
     over.image = "a".repeat(MAX_IMAGE_LEN + 1);
     let body = reply(vec![stop("r1"), Command::Start(Box::new(over))]);
-    let check = body.validate().unwrap();
+    let check = body.validate();
     assert_eq!(check.commands, vec![&stop("r1")]);
     assert_eq!(check.refused.len(), 1);
     let first = check.refused[0];
@@ -77,7 +77,7 @@ fn a_newer_servers_raised_cap_does_not_cost_the_stop() {
         "commands": [{"type": "stop", "run_id": "r1"}, start, {"type": "cancel", "run_id": "r2"}],
     });
     let body: HeartbeatReply = serde_json::from_value(body).unwrap();
-    let check = body.validate().unwrap();
+    let check = body.validate();
     assert_eq!(check.commands, vec![&stop("r1"), &cancel("r2")]);
     assert_eq!(check.refused.len(), 1);
     assert_eq!(check.refused[0].index, 1);
@@ -97,7 +97,7 @@ fn each_command_is_judged_alone() {
         cancel(""),
         start("s1", &[0]),
     ]);
-    let check = body.validate().unwrap();
+    let check = body.validate();
     assert_eq!(
         check.commands,
         vec![&Command::Unknown, &cancel("r2"), &start("s1", &[0])]
@@ -120,17 +120,31 @@ fn each_command_is_judged_alone() {
     );
 }
 
-/// Only a command count over the cap refuses the whole reply, and the cap itself passes.
-/// It catches an unbounded command list being read, and the cap moving by one.
+/// Commands past the cap are refused by index; the first `MAX_COMMANDS` are still read,
+/// so a stop or cancel early in a reply from a server with a higher cap is acted on, and
+/// a command at the cap passes. It catches an unbounded command list being read, the cap
+/// moving by one, and a long reply costing the stop at its head.
 #[test]
-fn only_too_many_commands_refuse_the_whole_reply() {
-    let err = reply(vec![Command::Unknown; MAX_COMMANDS + 1])
-        .validate()
-        .unwrap_err();
-    expect(err, "commands", Rule::TooMany, refusal::INVALID_REPLY);
+fn commands_past_the_cap_are_refused_and_the_rest_are_read() {
+    let mut commands = vec![stop("a"), cancel("b")];
+    commands.resize(MAX_COMMANDS + 2, Command::Unknown);
+    let body = reply(commands);
+    let check = body.validate();
+    assert_eq!(check.commands.len(), MAX_COMMANDS);
+    assert_eq!(check.commands[..2], [&stop("a"), &cancel("b")]);
+    assert_eq!(
+        check.refused.iter().map(|r| r.index).collect::<Vec<_>>(),
+        [MAX_COMMANDS, MAX_COMMANDS + 1]
+    );
+    expect(
+        error_at(&check, MAX_COMMANDS),
+        "commands",
+        Rule::TooMany,
+        refusal::INVALID_REPLY,
+    );
     let at_cap = reply(vec![Command::Unknown; MAX_COMMANDS]);
-    assert_eq!(at_cap.validate().unwrap().commands.len(), MAX_COMMANDS);
-    assert_eq!(HeartbeatReply::default().validate().unwrap().refused, []);
+    assert_eq!(at_cap.validate().commands.len(), MAX_COMMANDS);
+    assert_eq!(HeartbeatReply::default().validate().refused, []);
 }
 
 /// A second start that names a run id or a GPU index an earlier accepted start already
@@ -141,7 +155,7 @@ fn only_too_many_commands_refuse_the_whole_reply() {
 #[test]
 fn starts_in_one_reply_do_not_overlap() {
     let same_run = reply(vec![start("a", &[0]), stop("a"), start("a", &[1])]);
-    let check = same_run.validate().unwrap();
+    let check = same_run.validate();
     assert_eq!(check.commands, vec![&start("a", &[0]), &stop("a")]);
     expect(
         error_at(&check, 2),
@@ -150,7 +164,7 @@ fn starts_in_one_reply_do_not_overlap() {
         refusal::INVALID_REPLY,
     );
     let same_gpu = reply(vec![start("a", &[0, 1]), start("b", &[1])]);
-    let check = same_gpu.validate().unwrap();
+    let check = same_gpu.validate();
     assert_eq!(check.commands, vec![&start("a", &[0, 1])]);
     assert_eq!(check.refused.len(), 1);
     assert_eq!(check.refused[0].index, 1);
@@ -164,13 +178,13 @@ fn starts_in_one_reply_do_not_overlap() {
     bad.gpu_indices = vec![0];
     bad.image = "--x".into();
     let freed = reply(vec![Command::Start(Box::new(bad)), start("b", &[0])]);
-    let check = freed.validate().unwrap();
+    let check = freed.validate();
     assert_eq!(check.commands, vec![&start("b", &[0])]);
     assert_eq!(check.refused.len(), 1);
     assert_eq!(check.refused[0].index, 0);
     assert_eq!(check.refused[0].error.code(), refusal::INVALID_IMAGE);
     let apart = reply(vec![start("a", &[0]), start("b", &[1])]);
-    assert_eq!(apart.validate().unwrap().commands.len(), 2);
+    assert_eq!(apart.validate().commands.len(), 2);
 }
 
 /// Acknowledgements over the cap, with a bad run id or repeating a run, make `acks` an
@@ -193,13 +207,13 @@ fn bad_acknowledgements_do_not_cost_the_commands() {
     ];
     for (acks, field, rule) in cases {
         let body = with(acks);
-        let check = body.validate().unwrap();
+        let check = body.validate();
         assert_eq!(check.commands, vec![&stop("r1")]);
         let err = check.acks.unwrap_err();
         expect(err, field, rule, refusal::INVALID_REPLY);
     }
     let at_cap = (0..MAX_RESULTS).map(|i| ack(&format!("r{i}"))).collect();
-    assert_eq!(with(at_cap).validate().unwrap().acks, Ok(()));
+    assert_eq!(with(at_cap).validate().acks, Ok(()));
 }
 
 /// An acknowledgement checked on its own: a good run id passes and an empty or path-like

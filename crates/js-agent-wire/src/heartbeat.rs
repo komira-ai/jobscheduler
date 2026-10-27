@@ -289,32 +289,33 @@ pub struct ReplyCheck<'a> {
 impl HeartbeatReply {
     /// Checks the reply the way the agent must before it acts on it.
     ///
-    /// The reply as a whole is refused (`Err`) only when it lists more than
-    /// [`limits::MAX_COMMANDS`] commands: nothing in it is then read. Otherwise every
-    /// command is checked on its own ([`Command::validate`]) and a start that names a run
-    /// id or a GPU index an earlier accepted start of the reply already names is refused
-    /// too; see [`ReplyCheck`] for what the agent does with the answer.
-    pub fn validate(&self) -> Result<ReplyCheck<'_>, ValidationError> {
+    /// Every command is checked on its own ([`Command::validate`]); a start that names a
+    /// run id or a GPU index an earlier accepted start of the reply already names is
+    /// refused too, and so is every command at an index of [`limits::MAX_COMMANDS`] or
+    /// more (the first [`limits::MAX_COMMANDS`] are still read, so a `Stop` early in a
+    /// reply from a server with a higher cap is not lost). See [`ReplyCheck`] for what
+    /// the agent does with the answer.
+    pub fn validate(&self) -> ReplyCheck<'_> {
         let at = At::new("reply", refusal::INVALID_REPLY);
-        check::count(
-            at.field("commands"),
-            self.commands.len(),
-            limits::MAX_COMMANDS,
-        )?;
         let mut taken = Taken::default();
         let mut commands = Vec::new();
         let mut refused = Vec::new();
         for (index, command) in self.commands.iter().enumerate() {
-            match taken.admit(at.field("commands"), command) {
+            let checked = if index < limits::MAX_COMMANDS {
+                taken.admit(at.field("commands"), command)
+            } else {
+                Err(at.field("commands").fail(Rule::TooMany))
+            };
+            match checked {
                 Ok(()) => commands.push(command),
                 Err(error) => refused.push(RefusedCommand { index, error }),
             }
         }
-        Ok(ReplyCheck {
+        ReplyCheck {
             commands,
             refused,
             acks: self.check_acks(at),
-        })
+        }
     }
 
     fn check_acks(&self, at: At) -> Result<(), ValidationError> {
