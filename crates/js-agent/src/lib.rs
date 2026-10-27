@@ -22,7 +22,9 @@
 //! | `--capability k=v` | a capability to report; repeatable; `os` and `arch` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
-//! | `--allow-host-jobs` | not available yet: refused at start, because a host job taints the host and the record of that does not exist; without it a start with `isolation = host` creates nothing and is refused |
+//! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
+//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required with `--container-bin`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it |
+//! | `--watch-dir <path>` | a directory the post-job checks list (one level: names, sizes, modification times, modes) and compare with the listing taken when the host was last known clean; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits) |
@@ -33,8 +35,11 @@
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
-//! What they configure is the [`lifecycle`], which no change has connected to the session
-//! yet: today the flags are validated and nothing runs a job.
+//! What they configure is the [`lifecycle`] and the post-job [`integrity`] checks, which no
+//! change has connected to the session yet: today the flags are validated and nothing runs
+//! a job. A marker that is already in the state root is reported on stderr at start.
+//! Container jobs are Linux-only (the checks read `/proc`): `--container-bin` on a Mac ends
+//! the agent with exit status 2.
 //!
 //! # What is detected
 //!
@@ -101,6 +106,7 @@ pub mod cli_runtime;
 mod container;
 mod facts;
 mod host;
+pub mod integrity;
 pub mod lifecycle;
 mod run;
 mod session;
@@ -122,7 +128,7 @@ pub use facts::{
     Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
-use lifecycle::Local;
+use lifecycle::{Local, StateRoot};
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
 pub use signals::SystemSleeper;
@@ -232,6 +238,23 @@ fn execute(
     // The job flags are checked now so a wrong one stops the agent before it registers.
     // The change that runs jobs builds the lifecycle from them.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    // The post-job checks read /proc, which a Mac does not have: a container job there
+    // would run unchecked, so none is accepted (see `integrity`).
+    if platform.is_macos() && local.container.is_some() {
+        return Err(Failure::Usage(
+            "--container-bin: container jobs are Linux-only: the post-job checks read /proc, \
+             which a Mac does not have"
+                .to_owned(),
+        ));
+    }
+    let taint = local.state.iter().filter_map(StateRoot::read);
+    taint.for_each(|taint| {
+        let _ = writeln!(
+            err,
+            "js-agent: warning: this host is tainted ({}): the agent starts no job on it",
+            taint.reason
+        );
+    });
     let container = local.container.iter();
     container.flat_map(Settings::warnings).for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");

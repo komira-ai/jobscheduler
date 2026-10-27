@@ -51,12 +51,22 @@
 //!   (those that have exited first, then the longest running), so an offer lowered since
 //!   the last start evicts the newest jobs that no longer fit.
 //!
+//! - **A host that is not known to be clean is tainted** (design 5.12, see the [`taint`]
+//!   module). A check that finds something or cannot run, a container or scratch
+//!   directory that cannot be removed, and a job that was allowed to change the host
+//!   (`isolation = host`, tainted when it starts) each write the taint marker under
+//!   `--state-root` before anything is reported or freed. A tainted agent answers every
+//!   later `Start` `failed_to_start` with the code `host-tainted`, lets the jobs it runs
+//!   finish, and offers the taint for the heartbeat ([`Lifecycle::pending_taint`]) until
+//!   the server acknowledges it. A marker that cannot be written keeps the agent tainted in
+//!   memory, and it frees no slot until the marker is written.
+//!
 //! # What this change does not do
 //!
 //! - **A blocked run never leaves.** A check that finds something, or cannot run, leaves
 //!   the run `Blocked`: its slot stays booked, it counts toward the runs the agent holds
-//!   and is listed as `exited_unacked` for as long as the agent lives. There is no way
-//!   out until the taint of design 5.12 exists; it is the integrity-check change's to add.
+//!   and is listed as `exited_unacked` for as long as the agent lives. Nothing clears a
+//!   taint yet: the host is reimaged, which is the clear flow's to add.
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
 //!   flag. A job that holds a read-write mount can write in its root, so it can swap a
@@ -72,9 +82,10 @@
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
-//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until a host
-//!   job can taint the host ([`Local::from_cli`]). [`Config::allow_host_jobs`] is the
-//!   switch the lifecycle honours once that exists.
+//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until the
+//!   scheduler records a host job's taint itself ([`Local::from_cli`]).
+//!   [`Config::allow_host_jobs`] is the switch the lifecycle honours once that exists; it
+//!   already taints the host when such a job starts.
 //!
 //! # The threading contract of the runtime seam
 //!
@@ -101,11 +112,14 @@ mod machine;
 mod mounts;
 mod runtime;
 mod scratch;
+pub mod taint;
 
 use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_agent_wire::Hello;
+use js_agent_wire::{Hello, Taint};
 
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
@@ -117,6 +131,7 @@ pub use runtime::{
     label,
 };
 pub use scratch::ScratchRoot;
+pub use taint::{MARKER_FILE, StateRoot};
 
 /// The `detail` of a `failed_to_start` result when the cause is not a wire refusal code.
 pub mod detail {
@@ -127,6 +142,9 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The job may change the host and the taint marker could not be written, so the job
+    /// was not started.
+    pub const TAINT_FAILED: &str = "taint-failed";
 }
 
 /// The codes of a [`Finding`].
@@ -146,6 +164,8 @@ pub mod code {
     /// A container that could not be accounted for could not be removed either, so it is
     /// still on the host, unbooked.
     pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
+    /// The taint marker could not be written. The host is tainted in memory all the same.
+    pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
@@ -156,15 +176,27 @@ pub trait Clock {
     fn now_ms(&self) -> u64;
 }
 
+/// A job whose container and scratch directory are gone, as the post-job checks see it.
+#[derive(Debug, Clone, Copy)]
+pub struct Finished<'a> {
+    /// The run.
+    pub run_id: &'a str,
+    /// The containers of the agent's other jobs that are still on the host (running, or
+    /// exited and not yet removed), and those that could not be removed. What they run and
+    /// mount is not the finished job's, so a check must not count it against the job.
+    pub live: &'a [ContainerId],
+}
+
 /// Runs after every job, after cleanup and before the slot is freed (design 5.12). The
-/// next change puts the integrity checks here.
+/// integrity checks of [`crate::integrity`] are the hook of an agent that runs jobs.
 pub trait CheckHook {
-    /// Checks the host after the run `run_id`.
+    /// Checks the host after the job `job`.
     ///
     /// # Errors
     ///
-    /// What was found, or that the check could not run. The slot is not freed.
-    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding>;
+    /// What was found, or that the check could not run. The slot is not freed and the host
+    /// is tainted.
+    fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
 }
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
@@ -241,7 +273,7 @@ fn bounded(text: &str) -> &str {
 pub struct NoChecks;
 
 impl CheckHook for NoChecks {
-    fn run(&mut self, _run_id: &str) -> Result<(), CheckFinding> {
+    fn run(&mut self, _job: &Finished<'_>) -> Result<(), CheckFinding> {
         Ok(())
     }
 }
@@ -328,6 +360,10 @@ pub enum Event {
         /// The run.
         run_id: String,
     },
+    /// The host is tainted from now on, and this is why (the first taint stays). It is
+    /// pushed before the marker is written and before the findings and results that follow
+    /// from the same cause; a failure to write the marker is a [`Finding`] after it.
+    Tainted(Taint),
     /// The slot is free again.
     SlotFreed {
         /// The run.
@@ -370,6 +406,8 @@ pub struct Config {
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
     pub scratch: ScratchRoot,
+    /// Where the taint marker is kept.
+    pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
     pub stop_grace: Duration,
 }
@@ -384,13 +422,20 @@ pub struct Local {
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
+    /// `--state-root`, when given; always given when containers are enabled.
+    pub state: Option<StateRoot>,
+    /// The `--watch-dir` flags, canonicalised, sorted, each once.
+    pub watch: Vec<PathBuf>,
 }
 
 impl Local {
-    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (a host job taints the
-    /// host, and the record of that taint does not exist yet), every mount root exists and
-    /// is canonicalised, the scratch root is private to the user running the agent, the
-    /// container runtime is an absolute path to an executable file.
+    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (the scheduler does
+    /// not record a host job's taint yet), every mount root exists and is canonicalised,
+    /// the scratch root and the state root are private to the user running the agent, the
+    /// container runtime is an absolute path to an executable file, containers need a state
+    /// root (the taint marker is kept there), and every watched directory is an absolute
+    /// path to an existing directory that no mount root, scratch root or state root lies in
+    /// or holds (those change with every job).
     ///
     /// # Errors
     ///
@@ -398,32 +443,83 @@ impl Local {
     pub fn from_cli(cli: &Cli) -> Result<Self, String> {
         if cli.allow_host_jobs {
             return Err(
-                "--allow-host-jobs: host jobs need the taint record, which is not available yet"
+                "--allow-host-jobs: host jobs are not available yet: the scheduler \
+                        does not record a host job's taint"
                     .to_owned(),
             );
         }
+        let mounts = MountRoots::new(&cli.mount_roots)?;
+        let scratch = cli
+            .scratch_root
+            .as_deref()
+            .map(ScratchRoot::open)
+            .transpose()?;
+        let container = Settings::from_flags(
+            &Flags {
+                bin: cli.container_bin.as_deref(),
+                network: cli.container_network.as_deref(),
+                user: cli.container_user.as_deref(),
+                host: cli.container_host.as_deref(),
+                pull: cli.container_pull.as_deref(),
+                tmp_size: cli.container_tmp_size.as_deref(),
+            },
+            (
+                rustix::process::geteuid().as_raw(),
+                rustix::process::getegid().as_raw(),
+            ),
+        )
+        .map_err(|why| why.to_string())?;
+        let state = cli.state_root.as_deref().map(StateRoot::open).transpose()?;
+        if container.is_none() && !cli.watch_dirs.is_empty() {
+            return Err("--watch-dir: needs --container-bin".to_owned());
+        }
+        if container.is_some() && state.is_none() {
+            return Err(
+                "--state-root: required with --container-bin: the taint marker is \
+                        kept there"
+                    .to_owned(),
+            );
+        }
+        let busy: Vec<&Path> = mounts
+            .paths()
+            .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(state.iter().map(StateRoot::path))
+            .collect();
         Ok(Self {
-            mounts: MountRoots::new(&cli.mount_roots)?,
-            scratch: cli
-                .scratch_root
-                .as_deref()
-                .map(ScratchRoot::open)
-                .transpose()?,
-            container: Settings::from_flags(
-                &Flags {
-                    bin: cli.container_bin.as_deref(),
-                    network: cli.container_network.as_deref(),
-                    user: cli.container_user.as_deref(),
-                    host: cli.container_host.as_deref(),
-                    pull: cli.container_pull.as_deref(),
-                    tmp_size: cli.container_tmp_size.as_deref(),
-                },
-                (
-                    rustix::process::geteuid().as_raw(),
-                    rustix::process::getegid().as_raw(),
-                ),
-            )
-            .map_err(|why| why.to_string())?,
+            watch: watch_dirs(&cli.watch_dirs, &busy)?,
+            mounts,
+            scratch,
+            container,
+            state,
         })
     }
+}
+
+/// The `--watch-dir` flags as canonical paths, sorted, each once. A directory that a job
+/// writes into by design would taint the host after every job, so one that lies in or
+/// holds a path of `busy` is refused.
+fn watch_dirs(given: &[PathBuf], busy: &[&Path]) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = given
+        .iter()
+        .map(|path| {
+            let fail = |why: &str| format!("--watch-dir {}: {why}", path.display());
+            let canonical = fs::canonicalize(path)
+                .ok()
+                .filter(|canonical| path.is_absolute() && canonical.is_dir())
+                .ok_or_else(|| fail("not an existing directory given as an absolute path"))?;
+            match busy
+                .iter()
+                .any(|root| root.starts_with(&canonical) || canonical.starts_with(root))
+            {
+                true => Err(fail(
+                    "lies in or holds a --mount-root, --scratch-root or --state-root, which \
+                     change with every job",
+                )),
+                false => Ok(canonical),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
 }

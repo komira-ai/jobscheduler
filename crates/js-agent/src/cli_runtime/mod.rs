@@ -180,7 +180,9 @@
 //! A container on a Mac runs in a Linux virtual machine that cannot reach the Apple GPU.
 //! A job that names a GPU there is refused as `failed_to_start` with the detail
 //! `gpu-unsupported` and nothing is created ([`ContainerRuntime::supports_gpus`]); the Mac
-//! path for GPU work is a lease of the whole host.
+//! path for GPU work is a lease of the whole host. The runtime itself works on a Mac, but
+//! the agent does not accept `--container-bin` there: the post-job checks of
+//! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
 //!
 //! # Not here
 //!

@@ -5,6 +5,28 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// The canonical path of `path`, which must be a directory (not a link to one) that the
+/// user running the agent owns, with no permission for group or others. `flag` names the
+/// flag in the error.
+///
+/// # Errors
+///
+/// The path is not such a directory. The text starts with `flag`.
+pub(super) fn private_dir(path: &Path, flag: &str) -> Result<PathBuf, String> {
+    let fail = |why: &str| format!("{flag}: {why}");
+    let (meta, canonical) = fs::symlink_metadata(path)
+        .and_then(|meta| fs::canonicalize(path).map(|canonical| (meta, canonical)))
+        .map_err(|_| fail("cannot read the directory"))?;
+    let mine = meta.uid() == rustix::process::geteuid().as_raw();
+    let owner_only = meta.mode() & 0o077 == 0;
+    match (meta.is_dir(), mine, owner_only) {
+        (false, _, _) => Err(fail("not a directory (a link is not accepted)")),
+        (true, false, _) => Err(fail("not owned by the user running the agent")),
+        (true, true, false) => Err(fail("group and others must have no permission")),
+        (true, true, true) => Ok(canonical),
+    }
+}
+
 /// The directory under which every run gets a scratch directory of its own, `0700`.
 ///
 /// The root must be a directory (not a link to one) that the user running the agent
@@ -26,18 +48,12 @@ impl ScratchRoot {
     /// The path is not an existing directory, is a link, is owned by another user, or
     /// grants group or others any permission. The text names the flag.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let flag = |why: &str| format!("--scratch-root: {why}");
-        let (meta, canonical) = fs::symlink_metadata(path)
-            .and_then(|meta| fs::canonicalize(path).map(|canonical| (meta, canonical)))
-            .map_err(|_| flag("cannot read the directory"))?;
-        let mine = meta.uid() == rustix::process::geteuid().as_raw();
-        let owner_only = meta.mode() & 0o077 == 0;
-        match (meta.is_dir(), mine, owner_only) {
-            (false, _, _) => Err(flag("not a directory (a link is not accepted)")),
-            (true, false, _) => Err(flag("not owned by the user running the agent")),
-            (true, true, false) => Err(flag("group and others must have no permission")),
-            (true, true, true) => Ok(Self { path: canonical }),
-        }
+        private_dir(path, "--scratch-root").map(|path| Self { path })
+    }
+
+    /// The canonical path of the root.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// The directory of the run, which need not exist.

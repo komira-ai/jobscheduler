@@ -97,6 +97,11 @@ impl MountRoots {
         Ok(Self { roots })
     }
 
+    /// The canonical paths of all the roots.
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.roots.values().map(PathBuf::as_path)
+    }
+
     /// The canonical path of the root `name`, when there is one.
     pub fn root(&self, name: &str) -> Option<&Path> {
         self.roots.get(name).map(PathBuf::as_path)

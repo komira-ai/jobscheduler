@@ -35,6 +35,10 @@ pub mod label {
     pub const GPUS: &str = "jobscheduler.dev/gpus";
     /// The wall-time limit in milliseconds.
     pub const WALL_MS: &str = "jobscheduler.dev/wall-ms";
+    /// `host` for a job that may change the host, `contained` for the rest. A container
+    /// without it (made by an earlier agent) is a contained job's. An agent that finds a
+    /// `host` one after a restart taints the host.
+    pub const ISOLATION: &str = "jobscheduler.dev/isolation";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.

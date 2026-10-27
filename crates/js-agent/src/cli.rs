@@ -57,9 +57,9 @@ pub struct Cli {
     #[arg(long, value_name = "CLASS")]
     pub gpu_class: Option<String>,
     /// Accept a start whose job is not confined to a container (`isolation = host`). Not
-    /// available yet: a host job taints the host, the record of that taint does not exist,
-    /// and the agent refuses this flag at start. Without it such a start creates nothing
-    /// and is refused.
+    /// available yet: the scheduler does not record a host job's taint, and the agent
+    /// refuses this flag at start. Without it such a start creates nothing and is
+    /// refused.
     #[arg(long)]
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
@@ -72,6 +72,20 @@ pub struct Cli {
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
+    /// The directory the agent keeps its taint marker in: it must be owned by the user
+    /// running the agent, with no permission for group or others. Required with
+    /// `--container-bin`. A host that a post-job check found unclean is tainted for good:
+    /// the marker survives a restart, and no code of the agent removes it.
+    #[arg(long, value_name = "PATH")]
+    pub state_root: Option<PathBuf>,
+    /// A directory whose listing (names, sizes, modification times and modes of its
+    /// entries, not its subdirectories' contents) the post-job checks compare with the
+    /// listing taken when the host was last known clean; a change taints the host. May be
+    /// given more than once. An absolute path to an existing directory that holds no mount
+    /// root, scratch root or state root and lies in none. A directory with more than 4096
+    /// entries cannot be checked and taints the host. Needs `--container-bin`.
+    #[arg(long = "watch-dir", value_name = "PATH")]
+    pub watch_dirs: Vec<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
     /// It is started by exactly this path, never looked up on the `PATH`, with an
     /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent

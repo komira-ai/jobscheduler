@@ -217,7 +217,10 @@ fn host_job_without_agent_consent_creates_nothing() {
             ..Options::default()
         },
     );
-    assert_eq!(names(&allowed.start(spec)), ["started r1"]);
+    assert_eq!(
+        names(&allowed.start(spec)),
+        ["tainted r1 host-job", "started r1"]
+    );
     assert_eq!(allowed.fake.created()[0].isolation, Isolation::Host);
 }
 

@@ -6,15 +6,16 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Outcome, ResultAck,
-    RunResult, limits, refusal,
+    RunResult, Taint, limits, refusal,
 };
 
 use super::runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, Status,
 };
+use super::taint::{TaintState, reason};
 use super::{
-    Capacity, CheckFinding, CheckHook, Clock, Config, Event, Finding, RuntimeError, Skip, code,
-    detail, label,
+    Capacity, CheckFinding, CheckHook, Clock, Config, Event, Finding, Finished, RuntimeError, Skip,
+    code, detail, label,
 };
 /// How many finished or stopped run ids the agent remembers, so a late or repeated start
 /// for one of them runs nothing. The oldest is forgotten first; a start for a run older
@@ -41,6 +42,38 @@ enum Stage {
     Blocked,
     /// The slot is free; the job is kept only for its unacknowledged result.
     Freed,
+}
+
+impl Stage {
+    /// The container of a job that is still on the host.
+    fn container(&self) -> Option<&ContainerId> {
+        match self {
+            Self::Running(id) | Self::Removing(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// The taint of a failed cleanup step: `code` is the finding's.
+fn cleanup_taint(run_id: Option<&str>, code: &str) -> Taint {
+    Taint {
+        reason: reason::CLEANUP_FAILED.to_owned(),
+        run_id: run_id.map(str::to_owned),
+        check: Some(code.to_owned()),
+    }
+}
+
+/// The taint of a post-job check that found something or could not run.
+fn check_taint(run_id: &str, found: &CheckFinding) -> Taint {
+    let why = match found {
+        CheckFinding::Residue { .. } => reason::RESIDUE,
+        CheckFinding::Unchecked { .. } => reason::UNCHECKED,
+    };
+    Taint {
+        reason: why.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: Some(found.code().to_owned()),
+    }
 }
 
 /// Why the agent is ending a job. It decides the result only when the agent's stop is what
@@ -129,6 +162,8 @@ struct Job {
     /// A cancelled job reports nothing.
     silent: bool,
     stop_sent: bool,
+    /// The job may change the host (`isolation = host`).
+    host: bool,
     result: Option<RunResult>,
     findings: Vec<Finding>,
 }
@@ -154,6 +189,14 @@ impl Job {
             };
             self.findings.push(finding.clone());
             events.push(Event::Finding(finding));
+        }
+    }
+
+    /// Taints the host for this job (the first taint stays) and writes the marker. A marker
+    /// that cannot be written is a finding of the job; the host is tainted all the same.
+    fn taint(&mut self, state: &mut TaintState, taint: Taint, events: &mut Vec<Event>) {
+        if let Err(why) = state.seal(taint, events) {
+            self.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
         }
     }
 
@@ -222,6 +265,7 @@ pub struct Lifecycle {
     /// Containers no job stands for that could not be removed; not held runs.
     stuck: Vec<Stuck>,
     retired: Retired,
+    taint: TaintState,
 }
 
 impl Lifecycle {
@@ -266,6 +310,7 @@ impl Lifecycle {
             })
             .collect();
         found.sort_by_key(|(exited, container)| (!exited, Reverse(container.running_ms)));
+        let taint = TaintState::load(config.state.clone());
         let mut this = Self {
             config,
             runtime,
@@ -274,13 +319,19 @@ impl Lifecycle {
             jobs: Vec::new(),
             stuck: Vec::new(),
             retired: Retired::default(),
+            taint,
         };
         let mut events = Vec::new();
         let mut stuck = Vec::new();
         for (_, container) in found {
             let now = this.clock.now_ms();
             match this.adoptable(&container, now) {
-                Ok(job) => {
+                Ok(mut job) => {
+                    // A host job that outlived the agent changed the host, and a marker
+                    // written when it started may be all that was lost.
+                    if job.host {
+                        job.taint(&mut this.taint, host_taint(&job.run_id), &mut events);
+                    }
                     events.push(Event::Adopted {
                         run_id: job.run_id.clone(),
                     });
@@ -335,15 +386,26 @@ impl Lifecycle {
         let _ = self.runtime.stop(id, self.config.stop_grace);
         let (code, fate, stuck) = match self.runtime.remove(id) {
             Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned(), None),
-            Err(failed) => (
-                code::UNADOPTABLE_KEPT,
-                format!("not removed, still on the host and booked: {failed}"),
-                Some(Stuck {
-                    id: id.clone(),
-                    booking: Booking::from_labels(found)
-                        .unwrap_or_else(|| Booking::everything(&self.config.capacity)),
-                }),
-            ),
+            Err(failed) => {
+                // A container that stays on the host is a cleanup that failed.
+                let taint = cleanup_taint(None, code::UNADOPTABLE_KEPT);
+                if let Err(why) = self.taint.seal(taint, events) {
+                    events.push(Event::Finding(Finding {
+                        run_id: None,
+                        code: code::TAINT_WRITE_FAILED,
+                        message: why.to_string(),
+                    }));
+                }
+                (
+                    code::UNADOPTABLE_KEPT,
+                    format!("not removed, still on the host and booked: {failed}"),
+                    Some(Stuck {
+                        id: id.clone(),
+                        booking: Booking::from_labels(found)
+                            .unwrap_or_else(|| Booking::everything(&self.config.capacity)),
+                    }),
+                )
+            }
         };
         events.push(Event::Finding(Finding {
             run_id: None,
@@ -405,8 +467,22 @@ impl Lifecycle {
                 .iter()
                 .for_each(|ack| self.acknowledge(ack));
         }
+        self.taint.ack(reply.taint_ack);
         self.sweep();
         events
+    }
+
+    /// The taint the next heartbeat must carry in `taint`: set from the moment the host is
+    /// tainted (or found tainted when the agent starts) until the server acknowledges the
+    /// report with `taint_ack`. The acknowledgement stops the report and keeps the marker
+    /// and the refusal of new starts: nothing but a reimaged host ends a taint.
+    pub fn pending_taint(&self) -> Option<Taint> {
+        self.taint.pending()
+    }
+
+    /// Whether the host is tainted, acknowledged or not.
+    pub fn is_tainted(&self) -> bool {
+        self.taint.is_tainted()
     }
 
     /// Lets the jobs make progress: watches each running container and its wall-time
@@ -415,6 +491,9 @@ impl Lifecycle {
     /// Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
+        // A marker that could not be written is tried again; the failure was noted when it
+        // happened, and the agent refuses starts and frees no slot until it is written.
+        let _ = self.taint.persist();
         for index in 0..self.jobs.len() {
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
@@ -515,6 +594,9 @@ impl Lifecycle {
     /// Whether a start may run now, and its mounts resolved when it may.
     fn admit(&self, spec: &JobSpec) -> Result<Vec<ResolvedMount>, Refusal> {
         let no = |code: &'static str, why: &str| -> Refusal { (code, why.to_owned()) };
+        if self.taint.is_tainted() {
+            return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
+        }
         if (spec.isolation, self.config.allow_host_jobs) == (Isolation::Host, false) {
             return Err(no(
                 refusal::HOST_JOBS_NOT_ALLOWED,
@@ -560,6 +642,17 @@ impl Lifecycle {
             .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))
     }
 
+    /// Taints the host for a job that may change it, and writes the marker.
+    fn taint_host_job(&mut self, spec: &JobSpec, events: &mut Vec<Event>) -> Result<(), Refusal> {
+        match spec.isolation {
+            Isolation::Contained => Ok(()),
+            Isolation::Host => self
+                .taint
+                .seal(host_taint(&spec.run_id), events)
+                .map_err(|why| (detail::TAINT_FAILED, why.to_string())),
+        }
+    }
+
     fn start(&mut self, spec: &JobSpec, received: u64, events: &mut Vec<Event>) {
         let run_id = &spec.run_id;
         let waited = self.clock.now_ms().saturating_sub(received);
@@ -588,7 +681,13 @@ impl Lifecycle {
             });
             return;
         }
-        let mounts = match self.admit(spec) {
+        // A job that may change the host taints it before it exists: whatever it does, and
+        // however the agent or the host ends, the marker is already there. One whose marker
+        // cannot be written is not started.
+        let admitted = self
+            .admit(spec)
+            .and_then(|mounts| self.taint_host_job(spec, events).map(|()| mounts));
+        let mounts = match admitted {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
                 let mut job = Job::of(spec, Stage::Freed, 0);
@@ -698,11 +797,20 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
+        let live: Vec<ContainerId> = self
+            .jobs
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, job)| job.stage.container().cloned())
+            .chain(self.stuck.iter().map(|held| held.id.clone()))
+            .collect();
         let Self {
             jobs,
             runtime,
             config,
             checks,
+            taint,
             ..
         } = self;
         let job = &mut jobs[index];
@@ -717,6 +825,8 @@ impl Lifecycle {
                         job.stage = Stage::Scratch;
                     }
                     Err(why) => {
+                        let tainted = cleanup_taint(Some(&run_id), code::CONTAINER_REMOVE_FAILED);
+                        job.taint(taint, tainted, events);
                         job.note(code::CONTAINER_REMOVE_FAILED, why.to_string(), events);
                         return;
                     }
@@ -729,20 +839,33 @@ impl Lifecycle {
                         job.stage = Stage::Checks;
                     }
                     Err(why) => {
+                        let tainted = cleanup_taint(Some(&run_id), code::SCRATCH_FAILED);
+                        job.taint(taint, tainted, events);
                         job.note(code::SCRATCH_FAILED, why.to_string(), events);
                         return;
                     }
                 },
-                Stage::Checks => match checks.run(&run_id) {
-                    Ok(()) => {
-                        events.push(Event::ChecksPassed {
-                            run_id: run_id.clone(),
-                        });
-                        job.stage = Stage::Freed;
-                        events.push(Event::SlotFreed {
-                            run_id: run_id.clone(),
-                        });
-                    }
+                Stage::Checks => match checks.run(&Finished {
+                    run_id: &run_id,
+                    live: &live,
+                }) {
+                    // A marker that is not on disk yet (it could not be written when the
+                    // host was tainted) holds the slot, whatever the job left.
+                    Ok(()) => match taint.persist() {
+                        Ok(()) => {
+                            events.push(Event::ChecksPassed {
+                                run_id: run_id.clone(),
+                            });
+                            job.stage = Stage::Freed;
+                            events.push(Event::SlotFreed {
+                                run_id: run_id.clone(),
+                            });
+                        }
+                        Err(why) => {
+                            job.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
+                            return;
+                        }
+                    },
                     Err(found) => {
                         // `detail()` is cut, whoever built the finding.
                         let message = match &found {
@@ -751,6 +874,7 @@ impl Lifecycle {
                                 format!("the check could not run: {}", found.detail())
                             }
                         };
+                        job.taint(taint, check_taint(&run_id, &found), events);
                         job.note(found.code(), message, events);
                         job.stage = Stage::Blocked;
                         return;
@@ -778,6 +902,7 @@ impl Job {
             cause: None,
             silent: false,
             stop_sent: false,
+            host: spec.isolation == Isolation::Host,
             result: None,
             findings: Vec::new(),
         }
@@ -806,9 +931,22 @@ impl Job {
             cause: None,
             silent: false,
             stop_sent: false,
+            host: found.labels.get(label::ISOLATION).map(String::as_str) == Some(HOST_LABEL),
             result: None,
             findings: Vec::new(),
         })
+    }
+}
+
+/// The value of the isolation label of a container that runs a host job.
+const HOST_LABEL: &str = "host";
+
+/// The taint of a host job's start.
+fn host_taint(run_id: &str) -> Taint {
+    Taint {
+        reason: reason::HOST_JOB.to_owned(),
+        run_id: Some(run_id.to_owned()),
+        check: None,
     }
 }
 
@@ -826,6 +964,13 @@ fn container_spec(
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
         (label::GPUS, gpus.join(",")),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),
+        (
+            label::ISOLATION,
+            match spec.isolation {
+                Isolation::Host => HOST_LABEL.to_owned(),
+                Isolation::Contained => "contained".to_owned(),
+            },
+        ),
     ];
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));

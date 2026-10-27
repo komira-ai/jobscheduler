@@ -249,7 +249,8 @@ impl Platform {
         }
     }
 
-    fn is_macos(&self) -> bool {
+    /// Whether this is a Mac.
+    pub fn is_macos(&self) -> bool {
         self.os == "macos"
     }
 }

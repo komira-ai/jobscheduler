@@ -380,8 +380,14 @@ fn container_flags_are_checked_when_the_agent_starts() {
     let exec = exec.to_str().unwrap();
     let (uid, gid) = own_ids();
     let own = format!("{uid}:{gid}");
+    let state = dir.path("state");
+    std::fs::create_dir(&state).unwrap();
+    std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let state = state.to_str().unwrap();
     if uid > 0 {
         let (status, err, sent) = start(&[
+            "--state-root",
+            state,
             "--container-bin",
             exec,
             "--container-network",

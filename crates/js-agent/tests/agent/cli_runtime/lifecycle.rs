@@ -274,7 +274,11 @@ fn an_orphan_that_cannot_be_removed_is_booked_and_retried() {
     .unwrap();
     assert_eq!(
         names(&events),
-        ["adopted r1", "finding - unadoptable-container-kept"]
+        [
+            "adopted r1",
+            "tainted - cleanup-failed",
+            "finding - unadoptable-container-kept"
+        ]
     );
     assert!(w.docker.ids().contains(&orphan));
     assert_eq!(life.free().cpu_millis, 2000, "the orphan is booked");
