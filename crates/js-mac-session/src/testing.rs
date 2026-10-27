@@ -364,12 +364,12 @@ pub(crate) fn trace() {
         .try_init();
 }
 
-// This test binary answers as kbf-testkit's `kbf-act` when it is run through a link of
+// This test binary answers as js-testkit's `kbf-act` when it is run through a link of
 // that name: the program the tests start as a lease's process.
 js_testkit::act_test_hook!();
 
 /// The path of a link to this test binary named `kbf-act`, made once: run through it,
-/// the binary runs kbf-testkit's act steps (`js_testkit::act`) instead of the tests.
+/// the binary runs js-testkit's act steps (`js_testkit::act`) instead of the tests.
 pub(crate) fn act() -> String {
     static LINK: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     LINK.get_or_init(|| {

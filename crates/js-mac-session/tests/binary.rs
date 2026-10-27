@@ -38,5 +38,8 @@ fn node_admin_refuses_off_macos() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(stderr, "REFUSED: js-mac-session node-admin runs on a Mac\n");
+    assert_eq!(
+        stderr,
+        "REFUSED: kbf-mac-session node-admin runs on a Mac\n"
+    );
 }

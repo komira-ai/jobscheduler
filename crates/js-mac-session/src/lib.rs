@@ -28,9 +28,10 @@
 //! to what goes over its socket or onto its disk: the protocol, the ledger, the account
 //! names (`kbf-lease-<term>-<seq>`, the role account `_kbf`), the default paths and the
 //! grant and scan-baseline headers keep the names they had, because the daemons and
-//! installers that use them name them. The `S<n>` and `fleet-updates` references in
-//! comments are sections of kbf's `docs/design/fleet-updates-security.md` and
-//! `docs/design/fleet-updates.md`.
+//! installers that use them name them. The program name in the diagnostics (`kbf-mac-session`)
+//! is kept too, although the binary file, and so the usage text, is now named
+//! `js-mac-session`. The `S<n>` and `fleet-updates` references in comments are sections
+//! of design documents of the kbf repository that are not part of this one.
 
 pub mod autologin;
 pub mod client;

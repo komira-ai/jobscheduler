@@ -30,6 +30,6 @@ fn node_admin(args: &[OsString]) -> ExitCode {
 
 #[cfg(not(target_os = "macos"))]
 fn node_admin(_args: &[OsString]) -> ExitCode {
-    eprintln!("REFUSED: js-mac-session node-admin runs on a Mac");
+    eprintln!("REFUSED: kbf-mac-session node-admin runs on a Mac");
     ExitCode::from(2)
 }

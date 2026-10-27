@@ -369,7 +369,7 @@ impl Mac {
         set_mode(SCRATCH, 0o755);
         let runner = Runner::from_sudo();
 
-        println!("== the helper, signed by sign-darwin; the client and the impostor");
+        println!("== the helper, signed ad hoc; the client and the impostor");
         let helper = Path::new(SCRATCH).join("kbf-mac-session");
         fs::copy(BIN, &helper).expect("copy the helper");
         sign_darwin(&helper);
