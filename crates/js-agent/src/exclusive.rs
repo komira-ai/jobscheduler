@@ -26,10 +26,11 @@
 //!    carries; it does not keep the agent from `serving`, as after any job.
 //!
 //! After a restart the agent has no memory of a ready lease. When it took over runs that
-//! belong to the lease the first reply names, the lifecycle answers [`Quiesce::prepare`]
+//! belong to the lease the first reply naming a lease names, the lifecycle answers [`Quiesce::prepare`]
 //! with ready at once (those runs could only have been started once the host was found
 //! quiet), so the next heartbeat reports ready and no refusal is made for a lease in use.
-//! Taken-over runs of any other lease prove nothing and the host is prepared as usual.
+//! Taken-over runs of any other lease prove nothing and the host is prepared as usual,
+//! as is a restart with no taken-over run (it prepares again on a quiet host).
 //!
 //! A phase other than `serving` that the agent is in for its own reasons (a drain) is not
 //! overridden. Without a [`Quiesce`] the session ignores `exclusive`.

@@ -47,8 +47,8 @@ impl Lifecycle {
     /// scoped by the agent label); the listing removes nothing, so a container that was
     /// created and never started is evicted here like one whose labels are unreadable.
     ///
-    /// A restart while a whole-node lease was ready: when the first reply names a lease
-    /// that a run taken over here belongs to, the hold starts ready (see
+    /// A restart while a whole-node lease was ready: when the first reply that names a lease
+    /// names one that a run taken over here belongs to, the hold starts ready (see
     /// [`Lifecycle::exclusive`]), because that run could only have been started once the
     /// host was found quiet. With no such run the hold is prepared for as for any grant.
     ///
