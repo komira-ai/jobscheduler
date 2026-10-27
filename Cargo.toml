@@ -29,6 +29,8 @@ libc = "0.2.190"
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
 # no TLS (an `sslmode=require` URL is refused rather than downgraded).
 postgres = "0.19.10"
+# The simulation kernel's seeded random stream (js-sim).
+rand_chacha = "0.10.0"
 # Test certificates only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
