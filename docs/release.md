@@ -36,8 +36,9 @@ code.
 A push is released when a file that ships changed since the latest release tag. The set is computed
 from the dependency graph (`cargo metadata`), not listed: the crates of `js-lease-server`, `js-cli`
 (the `js` binary) and `js-agent`, and every workspace crate they depend on through normal or build
-dependencies. For those crates, `src/**`, `Cargo.toml` and `build.rs` ship; so do the root
-`Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`.
+dependencies. Every file of those crates ships (`src/**`, `Cargo.toml`, `build.rs`, a sample
+configuration compiled in with `include_str!`) except `tests/`, `benches/`, `examples/` and markdown;
+so do the root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` and everything under `.cargo/`.
 
 These do not release: `docs/**` and every `*.md`, `.github/**`, a crate's `tests/`, benches and
 examples, and the crates that no shipped binary depends on (`xtask`, `js-coverage`, `js-conformance`)

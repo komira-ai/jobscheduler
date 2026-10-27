@@ -101,6 +101,26 @@ fn a_change_to_shipped_code_releases_the_next_patch() {
     }
 }
 
+/// Catches a file compiled into a binary from outside `src/` (an `include_str!` of a
+/// sample configuration) or a cargo setting under `.cargo/` that is not released.
+#[test]
+fn a_compiled_in_file_outside_src_releases() {
+    for (name, path) in [
+        ("example", "crates/app/example.toml"),
+        ("cargo-config", ".cargo/config.toml"),
+    ] {
+        let repo = released(name);
+        repo.write(path, "# changed\n");
+        repo.commit("change");
+        let said = plan::run(&repo.plan()).expect("plan");
+        assert_eq!(field(&said, "release"), "true", "{path}");
+        assert_eq!(
+            field(&said, "reason"),
+            format!("{path} changed since v0.1.0")
+        );
+    }
+}
+
 /// Catches a minor or major bump that is ignored (the release would be a patch above the
 /// tag), and one that is repeated (after the bump is released, the next push must be a
 /// patch above it, not the bumped number again).

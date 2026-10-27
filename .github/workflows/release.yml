@@ -41,11 +41,12 @@ permissions: {}
 
 # One release at a time, none cancelled: a second waits for the first (GitHub keeps one
 # waiting run per group, and the newer replaces the older; the replaced push is released
-# by the newer one). Only a run that will release shares the group; any other (a `ci` run
-# that failed or was cancelled, a pull request) takes a group of its own so it cannot
-# replace the waiting one.
+# by the newer one). Only a run that will release shares the group (the same test as the
+# jobs': a successful `ci` run of a push to main of this repository); any other (a `ci` run
+# that failed or was cancelled, a pull request, a fork's branch named `main`) takes a group
+# of its own so it cannot replace the waiting one.
 concurrency:
-  group: release-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}
+  group: release-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:

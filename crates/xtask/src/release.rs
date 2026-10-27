@@ -8,10 +8,12 @@
 //!
 //! What ships is computed, not listed: the workspace crates the shipped binaries
 //! (`js-lease-server`, `js` from `js-cli`, `js-agent`) depend on, through normal and build
-//! dependencies (`cargo metadata`). For each such crate, its `src/**`, `Cargo.toml` and
-//! `build.rs` ship; so do the root `Cargo.toml`, `Cargo.lock` and `rust-toolchain.toml`.
-//! Everything else does not: docs, markdown, `.github/`, a crate's `tests/`, and the crates
-//! no shipped binary depends on (`xtask`, `js-coverage`, `js-conformance`).
+//! dependencies (`cargo metadata`). Every file of such a crate ships (`src/**`, manifest,
+//! `build.rs`, an `include_str!`'d sample configuration) except its `tests/`, `benches/`,
+//! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
+//! `rust-toolchain.toml` and everything under `.cargo/`. Everything else does not: docs,
+//! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
+//! `js-coverage`, `js-conformance`).
 //!
 //! The version: one patch above the latest tag, unless the workspace version in
 //! `Cargo.toml` is above it, which is used as is. No tag yet: the workspace version.
@@ -234,18 +236,34 @@ impl Metadata {
 /// The files at the root of the repository that ship in every binary.
 const ROOT_FILES: [&str; 3] = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"];
 
+/// The directory at the root whose files (`config.toml`: rustflags, linker, build settings)
+/// change how every binary is built.
+const CARGO_DIR: &str = ".cargo/";
+
 /// Whether a change to `path` (relative to the repository root) changes a shipped binary:
-/// a root build input, or a file of a shipped crate that is compiled into it (`src/**`,
-/// `Cargo.toml`, `build.rs`). A crate's `tests/`, benches, examples and markdown are not.
+/// a root build input (including everything under `.cargo/`), or a file of a shipped crate.
+/// Everything in a shipped crate ships (a file can be `include_str!`'d from anywhere in
+/// it) except what is never compiled into a binary: `tests/`, `benches/`, `examples/`,
+/// markdown outside `src/`, and a crate-level `Cargo.lock` (cargo reads the workspace's).
 pub fn is_shipped(path: &str, dirs: &BTreeSet<String>) -> bool {
     ROOT_FILES.contains(&path)
+        || path.starts_with(CARGO_DIR)
         || dirs.iter().any(|dir| {
             path.strip_prefix(dir.as_str())
                 .and_then(|rest| rest.strip_prefix('/'))
-                .is_some_and(|rest| {
-                    rest == "Cargo.toml" || rest == "build.rs" || rest.starts_with("src/")
-                })
+                .is_some_and(crate_file_ships)
         })
+}
+
+/// Whether the file `rest`, relative to a shipped crate's directory, ships.
+fn crate_file_ships(rest: &str) -> bool {
+    if rest.starts_with("src/") {
+        return true;
+    }
+    let never = ["tests/", "benches/", "examples/"];
+    !(never.iter().any(|dir| rest.starts_with(dir))
+        || rest.ends_with(".md")
+        || rest == "Cargo.lock")
 }
 
 /// The first of `changed` that ships, if any.

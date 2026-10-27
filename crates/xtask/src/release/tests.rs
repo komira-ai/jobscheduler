@@ -195,6 +195,12 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "Cargo.toml",
         "Cargo.lock",
         "rust-toolchain.toml",
+        "crates/js-cli/example.toml",
+        "crates/js-cli/data/table.json",
+        "crates/js-cli/srcs/x.rs",
+        ".cargo/config.toml",
+        ".cargo/config",
+        ".cargo/other",
     ] {
         assert!(is_shipped(path, &shipped), "{path} ships");
     }
@@ -206,7 +212,10 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
         "crates/js-cli/benches/x.rs",
         "crates/js-cli-extra/src/lib.rs",
         "crates/js-cli",
-        "crates/js-cli/srcs/x.rs",
+        "crates/js-cli/examples/x.rs",
+        "crates/js-cli/tests/data/x.toml",
+        "crates/js-cli/docs/x.md",
+        "cargo/config.toml",
         "crates/xtask/src/lib.rs",
         "crates/js-conformance/src/lib.rs",
         ".github/workflows/release.yml",
