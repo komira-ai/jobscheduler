@@ -12,7 +12,9 @@
 # Which commit. A run started by `workflow_run` is at the tip of main (`github.sha`), and
 # that is the commit an attestation records. `plan` therefore releases the commit only
 # while main is still at it, read from the API when the job runs (a re-run keeps the
-# commit and `github.sha` of the run it repeats); if main has moved on, the newer push
+# commit and `github.sha` of the run it repeats; a re-run of only the failed jobs keeps
+# the `plan` that succeeded and does not read main again, so `publish` and `verify`
+# check the tag and the attestations); if main has moved on, the newer push
 # releases its change too, since a release covers everything since the latest tag. The
 # one gap: a run skipped because main moved is not made up if the newer push then fails
 # `ci`; the next push that passes releases it.
@@ -26,7 +28,8 @@
 # Order: plan, build, sums, attest, verify, publish. The tag is made last: `publish` makes
 # a draft release, uploads the files built, attested and verified, and publishes it in
 # one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
-# continues the same draft, adds what is missing and replaces nothing.
+# continues the same draft and adds what is missing; a published release is never changed,
+# a draft that is stale or differs is replaced (see `publish`).
 #
 # Permissions are per job. Only `attest` holds id-token and attestations write, and only
 # `publish` holds contents write; neither runs repository code, only pinned actions,
@@ -288,10 +291,17 @@ jobs:
   # Nothing is rebuilt. The release starts as a draft for this version (tag_name and
   # target_commitish the commit), every file is uploaded to it, and one last call
   # publishes it: a failed upload leaves a draft and no tag, and a re-run continues the
-  # same draft. Create-only: the draft is made only when there is no release for the
-  # version, a file is added only when the release lacks it, and a file the release has
-  # that differs from this run's is an error, never replaced. A tag that exists and does
-  # not name this commit is an error too.
+  # same draft. A published release is never changed: a file it has that differs from
+  # this run's is an error, and a tag that exists and does not name this commit is one
+  # too. A draft is unpublished and may be replaced: one that targets another commit, or
+  # holds a file that differs from this run's, is deleted and made again (else a failed
+  # publish of an older commit would block the version for good), and a file whose upload
+  # did not finish is deleted before it is uploaded again. The tag is read again right
+  # before the publishing call; one that names another commit stops the run.
+  #
+  # This shell is not in xtask on purpose: the job holds contents write and runs no
+  # repository code (see the top of this file), so its decisions stay in the few lines
+  # below. Nothing here is covered by a test; the dry run checks the file parses.
   publish:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
     needs: [plan, sums, verify]
@@ -315,9 +325,26 @@ jobs:
           cd dist
           sha256sum --check --strict SHA256SUMS
           api="repos/$REPO"
+          # The commit the tag names: nothing when there is no tag, a failure on any
+          # other error (a failed read is not "no tag").
+          tag_commit() {
+            local out
+            if out="$(gh api "$api/git/ref/tags/$TAG" --jq .object.sha 2>&1)"; then
+              echo "$out"
+            elif ! grep -q 'HTTP 404' <<< "$out"; then
+              echo "$out" >&2
+              return 1
+            fi
+          }
+          # A draft for this version at this commit (tag_name and target_commitish).
+          new_draft() {
+            gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
+              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              -F draft=true -F generate_release_notes=true --jq .id
+          }
           # `plan` found no tag for this version: one that exists now was made since, and
           # publishing would attach the release to it.
-          if [ "$TAG_EXISTS" != true ] && gh api "$api/git/ref/tags/$TAG" --silent 2> /dev/null; then
+          if [ "$TAG_EXISTS" != true ] && [ -n "$(tag_commit)" ]; then
             echo "::error::the tag $TAG exists now, which the plan did not see"
             exit 1
           fi
@@ -325,32 +352,67 @@ jobs:
           # lookup by tag does not).
           ids="$(gh api --paginate "$api/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .id")"
           if [ -z "$ids" ]; then
-            id="$(gh api "$api/releases" -f tag_name="$TAG" -f target_commitish="$COMMIT" -f name="jobscheduler $VERSION" \
-              -f body="js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
-              -F draft=true -F generate_release_notes=true --jq .id)"
+            id="$(new_draft)"
           elif [ "$(wc -l <<< "$ids")" -eq 1 ]; then
             id="$ids"
           else
             echo "::error::more than one release is named $TAG: $ids"
             exit 1
           fi
-          # Add the files the release lacks. A file it has must be this run's, byte for
-          # byte, or the files of two builds would be mixed.
-          assets="$(gh api "$api/releases/$id" --jq '.assets[] | "\(.id) \(.name)"')"
+          draft="$(gh api "$api/releases/$id" --jq .draft)"
+          target="$(gh api "$api/releases/$id" --jq .target_commitish)"
+          # A file the release has must be this run's, byte for byte, or the files of two
+          # builds would be mixed. A file whose upload did not finish is not compared.
+          replace=""
+          differing=""
+          if [ "$draft" = true ] && [ "$target" != "$COMMIT" ]; then
+            replace="it targets $target, not $COMMIT"
+          fi
           mkdir ../existing
+          assets="$(gh api "$api/releases/$id" --jq '.assets[] | "\(.id) \(.state) \(.name)"')"
+          while read -r asset_id state name; do
+            [ "$state" = uploaded ] || continue
+            gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$asset_id"
+            cmp -s -- "$name" "../existing/$asset_id" || differing="$name"
+          done <<< "$assets"
+          if [ -n "$differing" ]; then
+            if [ "$draft" != true ]; then
+              echo "::error::the published release $TAG holds a $differing that differs from this run's; a published release is never changed (docs/release.md)"
+              exit 1
+            fi
+            replace="$differing differs from this run's"
+          fi
+          if [ -n "$replace" ]; then
+            # A draft is unpublished and has no tag: delete it and start again.
+            echo "::notice::replacing the draft of $TAG: $replace"
+            gh api --method DELETE "$api/releases/$id" --silent
+            id="$(new_draft)"
+          elif [ "$draft" = true ]; then
+            while read -r asset_id state name; do
+              if [ -n "$asset_id" ] && [ "$state" != uploaded ]; then
+                echo "::notice::deleting $name, an upload that did not finish"
+                gh api --method DELETE "$api/releases/assets/$asset_id" --silent
+              fi
+            done <<< "$assets"
+          fi
+          # Add the files the release lacks.
+          present="$(gh api "$api/releases/$id" --jq '.assets[] | select(.state == "uploaded") | .name')"
           for file in ./*.tar.gz SHA256SUMS; do
             name="${file#./}"
-            asset_id="$(awk -v name="$name" '$2 == name { print $1 }' <<< "$assets")"
-            if [ -n "$asset_id" ]; then
-              gh api -H "Accept: application/octet-stream" "$api/releases/assets/$asset_id" > "../existing/$name"
-              cmp -- "$name" "../existing/$name"
+            if grep -Fxq -- "$name" <<< "$present"; then
               echo "$name is on the release already: kept"
             else
               gh api --method POST -H "Content-Type: application/octet-stream" "https://uploads.github.com/$api/releases/$id/assets?name=$name" --input "$file" --silent
             fi
           done
-          # Publishing creates the tag, at the commit, when the release is a draft.
+          # Publishing creates the tag, at the commit, when the release is a draft. A tag
+          # made since the check above would be published against; read it once more.
           if [ "$(gh api "$api/releases/$id" --jq .draft)" = true ]; then
+            now="$(tag_commit)"
+            if [ -n "$now" ] && [ "$now" != "$COMMIT" ]; then
+              echo "::error::the tag $TAG appeared and names $now, not $COMMIT; nothing was published (docs/release.md)"
+              exit 1
+            fi
             gh api --method PATCH "$api/releases/$id" -f tag_name="$TAG" -f target_commitish="$COMMIT" -F draft=false --silent
           fi
           at="$(gh api "$api/commits/$TAG" --jq .sha)"

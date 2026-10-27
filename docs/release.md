@@ -23,12 +23,13 @@ changes code that ships is released as the next version, after `ci` has passed o
 The tag is made last, by that one call, so a run that fails earlier leaves no tag and no public
 release: at worst a draft, which only people who can write to the repository see. Re-run the failed
 jobs from the run's page (below): the run continues the draft of the version, adds the files it
-lacks, and replaces none (a differing file fails the run).
+lacks, and replaces none of a published release (a differing file there fails the run; a stale or
+differing draft is replaced).
 
 `plan` releases the commit only while `main` is still at it, as the GitHub API reports when the job
 runs. If `main` has moved on since the commit passed `ci`, the run releases nothing: a build is
 attested with the commit the workflow runs at, which is the tip of `main`, and the push that moved it
-releases this change too. The same rule stops a re-run of an old run: its commit is no longer the tip.
+releases this change too. The same rule stops a full re-run of an old run: its commit is no longer the tip.
 `plan` also refuses a commit that a later `v*` tag is past (a tag at a descendant of the commit).
 
 The archives are made to be byte-identical when built again from the same commit: sorted file names,
@@ -155,13 +156,26 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 ## Recovery
 
 Open the failed run on the Actions page and use "Re-run failed jobs", not "Re-run all jobs": the files
-that were built and verified are kept and nothing is built twice. The run keeps its commit, and
-`plan` checks again that `main` is still at it.
+that were built and verified are kept and nothing is built twice. Re-running only the failed jobs
+keeps the `plan` job that succeeded, with its outputs: `plan` does not look at `main` again. The
+guards of such a re-run are in the jobs that run again: `publish` checks the tag before it
+publishes (and once more right before the publishing call), and `verify` checks the attestations
+against the commit. "Re-run all jobs" runs `plan` again, which checks that `main` is still at the
+commit and may find nothing to release.
+
+A published release is never changed: its files are never deleted or replaced and its commit never
+moves. A draft is not published and has no tag, so `publish` may replace it: a draft that targets
+another commit, or holds a file that differs from this run's, is deleted and made again, and a file
+whose upload did not finish is deleted before it is uploaded again.
 
 | What happened | State | What to do |
 |---|---|---|
 | `plan`, `build`, `sums`, `attest` or `verify` failed | No tag, no release | Re-run failed jobs. After `verify` failed nothing was published; fix the cause (a change to the workflow is a new push) or re-run. |
-| `publish` failed before the release was published (an upload, the draft) | A draft release, no tag | Re-run failed jobs. The run finds the draft of the version, adds the files it lacks and publishes it. |
+| `publish` failed before the release was published (an upload, the draft) | A draft release, no tag | Re-run failed jobs. The run finds the draft of the version, deletes a half-uploaded file, adds the files it lacks and publishes it. |
+| `main` moved after such a failure and the new push plans the same version | A draft at the older commit | Nothing to do: the new run deletes the stale draft (or one holding a file that differs), makes a new one and publishes it. |
+| `publish` says the tag appeared and names another commit | A draft, nothing published, a tag on the wrong commit | The tag was pushed by hand. Check that the commit is not on `main` (`git merge-base --is-ancestor <commit> origin/main` says no, exit status 1), delete the tag (`git push origin :refs/tags/vX.Y.Z`; the tag ruleset lets the owner), and re-run failed jobs. If the commit is on `main`, see the row for a release on the wrong commit. |
+| `plan` chose a version whose tag exists on a commit that is not on `main`, and `publish` fails at its tag check on every run | A hand-pushed tag, no release | List the commits the tag names (`git ls-remote origin 'refs/tags/v*'`) and check each is not on `main`: `git fetch origin main` then `git merge-base --is-ancestor <commit> origin/main`, which exits 1 for a commit that is not. Delete such a tag (`git push origin :refs/tags/vX.Y.Z`), then re-run failed jobs (or push a change that ships). Never delete a tag whose commit is on `main` or that a published release uses. |
+| A published release is on the wrong commit (the tag does not name the commit the files were built from) | A public release that must not be trusted | Its files are not changed and the release is not edited. Mark it so on the release page and in a new issue, and cut the next version by pushing a change that ships; users verify with `--source-digest` (above), which fails for these files at the tag's commit. |
 | `publish` failed at the last call or after it | Possibly the tag and a published release | Re-run failed jobs: the tag stays, files the release lacks are added, the tag is checked to name the commit. |
 | `publish` says a file differs | The release holds a file that is not this run's | Never delete or replace assets of a published release. Cut a new version: push a change that ships (the next version counts from the tag). |
 | The run was green but released nothing | `plan` printed why | `main` moved on (the newer push releases this change), a later release exists past the commit, or nothing that ships changed. Nothing to do. |
@@ -173,5 +187,7 @@ push that moved `main` releases the change, unless it fails `ci`; then the next 
 code does.
 
 There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and
-`workflow_dispatch` does not exist. An old run that is re-run cannot publish its old commit, because
-`plan` finds `main` past it. To release by hand there is nothing to do but merge a change that ships.
+`workflow_dispatch` does not exist. An old run that is re-run with "Re-run all jobs" cannot publish its
+old commit, because `plan` finds `main` past it. A re-run of only the failed jobs does not run `plan`
+again; the tag checks in `publish` and the attestation check in `verify` are what guard it (the draft
+it finds is replaced when it targets another commit). To release by hand there is nothing to do but merge a change that ships.
