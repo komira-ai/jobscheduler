@@ -17,7 +17,21 @@
 //!   phase `serving`, no held run, no live run.
 //!
 //! A whole-node booking restored by a restart (`seat`) starts `Committed`, never `Free`:
-//! the preparation was in memory only, so the agent reports ready for it again.
+//! the preparation was in memory only, so the agent reports ready for it again. The one
+//! exception is a host that already lists held runs: a whole-node host is quiet when the
+//! lease commits and takes no run before the lease is ready, so a run on it can only
+//! belong to the lease, which was therefore ready before the restart. That lease is
+//! seated `Ready`, so its consumer is not refused `not-ready` until those runs end.
+//!
+//! A ready report is taken only as the transition `Committed` to `Ready`, for the lease
+//! the host is committed to and a clean host. A report for any other lease, for a host in
+//! another state (free, ready, restoring), or from a tainted host changes nothing and the
+//! heartbeat is answered as usual: the report is a claim of the agent, and a claim that
+//! does not match what the registry holds is not an error.
+//!
+//! A committed lease has no deadline here and no check that the agent is able to
+//! prepare: both come later (a per-lease prepare timeout that ends the lease and
+//! excludes the host, and a refusal when no capable host exists).
 //!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
 //! falls back to `Committed` (the same lease and commit time) until it reports again.
@@ -72,6 +86,16 @@ impl Exclusive {
                 Self::Ready { lease, at }
             }
             other => other,
+        }
+    }
+
+    /// The state of a whole-node booking put back after a restart, `at` the restore:
+    /// `Ready` when the host lists held runs (see the module documentation), else
+    /// `Committed`.
+    pub(crate) fn seated(lease: LeaseId, at: Timestamp, runs_held: bool) -> Self {
+        match runs_held {
+            true => Self::Ready { lease, at },
+            false => Self::Committed { lease, at },
         }
     }
 
