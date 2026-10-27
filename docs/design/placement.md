@@ -7,7 +7,8 @@ The generic core must not assume memory gates admission. The `Book(Dims)` form c
 `Dims` are not compared with free capacity; they are checked once against the pool's total (a request whose memory equals the pool's is
 exclusive and runs alone; a request above it does not fit that pool), yet they are still added to the booked total and still count in
 `Rank`. Their protection is the agent's job (a hard limit per lease, the pressure backstop, and a rerun on another node on a busy-node kill, which never raises the
-booking). Classes that need isolation use `BookAll`.
+booking). Classes that need isolation use `BookAll` (ucdk Job classes, with no reservation); a class that needs the host exclusive and quiet is
+whole-node (`Whole`, 5.17).
 
 ## 6.4 Devices and exclusive work
 `crates/kbf-sched/src/devices.rs` is the model for named assignments: pick the first free device by id that satisfies the attributes;
@@ -20,7 +21,8 @@ release on result acceptance or give-up; a re-sent report that drops the device 
 - GPUs exist only on the Mac Studio machines of the GPU pool (D32): the shape declares `gpu_class = "apple-m"` and `gpus = 1`, and a GPU
   request is satisfiable only by that pool ([capabilities.md](capabilities.md), GPUs).
 
-A whole-machine request reserves a worker once queued, which stops small requests from starving it. Large non-whole requests have no
+A whole-node request reserves exactly one host once queued, which stops small requests from starving it (5.17, whole-node.md; the reservation
+is capped per pool and per consumer). Large non-whole requests have no
 reservation today (`docs/design/simulation.md`, scenario F1.5, documents this); R1 forbids adding reservation admission, so the design
 adds none and the scenario is kept as a known behaviour.
 

@@ -17,7 +17,7 @@ generic contract differs. Section numbers refer to design.md.
   |---|---|---|
   | registering | launched or listed, no hello yet (scheduler-side only) | no |
   | serving | normal | yes |
-  | preparing, restoring | the node is switching sessions, tied to a whole-machine lease (`SESSION_SWITCH_GRACE`) | no |
+  | preparing, restoring | the node is switching sessions, tied to a whole-node lease (`SESSION_SWITCH_GRACE`; 5.17) | no |
   | memory-pressure | only while the node holds a lease | no |
   | draining | announced by the agent (SIGTERM): leases run to their end, nothing is requeued | no |
   | quarantined | held out | no |

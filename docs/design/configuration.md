@@ -44,7 +44,8 @@ linux-x86-16 = "<instance-type>"           # a cloud provider offers no GPU shap
 name = "gpu"                                # the GPU machines run js-agent and register (D32, D36); no elastic provider has a GPU shape
 providers = ["registered"]                  # one entry: nothing to fall through to
 shape = "mac-studio-gpu"
-class = "gpu-host"
+class = "whole-node"                        # a dedicated whole-node pool; the merged name gpu-host is read as this (5.17). Every lease is a whole host
+max_whole_node_per_consumer = 2             # default 1; max_whole_node defaults to max_machines here, and max_draining to 1 (whole-node.md)
 max_machines = 8                            # never exceeded, in-flight and tainted hosts counted (5.11)
 regain_grace = "5m"                         # a queued request waits this long after its last capable host left (D41); default 5m
 join_token_file = "<path-to-token-file>"    # one file per pool that admits registering hosts; may hold several tokens, so rotation overlaps
@@ -72,8 +73,8 @@ to selectors (the file is kbf's; the scheduler never reads it):
 
 ```toml
 [[scheduler.class]]
-kbf_class = "whole_machine"                 # leases a whole gpu host from any pool labelled tier=gpu (the GPU pool, D32)
-class = "gpu-host"
+kbf_class = "whole_machine"                 # kbf's name; leases a whole gpu host from any pool labelled tier=gpu (the GPU pool, D32)
+class = "whole-node"                        # the generic class (5.17); the merged name gpu-host is read as this
 labels = { tier = "gpu" }
 
 [scheduler]
@@ -81,7 +82,7 @@ max_leased_machines = 16                    # kbf's own cap on machine leases he
 allow_host_jobs = false                     # default; a host job also needs the pool's and the agent's consent (5.12)
 ```
 
-Capabilities, VMs and the whole-node class (5.13 to 5.15) add this, all optional. The schema declares namespaced keys beyond the built-in
+Capabilities, VMs and the whole-node class (5.13, 5.14, 5.17) add this, all optional. The schema declares namespaced keys beyond the built-in
 ones; a pool may state the class its hosts serve, the time it waits for a whole-node host to become ready, and a base image its elastic
 hosts are launched with (so the scaler can count a constrained request as demand); the agent's VM settings are flags (R4), not file keys:
 
@@ -95,7 +96,13 @@ name = "mac-vms"
 shape = "mac-arm64"
 providers = ["registered"]
 class = "vm"                                # runtime_tag vm (6.2)
-prepare_timeout = "10m"                     # a whole-node lease gives up when its host is not ready this soon (5.15)
+max_machines = 4
+prepare_timeout = "10m"                     # a whole-node lease gives up when its host is not ready this soon (5.17)
+max_whole_node = 2                          # this mixed pool offers whole-node leases only because this is set: most hosts reserved or held at once
+max_draining = 1                            # most hosts reserved and not yet held; default 1
+max_whole_node_per_consumer = 1             # default 1
+keep_for_ordinary = 1                       # hosts kept unmarked for ordinary work; default 1 in a mixed pool; max_whole_node + this <= max_machines
+drain_deadline = "4h"                       # a reservation is given up after this; default the pool's max wall time (whole-node.md, section 4)
 base_images = ["macos15-xcode16-a"]         # what an elastic host of this pool is launched with; the scaler counts a guest constraint as demand only if one of these can meet it
 [pool.capabilities]
 os = "macos"
