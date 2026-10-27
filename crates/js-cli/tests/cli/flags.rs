@@ -1,10 +1,9 @@
 //! The checks before any request: the flags, the server URL, the token file and the
 //! certificate file.
 
-use std::net::TcpListener;
 use std::os::unix::fs::symlink;
 
-use crate::support::{Harness, Js, Scratch, TOKEN, acquire_words, against};
+use crate::support::{Harness, Js, Scratch, TOKEN, acquire_words, against, hangup_port};
 
 /// Asserts that `--help` and `--version` print on stdout and exit 0, and that every
 /// way of getting a command line wrong exits 2 with the usage on stderr: no
@@ -126,15 +125,14 @@ fn a_bad_server_url_is_refused() {
 }
 
 /// Asserts that http to the machine itself is accepted by name and by address, v4 and
-/// v6 (the connection then fails: nothing listens), and that https needs no loopback.
+/// v6 (the request is then attempted and fails: the server hangs up), and that https
+/// needs no loopback. Catches a loopback http address refused by the flag check, and,
+/// by holding the port for the whole test, a port another process took between choosing
+/// it and dialling it, which would have answered instead of failing.
 #[test]
 fn loopback_hosts_may_use_plain_http() {
     let scratch = Scratch::new("flags_loopback");
-    let closed = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let closed = hangup_port();
     for url in [
         format!("http://127.0.0.1:{closed}"),
         format!("http://127.9.9.9:{closed}"),
