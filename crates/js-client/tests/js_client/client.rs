@@ -72,6 +72,35 @@ fn requests_carry_the_token_and_replies_are_parsed() {
     assert!(seen[2].ends_with(r#"{"ttl_seconds":5}"#), "{}", seen[2]);
 }
 
+/// A reply with one extra header line.
+fn reply_with_header(status: u16, header: &str) -> Vec<u8> {
+    let head = format!(
+        "HTTP/1.1 {status} Reply\r\n{header}\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{}}"
+    );
+    head.into_bytes()
+}
+
+/// Asserts that `Retry-After` in whole seconds is read, and that an absent header, the
+/// date form and a text that is not a number read as no wait. It catches a client that
+/// drops the header (so a caller retries into a rate limit at once) and one that takes a
+/// date for seconds.
+#[test]
+fn retry_after_is_read_in_whole_seconds_only() {
+    let dir = Scratch::new("client_retry_after");
+    let fake = Fake::plain(vec![
+        reply_with_header(429, "retry-after: 7"),
+        reply_with_header(429, "retry-after:  3 "),
+        json_reply(200, "{}"),
+        reply_with_header(429, "retry-after: Wed, 21 Oct 2026 07:28:00 GMT"),
+        reply_with_header(429, "retry-after: -1"),
+    ]);
+    let client = Client::connect(&fake.url("http"), &token_file(&dir), None, LIMIT).unwrap();
+    let waits: Vec<Option<Duration>> = (0..5).map(|_| talk(&client, "/x").retry_after).collect();
+    let secs = |n| Some(Duration::from_secs(n));
+    assert_eq!(waits, [secs(7), secs(3), None, None, None]);
+    fake.requests();
+}
+
 /// Asserts that a body that is empty or not JSON reads as `null`, with the status kept.
 #[test]
 fn a_body_that_is_not_json_reads_as_null() {
@@ -214,4 +243,21 @@ fn errors_print_as_their_text() {
     };
     assert_eq!(flag.to_string(), "--server: is required");
     assert_eq!(ClientError::Server("down".to_owned()).to_string(), "down");
+}
+
+/// Asserts that the debug text of a reply shows the status and the wait but not the body,
+/// which can hold a session secret. It catches a derived `Debug` that prints the body.
+#[test]
+fn a_reply_prints_without_its_body() {
+    let reply = Reply {
+        status: 200,
+        body: json!({ "session": "sess-secret-0001" }),
+        retry_after: Some(Duration::from_secs(3)),
+    };
+    let text = format!("{reply:?}");
+    assert!(!text.contains("sess-secret-0001"), "{text}");
+    assert_eq!(
+        text,
+        "Reply { status: 200, body: <redacted>, retry_after: Some(3s) }"
+    );
 }

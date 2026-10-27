@@ -1,5 +1,6 @@
 //! The HTTP client: one agent per command, bound to one server and one token.
 
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,13 +23,25 @@ pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 const REPLY_LIMIT: u64 = 1024 * 1024;
 
 /// What the server answered: a status and the JSON body (`null` when the body was empty
-/// or not JSON).
-#[derive(Debug)]
+/// or not JSON). Its `Debug` text leaves the body out: a welcome holds a session secret.
 pub struct Reply {
     /// The HTTP status.
     pub status: u16,
     /// The body as JSON, or `null`.
     pub body: Value,
+    /// The wait a `Retry-After` header asked for, when it holds whole seconds. The
+    /// date form of the header reads as absent.
+    pub retry_after: Option<Duration>,
+}
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.debug_struct("Reply")
+            .field("status", &self.status)
+            .field("body", &format_args!("<redacted>"))
+            .field("retry_after", &self.retry_after)
+            .finish()
+    }
 }
 
 /// A connection to one lease server. It holds the token and never prints it: it has no
@@ -149,6 +162,12 @@ impl Client {
         };
         let mut response = sent.map_err(unreachable)?;
         let status = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
         let read = response
             .body_mut()
             .with_config()
@@ -156,7 +175,11 @@ impl Client {
             .read_to_vec();
         let bytes = read.map_err(unreachable)?;
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        Ok(Reply { status, body })
+        Ok(Reply {
+            status,
+            body,
+            retry_after,
+        })
     }
 }
 
