@@ -76,6 +76,7 @@ impl Lifecycle {
             stuck: Vec::new(),
             retired: Retired::default(),
             taint,
+            exclusive: None,
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);

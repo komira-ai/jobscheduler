@@ -13,6 +13,7 @@ mod cli_runtime;
 mod container;
 mod drive;
 mod e2e;
+mod exclusive;
 mod facts;
 mod flags;
 mod integrity;

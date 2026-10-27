@@ -51,11 +51,14 @@ use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, Refused, ValidationError, Welcome,
+    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, RefusalReason, Refused,
+    ValidationError, Welcome,
 };
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
+use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
+use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
 
 /// The route of the hello.
@@ -160,6 +163,18 @@ pub enum Note {
         /// How many.
         commands: usize,
     },
+    /// The server granted a whole-node lease; the agent prepares the host for it.
+    Preparing {
+        /// The lease.
+        lease: String,
+    },
+    /// The agent refused the lease it was preparing for.
+    Refused {
+        /// The code sent.
+        code: RefusalReason,
+    },
+    /// The lease ended; the agent restores the host.
+    Restoring,
     /// The host announced that it is draining.
     Draining {
         /// Whether the server acknowledged it.
@@ -180,6 +195,11 @@ impl fmt::Display for Note {
             Self::Ignored { commands } => {
                 write!(f, "ignoring {commands} command(s): not handled yet")
             }
+            Self::Preparing { lease } => write!(f, "preparing the host for lease {lease}"),
+            Self::Refused { code } => {
+                write!(f, "refusing the whole-node lease: {}", String::from(*code))
+            }
+            Self::Restoring => write!(f, "the whole-node lease ended: restoring the host"),
             Self::Draining { told: true } => write!(f, "draining: the server was told"),
             Self::Draining { told: false } => {
                 write!(f, "draining: the server could not be told")
@@ -267,14 +287,17 @@ fn welcome(body: &Value) -> Result<Welcome, &'static str> {
         })
 }
 
-/// The number of commands (accepted or refused) in a heartbeat answer, which is checked
-/// as a whole.
-fn reply_commands(body: &Value) -> Result<usize, &'static str> {
+/// What a heartbeat answer says, checked as a whole: the number of commands (accepted or
+/// refused), and the whole-node lease it names (`Some(None)` when it names none, `None`
+/// when the lease id it names is not acceptable and the agent changes nothing).
+fn reply_of(body: &Value) -> Result<(usize, Option<Option<String>>), &'static str> {
     serde_json::from_value::<HeartbeatReply>(body.clone())
         .map_err(|_| refusal::INVALID_REPLY)
         .map(|reply| {
             let checked = reply.validate();
-            checked.commands.len() + checked.refused.len()
+            let commands = checked.commands.len() + checked.refused.len();
+            let lease = checked.exclusive.is_ok().then(|| reply.exclusive.clone());
+            (commands, lease)
         })
 }
 
@@ -291,6 +314,7 @@ pub struct Session<'a> {
     /// does not end the run of failures: a server that welcomes and at once refuses is
     /// backed off from more and more, not forgiven by each welcome.
     lost_young: bool,
+    hold: Option<Hold<'a>>,
 }
 
 impl<'a> Session<'a> {
@@ -308,7 +332,31 @@ impl<'a> Session<'a> {
             backoff: Backoff::default(),
             proven: false,
             lost_young: false,
+            hold: None,
         }
+    }
+
+    /// The same session following the whole-node lease the server grants (see the
+    /// `exclusive` module): it asks `host` whether it is quiet, counts
+    /// the `prepare_timeout` on `clock`, and says what it finds in the heartbeat. Without
+    /// it the session ignores `exclusive`.
+    #[must_use]
+    pub fn with_quiesce(
+        self,
+        host: &'a mut dyn Quiesce,
+        clock: &'a dyn Clock,
+        prepare_timeout: Duration,
+    ) -> Self {
+        Self {
+            hold: Some(Hold::new(host, clock, prepare_timeout)),
+            ..self
+        }
+    }
+
+    /// [`Session::with_quiesce`] with the pool's default `prepare_timeout`.
+    #[must_use]
+    pub fn with_default_quiesce(self, host: &'a mut dyn Quiesce, clock: &'a dyn Clock) -> Self {
+        self.with_quiesce(host, clock, PREPARE_TIMEOUT)
     }
 
     /// Does one exchange: a hello when there is no session, a heartbeat when there is.
@@ -324,8 +372,9 @@ impl<'a> Session<'a> {
     /// no session.
     pub fn drain(&mut self) -> Option<Note> {
         self.phase = Phase::Draining;
+        let lease = self.hold.as_mut().map(Hold::fields).unwrap_or_default();
         self.live.take().map(|live| {
-            let message = self.heartbeat_message(&live);
+            let message = self.heartbeat_message(&live, lease);
             let told = self.post(HEARTBEAT_PATH, message);
             Note::Draining {
                 told: told.is_ok_and(|answer| answer.status == 200),
@@ -339,17 +388,22 @@ impl<'a> Session<'a> {
             .map(|()| serde_json::to_value(&self.hello).unwrap_or_default())
     }
 
-    fn heartbeat_message(&self, live: &Live) -> Result<Value, ValidationError> {
+    fn heartbeat_message(&self, live: &Live, lease: Fields) -> Result<Value, ValidationError> {
+        // The lease puts the agent in a phase only when nothing else does.
+        let phase = match (self.phase, lease.phase) {
+            (Phase::Serving, Some(phase)) => phase,
+            (phase, _) => phase,
+        };
         let beat = Heartbeat {
             host_id: self.hello.host_id.clone(),
             epoch: live.epoch,
             session: live.secret.0.clone(),
-            phase: self.phase,
+            phase,
             held: Vec::new(),
             results: Vec::new(),
             taint: None,
-            exclusive_ready: None,
-            exclusive_refused: None,
+            exclusive_ready: lease.ready,
+            exclusive_refused: lease.refused,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -410,7 +464,8 @@ impl<'a> Session<'a> {
     }
 
     fn beat_step(&mut self, live: Live) -> Step {
-        let message = self.heartbeat_message(&live);
+        let lease = self.hold.as_mut().map(Hold::fields).unwrap_or_default();
+        let message = self.heartbeat_message(&live, lease);
         match self.post(HEARTBEAT_PATH, message) {
             Err(reason) => {
                 self.live = Some(live);
@@ -434,14 +489,21 @@ impl<'a> Session<'a> {
     }
 
     fn beat_done(&mut self, body: &Value, interval: Duration) -> Step {
-        match reply_commands(body) {
-            Ok(commands) => {
+        match reply_of(body) {
+            Ok((commands, lease)) => {
                 self.backoff.reset();
                 self.proven = true;
                 self.lost_young = false;
+                let followed = lease.and_then(|lease| {
+                    let hold = self.hold.as_mut()?;
+                    hold.follow(lease.as_deref())
+                });
+                let refused = self.hold.as_mut().and_then(Hold::take_note);
                 Step::Wait {
                     after: interval,
-                    note: (commands > 0).then_some(Note::Ignored { commands }),
+                    note: followed
+                        .or(refused)
+                        .or_else(|| (commands > 0).then_some(Note::Ignored { commands })),
                 }
             }
             Err(wire) => self.retry("heartbeat", Reason::Unusable(wire), None),
