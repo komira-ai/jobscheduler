@@ -44,8 +44,12 @@
 //!   so the server never sees a gap that would make it run the work twice. A labelled
 //!   container no job can stand for (bad or repeated labels, a booking outside the offer
 //!   or beside one already taken over, a number of runs beyond what a heartbeat can
-//!   list) is stopped and removed by its own id and recorded as a [`Finding`]; nothing is
-//!   left running with nothing booked for it.
+//!   list) is stopped and removed by its own id and recorded as a [`Finding`]. One that
+//!   cannot be removed holds what its labels say it booked (the whole offer when they do
+//!   not say) and is stopped and removed again at every step, so nothing is left running
+//!   with nothing booked for it. Containers are taken over in the order of their age
+//!   (those that have exited first, then the longest running), so an offer lowered since
+//!   the last start evicts the newest jobs that no longer fit.
 //!
 //! # What this change does not do
 //!
@@ -71,14 +75,15 @@
 //! # The threading contract of the runtime seam
 //!
 //! [`ContainerRuntime`] calls block (an image pull, the grace of a stop, a slow daemon).
-//! They are made by [`Lifecycle`] only, and a [`Lifecycle`] must be driven from its own
-//! worker thread, never from the session's heartbeat loop: a slow runtime call then delays
-//! the next [`Lifecycle::step`] but never a heartbeat, so a slow docker call cannot make
-//! the agent miss its heartbeat deadline and fence itself. The worker owns the lifecycle
-//! (build it on that thread, so the runtime needs no `Send` bound); the session loop hands
-//! it replies and takes [`Lifecycle::held`], [`Lifecycle::results`] and
-//! [`Lifecycle::free`] as snapshots the worker publishes after each call. The backend and
-//! the wiring changes keep this contract.
+//! They are made by [`Lifecycle`] only. No worker thread exists yet: this is a
+//! requirement on the change that wires the lifecycle to the session, and on the backend.
+//! A [`Lifecycle`] must be driven from its own worker thread, never from the session's
+//! heartbeat loop, so that a slow runtime call delays the next [`Lifecycle::step`] but
+//! never a heartbeat, and a slow docker call cannot make the agent miss its heartbeat
+//! deadline and fence itself. The worker owns the lifecycle (build it on that thread, so
+//! the runtime needs no `Send` bound); the session loop hands it replies and takes
+//! [`Lifecycle::held`], [`Lifecycle::results`] and [`Lifecycle::free`] as snapshots the
+//! worker publishes after each call.
 //!
 //! # Not wired yet
 //!
@@ -189,7 +194,7 @@ impl CheckFinding {
     pub fn residue(code: &'static str, detail: &str) -> Self {
         Self::Residue {
             code,
-            detail: bounded(detail),
+            detail: bounded(detail).to_owned(),
         }
     }
 
@@ -198,7 +203,7 @@ impl CheckFinding {
     pub fn unchecked(code: &'static str, detail: &str) -> Self {
         Self::Unchecked {
             code,
-            detail: bounded(detail),
+            detail: bounded(detail).to_owned(),
         }
     }
 
@@ -209,21 +214,22 @@ impl CheckFinding {
         }
     }
 
-    /// The detail, at most [`CHECK_DETAIL_MAX`] bytes.
+    /// The detail, at most [`CHECK_DETAIL_MAX`] bytes: cut here too, so a finding built
+    /// as a struct literal, which skips the constructors, is bounded where it is read.
     pub fn detail(&self) -> &str {
         match self {
-            Self::Residue { detail, .. } | Self::Unchecked { detail, .. } => detail,
+            Self::Residue { detail, .. } | Self::Unchecked { detail, .. } => bounded(detail),
         }
     }
 }
 
 /// `text` cut to at most [`CHECK_DETAIL_MAX`] bytes, at a character boundary.
-fn bounded(text: &str) -> String {
+fn bounded(text: &str) -> &str {
     let end = (0..=CHECK_DETAIL_MAX.min(text.len()))
         .rev()
         .find(|&at| text.is_char_boundary(at))
         .unwrap_or(0);
-    text[..end].to_owned()
+    &text[..end]
 }
 
 /// The hook with no checks: every job passes.

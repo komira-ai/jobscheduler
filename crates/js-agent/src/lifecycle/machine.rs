@@ -1,6 +1,7 @@
 //! The state machine: one [`Job`] per run the agent holds, moved by the commands of a
 //! reply ([`Lifecycle::apply`]) and by the passing of time ([`Lifecycle::step`]).
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use js_agent_wire::{
@@ -75,6 +76,46 @@ impl Booking {
         .into_iter()
         .all(|ok| ok)
     }
+
+    /// What the labels of a container say it booked: all three are numbers and no GPU is
+    /// named twice (the agent never writes such a booking).
+    fn from_labels(found: &Found) -> Option<Self> {
+        let gpus = found
+            .labels
+            .get(label::GPUS)?
+            .split(',')
+            .filter(|index| !index.is_empty())
+            .map(|index| index.parse::<u32>().ok())
+            .collect::<Option<Vec<_>>>()?;
+        let distinct: BTreeSet<&u32> = gpus.iter().collect();
+        (distinct.len() == gpus.len()).then_some(())?;
+        Some(Self {
+            cpu_millis: label_number(found, label::CPU_MILLIS)?,
+            memory_bytes: label_number(found, label::MEMORY_BYTES)?,
+            gpus,
+        })
+    }
+
+    /// All that `offered` has: what is held for a container whose booking is not known.
+    fn everything(offered: &Capacity) -> Self {
+        Self {
+            cpu_millis: offered.cpu_millis,
+            memory_bytes: offered.memory_bytes,
+            gpus: offered.gpus.iter().copied().collect(),
+        }
+    }
+}
+
+/// The label `key` of a found container, as a number.
+fn label_number(found: &Found, key: &str) -> Option<u64> {
+    found.labels.get(key)?.parse().ok()
+}
+
+/// A container the agent could not remove: it may still run, so what it booked, or the
+/// whole offer when that is not known, stays booked until a removal succeeds.
+struct Stuck {
+    id: ContainerId,
+    booking: Booking,
 }
 
 struct Job {
@@ -178,6 +219,8 @@ pub struct Lifecycle {
     checks: Box<dyn CheckHook>,
     clock: Box<dyn Clock>,
     jobs: Vec<Job>,
+    /// Containers no job stands for that could not be removed; not held runs.
+    stuck: Vec<Stuck>,
     retired: Retired,
 }
 
@@ -188,7 +231,20 @@ impl Lifecycle {
     /// recorded as a finding: one whose labels do not say what it booked, one that repeats
     /// a run id, one whose booking does not fit the machine's offer beside the containers
     /// taken over before it (a GPU not offered, or one already booked), and any beyond the
-    /// number of runs a heartbeat can list. Nothing is left running without a booking.
+    /// number of runs a heartbeat can list. One that cannot be removed is not left
+    /// unbooked: it holds what its labels say it booked (the whole offer when they do not
+    /// say), and the stop and removal are tried again at every [`Lifecycle::step`] until
+    /// the removal succeeds. It is not a held run, and it never costs a running job its
+    /// place.
+    ///
+    /// The containers are taken over in the order of their age: those that have exited
+    /// (their results are held) first, then the rest, the longest running first, whatever
+    /// order the runtime lists them in. When the offer is lower than at the last start,
+    /// the jobs that no longer fit are therefore the newest, and they are evicted.
+    ///
+    /// One agent owns a runtime: the run label is not scoped to an agent instance, so every
+    /// container carrying it is treated as this agent's own, including the removal of those
+    /// that cannot be adopted.
     ///
     /// # Errors
     ///
@@ -200,17 +256,27 @@ impl Lifecycle {
         checks: Box<dyn CheckHook>,
         clock: Box<dyn Clock>,
     ) -> Result<(Self, Vec<Event>), RuntimeError> {
-        let found = runtime.list_labelled()?;
+        let mut found: Vec<(bool, Found)> = runtime
+            .list_labelled()?
+            .into_iter()
+            .map(|container| {
+                let exited = matches!(runtime.poll(&container.id), Ok(Status::Exited(_)));
+                (exited, container)
+            })
+            .collect();
+        found.sort_by_key(|(exited, container)| (!exited, Reverse(container.running_ms)));
         let mut this = Self {
             config,
             runtime,
             checks,
             clock,
             jobs: Vec::new(),
+            stuck: Vec::new(),
             retired: Retired::default(),
         };
         let mut events = Vec::new();
-        for container in found {
+        let mut stuck = Vec::new();
+        for (_, container) in found {
             let now = this.clock.now_ms();
             match this.adoptable(&container, now) {
                 Ok(job) => {
@@ -219,9 +285,12 @@ impl Lifecycle {
                     });
                     this.jobs.push(job);
                 }
-                Err(why) => this.evict(&container.id, why, &mut events),
+                Err(why) => stuck.extend(this.evict(&container, why, &mut events)),
             }
         }
+        // Booked only now, so that a container that cannot be removed never makes a
+        // container that runs look like one that does not fit.
+        this.stuck = stuck;
         Ok((this, events))
     }
 
@@ -255,14 +324,21 @@ impl Lifecycle {
     /// Stops and removes a container no job stands for, so that nothing runs on the host
     /// unbooked, and records it. A stop that fails does not keep the removal from being
     /// tried (removal takes a running container too); a removal that fails is the louder
-    /// finding, because the container is then still there.
-    fn evict(&mut self, id: &ContainerId, why: &str, events: &mut Vec<Event>) {
+    /// finding, because the container is then still there, and it is returned to be booked
+    /// and tried again.
+    fn evict(&mut self, found: &Found, why: &str, events: &mut Vec<Event>) -> Option<Stuck> {
+        let id = &found.id;
         let _ = self.runtime.stop(id, self.config.stop_grace);
-        let (code, fate) = match self.runtime.remove(id) {
-            Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned()),
+        let (code, fate, stuck) = match self.runtime.remove(id) {
+            Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned(), None),
             Err(failed) => (
                 code::UNADOPTABLE_KEPT,
-                format!("not removed, still on the host: {failed}"),
+                format!("not removed, still on the host and booked: {failed}"),
+                Some(Stuck {
+                    id: id.clone(),
+                    booking: Booking::from_labels(found)
+                        .unwrap_or_else(|| Booking::everything(&self.config.capacity)),
+                }),
             ),
         };
         events.push(Event::Finding(Finding {
@@ -270,6 +346,30 @@ impl Lifecycle {
             code,
             message: format!("container {}: {why}; {fate}", id.0),
         }));
+        stuck
+    }
+
+    /// Tries again to stop and remove the containers that could not be removed; the
+    /// booking of one that is gone is freed.
+    fn retry_stuck(&mut self, events: &mut Vec<Event>) {
+        let Self {
+            stuck,
+            runtime,
+            config,
+            ..
+        } = self;
+        stuck.retain(|held| {
+            let _ = runtime.stop(&held.id, config.stop_grace);
+            let gone = runtime.remove(&held.id).is_ok();
+            if gone {
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::UNADOPTABLE,
+                    message: format!("container {}: removed on a later attempt", held.id.0),
+                }));
+            }
+            !gone
+        });
     }
 
     /// Acts on a heartbeat reply: validates it as the wire demands, starts what can be
@@ -306,7 +406,8 @@ impl Lifecycle {
     }
 
     /// Lets the jobs make progress: watches each running container and its wall-time
-    /// limit, then takes each finished job as far through its cleanup as it will go.
+    /// limit, then takes each finished job as far through its cleanup as it will go, and
+    /// tries again to remove the containers no job stands for that could not be removed.
     /// Call it on every tick.
     pub fn step(&mut self) -> Vec<Event> {
         let mut events = Vec::new();
@@ -314,6 +415,7 @@ impl Lifecycle {
             self.supervise(index, &mut events);
             self.clean(index, &mut events);
         }
+        self.retry_stuck(&mut events);
         self.sweep();
         events
     }
@@ -360,17 +462,22 @@ impl Lifecycle {
             .collect()
     }
 
-    /// What the booked slots hold: the sum of the jobs whose slot is not free.
+    /// What the booked slots hold: the sum of the jobs whose slot is not free, and of the
+    /// containers that could not be removed.
     fn booked(&self) -> Capacity {
         let mut used = Capacity {
             cpu_millis: 0,
             memory_bytes: 0,
             gpus: BTreeSet::new(),
         };
-        for job in self.jobs.iter().filter(|job| job.stage != Stage::Freed) {
-            used.cpu_millis = used.cpu_millis.saturating_add(job.booking.cpu_millis);
-            used.memory_bytes = used.memory_bytes.saturating_add(job.booking.memory_bytes);
-            used.gpus.extend(job.booking.gpus.iter().copied());
+        let jobs = self.jobs.iter().filter(|job| job.stage != Stage::Freed);
+        let bookings = jobs
+            .map(|job| &job.booking)
+            .chain(self.stuck.iter().map(|held| &held.booking));
+        for booking in bookings {
+            used.cpu_millis = used.cpu_millis.saturating_add(booking.cpu_millis);
+            used.memory_bytes = used.memory_bytes.saturating_add(booking.memory_bytes);
+            used.gpus.extend(booking.gpus.iter().copied());
         }
         used
     }
@@ -633,10 +740,11 @@ impl Lifecycle {
                         });
                     }
                     Err(found) => {
+                        // `detail()` is cut, whoever built the finding.
                         let message = match &found {
-                            CheckFinding::Residue { detail, .. } => detail.clone(),
-                            CheckFinding::Unchecked { detail, .. } => {
-                                format!("the check could not run: {detail}")
+                            CheckFinding::Residue { .. } => found.detail().to_owned(),
+                            CheckFinding::Unchecked { .. } => {
+                                format!("the check could not run: {}", found.detail())
                             }
                         };
                         job.note(found.code(), message, events);
@@ -673,10 +781,8 @@ impl Job {
 
     /// The job a labelled container stands for, when its labels say what it is.
     fn adopted(found: &Found, now: u64) -> Option<Self> {
-        let text = |key: &str| found.labels.get(key);
-        let number = |key: &str| text(key).and_then(|value| value.parse::<u64>().ok());
         let id = |key: &str| {
-            text(key).filter(|value| {
+            found.labels.get(key).filter(|value| {
                 let held = HeldRun {
                     run_id: (*value).clone(),
                     state: HeldState::Running,
@@ -684,20 +790,8 @@ impl Job {
                 held.validate().is_ok()
             })
         };
-        let gpus = text(label::GPUS)?
-            .split(',')
-            .filter(|index| !index.is_empty())
-            .map(|index| index.parse::<u32>().ok())
-            .collect::<Option<Vec<_>>>()?;
-        // A device named twice is not a booking the agent ever wrote.
-        let distinct: BTreeSet<&u32> = gpus.iter().collect();
-        (distinct.len() == gpus.len()).then_some(())?;
-        let wall_ms = number(label::WALL_MS)?;
-        let booking = Booking {
-            cpu_millis: number(label::CPU_MILLIS)?,
-            memory_bytes: number(label::MEMORY_BYTES)?,
-            gpus,
-        };
+        let booking = Booking::from_labels(found)?;
+        let wall_ms = label_number(found, label::WALL_MS)?;
         let remaining = wall_ms.saturating_sub(found.running_ms);
         Some(Self {
             run_id: id(label::RUN)?.clone(),

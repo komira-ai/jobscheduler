@@ -23,7 +23,8 @@ pub enum MountError {
     #[error("the mount path leaves its root")]
     Escapes,
     /// The canonical host path holds a character that a runtime's mount option cannot
-    /// carry safely: a comma, a colon or a control character. A link inside a root can
+    /// carry safely: a comma, a colon, a double quote (a value is CSV-quoted with it) or a
+    /// control character. A link inside a root can
     /// lead to such a path even though the message's text cannot name one.
     #[error("the mount path holds a character a mount option cannot carry")]
     BadPath,
@@ -38,7 +39,7 @@ pub enum MountError {
 /// canonical path is what the runtime mounts, never the message's text.
 ///
 /// The canonical path must also be one a runtime's mount option can carry: no comma, no
-/// colon, no control character (see [`MountError::BadPath`]). A job with a read-write mount
+/// colon, no double quote, no control character (see [`MountError::BadPath`]). A job with a read-write mount
 /// can create such a directory name, and a link to it, inside a root.
 ///
 /// # What this does not defend against
@@ -81,7 +82,7 @@ impl MountRoots {
                 .ok_or_else(|| format!("--mount-root {name}: not an existing directory"))?;
             if !carries(&canonical) {
                 return Err(format!(
-                    "--mount-root {name}: the path holds a comma, a colon or a control character"
+                    "--mount-root {name}: the path holds a comma, a colon, a double quote or a control character"
                 ));
             }
             if roots.insert(name.clone(), canonical).is_some() {
@@ -119,9 +120,13 @@ impl MountRoots {
 }
 
 /// Whether a runtime's mount option can carry `path` as it is: text with no comma (the
-/// option separator), no colon (the separator of the short mount form) and no control
-/// character. A path that is not text cannot be.
+/// option separator), no colon (the separator of the short mount form), no double quote
+/// (the quote of a value in the option list) and no control character. A path that is
+/// not text cannot be.
 fn carries(path: &Path) -> bool {
-    path.to_str()
-        .is_some_and(|text| !text.chars().any(|c| c == ',' || c == ':' || c.is_control()))
+    path.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|c| matches!(c, ',' | ':' | '"') || c.is_control())
+    })
 }

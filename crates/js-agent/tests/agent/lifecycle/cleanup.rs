@@ -267,6 +267,44 @@ fn a_check_finding_detail_is_bounded() {
     assert_eq!(CheckFinding::residue("x", "").detail(), "");
 }
 
+/// Asserts that the cap holds for a finding built as a struct literal, which skips the
+/// constructors: the detail a check hands over is cut where the lifecycle reads it, both
+/// in what `detail()` returns and in the finding the run keeps. It catches a check that
+/// puts the output of a program into the agent's memory and log by naming the variant.
+#[test]
+fn a_check_finding_built_by_hand_is_bounded_where_it_is_read() {
+    let long = "z".repeat(CHECK_DETAIL_MAX * 4);
+    let residue = CheckFinding::Residue {
+        code: "big-residue",
+        detail: long.clone(),
+    };
+    let unchecked = CheckFinding::Unchecked {
+        code: "big-unchecked",
+        detail: long,
+    };
+    assert_eq!(residue.detail().len(), CHECK_DETAIL_MAX);
+    assert_eq!(unchecked.detail().len(), CHECK_DETAIL_MAX);
+    for (finding, expected) in [
+        (residue, "z".repeat(CHECK_DETAIL_MAX)),
+        (
+            unchecked,
+            format!("the check could not run: {}", "z".repeat(CHECK_DETAIL_MAX)),
+        ),
+    ] {
+        let mut h = Harness::with(
+            "check-literal",
+            Options {
+                findings: vec![("r1", finding)],
+                ..Options::default()
+            },
+        );
+        h.start(job("r1"));
+        h.fake.exit("r1", 0);
+        h.life.step();
+        assert_eq!(h.life.findings()[0].message, expected);
+    }
+}
+
 /// Asserts that a container that fails to start gives a `failed_to_start` result with
 /// the fixed detail (not the runtime's text), records the runtime's text as a finding,
 /// removes the scratch directory it made and frees the slot. It catches a start failure

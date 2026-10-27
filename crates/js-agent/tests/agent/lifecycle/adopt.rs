@@ -36,9 +36,13 @@ fn restart_readopts_labelled_containers_listed_first() {
     assert_eq!(h.fake.created().len(), 2);
 
     let events = h.restart().unwrap();
-    assert_eq!(names(&events), ["adopted r1", "adopted r2"]);
+    assert_eq!(
+        names(&events),
+        ["adopted r2", "adopted r1"],
+        "the exited one first"
+    );
     assert_eq!(h.fake.created().len(), 2, "adopting creates nothing");
-    assert_eq!(h.held(), ["r1", "r2"], "held before any heartbeat");
+    assert_eq!(h.held(), ["r2", "r1"], "held before any heartbeat");
     assert_eq!(h.life.free().cpu_millis, 2000);
     assert_eq!(h.life.free().gpus.into_iter().collect::<Vec<_>>(), [0]);
 
@@ -46,7 +50,7 @@ fn restart_readopts_labelled_containers_listed_first() {
     assert!(resent.is_empty());
     assert_eq!(h.fake.created().len(), 2, "the work did not run twice");
     h.start(job("r3"));
-    assert_eq!(h.held(), ["r1", "r2", "r3"], "adopted runs come first");
+    assert_eq!(h.held(), ["r2", "r1", "r3"], "adopted runs come first");
 
     h.life.step();
     let result = h
@@ -62,7 +66,7 @@ fn restart_readopts_labelled_containers_listed_first() {
     );
     assert_eq!(result.lease_id, "lease-r2");
     assert_eq!(
-        h.life.held()[0],
+        h.life.held()[1],
         HeldRun {
             run_id: "r1".to_owned(),
             state: HeldState::Running
@@ -171,8 +175,135 @@ fn an_unadoptable_container_that_cannot_be_removed_is_a_louder_finding() {
     );
 }
 
+/// Asserts that a container the agent cannot remove is booked while it stays: a container
+/// whose labels say what it booked holds that, one whose labels do not hold the whole
+/// offer, a start that wants the room is refused, a running job taken over beside it is
+/// kept, and each step stops and removes it again until the removal succeeds, which frees
+/// the booking and records that it is gone. It catches a possibly running container left
+/// with nothing booked and nothing retried.
+#[test]
+fn a_container_that_cannot_be_removed_stays_booked_and_is_retried() {
+    let mut h = Harness::new("evict-retry");
+    let odd = set(&labels("odd", ""), label::CPU_MILLIS, "lots");
+    let stuck = h.fake.leak(&odd, 0);
+    h.fake.leak(&labels("good", "0"), 0);
+    h.fake.fail("remove", 2);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(
+        events,
+        ["finding - unadoptable-container-kept", "adopted good"]
+    );
+    assert_eq!(
+        h.held(),
+        ["good"],
+        "a stuck container evicts no running job"
+    );
+    assert_eq!(
+        h.life.free().cpu_millis,
+        0,
+        "unknown booking: the whole offer"
+    );
+    assert!(h.life.free().gpus.is_empty());
+    assert_eq!(h.life.free().memory_bytes, 0);
+    assert!(matches!(
+        h.start(job("late")).as_slice(),
+        [js_agent::lifecycle::Event::Refused {
+            code: "no-capacity",
+            ..
+        }]
+    ));
+    assert_eq!(h.fake.stops().len(), 1);
+
+    assert!(
+        h.life.step().is_empty(),
+        "a failed retry is not reported again"
+    );
+    assert_eq!(h.fake.stops().len(), 2, "the stop is tried again");
+    assert_eq!(h.life.free().cpu_millis, 0);
+    assert!(h.fake.existing().contains(&stuck));
+
+    let events = names(&h.life.step());
+    assert_eq!(events, ["finding - unadoptable-container"]);
+    assert_eq!(h.fake.stops().len(), 3);
+    assert!(!h.fake.existing().contains(&stuck));
+    assert_eq!(
+        h.life.free().cpu_millis,
+        3000,
+        "only good's booking is left"
+    );
+    assert!(h.life.step().is_empty(), "and nothing is retried after");
+    assert_eq!(h.fake.stops().len(), 3);
+}
+
+/// Asserts that a container that cannot be removed holds what its labels say it booked
+/// when they do say, not the whole offer: here its lease label is wrong and the rest is
+/// fine. It catches a booking that is more conservative than the evidence.
+#[test]
+fn a_container_that_cannot_be_removed_holds_what_its_labels_booked() {
+    let mut h = Harness::new("evict-known");
+    let odd = set(&labels("odd", "1"), label::LEASE, "a b");
+    h.fake.leak(&odd, 0);
+    h.fake.fail("remove", 1);
+    h.restart().unwrap();
+    let free = h.life.free();
+    assert_eq!(free.cpu_millis, 3000);
+    assert_eq!(free.memory_bytes, (8 << 30) - (1 << 30));
+    assert_eq!(free.gpus.into_iter().collect::<Vec<_>>(), [0]);
+    assert!(h.held().is_empty(), "it is not a held run");
+}
+
+/// Asserts that a restart adopts the oldest containers first, and those that have exited
+/// (whose results are held) before those that run, whatever order the runtime lists them
+/// in, so that an offer lowered since the last start evicts the newest jobs that no longer
+/// fit. Here the runtime lists the newest first; the offer holds two of four. It catches
+/// an adoption in listing order, which evicts the longest running job while keeping a
+/// newer one.
+#[test]
+fn adoption_keeps_exited_then_oldest_and_evicts_the_newest() {
+    let mut h = Harness::new("adopt-order");
+    h.config.capacity.cpu_millis = 2000;
+    let [new, mid, old, done] = [
+        h.fake.leak(&labels("new", ""), 1_000),
+        h.fake.leak(&labels("mid", ""), 5_000),
+        h.fake.leak(&labels("old", ""), 9_000),
+        h.fake.leak(&labels("done", ""), 100),
+    ];
+    h.fake.exit("done", 0);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(
+        events,
+        [
+            "adopted done",
+            "adopted old",
+            "finding - unadoptable-container",
+            "finding - unadoptable-container"
+        ]
+    );
+    assert_eq!(h.held(), ["done", "old"]);
+    let stopped: Vec<String> = h.fake.stops().into_iter().map(|(id, _)| id).collect();
+    assert_eq!(stopped, [mid.clone(), new.clone()], "the newest go");
+    assert_eq!(h.fake.existing(), [old, done]);
+    h.life.step();
+    assert_eq!(h.life.results()[0].run_id, "done", "its result is kept");
+}
+
+/// Asserts that a lone GPU list that names a device twice is not adopted, though both
+/// entries fit the offer: nothing else is adopted before it to make the second entry look
+/// booked. It catches a booking of one device twice that only the capacity check refuses
+/// when another container happens to hold it.
+#[test]
+fn a_gpu_named_twice_is_not_a_booking() {
+    let mut h = Harness::new("adopt-dup-gpu");
+    h.fake.leak(&labels("twice", "1,1"), 0);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["finding - unadoptable-container"]);
+    assert!(h.held().is_empty());
+    assert!(h.fake.existing().is_empty());
+}
+
 /// Asserts that adopted bookings are checked against what the agent offers and against
-/// each other, in the order the runtime lists the containers: a second container on a GPU
+/// each other, in the order of adoption (all of one age here, so the order the runtime
+/// lists them): a second container on a GPU
 /// that is already booked, one on a GPU the machine does not offer, one that books more
 /// CPU than is left and one that books more memory than is left are each stopped and
 /// removed with a finding, while one that books exactly what is left is adopted. It
