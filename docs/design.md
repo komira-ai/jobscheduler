@@ -99,7 +99,7 @@ and risks K8 to K18. The pool keys `min` and `max` are renamed `min_machines` an
 Added by the capabilities amendment: typed capabilities, a constraint language and refusal codes (5.13,
 [design/capabilities.md](design/capabilities.md)); a VM backend in `js-agent` with a fresh VM per lease, an optional warm pool, the guest
 channel and VM integrity (5.14); shared hosts and a whole-node class (5.15, [design/vm-backend.md](design/vm-backend.md)); the terms of
-section 3; steps 36 to 47; decisions D26 to D31 (D26 open); risks K19 to K26. Text moved to companions to keep this file short: 5.6,
+section 3; steps 36 to 47; decisions D26 to D31 (D26 open); risks K19 to K27. Text moved to companions to keep this file short: 5.6,
 12.1 to 12.3 and steps 23 to 35.
 
 ## 2. Goals and non-goals
@@ -520,9 +520,7 @@ The class separates dimensions that *gate* admission from dimensions that are *c
 `Book({cpu_millis, gpus, vms})` as the gate set, bounded by the pool's separate lease-count cap (section 3); memory is gated only
 against the pool's total (a request above it does not fit; a request equal to it is exclusive), and the grant still counts the whole
 request, memory included, in the pool's booked total, on which `Rank` (`Load`) reads the memory share. This is today's behaviour (4.1),
-and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `BookAll` (the macOS VM
-design states "No overcommit of memory", `docs/design/macos-vms.md`), and `WholeMachine` to `Whole`. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the recommended admission is `BookAll` (D7); this is
-booking, not reservation, and per class, so it does not conflict with R1.
+and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `Book({cpu_millis, memory_bytes, vms})` at the sizes the VM is created with (D26, open): a VM books its configured CPUs and memory in full, no overcommit, and shares a host with containers and warm VMs (5.15); the earlier intent to admit `Vm` as `BookAll` is superseded by 5.15. `WholeMachine` maps to `Whole`, the only class that takes the whole host. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the recommended admission is `BookAll` (D7); this is booking, not reservation, and per class, so it does not conflict with R1.
 
 **Selecting pools.** A class says how a lease is admitted; it does not say where. A level-1 lease request (9.1) carries a class and label
 selectors, and the scheduler offers it the pools whose `class` is that class and whose labels satisfy every selector (equality on
@@ -537,7 +535,7 @@ Both are in [design/placement.md](design/placement.md). In short: the `Book(Dims
 against the pool's total yet still counted in the booking, with the agent's hard limit and the pressure backstop as protection and a
 rerun elsewhere as recovery, while classes that need isolation use `BookAll`. Named devices are assigned from `assignments`; at most one
 device lease per agent and whole-device GPUs only (D10). For a machine lease the consumer applies both inside its lease (9.1). A
-whole-machine request reserves a worker once queued; large non-whole requests have no reservation, and R1 forbids adding one.
+whole-machine request reserves a worker once queued, by draining one host (the drain rule in [vm-backend.md](design/vm-backend.md)); large non-whole requests have no reservation, and R1 forbids adding one.
 
 ### 6.5 Rank for elastic pools
 Spread is right for a fixed fleet. In any pool that scales, idle machines are terminated, so packing matters: it leaves hosts idle that
@@ -637,7 +635,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 |---|---|
 | `LeaseKind::Action` | class `action`, `Book({cpu_millis, gpus, vms})` plus the pool's lease-count cap (6.2), served by a container or native runtime |
 | `LeaseKind::WholeMachine` | class `whole_machine`, `Whole`; at level 1 a machine lease of a pool's shape |
-| `LeaseKind::Vm` | class `vm`, `BookAll` (unshipped) |
+| `LeaseKind::Vm` | class `vm`, `Book({cpu_millis, memory_bytes, vms})` at the sizes fixed at VM creation (D26 open; 5.15 supersedes the earlier `BookAll` intent; unshipped) |
 | a kbf worker pool in kbf's config | a selector (class and labels) that picks pools in the scheduler's configuration (5.7) |
 | `ActionKey` | payload and optional dedup key |
 | `hermetic` | class `action` declares self-fence as the default; a request marked `hermetic` resolves to run-on, and the resolved value is recorded |
@@ -703,7 +701,7 @@ variants, `Answer`). Splitting it into two modules with re-exports is step 3, be
   today's behaviour: self-fence, derive limits locally, one device id, no labels, no mounts, contained. `Heartbeat` gains an optional taint.
 - **Capabilities and VMs (5.13, 5.14), all optional fields, major 1 unchanged:** `Hello.facts`; `Heartbeat.facts_rev` and `facts`;
   `HeartbeatReply.facts_ack` and `exclusive`; `Heartbeat.exclusive_ready`; `JobSpec.runtime` and `vm`; the lease request's `needs`. A new
-  value an old peer does not know is skipped, except a constraint op (refused) and the phase (read as quarantined).
+  value an old peer does not know is skipped, except a constraint op (refused) and the phase (read as quarantined). **Needs support is advertised:** the server's `Welcome` and its version reply to a consumer carry `features`, a list of tokens including `needs`; a consumer sends non-empty `needs`, or a `vm` class request, only to a server that lists it, else fails closed naming the missing feature (an old server would skip `needs` and place the request unconstrained).
 - Stale comment in `worker.proto` on `memory_bytes` is corrected in step 2.
 
 ### 10.4 How kbf keeps working at every step
@@ -987,12 +985,13 @@ package (10.3).
 - **K19. A wrong constraint places work on a host that cannot run it, or on none.** Skipping an unknown op, reading an absent fact as zero,
   or matching images one constraint at a time would. Mitigated by refusing unknown ops, absent-is-unmet, one-image guest scope, and the constraint suite (5.13).
 - **K20. Stale or false facts.** An agent that reports a runtime it lost, or a snapshot lost in transit, misleads placement. Mitigated by full
-  snapshots with an ack, the agent re-probing after each job, and the agent refusing a `Start` it cannot honour (`image-unavailable`); a fact never reaches a lease already granted.
+  snapshots with an ack, the agent re-probing after each job, and the agent refusing a `Start` it cannot honour (`image-unavailable`); a fact never reaches a lease already granted. A server from before this change would skip `needs` and place unconstrained: the consumer reads the server's `features` and refuses to send `needs` or `runtime = vm` without `needs` support (10.3, capabilities.md).
 - **K21. A guest attacks the host through the channel or the hypervisor.** Mitigated by a bounded, fuzzed frame codec, no shared writable host
   path, no network by default, no credential in a guest, host checks after every VM job, and taint on a failed destroy (5.14). A hypervisor escape is not
   covered by any check here.
 - **K22. Warm VMs starve the host.** Idle booted VMs hold memory containers could use. Mitigated by counting them in full, refilling only into free capacity, one at a time, a failure brake, and a pool that is off by default (5.15).
 - **K23. Base image drift.** A mutable image would make two leases differ. Mitigated by immutable names, a digest pinned in the `Start` and verified (5.14).
-- **K24. A whole-node lease never becomes ready, or is shared by mistake.** Mitigated by the withheld token, `prepare_timeout` and the offer invariant (5.15).
+- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and a drain rule with a drain deadline and at most one draining host per pool (5.15, vm-backend.md).
 - **K25. Boot cost per lease.** A boot each time; bounded by the warm pool, whose hit rate D26 decides.
 - **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
+- **K27. Advertised facts are unverified claims.** A registered agent can claim any fact, `sandbox=vm` isolation included. Bounded: facts never override pool selection by class and labels, the lease token still binds one consumer, and a lie costs queueing, misplacement or refusal and the agent its taint and deny-file path; a consumer needing isolation leases from a pool whose operator it trusts (Trust, capabilities.md).

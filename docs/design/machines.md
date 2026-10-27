@@ -5,7 +5,7 @@ Companion to [docs/design.md](../design.md), sections 5.4 and 5.8. Section numbe
 ## 5.10 Machine reuse
 
 *VM jobs.* The machine is reused exactly as below, but a VM is not: every VM job gets a fresh VM that is destroyed before the slot is freed,
-and a warm VM is destroyed, never reused, once assigned or aged out (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
+and a warm VM that is assigned runs one job and is destroyed after it, one that ages out is destroyed unassigned, and neither is reused (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
 "stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check. A host refill of the warm pool follows
 the freed slot and never delays it.
 

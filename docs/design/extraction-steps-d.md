@@ -53,7 +53,7 @@ numbers refer to design.md.
 35. The first real aws pool, disabled by default; enabling it needs the go in R7.
 
 **Phase F. Capabilities as data and the VM backend.** Steps 36 to 40 need no VM. Steps 41 to 47 need step 30b (reuse and integrity in the
-agent) and the merged lifecycle. Step 36 can come before step 15; step 15 then moves kbf's comparators in as schema entries of the crate
+agent) and the merged lifecycle; step 43 also needs step 41b (the `vms` dimension). Step 36 can come before step 15; step 15 then moves kbf's comparators in as schema entries of the crate
 step 36 made. Steps 43 (the size fields) and 45 wait for D26.
 
 36. `js-caps`: the typed model, the version order, the schema, the constraint evaluator with host and guest scope, and the refusal codes
@@ -68,12 +68,17 @@ step 36 made. Steps 43 (the size fields) and 45 wait for D26.
     overrides a probe, and the revision moves only when a value changed.
 39. Needs in the lease request and matching in the server: `needs`, the refusal codes at submit, host and guest scope, the image named in
     the grant, the lease record's `rev` and image (additive), and the unservable wait for a constraint no host meets. *Proves:* the worked
-    example of capabilities.md on three fake hosts; an old lease file loads; an older server skips the new keys; a stale revision does not
-    match; a malformed constraint is refused before it is queued.
+    example of capabilities.md on three fake hosts; an old lease file loads; the server lists the feature `needs` in `features`; a stale revision does not
+    match; a malformed constraint is refused before it is queued. (A server from before this step skips `needs`, so step 40's consumer
+    reads `features`.)
 40. The consumer side for kbf: the translation table in kbf's configuration and its test of the worked example. *Proves:* the table
-    yields exactly the constraints of the example; an unknown platform property follows kbf's policy of step 15.
+    yields exactly the constraints of the example; an unknown platform property follows kbf's policy of step 15; against a fake old
+    server that lacks `features: needs`, a request with `needs` is not sent and fails closed with a message naming the missing feature.
 41. The `Sandbox` seam in the lifecycle, with `ContainerSandbox` the only implementation. *Proves:* the lifecycle tests of the container
     path pass unchanged; the coverage of `js-agent` is not lower (R6).
+41b. The `vms` dimension in `js-types` (the merged code refuses it today as an unknown dimension), as a booked and offered dimension
+    only: the arithmetic of 5.15 stays in step 44. It comes before step 43, whose first lifecycle step books against it. *Proves:* a pool
+    with `vms` loads and books; a previous pool without it loads unchanged; an unknown dimension is still refused.
 42. `VmRuntime`, `GuestChannel`, the fake VM runtime, `js-guest-wire` and its hostile-frame corpus, and the `JobSpec` fields `runtime` and
     `vm` with their validation (5.14). *Proves:* a `host` VM job and a GPU VM job are refused; the old decoder skips the fields; every
     hostile frame ends a run with `vm-guest-protocol` and nothing else.
@@ -81,14 +86,15 @@ step 36 made. Steps 43 (the size fields) and 45 wait for D26.
     start-up sweep; the VM store check; `base_images` and `image_profiles` as facts. Size fields wait for D26. *Proves:* the cleanup order
     on the fake; a failed destroy frees nothing and taints; no VM serves two runs; a restart destroys every clone; the guest never holds a
     writable host path.
-44. Mixed-host accounting: the `vms` dimension in `js-types` (it is refused today as unknown), VM bookings in full, containers checked
+44. Mixed-host accounting (the `vms` dimension itself is step 41b): VM bookings in full, containers checked
     against the total less VM memory, the offer rules of 5.15. *Proves:* the offer is never above total less booked less warm over seeded
     runs; the example of 5.15; the previous pools load unchanged.
 45. The warm pool: `--vm-warm`, assignment, refill, maximum age, the failure brake, `warm_images`. Waits for D26. *Proves:* a warm VM is
     never handed a job twice; assignment is irreversible; refill is one at a time and only into free capacity; age and the brake with an
     injected clock.
-46. The whole-node class: the `exclusive` and `exclusive_ready` fields, the withheld lease token, drain of the warm pool,
-    `prepare_timeout`, restore. *Proves:* the sequence of 5.15 on the fake agent; the token is not minted before the report; a timeout
+46. The whole-node class: introduces the design's `Whole` mode (or shows that `BookAll` plus the selection rule suffices), the drain of a
+    host with its deadline and one-per-pool bound, the `exclusive` and `exclusive_ready` fields, the withheld lease token, drain of the
+    warm pool, `prepare_timeout` with the re-place cap, restore. *Proves:* the sequence of 5.15 on the fake agent; the token is not minted before the report; a timeout
     gives the lease up; an older client that ignores readiness still waits.
 47. The first real VM driver, disabled by default, on an operator's host; it passes the VM conformance suite there. *Proves:* the same
     suite as the fake; it is not run on shared CI.

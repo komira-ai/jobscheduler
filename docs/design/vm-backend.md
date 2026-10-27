@@ -149,8 +149,9 @@ of that base image.
 - **A warm VM is fresh.** It was cloned from the base image and booted after the agent started, its guest said `Ready`, and it has never been
   handed a job, an input or an `Exec`. It is destroyed, not reused, once it is older than `--vm-warm-max-age` (the agent's clock; stale
   leases and clocks in a long-idle guest) and replaced. A warm VM is not a held run; the scheduler never sees it as a lease.
-- **Assigning one is irreversible.** A `Start` for `base_image = X` takes a warm VM of X whose size fits the request (D26) and marks it
-  assigned; from then on it is a cold VM at step 5. If none fits, the agent cold-boots (steps 2 to 4). An assigned VM never goes back.
+- **Assigning one is irreversible.** Each warm VM's metadata records the digest of the base image it was cloned from. A `Start` for
+  `base_image = X` takes a warm VM of X whose size fits the request (D26) and whose recorded digest equals the digest the `Start` pins; one
+  that differs is destroyed and the agent cold-boots. The chosen VM is marked assigned; from then on it is a cold VM at step 5. If none fits, the agent cold-boots (steps 2 to 4). An assigned VM never goes back.
 - **Refill** is one VM at a time, after the freed capacity is back and only when all hold: the agent is `serving`; the host's free capacity
   covers the VM's full size (below); no exclusive lease is pending or held (below); the pool is below target. A refill that fails backs off
   (the merged backoff) and after `--vm-warm-max-failures` failures in a row stops until the next image change, with a finding and
@@ -168,7 +169,9 @@ new image (installs the OS, Xcode, the simulator runtimes and `js-guest`, captur
 creating images is not an agent feature. The agent's own permissions on the image directories are read-only. It verifies a digest when an
 image first appears and when its manifest changes, and an image that fails is dropped from `base_images`. `base_images`,
 `image_profiles` and `warm_images` are facts (capabilities.md): a new image is a capability change, reaching the scheduler at the next
-heartbeat. A `Start` pins the image digest; a mismatch is `image-unavailable`.
+heartbeat. A `Start` pins the image digest; a mismatch is `image-unavailable`. When an image leaves `base_images` (digest failure, removal)
+or its manifest or digest changes, the agent destroys every warm VM cloned from the old content at once and leaves them out of
+`warm_images`; the refill failure brake above is lifted by that change, not by waiting.
 
 ## 5.15 Sharing a host, caps, and the whole-node class
 
@@ -196,14 +199,21 @@ and one is warm: its memory is checked against 64 - 32 = 32 GiB.
 
 ### Whole-node lease class (exclusive; for performance tests)
 
-A whole-node lease is the class `whole_machine` (`Admission::Whole`, 6.2; kbf's class of that name): it books every dimension and needs the
-host to itself. A performance test must see no other job and no idle booted VM, so the host is made quiet before the lease is usable.
+A whole-node lease is the class `whole_machine` (the design's `Whole` mode of 6.2; it is not in the merged `Admission`, where `BookAll` gives
+the whole host today; step 46 either introduces `Whole` or shows that `BookAll` plus the selection and drain rules below is enough; kbf's
+class of that name): it books every dimension and needs the host to itself. A performance test must see no other job and no idle booted VM, so the host is made quiet before the lease is usable.
 
-1. **Selection.** The scheduler picks a host with no lease and no running job, commits the lease, and places nothing else on the host from
-   that moment (the choice and any placement commit under the table lock, first one wins; 5.10).
+1. **Selection and drain.** The scheduler picks a host with no lease and no running job, commits the lease, and places nothing else on the
+   host from that moment (the choice and any placement commit under the table lock, first one wins; 5.10). A busy pool may never have such a
+   host, so a request that has waited `drain_after` (pool configuration, injected clock) makes the scheduler pick one host, mark it
+   **draining**, place nothing new on it, and commit the lease when it empties (running jobs finish; nothing is killed). Bounds: one draining host per pool, or at most `max_draining_fraction` of the pool if the operator sets it, so exclusive
+   requests cannot idle the pool; a drain that outlasts `drain_deadline` is given up (the host returns to `serving`, the request keeps
+   waiting and may start a drain on another host after a back-off). Because the host is empty at the commit, nothing runs during
+   `preparing` and `prepare_timeout` cannot be outrun by a long job. A re-place after `prepare_timeout` is capped at `max_replace` tries per
+   request with a back-off between them, after which the request fails `exclusive-not-ready` to the consumer.
 2. **Preparing.** The scheduler's next heartbeat reply tells the agent an exclusive lease is granted (an additive field, `exclusive`:
    lease id). The agent announces the phase `preparing` (the merged phase; no new leases), **stops the warm pool and destroys every warm
-   VM**, stops refilling, finishes anything it still runs (a job placed before the commit completes first) and runs the post-job checks.
+   VM**, stops refilling, and runs the post-job checks (the host was empty at the commit, so no job runs).
    `warm_images` becomes empty.
 3. **Ready.** The agent reports `exclusive_ready: lease id` in the heartbeat (additive) and returns to `serving`. Until the scheduler has
    that report the lease stays `pending` and **the lease token is not minted**: the consumer cannot reach the agent, so a consumer that
@@ -216,8 +226,10 @@ host to itself. A performance test must see no other job and no idle booted VM, 
 5. **End.** On release the agent removes what remains, runs the checks, announces `restoring`, refills the warm pool toward its target,
    and returns to `serving`; only then may the scheduler place other work on the host. A tainted host is replaced instead (5.12).
 
-The agent's heartbeat is how readiness is signalled; there is no side channel. A whole-node lease on a host that is also in use by
-`share` leases waits for them to end (the scheduler does not pick it) or, if the consumer asked for the node by name, queues.
+The agent's heartbeat is how readiness is signalled; there is no side channel. A whole-node request never takes a host that
+`share` leases are using; it waits for one to empty, or drains one by the rule in step 1 (a request that names a node queues for that node,
+and drains it by the same rule). Tests: with a stream of share leases, a queued whole-node request is granted within `drain_after` plus
+`drain_deadline` on the injected clock; with a stream of whole-node requests, share leases keep running on the rest of the pool.
 
 ## D26. The macOS VM sizing question (open; another engineer is answering it)
 
@@ -262,9 +274,11 @@ that sends a bad frame, a second `Ready`, an oversized frame, floods of log fram
 a leaked clone, an image whose digest changed, and a store that holds an unaccounted directory. Conformance cases (agent suite, Phase F
 of the steps): a VM is destroyed before the slot is freed, and a failed destroy frees nothing and taints; **no VM serves two runs** (the
 fake counts VM ids per run id and fails on a repeat); a warm VM is destroyed, not reused, at the max age; assignment is irreversible and a
-refused assignment cold-boots; refill respects free capacity, one at a time, and the failure brake; warm VMs count in `vms` and in the
+refused assignment cold-boots; a warm VM whose recorded digest differs from the `Start`'s is destroyed and the run cold-boots; dropping or
+changing an image destroys its warm VMs at once and removes them from `warm_images`; refill respects free capacity, one at a time, and the failure brake; warm VMs count in `vms` and in the
 offer, with the order of 5.15 (the offer is never above total less booked less warm at any step of a seeded run); a container job is
 refused when VM memory leaves too little; the whole-node sequence: warm VMs are gone, no refill, the token is not minted before
-`exclusive_ready`, a timeout gives the lease up, release refills; restart sweeps every clone; a `host` VM job and a GPU VM job are
+`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a drain places nothing new and ends at its deadline, release
+refills; restart sweeps every clone; a `host` VM job and a GPU VM job are
 refused; mounts are copied in and out and the guest never holds a writable host path; a hostile frame corpus ends the run and never
 taints. No test asserts elapsed time (R2): boots, ages and timeouts are counted on the injected clock.

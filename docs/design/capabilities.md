@@ -64,7 +64,7 @@ major 1 stays (the rules of `protocol.rs`: fields are only added; a receiver ign
 - `Hello.facts` (optional): `{ rev, host, images }`. `rev` is a number the agent increments on every change, starting at 1 in a session.
   `host` is `map<key, Value>` and `images` is `map<image name, map<key, Value>>`. `Value` is a tagged object: `{"kind":"text","value":".."}`,
   `{"kind":"version","value":".."}`, `{"kind":"set_text","items":[..]}`, `{"kind":"set_version","items":[..]}`, `{"kind":"count","value":n}`.
-  New limits beside the existing ones: 64 host keys, 16 images of 32 keys each, 256 items per set, 64 bytes per item, 32 bytes per version.
+  New limits beside the existing ones: 64 host keys, 16 images of 32 keys each, 256 items per set, 64 bytes per item, 40 bytes per version (the longest the grammar allows is four components of nine digits and three dots, 39).
   A value over a limit is refused with `invalid-hello` as every other limit is.
 - `Heartbeat.facts_rev` (optional): the revision the agent now holds. `Heartbeat.facts` (optional): the full snapshot, sent whenever the
   agent's revision is newer than the last `facts_ack` it received, so a lost update is repeated with the next heartbeat (the pattern of
@@ -76,6 +76,20 @@ major 1 stays (the rules of `protocol.rs`: fields are only added; a receiver ign
   server reading a hello without `facts` takes each legacy entry whose schema kind is `text` or `version` (a value that does not parse is
   skipped) and nothing else, so old agents keep working and can satisfy scalar constraints only.
 - `JobSpec` and the lease request gain fields in 5.14 and below; every field is optional and an absent field means today's behaviour.
+- **Advertised support for `needs`.** A server from before this change skips an unknown `needs` field and would place the request with no
+  constraints, which is the failure semantic 5 exists to prevent (its "unknown op is refused" applies only to a server that knows `needs`).
+  So a server lists the feature `needs` in `features`, a field of its `Welcome` to agents and of its version reply to consumers (10.3). A
+  consumer refuses to send non-empty `needs`, or a request for a class with a `vm` runtime, to a server that does not list it, fails closed
+  and says which feature is missing. Gating `runtime = vm` on `vms >= 1` (5.14) stays as the second guard.
+
+## Trust
+
+Facts are unverified claims. They come from an agent that has already passed the pool credential and the id binding (5.8), so a hostile
+agent can attract only work that the pool's consumers already hand to its pool: it cannot reach another pool or consumer, because a lease
+token binds it to one consumer. Facts never override pool selection by class and labels. A false `arch`, version set, image profile, `vms`,
+`warm_images` or `exclusive_ready` can at most cause queueing, misplacement or refusal, and a lie found out costs the agent its taint and the
+deny-file path (5.12). The claim `sandbox=vm` is the one that is a security property (isolation), and the scheduler cannot check it: a
+consumer that needs isolation leases from a pool whose operator it trusts to run the VM backend (K27).
 
 ## Storage and refresh
 
@@ -90,7 +104,9 @@ a value changed. `warm_images` changes with the warm pool and is the one fact th
 
 A request carries `needs`: a list of at most 32 constraints, all of which must hold (a conjunction; there is no `or` and no `not`; an
 alternative is a second request or the consumer's own retry, and `in` covers alternatives of one key). A constraint is
-`{ "key", "op", "value", "scope" }`; `scope` is `host` (the default when absent) or `guest` (the facts of an image profile).
+`{ "key", "op", "value", "scope" }`; `scope` is `host` (the default when absent) or `guest` (the facts of an image profile). The profile schema is exactly `os`, `os_version`,
+`arch`, `xcode` and `sim.*`: a `guest` constraint on any other key (`vms`, `base_images`, `warm_images`, a namespaced key) is refused with
+`constraint-bad-scope` at submit, and a `host` constraint on any key is meaningful (it reads the host's own facts).
 
 | Kind of the key | Ops | Value | True when |
 |---|---|---|---|
@@ -132,7 +148,7 @@ refused at submit, before it is queued, naming the index of the constraint.
 | `constraint-bad-value` | the value's type does not fit the op (a non-integer for a count, a list where one token is wanted, an empty or over-long list, a token outside the grammar) |
 | `constraint-bad-version` | a version outside the grammar, or a `series` prefix of more than 3 components |
 | `constraint-empty-range` | `lo >= hi`, or neither bound |
-| `constraint-bad-scope` | a scope other than `host` or `guest`, or `guest` on a class without a VM runtime |
+| `constraint-bad-scope` | a scope other than `host` or `guest`, `guest` on a class without a VM runtime, or `guest` on a key outside the profile schema |
 | `constraint-too-many` | more than 32 constraints |
 
 A well-formed constraint that no host can meet is not an error; the request waits (8.2). Selecting pools by class and labels is unchanged
@@ -148,7 +164,7 @@ Worked example: an iOS test that needs Xcode 16.x and an iOS 18 simulator runtim
 
 | kbf property | Constraint |
 |---|---|
-| `OSFamily=darwin` | `{scope:host, key:os, op:eq, value:"macos"}` (the guest is macOS, so the host is too) |
+| `OSFamily=darwin` | `{scope:host, key:os, op:eq, value:"macos"}` (the guest is macOS, so the host is too), and `{scope:guest, key:os, op:eq, value:"macos"}`, so the image is macOS and `min-os` below is meaningful |
 | `Arch=arm64` | `{scope:host, key:arch, op:eq, value:"aarch64"}`, and the same on the guest |
 | `sandbox=vm` | `{scope:host, key:vms, op:ge, value:1}` |
 | `min-os=15.0` | `{scope:guest, key:os_version, op:ge, value:"15.0"}` |
@@ -156,9 +172,9 @@ Worked example: an iOS test that needs Xcode 16.x and an iOS 18 simulator runtim
 | `sim-runtime=ios-18` | `{scope:guest, key:sim.ios, op:has_series, value:"18"}` |
 
 A host with `os=macos, arch=aarch64, vms=2, base_images={mac15-x16-a, mac14-x15-a}` where `mac15-x16-a` has
-`os_version=15.2, xcode={16.0,16.2}, sim.ios={18.0,18.2}, arch=aarch64` meets every constraint; the eligible image set is `{mac15-x16-a}`,
-the grant names it, and the `Start` of the VM job names it (5.14). A host holding only `mac14-x15-a` (`os_version=14.6, xcode={15.4}`) is
-skipped: no image meets all four guest constraints, though each constraint alone is met by some image of some host. The same need run
+`os=macos, os_version=15.2, xcode={16.0,16.2}, sim.ios={18.0,18.2}, arch=aarch64` meets every constraint (guest `os`, `arch`, `os_version`, `xcode`, `sim.ios`); the eligible image set is `{mac15-x16-a}`,
+the grant names it, and the `Start` of the VM job names it (5.14). A host holding only `mac14-x15-a` (`os=macos, os_version=14.6, xcode={15.4}`) is
+skipped: no image meets all the guest constraints, though each constraint alone is met by some image of some host. The same need run
 natively (a `host` job, off by default, 5.12) drops `sandbox=vm` and puts the three Xcode and OS constraints in `host` scope.
 
 ## Tests (13.2)
@@ -169,4 +185,6 @@ boundary `16.9.9` against `17`). Absent is unmet for every op. Each refusal code
 scope: three images, each meeting a different constraint, none meeting all, is no match. Wire: a golden hello with `facts` is skipped by a
 decoder of the previous crate version (the cross-version test of 13.6); a legacy-only hello still meets a scalar constraint; a
 conflicting legacy entry is `invalid-hello`; a heartbeat whose ack was lost is repeated and a repeat is ignored; a snapshot over each limit
-is refused. The kbf translation table is tested in kbf with the example above.
+is refused; a version of exactly 39 bytes is accepted and 41 refused; a `guest` constraint on `vms`, `base_images`, `warm_images` and a
+namespaced key is `constraint-bad-scope`; a guest `os=linux` image never meets the worked example; a consumer given a server without the
+`needs` feature sends no `needs` and fails closed. The kbf translation table is tested in kbf with the example above.
