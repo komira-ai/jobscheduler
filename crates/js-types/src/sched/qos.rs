@@ -5,7 +5,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// A QoS level, chosen by the user (never a platform property: it must not enter the
-/// action digest).
+/// work key, which decides whether two requests are the same work).
 ///
 /// Three levels are built in, from most to least urgent: `interactive` (a human is
 /// waiting), `ci`, and `batch` (jobs; the only level that is preempted). A deployment
