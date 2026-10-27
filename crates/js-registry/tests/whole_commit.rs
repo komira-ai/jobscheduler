@@ -436,7 +436,9 @@ fn a_hello_restarts_the_restore_and_a_taint_ends_booking() {
     });
     for _ in 0..2 {
         beat_with(&fx, "a", epoch, |_| {});
-        assert_eq!(provider.start(whole_spec(2)), no_capacity());
+        // The only host is tainted, so no host could ever be given whole.
+        let refused = StartAck::Refused(RefusalCode::NoCapableHost);
+        assert_eq!(provider.start(whole_spec(2)), refused);
     }
 }
 

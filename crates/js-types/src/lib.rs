@@ -15,7 +15,7 @@ mod resources;
 mod shape;
 
 pub use class::{Admission, ClassError, ResourceClass};
-pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId};
+pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};

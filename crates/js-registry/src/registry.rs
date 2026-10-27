@@ -9,7 +9,7 @@ use js_agent_wire::{
 use js_lease::{Clock, Timestamp};
 use js_pool_static::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, HostId, LeaseId, ProviderId, Request, ResourceClass, Shape};
+use js_types::{Admission, HostId, LeaseId, ProviderId, RequestId, ResourceClass, Shape};
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
@@ -17,8 +17,9 @@ use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
 use crate::whole::exclusive::Exclusive;
+use crate::whole::queue::{Verdict, WaitList};
 use crate::whole::reasons::{Cause, HostEffect};
-use crate::whole::requests::{Failure, NotReady, RequestRecord, Requests, Rules};
+use crate::whole::requests::{Failure, NotReady, RequestKey, RequestRecord, Requests, Rules};
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +164,8 @@ struct State {
     runs: Runs,
     /// The whole-node requests' failed prepares and the leases committed for them.
     requests: Requests,
+    /// The whole-node requests that found no free host and wait for one.
+    waiting: WaitList,
 }
 
 /// The parts of the state a failed prepare changes besides the host's own record.
@@ -285,6 +288,7 @@ impl Registry {
             reserved: BTreeSet::new(),
             runs: Runs::default(),
             requests: Requests::default(),
+            waiting: WaitList::default(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -312,6 +316,7 @@ impl Registry {
             .unwrap_or_else(PoisonError::into_inner);
         let config = &self.shared.config;
         state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
+        state.waiting.expire(now, Rules::of(config).regain_grace_ms);
         state
     }
 
@@ -353,19 +358,36 @@ impl Registry {
 
     /// The record of a whole-node request: its failed prepares, the hosts left out of its
     /// placements and the last failure. `None` for a request that has failed none, or
-    /// was placed since. The registry has no request id yet, so equal requests share a
+    /// was placed since. Ask by the request id (`&RequestId`); a request whose start
+    /// carried no id is kept under its content (`&Request`), so equal requests share a
     /// record.
-    pub fn request_record(&self, request: &Request) -> Option<RequestRecord> {
-        self.lock().requests.record(request).cloned()
+    pub fn request_record(&self, key: impl Into<RequestKey>) -> Option<RequestRecord> {
+        self.lock().requests.record(&key.into()).cloned()
     }
 
     /// Why a request fails `exclusive-not-ready`: the last code and detail reported,
-    /// once it has used up `max_replace` prepare failures; `None` before.
-    pub fn not_ready(&self, request: &Request) -> Option<NotReady> {
-        let record = self.request_record(request);
+    /// once it has used up `max_replace` prepare failures; `None` before. A start of such
+    /// a request is refused [`RefusalCode::ExclusiveNotReady`]. Ask as
+    /// [`Registry::request_record`] does.
+    pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
+        let record = self.request_record(key);
         record
             .filter(|record| record.terminal)
             .and_then(|record| record.last)
+    }
+
+    /// Where whole-node request `id` waits for a host, from the front (zero is next), or
+    /// `None` if it is not waiting. A request waits from the first start that finds a
+    /// capable host but none free, in the order such starts were first seen; a repeat of
+    /// the start is a poll and keeps its place. It stops waiting when it is placed, is
+    /// cancelled, is refused, or is not presented for the pool's `regain_grace`.
+    pub fn queue_position(&self, id: &RequestId) -> Option<usize> {
+        self.lock().waiting.position(id)
+    }
+
+    /// Takes whole-node request `id` off the wait list at once; whether it was waiting.
+    pub fn cancel_request(&self, id: &RequestId) -> bool {
+        self.lock().waiting.cancel(id)
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -805,9 +827,11 @@ impl Registry {
             records,
             runs,
             requests,
+            waiting,
             ..
         } = &mut *guard;
         let lease = spec.lease();
+        let key = RequestKey::of(spec);
         let held = book.read(&lease);
         let pending = match &held {
             Observed::Present { host } => records
@@ -819,16 +843,14 @@ impl Registry {
             return StartAck::Unknown;
         }
         // A request that used up its tries is not placed again.
-        let spent = requests
-            .record(spec.request())
-            .is_some_and(|record| record.terminal);
+        let spent = requests.record(&key).is_some_and(|record| record.terminal);
         if spent {
-            return StartAck::Refused(RefusalCode::NoCapacity);
+            return StartAck::Refused(RefusalCode::ExclusiveNotReady);
         }
         let gate = HostBook::class_gate(classes, spec);
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
-            let barred = requests.excluded(spec.request(), id, now);
+            let barred = requests.excluded(&key, id, now);
             let bookable =
                 record.is_some_and(|record| record.bookable(now, grace, record.quiet(runs, id)));
             bookable & !barred
@@ -843,7 +865,10 @@ impl Registry {
             record.into_iter().for_each(|record| {
                 record.exclusive = Exclusive::Committed { lease, at: now };
             });
-            requests.commit(lease, spec.request());
+            requests.commit(lease, key);
+            spec.request_id().into_iter().for_each(|id| {
+                waiting.cancel(id);
+            });
             return StartAck::Unknown;
         }
         // The book answers `NoFit` when no listed host fits. Every host is booked as the
@@ -852,11 +877,40 @@ impl Registry {
         let floor = self.shared.config.shape();
         let wanted = spec.request();
         let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
-        match (ack, fits_pool) {
-            (StartAck::Refused(RefusalCode::NoFit), true) => {
+        let declined = matches!(
+            ack,
+            StartAck::Refused(RefusalCode::NoFit | RefusalCode::NoCapacity)
+        );
+        match (ack, fits_pool, whole && declined) {
+            (_, true, true) => {
+                // A whole-node request that fits the pool: no host could ever be given
+                // whole is the one refusal for lack of a host; otherwise it waits.
+                let capable = book.hosts().iter().any(|host| {
+                    let fits = host
+                        .shape
+                        .satisfies(&wanted.resources, &wanted.capabilities);
+                    let clean = records
+                        .get(&host.host)
+                        .is_some_and(|record| record.taint.is_none());
+                    let barred = requests.barred_for_life(&key, &host.host);
+                    fits & clean & !barred
+                });
+                let grace = Rules::of(&self.shared.config).regain_grace_ms;
+                let place = spec
+                    .request_id()
+                    .map(|id| waiting.present(id, capable, now, grace));
+                match (place, capable) {
+                    (Some(Verdict::Waiting(_)), _) => StartAck::Unknown,
+                    (Some(Verdict::Unservable), _) | (None, false) => {
+                        StartAck::Refused(RefusalCode::NoCapableHost)
+                    }
+                    (None, true) => StartAck::Refused(RefusalCode::NoCapacity),
+                }
+            }
+            (StartAck::Refused(RefusalCode::NoFit), true, false) => {
                 StartAck::Refused(RefusalCode::NoCapacity)
             }
-            (other, _) => other,
+            (other, _, _) => other,
         }
     }
 

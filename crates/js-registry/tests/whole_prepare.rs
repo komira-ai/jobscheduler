@@ -1,8 +1,8 @@
 //! What the registry does when a committed whole-node lease does not become ready: a
 //! typed refusal, the `prepare_timeout`, the host and request effects of each reason, and
 //! the cap on tries. The registry is driven directly, on a manual clock, with
-//! hand-built heartbeats. The registry has no request id yet, so a request is its
-//! content: the tests place the same `whole_request()` under a new lease id each time.
+//! hand-built heartbeats. The starts carry no request id, so a request is its content: the
+//! tests place the same `whole_request()` under a new lease id each time.
 
 mod support;
 
@@ -369,7 +369,8 @@ fn the_request_fails_not_ready_after_max_replace_failures() {
     let kept = record(&fx);
     assert_eq!((kept.prepare_failures, kept.give_ups), (2, 0));
     assert!(kept.terminal);
-    assert_eq!(provider.start(whole_spec(3)), no_capacity());
+    let spent = StartAck::Refused(RefusalCode::ExclusiveNotReady);
+    assert_eq!(provider.start(whole_spec(3)), spent);
     assert!(provider.booked().is_empty());
 }
 
