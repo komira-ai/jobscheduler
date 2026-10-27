@@ -13,8 +13,13 @@ use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
+use js_registry::{Credential, PoolConfig};
+
+use crate::agent_pool;
+use crate::agent_tokens::AgentTokens;
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
+use crate::rate::HelloLimit;
 
 /// The command line. Configuration is flags only; secrets come from files.
 #[derive(Debug, Parser)]
@@ -36,12 +41,40 @@ pub struct Cli {
     /// silently started empty.
     #[arg(long, value_enum)]
     pub boot: BootMode,
-    /// The TOML file listing the hosts to lease.
+    /// The TOML file listing the hosts to lease. Optional when agents register hosts
+    /// (`--agent-token-file`); one of the two sources is required.
     #[arg(long)]
-    pub pool_config: PathBuf,
+    pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
     #[arg(long)]
     pub token_file: PathBuf,
+    /// Turns agent registration on: a file holding the join tokens agents present, one
+    /// per line (several while one is being replaced), each at least 32 bytes and the
+    /// file owner-only like `--token-file`. Read again at every tick. Needs
+    /// `--agent-pool-config`.
+    #[arg(long)]
+    pub agent_token_file: Option<PathBuf>,
+    /// The TOML file describing the pool that registering hosts join: its name, class,
+    /// machine limit, shape, capabilities and timing. Needs `--agent-token-file`.
+    #[arg(long)]
+    pub agent_pool_config: Option<PathBuf>,
+    /// The hellos one join token may say in a burst before it is held to one per
+    /// `--agent-hello-interval`.
+    #[arg(
+        long,
+        default_value = "60",
+        value_parser = clap::value_parser!(u32).range(1..),
+        requires = "agent_token_file"
+    )]
+    pub agent_hello_burst: u32,
+    /// How often a join token that spent its burst is allowed one more hello.
+    #[arg(
+        long,
+        default_value = "1s",
+        value_parser = parse_duration,
+        requires = "agent_token_file"
+    )]
+    pub agent_hello_interval: Duration,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -187,6 +220,17 @@ impl Token {
     pub(crate) fn matches(&self, given: &[u8]) -> bool {
         self.0.ct_eq(given).into()
     }
+
+    /// Whether `other` is the same token, compared as [`Token::matches`] does.
+    pub(crate) fn same_as(&self, other: &Token) -> bool {
+        self.matches(&other.0)
+    }
+
+    /// The credential a host admitted with this token is bound to. A token is printable
+    /// ASCII, so its text is exact.
+    pub(crate) fn credential(&self) -> Credential {
+        Credential::of_token(&String::from_utf8_lossy(&self.0))
+    }
 }
 
 impl std::fmt::Debug for Token {
@@ -215,18 +259,41 @@ pub struct Config {
     pub(crate) token: Token,
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
-    pub(crate) capacity: Box<dyn CapacitySource>,
+    pub(crate) hosts: Hosts,
+}
+
+/// Where the hosts come from: the operator's pool file alone, or that file (when given)
+/// beside the hosts agents register.
+pub(crate) enum Hosts {
+    /// `--pool-config` alone: the server builds exactly what it always has.
+    Static(Box<dyn CapacitySource>),
+    /// Agent registration is on.
+    Layered {
+        /// The static pool, when `--pool-config` was given; it is tried first.
+        static_pool: Option<Box<dyn CapacitySource>>,
+        /// The registering side.
+        agents: Box<AgentSetup>,
+    },
+}
+
+/// What `--agent-token-file`, `--agent-pool-config` and the hello limit decided.
+pub(crate) struct AgentSetup {
+    pub(crate) tokens: AgentTokens,
+    pub(crate) pool: PoolConfig,
+    pub(crate) hello_limit: HelloLimit,
 }
 
 impl Config {
     /// Checks `cli`: the ttls are consistent, a listen address that is not loopback has
-    /// TLS flags, and the token file is owner-only and holds a token.
+    /// TLS flags, the token files are owner-only and hold tokens, the pool files are
+    /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
             .map_err(|err| StartupError::new("--default-ttl", err))?;
         let tls = tls_files(&cli)?;
         let token = read_token(&cli.token_file)?;
         let limits = Limits::from(&cli);
+        let hosts = hosts(&cli, &token)?;
         Ok(Self {
             listen: cli.listen,
             state_file: cli.state_file,
@@ -236,14 +303,20 @@ impl Config {
             token,
             tls,
             limits,
-            capacity: Box::new(StaticPoolSource::new(cli.pool_config)),
+            hosts,
         })
     }
 
-    /// The same configuration taking its hosts from `capacity` instead of the file
-    /// `--pool-config` names.
+    /// The same configuration taking its static hosts from `capacity` instead of the
+    /// file `--pool-config` names.
     pub fn with_capacity_source(mut self, capacity: Box<dyn CapacitySource>) -> Self {
-        self.capacity = capacity;
+        self.hosts = match self.hosts {
+            Hosts::Static(_) => Hosts::Static(capacity),
+            Hosts::Layered { agents, .. } => Hosts::Layered {
+                static_pool: Some(capacity),
+                agents,
+            },
+        };
         self
     }
 
@@ -256,6 +329,42 @@ impl Config {
     /// How often the production ticker ticks (`--tick`).
     pub fn tick_period(&self) -> Duration {
         self.tick
+    }
+}
+
+/// The sources of hosts the flags name. At least one is required; the two agent flags
+/// come together.
+fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
+    let static_pool = cli
+        .pool_config
+        .as_ref()
+        .map(|path| Box::new(StaticPoolSource::new(path)) as Box<dyn CapacitySource>);
+    match (&cli.agent_token_file, &cli.agent_pool_config) {
+        (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
+            StartupError::new(
+                "--pool-config",
+                "required unless agents register hosts (--agent-token-file and --agent-pool-config)",
+            )
+        }),
+        (Some(tokens), Some(pool)) => Ok(Hosts::Layered {
+            static_pool,
+            agents: Box::new(AgentSetup {
+                tokens: AgentTokens::open(tokens, client)?,
+                pool: agent_pool::read(pool)?,
+                hello_limit: HelloLimit {
+                    burst: cli.agent_hello_burst,
+                    interval: cli.agent_hello_interval,
+                },
+            }),
+        }),
+        (Some(_), None) => Err(StartupError::new(
+            "--agent-pool-config",
+            "required with --agent-token-file",
+        )),
+        (None, Some(_)) => Err(StartupError::new(
+            "--agent-token-file",
+            "required with --agent-pool-config",
+        )),
     }
 }
 
@@ -297,7 +406,7 @@ pub const MIN_TOKEN_BYTES: usize = 32;
 /// The token a file's bytes hold: its content without trailing whitespace, which must
 /// be one run of printable ASCII (an HTTP header value cannot carry anything else, so
 /// any other token could never match a request) of at least [`MIN_TOKEN_BYTES`] bytes.
-fn parse_token(bytes: &[u8]) -> Result<Token, String> {
+pub(crate) fn parse_token(bytes: &[u8]) -> Result<Token, String> {
     let token = bytes.trim_ascii_end();
     let printable = token.iter().all(u8::is_ascii_graphic);
     match (token.is_empty(), printable, token.len() < MIN_TOKEN_BYTES) {
