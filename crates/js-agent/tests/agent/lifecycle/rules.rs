@@ -33,6 +33,13 @@ fn duplicate_start_idempotent() {
     assert_eq!(h.fake.created().len(), 2);
     h.fake.exit("r1", 0);
     h.life.step();
+    let after_exit = h.start(job("r1"));
+    assert!(
+        after_exit.is_empty(),
+        "a run that exited and is not acknowledged is held: {after_exit:?}"
+    );
+    assert_eq!(h.fake.created().len(), 2);
+    assert_eq!(h.life.results().len(), 1);
     h.ack("r1", "ACCEPTED");
     assert_eq!(h.held(), ["r2"]);
     let late = h.start(job("r1"));
@@ -81,7 +88,11 @@ fn the_memory_of_stopped_runs_is_bounded() {
             .collect();
         h.apply(stops);
     }
-    h.stop(&ids[1]);
+    assert_eq!(
+        names(&h.start(job("x1"))),
+        ["skipped x1 Retired"],
+        "the second oldest is still remembered, with no stop sent again"
+    );
     assert_eq!(
         names(&h.start(job("x0"))),
         ["started x0"],
@@ -94,31 +105,67 @@ fn the_memory_of_stopped_runs_is_bounded() {
     );
 }
 
+/// Asserts that a stop repeated for the same unknown run takes one place in the memory of
+/// stopped runs: after it, as many other ids as fit beside it are stopped, and the first
+/// still cannot start. It catches a repeated stop that is remembered twice and pushes the
+/// run out of the memory early.
+#[test]
+fn a_repeated_stop_takes_one_place_in_the_memory() {
+    let mut h = Harness::new("retired-repeat");
+    h.stop("dup");
+    h.stop("dup");
+    let others: Vec<String> = (0..RETIRED_CAP - 1).map(|n| format!("y{n}")).collect();
+    for chunk in others.chunks(1000) {
+        let stops = chunk
+            .iter()
+            .map(|run_id| Command::Stop {
+                run_id: run_id.clone(),
+            })
+            .collect();
+        h.apply(stops);
+    }
+    assert_eq!(names(&h.start(job("dup"))), ["skipped dup Retired"]);
+}
+
 /// Asserts that a start that waited longer than its `valid_for_ms` on the agent's clock
 /// (here because the starts before it in the reply took long) is dropped with no result,
-/// no held run and no container, that a start with no bound is not, and that the same
-/// run may start from a later reply. It catches a stale start that runs, and one that is
-/// reported (the server gives its lease up as never started on its own).
+/// no held run and no container; that a start that waited exactly its `valid_for_ms`
+/// still runs; that a start with no bound runs however long the starts before it took;
+/// and that the same run may start from a later reply. It catches a stale start that
+/// runs, one that is reported (the server gives its lease up as never started on its
+/// own), a boundary off by one millisecond, and a zero bound read as "no time at all".
 #[test]
 fn stale_start_dropped_silently() {
     let mut h = Harness::new("stale");
     h.fake.create_takes(1500);
-    let mut slow = job("slow");
-    slow.valid_for_ms = 0;
-    let mut late = job("late");
-    late.valid_for_ms = 1000;
-    let mut fine = job("fine");
-    fine.valid_for_ms = 5000;
+    // Each start takes 1500 ms, so the n-th start of the reply waited (n - 1) * 1500.
+    let small = |run: &str, valid_for_ms: u64| {
+        let mut spec = job(run);
+        spec.limits.cpu_millis = 500;
+        spec.valid_for_ms = valid_for_ms;
+        spec
+    };
+    let late = small("late", 1000);
     let events = h.apply(vec![
-        Command::Start(Box::new(slow)),
+        Command::Start(Box::new(small("slow", 0))),
+        // Waited exactly as long as it allows: runs.
+        Command::Start(Box::new(small("exact", 1500))),
+        // No bound, after the clock has moved: runs.
+        Command::Start(Box::new(small("unbounded", 0))),
         Command::Start(Box::new(late.clone())),
-        Command::Start(Box::new(fine)),
+        Command::Start(Box::new(small("fine", 5000))),
     ]);
     assert_eq!(
         names(&events),
-        ["started slow", "skipped late Stale", "started fine"]
+        [
+            "started slow",
+            "started exact",
+            "started unbounded",
+            "skipped late Stale",
+            "started fine"
+        ]
     );
-    assert_eq!(h.held(), ["slow", "fine"]);
+    assert_eq!(h.held(), ["slow", "exact", "unbounded", "fine"]);
     assert!(
         h.life.results().is_empty(),
         "nothing is sent for a stale start"
@@ -154,6 +201,14 @@ fn host_job_without_agent_consent_creates_nothing() {
             state: HeldState::ExitedUnacked
         }]
     );
+
+    let again = h.start(spec.clone());
+    assert!(
+        again.is_empty(),
+        "a refused run whose result is held is not refused twice: {again:?}"
+    );
+    assert_eq!(h.life.results().len(), 1);
+    assert_eq!(h.life.held().len(), 1);
 
     let mut allowed = Harness::with(
         "host-allowed",
@@ -476,9 +531,56 @@ fn a_stop_after_the_exit_changes_nothing() {
     assert!(h.fake.stops().is_empty());
 }
 
-/// Asserts that a cancel, even after a stop, reports nothing: the container is stopped
-/// and cleaned and the slot freed, but no result is held. It catches a cancelled run
-/// that is reported to a server that no longer holds its lease.
+/// Asserts that a stop applied after the container exited, and before the agent looked,
+/// reports the job's own exit: success stays `succeeded` with status 0, a failure stays
+/// `failed` with its status, and no stop is sent to a container that has finished. It
+/// catches finished work reported as killed because a stop raced the poll.
+#[test]
+fn a_stop_that_beats_the_look_does_not_relabel_a_finished_job() {
+    let mut h = Harness::new("stop-beats-look");
+    h.start(job("ok"));
+    h.start(job("bad"));
+    h.fake.exit("ok", 0);
+    h.fake.exit("bad", 3);
+    h.stop("ok");
+    h.stop("bad");
+    h.life.step();
+    let results = h.life.results();
+    assert_eq!(
+        (results[0].outcome, results[0].exit_code),
+        (Outcome::Succeeded, Some(0))
+    );
+    assert_eq!(
+        (results[1].outcome, results[1].exit_code),
+        (Outcome::Failed, Some(3))
+    );
+    assert!(h.fake.stops().is_empty());
+}
+
+/// Asserts that a job past its wall time whose stop the runtime refused, and which then
+/// exits by itself, is reported as it exited: what happened is reported, not what the
+/// agent meant to do. It catches a late success reported as `timed_out`.
+#[test]
+fn a_timeout_whose_stop_failed_reports_a_later_exit_as_it_was() {
+    let mut h = Harness::new("timeout-stop-fails");
+    h.start(job("r1"));
+    h.fake.fail("stop", 1);
+    h.clock.advance(60_000);
+    assert_eq!(names(&h.life.step()), ["finding r1 stop-failed"]);
+    h.fake.exit("r1", 0);
+    h.life.step();
+    let result = &h.life.results()[0];
+    assert_eq!(
+        (result.outcome, result.exit_code),
+        (Outcome::Succeeded, Some(0))
+    );
+    assert!(h.fake.stops().is_empty());
+}
+
+/// Asserts that a cancel, even after a stop, reports nothing, and that a stop after a
+/// cancel does not take the cancel back: the container is stopped and cleaned and the
+/// slot freed, but no result is held. It catches a cancelled run that is reported to a
+/// server that no longer holds its lease.
 #[test]
 fn a_cancel_reports_nothing_even_after_a_stop() {
     let mut h = Harness::new("cancel");
@@ -490,6 +592,13 @@ fn a_cancel_reports_nothing_even_after_a_stop() {
     assert!(h.life.results().is_empty());
     assert!(h.held().is_empty(), "nothing is owed, so nothing is held");
     assert_eq!(h.life.free().cpu_millis, 4000);
+
+    h.start(job("r2"));
+    h.cancel("r2");
+    h.stop("r2");
+    h.life.step();
+    assert!(h.life.results().is_empty(), "a stop after a cancel reports");
+    assert!(h.held().is_empty());
 }
 
 /// Asserts that the container is created with the job's own labels and the agent's over

@@ -22,7 +22,7 @@
 //! | `--capability k=v` | a capability to report; repeatable; `os` and `arch` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
-//! | `--allow-host-jobs` | accept a start with `isolation = host`; off by default, and without it such a start creates nothing and is refused |
+//! | `--allow-host-jobs` | not available yet: refused at start, because a host job taints the host and the record of that does not exist; without it a start with `isolation = host` creates nothing and is refused |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; without it no container runs |

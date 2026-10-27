@@ -18,13 +18,15 @@ fn mount(root: &str, rel: &str) -> Mount {
 }
 
 /// A root `data` with a directory `ok/inner`, a link `up` out of it to the sibling
-/// `outside`, a link `down` inside it, and a plain file `file`.
+/// `outside`, a link `evil` out of it to the sibling `data-evil` (whose path starts with
+/// the root's as text), a link `down` inside it, and a plain file `file`.
 fn tree(name: &str) -> (Scratch, MountRoots) {
     let dir = Scratch::new(name);
-    for sub in ["data/ok/inner", "outside/secret"] {
+    for sub in ["data/ok/inner", "outside/secret", "data-evil/secret"] {
         fs::create_dir_all(dir.path(sub)).unwrap();
     }
     symlink(dir.path("outside"), dir.path("data/up")).unwrap();
+    symlink(dir.path("data-evil"), dir.path("data/evil")).unwrap();
     symlink(dir.path("data/ok"), dir.path("data/down")).unwrap();
     fs::write(dir.path("data/file"), "x").unwrap();
     let roots = MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap();
@@ -98,6 +100,62 @@ fn symlink_escape_refused() {
     );
 }
 
+/// Asserts that a sibling directory whose name begins with the root's name (`data-evil`
+/// beside `data`) is outside the root, whether it is reached by a link or by `..`. It
+/// catches a containment check made on the text of the path instead of on its
+/// components.
+#[test]
+fn a_sibling_that_shares_the_roots_name_as_a_prefix_is_outside() {
+    let (_dir, roots) = tree("mounts-sibling");
+    for rel in ["evil", "evil/secret", "../data-evil", "../data-evil/secret"] {
+        assert_eq!(
+            roots.resolve(&mount("data", rel)),
+            Err(MountError::Escapes),
+            "{rel}"
+        );
+    }
+}
+
+/// Asserts that a canonical path with a comma, a colon or a control character is refused,
+/// including when it is reached through a link in the root: a job that can write in a
+/// root can make a directory named `d,readonly=false` and a link to it, and a backend that
+/// builds `--mount type=bind,source=...` from the path would take the rest of the name as
+/// options. A root whose own path has such a character is refused when the agent starts.
+/// It catches an option injection through a path the job named itself.
+#[test]
+fn a_canonical_path_a_mount_option_cannot_carry_is_refused() {
+    let (dir, roots) = tree("mounts-option-chars");
+    fs::create_dir(dir.path("data/work")).unwrap();
+    for (n, name) in ["d,readonly=false", "a:b", "tab\there", "line\nbreak"]
+        .into_iter()
+        .enumerate()
+    {
+        let real = format!("work/{name}");
+        fs::create_dir(dir.path(&format!("data/{real}"))).unwrap();
+        let link = format!("link{n}");
+        symlink(
+            dir.path(&format!("data/{real}")),
+            dir.path(&format!("data/{link}")),
+        )
+        .unwrap();
+        for rel in [real.as_str(), link.as_str()] {
+            assert_eq!(
+                roots.resolve(&mount("data", rel)),
+                Err(MountError::BadPath),
+                "{rel:?}"
+            );
+        }
+    }
+    assert!(roots.resolve(&mount("data", "work")).is_ok());
+    fs::create_dir(dir.path("a,b")).unwrap();
+    let entry = ("odd".to_owned(), dir.path("a,b"));
+    assert!(
+        MountRoots::new(&[entry])
+            .unwrap_err()
+            .contains("--mount-root odd")
+    );
+}
+
 /// Asserts that a `..` that climbs out of the root is refused even when the message is
 /// not validated first (the wire validator refuses these texts; the resolver does not
 /// rely on that), and that a `..` that stays inside the root is allowed to resolve. It
@@ -143,6 +201,7 @@ fn mount_errors_say_what_they_mean() {
         MountError::UnknownRoot,
         MountError::Unresolvable,
         MountError::Escapes,
+        MountError::BadPath,
     ]
     .map(|why| why.to_string());
     assert_eq!(
@@ -150,7 +209,8 @@ fn mount_errors_say_what_they_mean() {
         [
             "the mount names a root this agent does not have",
             "the mount path cannot be resolved below its root",
-            "the mount path leaves its root"
+            "the mount path leaves its root",
+            "the mount path holds a character a mount option cannot carry"
         ]
     );
 }

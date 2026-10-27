@@ -6,6 +6,11 @@
 //! (`stop` and `remove` of a container that is already gone succeed), and a call that
 //! fails says so in a [`RuntimeError`] whose text stays on the host: it is logged and
 //! kept in a finding, and never put into a message to the server.
+//!
+//! The calls run on the lifecycle's own worker thread, never on the session's heartbeat
+//! loop (see the [module](super) documentation), so a call may take as long as the runtime
+//! needs: a pull inside `create_and_start`, the grace of a `stop`. It delays the lifecycle's
+//! next step and nothing else.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -45,7 +50,10 @@ pub struct ContainerId(pub String);
 /// A mount whose host path the agent has resolved against one of its own roots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMount {
-    /// The canonical host path, below the root the mount names.
+    /// The canonical host path, below the root the mount names, as it was when the agent
+    /// resolved it. A backend must not trust it to be the same path at the moment it binds:
+    /// it opens the path by file descriptor, beneath the root, and binds that (see
+    /// [`MountRoots`](super::MountRoots)).
     pub host: PathBuf,
     /// The path inside the container: `/mnt/<root name>/<rel>`.
     pub target: String,
@@ -93,7 +101,8 @@ pub struct Exit {
 /// What a poll found of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// It runs.
+    /// It runs, or it is created and about to: there is no state between a created
+    /// container and a running one, so a backend reports a created container as running.
     Running,
     /// It has exited.
     Exited(Exit),

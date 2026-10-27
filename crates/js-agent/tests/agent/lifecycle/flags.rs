@@ -30,7 +30,6 @@ fn good_job_flags_start_the_agent() {
         scratch.display().to_string(),
     );
     let (status, err, sent) = start(&[
-        "--allow-host-jobs",
         "--mount-root",
         &data,
         "--mount-root",
@@ -40,6 +39,22 @@ fn good_job_flags_start_the_agent() {
     ]);
     assert_eq!(status, code(0), "{err}");
     assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
+}
+
+/// Asserts that `--allow-host-jobs` ends the agent with status 2 before anything is sent,
+/// and says why: a host job needs the taint record, which is not available yet. It
+/// catches an agent that runs jobs outside a container without a way to taint the host.
+#[test]
+fn host_jobs_are_not_available_yet() {
+    let (status, err, sent) = start(&["--allow-host-jobs"]);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains(
+            "--allow-host-jobs: host jobs need the taint record, which is not available yet"
+        ),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
 }
 
 /// Asserts that a wrong job flag ends the agent with status 2 before anything is sent,

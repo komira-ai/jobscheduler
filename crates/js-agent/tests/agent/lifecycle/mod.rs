@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    Capacity, CheckHook, Config, Event, Lifecycle, MountRoots, NoChecks, RuntimeError, ScratchRoot,
+    Capacity, CheckFinding, CheckHook, Config, Event, Lifecycle, MountRoots, NoChecks,
+    RuntimeError, ScratchRoot,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, Limits};
 use serde_json::{Value, json};
@@ -46,7 +47,7 @@ pub struct Harness {
 pub struct Options {
     pub allow_host_jobs: bool,
     /// Runs whose post-job check finds something.
-    pub findings: Vec<(&'static str, &'static str)>,
+    pub findings: Vec<(&'static str, CheckFinding)>,
 }
 
 impl Harness {
@@ -161,13 +162,13 @@ fn hook(
     log: &Log,
     fake: &FakeRuntime,
     scratch_root: &std::path::Path,
-    findings: &[(&'static str, &'static str)],
+    findings: &[(&'static str, CheckFinding)],
 ) -> Box<dyn CheckHook> {
     let checks = ScriptedChecks::new(log, fake, scratch_root);
     Box::new(
         findings
             .iter()
-            .fold(checks, |c, (run, text)| c.find(run, text)),
+            .fold(checks, |c, (run, found)| c.find(run, found.clone())),
     )
 }
 

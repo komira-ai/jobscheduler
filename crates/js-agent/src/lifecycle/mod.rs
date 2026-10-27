@@ -25,17 +25,60 @@
 //! - **A job is confined to its limits.** Its wall time is counted on the agent's clock
 //!   from the moment its container started, and a job past it is stopped and reported
 //!   `timed_out`.
-//! - **A result is sent as soon as the container has exited**, before any cleanup, and
-//!   it stays in the heartbeat until the server acknowledges it. An acknowledgement of a
-//!   kind this version does not know keeps it.
+//! - **A result says what happened.** It is sent as soon as the container has exited,
+//!   before any cleanup, and it stays in the heartbeat until the server acknowledges it. An
+//!   acknowledgement of a kind this version does not know keeps it. A container that
+//!   exited before a stop reached it (a `Stop` applied between the exit and the next step,
+//!   or a stop the runtime refused) is reported as it exited, `succeeded` with status 0
+//!   included; `killed` and `timed_out` mean the agent's stop ended it, or that the
+//!   container was gone when the agent looked.
+//! - **A result with a failure code is a result.** A `failed_to_start` result with a
+//!   refusal code or one of [`detail`] is terminal: the run did not start and will not
+//!   be tried again here, and the server counts it like any other failure of the run.
 //! - **Cleanup runs in one order**: the container, the scratch directory, the post-job
 //!   checks, and only then the slot is freed. A step that fails stops the order there and
 //!   is tried again at the next [`Lifecycle::step`]; the slot stays held and a
-//!   [`Finding`] is recorded. A check that reports a finding blocks the slot for good (the
-//!   taint of design 5.12 is the next change's).
-//! - **A restart loses no job.** [`Lifecycle::adopt`] finds the containers the agent
-//!   labelled, before the first heartbeat of the new process, and lists them first, so the
-//!   server never sees a gap that would make it run the work twice.
+//!   [`Finding`] is recorded.
+//! - **A restart loses no running job.** [`Lifecycle::adopt`] finds the containers the
+//!   agent labelled, before the first heartbeat of the new process, and lists them first,
+//!   so the server never sees a gap that would make it run the work twice. A labelled
+//!   container no job can stand for (bad or repeated labels, a booking outside the offer
+//!   or beside one already taken over, a number of runs beyond what a heartbeat can
+//!   list) is stopped and removed by its own id and recorded as a [`Finding`]; nothing is
+//!   left running with nothing booked for it.
+//!
+//! # What this change does not do
+//!
+//! - **A blocked run never leaves.** A check that finds something, or cannot run, leaves
+//!   the run `Blocked`: its slot stays booked, it counts toward the runs the agent holds
+//!   and is listed as `exited_unacked` for as long as the agent lives. There is no way
+//!   out until the taint of design 5.12 exists; it is the integrity-check change's to add.
+//! - **Mount roots are read-write.** A root is whatever directory the operator names, and
+//!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
+//!   flag. A job that holds a read-write mount can write in its root, which is why the
+//!   backend must open mounts by descriptor (see [`MountRoots`]).
+//! - **Held and retired state is in memory.** After a restart an unacknowledged result
+//!   whose container was removed is lost, and the agent forgets which run ids it was told
+//!   to stop; a late `Start` for one of them runs. Containers that still exist are
+//!   re-adopted (and a run that exited in the meantime is reported as its container
+//!   says). The scheduler reruns a lease the agent no longer reports.
+//! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
+//!   purpose**, so that a `Start` that arrives after it never runs.
+//! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until a host
+//!   job can taint the host ([`Local::from_cli`]). [`Config::allow_host_jobs`] is the
+//!   switch the lifecycle honours once that exists.
+//!
+//! # The threading contract of the runtime seam
+//!
+//! [`ContainerRuntime`] calls block (an image pull, the grace of a stop, a slow daemon).
+//! They are made by [`Lifecycle`] only, and a [`Lifecycle`] must be driven from its own
+//! worker thread, never from the session's heartbeat loop: a slow runtime call then delays
+//! the next [`Lifecycle::step`] but never a heartbeat, so a slow docker call cannot make
+//! the agent miss its heartbeat deadline and fence itself. The worker owns the lifecycle
+//! (build it on that thread, so the runtime needs no `Send` bound); the session loop hands
+//! it replies and takes [`Lifecycle::held`], [`Lifecycle::results`] and
+//! [`Lifecycle::free`] as snapshots the worker publishes after each call. The backend and
+//! the wiring changes keep this contract.
 //!
 //! # Not wired yet
 //!
@@ -89,10 +132,11 @@ pub mod code {
     pub const CONTAINER_REMOVE_FAILED: &str = "container-remove-failed";
     /// The scratch directory could not be made or removed.
     pub const SCRATCH_FAILED: &str = "scratch-failed";
-    /// A post-job check found something.
-    pub const CHECK_FAILED: &str = "check-failed";
     /// A labelled container could not be accounted for after a restart.
     pub const UNADOPTABLE: &str = "unadoptable-container";
+    /// A container that could not be accounted for could not be removed either, so it is
+    /// still on the host, unbooked.
+    pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
@@ -110,8 +154,76 @@ pub trait CheckHook {
     ///
     /// # Errors
     ///
-    /// The text of what was found, or why the check could not run. The slot is not freed.
-    fn run(&mut self, run_id: &str) -> Result<(), String>;
+    /// What was found, or that the check could not run. The slot is not freed.
+    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding>;
+}
+
+/// The most bytes of detail a [`CheckFinding`] keeps.
+pub const CHECK_DETAIL_MAX: usize = 256;
+
+/// What a post-job check reports when the host is not known to be clean: a short code the
+/// check owns, and a detail cut to [`CHECK_DETAIL_MAX`] bytes so that a check cannot fill
+/// the agent's memory or its log with the output of a program. The code becomes the code
+/// of the run's [`Finding`], so it is one finding for each code of a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckFinding {
+    /// The run left something behind on the host.
+    Residue {
+        /// What kind, as a short code of the check.
+        code: &'static str,
+        /// What the check saw.
+        detail: String,
+    },
+    /// The check could not run, so the host is not known to be clean.
+    Unchecked {
+        /// Which check, as a short code.
+        code: &'static str,
+        /// Why it could not run.
+        detail: String,
+    },
+}
+
+impl CheckFinding {
+    /// A [`CheckFinding::Residue`] of `code`; `detail` is cut to [`CHECK_DETAIL_MAX`]
+    /// bytes, at a character boundary.
+    pub fn residue(code: &'static str, detail: &str) -> Self {
+        Self::Residue {
+            code,
+            detail: bounded(detail),
+        }
+    }
+
+    /// A [`CheckFinding::Unchecked`] of `code`; `detail` is cut to [`CHECK_DETAIL_MAX`]
+    /// bytes, at a character boundary.
+    pub fn unchecked(code: &'static str, detail: &str) -> Self {
+        Self::Unchecked {
+            code,
+            detail: bounded(detail),
+        }
+    }
+
+    /// The short code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Residue { code, .. } | Self::Unchecked { code, .. } => code,
+        }
+    }
+
+    /// The detail, at most [`CHECK_DETAIL_MAX`] bytes.
+    pub fn detail(&self) -> &str {
+        match self {
+            Self::Residue { detail, .. } | Self::Unchecked { detail, .. } => detail,
+        }
+    }
+}
+
+/// `text` cut to at most [`CHECK_DETAIL_MAX`] bytes, at a character boundary.
+fn bounded(text: &str) -> String {
+    let end = (0..=CHECK_DETAIL_MAX.min(text.len()))
+        .rev()
+        .find(|&at| text.is_char_boundary(at))
+        .unwrap_or(0);
+    text[..end].to_owned()
 }
 
 /// The hook with no checks: every job passes.
@@ -119,7 +231,7 @@ pub trait CheckHook {
 pub struct NoChecks;
 
 impl CheckHook for NoChecks {
-    fn run(&mut self, _run_id: &str) -> Result<(), String> {
+    fn run(&mut self, _run_id: &str) -> Result<(), CheckFinding> {
         Ok(())
     }
 }
@@ -131,7 +243,7 @@ impl CheckHook for NoChecks {
 pub struct Finding {
     /// The run it is about, when it is about one.
     pub run_id: Option<String>,
-    /// One of [`code`].
+    /// One of [`code`], or the code of a [`CheckFinding`].
     pub code: &'static str,
     /// What the runtime, the file system or the check said.
     pub message: String,
@@ -255,8 +367,6 @@ pub struct Config {
 /// The flags that configure jobs, checked.
 #[derive(Debug, Clone)]
 pub struct Local {
-    /// `--allow-host-jobs`.
-    pub allow_host_jobs: bool,
     /// The `--mount-root` flags, canonicalised.
     pub mounts: MountRoots,
     /// `--scratch-root`, when given.
@@ -267,16 +377,22 @@ pub struct Local {
 }
 
 impl Local {
-    /// Checks the job flags of `cli`: every mount root exists and is canonicalised, the
-    /// scratch root is private to the user running the agent, the container runtime is
-    /// an absolute path to an executable file.
+    /// Checks the job flags of `cli`: `--allow-host-jobs` is refused (a host job taints the
+    /// host, and the record of that taint does not exist yet), every mount root exists and
+    /// is canonicalised, the scratch root is private to the user running the agent, the
+    /// container runtime is an absolute path to an executable file.
     ///
     /// # Errors
     ///
     /// The text names the flag at fault.
     pub fn from_cli(cli: &Cli) -> Result<Self, String> {
+        if cli.allow_host_jobs {
+            return Err(
+                "--allow-host-jobs: host jobs need the taint record, which is not available yet"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
-            allow_host_jobs: cli.allow_host_jobs,
             mounts: MountRoots::new(&cli.mount_roots)?,
             scratch: cli
                 .scratch_root

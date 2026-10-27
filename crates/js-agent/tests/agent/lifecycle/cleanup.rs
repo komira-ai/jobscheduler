@@ -3,7 +3,7 @@
 
 use std::fs;
 
-use js_agent::lifecycle::code;
+use js_agent::lifecycle::{CHECK_DETAIL_MAX, CheckFinding, code};
 use js_agent_wire::{HeldRun, HeldState, Outcome};
 
 use super::{Harness, Options, cleanup, job, names};
@@ -183,7 +183,7 @@ fn a_check_finding_blocks_the_slot() {
     let mut h = Harness::with(
         "check-finding",
         Options {
-            findings: vec![("r1", "stray process")],
+            findings: vec![("r1", CheckFinding::residue("stray-process", "pid 41"))],
             ..Options::default()
         },
     );
@@ -199,7 +199,7 @@ fn a_check_finding_blocks_the_slot() {
                 "result r1",
                 "container removed r1",
                 "scratch removed r1",
-                "finding r1 check-failed",
+                "finding r1 stray-process",
                 "result r2"
             ]
             .into_iter()
@@ -223,9 +223,48 @@ fn a_check_finding_blocks_the_slot() {
         1,
         "a blocked slot is not re-checked: {checks:?}"
     );
-    assert_eq!(h.life.findings()[0].message, "stray process");
+    assert_eq!(h.life.findings()[0].message, "pid 41");
     assert_eq!(h.life.free().cpu_millis, 3000, "r1's CPU is still booked");
     assert_eq!(h.held(), ["r1", "r2"], "a blocked run stays listed");
+}
+
+/// Asserts that a check that could not run blocks the slot like one that found something,
+/// under its own code and with a message that says the check did not run. It catches an
+/// unrun check treated as a clean host.
+#[test]
+fn a_check_that_could_not_run_blocks_the_slot() {
+    let mut h = Harness::with(
+        "check-unrun",
+        Options {
+            findings: vec![("r1", CheckFinding::unchecked("ps-failed", "no ps"))],
+            ..Options::default()
+        },
+    );
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(events.last().unwrap(), "finding r1 ps-failed");
+    let found = &h.life.findings()[0];
+    assert_eq!(found.message, "the check could not run: no ps");
+    assert_eq!(h.life.free().cpu_millis, 3000);
+}
+
+/// Asserts that a check finding keeps at most `CHECK_DETAIL_MAX` bytes of detail and cuts
+/// at a character boundary, and keeps a short detail whole. It catches a check that can
+/// put the output of a program into the agent's memory and log without bound.
+#[test]
+fn a_check_finding_detail_is_bounded() {
+    let short = CheckFinding::residue("x", "short");
+    assert_eq!((short.code(), short.detail()), ("x", "short"));
+    let exact = "a".repeat(CHECK_DETAIL_MAX);
+    assert_eq!(CheckFinding::unchecked("x", &exact).detail(), exact);
+    let long = "a".repeat(CHECK_DETAIL_MAX + 1);
+    assert_eq!(CheckFinding::residue("x", &long).detail(), exact);
+    // A two-byte character that straddles the limit is dropped whole.
+    let straddle = format!("{}é", "a".repeat(CHECK_DETAIL_MAX - 1));
+    let cut = CheckFinding::residue("x", &straddle);
+    assert_eq!(cut.detail(), "a".repeat(CHECK_DETAIL_MAX - 1));
+    assert_eq!(CheckFinding::residue("x", "").detail(), "");
 }
 
 /// Asserts that a container that fails to start gives a `failed_to_start` result with

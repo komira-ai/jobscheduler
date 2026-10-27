@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use js_agent::lifecycle::{
-    CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError,
-    Status, label,
+    CheckFinding, CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found,
+    RuntimeError, Status, label,
 };
 
 /// A clock that moves only when a test says so. Clones share one reading.
@@ -288,7 +288,7 @@ pub struct ScriptedChecks {
     log: Log,
     runtime: FakeRuntime,
     scratch_root: PathBuf,
-    findings: BTreeMap<String, String>,
+    findings: BTreeMap<String, CheckFinding>,
 }
 
 impl ScriptedChecks {
@@ -301,14 +301,14 @@ impl ScriptedChecks {
         }
     }
 
-    pub fn find(mut self, run_id: &str, text: &str) -> Self {
-        self.findings.insert(run_id.to_owned(), text.to_owned());
+    pub fn find(mut self, run_id: &str, finding: CheckFinding) -> Self {
+        self.findings.insert(run_id.to_owned(), finding);
         self
     }
 }
 
 impl CheckHook for ScriptedChecks {
-    fn run(&mut self, run_id: &str) -> Result<(), String> {
+    fn run(&mut self, run_id: &str) -> Result<(), CheckFinding> {
         let container = match self.runtime.gone(run_id) {
             true => "container gone",
             false => "container present",
@@ -322,6 +322,6 @@ impl CheckHook for ScriptedChecks {
             .push(format!("check {run_id} ({container}, {scratch})"));
         self.findings
             .get(run_id)
-            .map_or(Ok(()), |text| Err(text.clone()))
+            .map_or(Ok(()), |finding| Err(finding.clone()))
     }
 }
