@@ -31,9 +31,27 @@
 //! [`FakeAgent`] is the correct in-process agent. Each [`Defect`] is the same agent
 //! missing exactly one behaviour, and the crate's tests assert that each scenario fails
 //! on its broken agent and that no other scenario does, so no scenario passes vacuously.
-//! The wire fields these scenarios read (a Start's validity bound, the fence window) are
-//! the harness's to carry: a transport that has not got them yet cannot implement the
-//! trait fully, which is the finding.
+//!
+//! # What a transport adapter maps
+//!
+//! - **Start validity is relative.** `start(lease, valid_for, waited)` is a Start that
+//!   may be acted on for `valid_for` ms (0 means unbounded) and that waited `waited` ms
+//!   before the agent acted on it; it is dropped when `waited > valid_for`, so exactly at
+//!   the limit it runs and one tick past it does not. The adapter arranges the wait the
+//!   way its transport counts it: the legacy agent measures from receipt on the agent's
+//!   own clock (so the adapter holds the Start while the clock advances), the worker
+//!   wire from the send time of the heartbeat the Start names (so the adapter backdates
+//!   that heartbeat).
+//! - **The fence window comes from the transport.** `fence_window` is the transport's own
+//!   value, or `None` when the agent has none. The legacy agent has no self-fence today
+//!   (it reads no clock), so `SelfFencesAfterSilence` is a check it cannot pass until it
+//!   gains one; the scenario then fails with that reason rather than being skipped.
+//! - **`Observed.launches` and `never_started` are derived.** Where the agent emits an
+//!   event for a skipped stale Start (the legacy agent does) read that; where it does
+//!   not (the worker wire), derive them from the Results and refusals that reached the
+//!   harness and from what the job runner was asked to launch.
+//! - **Results repeat.** An unacknowledged result is repeated in every heartbeat, so
+//!   `heartbeat` makes the agent send one and `results_sent` counts every transmission.
 
 mod fake;
 mod scenarios;
@@ -61,7 +79,7 @@ pub struct Observed {
     pub running: BTreeSet<String>,
     /// Leases the agent stopped because it heard nothing for the fence window.
     pub fenced: BTreeSet<String>,
-    /// Leases whose Start arrived past its validity bound and was dropped.
+    /// Leases whose Start had waited past its validity and was dropped.
     pub never_started: BTreeSet<String>,
     /// How many times the agent actually launched each lease's job.
     pub launches: BTreeMap<String, u32>,
@@ -74,8 +92,9 @@ pub struct Observed {
 /// Times are milliseconds on the injected clock, which starts at 0. An operation that
 /// needs the connection answers [`Delivery::Lost`] while it is down and changes nothing.
 pub trait AgentHarness {
-    /// The silence after which the agent stops its leases by itself. At least 2.
-    fn fence_window(&self) -> u64;
+    /// The silence after which the agent stops its leases by itself, at least 2, or
+    /// `None` for an agent that has no self-fence.
+    fn fence_window(&self) -> Option<u64>;
 
     /// The injected clock now.
     fn now(&self) -> u64;
@@ -83,9 +102,10 @@ pub trait AgentHarness {
     /// Moves the injected clock forward and lets the agent act on the new time.
     fn advance(&mut self, millis: u64);
 
-    /// Delivers a Start for `lease` that is valid until `not_after`. Counts as scheduler
-    /// contact when delivered.
-    fn start(&mut self, lease: &str, not_after: u64) -> Delivery;
+    /// Delivers a Start for `lease` that is valid for `valid_for` ms (0 is unbounded) and
+    /// has waited `waited` ms before the agent acts on it. Counts as scheduler contact
+    /// when delivered.
+    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery;
 
     /// Delivers a Cancel for `lease`. Counts as scheduler contact when delivered.
     fn cancel(&mut self, lease: &str) -> Delivery;
@@ -93,8 +113,13 @@ pub trait AgentHarness {
     /// Acknowledges the result of `lease`. Counts as scheduler contact when delivered.
     fn ack(&mut self, lease: &str) -> Delivery;
 
-    /// The job of the running `lease` ends on its own, producing a result.
+    /// The job of the running `lease` ends on its own, producing a result, which the
+    /// agent sends at its next heartbeat (here, at once if connected).
     fn complete(&mut self, lease: &str);
+
+    /// The agent sends a heartbeat now, repeating every result not yet acknowledged.
+    /// Nothing is sent while the connection is down.
+    fn heartbeat(&mut self);
 
     /// The scheduler is heard from, as an answered heartbeat.
     fn contact(&mut self);
@@ -102,7 +127,7 @@ pub trait AgentHarness {
     /// Drops the connection.
     fn disconnect(&mut self);
 
-    /// Connects again, and lets the agent say what it has to say on a new connection.
+    /// Connects again; the agent's first heartbeat on the new connection follows.
     fn reconnect(&mut self);
 
     /// What the agent has reported so far.

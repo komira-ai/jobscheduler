@@ -13,15 +13,24 @@ broken agent and that no other scenario does.
 
 | Scenario | Checks | Fails on |
 |---|---|---|
-| `StartIsIdempotent` | a repeated Start launches the job once and is acknowledged | `StartRunsTwice` |
-| `CancelUntilAbsent` | a Cancel lost on a dropped connection changes nothing; resent while the lease is listed, the lease leaves the listing; a further Cancel is harmless | `CancelKeepsListed` |
-| `LateStartIsDropped` | a Start past its bound is reported never started and launches nothing; one inside the bound runs | `RunsLateStart` |
-| `SelfFencesAfterSilence` | one tick short of the fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced | `NeverFences` |
-| `UnackedResultIsResent` | an unacknowledged result is sent again after each reconnect, an acknowledged one is not | `ForgetsUnackedResult` |
+| `StartIsIdempotent` | a repeated Start launches the job once | `StartRunsTwice` |
+| `CancelUntilAbsent` | a Cancel lost on a dropped connection changes nothing; resent while the lease is listed, the lease leaves the listing; a further Cancel is harmless; a Start for the cancelled id does not run (the id is retired) | `CancelKeepsListed`, `ForgetsRetiredIds` |
+| `LateStartIsDropped` | a Start that waited longer than its validity is reported never started and launches nothing; one that waited exactly its validity runs; validity 0 is unbounded and runs | `RunsLateStart` |
+| `SelfFencesAfterSilence` | one tick short of the agent's own fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced; an agent with no fence fails | `NeverFences` |
+| `UnackedResultIsResent` | an unacknowledged result is repeated in every heartbeat, including the first on a new connection, and not while the link is down; an acknowledged one is not | `ForgetsUnackedResult` |
 
-Not yet built: no harness exists for a real transport (the old `js-agent` wire, or the worker wire the host agent will speak); a
-transport without a Start validity bound or a fence window cannot implement the trait fully. The fake cancels without producing a
-result and does not model grace periods.
+How an adapter maps a transport (full text in the module documentation of `agent`):
+
+- Start validity is relative (`valid_for`, 0 unbounded; dropped when `waited > valid_for`). The legacy agent measures `waited` from
+  receipt on the agent's clock (`valid_for_ms != 0 && waited > valid_for_ms`); the worker wire counts `valid_for_ms` from the send
+  time of the heartbeat the Start names.
+- The fence window is the transport's own (the worker daemon's fence T), or none. The legacy agent has no self-fence and reads no
+  clock, so `SelfFencesAfterSilence` is a check it cannot pass today; the scenario fails with that reason.
+- `launches` and `never_started` are derived: the legacy agent emits a skipped-stale event to read; the worker wire has none, so an
+  adapter derives them from the Results and refusals that reached it and from what its job runner was asked to launch.
+
+Not yet built: no harness exists for a real transport (the legacy `js-agent` wire, or the worker wire the host agent will speak).
+The fake cancels without producing a result and does not model grace periods or a cap on retired ids.
 
 ## Still prose
 

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{AgentHarness, Delivery, Observed};
 
-/// The fence window of [`FakeAgent`], in milliseconds.
+/// The fence window [`FakeAgent::new`] uses, in milliseconds.
 pub const FENCE_WINDOW: u64 = 30_000;
 
 /// The one behaviour a broken [`FakeAgent`] lacks. Each is the cause of exactly one
@@ -13,7 +13,9 @@ pub enum Defect {
     StartRunsTwice,
     /// A Cancel stops the job but the lease stays listed as running.
     CancelKeepsListed,
-    /// A Start past its validity bound is run.
+    /// A Cancel does not retire the lease id, so a later Start for it runs.
+    ForgetsRetiredIds,
+    /// A Start that waited longer than its validity is run.
     RunsLateStart,
     /// The agent never stops its leases for want of the scheduler.
     NeverFences,
@@ -25,10 +27,12 @@ pub enum Defect {
 #[derive(Debug, Clone)]
 pub struct FakeAgent {
     defect: Option<Defect>,
+    window: Option<u64>,
     now: u64,
     last_contact: u64,
     connected: bool,
     known: BTreeSet<String>,
+    retired: BTreeSet<String>,
     running: BTreeSet<String>,
     fenced: BTreeSet<String>,
     never_started: BTreeSet<String>,
@@ -38,14 +42,22 @@ pub struct FakeAgent {
 }
 
 impl FakeAgent {
-    /// A correct agent, connected, at time 0.
+    /// A correct agent with a [`FENCE_WINDOW`] fence, connected, at time 0.
     pub fn new() -> Self {
+        Self::with_window(Some(FENCE_WINDOW))
+    }
+
+    /// A correct agent whose fence window is `window`, or with `None` an agent that has
+    /// no self-fence at all, as an agent whose wire carries none.
+    pub fn with_window(window: Option<u64>) -> Self {
         Self {
             defect: None,
+            window,
             now: 0,
             last_contact: 0,
             connected: true,
             known: BTreeSet::new(),
+            retired: BTreeSet::new(),
             running: BTreeSet::new(),
             fenced: BTreeSet::new(),
             never_started: BTreeSet::new(),
@@ -66,13 +78,6 @@ impl FakeAgent {
     fn lacks(&self, defect: Defect) -> bool {
         self.defect == Some(defect)
     }
-
-    /// Sends the result of `lease` if the connection is up.
-    fn send(&mut self, lease: &str) {
-        if self.connected {
-            self.sent.push(lease.to_string());
-        }
-    }
 }
 
 impl Default for FakeAgent {
@@ -82,8 +87,8 @@ impl Default for FakeAgent {
 }
 
 impl AgentHarness for FakeAgent {
-    fn fence_window(&self) -> u64 {
-        FENCE_WINDOW
+    fn fence_window(&self) -> Option<u64> {
+        self.window
     }
 
     fn now(&self) -> u64 {
@@ -92,21 +97,24 @@ impl AgentHarness for FakeAgent {
 
     fn advance(&mut self, millis: u64) {
         self.now += millis;
-        let silent = self.now - self.last_contact >= FENCE_WINDOW;
+        let silence = self.now - self.last_contact;
+        let silent = self.window.is_some_and(|window| silence >= window);
         if !self.running.is_empty() && silent && !self.lacks(Defect::NeverFences) {
             self.fenced.append(&mut self.running);
         }
     }
 
-    fn start(&mut self, lease: &str, not_after: u64) -> Delivery {
+    fn start(&mut self, lease: &str, valid_for: u64, waited: u64) -> Delivery {
         if !self.connected {
             return Delivery::Lost;
         }
         self.last_contact = self.now;
         let fresh = self.known.insert(lease.to_string());
         let repeat = !fresh && !self.lacks(Defect::StartRunsTwice);
-        let late = not_after < self.now && !self.lacks(Defect::RunsLateStart);
-        if !repeat {
+        let bounded = valid_for != 0 && waited > valid_for;
+        let late = bounded && !self.lacks(Defect::RunsLateStart);
+        let retired = self.retired.contains(lease);
+        if !repeat && !retired {
             if late {
                 self.never_started.insert(lease.to_string());
             } else {
@@ -125,6 +133,11 @@ impl AgentHarness for FakeAgent {
         if !self.lacks(Defect::CancelKeepsListed) {
             self.running.remove(lease);
         }
+        if self.lacks(Defect::ForgetsRetiredIds) {
+            self.known.remove(lease);
+        } else {
+            self.retired.insert(lease.to_string());
+        }
         Delivery::Delivered
     }
 
@@ -140,7 +153,13 @@ impl AgentHarness for FakeAgent {
     fn complete(&mut self, lease: &str) {
         self.running.remove(lease);
         self.unacked.insert(lease.to_string());
-        self.send(lease);
+        self.heartbeat();
+    }
+
+    fn heartbeat(&mut self) {
+        if self.connected {
+            self.sent.extend(self.unacked.iter().cloned());
+        }
     }
 
     fn contact(&mut self) {
@@ -156,7 +175,7 @@ impl AgentHarness for FakeAgent {
 
     fn reconnect(&mut self) {
         self.connected = true;
-        self.sent.extend(self.unacked.iter().cloned());
+        self.heartbeat();
     }
 
     fn observed(&self) -> Observed {

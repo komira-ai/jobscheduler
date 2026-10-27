@@ -4,23 +4,31 @@ use crate::Verdict;
 /// How many times the scenario resends a Cancel while the lease is still listed.
 const CANCEL_ROUNDS: u32 = 3;
 
+/// The validity of a Start that never goes stale.
+const UNBOUNDED: u64 = 0;
+
+/// The validity the late-Start scenario gives its Starts, in milliseconds.
+const VALIDITY: u64 = 1_000;
+
 /// One behaviour every host agent must have, named in the suite's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scenario {
-    /// A Start repeated for the same lease id launches the job once and is acknowledged.
+    /// A Start repeated for the same lease id launches the job once.
     StartIsIdempotent,
     /// A Cancel that never arrived changes nothing; the scheduler resends it while the
     /// lease is listed, and the lease leaves the listing, after which a further Cancel
-    /// is harmless.
+    /// is harmless and a Start for the cancelled id does not run it again.
     CancelUntilAbsent,
-    /// A Start that arrives after its validity bound is dropped and reported as never
-    /// started, and a Start inside the bound beside it runs.
+    /// A Start that has waited longer than its validity is dropped and reported as never
+    /// started; one that waited exactly its validity, and one with no validity bound,
+    /// run.
     LateStartIsDropped,
-    /// Silence of the fence window, counted from the last scheduler contact, makes the
-    /// agent stop its leases; one tick less does not.
+    /// Silence of the agent's fence window, counted from the last scheduler contact,
+    /// makes the agent stop its leases; one tick less does not. An agent with no
+    /// self-fence fails this scenario, as the legacy agent does today.
     SelfFencesAfterSilence,
-    /// A result the scheduler has not acknowledged is sent again on every new
-    /// connection, and one that was acknowledged is not.
+    /// A result the scheduler has not acknowledged is sent again in every heartbeat,
+    /// including the first on a new connection, and one that was acknowledged is not.
     UnackedResultIsResent,
 }
 
@@ -67,21 +75,9 @@ impl Notes {
     }
 }
 
-/// The time up to which a Start made now is valid.
-fn bound<H: AgentHarness>(harness: &H) -> u64 {
-    harness.now() + harness.fence_window()
-}
-
 fn start_is_idempotent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let until = bound(harness);
-    notes.expect(
-        harness.start("lease", until) == Delivery::Delivered,
-        "the first Start is delivered",
-    );
-    notes.expect(
-        harness.start("lease", until) == Delivery::Delivered,
-        "the repeated Start is delivered",
-    );
+    harness.start("lease", UNBOUNDED, 0);
+    harness.start("lease", UNBOUNDED, 0);
     let seen = harness.observed();
     notes.expect(
         seen.launches.get("lease") == Some(&1),
@@ -91,8 +87,7 @@ fn start_is_idempotent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
 }
 
 fn cancel_until_absent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let until = bound(harness);
-    harness.start("lease", until);
+    harness.start("lease", UNBOUNDED, 0);
     harness.disconnect();
     notes.expect(
         harness.cancel("lease") == Delivery::Lost,
@@ -117,50 +112,58 @@ fn cancel_until_absent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
         harness.cancel("lease") == Delivery::Delivered,
         "a Cancel for an absent lease is acknowledged",
     );
+    harness.start("lease", UNBOUNDED, 0);
     let seen = harness.observed();
     notes.expect(
         !seen.running.contains("lease"),
-        "a Cancel for an absent lease does not bring it back",
+        "a cancelled lease id is retired: a later Start does not run it",
     );
     notes.expect(
         seen.launches.get("lease") == Some(&1),
-        "a Cancel for an absent lease launches nothing",
+        "a Cancel and a later Start launch nothing more",
     );
 }
 
 fn late_start_is_dropped<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let late = bound(harness);
-    harness.advance(harness.fence_window() + 1);
-    harness.start("late", late);
-    let until = bound(harness);
-    harness.start("timely", until);
+    harness.start("late", VALIDITY, VALIDITY + 1);
+    harness.start("at-limit", VALIDITY, VALIDITY);
+    harness.start("unbounded", UNBOUNDED, u64::MAX);
     let seen = harness.observed();
     notes.expect(
         seen.never_started.contains("late"),
-        "a Start past its bound is reported as never started",
+        "a Start one tick past its validity is reported as never started",
     );
     notes.expect(
         !seen.running.contains("late"),
-        "a Start past its bound is not running",
+        "a Start past its validity is not running",
     );
     notes.expect(
         !seen.launches.contains_key("late"),
-        "a Start past its bound launches nothing",
+        "a Start past its validity launches nothing",
     );
     notes.expect(
-        seen.running.contains("timely"),
-        "a Start inside its bound runs",
+        seen.running.contains("at-limit"),
+        "a Start at exactly its validity runs",
     );
     notes.expect(
-        !seen.never_started.contains("timely"),
-        "a Start inside its bound is not reported as never started",
+        seen.running.contains("unbounded"),
+        "a Start with no validity bound runs however long it waited",
+    );
+    notes.expect(
+        seen.never_started.len() == 1,
+        "only the stale Start is reported as never started",
     );
 }
 
 fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let window = harness.fence_window();
-    let until = bound(harness);
-    harness.start("lease", until);
+    let Some(window) = harness.fence_window() else {
+        notes.expect(
+            false,
+            "the agent has no self-fence, so it cannot stop its leases by itself",
+        );
+        return;
+    };
+    harness.start("lease", UNBOUNDED, 0);
     harness.advance(window - 1);
     notes.expect(
         harness.observed().running.contains("lease"),
@@ -186,27 +189,33 @@ fn self_fences_after_silence<H: AgentHarness>(harness: &mut H, notes: &mut Notes
 }
 
 fn unacked_result_is_resent<H: AgentHarness>(harness: &mut H, notes: &mut Notes) {
-    let until = bound(harness);
-    harness.start("lease", until);
+    harness.start("lease", UNBOUNDED, 0);
     harness.complete("lease");
     notes.expect(
         harness.observed().results_sent == ["lease"],
-        "the result is sent once when the job ends",
+        "the result is sent when the job ends",
     );
-    harness.disconnect();
-    harness.reconnect();
+    harness.heartbeat();
     notes.expect(
         harness.observed().results_sent == ["lease", "lease"],
-        "an unacknowledged result is sent again after a reconnect",
+        "an unacknowledged result is repeated in the next heartbeat",
+    );
+    harness.disconnect();
+    harness.heartbeat();
+    harness.reconnect();
+    notes.expect(
+        harness.observed().results_sent == ["lease", "lease", "lease"],
+        "an unacknowledged result is sent again on a new connection, and not while it is down",
     );
     notes.expect(
         harness.ack("lease") == Delivery::Delivered,
         "the acknowledgement is delivered",
     );
+    harness.heartbeat();
     harness.disconnect();
     harness.reconnect();
     notes.expect(
-        harness.observed().results_sent == ["lease", "lease"],
+        harness.observed().results_sent == ["lease", "lease", "lease"],
         "an acknowledged result is not sent again",
     );
 }
