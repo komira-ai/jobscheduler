@@ -3,9 +3,11 @@
 # only on a crate of its own layer or a lower one. Every workspace crate is in exactly one
 # layer; a crate that is added to the workspace is added here in the same pull request.
 #
-# `pure`: the layer's crates take time and I/O as inputs, so each denies
-# `clippy::disallowed_methods` and `clippy::disallowed_types` (clippy.toml) in its
-# src/lib.rs. `planned`: names reserved for crates that have not arrived yet.
+# `pure`: the layer's crates take time as an input and read no clock, sleep, hash no
+# collection and open no TCP or UDP socket, so each denies `clippy::disallowed_methods` and
+# `clippy::disallowed_types` (clippy.toml) in its library and binary roots, never relaxes them,
+# and reaches no async runtime, network or random-source crate (not covered: std::fs,
+# std::process, std::env, Unix sockets). `planned`: names reserved for crates that have not arrived yet.
 #
 # `single_source`: packages that exist once, from this workspace. A second copy (a git or
 # registry one) would make the types of one different from the types of the other.

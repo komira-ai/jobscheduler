@@ -5,7 +5,7 @@ The design is in `docs/design.md` (it arrives with the design pull request). The
 
 ## Layers
 
-`layers.toml` puts every crate in a layer and `cargo test -p xtask --test layering` fails when a crate depends on a higher layer, when a pure crate does not deny the clock, hashed-collection and socket items in `clippy.toml`, or when a second `js-types` exists. How a crate is added to the workspace and how another repository depends on these crates by git revision are in `docs/layering.md`.
+`layers.toml` puts every crate in a layer and `cargo test -p xtask --test layering` fails when a crate depends on a higher layer or on anything neither listed nor declared in the root `[workspace.dependencies]` (a `kbf-*` crate included), when a pure crate does not deny the clock-read, sleep, `HashMap`/`HashSet` and TCP/UDP-socket items in `clippy.toml` (or relaxes that lint, or reaches tokio, hyper and the like), or when a second `js-types` exists. How a crate is added to the workspace and how another repository depends on these crates by git revision are in `docs/layering.md`.
 
 ## Coverage
 

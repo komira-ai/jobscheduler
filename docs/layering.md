@@ -9,7 +9,7 @@ a convention that only a reviewer enforces.
 `layers.toml` lists the workspace's layers from the bottom up and the crates of each. A crate
 may depend, through `[dependencies]`, `[build-dependencies]` and their `[target.*]` forms,
 only on a crate of its own layer or a lower one. `[dev-dependencies]` are not edges: a test
-may reach up to the crate it exercises (`js-conformance` does).
+may reach up to the crate it exercises (no crate does today).
 
 | layer | holds |
 |---|---|
@@ -24,36 +24,74 @@ arrives is added to `layers.toml` in the same pull request (a workspace crate in
 fails the test), and may not be in two layers.
 
 `cargo test -p xtask --test layering` is the check (`crates/xtask/src/layering.rs`). It reads
-the manifests, so it needs no network. It also fails when a layer marked `pure` has a crate
-whose `src/lib.rs` lacks the `deny` line below, and it fails on a second `js-types` (below).
-Its tests copy the real manifests and `layers.toml` into a scratch directory, plant a defect
-(an edge up a layer, a missing `deny`, a git copy of `js-types`) and require the check to
-name it.
+the manifests, so the manifest rules need no network (the transitive walk below runs
+`cargo metadata --locked`). It fails on:
+
+- a crate in no layer, or in two;
+- a dependency from a lower layer up to a higher one;
+- a non-dev dependency (normal, build or `[target.*]`) of a workspace crate that is neither a
+  crate `layers.toml` lists nor a registry dependency declared in the root
+  `[workspace.dependencies]`: a `kbf-*` crate (by path, git or version) and an unlisted path
+  or git dependency both fail here, so this repository cannot depend on the repository its
+  crates were lifted out of. An external dependency must be `name.workspace = true`;
+- a pure crate that lacks the `deny` below in its library root or any binary root, that
+  relaxes the lints anywhere in its `src/` tree (see Purity), or that reaches a forbidden
+  external crate through its resolved normal dependencies (see Purity);
+- a second `js-types` (below).
+
+`deny.toml` also bans kbf's crates by name in the resolved graph (cargo-deny matches exact
+names, so the list is explicit and is refreshed when kbf's crates change; the layering rule
+above is by prefix and covers a crate kbf adds later).
+
+Its tests copy the real manifests, sources and `layers.toml` into a scratch directory, plant a
+defect (an edge up a layer, a missing `deny`, an `allow`, a `kbf-types` dependency, a git copy
+of `js-types`) and require the check to name it.
 
 ## Purity
 
-A pure crate never reads a clock, hashes a collection with a per-process seed, waits, or opens
-a socket, so a seed replays exactly: time enters as an input and ordered collections stand in
-for hashed ones. `clippy.toml` lists the disallowed methods and types
-(`Instant::now`, `SystemTime::now`, `thread::sleep`, `HashMap`, `HashSet`, `TcpStream`,
-`TcpListener`, `UdpSocket`); the workspace allows them (`[workspace.lints.clippy]`) and a pure
-crate turns them back on in `src/lib.rs`:
+A pure crate never reads a clock, sleeps, hashes a collection with a per-process seed, or opens
+a TCP or UDP socket, so a seed replays exactly: time enters as an input and ordered
+collections stand in for hashed ones. This is what the lints cover, no more: `clippy.toml`
+lists `Instant::now`, `SystemTime::now`, `thread::sleep`, `HashMap`, `HashSet`, `TcpStream`,
+`TcpListener` and `UdpSocket`. Other I/O (`std::fs`, `std::process`, `std::env`, Unix
+sockets such as `UnixStream`) is **not** covered and is a matter for review. The workspace
+allows the lints (`[workspace.lints.clippy]`) and a pure crate turns them back on in its
+library root and in every binary root (`src/main.rs`, `src/bin/*`, a `[[bin]]` path):
 
 ```rust
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 ```
 
-The line must be on one line as written here. The lint job runs clippy with `-D warnings`, so
-a clock or a `HashMap` in a pure crate fails it. The list is the one kbf uses for its pure
-crates, so code that moves keeps passing under the same rules.
+The attribute must be on one line, listing both lints (`forbid` instead of `deny` is
+accepted); a lint name that only a trailing comment mentions does not count. The lint job runs
+clippy with `-D warnings`, so a clock or a `HashMap` in a pure crate fails it. The layering
+test also refuses, anywhere under a pure crate's `src/`, an attribute other than `deny` or
+`forbid` that names `clippy::disallowed_*`, `clippy::all` or `clippy::style` (an `allow`, an
+`expect`, a `warn`); a lint name inside a comment that follows another attribute is not
+read as one.
 
-## Build configuration
+A pure crate also reaches no async runtime, network stack or random source, directly or through
+any other crate: tokio, tonic, hyper, reqwest, rand, rand_core, rand_chacha, getrandom, mio,
+socket2 (the list kbf's layering test keeps for its pure crates). The test walks the resolved
+normal dependencies from `cargo metadata`; dev and build dependencies are not linked into the
+library and are not walked.
 
-The workspace builds with the toolchain in `rust-toolchain.toml` (1.95.0), edition 2024,
-resolver 3, and the lints in the root `Cargo.toml`: `missing_docs` (every public item is
-documented), `unexpected_cfgs` with `cfg(coverage)` declared (cargo-llvm-cov sets it, and a
-moved crate may compile code out under it), and the clippy purity lints above. These match
-kbf's, so a crate does not pass in one repository and fail in the other.
+## Build configuration and parity with kbf
+
+The workspace builds with the toolchain in `rust-toolchain.toml` (1.95.0), edition 2024 and
+resolver 3. Where it matches kbf and where it does not, so a moved crate is not surprised:
+
+- The same as kbf: toolchain, edition, resolver 3, `unexpected_cfgs` with `cfg(coverage)`
+  declared (cargo-llvm-cov sets it, and a moved crate may compile code out under it), and the
+  `clippy.toml` lists.
+- **Stricter here, deliberately**: `missing_docs = "warn"` in `[workspace.lints.rust]`, and the
+  lint job runs clippy with `-D warnings`, so every undocumented public item fails. kbf has no
+  `missing_docs`, so a crate that passes there can fail here. A moved crate documents its
+  public API, or carries a scoped `#![allow(missing_docs)]` with a comment naming the
+  follow-up issue that removes it.
+- **Different files**: this repository has a `rustfmt.toml` (`edition = 2024`); kbf has none.
+  `cargo fmt` reads the edition from the manifest in both, but the file is a difference to
+  keep in mind when formatting moved code.
 
 ## Moving a crate in from another repository
 
