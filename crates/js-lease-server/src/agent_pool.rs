@@ -5,9 +5,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
-use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig};
+use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 use serde::Deserialize;
+use tracing::warn;
 
 use crate::config::parse_duration;
 use crate::error::StartupError;
@@ -29,7 +30,45 @@ struct RawPool {
     heartbeat_interval: Option<String>,
     grace: Option<String>,
     lost_retention: Option<String>,
+    // The whole-node class (design whole-node.md, section 6). Every key is optional.
+    max_whole_node: Option<usize>,
+    max_draining: Option<usize>,
+    max_whole_node_per_consumer: Option<usize>,
+    keep_for_ordinary: Option<usize>,
+    allow_last_capable: Option<bool>,
+    drain_after: Option<String>,
+    drain_deadline: Option<String>,
+    reserve_backoff: Option<String>,
+    max_reserve_attempts: Option<u32>,
+    prepare_timeout: Option<String>,
+    max_replace: Option<u32>,
+    regain_grace: Option<String>,
 }
+
+impl RawPool {
+    /// Whether the file sets any whole-node key.
+    fn sets_whole_node_keys(&self) -> bool {
+        let set = [
+            self.max_whole_node.is_some(),
+            self.max_draining.is_some(),
+            self.max_whole_node_per_consumer.is_some(),
+            self.keep_for_ordinary.is_some(),
+            self.allow_last_capable.is_some(),
+            self.drain_after.is_some(),
+            self.drain_deadline.is_some(),
+            self.reserve_backoff.is_some(),
+            self.max_reserve_attempts.is_some(),
+            self.prepare_timeout.is_some(),
+            self.max_replace.is_some(),
+            self.regain_grace.is_some(),
+        ];
+        set.into_iter().any(|key| key)
+    }
+}
+
+/// Why a mixed pool (a class admitted `Book`) is refused at load.
+const MIXED_UNSERVED: &str =
+    "a mixed pool (a class that books part of a host) is not served by this server yet";
 
 /// The `[shape]` table: what the pool promises and books for every host.
 #[derive(Debug, Deserialize)]
@@ -47,14 +86,39 @@ pub(crate) fn read(path: &Path) -> Result<PoolConfig, StartupError> {
     let flag = "--agent-pool-config";
     let text = std::fs::read_to_string(path)
         .map_err(|err| StartupError::new(flag, format!("{}: {err}", path.display())))?;
-    parse(&text).map_err(|reason| StartupError::new(flag, format!("{}: {reason}", path.display())))
+    let pool = parse(&text)
+        .map_err(|reason| StartupError::new(flag, format!("{}: {reason}", path.display())))?;
+    if let Some(note) = surplus_warning(&pool) {
+        warn!("{}: {note}", path.display());
+    }
+    Ok(pool)
+}
+
+/// What to tell the operator when a dedicated pool allows fewer whole hosts than
+/// machines: the surplus hosts would serve nothing.
+fn surplus_warning(pool: &PoolConfig) -> Option<String> {
+    let surplus = pool.whole_surplus();
+    (surplus > 0).then(|| {
+        format!("max_whole_node is below max_machines, so {surplus} host(s) of the pool will serve nothing")
+    })
 }
 
 /// The pool a file's text describes, or what is wrong with it.
 pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
+    parse_with(text, class)
+}
+
+/// [`parse`] with the class names read by `classes`, so a test can offer a class no
+/// file can name today.
+fn parse_with(
+    text: &str,
+    classes: fn(&str) -> Result<ResourceClass, String>,
+) -> Result<PoolConfig, String> {
     let raw: RawPool = toml::from_str(text).map_err(|err| err.to_string())?;
     let name = ProviderId::new(&raw.name).map_err(|err| format!("name: {err}"))?;
-    let class = class(&raw.class)?;
+    let class = classes(&raw.class)?;
+    let admission = class.admission().clone();
+    let whole = whole_node(&raw, &admission)?;
     let machines = 1..=MAX_MACHINES;
     if !machines.contains(&raw.max_machines) {
         return Err(format!("max_machines must be from 1 to {MAX_MACHINES}"));
@@ -90,8 +154,74 @@ pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
         raw.lost_retention,
         DEFAULT_LOST_RETENTION_MS,
     )?;
-    pool.with_lost_retention(retention)
-        .map_err(|err| format!("lost_retention: {err}"))
+    let pool = pool
+        .with_lost_retention(retention)
+        .map_err(|err| format!("lost_retention: {err}"))?;
+    let pool = match whole {
+        Some(whole) => pool.with_whole_node(whole).map_err(|err| err.to_string())?,
+        None => pool,
+    };
+    match admission {
+        Admission::Book(_) => Err(MIXED_UNSERVED.to_string()),
+        _ => Ok(pool),
+    }
+}
+
+/// The whole-node settings a file asks for: a `Whole` class takes the dedicated
+/// defaults with the file's keys over them; a `Book` class (a mixed pool) takes them
+/// only when `max_whole_node` is set; any other class takes none and refuses the keys.
+fn whole_node(raw: &RawPool, admission: &Admission) -> Result<Option<WholeNodeConfig>, String> {
+    let base = match (admission, raw.max_whole_node) {
+        (Admission::Whole, _) => WholeNodeConfig::dedicated(raw.max_machines),
+        (Admission::Book(_), Some(most)) => WholeNodeConfig::mixed(most),
+        (Admission::Book(_), None) => return Ok(None),
+        (Admission::BookAll, _) => {
+            return match raw.sets_whole_node_keys() {
+                true => Err("whole-node keys need a whole-node class".to_string()),
+                false => Ok(None),
+            };
+        }
+    };
+    let deadline = raw.drain_deadline.clone();
+    Ok(Some(WholeNodeConfig {
+        max_whole_node: raw.max_whole_node.unwrap_or(base.max_whole_node),
+        max_draining: raw.max_draining.unwrap_or(base.max_draining),
+        max_whole_node_per_consumer: raw.max_whole_node_per_consumer,
+        keep_for_ordinary: raw.keep_for_ordinary.unwrap_or(base.keep_for_ordinary),
+        allow_last_capable: raw.allow_last_capable.unwrap_or(base.allow_last_capable),
+        drain_after_ms: millis_or_zero("drain_after", &raw.drain_after, base.drain_after_ms)?,
+        drain_deadline_ms: deadline
+            .map(|text| millis("drain_deadline", Some(text), 0))
+            .transpose()?,
+        reserve_backoff_ms: millis(
+            "reserve_backoff",
+            raw.reserve_backoff.clone(),
+            base.reserve_backoff_ms,
+        )?,
+        max_reserve_attempts: raw
+            .max_reserve_attempts
+            .unwrap_or(base.max_reserve_attempts),
+        prepare_timeout_ms: millis(
+            "prepare_timeout",
+            raw.prepare_timeout.clone(),
+            base.prepare_timeout_ms,
+        )?,
+        max_replace: raw.max_replace.unwrap_or(base.max_replace),
+        regain_grace_ms: millis(
+            "regain_grace",
+            raw.regain_grace.clone(),
+            base.regain_grace_ms,
+        )?,
+    }))
+}
+
+/// Like [`millis`], but `0` is a value: the setting is "none".
+fn millis_or_zero(field: &str, text: &Option<String>, default: u64) -> Result<u64, String> {
+    let zero = |text: &String| matches!(text.as_str(), "0" | "0s" | "0m" | "0h");
+    match text.as_ref().is_some_and(zero) {
+        true => Ok(0),
+        false => millis(field, text.clone(), default),
+    }
 }
 
 /// The class a name stands for: a shipped class (`whole-node`, or `gpu-host`, kept as
@@ -181,12 +311,15 @@ mod tests {
     }
 
     /// Asserts the class names: `whole-node` and `gpu-host` load as the shipped classes
-    /// (both `Whole`, with their GPU minimums), and any other id loads as `BookAll`
-    /// with no minimum. A defect that dropped a shipped name would load it as BookAll.
+    /// (`whole-node` is `Whole`; `gpu-host` is still `BookAll`, with its GPU minimum), and
+    /// any other id loads as `BookAll` with no minimum. A defect that dropped a shipped
+    /// name would load it with no minimum, or `whole-node` as BookAll.
     #[test]
     fn class_names_load_the_shipped_classes() {
         assert_eq!(class("whole-node").unwrap(), ResourceClass::whole_node());
+        assert_eq!(class("whole-node").unwrap().admission(), &Admission::Whole);
         assert_eq!(class("gpu-host").unwrap(), ResourceClass::gpu_host());
+        assert_eq!(class("gpu-host").unwrap().admission(), &Admission::BookAll);
         let other = class("mac-host").unwrap();
         assert_eq!(other.admission(), &Admission::BookAll);
         assert_eq!(other.min_gpus(), 0);
@@ -258,5 +391,195 @@ mod tests {
     fn a_duration_that_overflows_milliseconds_is_refused() {
         let text = Some("18446744073709551615s".to_string());
         assert!(millis("grace", text, 0).is_err());
+    }
+
+    fn whole(extra: &str) -> String {
+        with(extra).replace("mac-host", "whole-node")
+    }
+
+    fn book(_: &str) -> Result<ResourceClass, String> {
+        let id = ClassId::new("mixed").unwrap();
+        Ok(ResourceClass::new(
+            id,
+            Admission::Book(Default::default()),
+            0,
+        ))
+    }
+
+    /// A whole-node pool file with no whole-node key takes the dedicated defaults of the
+    /// design's table, key by key (so a changed default fails), and a file with every key
+    /// carries each one through. It catches a key read and dropped, a default that
+    /// drifts, and a unit slip (minutes read as seconds).
+    #[test]
+    fn a_whole_node_pool_takes_the_tables_defaults_and_every_key() {
+        let pool = parse(&whole("")).unwrap();
+        let w = pool.whole_node().unwrap();
+        assert_eq!(*w, WholeNodeConfig::dedicated(4));
+        assert_eq!(
+            (w.max_whole_node, w.max_draining, w.keep_for_ordinary),
+            (4, 1, 0)
+        );
+        assert_eq!(
+            (w.max_whole_node_per_consumer, w.allow_last_capable),
+            (None, false)
+        );
+        assert_eq!((w.drain_after_ms, w.drain_deadline_ms), (0, None));
+        assert_eq!((w.max_reserve_attempts, w.max_replace), (2, 3));
+        assert_eq!(w.prepare_timeout_ms, 600_000);
+        let all = parse(&whole(
+            "max_whole_node = 3\nmax_draining = 2\nmax_whole_node_per_consumer = 1\n\
+             keep_for_ordinary = 0\nallow_last_capable = true\ndrain_after = \"1m\"\n\
+             drain_deadline = \"2h\"\nreserve_backoff = \"30s\"\nmax_reserve_attempts = 5\n\
+             prepare_timeout = \"20m\"\nmax_replace = 7\nregain_grace = \"45\"",
+        ))
+        .unwrap();
+        let expected = WholeNodeConfig {
+            max_whole_node: 3,
+            max_draining: 2,
+            max_whole_node_per_consumer: Some(1),
+            keep_for_ordinary: 0,
+            allow_last_capable: true,
+            drain_after_ms: 60_000,
+            drain_deadline_ms: Some(7_200_000),
+            reserve_backoff_ms: 30_000,
+            max_reserve_attempts: 5,
+            prepare_timeout_ms: 1_200_000,
+            max_replace: 7,
+            regain_grace_ms: 45_000,
+        };
+        assert_eq!(all.whole_node(), Some(&expected));
+    }
+
+    /// A pool file written before the whole-node keys loads unchanged in every old field:
+    /// a `gpu-host` file (class `BookAll`) equals the pool built from the old settings
+    /// alone, with no whole-node settings, exactly as merged; and it refuses whole-node
+    /// keys, which need the `whole-node` class.
+    #[test]
+    fn old_pool_files_load_unchanged() {
+        let old = "name = \"gpus\"\nclass = \"gpu-host\"\nmax_machines = 8\n\
+                   [shape]\ncpu_millis = 8000\nmemory_bytes = 1024\ngpus = 1\ngpu_class = \"a\"\n";
+        let loaded = parse(old).unwrap();
+        let shape = Shape::new(
+            Resources::new(8000, 1024, 1, Some("a".to_string())).unwrap(),
+            BTreeMap::new(),
+        );
+        let name = ProviderId::new("gpus").unwrap();
+        let built = PoolConfig::new(name, ResourceClass::gpu_host(), shape, 8);
+        assert_eq!(loaded, built);
+        assert_eq!(loaded.whole_node(), None);
+        let keyed = parse(&format!("max_whole_node = 2\n{old}")).unwrap_err();
+        assert!(keyed.contains("whole-node class"), "{keyed}");
+        assert_eq!(parse(MINIMAL).unwrap().whole_node(), None);
+    }
+
+    /// A dedicated pool that allows fewer whole hosts than machines loads, and the
+    /// surplus is reported as a warning text that counts the idle hosts; a pool with no
+    /// surplus reports nothing. Through `read` the same file still loads and the warning
+    /// is a log line, not an error.
+    #[test]
+    fn a_surplus_is_a_warning_not_an_error() {
+        let pool = parse(&whole("max_whole_node = 1")).unwrap();
+        let note = surplus_warning(&pool).unwrap();
+        assert!(note.contains("3 host(s)"), "{note}");
+        assert_eq!(surplus_warning(&parse(&whole("")).unwrap()), None);
+        // A call with no subscriber skips evaluating its fields, so the warning would go
+        // unrun; this one runs it and drops the line.
+        let scope = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .finish(),
+        );
+        let dir = std::env::temp_dir();
+        for (key, text) in [
+            ("surplus", whole("max_whole_node = 1")),
+            ("full", whole("")),
+        ] {
+            let path = dir.join(format!("js-pool-{key}-{}.toml", std::process::id()));
+            std::fs::write(&path, &text).unwrap();
+            let read_back = read(&path);
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(read_back.unwrap(), parse(&text).unwrap());
+        }
+        drop(scope);
+    }
+
+    /// `read` names its flag and the path when the file is missing and when its text is
+    /// not a pool, so the operator learns which file and why. It catches a start-up
+    /// error that drops the path or the reason.
+    #[test]
+    fn a_file_that_cannot_be_read_or_parsed_is_refused_with_its_path() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join(format!("js-pool-missing-{}.toml", std::process::id()));
+        let err = read(&missing).unwrap_err();
+        assert_eq!(err.flag(), "--agent-pool-config");
+        assert!(
+            err.to_string().contains(&*missing.to_string_lossy()),
+            "{err}"
+        );
+        let bad = dir.join(format!("js-pool-bad-{}.toml", std::process::id()));
+        std::fs::write(&bad, "speed = 1\n").unwrap();
+        let err = read(&bad).unwrap_err();
+        std::fs::remove_file(&bad).unwrap();
+        let shown = err.to_string();
+        assert!(shown.contains(&*bad.to_string_lossy()), "{shown}");
+        assert!(shown.contains("speed"), "{shown}");
+    }
+
+    /// Every whole-node mistake is refused and names the key: a zero maximum or count, a
+    /// zero duration where zero means nothing, a kept host in a dedicated pool, whole-node
+    /// keys on a class that books all, the removed `max_draining_fraction`, and a bad
+    /// duration. `drain_after` accepts zero in each spelling, because zero reserves at
+    /// once.
+    #[test]
+    fn whole_node_mistakes_are_refused_by_name() {
+        let cases = [
+            (whole("max_whole_node = 0"), "max_whole_node"),
+            (whole("max_draining = 0"), "max_draining"),
+            (
+                whole("max_whole_node_per_consumer = 0"),
+                "max_whole_node_per_consumer",
+            ),
+            (whole("max_reserve_attempts = 0"), "max_reserve_attempts"),
+            (whole("max_replace = 0"), "max_replace"),
+            (whole("keep_for_ordinary = 1"), "keep_for_ordinary"),
+            (whole("reserve_backoff = \"0s\""), "reserve_backoff"),
+            (whole("prepare_timeout = \"0\""), "prepare_timeout"),
+            (whole("regain_grace = \"0m\""), "regain_grace"),
+            (whole("drain_deadline = \"0\""), "drain_deadline"),
+            (whole("drain_deadline = \"soon\""), "drain_deadline"),
+            (whole("drain_after = \"soon\""), "drain_after"),
+            (whole("drain_after = \"0ms\""), "drain_after"),
+            (whole("drain_after = \"0smh\""), "drain_after"),
+            (
+                whole("max_draining_fraction = 0.5"),
+                "max_draining_fraction",
+            ),
+            (with("max_draining = 2"), "whole-node class"),
+        ];
+        for (text, names) in cases {
+            let reason = parse(&text).unwrap_err();
+            assert!(reason.contains(names), "{names}: {reason}");
+        }
+        for zero in ["0", "0s", "0m", "0h"] {
+            let pool = parse(&whole(&format!("drain_after = \"{zero}\""))).unwrap();
+            assert_eq!(pool.whole_node().unwrap().drain_after_ms, 0);
+        }
+    }
+
+    /// A mixed pool (class admitted `Book`) is validated and then refused with one exact
+    /// message: a file that fits, a file with no `max_whole_node`, and a file over the
+    /// ceiling (which is refused for the ceiling first). It catches a mixed pool that
+    /// loads and is silently served as something else.
+    #[test]
+    fn a_mixed_pool_is_validated_then_refused_as_not_served() {
+        let mixed = |extra: &str| parse_with(&with(extra), book).unwrap_err();
+        assert_eq!(mixed("max_whole_node = 3"), MIXED_UNSERVED);
+        assert_eq!(mixed(""), MIXED_UNSERVED);
+        assert!(mixed("max_whole_node = 4").contains("max_machines"));
+        assert!(mixed("max_whole_node = 0").contains("max_whole_node"));
+        assert_eq!(
+            MIXED_UNSERVED,
+            "a mixed pool (a class that books part of a host) is not served by this server yet"
+        );
     }
 }
