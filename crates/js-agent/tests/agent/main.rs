@@ -16,6 +16,7 @@ mod e2e;
 mod facts;
 mod flags;
 mod integrity;
+mod jobs;
 mod lifecycle;
 mod server;
 mod session;

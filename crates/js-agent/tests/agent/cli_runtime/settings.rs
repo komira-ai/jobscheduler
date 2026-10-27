@@ -386,10 +386,20 @@ fn container_flags_are_checked_when_the_agent_starts() {
     std::fs::create_dir(&state).unwrap();
     std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let state = state.to_str().unwrap();
+    let scratch = dir.path("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    std::fs::set_permissions(
+        &scratch,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let scratch = scratch.to_str().unwrap();
     if uid > 0 {
         let (status, err, sent) = start(&[
             "--state-root",
             state,
+            "--scratch-root",
+            scratch,
             "--container-bin",
             exec,
             "--container-network",

@@ -45,6 +45,28 @@
 //!
 //! The session secret is held in memory, goes into the body of every heartbeat and into
 //! nothing else: it is in no log line, no [`Note`] and no `Debug` output.
+//!
+//! # Jobs
+//!
+//! A session given a [`Worker`] ([`Session::with_jobs`]) carries what the worker holds. It
+//! never calls the container runtime and never waits for the worker:
+//!
+//! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
+//!   results not yet acknowledged and the taint to report. So does every hello, as its
+//!   held list, so a server that restarted learns what the agent still runs. A new epoch
+//!   keeps the worker and everything it holds.
+//! - Every accepted reply that says anything (a command, an acknowledgement, a
+//!   `taint_ack`) is handed to the worker, which checks it as a whole and acts on each
+//!   command in order; a command it refuses is logged by its place in the reply. A reply
+//!   the worker has no room for is dropped and noted ([`Note::Busy`]): the server sends
+//!   everything again.
+//! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
+//!   session clears it from a reply to a heartbeat that did not, so the worker never
+//!   marks as told a taint the server was not told.
+//! - A worker that has ended ends the session with [`Step::Failed`].
+//!
+//! Without a worker the session carries nothing and counts the commands it ignores
+//! ([`Note::Ignored`]).
 
 use std::fmt;
 use std::time::Duration;
@@ -57,6 +79,7 @@ use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
 use crate::transport::{Answer, Transport};
+use crate::worker::{Snapshot, Worker};
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -155,11 +178,15 @@ pub enum Note {
         /// Why it failed.
         reason: Reason,
     },
-    /// A heartbeat answer carried commands, which this agent does not act on yet.
+    /// A heartbeat answer carried commands, which this agent does not act on: it runs no
+    /// jobs.
     Ignored {
         /// How many.
         commands: usize,
     },
+    /// The job worker had no room for a heartbeat answer, which was dropped; the server
+    /// sends what it said again.
+    Busy,
     /// The host announced that it is draining.
     Draining {
         /// Whether the server acknowledged it.
@@ -178,8 +205,12 @@ impl fmt::Display for Note {
             Self::Lost { code } => write!(f, "the server lost the session ({code})"),
             Self::Retrying { what, reason } => write!(f, "{what} failed: {reason}"),
             Self::Ignored { commands } => {
-                write!(f, "ignoring {commands} command(s): not handled yet")
+                write!(f, "ignoring {commands} command(s): this agent runs no jobs")
             }
+            Self::Busy => write!(
+                f,
+                "the job worker is busy: an answer was dropped and will be sent again"
+            ),
             Self::Draining { told: true } => write!(f, "draining: the server was told"),
             Self::Draining { told: false } => {
                 write!(f, "draining: the server could not be told")
@@ -198,8 +229,29 @@ pub enum Step {
         /// What happened, when it is worth a log line.
         note: Option<Note>,
     },
-    /// The agent ends.
+    /// The agent ends: the server refused the host for good.
     Fatal(Fatal),
+    /// The agent ends: the job worker is gone, so the jobs would run unsupervised.
+    Failed(String),
+}
+
+/// What the agent says when its job worker has ended.
+const WORKER_ENDED: &str = "the job worker stopped: the agent cannot supervise its jobs";
+
+/// How a drain treats the jobs that are running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drain {
+    /// How long the jobs may go on before they are stopped.
+    pub wait: Duration,
+    /// How long after the stop the agent goes on heartbeating, so the results of the
+    /// stopped jobs reach the server.
+    pub settle: Duration,
+}
+
+/// The worker a session carries, and how a drain treats its jobs.
+struct Jobs<'a> {
+    worker: &'a Worker,
+    drain: Drain,
 }
 
 /// How an answer's status and code read.
@@ -267,17 +319,6 @@ fn welcome(body: &Value) -> Result<Welcome, &'static str> {
         })
 }
 
-/// The number of commands (accepted or refused) in a heartbeat answer, which is checked
-/// as a whole.
-fn reply_commands(body: &Value) -> Result<usize, &'static str> {
-    serde_json::from_value::<HeartbeatReply>(body.clone())
-        .map_err(|_| refusal::INVALID_REPLY)
-        .map(|reply| {
-            let checked = reply.validate();
-            checked.commands.len() + checked.refused.len()
-        })
-}
-
 /// The agent's side of one host's session.
 pub struct Session<'a> {
     transport: &'a mut dyn Transport,
@@ -291,6 +332,9 @@ pub struct Session<'a> {
     /// does not end the run of failures: a server that welcomes and at once refuses is
     /// backed off from more and more, not forgiven by each welcome.
     lost_young: bool,
+    jobs: Option<Jobs<'a>>,
+    /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
+    carried: bool,
 }
 
 impl<'a> Session<'a> {
@@ -308,11 +352,26 @@ impl<'a> Session<'a> {
             backoff: Backoff::default(),
             proven: false,
             lost_young: false,
+            jobs: None,
+            carried: false,
+        }
+    }
+
+    /// The same session carrying the jobs of `worker` (see the module documentation), with
+    /// `drain` saying how a drain treats them.
+    #[must_use]
+    pub fn with_jobs(self, worker: &'a Worker, drain: Drain) -> Self {
+        Self {
+            jobs: Some(Jobs { worker, drain }),
+            ..self
         }
     }
 
     /// Does one exchange: a hello when there is no session, a heartbeat when there is.
     pub fn tick(&mut self) -> Step {
+        if self.jobs.iter().any(|jobs| jobs.worker.ended()) {
+            return Step::Failed(WORKER_ENDED.to_owned());
+        }
         match self.live.take() {
             None => self.hello_step(),
             Some(live) => self.beat_step(live),
@@ -321,11 +380,13 @@ impl<'a> Session<'a> {
 
     /// Announces that the host is draining, once: one heartbeat with the phase
     /// `draining`, answered or not. Nothing is sent, and `None` returned, when there is
-    /// no session.
+    /// no session. This is the whole drain of an agent with no jobs; one with jobs drains
+    /// with [`Session::begin_drain`] and ticks.
     pub fn drain(&mut self) -> Option<Note> {
         self.phase = Phase::Draining;
+        let jobs = self.snapshot();
         self.live.take().map(|live| {
-            let message = self.heartbeat_message(&live);
+            let message = self.heartbeat_message(&live, jobs);
             let told = self.post(HEARTBEAT_PATH, message);
             Note::Draining {
                 told: told.is_ok_and(|answer| answer.status == 200),
@@ -333,21 +394,68 @@ impl<'a> Session<'a> {
         })
     }
 
-    fn hello_message(&self) -> Result<Value, ValidationError> {
-        self.hello
-            .validate()
-            .map(|()| serde_json::to_value(&self.hello).unwrap_or_default())
+    /// Starts a drain with jobs: the phase is `draining` in every heartbeat and in a
+    /// hello that may follow, and the worker takes no new job. The caller goes on ticking
+    /// ([`Session::tick`]) while [`Session::jobs_left`], and stops the jobs when the
+    /// [`Drain::wait`] has passed ([`Session::stop_jobs`]).
+    pub fn begin_drain(&mut self) {
+        self.phase = Phase::Draining;
+        self.hello.phase = Phase::Draining;
+        self.jobs.iter().for_each(|jobs| jobs.worker.close());
     }
 
-    fn heartbeat_message(&self, live: &Live) -> Result<Value, ValidationError> {
+    /// How the drain treats the jobs, when the session has a worker.
+    pub fn drain_plan(&self) -> Option<Drain> {
+        self.jobs.as_ref().map(|jobs| jobs.drain)
+    }
+
+    /// Whether the worker holds a run or a result the server has not acknowledged.
+    pub fn jobs_left(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|jobs| !jobs.worker.snapshot().is_empty())
+    }
+
+    /// Asks the worker to stop every run it holds.
+    pub fn stop_jobs(&self) {
+        self.jobs.iter().for_each(|jobs| jobs.worker.stop_all());
+    }
+
+    /// The lines the worker wants printed since the last call.
+    pub fn job_lines(&self) -> Vec<String> {
+        let lines = self.jobs.iter().map(|jobs| jobs.worker.take_lines());
+        lines.flatten().collect()
+    }
+
+    /// What the worker publishes (nothing, for a session with no worker), and whether the
+    /// heartbeat that carries it carries the taint.
+    fn snapshot(&mut self) -> Snapshot {
+        let published = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot());
+        let snapshot = published.unwrap_or_default();
+        self.carried = snapshot.taint.is_some();
+        snapshot
+    }
+
+    fn hello_message(&self) -> Result<Value, ValidationError> {
+        let mut hello = self.hello.clone();
+        let held = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot().held);
+        if let Some(held) = held {
+            hello.held = held;
+        }
+        hello
+            .validate()
+            .map(|()| serde_json::to_value(&hello).unwrap_or_default())
+    }
+
+    fn heartbeat_message(&self, live: &Live, jobs: Snapshot) -> Result<Value, ValidationError> {
         let beat = Heartbeat {
             host_id: self.hello.host_id.clone(),
             epoch: live.epoch,
             session: live.secret.0.clone(),
             phase: self.phase,
-            held: Vec::new(),
-            results: Vec::new(),
-            taint: None,
+            held: jobs.held,
+            results: jobs.results,
+            taint: jobs.taint,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -408,7 +516,8 @@ impl<'a> Session<'a> {
     }
 
     fn beat_step(&mut self, live: Live) -> Step {
-        let message = self.heartbeat_message(&live);
+        let jobs = self.snapshot();
+        let message = self.heartbeat_message(&live, jobs);
         match self.post(HEARTBEAT_PATH, message) {
             Err(reason) => {
                 self.live = Some(live);
@@ -432,17 +541,35 @@ impl<'a> Session<'a> {
     }
 
     fn beat_done(&mut self, body: &Value, interval: Duration) -> Step {
-        match reply_commands(body) {
-            Ok(commands) => {
+        match serde_json::from_value::<HeartbeatReply>(body.clone()) {
+            Ok(reply) => {
                 self.backoff.reset();
                 self.proven = true;
                 self.lost_young = false;
                 Step::Wait {
                     after: interval,
-                    note: (commands > 0).then_some(Note::Ignored { commands }),
+                    note: self.accept(reply),
                 }
             }
-            Err(wire) => self.retry("heartbeat", Reason::Unusable(wire), None),
+            Err(_) => self.retry("heartbeat", Reason::Unusable(refusal::INVALID_REPLY), None),
+        }
+    }
+
+    /// What a decoded reply does: handed to the worker, or counted as ignored when there
+    /// is none.
+    fn accept(&mut self, reply: HeartbeatReply) -> Option<Note> {
+        let Some(jobs) = &self.jobs else {
+            let checked = reply.validate();
+            let commands = checked.commands.len() + checked.refused.len();
+            return (commands > 0).then_some(Note::Ignored { commands });
+        };
+        let reply = HeartbeatReply {
+            taint_ack: reply.taint_ack & self.carried,
+            ..reply
+        };
+        match reply == HeartbeatReply::default() {
+            true => None,
+            false => (!jobs.worker.try_deliver(reply)).then_some(Note::Busy),
         }
     }
 

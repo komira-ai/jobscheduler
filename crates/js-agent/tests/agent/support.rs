@@ -8,15 +8,18 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::{
-    Answer, CommandRunner, Connector, FileReader, Jitter, Platform, Services, Sleeper, Transport,
-    Wake, run_with,
+    Answer, CommandRunner, Connector, FileReader, Handle, Jitter, Machine, Platform, Services,
+    Sleeper, Transport, Wake, run_with,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
 use serde_json::{Value, json};
+
+use crate::jobs::fake::FakeMachine;
 
 /// The pool the tests' hosts ask to join.
 pub const POOL: &str = "macs";
@@ -509,13 +512,29 @@ impl Ran {
     }
 }
 
-/// Runs the program on `args` against `host`.
+/// Runs the program on `args` against `host`, with a machine whose runtime lives in memory.
 pub fn run(
     args: &[&str],
     host: &Host,
     connector: &dyn Connector,
     sleeper: &mut dyn Sleeper,
     jitter: &mut dyn Jitter,
+) -> Ran {
+    let machine = Arc::new(FakeMachine::new());
+    run_on(args, host, connector, sleeper, jitter, (machine, None))
+}
+
+/// The machine the jobs run on and the hook that is told of their worker.
+pub type Jobs<'a> = (Arc<dyn Machine>, Option<&'a dyn Fn(Handle)>);
+
+/// Runs the program on `args` against `host`, with the machine and the worker hook given.
+pub fn run_on(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
 ) -> Ran {
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let mut services = Services {
@@ -525,6 +544,8 @@ pub fn run(
         connector,
         jitter,
         sleeper,
+        machine: jobs.0,
+        worker_hook: jobs.1,
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();
