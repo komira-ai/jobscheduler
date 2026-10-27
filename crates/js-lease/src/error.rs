@@ -7,6 +7,12 @@ use js_types::LeaseId;
 use crate::LeaseState;
 
 /// The lease file could not be written.
+///
+/// The change that led to the save is already applied in memory, so the table is ahead of
+/// the file: the file still holds what the last successful save wrote. The table does not
+/// roll back. The next successful save (a tick retries it) writes the whole table and
+/// brings the file level; a caller that wants what the file says drops the table and
+/// opens it again. See the crate docs, "When a save fails".
 #[derive(Debug, thiserror::Error)]
 #[error("lease file {}: cannot write: {source}", path.display())]
 pub struct SaveError {
@@ -63,7 +69,15 @@ pub enum OpenError {
         /// What was wrong.
         reason: String,
     },
-    /// The file could not be written after loading.
+    /// The file's term is the largest the file can hold, so this boot cannot take the
+    /// next one and no id of it could be told apart from an earlier boot's.
+    #[error("lease file {}: the term cannot advance: the ids of this file are used up", path.display())]
+    TermExhausted {
+        /// The file.
+        path: PathBuf,
+    },
+    /// The file could not be written after loading. No table is returned;
+    /// the file is as the last successful save left it, and the open can be tried again.
     #[error(transparent)]
     Save(#[from] SaveError),
 }
@@ -74,6 +88,10 @@ pub enum AcquireError {
     /// The ttl was zero.
     #[error("the ttl must be positive")]
     TtlNotPositive,
+    /// The sequence has reached the largest value the file can hold, so no further id
+    /// can be issued. Nothing was recorded and the provider was not called.
+    #[error("lease ids are used up: the next sequence cannot be stored")]
+    IdsExhausted,
     /// The request or the provider was refused, with a plain constant code.
     #[error("the start was refused: {}", .0.as_str())]
     Refused(RefusalCode),
@@ -109,7 +127,9 @@ pub enum RenewError {
     /// The lease's expiry has passed and the next tick will release it.
     #[error("lease {0} has expired")]
     Expired(LeaseId),
-    /// The lease file could not be written. The renewal took effect in memory.
+    /// The lease file could not be written. The renewal took effect in memory and the file
+    /// is behind it until the next successful save (see [`SaveError`]); reopening the
+    /// table returns to the file's expiry.
     #[error(transparent)]
     Save(#[from] SaveError),
 }
@@ -121,7 +141,8 @@ pub enum ReleaseError {
     #[error("lease {0} is not known")]
     Unknown(LeaseId),
     /// The lease file could not be written before the stop. The lease stays marked
-    /// releasing in memory and the next tick stops it.
+    /// releasing in memory and the next tick stops it. The file is behind
+    /// until a save succeeds (see [`SaveError`]); reopening returns to what it says.
     #[error(transparent)]
     Save(#[from] SaveError),
 }

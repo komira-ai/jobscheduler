@@ -16,6 +16,11 @@ use crate::state::LeaseState;
 /// that is higher, so an older build in between does not destroy a later one's data.
 pub(crate) const FORMAT_VERSION: u32 = 1;
 
+/// The largest integer a TOML file holds (`i64::MAX`). A term or a sequence above it
+/// cannot be written, so the last id of a term or of the sequence is the one whose
+/// successor is this value.
+pub(crate) const LARGEST: u64 = i64::MAX.unsigned_abs();
+
 /// The whole file.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Document {
@@ -103,12 +108,22 @@ pub(crate) fn write(path: &Path, document: &Document) -> Result<(), SaveError> {
 }
 
 fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace_with(path, bytes, |from, to| fs::rename(from, to))
+}
+
+/// [`replace`] with the rename step passed in, so a test can make exactly that step fail
+/// and see that the old file is still what a reader gets.
+fn replace_with(
+    path: &Path,
+    bytes: &[u8],
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let temp = sibling(path, ".tmp");
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let dir = dir.unwrap_or(Path::new("."));
     fs::File::create(&temp)
         .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
-        .and_then(|()| fs::rename(&temp, path))
+        .and_then(|()| rename(&temp, path))
         .and_then(|()| fs::File::open(dir).and_then(|dir| dir.sync_all()))
 }
 
@@ -118,3 +133,6 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     name.push(suffix);
     path.with_file_name(name)
 }
+
+#[cfg(test)]
+mod tests;

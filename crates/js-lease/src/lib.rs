@@ -65,6 +65,57 @@
 //!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
+//!
+//! # When a save fails
+//!
+//! A change is applied in memory first and written second, so after a [`SaveError`]
+//! the table holds the change and the file is behind it: it still says what the last
+//! successful save wrote. The table does not roll back. The next successful save, which
+//! [`LeaseTable::tick`] retries while the file is behind, writes the whole table and
+//! brings the file level. A caller that wants to return to what the file says instead
+//! drops the table and opens the file again; the open observes every held lease and a
+//! tick every pending one, so the
+//! provider settles anything the dropped changes touched. A crash while the file is
+//! behind loses the changes after the last save: a lease the provider started but the
+//! file never held is found pending (or missing) and resolved by observing it, which is
+//! why a start is never called before its pending record is written.
+//!
+//! # The lock
+//!
+//! The lock beside the file is an advisory lock (`flock`) on `<file>.lock`. It keeps
+//! two tables of one host from sharing a file, and it is only as good as the
+//! filesystem: on a network filesystem `flock` may not be enforced between hosts, or may
+//! be lost on a reconnect, and two tables could then issue the same ids. Keep the file
+//! on a local disk that one server owns.
+//!
+//! # Restoring an older file
+//!
+//! Ids stay unique because the term and the sequence in the file only grow. A file
+//! restored from a backup is older than the one it replaces: its term and sequence may
+//! be below ids the lost file already issued, and the next boot would issue them again.
+//! So a restore must be followed by a term bump before the server starts: edit `term`
+//! and `next_sequence` in the restored file to values above any the lost file can have
+//! held (above the highest the clients or the provider have seen), then start; the
+//! first boot takes the term after that. A verb that does this safely, and checks it
+//! against the provider, is a follow-up; until then a restore is an operator action and
+//! the table cannot tell it happened.
+//!
+//! # Versions
+//!
+//! A file with a higher `version` than this build writes is accepted: the number is
+//! ignored, the fields it adds are kept and written back. That is safe while changes are
+//! additive. A later change that is not additive (a field whose meaning changes, one an
+//! older build must not ignore) will need a minimum-reader-version field that makes an
+//! older build refuse the file; that field is a follow-up and does not exist yet, so
+//! such a change cannot be made before it.
+//!
+//! # Id limits
+//!
+//! A term and a sequence are written as TOML integers, so each stops at `i64::MAX`. The
+//! last sequence whose successor fits is issued; after it [`AcquireError::IdsExhausted`]
+//! refuses every acquire, and a file whose term has no successor is an
+//! [`OpenError::TermExhausted`]. Nothing wraps or saturates into a repeated id; a file
+//! edited past the limit is refused the same way.
 
 mod book;
 mod clock;
