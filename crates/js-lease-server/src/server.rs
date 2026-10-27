@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::adapt::{BoxedProvider, SharedClock};
+use crate::agents::assemble;
 use crate::api::{Shared, router};
 use crate::capacity::Seated;
 use crate::config::Config;
@@ -45,7 +46,8 @@ pub async fn start<T: Ticker>(
 ) -> Result<Running, StartupError> {
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let Seated { provider, unseated } = config.capacity.provider(&bookings)?;
+    let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
+    let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
     let bound = TcpListener::bind(config.listen)
         .await
@@ -78,7 +80,7 @@ pub async fn start<T: Ticker>(
         tls = acceptor.is_some(),
         "listening"
     );
-    let shared = Arc::new(Shared::new(table, config.token));
+    let shared = Arc::new(Shared::new(table, config.token, agents));
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(config.limits.max_connections));
     let serving = serve(
@@ -140,6 +142,13 @@ impl Running {
     /// How many ticks failed to write the lease file since the server started.
     pub fn save_errors(&self) -> u64 {
         self.shared.save_errors()
+    }
+
+    /// How many times the agent side could not read or write one of its files since the
+    /// server started: the join token file that could not be read again at a tick, and
+    /// the file of bindings that could not be written. Always 0 without agent flags.
+    pub fn agent_errors(&self) -> u64 {
+        self.shared.agent_errors()
     }
 
     /// How many times the accept loop found every one of the `--max-connections` slots

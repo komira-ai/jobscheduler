@@ -243,14 +243,39 @@ fn a_host_bound_to_a_rotated_token_registers_again_after_eviction() {
     assert_eq!(welcome.epoch, 1);
 }
 
-/// Asserts that an awaiting host, which has never been heard and so has no time to count
-/// from, is not forgotten however much time passes.
+/// Asserts that an awaiting host that holds a booking is not forgotten however much time
+/// passes: its lease is still the table's, and its agent may yet say hello.
 #[test]
-fn an_awaiting_host_is_not_forgotten() {
+fn a_booked_awaiting_host_is_not_forgotten() {
     let fx = short_retention(4);
     fx.provider.seat(&host("a"), lease(1), None).unwrap();
     advance(&fx, MAX_LOST_RETENTION_MS * 2);
     assert_eq!(fx.registry.hosts()[0].state, HostState::Awaiting);
+}
+
+/// Asserts that an awaiting host whose lease has ended is forgotten, binding included,
+/// once the grace period and the retention have passed since it was seated (not since
+/// the lease ended), and not a moment before; and that its slot is then free for another
+/// host. Without a seat time to count from, an agent that never returns keeps its
+/// record, its binding and its place in `max_machines` until the next restart.
+#[test]
+fn an_awaiting_host_with_no_booking_is_forgotten_from_its_seating() {
+    let mut fx = short_retention(1);
+    let binding = Binding::new(cred("t"), None);
+    fx.provider
+        .seat(&host("a"), lease(1), Some(binding))
+        .unwrap();
+    assert_eq!(fx.registry.bindings().len(), 1);
+    lost_for_retention(&fx);
+    fx.provider.stop(&lease(1));
+    assert_eq!(fx.registry.hosts()[0].state, HostState::Awaiting);
+    assert_eq!(fx.registry.hosts()[0].lease, None);
+    let full = fx.registry.hello(&hello("b"), &cred("t")).unwrap_err();
+    assert_eq!(full, Refusal::PoolFull);
+    advance(&fx, 1);
+    assert!(fx.registry.hosts().is_empty());
+    assert!(fx.registry.bindings().is_empty());
+    assert_eq!(fx.join("b", "t"), 1);
 }
 
 /// Asserts that the retention is bounded: a minute to thirty days are accepted and
@@ -387,4 +412,36 @@ fn the_sequential_source_counts_from_one() {
     let second = source.fresh().unwrap();
     assert_eq!((first[31], second[31]), (1, 2));
     assert_eq!(first[..24], [0; 24]);
+}
+
+/// Asserts that `bindings` lists what each known host id is bound to (the credential and
+/// the instance of its first hello), that a seated booking shows the binding it was
+/// seated with, and that a seat without one shows none until the first hello binds the
+/// id. It catches a caller that persists bindings getting a list that is empty, that
+/// leaves out an awaiting host's binding (so a second restart would lose it), or that
+/// invents one.
+#[test]
+fn bindings_list_what_each_host_is_bound_to() {
+    let fx = fixture(4);
+    assert!(fx.registry.bindings().is_empty());
+    fx.registry.hello(&on("a", "i-1"), &cred("t")).unwrap();
+    fx.registry.hello(&hello("b"), &cred("u")).unwrap();
+    let listed = fx.registry.bindings();
+    let a = &listed[&host("a")];
+    assert_eq!(a.credential(), &cred("t"));
+    assert_eq!(a.instance(), Some(&instance("i-1")));
+    let b = &listed[&host("b")];
+    assert_eq!(b.credential(), &cred("u"));
+    assert_eq!(b.instance(), None);
+
+    let restarted = fixture(4);
+    let kept = Binding::new(cred("t"), Some(instance("i-9")));
+    restarted
+        .provider
+        .seat(&host("c"), lease(1), Some(kept.clone()))
+        .unwrap();
+    restarted.provider.seat(&host("d"), lease(2), None).unwrap();
+    let awaiting = restarted.registry.bindings();
+    assert_eq!(awaiting.len(), 1);
+    assert_eq!(awaiting[&host("c")], kept);
 }

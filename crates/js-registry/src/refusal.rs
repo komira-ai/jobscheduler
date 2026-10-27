@@ -24,6 +24,9 @@ pub enum Refusal {
     /// The host id has a live session.
     #[error("the host id has a live session")]
     HostLive,
+    /// The host id is reserved to another source of hosts (see [`crate::Registry::reserve`]).
+    #[error("the host id belongs to another source of hosts")]
+    HostListed,
     /// The shape the host claims does not offer what the pool's shape promises.
     #[error("the shape does not offer what the pool promises")]
     ShapeNotAccepted,
@@ -54,6 +57,7 @@ impl Refusal {
             Self::UnknownPool => refusal::UNKNOWN_POOL,
             Self::HostBound => refusal::HOST_BOUND,
             Self::HostLive => refusal::HOST_LIVE,
+            Self::HostListed => refusal::HOST_LISTED,
             Self::ShapeNotAccepted => refusal::SHAPE_NOT_ACCEPTED,
             Self::PoolFull => refusal::POOL_FULL,
             Self::UnknownHost => refusal::UNKNOWN_HOST,

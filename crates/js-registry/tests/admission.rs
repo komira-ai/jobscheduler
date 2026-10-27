@@ -340,3 +340,25 @@ fn every_refusal_has_a_fixed_text_without_peer_data() {
     distinct.dedup();
     assert_eq!(distinct.len(), 7);
 }
+
+/// Asserts that a host id reserved to another source is refused at hello with the
+/// host-listed code, that nothing is created for it (no record, no count against the
+/// pool), and that other ids still join. It catches a registered host taking the id of a
+/// host the operator lists in a static pool, which would give the table two hosts of one
+/// name.
+#[test]
+fn a_reserved_id_is_refused_at_hello() {
+    let fx = fixture(1);
+    assert!(fx.registry.reserved().is_empty());
+    fx.registry.reserve([host("gpu-01")]);
+    fx.registry.reserve([host("gpu-02")]);
+    let both = [host("gpu-01"), host("gpu-02")];
+    assert_eq!(fx.registry.reserved().into_iter().collect::<Vec<_>>(), both);
+    let refused = fx.registry.hello(&hello("gpu-01"), &cred("t")).unwrap_err();
+    assert_eq!(refused, Refusal::HostListed);
+    assert_eq!(refused.code(), refusal::HOST_LISTED);
+    assert!(!refused.to_string().contains("gpu-01"));
+    assert!(fx.registry.hosts().is_empty());
+    assert!(fx.registry.bindings().is_empty());
+    fx.registry.hello(&hello("free"), &cred("t")).unwrap();
+}

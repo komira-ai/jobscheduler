@@ -11,12 +11,16 @@ use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport};
+use js_provider::Provider;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
 use crate::adapt::{BoxedProvider, SharedClock};
+use crate::agent_api;
+use crate::agents::Agents;
 use crate::config::Token;
+use crate::hosts::HostList;
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -29,22 +33,30 @@ pub const BODY_LIMIT: usize = 64 * 1024;
 pub(crate) type Table = LeaseTable<BoxedProvider, SharedClock>;
 
 /// What every request handler and the tick loop share: the table behind its one lock,
-/// the token, and the count of lease-file writes that failed.
+/// the token, the count of lease-file writes that failed, and the agent side when agents
+/// register hosts.
 pub(crate) struct Shared {
     table: Mutex<Table>,
     token: Token,
+    agents: Option<Arc<Agents>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
 }
 
 impl Shared {
-    pub(crate) fn new(table: Table, token: Token) -> Self {
+    pub(crate) fn new(table: Table, token: Token, agents: Option<Arc<Agents>>) -> Self {
         Self {
             table: Mutex::new(table),
             token,
+            agents,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
         }
+    }
+
+    /// How many times the agent side could not read or write its files; 0 without agents.
+    pub(crate) fn agent_errors(&self) -> u64 {
+        self.agents.as_ref().map_or(0, |agents| agents.errors())
     }
 
     /// Whether the tick loop is running.
@@ -67,6 +79,9 @@ impl Shared {
     pub(crate) async fn tick(&self) -> TickReport {
         let report = self.table.lock().await.tick();
         self.record(&report);
+        if let Some(agents) = &self.agents {
+            agents.refresh().await;
+        }
         report
     }
 
@@ -95,14 +110,19 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .route("/v1/leases", post(acquire).get(list))
         .route("/v1/leases/{id}/renew", post(renew))
         .route("/v1/leases/{id}", delete(release))
+        .route("/v1/hosts", get(hosts))
         .fallback(no_route)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(from_fn_with_state(shared.clone(), authenticate))
         .with_state(shared.clone());
     let open = Router::new()
         .route("/healthz", get(healthz))
-        .with_state(shared);
-    open.merge(guarded)
+        .with_state(shared.clone());
+    let app = open.merge(guarded);
+    match &shared.agents {
+        Some(agents) => app.merge(agent_api::router(agents.clone())),
+        None => app,
+    }
 }
 
 /// Refuses a request that lacks `Authorization: Bearer <token>`, with a 401 that says
@@ -121,7 +141,7 @@ async fn authenticate(State(shared): State<Arc<Shared>>, request: Request, next:
 
 /// The token of an `Authorization` value of the form `Bearer <token>`; the scheme is
 /// matched without regard to case (RFC 9110 section 11.1).
-fn bearer(value: &str) -> Option<&str> {
+pub(crate) fn bearer(value: &str) -> Option<&str> {
     let (scheme, token) = value.split_once(' ')?;
     scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }
@@ -200,6 +220,21 @@ async fn list(State(shared): State<Arc<Shared>>) -> Response {
     let leases = shared.table.lock().await.list();
     let leases = leases.into_iter().map(Into::into).collect();
     json(StatusCode::OK, &LeaseList { leases })
+}
+
+/// Every host the server leases: the static pool's, and the registered ones with the
+/// state of their session. The table's lock is taken first and dropped, then the
+/// registry's; the order of the two never reverses.
+async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
+    let capacity = shared.table.lock().await.provider().capacity();
+    let list = match &shared.agents {
+        Some(agents) => {
+            let reserved = agents.registry.reserved();
+            HostList::of(capacity, agents.registry.hosts(), Some(&reserved))
+        }
+        None => HostList::of(capacity, Vec::new(), None),
+    };
+    json(StatusCode::OK, &list)
 }
 
 #[cfg(test)]

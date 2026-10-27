@@ -12,13 +12,44 @@ use sha2::Digest;
 /// Equality is on the digest, which is what the registry compares. The constant-time
 /// comparison of the token itself, when the transport checks a request against the
 /// pool's accepted tokens, belongs to the transport and is not done here.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct Credential([u8; 32]);
 
 impl Credential {
     /// The credential of a join token.
     pub fn of_token(token: &str) -> Self {
         Self(sha2::Sha256::digest(token.as_bytes()).into())
+    }
+
+    /// The digest as 64 lower-case hex digits: the form a caller that persists bindings
+    /// writes. It is a one-way digest of a token of at least 32 random bytes, but it is
+    /// what a host id is bound to, so the file that holds it should be as private as the
+    /// token file.
+    pub fn to_hex(&self) -> String {
+        crate::session::secret_text(&self.0)
+    }
+
+    /// The credential whose [`Credential::to_hex`] is `text`; `None` for anything else
+    /// (a wrong length, an upper-case or non-hex digit).
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let digits = text.as_bytes();
+        if digits.len() != 64 {
+            return None;
+        }
+        let mut digest = [0; 32];
+        for (byte, pair) in digest.iter_mut().zip(digits.chunks_exact(2)) {
+            *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+        }
+        Some(Self(digest))
+    }
+}
+
+/// The value of a lower-case hex digit.
+fn nibble(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -51,8 +82,14 @@ impl Binding {
         }
     }
 
-    pub(crate) fn credential(&self) -> &Credential {
+    /// The credential the host id is bound to.
+    pub fn credential(&self) -> &Credential {
         &self.credential
+    }
+
+    /// The instance the host id is bound to, when its first hello named one.
+    pub fn instance(&self) -> Option<&InstanceIdentity> {
+        self.instance.as_ref()
     }
 
     /// Whether a hello presenting `credential` and `instance` comes from what this
@@ -68,5 +105,32 @@ impl Binding {
             .as_ref()
             .is_none_or(|bound| Some(bound) == instance);
         [same_credential, same_instance].into_iter().all(|ok| ok)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A credential survives its hex form, the form is 64 lower-case digits, and any
+    /// other text is no credential. It catches a persisted binding that reads back as a
+    /// different credential (a host id bound to nobody) or one that accepts malformed
+    /// text as a digest.
+    #[test]
+    fn a_credential_round_trips_through_hex_and_nothing_else_parses() {
+        let credential = Credential::of_token("a-join-token-of-some-length-0123456789");
+        let text = credential.to_hex();
+        assert_eq!(text.len(), 64);
+        assert!(text.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(text, text.to_ascii_lowercase());
+        assert_eq!(Credential::from_hex(&text), Some(credential));
+        assert_eq!(Credential::from_hex(&text[1..]), None);
+        assert_eq!(Credential::from_hex(&format!("{text}0")), None);
+        assert_eq!(Credential::from_hex(&text.to_uppercase()), None);
+        let low = format!("g{}", &text[1..]);
+        assert_eq!(Credential::from_hex(&low), None);
+        let high = format!("{}g", &text[..63]);
+        assert_eq!(Credential::from_hex(&high), None);
+        assert_eq!(Credential::from_hex(""), None);
     }
 }

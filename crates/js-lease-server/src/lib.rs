@@ -7,8 +7,9 @@
 //! - [`Config`] and [`Cli`]: the flags, and the checks that refuse a start (a token file
 //!   anyone can read, a listen address off the loopback without TLS).
 //! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
-//!   operator's pool file. Hosts registered by agents are a future source of the same
-//!   trait; it is not built here.
+//!   operator's pool file. With agent registration on (see "Agents" below), the static
+//!   pool and the hosts agents register are two sources of the same trait, layered
+//!   behind one provider.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
@@ -22,7 +23,10 @@
 //! | `--listen <addr>` | default `127.0.0.1:7300`; off the loopback it needs both TLS flags |
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
-//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]) |
+//! | `--pool-config <path>` | the static pool file ([`js_pool_static`]); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
+//! | `--agent-token-file <path>` | turns agent registration on: join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Needs `--agent-pool-config` |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`. Needs `--agent-token-file` |
+//! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked, `5s` unless given |
@@ -60,6 +64,7 @@
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms}`; 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase` and `agent_version` are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -96,6 +101,58 @@
 //! request and the tick wait for it. That is cheap for the static pool; a provider that
 //! can take long (one that calls over a network) must bound its own calls, see
 //! [`CapacitySource`].
+//!
+//! # Agents
+//!
+//! With `--agent-token-file` and `--agent-pool-config` a machine can register itself as
+//! a host of the pool the pool file describes, beside the static pool (if any). The
+//! machine's agent calls two routes with a join token, on the same listener, body cap,
+//! timeouts and connection cap as everything else. Without those flags the routes do not
+//! exist and the server builds exactly what it always has.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands: [], result_acks: [], taint_ack: false}`; 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
+//!
+//! A leasing client asks for a lease as ever and is given a static host first, a
+//! registered one when the static pool has none; it cannot tell which it got except by
+//! `GET /v1/hosts`. A registered host takes a lease only while it is live (heard within
+//! the grace period) and serving. A host that goes silent keeps its lease and reads
+//! `Unknown` until it is heard again or the lease ends by its ttl or a release.
+//!
+//! **Tokens.** The join tokens and the client token are different secrets: each is a 401
+//! with an empty body on the other's routes, and a join-token file that holds the client
+//! token is refused. A file may hold several tokens, so that a new one can be added
+//! before an old one is removed; the file is read again at every tick, and a read that
+//! fails (a half-saved edit, a mode that is no longer private) keeps the tokens in force,
+//! is logged and is counted in [`Running::agent_errors`]. A host id is bound to the
+//! credential (the SHA-256 of the token) of the first hello that admitted it, so
+//! removing a token also removes the ability of the hosts bound to it to heartbeat or say
+//! hello again: that is revocation. Moving such a host to a new token means the registry
+//! forgetting it first (it is forgotten after it has been lost for `lost_retention`, if
+//! no lease holds it), and a host that holds a lease is never forgotten.
+//!
+//! **What a join token can and cannot do.** Every host of a pool shares the join tokens.
+//! A session secret issued in the welcome and carried in every heartbeat keeps one
+//! token holder from keeping another's host alive, and a binding to the first credential
+//! (and to the instance, when the hello names one) keeps it from taking over a live host.
+//! A holder of a token can still say hello for an id that is not instance-bound once the
+//! host is lost, and can fill `max_machines` with made-up ids; hellos are limited per
+//! token (`--agent-hello-burst`, `--agent-hello-interval`) to slow that, not to stop it.
+//! Per-host credentials close it and are not built. The limit is one bucket for each join
+//! token, shared by every agent of the pool that uses it, so a holder of the token can
+//! spend the bucket and make the pool's other agents get 429 `rate-limited` on their
+//! hellos until it refills: that is the per-host credential gap (design D18) again, not
+//! something the limit prevents. A refusal is logged once per token per interval, and
+//! the bucket of a token that has left the token file is dropped at the next tick that
+//! reads the file. The registered hosts of a pool are
+//! as trusted as the holders of its join tokens: a lease is a whole machine that the
+//! pool's holders run.
+//!
+//! **Not built.** Commands to hosts (a heartbeat is answered with none), results and
+//! taint reports in heartbeats (read and ignored), the agent itself, several pools,
+//! a deny list of host ids.
 //!
 //! # Limits
 //!
@@ -134,6 +191,31 @@
 //! state across restarts (a provider that is a service, or hosts that agents report) is
 //! free to ignore the bookings it is given.
 //!
+//! The registered hosts are a source of that second kind in part. The registry holds
+//! nothing across a restart, so each booking of the lease file that names a host the
+//! static pool does not list is seated on the registry as an *awaiting* host: its lease
+//! is held and observes `Unknown` (never `Absent`, so the table keeps it), the host takes
+//! no new lease, and it counts toward `max_machines`, until its agent says hello again.
+//! That hello is admitted as any other and the lease then observes `Present`. An awaiting
+//! host whose lease has ended and whose agent has not returned is forgotten, binding
+//! included, once the grace period and `lost_retention` have passed since the restart
+//! that seated it; the next tick writes the file of bindings without it. An agent
+//! whose heartbeat reaches a restarted server is answered 409 `unknown-host` and says
+//! hello.
+//!
+//! What would otherwise let any join-token holder take such a lease with the first hello
+//! after the restart is the binding of the host id to the credential and instance it was
+//! admitted with. The server keeps the bindings in a file of its own beside the lease
+//! file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys it does not know
+//! ignored), written when a hello admits a host and again at a tick when it differs, and
+//! reads it at start. It holds SHA-256 digests of join tokens, not tokens. The file is
+//! not part of the lease file, so the lease file's format and the static-only start are
+//! unchanged. A file that is present and unreadable, or not private, is a refused start
+//! naming `--state-file`. A missing file means no bindings: a lease on a registered host
+//! then restores without one, and the first hello binds the id. If the file cannot be
+//! written (the failure is logged and counted) a lease granted meanwhile survives a
+//! restart without its binding until a later tick writes it.
+//!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
@@ -147,12 +229,20 @@
 //! while it drains is not needed: the drain is bounded.
 
 mod adapt;
+mod agent_api;
+mod agent_pool;
+mod agent_state;
+mod agent_tokens;
+mod agents;
 mod api;
 mod capacity;
 mod config;
 mod error;
+mod hosts;
 mod io_timeout;
+mod layered;
 mod listener;
+mod rate;
 mod server;
 mod ticker;
 mod tls;
@@ -174,6 +264,8 @@ pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use config::{BootMode, Cli, Config, Limits, MIN_TOKEN_BYTES, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
+#[doc(hidden)]
+pub use layered::LayeredProvider;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 

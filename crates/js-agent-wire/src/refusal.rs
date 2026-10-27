@@ -61,3 +61,11 @@ pub const HOST_BOUND: &str = "host-bound";
 pub const SESSION_MISMATCH: &str = "session-mismatch";
 /// A hello the server cannot answer because it could not make a session secret.
 pub const SESSION_UNAVAILABLE: &str = "session-unavailable";
+/// A hello for a host id the operator lists in a static pool: an id belongs to one
+/// source of hosts only, so a registering host cannot take it.
+pub const HOST_LISTED: &str = "host-listed";
+/// A hello the server refuses because its credential has said hello too often; the agent
+/// tries again later.
+pub const RATE_LIMITED: &str = "rate-limited";
+/// A request body over the transport's cap, refused before it is read in full.
+pub const BODY_TOO_LARGE: &str = "body-too-large";

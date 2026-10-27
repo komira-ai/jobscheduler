@@ -603,6 +603,7 @@ version = "0.1.0"
 dependencies = [
  "js-agent-wire",
  "js-lease",
+ "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
@@ -639,10 +640,12 @@ dependencies = [
  "clap",
  "hyper",
  "hyper-util",
+ "js-agent-wire",
  "js-lease",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-registry",
  "js-types",
  "rcgen",
  "rustix",
@@ -653,6 +656,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
