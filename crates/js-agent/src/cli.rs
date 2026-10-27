@@ -159,7 +159,8 @@ pub struct Cli {
     /// statuses refuse the lease with a typed reason (75 `noise-over-bound`, 76
     /// `not-quiet`, 77 `setup-failed`, 78 `unsupported`; any other `setup-failed`), and
     /// the first line it prints is the refusal's detail. It gets an environment of its
-    /// own and nothing of the scheduler's, and `prepare_timeout` to finish.
+    /// own and nothing of the scheduler's, and `prepare_timeout` for its output to end and
+    /// as long again for its exit (twice that in the worst case).
     #[arg(long, value_name = "PATH")]
     pub readiness_hook: Option<String>,
     /// An argument of `--readiness-hook`, in order. May be given more than once. Needs

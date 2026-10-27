@@ -14,7 +14,9 @@
 //! `PATH` and nothing the agent inherited, and with no standard input. No argument or
 //! variable carries anything of the scheduler's (no lease id, no token, no session
 //! secret). It is bounded by the `prepare_timeout` the agent counts from the grant
-//! ([`hook_runner`]); it is killed and collected when it overruns.
+//! ([`hook_runner`]): at most that long for its output to end and at most that long again
+//! for its exit, so twice `prepare_timeout` in the worst case. It is killed and collected
+//! when it overruns.
 //!
 //! # The answer
 //!
