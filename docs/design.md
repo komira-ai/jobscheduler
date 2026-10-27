@@ -71,7 +71,7 @@ The decisions, in one place:
 13. **A machine serves many jobs; it is capped; it is kept clean.** After a job `js-agent` removes the container and scratch and frees the
     slot, queued work that fits runs on the same machine at once, and a machine is released only after an idle time. `max_machines` is
     never exceeded and growth is a few machines per tick; this is overload protection, not a cost guardrail (5.10, 5.11).
-14. **A job declares `contained` or `host`; a machine can be tainted.** A host job taints its machine, `js-agent` checks after every job
+14. **A job declares `contained` or `host`; a machine can be tainted.** A host job taints its machine (the scheduler records this itself, not on the agent's report), `js-agent` checks after every job
     and taints on any finding, and a tainted machine takes no work and is replaced, never cleared on the agent's word (5.12).
 
 ### 1.1 What this amendment deletes and adds
@@ -248,7 +248,7 @@ until its first hello, and takes none.
 | memory-pressure | only while the node holds a lease | no |
 | draining | announced by the agent (SIGTERM): leases run to their end, nothing is requeued | no |
 | quarantined | held out | no |
-| tainted | a host job ran or a post-job check found something (5.12); sticky until the provider replaces the host or an operator clears it | no |
+| tainted | the scheduler granted a `host_jobs` lease or sent a host `Start`, or a post-job check found something (5.12); sticky until the provider replaces the host or an operator clears it | no |
 
 An unknown phase value is read as quarantined (fail closed), the one deliberate exception to "skip what you do not know", since skipping a
 phase could place work on a node that is not serving. Agent-announced draining is distinct from operator cordon and drain (4.1).
@@ -267,7 +267,7 @@ granted the lease (5.1):
 - A lease lives while the agent is heard and lists it. There is no renew call.
 - **After every job** the agent removes the container and the scratch directory, runs the post-job checks, and only then frees the slot
   (the unit leaves the heartbeat and the booking returns to the host). Queued work that fits is placed on the same machine at once. A
-  cleanup failure or a finding taints the host instead of freeing the slot (5.10, 5.12).
+  cleanup failure or a finding taints the host instead of freeing the slot; a host job's machine was already tainted by the scheduler (5.10, 5.12).
 - A `Start` that arrives later than its validity window is refused by the agent, which then sends nothing; the scheduler gives the lease
   up as never started (`NeverStarted`).
 - A `Cancel` for a lease the scheduler no longer holds is resent while the lease is listed. A lost Cancel is therefore not an error.
@@ -437,7 +437,7 @@ reading back Absent (5.6), or, for a static host, when the operator removes it.
   `releasing` host takes no new leases, and a host with a lease committed first is not selected. A failed or Unknown release leaves it
   `releasing` and is retried; it serves again only if a read-back says Present after a `Refused`. Ranking packs onto the fewest hosts
   (`FirstFit`, 6.5) so that idle hosts exist.
-- *Static pools* do not launch. `min_machines` and `max_machines` then bound how many inventory hosts the pool claims; `idle_timeout` does not apply.
+- *Static pools* do not launch. `min_machines` and `max_machines` then bound how many inventory hosts the pool claims; an idle claimed host is returned to the inventory by the Release rule, above `min_machines`.
 
 `max_machines` and `max_step` are overload protection, not cost guardrails (5.11). A pool at `max_machines` with a request no host can fit
 is unservable (8.2). Cold start is paid by the queue unless the owner sets `min_machines` above zero (D21). Reuse, caps and taint: 5.10 to 5.12.
@@ -764,7 +764,7 @@ The merged `js-provider-fake` becomes the fake capacity provider, a fake aws in 
 launch failure, slow boot, an `acquire` accepted but answered Unknown, a `release` answered Unknown, an instance that disappears
 (reclaim), a leaked instance in `list`, a quota refusal, and a duplicate acquire id. A fake agent (in `js-sim`) models the agent
 side: loss, fence, out-of-memory kill, node pressure, phase changes, unknown observations and slow starts, and the taint paths: a host
-job, each post-job check finding something, a cleanup failure, and a taint report lost and resent. Starting points:
+job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. Starting points:
 `kbf_daemon::Runtime`'s fake in `crates/kbf-daemon/src/runtime.rs` and `crates/kbf-sim-cell`. The fakes are the executable spec, as in
 ucdk (`ucdk/crates/ucdk-provider-fake`).
 
@@ -795,11 +795,13 @@ Conformance against a real account runs only in a sandbox account, on the owner'
 The scheduler invariants I1 to I16 and L1 to L4 are checked after every input in seeded sweeps. For the kbf instantiation, the golden
 trace hashes (step 0) must be identical before and after each extraction PR. New invariants: an Unknown observation never frees a
 booking; an Absent observation frees it exactly once; a pool never launches two instances for one acquire id; a pool never exceeds `max_machines`
-(in-flight acquires and tainted hosts counted) and never acquires more than `max_step` in a tick, and is never below `min_machines` while it
-has demand; queued work that fits a freed slot is placed on that host before any acquire; a tainted host takes no lease and is never
-untainted by a hello; a tainted host id is refused at admission; a pool stops replacing after `max_taints_in_a_row`; a host holding a lease is never released, including when a lease commits between selection and release; a host in `releasing` takes no
-lease; a pool with a failing boot stops acquiring after `max_boot_failures`; the reaper never releases an instance whose agent holds
-leases; every instance in `list` is a pool host or is being reaped. A kbf case: an out-of-memory kill at the top rung of a half-node
+(in-flight acquires and tainted hosts counted), never acquires more than `max_step` in a tick, and keeps `min_machines` hosts whether or
+not there is demand (never released at or below it); queued work that fits a freed slot is placed on that host before any acquire; a
+tainted host takes no lease and is never untainted by a hello, a heartbeat or a Result, even when the agent reports no taint after a host
+job (the scheduler tainted it itself); a tainted host id is refused at admission; a pool stops replacing after `max_taints_in_a_row`; a
+host holding a lease is never released, including when a lease commits between selection and release; a host in `releasing` takes no lease
+or placed job (run service, ucdk), selection and placement committing under the table lock, first one wins; a pool with a failing boot stops
+acquiring after `max_boot_failures`; the reaper never releases an instance whose agent holds leases; every instance in `list` is a pool host or is being reaped. A kbf case: an out-of-memory kill at the top rung of a half-node
 lease is rerun in a whole-node lease (7.4).
 
 ### 13.4 Request-history replay
@@ -948,8 +950,8 @@ package (10.3).
   a cost guardrail, and the earlier ruling against cost guardrails (N4) stands (5.11).
 - **D25. Isolation and taint.** (a) Every job contained, no host jobs; (b) a job declares `contained` or `host`, a host job taints its
   machine, the agent checks after every job and taints on any finding, and a tainted machine is replaced or cordoned, never cleared on
-  the agent's word; (c) b with a scheduler-side check as well. Recommend (b), with host jobs off by default and needing consumer, pool and
-  agent consent (5.12). A scheduler-side check would trust an agent that may be the thing that is compromised, so (c) adds nothing.
+  the agent's word; (c) b, and the scheduler also records the taint itself when it grants a `host_jobs` lease or sends a host `Start`,
+  before the job runs. Recommend (c), host jobs off by default and needing consumer, pool and agent consent (5.12). The scheduler's record is of what it granted, not a check of the host, so it does not depend on an agent that may be compromised; the agent's report is the second path.
 
 ## 16. Risks
 
@@ -990,7 +992,7 @@ package (10.3).
   consumer's. Mitigated by removing the container and scratch before the slot is freed, the post-job checks, taint on any finding or
   failed check (a check that cannot run is a finding), and a clean baseline (5.10, 5.12). The checks are a minimum and cheap: a host job
   or a determined escape can defeat them, which is why a host job taints unconditionally and host jobs are off by default.
-- **K17. A compromised or wrong agent hides a taint.** The agent is the only reporter of its own host. Mitigated by the agent persisting
+- **K17. A compromised or wrong agent hides a taint.** The agent reports its own host's checks. Mitigated by the scheduler tainting a host job's machine itself, at grant, whatever the agent reports (5.12), and the agent persisting
   the taint before reporting, the scheduler never clearing on its word, replacement by the provider, and host jobs needing the pool's
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,

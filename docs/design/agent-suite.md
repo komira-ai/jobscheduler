@@ -16,7 +16,8 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
   is refused without all three consents (5.12); a host job taints on completion whatever its outcome; each post-job check (stray
   process, file outside the roots, mounts, users, kernel modules, cleanup failure) taints on its own, and a check that cannot run is a
   finding; a taint is resent until acknowledged, survives an agent restart, and is not cleared by a later clean hello; a tainted host
-  takes no `Start`;
+  takes no `Start`; a fake agent that reports no taint after a host job still leaves the host tainted at the scheduler (recorded at the
+  `host_jobs` grant or the host `Start`), which grants it no new lease, and a Result, hello or heartbeat does not untaint it;
 - per session (5.1): the leasee's session obeys the cancel, grace, ack and never-started rules for its placements, and the scheduler
   cancels none of them; a hello that announces a lease not committed to its host id is answered `Cancel`; a mount outside the agent's
   roots is refused.

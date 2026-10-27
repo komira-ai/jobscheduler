@@ -22,6 +22,10 @@ fits the freed slot, on this host, before any other pool is asked for a machine.
 its own loop does the same. In both cases queued work that fits existing capacity is placed before the scaler acquires anything (5.8):
 demand that fits is never demand for a new machine.
 
+Reuse placement considers only hosts that are serving, not cordoned, not draining, not tainted and not `releasing`. Choosing a host for
+release and placing work on it both run under the table lock, and whichever commits first wins: a host chosen for release takes no lease and
+no placed job (run service, ucdk), and a host that has taken one is not chosen.
+
 **A machine is released only after it has been idle.** A host is idle from the moment it has no lease and no running job. After
 `idle_timeout` of continuous idleness, while the pool holds more than `min_machines`, the scaler releases it (terminates it, for a cloud
 provider; returns it to the inventory, for a static one). A job or lease arriving before then restarts nothing: the host simply serves
@@ -40,7 +44,7 @@ serving, `registering`, in-flight `acquire` (an intent recorded but not yet answ
 check is made under the table lock when the intent is recorded, so two scaler ticks cannot both pass it. A restart counts what `list`
 returns plus the open intents. A pool at `max_machines` leaves the demand queued (8.2).
 
-`min_machines` is the floor the scaler keeps while the pool has demand, and defaults to 0.
+`min_machines` is the floor the scaler keeps whether or not there is demand (a warm floor, D21), and defaults to 0. It is never released below.
 
 **Growth is bounded and follows real demand.** Each tick the scaler acquires at most `max_step` machines (default 2). It acquires only for
 queued demand that does not fit existing capacity: leases in `acquiring` that no free host, no host about to be freed and no
@@ -77,6 +81,12 @@ The default is contained only. A pool that allows host jobs should be a pool of 
 
 **After a host job the machine is tainted.** On completion (any outcome: success, failure, kill, timeout), the agent marks the host
 tainted before it frees anything.
+
+**The scheduler taints a host job's machine itself.** When it grants a lease whose token carries a `host_jobs` claim, or sends a `Start`
+with `isolation = host`, it records the host as tainted in the lease file before the job starts. This is unconditional and does not wait
+for the agent: the record is of what the scheduler granted, so an agent that is compromised by the job and reports clean still leaves a
+tainted host. The scheduler never untaints on a `Result`, a hello or a heartbeat. The lease granted keeps running; the host takes no
+other new lease or job. The agent's marker and report below are the second path, and the only one for a finding after a contained job.
 
 **Post-job checks.** After every job, contained or host, the agent runs cheap checks against a baseline it recorded when the host was
 last known clean (at agent start, and after each job that passed). This list is a minimum; a check may be added later (additively, R3),
