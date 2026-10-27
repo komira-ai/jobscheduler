@@ -15,11 +15,11 @@
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
-//! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control character |
+//! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
-//! | session timing | [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
+//! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
 
 /// Longest id, in bytes: run, lease, host, pool, instance and provider ids.
 pub const MAX_ID_LEN: usize = 128;
@@ -80,6 +80,9 @@ pub const MAX_WALL_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 pub const MAX_VALID_FOR_MS: u64 = MAX_WALL_MS;
 /// Largest lease-count cap a host may announce.
 pub const MAX_LEASE_CAP: u64 = 4096;
+/// Shortest heartbeat interval a welcome may set, in milliseconds; a smaller one would
+/// make the agent heartbeat in a busy loop.
+pub const MIN_HEARTBEAT_INTERVAL_MS: u64 = 250;
 /// Longest heartbeat interval a welcome may set, in milliseconds (one hour).
 pub const MAX_HEARTBEAT_INTERVAL_MS: u64 = 60 * 60 * 1000;
 /// Longest grace a welcome may set, in milliseconds (one day).

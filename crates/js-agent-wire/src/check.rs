@@ -81,7 +81,8 @@ pub(crate) fn opt_ident(at: At, value: Option<&String>) -> Result<(), Validation
     value.map_or(Ok(()), |text| ident(at, text))
 }
 
-/// Non-empty text of at most `max` bytes with no control character.
+/// Non-empty text of at most `max` bytes with no control or
+/// format character.
 pub(crate) fn text(at: At, value: &str, max: usize) -> Result<(), ValidationError> {
     if value.is_empty() {
         return Err(at.fail(Rule::Empty));
@@ -89,10 +90,35 @@ pub(crate) fn text(at: At, value: &str, max: usize) -> Result<(), ValidationErro
     if value.len() > max {
         return Err(at.fail(Rule::TooLong));
     }
-    if value.chars().any(char::is_control) {
+    if value.chars().any(|c| c.is_control() || is_format(c)) {
         return Err(at.fail(Rule::BadChars));
     }
     Ok(())
+}
+
+/// Unicode format and separator characters (general category Cf, plus U+2028 and
+/// U+2029): none draws a glyph, but each can reorder or hide the text around it.
+const FORMAT_RANGES: [(u32, u32); 13] = [
+    (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x180E, 0x180E),
+    (0x200B, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x206F),
+    (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
+];
+
+fn is_format(c: char) -> bool {
+    let code = u32::from(c);
+    FORMAT_RANGES
+        .iter()
+        .any(|&(low, high)| (low..=high).contains(&code))
 }
 
 /// Present text; absent text passes.

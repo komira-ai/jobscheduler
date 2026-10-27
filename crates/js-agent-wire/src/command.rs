@@ -83,8 +83,10 @@ pub struct Mount {
     /// The name of one of the agent's configured roots: `[A-Za-z0-9._-]`, leading
     /// alphanumeric, at most [`limits::MAX_ROOT_NAME_LEN`] bytes.
     pub root_name: String,
-    /// The path below that root: not empty, relative, with no `..` component and no NUL,
-    /// at most [`limits::MAX_REL_LEN`] bytes. The root itself is not mountable.
+    /// The path below that root: relative, with at least one named component (`.` and `./`
+    /// alone name the root, which is not mountable), no `..` component, no control
+    /// character, no `:` and no `,` (so it cannot add a field to a mount option string),
+    /// at most [`limits::MAX_REL_LEN`] bytes.
     pub rel: String,
     /// Whether the job sees the directory read-only.
     pub ro: bool,
@@ -111,7 +113,11 @@ impl Mount {
         if self.rel.len() > limits::MAX_REL_LEN {
             return Err(rel.fail(Rule::TooLong));
         }
-        if self.rel.contains('\0') {
+        let unsafe_char = self
+            .rel
+            .chars()
+            .any(|c| c.is_control() || c == ':' || c == ',');
+        if unsafe_char {
             return Err(rel.fail(Rule::BadChars));
         }
         let climbs = Path::new(&self.rel).components().any(|part| {
@@ -122,6 +128,12 @@ impl Mount {
         });
         if climbs {
             return Err(rel.fail(Rule::Escapes));
+        }
+        let names_something = Path::new(&self.rel)
+            .components()
+            .any(|part| matches!(part, Component::Normal(_)));
+        if !names_something {
+            return Err(rel.fail(Rule::Empty));
         }
         Ok(())
     }
@@ -183,6 +195,9 @@ impl JobSpec {
         let gpus = at.field("gpu_indices");
         check::count(gpus, self.gpu_indices.len(), limits::MAX_GPUS as usize)?;
         check::distinct(gpus, self.gpu_indices.iter())?;
+        for index in &self.gpu_indices {
+            check::range(gpus, u64::from(*index), 0, limits::MAX_GPUS - 1)?;
+        }
         let mounts = At::new("mounts", refusal::INVALID_MOUNT);
         check::count(mounts, self.mounts.len(), limits::MAX_MOUNTS)?;
         for mount in &self.mounts {
@@ -215,8 +230,9 @@ impl JobSpec {
         Ok(())
     }
 
-    /// Whether the job's limits and GPU indices fit one host's offered shape. This is the
-    /// check for a single job; the sum over several jobs on one host is the server's, and
+    /// Whether the job's limits and the number of its GPU indices fit one host's offered
+    /// shape. [`JobSpec::validate`] bounds each index; matching the indices to the devices
+    /// the host reported is the caller's, who holds that list. This is the check for a single job; the sum over several jobs on one host is the server's, and
     /// it adds with `checked_add` (every value here is below the caps that keep a sum of
     /// 2^18 jobs from overflowing).
     pub fn fits_shape(&self, shape: &WireShape) -> Result<(), ValidationError> {

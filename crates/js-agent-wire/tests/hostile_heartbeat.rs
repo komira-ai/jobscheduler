@@ -242,7 +242,12 @@ fn reply_is_bounded_and_every_entry_validated() {
     );
     let mut ok = reply();
     ok.commands = vec![Command::Unknown; MAX_COMMANDS];
-    ok.result_acks = vec![ack; MAX_RESULTS];
+    ok.result_acks = (0..MAX_RESULTS)
+        .map(|i| ResultAck {
+            run_id: format!("r{i}"),
+            ..ack.clone()
+        })
+        .collect();
     assert_eq!(ok.validate(), Ok(()));
     assert_eq!(HeartbeatReply::default().validate(), Ok(()));
     assert_eq!(
@@ -267,10 +272,10 @@ fn welcome_check(edit: impl FnOnce(&mut Welcome)) -> ValidationError {
     broken(&welcome(), edit, Welcome::validate)
 }
 
-/// A welcome with a zero interval, an interval or grace above its cap, a grace that does
-/// not exceed two intervals, a protocol the agent does not speak or a bad pool is
-/// refused; the caps and the smallest valid grace pass. It catches the server reply
-/// `{"heartbeat_interval_ms":0}` that would make an agent spin.
+/// A welcome with a zero interval, one below the floor, an interval or grace above its
+/// cap, a grace that does not exceed two intervals, a protocol the agent does not speak or a bad pool is
+/// refused; the caps, the floor and the smallest valid grace pass. It catches the server reply
+/// `{"heartbeat_interval_ms":1}` that would make an agent heartbeat in a busy loop.
 #[test]
 fn welcome_is_checked_before_the_agent_acts() {
     let code = refusal::INVALID_WELCOME;
@@ -280,6 +285,11 @@ fn welcome_is_checked_before_the_agent_acts() {
         Rule::OutOfRange,
         code,
     );
+    let err = welcome_check(|w| w.heartbeat_interval_ms = MIN_HEARTBEAT_INTERVAL_MS - 1);
+    expect(err, "heartbeat_interval_ms", Rule::OutOfRange, code);
+    let mut at_floor = welcome();
+    at_floor.heartbeat_interval_ms = MIN_HEARTBEAT_INTERVAL_MS;
+    assert_eq!(at_floor.validate(), Ok(()));
     let err = welcome_check(|w| w.heartbeat_interval_ms = MAX_HEARTBEAT_INTERVAL_MS + 1);
     expect(err, "heartbeat_interval_ms", Rule::OutOfRange, code);
     expect(
@@ -364,4 +374,27 @@ fn refusal_and_hello_reply_are_checked() {
     bad.grace_ms = 0;
     assert!(HelloReply::Welcome(bad).validate().is_err());
     assert!(HelloReply::Refused(refused("", None)).validate().is_err());
+}
+
+/// Two starts in one reply that name the same run id or the same GPU index, and two
+/// acknowledgements for one run, are refused; distinct ones pass. It catches a reply that
+/// starts a run twice or hands one device to two jobs, which the contract forbids.
+#[test]
+fn reply_entries_do_not_overlap() {
+    let start = |run: &str, gpus: &[u32]| {
+        let mut spec = common::job();
+        spec.run_id = run.into();
+        spec.gpu_indices = gpus.to_vec();
+        Command::Start(Box::new(spec))
+    };
+    let err = reply_check(|r| r.commands = vec![start("a", &[0]), start("a", &[1])]);
+    expect(err, "commands", Rule::Duplicate, refusal::INVALID_REPLY);
+    let err = reply_check(|r| r.commands = vec![start("a", &[0, 1]), start("b", &[1])]);
+    expect(err, "commands", Rule::Duplicate, refusal::INVALID_REPLY);
+    let ack = reply().result_acks[0].clone();
+    let err = reply_check(|r| r.result_acks = vec![ack.clone(), ack]);
+    expect(err, "result_acks", Rule::Duplicate, refusal::INVALID_REPLY);
+    let mut ok = reply();
+    ok.commands = vec![start("a", &[0]), start("b", &[1])];
+    assert_eq!(ok.validate(), Ok(()));
 }

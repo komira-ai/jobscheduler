@@ -184,6 +184,13 @@ fn gpu_devices_match_the_shape() {
         h.gpu_devices = (0..=MAX_GPUS as u32).map(device).collect();
     });
     expect(err, "gpu_devices", Rule::TooMany, refusal::INVALID_HELLO);
+    let err = check(|h| h.gpu_devices[0].index = MAX_GPUS as u32);
+    expect(
+        err,
+        "gpu_devices.index",
+        Rule::OutOfRange,
+        refusal::INVALID_HELLO,
+    );
     let err = check(|h| h.gpu_devices[0].uuid.clear());
     expect(err, "gpu_devices.uuid", Rule::Empty, refusal::INVALID_HELLO);
     let err = check(|h| h.gpu_devices[0].model = long(MAX_GPU_TEXT_LEN + 1));

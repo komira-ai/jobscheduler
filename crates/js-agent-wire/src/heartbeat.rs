@@ -257,8 +257,8 @@ impl ResultAck {
 impl HeartbeatReply {
     /// Checks the reply the way the agent must before it acts on it: at most
     /// [`limits::MAX_COMMANDS`] commands, each valid (an unknown one passes and is
-    /// skipped), and at most [`limits::MAX_RESULTS`] acknowledgements, each with a good
-    /// run id.
+    /// skipped), no run id and no GPU index named by two starts, and at most [`limits::MAX_RESULTS`] acknowledgements, each with a good
+    /// run id, none twice.
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("reply", refusal::INVALID_REPLY);
         check::count(
@@ -269,6 +269,13 @@ impl HeartbeatReply {
         for command in &self.commands {
             command.validate()?;
         }
+        let starts = self.commands.iter().filter_map(|command| match command {
+            Command::Start(spec) => Some(spec),
+            _ => None,
+        });
+        let commands = at.field("commands");
+        check::distinct(commands, starts.clone().map(|spec| spec.run_id.as_str()))?;
+        check::distinct(commands, starts.flat_map(|spec| spec.gpu_indices.iter()))?;
         check::count(
             at.field("result_acks"),
             self.result_acks.len(),
@@ -277,6 +284,10 @@ impl HeartbeatReply {
         for ack in &self.result_acks {
             ack.check(at)?;
         }
+        check::distinct(
+            at.field("result_acks"),
+            self.result_acks.iter().map(|ack| ack.run_id.as_str()),
+        )?;
         Ok(())
     }
 }

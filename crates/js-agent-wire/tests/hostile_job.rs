@@ -219,6 +219,14 @@ fn mounts_stay_under_a_named_root() {
         let err = mount("cache", rel).validate().unwrap_err();
         expect(err, "mounts.rel", Rule::Escapes, refusal::INVALID_MOUNT);
     }
+    for rel in [".", "./", "./."] {
+        let err = mount("cache", rel).validate().unwrap_err();
+        expect(err, "mounts.rel", Rule::Empty, refusal::INVALID_MOUNT);
+    }
+    for rel in ["a:b", "a,b", "x:/host:rw", "a\nb", "a\tb", "a\u{7f}"] {
+        let err = mount("cache", rel).validate().unwrap_err();
+        expect(err, "mounts.rel", Rule::BadChars, refusal::INVALID_MOUNT);
+    }
     let err = mount("cache", "a\0b").validate().unwrap_err();
     expect(err, "mounts.rel", Rule::BadChars, refusal::INVALID_MOUNT);
     let err = mount("cache", "").validate().unwrap_err();
@@ -302,10 +310,15 @@ fn gpu_indices_and_validity_are_bounded() {
     expect(err, "gpu_indices", Rule::Duplicate, refusal::INVALID_JOB);
     let err = check(|j| j.gpu_indices = (0..=MAX_GPUS as u32).collect());
     expect(err, "gpu_indices", Rule::TooMany, refusal::INVALID_JOB);
+    for index in [MAX_GPUS as u32, 4_000_000_000, u32::MAX] {
+        let err = check(|j| j.gpu_indices = vec![index]);
+        expect(err, "gpu_indices", Rule::OutOfRange, refusal::INVALID_JOB);
+    }
     let err = check(|j| j.valid_for_ms = MAX_VALID_FOR_MS + 1);
     expect(err, "valid_for_ms", Rule::OutOfRange, refusal::INVALID_JOB);
     let mut spec = job();
     spec.gpu_indices = (0..MAX_GPUS as u32).collect();
+    assert_eq!(spec.gpu_indices.last(), Some(&(MAX_GPUS as u32 - 1)));
     spec.valid_for_ms = MAX_VALID_FOR_MS;
     assert_eq!(spec.validate(), Ok(()));
     spec.valid_for_ms = 0;

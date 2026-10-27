@@ -142,6 +142,8 @@ pub struct GpuDevice {
 
 impl GpuDevice {
     fn check(&self, at: At) -> Result<(), ValidationError> {
+        let index = at.field("gpu_devices.index");
+        check::range(index, u64::from(self.index), 0, limits::MAX_GPUS - 1)?;
         let uuid = at.field("gpu_devices.uuid");
         check::text(uuid, &self.uuid, limits::MAX_GPU_TEXT_LEN)?;
         let model = at.field("gpu_devices.model");
@@ -294,8 +296,8 @@ pub struct Welcome {
     pub protocol: u32,
     /// The session. Every heartbeat names it; a heartbeat for another epoch is stale.
     pub epoch: u64,
-    /// How often the agent heartbeats, in milliseconds: above zero, at most
-    /// [`limits::MAX_HEARTBEAT_INTERVAL_MS`].
+    /// How often the agent heartbeats, in milliseconds: at least
+    /// [`limits::MIN_HEARTBEAT_INTERVAL_MS`], at most [`limits::MAX_HEARTBEAT_INTERVAL_MS`].
     pub heartbeat_interval_ms: u64,
     /// How long the server waits in silence before it treats the host as lost, in
     /// milliseconds. It exceeds two heartbeat intervals ([`crate::grace_covers_heartbeats`])
@@ -324,7 +326,7 @@ impl Welcome {
         check::range(
             interval,
             self.heartbeat_interval_ms,
-            1,
+            limits::MIN_HEARTBEAT_INTERVAL_MS,
             limits::MAX_HEARTBEAT_INTERVAL_MS,
         )?;
         let grace = at.field("grace_ms");
