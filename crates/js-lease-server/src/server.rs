@@ -16,7 +16,7 @@ use crate::api::{Shared, router};
 use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
-use crate::listener::serve;
+use crate::listener::{Slots, serve};
 use crate::ticker::Ticker;
 use crate::tls;
 
@@ -26,6 +26,7 @@ pub struct Running {
     addr: SocketAddr,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
+    slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
 }
@@ -77,11 +78,13 @@ pub async fn start<T: Ticker>(
     );
     let shared = Arc::new(Shared::new(table, config.token));
     let (stop, stopped) = oneshot::channel::<()>();
+    let slots = Arc::new(Slots::new(config.limits.max_connections));
     let serving = serve(
         listener,
         acceptor,
         router(shared.clone()),
         config.limits,
+        slots.clone(),
         stopped,
     );
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
@@ -89,6 +92,7 @@ pub async fn start<T: Ticker>(
         addr,
         shared,
         stop,
+        slots,
         serving: tokio::spawn(serving),
         ticking,
     })
@@ -104,8 +108,19 @@ impl Drop for Ticking {
     }
 }
 
+/// Marks the tick loop as stopped when it is dropped, however it ends: the caller
+/// aborting it, or the ticker or the table panicking. `/healthz` reads the mark.
+struct Alive(Arc<Shared>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.stop_ticking();
+    }
+}
+
 /// Ticks the table at every tick of `ticker`, forever; the caller aborts it.
 async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T) {
+    let _alive = Alive(shared.clone());
     loop {
         let tick = ticker.next().await;
         shared.tick().await;
@@ -124,15 +139,31 @@ impl Running {
         self.shared.save_errors()
     }
 
+    /// How many times the accept loop found every one of the `--max-connections` slots
+    /// taken and waited for one to be given back, since the server started. A loop
+    /// that waits is not accepting: this is how a test sees the cap hold, with a
+    /// connection open at the cap, without waiting for something not to happen.
+    pub fn accept_waits(&self) -> u64 {
+        self.slots.waits()
+    }
+
     /// Stops the server: no new connections, the requests in flight finish (those still
     /// open after `--drain-timeout` are cut), the table is ticked once more (so an expiry
     /// that fell due is stopped before the process ends) and the lease table is released.
+    ///
+    /// It is an error when the serving task failed, or when that last tick could not
+    /// write the lease file: the file is then behind the table, and an orderly stop
+    /// that says nothing would hide it. The cause is in the error and in the log.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
         let served = self.serving.await.map_err(io::Error::other);
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
-        self.shared.tick().await;
-        served
+        let report = self.shared.tick().await;
+        let saved = report.save_error.map_or(Ok(()), |err| {
+            let reason = format!("the final tick could not write the lease file: {err}");
+            Err(io::Error::other(reason))
+        });
+        served.and(saved)
     }
 }

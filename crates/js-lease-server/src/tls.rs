@@ -8,10 +8,12 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
 
-use crate::config::TlsFiles;
+use crate::config::{TlsFiles, read_private};
 use crate::error::StartupError;
 
 /// An acceptor serving the certificate chain and key in `files`, speaking HTTP/1.1 only.
+/// The key file must be owner-only like the token file (see `read_private`). Both files
+/// are read here, once: a certificate renewed on disk is served after a restart.
 pub(crate) fn acceptor(files: &TlsFiles) -> Result<TlsAcceptor, StartupError> {
     let certs = CertificateDer::pem_file_iter(&files.cert)
         .and_then(|found| found.collect::<Result<Vec<_>, _>>())
@@ -22,7 +24,8 @@ pub(crate) fn acceptor(files: &TlsFiles) -> Result<TlsAcceptor, StartupError> {
         let reason = format!("{}: no certificate found", files.cert.display());
         return Err(StartupError::new("--tls-cert", reason));
     }
-    let key = PrivateKeyDer::from_pem_file(&files.key)
+    let key_bytes = read_private(&files.key, "--tls-key")?;
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes)
         .map_err(|err| StartupError::new("--tls-key", format!("{}: {err}", files.key.display())))?;
     let provider = Arc::new(default_provider());
     let builder = ServerConfig::builder_with_provider(provider)

@@ -1,7 +1,9 @@
 //! The program itself, run as a child process: it listens, serves, and exits 0 on
-//! SIGTERM after finishing; and its refusals exit 2.
+//! SIGTERM after finishing; its refusals exit 2; a final save that fails exits 1.
 
-use std::io::{BufRead, BufReader};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read};
+use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -26,18 +28,16 @@ impl Drop for Guard {
     }
 }
 
-/// Asserts that the real program prints the address it listens on, answers requests
-/// with the system clock and a timer, and on SIGTERM stops with status 0.
-#[tokio::test]
-async fn the_program_serves_and_stops_on_sigterm() {
-    let scratch = Scratch::new("binary");
-    let args = base_args(&scratch);
+/// Starts the program on `args` (the program name first) with a timer that never fires
+/// in a test, standard error going to `stderr`, and returns it with the address it
+/// printed.
+fn launch(args: &[OsString], stderr: Stdio) -> (Guard, SocketAddr) {
     let mut child = Guard(
         Command::new(PROGRAM)
             .args(&args[1..])
             .args(["--tick", "1h"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .unwrap(),
     );
@@ -55,6 +55,15 @@ async fn the_program_serves_and_stops_on_sigterm() {
         .unwrap()
         .parse()
         .unwrap();
+    (child, addr)
+}
+
+/// Asserts that the real program prints the address it listens on, answers requests
+/// with the system clock and a timer, and on SIGTERM stops with status 0.
+#[tokio::test]
+async fn the_program_serves_and_stops_on_sigterm() {
+    let scratch = Scratch::new("binary");
+    let (mut child, addr) = launch(&base_args(&scratch), Stdio::null());
 
     let health = request(addr, "GET", "/healthz", None, None).await;
     assert_eq!(health.status, 200);
@@ -68,6 +77,40 @@ async fn the_program_serves_and_stops_on_sigterm() {
     assert!(status.success(), "{status:?}");
     let saved = std::fs::read_to_string(scratch.state()).unwrap();
     assert!(saved.contains("lease_count = 1"));
+}
+
+/// Asserts that a program whose lease file cannot be written at the last tick exits 1
+/// and says why on standard error, instead of the 0 of an orderly stop. The file is
+/// made unwritable by putting a directory where its temporary file goes; a renew then
+/// fails to save (a 500) and leaves the file behind the table, so the final tick has
+/// to write it and cannot.
+#[tokio::test]
+async fn the_program_exits_1_when_the_final_save_fails() {
+    let scratch = Scratch::new("binary_final_save");
+    let (mut child, addr) = launch(&base_args(&scratch), Stdio::piped());
+    let body = lease_body().to_string().into_bytes();
+    let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
+    assert_eq!(made.status, 201, "{}", made.body);
+    std::fs::create_dir(scratch.path("leases.toml.tmp")).unwrap();
+    let renewed = request(addr, "POST", "/v1/leases/1-1/renew", Some(TOKEN), None).await;
+    assert_eq!(renewed.status, 500, "{}", renewed.body);
+
+    let pid = Pid::from_child(&child.0);
+    kill_process(pid, Signal::TERM).unwrap();
+    let status = child.0.wait().unwrap();
+    assert_eq!(status.code(), Some(1), "{status:?}");
+    let mut message = String::new();
+    child
+        .0
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut message)
+        .unwrap();
+    assert!(
+        message.contains("js-lease-server: the final tick could not write the lease file"),
+        "{message}"
+    );
 }
 
 /// Asserts that the real program exits 2 and names the flag when a start is refused.

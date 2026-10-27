@@ -65,9 +65,18 @@ pub struct Cli {
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub handshake_timeout: Duration,
     /// How long a client has to send the head of a request, from the connection's
-    /// start and again after each response on it.
-    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    /// start and again after each response on it. This is also how long a keep-alive
+    /// connection may sit idle between requests.
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub header_timeout: Duration,
+    /// How long a write to a client may make no progress before the connection is
+    /// closed: a client that does not read its answers cannot hold a connection.
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    pub write_timeout: Duration,
+    /// The most requests served on one connection. The last answer says
+    /// `Connection: close`; a client opens another connection for the next request.
+    #[arg(long, default_value = "100", value_parser = clap::value_parser!(u32).range(1..))]
+    pub max_requests: u32,
     /// How long a stop waits for the requests in flight before it cuts what is left.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub drain_timeout: Duration,
@@ -81,8 +90,13 @@ pub struct Limits {
     pub max_connections: u16,
     /// How long a TLS handshake may take.
     pub handshake_timeout: Duration,
-    /// How long the head of a request may take to arrive.
+    /// How long the head of a request may take to arrive; also the idle time of a
+    /// keep-alive connection between two requests.
     pub header_timeout: Duration,
+    /// How long a write to a client may make no progress.
+    pub write_timeout: Duration,
+    /// The most requests one connection serves.
+    pub max_requests: u32,
     /// How long a stop waits for requests in flight.
     pub drain_timeout: Duration,
 }
@@ -92,8 +106,23 @@ impl Default for Limits {
         Self {
             max_connections: 256,
             handshake_timeout: Duration::from_secs(10),
-            header_timeout: Duration::from_secs(30),
+            header_timeout: Duration::from_secs(10),
+            write_timeout: Duration::from_secs(10),
+            max_requests: 100,
             drain_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+impl From<&Cli> for Limits {
+    fn from(cli: &Cli) -> Self {
+        Self {
+            max_connections: cli.max_connections,
+            handshake_timeout: cli.handshake_timeout,
+            header_timeout: cli.header_timeout,
+            write_timeout: cli.write_timeout,
+            max_requests: cli.max_requests,
+            drain_timeout: cli.drain_timeout,
         }
     }
 }
@@ -187,6 +216,7 @@ impl Config {
             .map_err(|err| StartupError::new("--default-ttl", err))?;
         let tls = tls_files(&cli)?;
         let token = read_token(&cli.token_file)?;
+        let limits = Limits::from(&cli);
         Ok(Self {
             listen: cli.listen,
             state_file: cli.state_file,
@@ -195,12 +225,7 @@ impl Config {
             tick: cli.tick,
             token,
             tls,
-            limits: Limits {
-                max_connections: cli.max_connections,
-                handshake_timeout: cli.handshake_timeout,
-                header_timeout: cli.header_timeout,
-                drain_timeout: cli.drain_timeout,
-            },
+            limits,
             capacity: Box::new(StaticPoolSource::new(cli.pool_config)),
         })
     }
@@ -248,47 +273,56 @@ fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {
     }
 }
 
-/// Whether a token file may be trusted: a regular file, owned by the user running the
+/// Whether a secret file may be trusted: a regular file, owned by the user running the
 /// server (`euid`), that nobody else can read or write (mode 0600 or 0400).
-fn trusted_token_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
+fn trusted_private_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
     is_file & matches!(mode, 0o600 | 0o400) & (owner == euid)
 }
 
+/// The fewest bytes a bearer token may have after its trailing whitespace is dropped.
+/// A token that anyone on the network can try to guess is only as strong as it is long;
+/// 32 bytes of a random source is out of reach.
+pub const MIN_TOKEN_BYTES: usize = 32;
+
 /// The token a file's bytes hold: its content without trailing whitespace, which must
 /// be one run of printable ASCII (an HTTP header value cannot carry anything else, so
-/// any other token could never match a request).
-fn parse_token(bytes: &[u8]) -> Result<Token, &'static str> {
+/// any other token could never match a request) of at least [`MIN_TOKEN_BYTES`] bytes.
+fn parse_token(bytes: &[u8]) -> Result<Token, String> {
     let token = bytes.trim_ascii_end();
-    match (token.is_empty(), token.iter().all(u8::is_ascii_graphic)) {
-        (true, _) => Err("is empty"),
-        (false, false) => {
-            Err("must hold one token of printable ASCII with no space or line break inside it")
-        }
-        (false, true) => Ok(Token(token.to_vec())),
+    let printable = token.iter().all(u8::is_ascii_graphic);
+    match (token.is_empty(), printable, token.len() < MIN_TOKEN_BYTES) {
+        (true, _, _) => Err("is empty".to_string()),
+        (false, false, _) => Err(
+            "must hold one token of printable ASCII with no space or line break inside it"
+                .to_string(),
+        ),
+        (false, true, true) => Err(format!(
+            "holds a token of {} bytes; a token must have at least {MIN_TOKEN_BYTES} (use a random one)",
+            token.len()
+        )),
+        (false, true, false) => Ok(Token(token.to_vec())),
     }
 }
 
-/// Reads the token from `path` after checking, on the open file, that it is a regular
-/// file owned by the server's user that only that user can use. The file is opened
-/// without blocking, so a named pipe at the path is refused instead of waited on; a
-/// symbolic link is followed (secret mounts are links) and the checks are on what it
-/// leads to.
-fn read_token(path: &Path) -> Result<Token, StartupError> {
-    let refuse = StartupError::because("--token-file");
+/// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
+/// that it is a regular file owned by the server's user that only that user can use.
+/// The file is opened without blocking, so a named pipe at the path is refused instead
+/// of waited on; a symbolic link is followed (secret mounts are links) and the checks
+/// are on what it leads to.
+pub(crate) fn read_private(path: &Path, flag: &'static str) -> Result<Vec<u8>, StartupError> {
+    let refuse = StartupError::because(flag);
     let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
     let opened = OpenOptions::new()
         .read(true)
         .custom_flags(nonblocking)
         .open(path);
     let mut file = opened.map_err(|err| refuse(format!("{}: {err}", path.display())))?;
-    let meta = file
-        .metadata()
-        .map_err(StartupError::because("--token-file"))?;
+    let meta = file.metadata().map_err(StartupError::because(flag))?;
     let mode = meta.permissions().mode() & 0o777;
     let euid = geteuid().as_raw();
-    if !trusted_token_file(meta.is_file(), mode, meta.uid(), euid) {
+    if !trusted_private_file(meta.is_file(), mode, meta.uid(), euid) {
         return Err(StartupError::new(
-            "--token-file",
+            flag,
             format!(
                 "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
                 path.display(),
@@ -298,7 +332,13 @@ fn read_token(path: &Path) -> Result<Token, StartupError> {
     }
     let mut bytes = Vec::new();
     let read = file.read_to_end(&mut bytes);
-    read.map_err(StartupError::because("--token-file"))?;
+    read.map_err(StartupError::because(flag))?;
+    Ok(bytes)
+}
+
+/// Reads the token from the file `--token-file` names, see [`read_private`].
+fn read_token(path: &Path) -> Result<Token, StartupError> {
+    let bytes = read_private(path, "--token-file")?;
     parse_token(&bytes)
         .map_err(|reason| StartupError::new("--token-file", format!("{} {reason}", path.display())))
 }
@@ -322,12 +362,12 @@ mod tests {
     /// in mode, and owned by the user running the server: each condition alone refuses.
     #[test]
     fn a_token_file_must_be_the_servers_own_private_file() {
-        assert!(trusted_token_file(true, 0o600, 1000, 1000));
-        assert!(trusted_token_file(true, 0o400, 1000, 1000));
-        assert!(!trusted_token_file(false, 0o600, 1000, 1000));
-        assert!(!trusted_token_file(true, 0o640, 1000, 1000));
-        assert!(!trusted_token_file(true, 0o600, 0, 1000));
-        assert!(!trusted_token_file(true, 0o600, 1000, 0));
+        assert!(trusted_private_file(true, 0o600, 1000, 1000));
+        assert!(trusted_private_file(true, 0o400, 1000, 1000));
+        assert!(!trusted_private_file(false, 0o600, 1000, 1000));
+        assert!(!trusted_private_file(true, 0o640, 1000, 1000));
+        assert!(!trusted_private_file(true, 0o600, 0, 1000));
+        assert!(!trusted_private_file(true, 0o600, 1000, 0));
     }
 
     /// Asserts that a token is the content without trailing whitespace, and that empty
@@ -335,8 +375,14 @@ mod tests {
     /// is refused: no header value could ever equal such a token.
     #[test]
     fn a_token_is_one_run_of_printable_ascii() {
-        assert!(parse_token(b"abc-123\n").unwrap().matches(b"abc-123"));
-        assert_eq!(parse_token(b" \r\n").err(), Some("is empty"));
+        let good = "abcdefghijklmnopqrstuvwxyz-0123456789";
+        let trailing = format!("{good}\r\n");
+        assert!(
+            parse_token(trailing.as_bytes())
+                .unwrap()
+                .matches(good.as_bytes())
+        );
+        assert_eq!(parse_token(b" \r\n").err().as_deref(), Some("is empty"));
         for bad in [
             &b"two\nlines\n"[..],
             b"has space",
@@ -348,6 +394,21 @@ mod tests {
             let reason = parse_token(bad).err().unwrap();
             assert!(reason.contains("printable ASCII"), "{bad:?}");
         }
+    }
+
+    /// Asserts that a token of 31 bytes is refused and one of 32 is accepted, counting
+    /// the bytes without the trailing whitespace, and that the refusal says how long
+    /// the token was and how long it must be.
+    #[test]
+    fn a_token_must_have_at_least_32_bytes() {
+        let short = "x".repeat(MIN_TOKEN_BYTES - 1);
+        let reason = parse_token(format!("{short}\n\n").as_bytes())
+            .err()
+            .unwrap();
+        assert!(reason.contains("31 bytes"), "{reason}");
+        assert!(reason.contains("at least 32"), "{reason}");
+        let enough = "x".repeat(MIN_TOKEN_BYTES);
+        assert!(parse_token(enough.as_bytes()).is_ok());
     }
 
     /// Asserts that the default limits are what the flags default to, so the two
@@ -362,12 +423,6 @@ mod tests {
             "--token-file=c",
         ])
         .unwrap();
-        let from_flags = Limits {
-            max_connections: cli.max_connections,
-            handshake_timeout: cli.handshake_timeout,
-            header_timeout: cli.header_timeout,
-            drain_timeout: cli.drain_timeout,
-        };
-        assert_eq!(from_flags, Limits::default());
+        assert_eq!(Limits::from(&cli), Limits::default());
     }
 }

@@ -301,3 +301,45 @@ async fn a_failed_acquire_never_starts_the_lease() {
         assert_eq!(made.status, 201, "{}", made.body);
     }
 }
+
+/// Asserts that a 400 never repeats what the client sent: a class that is not a valid
+/// id, a value of the wrong type, an unknown field, a body cut short and a body that is
+/// not JSON each get a reason that names the kind of fault, and none of them contains
+/// the marker the request carried (the parser's own messages would).
+#[tokio::test]
+async fn bad_request_reasons_do_not_echo_the_request() {
+    let h = Harness::new("no_echo").await;
+    let marker = "SENTINEL marker";
+    let bodies: Vec<Vec<u8>> = vec![
+        with(lease_body(), "class", json!(marker))
+            .to_string()
+            .into_bytes(),
+        with(lease_body(), "max_wall_seconds", json!(marker))
+            .to_string()
+            .into_bytes(),
+        with(lease_body(), marker, json!(1))
+            .to_string()
+            .into_bytes(),
+        format!("{{\"class\": \"{marker}").into_bytes(),
+        format!("{marker}!").into_bytes(),
+    ];
+    let mut reasons = Vec::new();
+    for body in bodies {
+        let token = Some(crate::support::TOKEN);
+        let reply = request(h.addr(), "POST", "/v1/leases", token, Some(&body)).await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert!(!reply.body.contains("SENTINEL"), "{}", reply.body);
+        reasons.push(reply.json()["reason"].as_str().unwrap().to_string());
+    }
+    assert_eq!(reasons[0], "class is not a valid class id");
+    assert!(reasons[1].starts_with("the body is JSON, but not what this route takes (line "));
+    assert!(reasons[2].starts_with("the body is JSON, but not what this route takes (line "));
+    assert!(reasons[3].starts_with("the body is not valid JSON (line "));
+    assert!(reasons[4].starts_with("the body is not valid JSON (line "));
+    let mismatch = with(lease_body(), "resources", json!({ "gpus": 1 }));
+    let reply = h.call("POST", "/v1/leases", Some(&mismatch)).await;
+    assert_eq!(
+        reply.json()["reason"],
+        "gpu_class must be named exactly when gpus is above zero"
+    );
+}

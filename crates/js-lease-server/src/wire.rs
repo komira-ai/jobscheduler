@@ -11,6 +11,7 @@ use js_provider::RefusalCode;
 use js_types::{ClassId, LeaseId, Request, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::error::Category;
 use tracing::error;
 
 /// The body of `POST /v1/leases`.
@@ -48,11 +49,14 @@ impl AcquireBody {
     /// The request and the ttl asked for, or the 400 for a body that names an id or a
     /// GPU class the types refuse.
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
-        let class = ClassId::new(&self.class).map_err(ApiError::bad_request)?;
+        let class = ClassId::new(&self.class)
+            .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
         let resources = &self.resources;
         let (cpu, memory, gpus) = (resources.cpu_millis, resources.memory_bytes, resources.gpus);
-        let resources = Resources::new(cpu, memory, gpus, self.resources.gpu_class)
-            .map_err(ApiError::bad_request)?;
+        let resources =
+            Resources::new(cpu, memory, gpus, self.resources.gpu_class).map_err(|_| {
+                ApiError::bad_request("gpu_class must be named exactly when gpus is above zero")
+            })?;
         let request = Request {
             class,
             resources,
@@ -73,11 +77,21 @@ pub(crate) struct RenewBody {
     pub(crate) ttl_seconds: Option<u64>,
 }
 
-/// Parses a request body as `T`. The error carries the parser's reason, which names a
-/// field or a position and never repeats the body.
+/// Parses a request body as `T`. The 400 says which kind of fault it is and where the
+/// parser stopped; it never repeats the body or a value or field name in it, since the
+/// parser's own message does.
 pub(crate) fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, ApiError> {
-    serde_json::from_slice(body)
-        .map_err(|err| ApiError::bad_request(format!("invalid JSON body: {err}")))
+    serde_json::from_slice(body).map_err(|err| {
+        let fault = match err.classify() {
+            Category::Data => "the body is JSON, but not what this route takes",
+            Category::Syntax | Category::Eof | Category::Io => "the body is not valid JSON",
+        };
+        ApiError::bad_request(format!(
+            "{fault} (line {}, column {})",
+            err.line(),
+            err.column()
+        ))
+    })
 }
 
 /// A lease that was granted: the 201 body.

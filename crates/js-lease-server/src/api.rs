@@ -1,7 +1,7 @@
 //! The routes, the authentication in front of them, and the state they share.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -34,6 +34,7 @@ pub(crate) struct Shared {
     table: Mutex<Table>,
     token: Token,
     save_errors: AtomicU64,
+    ticking: AtomicBool,
 }
 
 impl Shared {
@@ -42,7 +43,18 @@ impl Shared {
             table: Mutex::new(table),
             token,
             save_errors: AtomicU64::new(0),
+            ticking: AtomicBool::new(true),
         }
+    }
+
+    /// Whether the tick loop is running.
+    pub(crate) fn ticking(&self) -> bool {
+        self.ticking.load(Ordering::SeqCst)
+    }
+
+    /// Records that the tick loop has ended.
+    pub(crate) fn stop_ticking(&self) {
+        self.ticking.store(false, Ordering::SeqCst);
     }
 
     /// How many ticks failed to write the lease file.
@@ -86,8 +98,11 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .fallback(no_route)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(from_fn_with_state(shared.clone(), authenticate))
+        .with_state(shared.clone());
+    let open = Router::new()
+        .route("/healthz", get(healthz))
         .with_state(shared);
-    Router::new().route("/healthz", get(healthz)).merge(guarded)
+    open.merge(guarded)
 }
 
 /// Refuses a request that lacks `Authorization: Bearer <token>`, with a 401 that says
@@ -111,8 +126,13 @@ fn bearer(value: &str) -> Option<&str> {
     scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }
 
-async fn healthz() -> &'static str {
-    "ok"
+/// 200 `ok` while the tick loop runs; 503 once it has stopped, since a server that no
+/// longer ticks expires nothing and a load balancer should stop sending it work.
+async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
+    match shared.ticking() {
+        true => "ok".into_response(),
+        false => (StatusCode::SERVICE_UNAVAILABLE, "tick loop stopped").into_response(),
+    }
 }
 
 async fn no_route() -> ApiError {

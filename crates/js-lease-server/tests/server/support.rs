@@ -25,7 +25,7 @@ use tokio::net::TcpStream;
 pub const T0: u64 = 1_000_000;
 
 /// The bearer token of the test servers.
-pub const TOKEN: &str = "test-token-0123456789";
+pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
 
 /// A directory under the target directory that holds one test's files and is removed
 /// when the test ends.
@@ -435,4 +435,25 @@ pub fn lease_file(leases: &[(u64, &str, Option<&str>)]) -> String {
         ));
     }
     text
+}
+
+/// Waits for `future`, failing the test instead of hanging it if the thing it waits
+/// for never happens (a bound set high enough that no healthy machine reaches it; it is
+/// not an assertion about how long anything takes).
+pub async fn guard<F: std::future::Future>(future: F) -> F::Output {
+    let bound = std::time::Duration::from_secs(30);
+    match tokio::time::timeout(bound, future).await {
+        Ok(output) => output,
+        Err(_) => panic!("still waiting after {bound:?}: the awaited event never happened"),
+    }
+}
+
+/// Yields to the runtime until `ready` holds, under the same hang guard as [`guard`].
+pub async fn until(mut ready: impl FnMut() -> bool) {
+    guard(async {
+        while !ready() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
 }

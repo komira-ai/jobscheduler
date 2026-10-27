@@ -23,13 +23,15 @@
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]) |
-//! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII (trailing whitespace is dropped) |
+//! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked, `5s` unless given |
-//! | `--tls-cert`, `--tls-key` | PEM files; both or neither |
+//! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file. Both are read at start only: renew a certificate by restarting the server |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
-//! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response, `30s` |
+//! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response (so also how long a keep-alive connection may idle), `10s` |
+//! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
+//! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2.
@@ -39,7 +41,17 @@
 //! Every route but `/healthz` needs `Authorization: Bearer <token>` (the scheme in any
 //! letter case); a missing or wrong
 //! token is a 401 with an empty body. Bodies are JSON, at most 64 KiB. Errors are
-//! `{"error": "<code>"}` (a 400 adds `"reason"`).
+//! `{"error": "<code>"}` (a 400 adds `"reason"`, which says what kind of fault it was and
+//! where the parser stopped, and never repeats a value of the request).
+//!
+//! # Who may do what
+//!
+//! The server is single-tenant: there is one token, and so one trust domain. Whoever
+//! holds the token can list every lease, and renew or release any of them, whichever
+//! client acquired it. A lease has no owner the server checks. Share the token only with
+//! parties that trust each other with every host of the pool. Per-tenant leases, with a
+//! token of their own that sees and changes only its own leases (design K7), are a
+//! follow-up and not built here.
 //!
 //! | request | answers |
 //! |---|---|
@@ -47,7 +59,7 @@
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms}`; 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
-//! | `GET /healthz` | 200 `ok`, no token |
+//! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
 //! not the JSON the route takes a 400, a body over the cap a 413, and a lease file that
@@ -60,12 +72,22 @@
 //!   so the provider was not called and no host was started. The lease is not granted
 //!   and the client has no id. The record stays pending in memory, is listed until the
 //!   next tick, and that tick finds nothing on the provider and drops it; it is never
-//!   started later. The client may retry the acquire.
+//!   started later. The client may retry the acquire after this 500.
 //! - `POST /v1/leases/{id}/renew`: the new expiry took effect in memory only. The lease
 //!   is held and the client may renew again; a restart before the next successful
 //!   write loses the extension.
 //! - `DELETE /v1/leases/{id}`: the lease is marked releasing in memory and the provider
 //!   was not asked to stop it yet. The next tick stops it. Treat the lease as released.
+//!
+//! An acquire is not safe to retry blindly. If the connection drops or times out after
+//! the request was sent and before the answer arrived, the client cannot tell whether
+//! the lease was granted: the server may hold a lease, and a host, that the client has
+//! no id for. A client must not repeat `POST /v1/leases` after a lost answer without
+//! first listing (`GET /v1/leases`) and finding its lease by the labels it sent, or the
+//! retry can take a second host; the first one lapses only when its ttl does. An
+//! idempotency key, so that a repeated acquire returns the lease it made, is a
+//! follow-up and not built here. Renew and release name their lease and are safe to
+//! repeat.
 //!
 //! The table sits behind one async mutex, taken for the table call alone and never held
 //! across an await. A table call is synchronous: it writes and syncs the lease file and
@@ -80,7 +102,15 @@
 //! `--max-connections` connections are open (the permit is taken before a connection is
 //! accepted and kept until it closes), a TLS handshake that is not finished in
 //! `--handshake-timeout` is dropped, and a connection whose request head has not arrived
-//! in `--header-timeout` is closed. A client that sends its head and then stalls on the
+//! in `--header-timeout` is closed; that clock starts again after each response, so it
+//! also closes a keep-alive connection that idles. Every connection is bounded in
+//! the other direction too: a write to the client that makes no progress for
+//! `--write-timeout` closes the connection (a client that sends requests and never reads
+//! the answers is cut and its slot is free again), and the answer to a connection's
+//! `--max-requests`th request says `Connection: close`, with later requests pipelined
+//! behind it unanswered. The server reads at most 64 KiB of a request head, so an
+//! unauthenticated client cannot make it buffer more before the token is checked (a
+//! larger head is a 431). A client that sends its head and then stalls on the
 //! body does so with a valid token, since the token is checked on the head; it holds a
 //! connection until it finishes or the server stops. A failed accept (descriptors used
 //! up, say) is logged and retried after 100 ms.
@@ -108,10 +138,12 @@
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
 //! ticks the table at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
-//! ([`Running::save_errors`]). On SIGTERM or ctrl-c the server stops accepting, gives the requests
+//! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped. On
+//! SIGTERM or ctrl-c the server stops accepting, gives the requests
 //! in flight `--drain-timeout` to finish (a connection still open then is cut), ticks
-//! once more and exits 0. A second signal while it drains is not needed: the drain is
-//! bounded.
+//! once more and exits 0. If that last tick cannot write the lease file the file is
+//! behind the table, so the server logs the cause and exits 1 instead. A second signal
+//! while it drains is not needed: the drain is bounded.
 
 mod adapt;
 mod api;
@@ -124,6 +156,7 @@ mod ticker;
 mod tls;
 mod util;
 mod wire;
+mod write_timeout;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -138,7 +171,7 @@ use tokio::sync::mpsc;
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
-pub use config::{BootMode, Cli, Config, Limits, TlsFiles, Token, parse_duration};
+pub use config::{BootMode, Cli, Config, Limits, MIN_TOKEN_BYTES, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};

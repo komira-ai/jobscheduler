@@ -67,3 +67,28 @@ async fn the_scheme_is_case_insensitive() {
         assert_eq!(reply.status, 401, "{scheme}");
     }
 }
+
+/// Asserts that the server is single-tenant, as its docs say: a lease acquired by one
+/// client is listed, renewed and released by another client that holds the same token
+/// (each request here is its own connection), because the lease has no owner the
+/// server checks. A per-tenant token would fail this test, which is the point of
+/// pinning it.
+#[tokio::test]
+async fn one_token_is_one_trust_domain() {
+    let h = Harness::new("single_tenant").await;
+    let body = crate::support::lease_body().to_string().into_bytes();
+    let made = request(h.addr(), "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
+    assert_eq!(made.status, 201, "{}", made.body);
+    let id = made.json()["id"].as_str().unwrap().to_string();
+
+    let listed = request(h.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
+    assert_eq!(crate::support::ids(&listed), vec![id.clone()]);
+    let renew_path = format!("/v1/leases/{id}/renew");
+    let renewed = request(h.addr(), "POST", &renew_path, Some(TOKEN), None).await;
+    assert_eq!(renewed.status, 200, "{}", renewed.body);
+    let release_path = format!("/v1/leases/{id}");
+    let released = request(h.addr(), "DELETE", &release_path, Some(TOKEN), None).await;
+    assert_eq!(released.status, 200, "{}", released.body);
+    let after = request(h.addr(), "GET", "/v1/leases", Some(TOKEN), None).await;
+    assert!(crate::support::ids(&after).is_empty());
+}
