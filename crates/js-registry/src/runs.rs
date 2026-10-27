@@ -447,6 +447,7 @@ impl Runs {
             commands,
             result_acks,
             taint_ack: false,
+            exclusive: None,
         }
     }
 

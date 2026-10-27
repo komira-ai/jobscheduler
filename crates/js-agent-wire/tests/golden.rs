@@ -5,8 +5,8 @@ mod common;
 
 use common::{heartbeat, hello, job, welcome};
 use js_agent_wire::{
-    Ack, Command, Heartbeat, HeartbeatReply, HelloReply, Isolation, Outcome, ProtocolRange,
-    Refused, ResultAck, Taint,
+    Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HelloReply, Isolation, Outcome,
+    ProtocolRange, RefusalReason, Refused, ResultAck, Taint,
 };
 use serde_json::{Value, json};
 
@@ -196,6 +196,7 @@ fn heartbeat_reply_wire_form() {
             ack: Ack::UnknownLease,
         }],
         taint_ack: true,
+        exclusive: None,
     };
     assert_eq!(
         serde_json::to_value(&reply).unwrap(),
@@ -232,4 +233,68 @@ fn heartbeat_decodes_from_literal_text() {
     assert_eq!(beat.phase, js_agent_wire::Phase::MemoryPressure);
     assert_eq!(beat.held[0].state, js_agent_wire::HeldState::Starting);
     let _: Value = serde_json::from_str(text).unwrap();
+}
+
+/// Asserts the exact JSON of a heartbeat that reports an exclusive lease ready, and of
+/// one that refuses it, and that a reply with `exclusive` encodes to fixed bytes. It
+/// catches a renamed field or code spelling, and a field sent when it is None.
+#[test]
+fn exclusive_wire_form() {
+    let ready = Heartbeat {
+        exclusive_ready: Some("7-1".into()),
+        taint: None,
+        results: Vec::new(),
+        held: Vec::new(),
+        ..heartbeat()
+    };
+    assert_eq!(
+        serde_json::to_string(&ready).unwrap(),
+        concat!(
+            r#"{"host_id":"mac-01","epoch":3,"session":"s3cret-0","phase":"draining","#,
+            r#""held":[],"results":[],"exclusive_ready":"7-1"}"#
+        )
+    );
+    let refused = Heartbeat {
+        exclusive_refused: Some(ExclusiveRefusal {
+            lease_id: "7-1".into(),
+            code: RefusalReason::NoiseOverBound,
+            detail: "p99 4ms".into(),
+        }),
+        taint: None,
+        results: Vec::new(),
+        held: Vec::new(),
+        ..heartbeat()
+    };
+    assert_eq!(
+        serde_json::to_string(&refused).unwrap(),
+        concat!(
+            r#"{"host_id":"mac-01","epoch":3,"session":"s3cret-0","phase":"draining","#,
+            r#""held":[],"results":[],"exclusive_refused":"#,
+            r#"{"lease_id":"7-1","code":"noise-over-bound","detail":"p99 4ms"}}"#
+        )
+    );
+    let reply = HeartbeatReply {
+        exclusive: Some("7-1".into()),
+        ..HeartbeatReply::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&reply).unwrap(),
+        r#"{"commands":[],"result_acks":[],"taint_ack":false,"exclusive":"7-1"}"#
+    );
+}
+
+/// A heartbeat and a reply from before the exclusive fields (the existing fixtures carry
+/// none) decode with them None and encode without them: the change is additive. It
+/// catches a required new field, which would refuse every deployed agent.
+#[test]
+fn a_body_from_before_the_exclusive_fields_still_decodes() {
+    let old_beat = serde_json::to_value(heartbeat()).unwrap();
+    assert!(old_beat.get("exclusive_ready").is_none());
+    assert!(old_beat.get("exclusive_refused").is_none());
+    let beat: Heartbeat = serde_json::from_value(old_beat.clone()).unwrap();
+    assert_eq!((beat.exclusive_ready, beat.exclusive_refused), (None, None));
+    let old_reply = json!({"commands": [], "result_acks": [], "taint_ack": true});
+    let reply: HeartbeatReply = serde_json::from_value(old_reply.clone()).unwrap();
+    assert_eq!(reply.exclusive, None);
+    assert_eq!(serde_json::to_value(&reply).unwrap(), old_reply);
 }
