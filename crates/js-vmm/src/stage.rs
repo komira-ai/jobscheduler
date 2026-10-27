@@ -660,41 +660,45 @@ fn copy_file_with(
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     use std::os::unix::fs::OpenOptionsExt;
-    let fail =
-        |e: &dyn std::fmt::Display| format!("copy {} -> {}: {e}", src.display(), dst.display());
-    let mut from = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(src)
-        .map_err(|e| fail(&e))?;
-    if !from.metadata().map_err(|e| fail(&e))?.is_file() {
+    let mut from = copy_step(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(src),
+        src,
+        dst,
+    )?;
+    if !copy_step(from.metadata(), src, dst)?.is_file() {
         return Err(format!(
             "{} is no longer the regular file that was planned",
             src.display()
         ));
     }
-    let mut to = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(dst)
-        .map_err(|e| fail(&e))?;
+    let mut to = copy_step(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dst),
+        src,
+        dst,
+    )?;
     // One byte more than planned is read, so a source that grew is seen and not copied whole.
     let mut reader = (&mut from).take(bytes.saturating_add(1));
     let (copied, sha256) = if hash {
         let (mut hasher, mut buf, mut total) = (Sha256::new(), vec![0u8; 1 << 20], 0u64);
         loop {
-            let n = reader.read(&mut buf).map_err(|e| fail(&e))?;
+            let n = copy_step(reader.read(&mut buf), src, dst)?;
             if n == 0 {
                 break;
             }
-            to.write_all(&buf[..n]).map_err(|e| fail(&e))?;
+            copy_step(to.write_all(&buf[..n]), src, dst)?;
             hasher.update(&buf[..n]);
             total += n as u64;
         }
         (total, Some(hex::encode(hasher.finalize())))
     } else {
-        (io::copy(&mut reader, &mut to).map_err(|e| fail(&e))?, None)
+        (copy_step(io::copy(&mut reader, &mut to), src, dst)?, None)
     };
     if copied != bytes {
         let seen = if copied > bytes {
@@ -708,10 +712,22 @@ fn copy_file_with(
         ));
     }
     // The attributes carry part of the code signature of a file that is not a Mach-O.
-    xattr::copy_fd(&from, &to, src).map_err(|e| fail(&e))?;
-    to.set_permissions(std::fs::Permissions::from_mode(mode))
-        .map_err(|e| fail(&e))?;
+    copy_step(xattr::copy_fd(&from, &to, src), src, dst)?;
+    copy_step(
+        to.set_permissions(std::fs::Permissions::from_mode(mode)),
+        src,
+        dst,
+    )?;
     Ok(sha256)
+}
+
+/// The error of one step of a copy: it names both paths.
+fn copy_step<T, E: std::fmt::Display>(
+    step: Result<T, E>,
+    src: &Path,
+    dst: &Path,
+) -> Result<T, String> {
+    step.map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))
 }
 
 /// Makes `dst` a symbolic link to `target`.
@@ -786,9 +802,11 @@ fn verify_clone(x: &TreePlan, staging: &Path) -> Result<(), String> {
     let mut dir_modes = vec![(staging.to_owned(), 0o755)];
     // The clone carries the attributes of the app; all but the quarantine mark and the macl
     // list stay.
-    std::iter::once(staging.to_owned())
-        .chain(x.nodes.iter().map(|n| staging.join(n.rel())))
-        .try_for_each(|at| xattr::strip_skipped(&at))?;
+    for at in
+        std::iter::once(staging.to_owned()).chain(x.nodes.iter().map(|n| staging.join(n.rel())))
+    {
+        xattr::strip_skipped(&at)?;
+    }
     for node in &x.nodes {
         let at = staging.join(node.rel());
         match node {
@@ -827,14 +845,15 @@ fn build_tree(x: &TreePlan, staging: &Path, env: &Env<'_>) -> Result<&'static st
     }
     // The attributes of the app, of each directory and of each link (a file's were copied
     // with its bytes), once everything exists.
-    std::iter::once((x.source.clone(), staging.to_owned()))
-        .chain(
-            x.nodes
-                .iter()
-                .filter(|n| !matches!(n, Node::File { .. }))
-                .map(|n| (x.source.join(n.rel()), staging.join(n.rel()))),
-        )
-        .try_for_each(|(from, to)| xattr::copy_nofollow(&from, &to))?;
+    let pairs = std::iter::once((x.source.clone(), staging.to_owned())).chain(
+        x.nodes
+            .iter()
+            .filter(|n| !matches!(n, Node::File { .. }))
+            .map(|n| (x.source.join(n.rel()), staging.join(n.rel()))),
+    );
+    for (from, to) in pairs {
+        xattr::copy_nofollow(&from, &to)?;
+    }
     apply_modes(dir_modes)?;
     Ok("copy")
 }

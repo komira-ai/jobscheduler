@@ -5,6 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::hostfs::{chown_tree, sibling, tail_of};
 use crate::spec::{Event, SHUTDOWN_COMMAND, VmSpec};
-use crate::system::{OfflineFile, Poll, Signature, System, VmProcess};
+use crate::system::{Clock, OfflineFile, Poll, RealClock, Signature, System, VmProcess};
 use crate::{offline, signature, vz};
 
 pub struct RealSystem;
@@ -126,6 +127,10 @@ fn run_text(program: &str, args: &[&str]) -> Option<String> {
 }
 
 impl System for RealSystem {
+    fn clock(&self) -> Arc<dyn Clock> {
+        Arc::new(RealClock::new())
+    }
+
     fn clonefile(&self, src: &Path, dst: &Path) -> std::io::Result<()> {
         let to_c = |p: &Path| {
             std::ffi::CString::new(p.as_os_str().as_encoded_bytes())

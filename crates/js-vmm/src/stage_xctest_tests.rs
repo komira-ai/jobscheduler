@@ -302,6 +302,24 @@ fn the_products_are_copied_with_modes_a_hash_per_file_and_a_record() {
     );
 }
 
+/// Catches an allowed link out of the products tree going unrecorded: the staged record
+/// lists it with its target, so the setup's record shows what leaves the tree.
+#[test]
+fn an_allowed_external_link_is_recorded_with_its_target() {
+    let dir = tmp("xt-stage-external");
+    let src = products(&dir);
+    link("/etc", &src.join("Debug-iphonesimulator/out"));
+    let plan = plan_all(None, &[], None, Some(&src), true).expect("plan");
+    let volume = volume_in(&dir);
+    let out = Harness::new(100 * GIB)
+        .run(&volume, &plan)
+        .expect("execute");
+    let links = out["tests"]["external_links"].as_array().expect("links");
+    assert_eq!(links.len(), 1, "{links:?}");
+    assert_eq!(links[0]["target"], "/etc");
+    assert!(links[0]["path"].as_str().expect("path").ends_with("out"));
+}
+
 /// Catches the tests directory keeping an earlier build (the guest would run a test run of
 /// another app), and a setup that names no tests leaving the earlier ones for a new Xcode.
 #[test]

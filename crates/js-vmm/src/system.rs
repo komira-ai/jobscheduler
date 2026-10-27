@@ -105,9 +105,7 @@ pub struct Signature {
 pub trait System {
     /// The clock the probes wait by. Every call may return a new clock with its own origin:
     /// only differences between readings of one clock mean anything.
-    fn clock(&self) -> Arc<dyn Clock> {
-        Arc::new(RealClock::new())
-    }
+    fn clock(&self) -> Arc<dyn Clock>;
     /// `clonefile(2)`: a copy-on-write copy of the file `src` at `dst`.
     ///
     /// # Errors
@@ -189,4 +187,20 @@ pub trait System {
     /// # Errors
     /// The VM could not be configured; start failures are events, not errors.
     fn run_vm_helper(&self, spec: &VmSpec) -> Result<(), String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches a real clock that goes back (a wait would then measure a negative span) or
+    /// a pause that does not return, and `Default` that builds a different clock than `new`.
+    #[test]
+    fn the_real_clock_never_goes_back_and_a_zero_pause_returns() {
+        for clock in [RealClock::new(), RealClock::default()] {
+            let before = clock.now();
+            clock.pause(Duration::ZERO);
+            assert!(clock.now() >= before);
+        }
+    }
 }

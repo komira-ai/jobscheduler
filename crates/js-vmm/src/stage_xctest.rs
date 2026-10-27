@@ -129,14 +129,15 @@ fn build(t: &TestsPlan, staging: &Path, env: &Env<'_>) -> Result<Vec<Value>, Str
     }
     // The attributes of the tree, of each directory and of each link (a file's were copied
     // with its bytes), once everything exists.
-    std::iter::once((tree.source.clone(), staging.to_owned()))
-        .chain(
-            tree.nodes
-                .iter()
-                .filter(|n| !matches!(n, Node::File { .. }))
-                .map(|n| (tree.source.join(n.rel()), staging.join(n.rel()))),
-        )
-        .try_for_each(|(from, to)| xattr::copy_nofollow(&from, &to))?;
+    let pairs = std::iter::once((tree.source.clone(), staging.to_owned())).chain(
+        tree.nodes
+            .iter()
+            .filter(|n| !matches!(n, Node::File { .. }))
+            .map(|n| (tree.source.join(n.rel()), staging.join(n.rel()))),
+    );
+    for (from, to) in pairs {
+        xattr::copy_nofollow(&from, &to)?;
+    }
     apply_modes(dirs)?;
     chown(env, staging)?;
     tree.nodes

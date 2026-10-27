@@ -61,11 +61,11 @@ pub fn remove_path(path: &Path) -> io::Result<()> {
 
 /// Sets mode and owner on an open descriptor.
 fn settle(file: &std::fs::File, mode: u32, owner: Option<(u32, u32)>) -> io::Result<()> {
-    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-    if let Some((uid, gid)) = owner {
-        std::os::unix::fs::fchown(file, Some(uid), Some(gid))?;
-    }
-    Ok(())
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .and_then(|()| match owner {
+            Some((uid, gid)) => std::os::unix::fs::fchown(file, Some(uid), Some(gid)),
+            None => Ok(()),
+        })
 }
 
 /// Makes the directory `at` (mode 0755 whatever the umask is, owner per `env`), and fixes
@@ -139,9 +139,9 @@ pub fn put(root: &Path, f: &OfflineFile, env: &Env<'_>) -> Result<Value, String>
         .mode(0o600)
         .open(&path)
         .and_then(|mut file| {
-            file.write_all(&f.contents)?;
-            settle(&file, f.mode, env.owner)?;
-            file.metadata()
+            file.write_all(&f.contents)
+                .and_then(|()| settle(&file, f.mode, env.owner))
+                .and_then(|()| file.metadata())
         })
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(json!({
@@ -187,10 +187,10 @@ mod tests {
     /// These tests need permission checks that root bypasses; as root say so and skip.
     fn unless_root(body: impl FnOnce()) {
         // SAFETY: geteuid cannot fail.
-        run_unless(unsafe { libc::geteuid() } == 0, body);
+        run_unless(unsafe { libc::geteuid() } == 0, Box::new(body));
     }
 
-    fn run_unless(root: bool, body: impl FnOnce()) {
+    fn run_unless(root: bool, body: Box<dyn FnOnce() + '_>) {
         if root {
             eprintln!(
                 "skipped: running as root, which bypasses the permission checks this test needs"
@@ -203,10 +203,12 @@ mod tests {
     /// Catches the root skip running a test body as root, or skipping it for a normal user.
     #[test]
     fn the_root_skip_skips_only_as_root() {
-        let mut ran = Vec::new();
-        run_unless(true, || ran.push("root"));
-        run_unless(false, || ran.push("user"));
-        assert_eq!(ran, ["user"]);
+        let ran = std::cell::Cell::new(0);
+        let body = || ran.set(ran.get() + 1);
+        run_unless(true, Box::new(body));
+        assert_eq!(ran.get(), 0, "the body is not run as root");
+        run_unless(false, Box::new(body));
+        assert_eq!(ran.get(), 1, "it is run for a normal user");
     }
 
     fn real_env() -> Env<'static> {
@@ -373,8 +375,32 @@ mod tests {
         remove_path(&root.join("f/")).expect("removes the link itself");
         assert!(outside.join("keep").exists());
         assert!(std::fs::symlink_metadata(root.join("f")).is_err());
+        std::fs::write(root.join("plain"), "x").expect("plain");
+        remove_path(&root.join("plain/child")).expect_err("a file is not a directory");
         remove_path(Path::new("/")).expect_err("no final name");
         remove_path(&root.join("g/..")).expect_err("no final name");
+    }
+
+    /// Catches a second write under an existing directory failing or recreating it, and a
+    /// file written over a whole directory leaving the directory's contents behind.
+    #[test]
+    fn existing_parents_are_kept_and_a_directory_in_the_way_is_removed() {
+        let root = tmp("put-existing");
+        put(&root, &file("a/b", 0o644), &real_env()).expect("first");
+        std::fs::write(root.join("a/keep"), "k").expect("keep");
+        let unowned = Env {
+            remove: &remove_path,
+            owner: None,
+        };
+        put(&root, &file("a/c", 0o644), &unowned).expect("second, with no owner to set");
+        assert!(
+            root.join("a/keep").exists(),
+            "the directory was not recreated"
+        );
+        assert!(root.join("a/b").exists());
+        assert!(root.join("a/c").exists());
+        put(&root, &file("a", 0o644), &real_env()).expect("over a directory");
+        assert!(root.join("a").is_file());
     }
 
     /// Catches a stat or create failure being swallowed: a parent that cannot be searched,
