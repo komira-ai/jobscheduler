@@ -2,6 +2,31 @@
 
 Moved from design.md section 13.2. Section numbers refer to design.md.
 
+## What exists now
+
+The suite is the `agent` module of `js-conformance`, beside the provider suite. It is wire-neutral: the scenarios speak only to the
+`AgentHarness` trait (deliver a Start with its validity bound, deliver a Cancel, acknowledge a result, end a job, answer a heartbeat,
+drop and restore the connection, advance an injected clock, read what the agent reported). One harness per transport implements the
+trait; the scenarios do not change. Time is injected, so no scenario sleeps or asserts how long anything took. `FakeAgent` is the
+correct in-process agent; each `Defect` is the same agent missing one behaviour, and the tests assert that each scenario fails on its
+broken agent and that no other scenario does.
+
+| Scenario | Checks | Fails on |
+|---|---|---|
+| `StartIsIdempotent` | a repeated Start launches the job once and is acknowledged | `StartRunsTwice` |
+| `CancelUntilAbsent` | a Cancel lost on a dropped connection changes nothing; resent while the lease is listed, the lease leaves the listing; a further Cancel is harmless | `CancelKeepsListed` |
+| `LateStartIsDropped` | a Start past its bound is reported never started and launches nothing; one inside the bound runs | `RunsLateStart` |
+| `SelfFencesAfterSilence` | one tick short of the fence window the lease runs, the window counts from the last contact, the full window stops and reports it fenced | `NeverFences` |
+| `UnackedResultIsResent` | an unacknowledged result is sent again after each reconnect, an acknowledged one is not | `ForgetsUnackedResult` |
+
+Not yet built: no harness exists for a real transport (the old `js-agent` wire, or the worker wire the host agent will speak); a
+transport without a Start validity bound or a fence window cannot implement the trait fully. The fake cancels without producing a
+result and does not model grace periods.
+
+## Still prose
+
+Everything in the list below that is not one of the five scenarios above.
+
 *Agent suite:*
 
 - start is idempotent on lease id; a `Cancel` is resent while the lease is listed and the lease leaves the heartbeat;
