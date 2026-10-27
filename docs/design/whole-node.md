@@ -144,8 +144,8 @@ request destroy another's results; re-queueing wastes only the drain already spe
    excludes that host for this request for `reserve_backoff`, and the request is placed again. A finding on the way taints the host as usual
    and ends the reservation on it.
 4. **A readiness refusal is typed and acts at once.** The agent (or a readiness hook it runs, item 5) may instead report
-   `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of at most 256 bytes
-   of text. The detail is recorded with the lease and shown to the consumer; the scheduler never parses it. The scheduler acts on the code
+   `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of text, which the receiver cuts to at most 256 bytes (the longest prefix within the bound that ends on a character
+   boundary) when it decodes the heartbeat, so a long detail never costs the beat's results, held list or typed refusal; senders should cut too. The detail is recorded with the lease and shown to the consumer; the scheduler never parses it. The scheduler acts on the code
    at once and does not wait for `prepare_timeout`:
 
    | Code | Meaning | Host | Request |
@@ -295,7 +295,7 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
 ## 10. Wire and configuration, in one place
 
 Additive fields (R3), none new on the agent beyond the merged design: `HeartbeatReply.exclusive` (lease id) and `Heartbeat.exclusive_ready`
-(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail of at most 256 bytes; section 5, item 4); a renewal answer's
+(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail cut by the receiver to at most 256 bytes; section 5, item 4); a renewal answer's
 `host_reserved`; the reservation records in the lease file (section 3). All are additive: an old reader skips and keeps them, and an old
 agent never sends a refusal and so only ever times out. Refusal constants: `exclusive-not-ready` (after `max_replace`, with the last code
 and detail), with `no-capable-host` and `no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
@@ -342,7 +342,7 @@ VM at `preparing` destroys it and reports a finding; a timeout (a silent agent) 
 `reserve_backoff` and the retries stop at `max_replace`; a `noise-over-bound` refusal re-queues the request on another host at once,
 without waiting for `prepare_timeout`, counts toward `max_replace` and not `max_reserve_attempts`, and the same request after a drain
 give-up counts the other way; `host-unsafe` taints and `unsupported` excludes for good; an unknown code acts as `setup-failed`; a
-detail over 256 bytes is cut; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
+detail over 256 bytes is cut by the receiver to a character boundary and the heartbeat is accepted with its results, held list and code; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
 keeps the host reserved with the same deadline once the request is presented again, and a restart loop does not reset the counters; an
 unclaimed record is dropped after `regain_grace`; a lease lost mid-run is reported gone and the scheduler issues no rerun; `gpu-host` configs
 and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
