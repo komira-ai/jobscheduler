@@ -60,11 +60,13 @@ impl ResourceClass {
         Self::new(id, Admission::Whole, 0)
     }
 
-    /// The retained alias for GPU testing: a whole host (`Whole`) with at least one
-    /// GPU of a class the request names.
+    /// The retained alias for GPU testing: a whole host with at least one GPU of a class
+    /// the request names. It stays admitted `BookAll`, as merged, until its agents report
+    /// a prepared host: only then does it take the whole-node reservation, quiet gate and
+    /// caps (docs/design/whole-node.md, section 1).
     pub fn gpu_host() -> Self {
         let id = ClassId::from_trusted("gpu-host");
-        Self::new(id, Admission::Whole, 1)
+        Self::new(id, Admission::BookAll, 1)
     }
 
     /// The class id.
@@ -99,13 +101,13 @@ impl ResourceClass {
 mod tests {
     use super::*;
 
-    /// Asserts that the shipped GPU class is a whole-node class and needs one GPU, and
-    /// that a request with none is refused with the numbers in the error.
+    /// Asserts that the shipped GPU class keeps its merged `BookAll` admission and needs
+    /// one GPU, and that a request with none is refused with the numbers in the error.
     #[test]
     fn gpu_host_needs_a_gpu() {
         let class = ResourceClass::gpu_host();
         assert_eq!(class.id().as_str(), "gpu-host");
-        assert_eq!(class.admission(), &Admission::Whole);
+        assert_eq!(class.admission(), &Admission::BookAll);
         assert_eq!(class.min_gpus(), 1);
         let one = Resources::new(1, 1, 1, Some("a100".into())).unwrap();
         assert_eq!(class.check(&one), Ok(()));
