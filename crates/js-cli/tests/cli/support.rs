@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use clap::Parser;
 use js_cli::{ForwardedSignal, Services, SignalSource, Signaller, Waiter};
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
-    CapacitySource, Cli as ServerCli, Config, Running, SharedClock, StartupError, TickHandle,
-    channel_ticker, start,
+    CapacitySource, Cli as ServerCli, Config, Running, Seated, SharedClock, StartupError,
+    TickHandle, channel_ticker, start,
 };
 use js_pool_static::EXAMPLE_CONFIG;
-use js_provider::{Call, Provider};
+use js_provider::Call;
 use js_provider_fake::FakeProvider;
 use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::Value;
@@ -29,7 +29,7 @@ use tokio::runtime::{Handle, Runtime};
 pub const T0: u64 = 1_000_000;
 
 /// The bearer token of the test servers.
-pub const TOKEN: &str = "cli-test-token-0123456789";
+pub const TOKEN: &str = "cli-test-token-0123456789abcdefghijklmn";
 
 /// The flags that ask for one whole host of the shipped pool.
 pub const HOST: [&str; 10] = [
@@ -276,10 +276,11 @@ impl Waiter for Manual {
 }
 
 /// A capacity source of two fake hosts whose first calls are scripted to get no answer.
+/// These tests never restart a server, so it is never given bookings to put back.
 pub struct Scripted(pub Vec<(Call, bool)>);
 
 impl CapacitySource for Scripted {
-    fn provider(&self) -> Result<Box<dyn Provider + Send>, StartupError> {
+    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
         let resources = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".into())).unwrap();
         let caps = BTreeMap::from([("isa".to_string(), "x86-64-v3".to_string())]);
         let shape = Shape::new(resources, caps);
@@ -288,7 +289,7 @@ impl CapacitySource for Scripted {
         for (call, landed) in &self.0 {
             fake.script_unknown(*call, *landed);
         }
-        Ok(Box::new(fake))
+        Ok(Seated::all(Box::new(fake)))
     }
 }
 
