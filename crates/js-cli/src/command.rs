@@ -1,6 +1,8 @@
 //! The command of `lease run`: a child in a process group of its own, which `js` signals
 //! as a whole and leaves no member of running.
 
+#[cfg(target_os = "linux")]
+use std::io;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::Sender;
@@ -8,6 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use rustix::io::Errno;
+#[cfg(target_os = "linux")]
+use rustix::process::set_parent_process_death_signal;
 use rustix::process::{
     Pid, Signal, WaitId, WaitIdOptions, kill_process_group, test_kill_process_group, waitid,
 };
@@ -120,25 +124,23 @@ impl Drop for Running {
 }
 
 /// Asks the system to kill the command when the thread that starts it ends: a `js` that
-/// is killed leaves no command running. Linux only.
+/// is killed leaves no command running. Linux only. A `js` that ends between the fork and
+/// the exec leaves the command running: the lease expires with its ttl.
 #[cfg(target_os = "linux")]
 fn end_with_parent(command: &mut Command) {
-    let parent = rustix::process::getpid();
-    // SAFETY: the closure runs in the forked child before the exec, where only
-    // async-signal-safe calls are allowed, and it makes two system calls (`arm_death_signal`)
-    // and allocates nothing: an error is an OS error code.
+    // SAFETY: `arm_death_signal` runs in the forked child before the exec, where only
+    // async-signal-safe calls are allowed: it makes one system call (`prctl`) and
+    // allocates nothing, an error being an OS error code.
     unsafe {
-        command.pre_exec(move || arm_death_signal(parent, Some(Signal::KILL)).map_err(Into::into));
+        command.pre_exec(arm_death_signal);
     }
 }
 
-/// What the forked child does before the exec: asks for `signal` when its parent ends, and
-/// fails if the parent `parent` has ended already (the signal would never come).
+/// What the forked child does before the exec: asks to be sent SIGKILL when its parent
+/// ends.
 #[cfg(target_os = "linux")]
-fn arm_death_signal(parent: Pid, signal: Option<Signal>) -> Result<(), Errno> {
-    rustix::process::set_parent_process_death_signal(signal)?;
-    let alive = rustix::process::getppid() == Some(parent);
-    alive.then_some(()).ok_or(Errno::SRCH)
+fn arm_death_signal() -> io::Result<()> {
+    set_parent_process_death_signal(Some(Signal::KILL)).map_err(Into::into)
 }
 
 /// Other systems have no such signal; a `js` that is killed leaves the command running.
@@ -190,18 +192,14 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
-    use rustix::process::{getpid, getppid};
-
     use super::*;
 
-    /// Asserts that what the forked child does before the exec succeeds while the parent
-    /// it was given is the process's parent, and fails with "no such process" when it is
-    /// not (the parent has ended, and another process has been made the parent). The
-    /// signal asked for is none, so the test process itself is not affected.
+    /// Asserts that what the forked child does before the exec succeeds. It is run here
+    /// in the test process, which is then asked to be killed when its parent ends (the
+    /// test runner outlives it), and the request is taken back at once.
     #[test]
-    fn the_death_signal_is_armed_only_while_the_parent_lives() {
-        let parent = getppid().unwrap();
-        assert_eq!(arm_death_signal(parent, None), Ok(()));
-        assert_eq!(arm_death_signal(getpid(), None), Err(Errno::SRCH));
+    fn the_death_signal_can_be_armed() {
+        assert!(arm_death_signal().is_ok());
+        assert!(set_parent_process_death_signal(None).is_ok());
     }
 }
