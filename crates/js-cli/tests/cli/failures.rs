@@ -1,8 +1,6 @@
 //! Answers the real server never gives, and a server that is not there: every way the
 //! client can fail without a refusal.
 
-use std::net::TcpListener;
-
 use crate::support::{Scratch, acquire_words, against, canned, http as reply};
 
 fn fails_with(url: &str, scratch: &Scratch, words: &[&str], message: &str) {
@@ -111,10 +109,12 @@ fn an_entry_without_a_state_is_malformed() {
     fails_with(&url, &scratch, &["lease", "list"], "\"state\"");
 }
 
-/// Asserts that a connection that ends before the body is complete, and one that was
-/// never accepted, are exit 1 naming the server.
+/// Asserts that a connection that ends before the body is complete, and one that ends
+/// with no reply at all, are exit 1 naming the server. Catches a lost connection reported
+/// as success or as a crash. The server stays bound, so no other process can answer in
+/// its place (a bound-then-dropped port can be taken between choosing it and dialling it).
 #[test]
-fn a_truncated_reply_and_a_closed_port_are_server_failures() {
+fn a_truncated_reply_and_a_hangup_are_server_failures() {
     let scratch = Scratch::new("failures_transport");
     let cut = canned("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc");
     fails_with(
@@ -123,12 +123,8 @@ fn a_truncated_reply_and_a_closed_port_are_server_failures() {
         &["lease", "list"],
         "cannot talk to http://127.0.0.1:",
     );
-    let closed = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let url = format!("http://{closed}");
-    fails_with(&url, &scratch, &["lease", "list"], "cannot talk to");
+    let silent = canned("");
+    fails_with(&silent, &scratch, &["lease", "list"], "cannot talk to");
 }
 
 /// Asserts that a body over the reply cap is a failure rather than a read to the end.

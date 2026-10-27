@@ -141,10 +141,18 @@ impl Fake {
     }
 }
 
-/// An address nothing listens on.
-pub fn closed_port() -> String {
+/// The URL of a server that closes every connection without a reply. The listener stays
+/// bound for the life of the test process: a port that was bound and then freed can be
+/// taken by another process before the client dials it.
+pub fn hangup_url() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    format!("http://{}", listener.local_addr().unwrap())
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    format!("http://{addr}")
 }
 
 /// A stream the fake server speaks over.

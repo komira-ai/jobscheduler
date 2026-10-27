@@ -269,7 +269,7 @@ fn token_file_0644_refused_naming_the_flag() {
     assert!(missing.err.contains("--token-file: "), "{}", missing.err);
 }
 
-/// Asserts that a server nobody listens on is not a refusal: the real transport reports it
+/// Asserts that a server that cannot be talked to is not a refusal: the real transport reports it
 /// as a failed hello naming the address, the agent waits and tries again, and a stop
 /// request ends the program with status 0. The token is not in the message.
 #[test]
@@ -277,11 +277,15 @@ fn an_unreachable_server_is_retried_not_fatal() {
     let dir = Scratch::new("flags_unreachable");
     let secret = "join-token-0123456789-abcdefghijklmnop";
     let token = dir.write("token", secret, 0o600);
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
-    let url = format!("http://127.0.0.1:{port}");
+    // The listener stays bound and hangs up on every connection: a port that was bound
+    // and then freed can be taken by another process before the agent dials it.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
     let args = [
         "--server",
         url.as_str(),
