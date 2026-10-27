@@ -112,7 +112,7 @@ pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
 /// file can name today.
 fn parse_with(
     text: &str,
-    classes: impl FnOnce(&str) -> Result<ResourceClass, String>,
+    classes: fn(&str) -> Result<ResourceClass, String>,
 ) -> Result<PoolConfig, String> {
     let raw: RawPool = toml::from_str(text).map_err(|err| err.to_string())?;
     let name = ProviderId::new(&raw.name).map_err(|err| format!("name: {err}"))?;
@@ -311,12 +311,15 @@ mod tests {
     }
 
     /// Asserts the class names: `whole-node` and `gpu-host` load as the shipped classes
-    /// (both `Whole`, with their GPU minimums), and any other id loads as `BookAll`
-    /// with no minimum. A defect that dropped a shipped name would load it as BookAll.
+    /// (`whole-node` is `Whole`; `gpu-host` is still `BookAll`, with its GPU minimum), and
+    /// any other id loads as `BookAll` with no minimum. A defect that dropped a shipped
+    /// name would load it with no minimum, or `whole-node` as BookAll.
     #[test]
     fn class_names_load_the_shipped_classes() {
         assert_eq!(class("whole-node").unwrap(), ResourceClass::whole_node());
+        assert_eq!(class("whole-node").unwrap().admission(), &Admission::Whole);
         assert_eq!(class("gpu-host").unwrap(), ResourceClass::gpu_host());
+        assert_eq!(class("gpu-host").unwrap().admission(), &Admission::BookAll);
         let other = class("mac-host").unwrap();
         assert_eq!(other.admission(), &Admission::BookAll);
         assert_eq!(other.min_gpus(), 0);
@@ -448,9 +451,9 @@ mod tests {
     }
 
     /// A pool file written before the whole-node keys loads unchanged in every old field:
-    /// a `gpu-host` file equals the pool built from the old settings alone (plus the
-    /// dedicated defaults its class now implies), and a file of a class that books all
-    /// has no whole-node settings at all.
+    /// a `gpu-host` file (class `BookAll`) equals the pool built from the old settings
+    /// alone, with no whole-node settings, exactly as merged; and it refuses whole-node
+    /// keys, which need the `whole-node` class.
     #[test]
     fn old_pool_files_load_unchanged() {
         let old = "name = \"gpus\"\nclass = \"gpu-host\"\nmax_machines = 8\n\
@@ -462,29 +465,64 @@ mod tests {
         );
         let name = ProviderId::new("gpus").unwrap();
         let built = PoolConfig::new(name, ResourceClass::gpu_host(), shape, 8);
-        let built = built
-            .with_whole_node(WholeNodeConfig::dedicated(8))
-            .unwrap();
         assert_eq!(loaded, built);
+        assert_eq!(loaded.whole_node(), None);
+        let keyed = parse(&format!("max_whole_node = 2\n{old}")).unwrap_err();
+        assert!(keyed.contains("whole-node class"), "{keyed}");
         assert_eq!(parse(MINIMAL).unwrap().whole_node(), None);
     }
 
     /// A dedicated pool that allows fewer whole hosts than machines loads, and the
     /// surplus is reported as a warning text that counts the idle hosts; a pool with no
-    /// surplus reports nothing. Through `read` the same file still loads (the warning is
-    /// a log line, not an error).
+    /// surplus reports nothing. Through `read` the same file still loads and the warning
+    /// is a log line, not an error.
     #[test]
     fn a_surplus_is_a_warning_not_an_error() {
         let pool = parse(&whole("max_whole_node = 1")).unwrap();
         let note = surplus_warning(&pool).unwrap();
         assert!(note.contains("3 host(s)"), "{note}");
         assert_eq!(surplus_warning(&parse(&whole("")).unwrap()), None);
+        // A call with no subscriber skips evaluating its fields, so the warning would go
+        // unrun; this one runs it and drops the line.
+        let scope = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .finish(),
+        );
         let dir = std::env::temp_dir();
-        let path = dir.join(format!("js-pool-surplus-{}.toml", std::process::id()));
-        std::fs::write(&path, whole("max_whole_node = 1")).unwrap();
-        let read_back = read(&path);
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(read_back.unwrap(), pool);
+        for (key, text) in [
+            ("surplus", whole("max_whole_node = 1")),
+            ("full", whole("")),
+        ] {
+            let path = dir.join(format!("js-pool-{key}-{}.toml", std::process::id()));
+            std::fs::write(&path, &text).unwrap();
+            let read_back = read(&path);
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(read_back.unwrap(), parse(&text).unwrap());
+        }
+        drop(scope);
+    }
+
+    /// `read` names its flag and the path when the file is missing and when its text is
+    /// not a pool, so the operator learns which file and why. It catches a start-up
+    /// error that drops the path or the reason.
+    #[test]
+    fn a_file_that_cannot_be_read_or_parsed_is_refused_with_its_path() {
+        let dir = std::env::temp_dir();
+        let missing = dir.join(format!("js-pool-missing-{}.toml", std::process::id()));
+        let err = read(&missing).unwrap_err();
+        assert_eq!(err.flag(), "--agent-pool-config");
+        assert!(
+            err.to_string().contains(&*missing.to_string_lossy()),
+            "{err}"
+        );
+        let bad = dir.join(format!("js-pool-bad-{}.toml", std::process::id()));
+        std::fs::write(&bad, "speed = 1\n").unwrap();
+        let err = read(&bad).unwrap_err();
+        std::fs::remove_file(&bad).unwrap();
+        let shown = err.to_string();
+        assert!(shown.contains(&*bad.to_string_lossy()), "{shown}");
+        assert!(shown.contains("speed"), "{shown}");
     }
 
     /// Every whole-node mistake is refused and names the key: a zero maximum or count, a
