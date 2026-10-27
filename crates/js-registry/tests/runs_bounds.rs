@@ -364,6 +364,38 @@ fn a_start_refused_as_host_tainted_taints_the_host() {
     assert_eq!(refused, RunRefusal::HostTainted);
 }
 
+/// Asserts that a tainted host takes no new lease while a clean one beside it does: the
+/// lease already on the tainted host stays held on it, and once that lease is stopped a
+/// request that only the tainted host could serve gets no-capacity, while the clean host
+/// is leased; both hosts still count toward the pool's limit. It catches a tainted host
+/// handed to the next client.
+#[test]
+fn a_tainted_host_is_not_leased_and_a_clean_one_is() {
+    let fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    fx.join("b", "t");
+    assert_eq!(started_on(&fx.provider.clone().start(spec(1))), Some("a"));
+    beat_tainted(&fx, epoch, &[]);
+    assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
+    assert_eq!(started_on(&fx.provider.clone().start(spec(2))), Some("b"));
+    assert_eq!(
+        fx.provider.clone().start(spec(3)),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+    fx.provider.clone().stop(&lease(1));
+    assert_eq!(
+        fx.provider.clone().start(spec(3)),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+    fx.provider.clone().stop(&lease(2));
+    assert_eq!(started_on(&fx.provider.clone().start(spec(4))), Some("b"));
+    assert_eq!(fx.registry.hosts().len(), 2);
+    assert_eq!(
+        fx.provider.clone().start(spec(5)),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
 /// Asserts that a taint is part of what is persisted and comes back: the bindings carry
 /// it, a registry started over them puts a tainted host back awaiting (without a lease),
 /// a binding without a taint puts nothing back, a host already known is left as it is,

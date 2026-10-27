@@ -160,7 +160,9 @@
 //! says `taint_ack: false`, so the agent reports again. A start the agent refuses with the
 //! detail `host-tainted` taints the host the same way, since an agent that cannot write
 //! its own marker (a full disk) may never report. A tainted host is sent no start, takes
-//! no new run (409 `host-tainted`), is never forgotten for being silent, and keeps its
+//! no new run (409 `host-tainted`), takes no new lease (a request only it could serve is
+//! `no-capacity`; a lease already on it is untouched until it ends), still counts toward
+//! `max_machines`, is never forgotten for being silent, and keeps its
 //! taint across its own hello and a server restart (the `.agents` file holds it, see
 //! "Restart"). The runs it already holds finish: their stops are sent, their results are
 //! acknowledged, and the budget returns when the host stops listing them. Nothing clears a

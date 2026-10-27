@@ -117,12 +117,13 @@ impl Record {
     }
 
     /// Whether a new lease may be placed here: heard from within the grace period,
-    /// serving, and `quiet` (no run left over from the last lease). Every other phase
-    /// takes no new lease.
+    /// serving, `quiet` (no run left over from the last lease) and not tainted. Every
+    /// other phase takes no new lease. A lease already on a tainted host is untouched.
     fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
         let live = self.state(now, grace_ms) == HostState::Live;
         let serving = self.phase == Phase::Serving;
-        [live, serving, quiet].into_iter().all(|ok| ok)
+        let clean = self.taint.is_none();
+        [live, serving, quiet, clean].into_iter().all(|ok| ok)
     }
 
     /// Whether the host has been silent for longer than the grace period and the
@@ -425,7 +426,8 @@ impl Registry {
     /// `taint_ack` whenever the heartbeat carries one. The caller must make the taint
     /// durable ([`Registry::bindings`]) before it lets the acknowledgement go, since the
     /// agent stops reporting once it has it. A tainted host is sent no start, takes no new
-    /// run ([`RunRefusal::HostTainted`]), and is never forgotten for being silent; the
+    /// run ([`RunRefusal::HostTainted`]), takes no new lease (a lease already on it is
+    /// untouched until it ends), and is never forgotten for being silent; the
     /// runs it already holds finish, their results are acknowledged, and their stops are
     /// sent as for any host. Nothing here clears a taint.
     pub fn heartbeat(
