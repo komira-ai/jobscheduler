@@ -13,6 +13,13 @@ use serde_json::json;
 
 use super::{Harness, Options, cleanup, job, names, reply_json};
 
+/// The labels of a container no job can stand for (its run id names a path) that is not a
+/// host job's.
+const ODD: [(&str, &str); 2] = [
+    ("jobscheduler.dev/run-id", "../x"),
+    ("jobscheduler.dev/isolation", "contained"),
+];
+
 /// A start that may change the host.
 fn host_job(run_id: &str) -> JobSpec {
     let mut spec = job(run_id);
@@ -123,10 +130,11 @@ fn marker_written_before_report_and_before_free() {
 }
 
 /// Asserts the fail-closed rule: when the marker cannot be written, the agent is tainted
-/// in memory all the same. It reports the taint, refuses every start, notes the failure as
-/// a finding of the job, frees no slot (not even the slot of a job whose own checks pass),
-/// and writes the marker as soon as it can. It catches an agent that treats a marker it
-/// could not write as no taint.
+/// in memory all the same. It refuses every start, notes the failure as a finding of the
+/// job, frees no slot (not even the slot of a job whose own checks pass), reports nothing
+/// until the marker is on disk, and writes the marker as soon as it can, then reports. It
+/// catches an agent that treats a marker it could not write as no taint, and one that
+/// reports a taint the host would forget.
 #[test]
 fn marker_write_failure_keeps_refusing() {
     let mut h = finding_after_r1("write-fails", false);
@@ -147,10 +155,11 @@ fn marker_write_failure_keeps_refusing() {
         ]
     );
     assert!(!h.marker().exists());
+    assert!(h.life.is_tainted());
     assert_eq!(
         h.life.pending_taint(),
-        Some(residue_of("r1", "stray-process")),
-        "the report goes out without the marker"
+        None,
+        "nothing is reported while the marker is not on disk"
     );
     assert_eq!(
         names(&h.start(job("r3"))),
@@ -176,6 +185,11 @@ fn marker_write_failure_keeps_refusing() {
     let events = names(&h.life.step());
     assert_eq!(events, ["checks passed r2", "freed r2"]);
     assert!(h.marker().exists(), "written at the first step that could");
+    assert_eq!(
+        h.life.pending_taint(),
+        Some(residue_of("r1", "stray-process")),
+        "and reported from then on"
+    );
     assert_eq!(h.life.free().cpu_millis, 3000, "r1 stays blocked");
 }
 
@@ -422,7 +436,7 @@ fn a_marker_that_cannot_be_written_at_adoption_is_a_finding() {
 
     let mut h = Harness::new("evict-fails");
     block_marker(&h);
-    let odd = h.fake.leak(&[("jobscheduler.dev/run-id", "../x")], 0);
+    let odd = h.fake.leak(&ODD, 0);
     h.fake.fail("remove", 2);
     let events = names(&h.restart().unwrap());
     assert_eq!(
@@ -496,7 +510,7 @@ fn cleanup_failure_taints_and_keeps_slot() {
 #[test]
 fn an_orphan_that_stays_taints_the_host() {
     let mut h = Harness::new("orphan-taint");
-    h.fake.leak(&[("jobscheduler.dev/run-id", "../x")], 0);
+    h.fake.leak(&ODD, 0);
     h.fake.fail("remove", 1);
     let events = names(&h.restart().unwrap());
     assert_eq!(
@@ -546,7 +560,9 @@ fn the_state_root_is_private_and_the_first_taint_stays() {
     let state = StateRoot::open(&root).unwrap();
     let first = residue_of("r1", "new-mount");
     state.write(&first).unwrap();
-    state.write(&residue_of("r2", "new-kernel-module")).unwrap();
+    state
+        .write(&residue_of("r2", "kernel-module-changed"))
+        .unwrap();
     assert_eq!(state.read().map(|t| t.run_id), Some(Some("r2".to_owned())));
     let listed: Vec<String> = fs::read_dir(&root)
         .unwrap()
@@ -577,4 +593,330 @@ fn the_state_root_is_private_and_the_first_taint_stays() {
         ("residue", Some("r1")),
         "the second cause changed nothing"
     );
+}
+
+/// The labels of a container this agent started for `run_id` that books one CPU and 1 GiB,
+/// with the isolation `isolation` (`None`: no isolation label at all).
+fn container(run_id: &str, isolation: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut labels = vec![
+        ("jobscheduler.dev/run-id", run_id.to_owned()),
+        ("jobscheduler.dev/lease-id", "lease-old".to_owned()),
+        ("jobscheduler.dev/cpu-millis", "1000".to_owned()),
+        ("jobscheduler.dev/memory-bytes", "1073741824".to_owned()),
+        ("jobscheduler.dev/gpus", String::new()),
+        ("jobscheduler.dev/wall-ms", "60000".to_owned()),
+    ];
+    labels.extend(isolation.map(|text| ("jobscheduler.dev/isolation", text.to_owned())));
+    labels
+}
+
+/// `labels` with the value of `key` replaced.
+fn with_label(
+    mut labels: Vec<(&'static str, String)>,
+    key: &str,
+    value: &str,
+) -> Vec<(&'static str, String)> {
+    labels.iter_mut().for_each(|(k, v)| {
+        if *k == key {
+            *v = value.to_owned();
+        }
+    });
+    labels
+}
+
+/// Leaks `labels` into the fake runtime.
+fn leak(h: &Harness, labels: &[(&'static str, String)]) -> String {
+    let borrowed: Vec<(&str, &str)> = labels.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    h.fake.leak(&borrowed, 0)
+}
+
+/// Asserts that a container the agent cannot account for taints the host when it is, or may
+/// be, a host job's: one that carries the host isolation label, one with no isolation label
+/// and one with a label the agent never writes, whichever way its booking is broken (an
+/// unreadable number, more than the machine has, a run id that names a path, a run id held
+/// already), is removed with the taint of a host job (naming the run when its id is one);
+/// one labelled `contained` taints nothing. It catches a host job's container that is
+/// removed without a trace because its booking failed, and an unlabelled container read as
+/// a contained one.
+#[test]
+fn a_container_the_agent_cannot_adopt_taints_the_host_unless_it_is_contained() {
+    /// (name, isolation label, label to break, its value, whether the host is tainted, the
+    /// run the taint names)
+    type Case<'a> = (&'a str, Option<&'a str>, &'a str, &'a str, bool, &'a str);
+    let cases: [Case; 8] = [
+        (
+            "host",
+            Some("host"),
+            "jobscheduler.dev/cpu-millis",
+            "lots",
+            true,
+            "h1",
+        ),
+        (
+            "host-big",
+            Some("host"),
+            "jobscheduler.dev/cpu-millis",
+            "99999999",
+            true,
+            "h1",
+        ),
+        (
+            "host-path",
+            Some("host"),
+            "jobscheduler.dev/run-id",
+            "../x",
+            true,
+            "-",
+        ),
+        (
+            "unlabelled",
+            None,
+            "jobscheduler.dev/cpu-millis",
+            "lots",
+            true,
+            "h1",
+        ),
+        (
+            "unknown",
+            Some("weird"),
+            "jobscheduler.dev/cpu-millis",
+            "lots",
+            true,
+            "h1",
+        ),
+        (
+            "empty",
+            Some(""),
+            "jobscheduler.dev/cpu-millis",
+            "lots",
+            true,
+            "h1",
+        ),
+        (
+            "contained",
+            Some("contained"),
+            "jobscheduler.dev/cpu-millis",
+            "lots",
+            false,
+            "h1",
+        ),
+        (
+            "contained-path",
+            Some("contained"),
+            "jobscheduler.dev/run-id",
+            "../x",
+            false,
+            "-",
+        ),
+    ];
+    for (name, isolation, key, value, taints, run) in cases {
+        let mut h = Harness::new(&format!("evict-{name}"));
+        let broken = with_label(container("h1", isolation), key, value);
+        let id = leak(&h, &broken);
+        let events = names(&h.restart().unwrap());
+        match taints {
+            true => {
+                assert_eq!(
+                    events,
+                    [
+                        format!("tainted {run} host-job"),
+                        "finding - unadoptable-container".to_owned()
+                    ],
+                    "{name}"
+                );
+                assert!(
+                    h.marker().exists(),
+                    "{name}: on disk before the container goes"
+                );
+                assert!(h.life.is_tainted(), "{name}");
+            }
+            false => {
+                assert_eq!(events, ["finding - unadoptable-container"], "{name}");
+                assert!(!h.marker().exists(), "{name}");
+                assert!(!h.life.is_tainted(), "{name}");
+            }
+        }
+        assert!(
+            !h.fake.existing().contains(&id),
+            "{name}: removed all the same"
+        );
+    }
+
+    let mut twice = Harness::new("evict-host-twice");
+    leak(&twice, &container("h1", Some("host")));
+    leak(&twice, &container("h1", Some("host")));
+    let events = names(&twice.restart().unwrap());
+    assert_eq!(
+        events,
+        [
+            "tainted h1 host-job",
+            "adopted h1",
+            "finding - unadoptable-container"
+        ],
+        "the first taint stays, and the repeated run is removed"
+    );
+}
+
+/// Asserts that a container found after a restart with no isolation label, or one the agent
+/// never writes, is adopted as a host job (the host is tainted, naming the run), and one
+/// labelled `contained` is not. It catches a container of unknown isolation that is taken
+/// for a contained one.
+#[test]
+fn an_adopted_container_of_unknown_isolation_is_a_host_job() {
+    for (isolation, taints) in [
+        (None, true),
+        (Some("weird"), true),
+        (Some("host"), true),
+        (Some("contained"), false),
+    ] {
+        let mut h = Harness::new("adopt-unknown-isolation");
+        leak(&h, &container("r9", isolation));
+        let events = names(&h.restart().unwrap());
+        let expected: &[&str] = match taints {
+            true => &["tainted r9 host-job", "adopted r9"],
+            false => &["adopted r9"],
+        };
+        assert_eq!(events, expected, "{isolation:?}");
+    }
+}
+
+/// Asserts that a taint is reported only once the marker is on disk and that an
+/// acknowledgement before that acknowledges nothing: with the marker blocked the host is
+/// tainted and refuses starts but reports nothing; an `ack` that arrives then does not
+/// count, so the report goes out when the marker is written, and stops at the next ack. It
+/// catches a taint reported to the server that a crash would make the host forget, and an
+/// acknowledgement of a report that was never made.
+#[test]
+fn a_taint_is_reported_only_once_it_is_on_disk() {
+    let mut h = finding_after_r1("report-after-disk", false);
+    block_marker(&h);
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    assert!(h.life.is_tainted());
+    assert_eq!(h.life.pending_taint(), None);
+    ack(&mut h);
+    unblock_marker(&h);
+    h.life.step();
+    assert_eq!(
+        h.life.pending_taint(),
+        Some(residue_of("r1", "stray-process")),
+        "the early acknowledgement did not stop the report"
+    );
+    ack(&mut h);
+    assert_eq!(h.life.pending_taint(), None);
+}
+
+/// Asserts that `step` writes a marker that could not be written when the host was
+/// tainted, with no job involved: a container that cannot be removed taints the host while
+/// the marker is blocked; once it can be written the next step writes it and the taint is
+/// reported. It catches a step that leaves the taint in memory for good, which a restart
+/// would lose.
+#[test]
+fn step_writes_a_marker_that_could_not_be_written() {
+    let mut h = Harness::new("step-persists");
+    block_marker(&h);
+    leak(
+        &h,
+        &with_label(
+            container("odd", Some("contained")),
+            "jobscheduler.dev/run-id",
+            "../x",
+        ),
+    );
+    h.fake.fail("remove", 1);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(
+        events,
+        [
+            "tainted - cleanup-failed",
+            "finding - taint-write-failed",
+            "finding - unadoptable-container-kept"
+        ]
+    );
+    assert!(!h.marker().exists());
+    assert_eq!(h.life.pending_taint(), None);
+    unblock_marker(&h);
+    h.life.step();
+    assert!(h.marker().exists(), "written by the step alone");
+    assert_eq!(
+        h.life.pending_taint().map(|taint| taint.reason),
+        Some(reason::CLEANUP_FAILED.to_owned())
+    );
+}
+
+/// Asserts that a check that could not run taints the host as `unchecked` and not as
+/// `residue`, naming the check, and says in the finding that the check could not run. It
+/// catches a check that did not run reported as one that found something.
+#[test]
+fn a_check_that_could_not_run_taints_as_unchecked() {
+    let mut h = Harness::with(
+        "unchecked",
+        Options {
+            findings: vec![(
+                "r1",
+                CheckFinding::unchecked("mounts-unreadable", "no mountinfo"),
+            )],
+            ..Options::default()
+        },
+    );
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(
+        events,
+        [
+            "result r1",
+            "container removed r1",
+            "scratch removed r1",
+            "tainted r1 unchecked",
+            "finding r1 mounts-unreadable"
+        ]
+    );
+    let taint = h.life.pending_taint().unwrap();
+    assert_eq!(
+        (taint.reason.as_str(), taint.check.as_deref()),
+        (reason::UNCHECKED, Some("mounts-unreadable"))
+    );
+    assert_eq!(
+        h.life.findings()[0].message,
+        "the check could not run: no mountinfo"
+    );
+}
+
+/// Asserts that a host job that is refused for any reason other than the taint taints
+/// nothing: one that names a mount root that does not exist, one larger than the machine
+/// and one that does not fit beside a running job leave no marker and the agent clean. It
+/// catches a host job that taints the host on a start that creates nothing.
+#[test]
+fn a_host_job_that_is_refused_for_another_reason_taints_nothing() {
+    let mut h = Harness::with("host-refused", allowing());
+    let mut bad_mount = host_job("m1");
+    bad_mount.mounts = vec![js_agent_wire::Mount {
+        root_name: "nowhere".to_owned(),
+        rel: "x".to_owned(),
+        ro: true,
+    }];
+    let mut large = host_job("l1");
+    large.limits.cpu_millis = 99_000_000;
+    let mut big = job("b1");
+    big.limits.cpu_millis = 3500;
+    let mut crowded = host_job("c1");
+    crowded.limits.cpu_millis = 1000;
+    for (spec, code) in [
+        (bad_mount, "invalid-mount"),
+        (large, "limits-exceed-shape"),
+        (big, "started"),
+        (crowded, "no-capacity"),
+    ] {
+        let run = spec.run_id.clone();
+        let expected = match code {
+            "started" => format!("started {run}"),
+            _ => format!("refused {run} {code}"),
+        };
+        assert_eq!(names(&h.start(spec)), [expected]);
+        assert!(!h.marker().exists(), "{run}");
+        assert!(!h.life.is_tainted(), "{run}");
+    }
+    assert_eq!(h.fake.created().len(), 1, "only b1 started");
 }

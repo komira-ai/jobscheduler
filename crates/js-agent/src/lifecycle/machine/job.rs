@@ -148,6 +148,9 @@ pub(super) struct Job {
     pub(super) stop_sent: bool,
     /// The job may change the host (`isolation = host`).
     pub(super) host: bool,
+    /// The record that this job's checks are owed is on disk (written before the first
+    /// step of its cleanup, removed once the checks have run).
+    pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
     pub(super) findings: Vec<Finding>,
 }
@@ -258,6 +261,7 @@ impl Job {
             silent: false,
             stop_sent: false,
             host: spec.isolation == Isolation::Host,
+            owed: false,
             result: None,
             findings: Vec::new(),
         }
@@ -265,28 +269,20 @@ impl Job {
 
     /// The job a labelled container stands for, when its labels say what it is.
     pub(super) fn adopted(found: &Found, now: u64) -> Option<Self> {
-        let id = |key: &str| {
-            found.labels.get(key).filter(|value| {
-                let held = HeldRun {
-                    run_id: (*value).clone(),
-                    state: HeldState::Running,
-                };
-                held.validate().is_ok()
-            })
-        };
         let booking = Booking::from_labels(found)?;
         let wall_ms = label_number(found, label::WALL_MS)?;
         let remaining = wall_ms.saturating_sub(found.running_ms);
         Some(Self {
-            run_id: id(label::RUN)?.clone(),
-            lease_id: id(label::LEASE)?.clone(),
+            run_id: label_id(found, label::RUN)?.to_owned(),
+            lease_id: label_id(found, label::LEASE)?.to_owned(),
             booking,
             deadline_ms: now.saturating_add(remaining),
             stage: Stage::Running(found.id.clone()),
             cause: None,
             silent: false,
             stop_sent: false,
-            host: found.labels.get(label::ISOLATION).map(String::as_str) == Some(HOST_LABEL),
+            host: may_change_host(found),
+            owed: false,
             result: None,
             findings: Vec::new(),
         })
@@ -296,11 +292,41 @@ impl Job {
 /// The value of the isolation label of a container that runs a host job.
 const HOST_LABEL: &str = "host";
 
+/// The value of the isolation label of a container that runs a contained job.
+const CONTAINED_LABEL: &str = "contained";
+
+/// The label `key` of a found container, when it is an id the wire accepts.
+pub(super) fn label_id<'a>(found: &'a Found, key: &str) -> Option<&'a str> {
+    found
+        .labels
+        .get(key)
+        .filter(|value| {
+            let held = HeldRun {
+                run_id: (*value).clone(),
+                state: HeldState::Running,
+            };
+            held.validate().is_ok()
+        })
+        .map(String::as_str)
+}
+
+/// Whether the job of a found container may have changed the host. Only a container the
+/// agent labelled `contained` has not: one labelled `host`, one with no isolation label and
+/// one with a label the agent never writes are all taken for a host job's (fail closed).
+pub(super) fn may_change_host(found: &Found) -> bool {
+    found.labels.get(label::ISOLATION).map(String::as_str) != Some(CONTAINED_LABEL)
+}
+
 /// The taint of a host job's start.
 pub(super) fn host_taint(run_id: &str) -> Taint {
+    host_taint_of(Some(run_id))
+}
+
+/// The taint of a host job whose run id may not be known.
+pub(super) fn host_taint_of(run_id: Option<&str>) -> Taint {
     Taint {
         reason: reason::HOST_JOB.to_owned(),
-        run_id: Some(run_id.to_owned()),
+        run_id: run_id.map(str::to_owned),
         check: None,
     }
 }
@@ -323,7 +349,7 @@ pub(super) fn container_spec(
             label::ISOLATION,
             match spec.isolation {
                 Isolation::Host => HOST_LABEL.to_owned(),
-                Isolation::Contained => "contained".to_owned(),
+                Isolation::Contained => CONTAINED_LABEL.to_owned(),
             },
         ),
     ];

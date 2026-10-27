@@ -21,6 +21,7 @@ use crate::support::Scratch;
 #[derive(Default)]
 struct Recorded {
     files: BTreeMap<String, String>,
+    links: BTreeMap<String, String>,
     listings: Vec<Result<Vec<&'static str>, &'static str>>,
     dirs: BTreeMap<PathBuf, Vec<Entry>>,
     listed: Cell<usize>,
@@ -34,6 +35,16 @@ impl FileReader for Host {
         (self.0.files.get(path))
             .cloned()
             .ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        (self.0.links.get(path))
+            .cloned()
+            .ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        Err(format!("{}: not recorded", path.display()))
     }
 }
 
@@ -496,4 +507,24 @@ fn the_system_host_digests_a_real_directory() {
     fs::write(dir.path("new"), "x").unwrap();
     let after = system.watched(&dir.path("")).unwrap();
     assert_ne!(before, after);
+}
+
+/// Asserts that the Linux host reads a namespace link through the file seam, and that a
+/// link that cannot be read is an error naming it. It catches a host that answers the
+/// namespace question from anything but the link.
+#[test]
+fn a_link_is_read_through_the_file_seam() {
+    let mut recorded = Recorded::default();
+    recorded
+        .links
+        .insert("/proc/1/ns/pid".to_owned(), "pid:[4026531836]".to_owned());
+    let view = host(recorded);
+    assert_eq!(
+        view.link("/proc/1/ns/pid"),
+        Ok("pid:[4026531836]".to_owned())
+    );
+    assert_eq!(
+        view.link("/proc/1/ns/mnt"),
+        Err("/proc/1/ns/mnt: No such file or directory".to_owned())
+    );
 }

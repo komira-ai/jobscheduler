@@ -76,7 +76,7 @@ fn a_dirty_job_leaves_the_baseline_where_it_was() {
     h.life.step();
     h.fake.exit("r2", 0);
     let events = names(&h.life.step());
-    assert_eq!(events.last().unwrap(), "finding r2 new-kernel-module");
+    assert_eq!(events.last().unwrap(), "finding r2 kernel-module-changed");
     assert_eq!(h.life.free().cpu_millis, 2000, "neither slot came back");
     assert_eq!(h.life.findings().len(), 2);
 }
@@ -91,7 +91,13 @@ fn the_checks_are_told_every_container_beside_the_job() {
     h.start(job("r3"));
     h.start(job("r1"));
     h.start(job("r2"));
-    h.fake.leak(&[("jobscheduler.dev/run-id", "../x")], 0);
+    h.fake.leak(
+        &[
+            ("jobscheduler.dev/run-id", "../x"),
+            ("jobscheduler.dev/isolation", "contained"),
+        ],
+        0,
+    );
     h.fake.fail("remove", 1);
     h.restart().unwrap();
     h.fake.fail("remove", 1);

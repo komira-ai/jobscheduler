@@ -3,11 +3,26 @@
 
 use std::cmp::Reverse;
 
-use super::job::{Booking, Job, Retired, Stuck, cleanup_taint, host_taint};
+use js_agent_wire::Taint;
+
+use super::job::{
+    Booking, Job, Retired, Stuck, cleanup_taint, host_taint, host_taint_of, label_id,
+    may_change_host,
+};
 use super::{Lifecycle, MAX_JOBS};
 use crate::lifecycle::runtime::{ContainerRuntime, Found, RuntimeError, Status};
-use crate::lifecycle::taint::TaintState;
-use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code};
+use crate::lifecycle::taint::{TaintState, reason};
+use crate::lifecycle::{CheckHook, Clock, Config, Event, Finding, code, label};
+
+/// The taint of a record of owed checks: the run it names, or the check code when the
+/// records could not be listed.
+fn owed_taint(run_id: Option<String>, check: Option<&str>) -> Taint {
+    Taint {
+        reason: reason::CHECK_OWED.to_owned(),
+        run_id,
+        check: check.map(str::to_owned),
+    }
+}
 
 impl Lifecycle {
     /// Starts the lifecycle of an agent that has just started, taking over the labelled
@@ -63,6 +78,7 @@ impl Lifecycle {
             taint,
         };
         let mut events = Vec::new();
+        this.owed_at_start(&mut events);
         let mut stuck = Vec::new();
         for (_, container) in found {
             let now = this.clock.now_ms();
@@ -85,6 +101,31 @@ impl Lifecycle {
         // container that runs look like one that does not fit.
         this.stuck = stuck;
         Ok((this, events))
+    }
+
+    /// Taints the host when the state root holds the record of a job whose checks were owed
+    /// and never ran (the previous process stopped after the job's cleanup began and before
+    /// its checks finished), or cannot be listed: what the job left behind may already be
+    /// part of the baseline the new process takes.
+    fn owed_at_start(&mut self, events: &mut Vec<Event>) {
+        let owed = match self.config.state.owed() {
+            Ok(runs) if runs.is_empty() => return,
+            Ok(runs) => owed_taint(runs.first().cloned(), None),
+            Err(_) => owed_taint(None, Some(code::OWED_UNREADABLE)),
+        };
+        self.seal(owed, events);
+    }
+
+    /// Taints the host with `taint` and writes the marker; a marker that cannot be written
+    /// is a finding that belongs to no run.
+    fn seal(&mut self, taint: Taint, events: &mut Vec<Event>) {
+        if let Err(why) = self.taint.seal(taint, events) {
+            events.push(Event::Finding(Finding {
+                run_id: None,
+                code: code::TAINT_WRITE_FAILED,
+                message: why.to_string(),
+            }));
+        }
     }
 
     /// The job a labelled container stands for, or why it cannot be one: it never started,
@@ -124,19 +165,19 @@ impl Lifecycle {
     /// and tried again.
     fn evict(&mut self, found: &Found, why: &str, events: &mut Vec<Event>) -> Option<Stuck> {
         let id = &found.id;
+        // A container that may be a host job's changed the host whatever becomes of it
+        // now: its booking being wrong does not undo that, and it is not left to a
+        // removal that may fail.
+        if may_change_host(found) {
+            let run = label_id(found, label::RUN);
+            self.seal(host_taint_of(run), events);
+        }
         let _ = self.runtime.stop(id, self.config.stop_grace);
         let (code, fate, stuck) = match self.runtime.remove(id) {
             Ok(()) => (code::UNADOPTABLE, "stopped and removed".to_owned(), None),
             Err(failed) => {
                 // A container that stays on the host is a cleanup that failed.
-                let taint = cleanup_taint(None, code::UNADOPTABLE_KEPT);
-                if let Err(why) = self.taint.seal(taint, events) {
-                    events.push(Event::Finding(Finding {
-                        run_id: None,
-                        code: code::TAINT_WRITE_FAILED,
-                        message: why.to_string(),
-                    }));
-                }
+                self.seal(cleanup_taint(None, code::UNADOPTABLE_KEPT), events);
                 (
                     code::UNADOPTABLE_KEPT,
                     format!("not removed, still on the host and booked: {failed}"),

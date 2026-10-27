@@ -183,11 +183,41 @@ impl CommandRunner for FakeCommands {
 #[derive(Clone, Default)]
 pub struct FakeFiles {
     files: BTreeMap<String, String>,
+    links: BTreeMap<String, String>,
+    /// Paths under a prefix share a device.
+    devices: Vec<(PathBuf, u64)>,
+    /// Paths under a prefix cannot be looked at.
+    unlooked: Vec<PathBuf>,
 }
 
 impl FakeFiles {
     pub fn with(mut self, path: &str, text: &str) -> Self {
         self.files.insert(path.to_owned(), text.to_owned());
+        self
+    }
+
+    /// The link at `path` points at `target`.
+    pub fn with_link(mut self, path: &str, target: &str) -> Self {
+        self.links.insert(path.to_owned(), target.to_owned());
+        self
+    }
+
+    /// The link at `path` cannot be read.
+    pub fn without_link(mut self, path: &str) -> Self {
+        self.links.remove(path);
+        self
+    }
+
+    /// Everything under `prefix` is on the device `device`; any other path is on a device
+    /// of its own.
+    pub fn with_device_under(mut self, prefix: &Path, device: u64) -> Self {
+        self.devices.push((prefix.to_path_buf(), device));
+        self
+    }
+
+    /// Nothing under `prefix` can be looked at.
+    pub fn unlooked_under(mut self, prefix: &Path) -> Self {
+        self.unlooked.push(prefix.to_path_buf());
         self
     }
 }
@@ -198,6 +228,31 @@ impl FileReader for FakeFiles {
             .get(path)
             .cloned()
             .ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        self.links
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        if self.unlooked.iter().any(|prefix| path.starts_with(prefix)) {
+            return Err(format!("{}: Permission denied", path.display()));
+        }
+        let shared = self
+            .devices
+            .iter()
+            .find(|(prefix, _)| path.starts_with(prefix));
+        Ok(shared.map_or_else(
+            || {
+                let mut hasher = std::hash::DefaultHasher::new();
+                std::hash::Hash::hash(path, &mut hasher);
+                std::hash::Hasher::finish(&hasher) | (1 << 63)
+            },
+            |(_, device)| *device,
+        ))
     }
 }
 
@@ -225,7 +280,11 @@ pub fn linux_host() -> Host {
             .with(NVIDIA_CMD, Ok(NVIDIA_TWO_A100)),
         files: FakeFiles::default()
             .with("/proc/meminfo", MEMINFO)
-            .with("/etc/machine-id", &format!("{MACHINE_ID}\n")),
+            .with("/etc/machine-id", &format!("{MACHINE_ID}\n"))
+            .with_link("/proc/self/ns/pid", "pid:[4026531836]")
+            .with_link("/proc/1/ns/pid", "pid:[4026531836]")
+            .with_link("/proc/self/ns/mnt", "mnt:[4026531841]")
+            .with_link("/proc/1/ns/mnt", "mnt:[4026531841]"),
     }
 }
 

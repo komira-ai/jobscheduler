@@ -9,6 +9,8 @@ mod cleanup;
 pub mod fake;
 mod flags;
 mod mounts;
+mod owed;
+mod reach;
 mod results;
 mod rules;
 mod taint;

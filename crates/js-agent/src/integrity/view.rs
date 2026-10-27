@@ -97,6 +97,13 @@ pub trait HostView {
     ///
     /// It cannot be listed.
     fn watched(&self, dir: &Path) -> Result<Watched, String>;
+
+    /// The target of the symbolic link at `path` (the namespace links of `/proc`).
+    ///
+    /// # Errors
+    ///
+    /// It cannot be read.
+    fn link(&self, path: &str) -> Result<String, String>;
 }
 
 /// The inputs of a [`FakeHost`], for [`FakeHost::fail`].
@@ -123,6 +130,7 @@ struct FakeState {
     groups: BTreeSet<String>,
     modules: BTreeSet<String>,
     watched: BTreeMap<PathBuf, Watched>,
+    links: BTreeMap<String, String>,
     failing: BTreeSet<&'static str>,
 }
 
@@ -172,8 +180,41 @@ impl FakeHost {
             state.users = BTreeSet::from(["root:x:0:0:root:/root:/bin/sh".to_owned()]);
             state.groups = BTreeSet::from(["root:x:0:".to_owned()]);
             state.modules = BTreeSet::from(["ext4".to_owned()]);
+            state.links = ["pid", "mnt"]
+                .into_iter()
+                .flat_map(|kind| ["self", "1"].map(|who| (namespace_path(who, kind), shared(kind))))
+                .collect();
         }
         host
+    }
+
+    /// A process of the agent's own is in the namespace `target` from now on:
+    /// `/proc/<who>/ns/<kind>` reads as `target`.
+    pub fn move_to_namespace(&self, who: &str, kind: &str, target: &str) {
+        self.state
+            .borrow_mut()
+            .links
+            .insert(namespace_path(who, kind), target.to_owned());
+    }
+
+    /// The link at `path` cannot be read from now on.
+    pub fn remove_link(&self, path: &str) {
+        self.state.borrow_mut().links.remove(path);
+    }
+
+    /// A user line is removed from the user database.
+    pub fn remove_user(&self, line: &str) {
+        self.state.borrow_mut().users.remove(line);
+    }
+
+    /// A line is removed from the group database.
+    pub fn remove_group(&self, line: &str) {
+        self.state.borrow_mut().groups.remove(line);
+    }
+
+    /// A kernel module is unloaded.
+    pub fn unload_module(&self, name: &str) {
+        self.state.borrow_mut().modules.remove(name);
     }
 
     /// A process starts.
@@ -270,4 +311,19 @@ impl HostView for FakeHost {
             watched.ok_or_else(|| format!("{}: no such directory", dir.display()))
         })
     }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        let target = self.state.borrow().links.get(path).cloned();
+        target.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+}
+
+/// The path of the namespace link of kind `kind` of `who` (`self` or a pid).
+fn namespace_path(who: &str, kind: &str) -> String {
+    format!("/proc/{who}/ns/{kind}")
+}
+
+/// The namespace a quiet host's agent shares with `init`.
+fn shared(kind: &str) -> String {
+    format!("{kind}:[4026531836]")
 }

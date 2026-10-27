@@ -89,7 +89,21 @@ impl Lifecycle {
         let job = &mut jobs[index];
         let run_id = job.run_id.clone();
         loop {
-            match job.stage.clone() {
+            let stage = job.stage.clone();
+            // The checks are owed from before the first step of the cleanup until they have
+            // run: an agent that stops in between leaves the record, and the next start
+            // taints the host. Without the record nothing could be removed.
+            let cleaning = matches!(stage, Stage::Removing(_) | Stage::Scratch | Stage::Checks);
+            if cleaning && !job.owed {
+                match config.state.owe(&run_id) {
+                    Ok(()) => job.owed = true,
+                    Err(why) => {
+                        job.note(code::OWED_FAILED, why.to_string(), events);
+                        return;
+                    }
+                }
+            }
+            match stage {
                 Stage::Removing(id) => match runtime.remove(&id) {
                     Ok(()) => {
                         events.push(Event::ContainerRemoved {
@@ -123,22 +137,25 @@ impl Lifecycle {
                     live: &live,
                 }) {
                     // A marker that is not on disk yet (it could not be written when the
-                    // host was tainted) holds the slot, whatever the job left.
-                    Ok(()) => match taint.persist() {
-                        Ok(()) => {
-                            events.push(Event::ChecksPassed {
-                                run_id: run_id.clone(),
-                            });
-                            job.stage = Stage::Freed;
-                            events.push(Event::SlotFreed {
-                                run_id: run_id.clone(),
-                            });
-                        }
-                        Err(why) => {
+                    // host was tainted) holds the slot, whatever the job left; so does a
+                    // record of the owed checks that cannot be removed.
+                    Ok(()) => {
+                        if let Err(why) = taint.persist() {
                             job.note(code::TAINT_WRITE_FAILED, why.to_string(), events);
                             return;
                         }
-                    },
+                        if let Err(why) = config.state.settle(&run_id) {
+                            job.note(code::OWED_FAILED, why.to_string(), events);
+                            return;
+                        }
+                        events.push(Event::ChecksPassed {
+                            run_id: run_id.clone(),
+                        });
+                        job.stage = Stage::Freed;
+                        events.push(Event::SlotFreed {
+                            run_id: run_id.clone(),
+                        });
+                    }
                     Err(found) => {
                         // `detail()` is cut, whoever built the finding.
                         let message = match &found {
@@ -150,6 +167,13 @@ impl Lifecycle {
                         job.taint(taint, check_taint(&run_id, &found), events);
                         job.note(found.code(), message, events);
                         job.stage = Stage::Blocked;
+                        // The checks have run. The record that they were owed goes once
+                        // the taint is on disk; until then it stays, so that a crash
+                        // still taints the host at the next start. If it cannot be
+                        // removed it stays and taints a restart that is tainted already.
+                        if taint.persist().is_ok() {
+                            let _ = config.state.settle(&run_id);
+                        }
                         return;
                     }
                 },

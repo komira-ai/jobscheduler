@@ -155,8 +155,8 @@ fn new_user() {
     assert_eq!(found.detail(), "user-changed: root");
 }
 
-/// Asserts that a kernel module the baseline did not have is found after the job, by name.
-/// It catches a job that loads a module unseen.
+/// Asserts that a kernel module the baseline did not have is found after the job, by name,
+/// as loaded. It catches a job that loads a module unseen.
 #[test]
 fn new_kernel_module() {
     let host = FakeHost::quiet();
@@ -167,8 +167,8 @@ fn new_kernel_module() {
         said(&found),
         (
             true,
-            code::NEW_KERNEL_MODULE,
-            "new-kernel-module: evil".to_owned()
+            code::MODULE_CHANGED,
+            "kernel-module-changed: loaded evil".to_owned()
         )
     );
 }
@@ -220,6 +220,9 @@ impl HostView for Mixed {
     }
     fn watched(&self, dir: &Path) -> Result<Watched, String> {
         self.real.watched(dir)
+    }
+    fn link(&self, path: &str) -> Result<String, String> {
+        self.fake.link(path)
     }
 }
 
@@ -409,7 +412,7 @@ fn several_findings_are_one_finding_with_every_detail() {
     assert_eq!(found.code(), code::NEW_MOUNT);
     assert_eq!(
         found.detail(),
-        "new-mount: /mnt/x (ext4) from /dev/sdb1; user-changed: mallory; new-kernel-module: evil"
+        "new-mount: /mnt/x (ext4) from /dev/sdb1; user-changed: mallory; kernel-module-changed: loaded evil"
     );
 
     for n in 0..60 {

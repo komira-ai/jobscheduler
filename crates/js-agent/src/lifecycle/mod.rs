@@ -38,7 +38,10 @@
 //! - **Cleanup runs in one order**: the container, the scratch directory, the post-job
 //!   checks, and only then the slot is freed. A step that fails stops the order there and
 //!   is tried again at the next [`Lifecycle::step`]; the slot stays held and a
-//!   [`Finding`] is recorded.
+//!   [`Finding`] is recorded. A retry that succeeds does not free the slot by itself: the
+//!   order goes on, the checks run after the cleanup that failed, and the slot is freed
+//!   only if they ran clean and the marker is on disk (a job whose checks find something
+//!   stays blocked).
 //! - **A restart loses no running job.** [`Lifecycle::adopt`] finds the containers the
 //!   agent labelled, before the first heartbeat of the new process, and lists them first,
 //!   so the server never sees a gap that would make it run the work twice. A labelled
@@ -53,13 +56,35 @@
 //!
 //! - **A host that is not known to be clean is tainted** (design 5.12, see the [`taint`]
 //!   module). A check that finds something or cannot run, a container or scratch
-//!   directory that cannot be removed, and a job that was allowed to change the host
-//!   (`isolation = host`, tainted when it starts) each write the taint marker under
-//!   `--state-root` before anything is reported or freed. A tainted agent answers every
-//!   later `Start` `failed_to_start` with the code `host-tainted`, lets the jobs it runs
-//!   finish, and offers the taint for the heartbeat ([`Lifecycle::pending_taint`]) until
-//!   the server acknowledges it. A marker that cannot be written keeps the agent tainted in
-//!   memory, and it frees no slot until the marker is written.
+//!   directory that cannot be removed, a job that was allowed to change the host
+//!   (`isolation = host`, tainted when it starts, before its container exists), a labelled
+//!   container that no job can stand for and that may be a host job's (one labelled `host`,
+//!   with no isolation label or with one the agent never writes: removed, and tainted
+//!   first), and the record of a job's owed checks found when the agent starts, each write
+//!   the taint marker under `--state-root`. The marker is written before the taint is
+//!   reported: [`Lifecycle::pending_taint`] offers it for the heartbeat only once the
+//!   marker is on disk, so a taint the server was told of is a taint a restart finds, and a
+//!   taint on disk is reported at the first heartbeat of the process that finds it. (The
+//!   run's own result is not held back by it: it is reported as soon as the container has
+//!   exited, before its cleanup and checks.) A tainted agent answers every later `Start`
+//!   `failed_to_start` with the code `host-tainted`, lets the jobs it runs finish, and
+//!   offers the taint until the server acknowledges it. A marker that cannot be written
+//!   keeps the agent tainted in memory (it refuses starts and frees no slot) and the taint
+//!   is not reported until it is written; the marker is tried again at every step.
+//! - **A check owed is not lost with the agent.** Before the first step of a job's cleanup
+//!   the agent records, in the state root, that the job's checks are owed; it removes the
+//!   record once they have run (and, when they found something, once the taint is on
+//!   disk). If the agent stops in between, the record is found when the next process
+//!   starts, and the host is tainted (`check-owed`): what the job left behind may be part
+//!   of the baseline the new process took. A record that cannot be written holds the
+//!   cleanup where it is, the container included; one that cannot be removed holds the
+//!   slot.
+//! - **A `host-tainted` refusal is final for that `Start`.** The run did not start on this
+//!   host and will not; the server must not send it to this host again (see
+//!   `refusal::HOST_TAINTED`). `taint_ack` acknowledges the taint this process reported:
+//!   the server answers it only to the session that carried the taint, an
+//!   acknowledgement that arrives before the taint was reportable counts for nothing, and a
+//!   restarted process reports the taint again.
 //!
 //! # What this change does not do
 //!
@@ -82,6 +107,11 @@
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
+//! - **Cgroup emptiness is not checked.** A container is removed, and nothing reads its
+//!   control group to see that no process of the job is left in it.
+//! - **A user-namespace remapping engine is not supported.** The container user would be
+//!   another uid on the host, and the check for a job's leftover processes compares the
+//!   host's uid with `--container-user`.
 //! - **Host jobs are not available.** `--allow-host-jobs` is refused at start until the
 //!   scheduler records a host job's taint itself ([`Local::from_cli`]).
 //!   [`Config::allow_host_jobs`] is the switch the lifecycle honours once that exists; it
@@ -121,6 +151,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Hello, Taint};
 
+use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
@@ -166,6 +197,13 @@ pub mod code {
     pub const UNADOPTABLE_KEPT: &str = "unadoptable-container-kept";
     /// The taint marker could not be written. The host is tainted in memory all the same.
     pub const TAINT_WRITE_FAILED: &str = "taint-write-failed";
+    /// The record that a job's checks are owed could not be written or removed. While it
+    /// cannot be written the job's container is not removed; while it cannot be removed
+    /// the job's slot is not freed.
+    pub const OWED_FAILED: &str = "owed-record-failed";
+    /// The records of owed checks in the state root could not be listed when the agent
+    /// started, so the host is tainted ([`reason::CHECK_OWED`](super::taint::reason)).
+    pub const OWED_UNREADABLE: &str = "owed-records-unreadable";
 }
 
 /// A monotonic clock in milliseconds, from an origin of its own. The lifecycle only
@@ -361,8 +399,8 @@ pub enum Event {
         run_id: String,
     },
     /// The host is tainted from now on, and this is why (the first taint stays). It is
-    /// pushed before the marker is written and before the findings and results that follow
-    /// from the same cause; a failure to write the marker is a [`Finding`] after it.
+    /// pushed once the marker has been tried and before the findings that follow from the
+    /// same cause; a failure to write the marker is a [`Finding`] after it.
     Tainted(Taint),
     /// The slot is free again.
     SlotFreed {
@@ -503,6 +541,45 @@ impl Local {
             container,
             state,
         })
+    }
+}
+
+impl Local {
+    /// Refuses a state root on the same file system as a mount root or the scratch root. A
+    /// job with a read-write mount, or its own scratch directory, can fill that file system,
+    /// and the taint marker could then not be written.
+    ///
+    /// # Errors
+    ///
+    /// The text names the flags at fault; a path that cannot be looked at is an error too.
+    pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
+        let Some(state) = &self.state else {
+            return Ok(());
+        };
+        let device = |path: &Path| {
+            files
+                .device(path)
+                .map_err(|why| format!("--state-root: cannot compare file systems: {why}"))
+        };
+        let own = device(state.path())?;
+        let roots = self
+            .mounts
+            .paths()
+            .map(|path| ("the --mount-root", path))
+            .chain(
+                self.scratch
+                    .iter()
+                    .map(|root| ("the --scratch-root", root.path())),
+            );
+        for (flag, root) in roots {
+            if device(root)? == own {
+                return Err(format!(
+                    "--state-root: on the same file system as {flag} {}: a job could fill it and the taint marker could not be written",
+                    root.display()
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

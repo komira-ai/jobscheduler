@@ -5,6 +5,7 @@
 mod checks;
 mod lifecycle;
 mod proc;
+mod rules;
 
 use std::path::PathBuf;
 

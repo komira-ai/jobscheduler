@@ -23,14 +23,14 @@
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
-//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required with `--container-bin`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root |
-//! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host |
+//! | `--state-root <path>` | the directory the taint marker is kept in; owned by the agent's user, no permission for group or others; required with `--container-bin`. A host that a post-job check found unclean is tainted for good: the marker survives a restart and no code of the agent removes it. It may not be, or lie in, a mount root or the scratch root, and it must be on another file system than every mount root and the scratch root (a job could fill the disk and the marker could not be written). The taint belongs to this directory, not to the machine: a second agent, another state root or a state root that is lost at a reboot (`tmpfs`) does not know of it |
+//! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
-//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits) |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); `userns-remap` is not supported either (the container user shows as another uid on the host); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; any named network gives a job egress to whatever it reaches, the host's metadata endpoint included, and the agent warns at start; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the user containers run as, both above zero; by default `65534:65534`; an agent that runs as root gives each run's scratch directory to this user, any other agent refuses to start unless this is its own `uid:gid`; needs `--container-bin` |
-//! | `--container-host <uri>` | the engine to talk to (`unix:///<path>`, `tcp://<address>`, `ssh://<address>`), passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; an `ssh://` host is accepted but not supported (the engine gets no `SSH_AUTH_SOCK` and no `HOME`); needs `--container-bin` |
+//! | `--container-host <uri>` | the engine to talk to: a socket on this machine, `unix:///<path>`, passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; `tcp://` and `ssh://` are refused (the post-job checks read this machine, and a job on another one would pass them all); needs `--container-bin` |
 //! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
 //!
@@ -144,6 +144,19 @@ pub mod exit {
     pub const USAGE: u8 = 2;
 }
 
+/// The directories worth a `--watch-dir` on a Linux host (each is listed one level deep):
+/// where a job that reached the host could leave a way back.
+pub const SUGGESTED_WATCH_DIRS: [&str; 8] = [
+    "/etc",
+    "/etc/cron.d",
+    "/etc/sudoers.d",
+    "/etc/systemd/system",
+    "/etc/ld.so.conf.d",
+    "/root/.ssh",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+];
+
 /// Everything the agent touches outside its own memory.
 pub struct Services<'a> {
     /// The platform whose probes to run.
@@ -238,6 +251,9 @@ fn execute(
     // The job flags are checked now so a wrong one stops the agent before it registers.
     // The change that runs jobs builds the lifecycle from them.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    local
+        .check_filesystems(services.files)
+        .map_err(Failure::Usage)?;
     // The post-job checks read /proc, which a Mac does not have: a container job there
     // would run unchecked, so none is accepted (see `integrity`).
     if platform.is_macos() && local.container.is_some() {
@@ -246,6 +262,12 @@ fn execute(
              which a Mac does not have"
                 .to_owned(),
         ));
+    }
+    // The agent must see what its jobs do: a container job runs where the agent's own
+    // `/proc` and mounts show it.
+    if local.container.is_some() {
+        integrity::require_host_namespaces(&|path| services.files.link(path))
+            .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
     }
     let taint = local.state.iter().filter_map(StateRoot::read);
     taint.for_each(|taint| {
@@ -259,6 +281,15 @@ fn execute(
     container.flat_map(Settings::warnings).for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
+    if local.container.is_some() && local.watch.is_empty() {
+        let _ = writeln!(
+            err,
+            "js-agent: warning: no --watch-dir given: after a job only the processes, mounts, \
+             kernel modules, /etc/passwd and /etc/group are checked, so a cron entry, a unit, a \
+             key or a sudoers line a job leaves behind is not seen; suggested: {}",
+            SUGGESTED_WATCH_DIRS.join(", ")
+        );
+    }
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

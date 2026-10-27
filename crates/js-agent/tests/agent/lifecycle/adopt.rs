@@ -17,6 +17,7 @@ fn labels<'a>(run: &'a str, gpus: &'a str) -> Vec<(&'static str, &'a str)> {
         (label::MEMORY_BYTES, "1073741824"),
         (label::GPUS, gpus),
         (label::WALL_MS, "60000"),
+        (label::ISOLATION, "contained"),
     ]
 }
 

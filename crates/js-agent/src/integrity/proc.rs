@@ -239,6 +239,10 @@ impl HostView for ProcHost {
                 false => Watched::Digest(digest(listing.entries)),
             })
     }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        self.files.link(path)
+    }
 }
 
 /// The process `pid` from the text of its `stat`, `status` and `cgroup` files. The name in

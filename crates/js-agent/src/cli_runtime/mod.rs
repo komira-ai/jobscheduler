@@ -42,13 +42,17 @@
 //! the agent's own `PATH`) reaches the engine, and the host is a flag, not a variable.
 //! Without `--container-host` the engine uses its own default (the system socket).
 //!
-//! **Not supported:** rootless engines and `ssh://` hosts. A rootless Podman needs
-//! `XDG_RUNTIME_DIR`, `HOME` and the D-Bus session of its user, none of which it is
-//! given, and may then run a container without its limits; an `ssh://` engine host needs
-//! `SSH_AUTH_SOCK` (or the keys under `HOME`) to log in, and gets neither. They are not
-//! passed through: a rootless engine or an `ssh://` host is configured at the
-//! operator's own risk, and a rootful engine on a socket or `tcp://` address is the
-//! supported setup.
+//! **Not supported:** rootless engines, engines with user-namespace remapping, and an
+//! engine on another machine. A rootless Podman needs `XDG_RUNTIME_DIR`, `HOME` and the
+//! D-Bus session of its user, none of which it is given, and may then run a container
+//! without its limits; they are not passed through, so a rootless engine is configured at
+//! the operator's own risk. With `userns-remap` the container's user is another uid on the
+//! host, so the post-job check for a job's leftover processes (which compares the host uid
+//! with `--container-user`) would miss them. `--container-host` accepts only a socket on
+//! this machine (`unix:///<path>`): the post-job checks read this machine's `/proc`,
+//! mounts and users, and a job on a machine reached through `tcp://` or `ssh://` would
+//! pass them all, so those are refused when the agent starts. The supported setup is a
+//! rootful engine on a local socket.
 //!
 //! # Names, and a create that may have worked
 //!

@@ -22,7 +22,7 @@
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs: what a child that outlived its parent looks like | residue |
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
-//! | `new-kernel-module` | a module in `/proc/modules` that was not there at the baseline | residue |
+//! | `kernel-module-changed` | a module in `/proc/modules` that was not there at the baseline, or one that was and is gone (an unload is a finding too: a job holds no capability to change modules, and a host where an operator unloads modules while jobs run cannot be called clean) | residue |
 //! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
 //! | `processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable` | an input could not be read or understood | unchecked |
 //! | `watch-over-bound` | a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested | unchecked |
@@ -34,24 +34,52 @@
 //! The container cleanup failures of design 5.12 (a container or scratch directory that
 //! could not be removed) are the lifecycle's own, and taint the host there.
 //!
+//! # What the agent must be able to see
+//!
+//! The checks read this machine's `/proc`, mounts and users, so they say something about a
+//! job only when the job runs here and the agent sees what it does.
+//! [`Integrity::start`] therefore refuses a host on which the agent is not in the pid and
+//! mount namespaces of `init` (compared through `/proc/self/ns` and `/proc/1/ns`; see
+//! [`require_host_namespaces`]), which is what an agent in a container, or under a service
+//! manager's `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`, looks like; and an agent
+//! that cannot read those links (they need root, or `CAP_SYS_PTRACE`) does not start
+//! either. `--container-host` takes only a socket on this machine, for the same reason. An
+//! engine with user-namespace remapping (`userns-remap`) is not supported: the container
+//! user shows as another uid on the host, and `process-as-job-user` would miss it.
+//!
 //! # What is not checked
 //!
 //! - **A process of another user** that started during the job, unless its parent is
 //!   `init`: a host where operators log in and services restart while jobs run has such
-//!   processes, and the agent does not call every one of them the job's.
-//! - **Files outside the watched directories**, and the contents of any file. A watched
-//!   directory is listed one level deep, and a file is judged by its metadata: a rewrite
-//!   of a file in the directory with its modification time put back is still seen, because
-//!   the status change time (which a job cannot set) moves. In a subdirectory only a name
-//!   added, removed or renamed moves the subdirectory's own modification time; a write to
-//!   a file that already exists in it changes nothing the listing reads, and is not seen.
-//! - **A job that the agent did not see end.** The baseline is taken when the agent
-//!   starts, and nothing records that a check is owed. If the agent stops after a job's
-//!   container is removed and before the check has run, or while an adopted job's
-//!   processes are on the host, what the job left behind is part of the next baseline and
-//!   is never a finding.
+//!   processes, and the agent does not call every one of them the job's. A kernel thread
+//!   (its parent is `kthreadd`, pid 2) is not a daemonised child.
+//! - **Files outside the watched directories**, and the contents of any file. With no
+//!   `--watch-dir` that is every file but `/etc/passwd` and `/etc/group` (no cron, systemd
+//!   units, `authorized_keys`, sudoers, shadow or `ld.so.preload`), and the agent warns at
+//!   start; the directories to watch are listed in [`crate::SUGGESTED_WATCH_DIRS`]. A
+//!   watched directory is listed one level deep, and a file is judged by its metadata: a
+//!   rewrite of a file in the directory with its modification time put back is still seen,
+//!   because the status change time (which a job cannot set) moves. In a subdirectory only
+//!   a name added, removed or renamed moves the subdirectory's own modification time; a
+//!   write to a file that already exists in it changes nothing the listing reads, and is
+//!   not seen (watch the subdirectory itself).
+//! - **What a job leaves in a read-write mount root.** The mount roots and the scratch root
+//!   change with every job and are excluded from the checks, and the content of a mount
+//!   root is never examined: a binary left there, a poisoned cache or a changed script passes
+//!   to the next job that mounts the same root.
+//! - **The emptiness of a container's control group.** The container is removed, but the
+//!   control group of its processes is not read to see that nothing is left in it; a
+//!   process that left the group is seen only by the process checks above.
+//! - **A job that the agent did not see end, partly.** The baseline is taken when the
+//!   agent starts. From before the first step of a job's cleanup until its checks have run
+//!   the state root holds a record that the checks are owed (see
+//!   [`StateRoot::owe`](crate::lifecycle::StateRoot::owe)); an agent that starts and finds
+//!   one taints the host, because what the job left behind may already be part of the new
+//!   baseline. A job whose container was still running when the agent stopped is adopted
+//!   and checked when it ends, but what it did before the stop is part of the baseline the
+//!   new process took.
 //! - **A mount's options**, remounts, and mounts that disappeared: only a new mount is a
-//!   finding. The same holds for modules.
+//!   finding, and two identical mounts count as one. Modules compare by name only.
 //! - **What a job does inside its container** (a container can fill its own file system),
 //!   and anything a process does without leaving the process table, the mounts, the
 //!   databases, the modules or a watched directory behind. This is a post-job check, not an
@@ -105,8 +133,8 @@ pub mod code {
     pub const USER_CHANGED: &str = "user-changed";
     /// The group database changed.
     pub const GROUP_CHANGED: &str = "group-changed";
-    /// A kernel module that was not loaded before.
-    pub const NEW_KERNEL_MODULE: &str = "new-kernel-module";
+    /// A kernel module was loaded or unloaded.
+    pub const MODULE_CHANGED: &str = "kernel-module-changed";
     /// A watched directory changed.
     pub const WATCH_DIR_CHANGED: &str = "watch-dir-changed";
     /// The process table could not be read.
@@ -149,6 +177,35 @@ impl Problem {
             unrun: true,
         }
     }
+}
+
+/// Checks that the agent sees the host's processes and mounts: it must be in the pid and
+/// mount namespaces of `init`. `link` reads a symbolic link (the namespace links of `/proc`).
+/// An agent in a namespace of its own (in a container, or under a service manager's
+/// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`) cannot see its jobs' processes or the
+/// overlay mounts of their containers, and every check would pass. Reading `/proc/1/ns`
+/// takes the privilege to trace `init` (root, or `CAP_SYS_PTRACE`): an agent without it
+/// cannot tell and does not start.
+///
+/// # Errors
+///
+/// The text says which namespace differs, or which link could not be read.
+pub fn require_host_namespaces(
+    link: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    for kind in ["pid", "mnt"] {
+        let read = |who: &str| {
+            link(&format!("/proc/{who}/ns/{kind}"))
+                .map_err(|why| format!("cannot tell whether the agent sees the host: {why}"))
+        };
+        let (own, init) = (read("self")?, read("1")?);
+        if own != init {
+            return Err(format!(
+                "the agent is in a {kind} namespace of its own ({own}; init is in {init}): it cannot see the processes and mounts of its jobs"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The host at one moment.
@@ -202,6 +259,7 @@ impl Integrity {
     /// The host cannot be read whole, so there is nothing to compare with later: the text
     /// says which input failed.
     pub fn start(view: Box<dyn HostView>, uid: u32, watch: Vec<PathBuf>) -> Result<Self, String> {
+        require_host_namespaces(&|path| view.link(path))?;
         let mut this = Self {
             view,
             uid,
@@ -310,11 +368,16 @@ impl Integrity {
                 changed(&self.baseline.groups, &now.groups),
             ),
             group(
-                code::NEW_KERNEL_MODULE,
+                code::MODULE_CHANGED,
                 now.modules
                     .difference(&self.baseline.modules)
-                    .cloned()
-                    .collect::<Vec<_>>(),
+                    .map(|name| format!("loaded {name}"))
+                    .chain(
+                        self.baseline
+                            .modules
+                            .difference(&now.modules)
+                            .map(|name| format!("unloaded {name}")),
+                    ),
             ),
             group(
                 code::WATCH_DIR_CHANGED,

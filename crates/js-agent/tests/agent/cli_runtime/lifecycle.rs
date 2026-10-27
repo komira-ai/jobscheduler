@@ -262,6 +262,7 @@ fn an_orphan_that_cannot_be_removed_is_booked_and_retried() {
         (label::MEMORY_BYTES, "1073741824"),
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
+        (label::ISOLATION, "contained"),
         (label::CREATED_MS, "1000000"),
     ]);
     w.docker.fail("rm", 1000);
