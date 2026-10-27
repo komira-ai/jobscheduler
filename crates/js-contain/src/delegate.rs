@@ -12,7 +12,7 @@
 //!    daemon, and anything its unit started beside it), listing again if a process
 //!    appeared meanwhile;
 //! 3. enables `+cpu +memory +pids` for its children;
-//! 4. writes `supervisor/memory.min` (`--supervisor-memory-min-mib`): memory the
+//! 4. writes `supervisor/memory.min` (the supervisor memory floor): memory the
 //!    kernel does not reclaim from the daemon while it uses no more than that, so a
 //!    node short of memory takes it from the builds and not from the process that
 //!    reports them. The kernel caps a cgroup's protection at its ancestors', so the
@@ -20,20 +20,20 @@
 //!    the nearest ancestor (below the root) whose `memory.min` is lower;
 //! 5. makes `actions/`, under which every lease cgroup is made, and enables the same
 //!    three in it;
-//! 6. writes `actions/memory.max` when given one (`--actions-memory-max-gib`): the most
+//! 6. writes `actions/memory.max` when given one (the actions memory limit): the most
 //!    memory all leases together may use, so the rest of the node stays for what else
 //!    runs on it.
 //!
 //! [`limit_cpus`] then writes `actions/cpu.max`: the leases' CPUs, which is the CPUs the
-//! daemon may use minus `--reserve-cpus`. It is a bandwidth limit on all leases together,
+//! daemon may use minus the reserved CPUs. It is a bandwidth limit on all leases together,
 //! not pinning; the daemon and the server keep the rest.
 //!
 //! A daemon whose own cgroup is already a `supervisor` leaf (a second start in the same
 //! unit, without the unit restarting) works on its parent; the steps find their work
 //! done. [`adopt`] is the other way in: an `actions/` cgroup someone else set up
-//! (`--cgroup-parent`), checked and not changed but for `memory.max` when given.
+//! (a cgroup parent the caller names), checked and not changed but for `memory.max` when given.
 //!
-//! [`enable_cpuset`] is for `--lease-placement=numa-node` alone: it enables `+cpuset` in
+//! [`enable_cpuset`] is for the `numa-node` lease placement alone: it enables `+cpuset` in
 //! `actions/` and its parent, where the three above do not.
 //!
 //! [`capacity`] reads what `actions/` may use: the lowest `memory.max` on the path
@@ -85,7 +85,7 @@ pub const PROC_SELF_CGROUP: &str = "/proc/self/cgroup";
 pub struct Delegation {
     /// The daemon's delegated cgroup (its unit's).
     pub root: String,
-    /// `<root>/actions`: what `--cgroup-parent` names when given.
+    /// `<root>/actions`: what the caller's cgroup parent names when given.
     pub actions: String,
     /// The nearest cgroup from `root` up (the root cgroup excluded) whose
     /// `memory.min` is below the one written on `supervisor/`, with its value: the
@@ -233,7 +233,7 @@ pub fn delegate(
     )
 }
 
-/// Checks the `actions` cgroup someone else set up (`--cgroup-parent`): cgroup v2 at
+/// Checks the `actions` cgroup someone else set up (a cgroup parent the caller names): cgroup v2 at
 /// `mount`, `cpu`, `memory` and `pids` enabled for its children, and a cgroup this
 /// process may make lease cgroups in. Writes its `memory.max` when given one.
 ///
@@ -257,7 +257,7 @@ pub fn capacity(mount: &Path, actions: &str) -> Result<Capacity, DelegateError> 
 }
 
 /// Limits the leases under `actions` to `cpus` CPUs together (`actions/cpu.max`), the
-/// leases' share of the node after `--reserve-cpus`. A bandwidth limit, not pinning: the
+/// leases' share of the node after the reserved CPUs. A bandwidth limit, not pinning: the
 /// leases run on any CPU, and all of them together are throttled to `cpus` CPUs of time.
 ///
 /// # Errors
@@ -276,7 +276,7 @@ pub fn limit_cpus_in(fs: &dyn CgroupFs, actions: &str, cpus: u64) -> Result<(), 
         .map_err(io_err(fs, "write", actions, "cpu.max"))
 }
 
-/// Enables `cpuset` for the leases under `actions` (`--lease-placement=numa-node`): in
+/// Enables `cpuset` for the leases under `actions` (the `numa-node` lease placement): in
 /// its parent's `cgroup.subtree_control`, so `actions/` has the cpuset files, and in
 /// `actions/`'s own, so each lease cgroup has them. Returns the CPUs `actions/` may use
 /// (`cpuset.cpus.effective`), `None` where the kernel shows none.
@@ -308,7 +308,7 @@ pub fn enable_cpuset_in(fs: &dyn CgroupFs, actions: &str) -> Result<Option<CpuSe
             what: "does not offer",
             missing: vec!["cpuset"],
             listed: offered.trim().to_owned(),
-            fix: "--lease-placement=numa-node needs it: the daemon's unit needs Delegate=yes \
+            fix: "the numa-node lease placement needs it: the daemon's unit needs Delegate=yes \
                   (or Delegate=cpu cpuset memory pids), and a user manager needs a drop-in \
                   that delegates cpuset"
                 .to_owned(),
@@ -478,7 +478,7 @@ pub fn adopt_in(
     require(actions, &enabled, "does not enable", || {
         format!(
             "enable them for its children (echo '+cpu +memory +pids' > {}), or leave \
-             --cgroup-parent out and the daemon sets up its own",
+             the cgroup parent out and the daemon sets up its own",
             file.display()
         )
     })?;

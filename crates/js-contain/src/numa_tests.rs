@@ -1,4 +1,4 @@
-//! Topology parsing, placement and the start-up fallbacks of `--lease-placement`.
+//! Topology parsing, placement and the start-up fallbacks of the lease placement setting.
 
 use std::path::Path;
 
@@ -301,7 +301,7 @@ fn cgroups(
     effective: Option<&str>,
 ) -> (crate::test_dir::TestDir, &'static str) {
     let root = scratch(&format!("{name}-cgroups"));
-    let unit = root.join("kbf.slice/kbf.service");
+    let unit = root.join("agent.slice/agent.service");
     put(&unit.join("cgroup.controllers"), offered);
     put(&unit.join("cgroup.subtree_control"), "cpu memory pids\n");
     put(
@@ -311,7 +311,7 @@ fn cgroups(
     if let Some(list) = effective {
         put(&unit.join("actions/cpuset.cpus.effective"), list);
     }
-    (root, "/kbf.slice/kbf.service/actions")
+    (root, "/agent.slice/agent.service/actions")
 }
 
 fn read(root: &Path, cgroup: &str, file: &str) -> Option<String> {
@@ -329,7 +329,7 @@ fn a_dual_node_host_is_placed_over_the_cpus_the_daemon_may_use() {
         .expect("started")
         .expect("placed");
     assert_eq!(placer.place(1000).cpus().to_string(), NODE0);
-    let unit = "/kbf.slice/kbf.service";
+    let unit = "/agent.slice/agent.service";
     assert_eq!(
         read(&root, unit, "cgroup.subtree_control").as_deref(),
         Some("+cpuset")
@@ -371,13 +371,13 @@ fn a_host_without_two_nodes_falls_back_to_no_placement() {
         ("memory-only", vec![(0, "0-87"), (1, "")]),
     ] {
         let dir = sysfs(name, &nodes);
-        let placer = start(&dir, &no_cgroups, "/kbf/actions", None).expect("started");
+        let placer = start(&dir, &no_cgroups, "/agent/actions", None).expect("started");
         assert!(placer.is_none(), "{name}");
     }
     let empty = scratch("absent");
     let absent = empty.join("no-such-dir");
     assert!(
-        start(&absent, &no_cgroups, "/kbf/actions", None)
+        start(&absent, &no_cgroups, "/agent/actions", None)
             .expect("started")
             .is_none()
     );
@@ -406,7 +406,7 @@ fn a_dual_node_host_that_cannot_enable_cpuset_fails_the_start() {
     );
 }
 
-/// `--lease-placement` values.
+/// lease placement values.
 #[test]
 fn the_placement_flag_values_parse() {
     assert_eq!("none".parse::<LeasePlacement>(), Ok(LeasePlacement::None));

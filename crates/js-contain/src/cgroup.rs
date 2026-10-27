@@ -15,7 +15,7 @@
 //! watches each lease ([`SwapKill`]) and kills one that is pressing its own cap into
 //! swap and has itself pushed more than a threshold there at its cap (swap that host
 //! pressure put there does not count). The node's backstop is `memory.max` on
-//! `actions/`, which the daemon writes from `--actions-memory-max-gib` (or the
+//! `actions/`, which the daemon writes from the actions memory limit (or the
 //! operator sets). CPU is compressible: `cpu.weight` from the booked CPU, never
 //! `cpu.max`.
 
@@ -236,7 +236,7 @@ impl LeaseCgroup {
     /// Creates the cgroup and sets its limits. A cgroup left half-made is removed by
     /// [`LeaseCgroup::remove`] like a whole one.
     ///
-    /// With a `pin` (`--lease-placement=numa-node`) the lease also gets `cpuset.cpus` and
+    /// With a `pin` (the `numa-node` lease placement) the lease also gets `cpuset.cpus` and
     /// `cpuset.mems`, and hands `cpuset` to the container's cgroup, which inherits both.
     pub fn create(&self, resources: &Resources, pin: Option<&Pin>) -> io::Result<()> {
         std::fs::create_dir(&self.dir)?;
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn create_writes_the_cap_and_the_oom_group_and_no_swap_limit() {
         let root = scratch("create");
-        let lease = LeaseCgroup::at(&root, "/actions", "kbf-lease-1-1");
+        let lease = LeaseCgroup::at(&root, "/actions", "lease-1-1");
         std::fs::create_dir(root.join("actions")).expect("mkdir");
         lease.create(&booked(2000, 1 << 30), None).expect("created");
         let read = |f: &str| std::fs::read_to_string(lease.dir().join(f)).ok();
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(read("memory.swap.max"), None);
         assert_eq!(read("memory.high"), None);
 
-        let unbooked = LeaseCgroup::at(&root, "/actions", "kbf-lease-1-2");
+        let unbooked = LeaseCgroup::at(&root, "/actions", "lease-1-2");
         unbooked
             .create(&Resources::default(), None)
             .expect("created");
@@ -667,7 +667,7 @@ mod tests {
         let second = placer.place(1000);
         let read = |lease: &LeaseCgroup, f: &str| std::fs::read_to_string(lease.dir().join(f)).ok();
 
-        let one = LeaseCgroup::at(&root, "/actions", "kbf-lease-1-1");
+        let one = LeaseCgroup::at(&root, "/actions", "lease-1-1");
         one.create(&booked(1000, 1 << 30), Some(&first))
             .expect("created");
         assert_eq!(read(&one, "cpuset.cpus").as_deref(), Some("0-1,4"));
@@ -678,13 +678,13 @@ mod tests {
         );
         assert_eq!(read(&one, "cpu.weight").as_deref(), Some("100"));
 
-        let two = LeaseCgroup::at(&root, "/actions", "kbf-lease-1-2");
+        let two = LeaseCgroup::at(&root, "/actions", "lease-1-2");
         two.create(&booked(1000, 1 << 30), Some(&second))
             .expect("created");
         assert_eq!(read(&two, "cpuset.cpus").as_deref(), Some("2-3,5"));
         assert_eq!(read(&two, "cpuset.mems").as_deref(), Some("1"));
 
-        let none = LeaseCgroup::at(&root, "/actions", "kbf-lease-1-3");
+        let none = LeaseCgroup::at(&root, "/actions", "lease-1-3");
         none.create(&booked(1000, 1 << 30), None).expect("created");
         assert_eq!(read(&none, "cpuset.cpus"), None);
         assert_eq!(read(&none, "cpuset.mems"), None);
@@ -766,7 +766,7 @@ mod tests {
         })
     }
 
-    /// Catches the false positive seen on the real-crun arm job (a lease killed as out of memory
+    /// Catches the false positive seen on the container-runtime test job (a lease killed as out of memory
     /// for swap the host put there): the absolute-swap rule. Host reclaim moved
     /// 143265792 bytes of the lease to swap below its cap (`max` 0), a few pages were
     /// read back (143233024), then the lease pressed its cap (`max` 156 to 7205) and
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn a_pressure_sample_reads_its_three_files_or_fails() {
         let root = scratch("pressure");
-        let lease = LeaseCgroup::at(&root, "/", "kbf-lease-1-1");
+        let lease = LeaseCgroup::at(&root, "/", "lease-1-1");
         std::fs::create_dir(lease.dir()).expect("mkdir");
         let put = |f: &str, v: &str| std::fs::write(lease.dir().join(f), v).expect("write");
         put("memory.events", "max 3\noom 0\noom_kill 0\n");

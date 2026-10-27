@@ -292,10 +292,10 @@ impl CgroupFs for Fake {
     }
 }
 
-const UNIT: &str = "/system.slice/kbf-daemon.service";
-const ACTIONS_CG: &str = "/system.slice/kbf-daemon.service/actions";
-const SUPERVISOR_CG: &str = "/system.slice/kbf-daemon.service/supervisor";
-const SELF: &str = "0::/system.slice/kbf-daemon.service\n";
+const UNIT: &str = "/system.slice/node-agent.service";
+const ACTIONS_CG: &str = "/system.slice/node-agent.service/actions";
+const SUPERVISOR_CG: &str = "/system.slice/node-agent.service/supervisor";
+const SELF: &str = "0::/system.slice/node-agent.service\n";
 /// The `memory.min` the tests ask for on `supervisor/`: 256 MiB.
 const MIN: u64 = 256 << 20;
 
@@ -303,8 +303,8 @@ const MIN: u64 = 256 << 20;
 /// processes left the delegated cgroup is EBUSY on a real host; enabling them in
 /// `actions/` before its parent offers them is ENOENT), a process left behind in the
 /// delegated cgroup, `actions/` without `memory` (no lease cgroup could set
-/// `memory.max`), `--supervisor-memory-min-mib` not reaching `supervisor/memory.min`
-/// (builds could then reclaim the daemon's memory), and `--actions-memory-max-gib`
+/// `memory.max`), the supervisor memory floor not reaching `supervisor/memory.min`
+/// (builds could then reclaim the daemon's memory), and the actions memory limit
 /// not reaching `actions/memory.max`. The unit's own `memory.min` is the kernel's 0, so
 /// it caps the leaf's protection and is named.
 #[test]
@@ -448,7 +448,7 @@ fn processes_that_come_and_go_during_the_move_are_handled() {
 /// None of them may have changed anything.
 #[test]
 fn hosts_and_units_that_cannot_delegate_are_refused_with_the_fix() {
-    let v1 = "12:memory:/system.slice/kbf-daemon.service\n1:name=systemd:/system.slice\n";
+    let v1 = "12:memory:/system.slice/node-agent.service\n1:name=systemd:/system.slice\n";
     let refused = |fake: &Fake, text: &str| {
         let err = delegate_in(fake, text, MIN, Some(1 << 30))
             .expect_err("refused")
@@ -580,7 +580,7 @@ fn a_move_or_enable_that_fails_stops_the_start() {
     assert!(pauses.iter().all(|p| *p <= MOVE_PAUSE_MAX));
 }
 
-/// Catches `--cgroup-parent` taken without a check (every lease would fail making its
+/// Catches a given cgroup parent taken without a check (every lease would fail making its
 /// cgroup): one that does not enable `memory` for its children, or that this process
 /// may not write, is refused with the fix; a good one gets its `memory.max` and
 /// nothing else.
@@ -602,7 +602,7 @@ fn an_actions_cgroup_given_on_the_command_line_is_checked() {
         err.contains(&format!("cgroup {ACTIONS_CG} does not enable memory")),
         "{err}"
     );
-    assert!(err.contains("leave --cgroup-parent out"), "{err}");
+    assert!(err.contains("leave the cgroup parent out"), "{err}");
 
     fake.write(UNIT, "cgroup.subtree_control", "+memory")
         .expect("enable");
@@ -703,7 +703,7 @@ fn cpu_lists_are_counted() {
     assert_eq!(count_cpus("a"), None);
 }
 
-/// Catches `--reserve-cpus` not reaching the kernel: `actions/cpu.max` is the leases'
+/// Catches the reserved CPUs not reaching the kernel: `actions/cpu.max` is the leases'
 /// CPUs in the kernel's `<quota> <period>` form (72 CPUs is 7200000 of 100000, a quota
 /// of CPUs and not of microseconds), written to `actions/` and nowhere else, never a
 /// quota of 0 (a cgroup that never runs), and a failed write names the file.
@@ -783,7 +783,7 @@ fn a_cpu_max_is_counted_in_cpus() {
     assert!(quota_cpus("x 100000").is_err());
 }
 
-/// Catches `--lease-placement=numa-node` enabling `cpuset` in the wrong order or place
+/// Catches the `numa-node` lease placement enabling `cpuset` in the wrong order or place
 /// (in `actions/` before its parent is ENOENT on a real host; in the parent alone leaves
 /// the lease cgroups without cpuset files), writing what is already enabled, and
 /// reporting the CPUs `actions/` may use (what the placer restricts the nodes to).
@@ -844,7 +844,7 @@ fn an_empty_or_unreadable_effective_cpuset_is_told_apart() {
     );
 }
 
-/// Catches an `actions` cgroup made directly under the root (`--cgroup-parent=/actions`)
+/// Catches an `actions` cgroup made directly under the root (a cgroup parent of `/actions`)
 /// failing on its parent: the root is the parent, already enabling `cpuset`.
 #[test]
 fn an_actions_cgroup_under_the_root_has_the_root_as_its_parent() {

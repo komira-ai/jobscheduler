@@ -268,7 +268,7 @@ mod tests {
     use super::*;
 
     /// With a line too short to name a uid, which no lookup may stop at.
-    const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n+short:x\nkbf:x:990:990::/var/lib/kbf:/usr/sbin/nologin\n";
+    const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n+short:x\nagent:x:990:990::/var/lib/agent:/usr/sbin/nologin\n";
 
     /// One test's files, beside the test binary.
     fn files(name: &str, subuid: Option<&str>, subgid: Option<&str>) -> IdFiles {
@@ -276,7 +276,7 @@ mod tests {
         let dir = exe
             .parent()
             .expect("deps directory")
-            .join("kbf-driver-container-unit")
+            .join("container-driver-unit")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch");
@@ -299,11 +299,11 @@ mod tests {
     #[test]
     fn a_full_range_by_name_or_number_passes() {
         for (name, text) in [
-            ("by-name", "kbf:100000:65536\n"),
+            ("by-name", "agent:100000:65536\n"),
             ("by-number", "990:100000:65536\n"),
             (
                 "in-halves",
-                "other:1:5\nkbf:100000:32768\n990:200000:32768\n",
+                "other:1:5\nagent:100000:32768\n990:200000:32768\n",
             ),
         ] {
             let files = files(name, Some(text), Some(text));
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn a_user_with_no_range_is_refused_by_file_and_name() {
         let other = "other:100000:65536\n";
-        let full = "kbf:100000:65536\n";
+        let full = "agent:100000:65536\n";
         for (name, subuid, subgid, missing) in [
             ("no-subuid", Some(other), Some(full), "subuid"),
             ("no-subgid", Some(full), None, "subgid"),
@@ -334,12 +334,12 @@ mod tests {
                 text.starts_with(&format!("{} has no range", file.display())),
                 "{text}"
             );
-            assert!(text.contains("kbf (uid 990)"), "{text}");
+            assert!(text.contains("agent (uid 990)"), "{text}");
             assert!(text.contains("map only to subordinate ids"), "{text}");
             assert!(text.contains("usermod --add-subuids"), "{text}");
         }
         let files = files("unknown-user", Some(full), Some(full));
-        let error = check_subordinate_ids(&files, 4242).expect_err("not kbf");
+        let error = check_subordinate_ids(&files, 4242).expect_err("not agent");
         assert!(error.to_string().contains(" uid 4242:"), "{error}");
     }
 
@@ -349,10 +349,10 @@ mod tests {
     #[test]
     fn a_range_counts_its_distinct_ids_once() {
         for (name, text, count) in [
-            ("twice", "kbf:100000:32768\n990:100000:32768\n", 32768),
+            ("twice", "agent:100000:32768\n990:100000:32768\n", 32768),
             (
                 "overlapping",
-                "kbf:100000:40000\n990:120000:40000\nkbf:130000:5\n",
+                "agent:100000:40000\n990:120000:40000\nagent:130000:5\n",
                 60000,
             ),
         ] {
@@ -362,12 +362,12 @@ mod tests {
             let says = format!("(uid 990) {count} subordinate ids;");
             assert!(error.to_string().contains(&says), "{name}: {error}");
         }
-        let huge = format!("kbf:1:{max}\n990:0:2\n", max = u64::MAX);
+        let huge = format!("agent:1:{max}\n990:0:2\n", max = u64::MAX);
         let files = files("huge", Some(&huge), Some(&huge));
         check_subordinate_ids(&files, 990).expect("saturates");
     }
 
-    /// Catches `--id-files` reading names other than the system files' in its directory.
+    /// Catches a custom id-file directory reading names other than the system files' in its directory.
     #[test]
     fn a_directory_holds_the_three_files() {
         assert_eq!(
@@ -384,7 +384,7 @@ mod tests {
     /// lines counting towards a range.
     #[test]
     fn a_short_or_malformed_range_is_refused() {
-        let short = "kbf:100000:65535\nkbf:x:9\nkbf:1:2:3\nkbf:1:many\nkbf\n";
+        let short = "agent:100000:65535\nagent:x:9\nagent:1:2:3\nagent:1:many\nagent\n";
         let files = files("short", Some(short), Some(short));
         let error = check_subordinate_ids(&files, 990).expect_err("short");
         assert!(
@@ -437,12 +437,12 @@ mod tests {
     /// the wrong shape, too short or past the 32-bit ids are skipped, by name or number.
     #[test]
     fn the_first_range_of_enough_ids_is_chosen() {
-        let text = "other:100000:65536\nbad line\nkbf:x:65536\nkbf:300000:100\n\
-                    kbf:4294967295:65536\n990:400000:70000\nkbf:500000:65536\n";
-        assert_eq!(first_big_range(text, Some("kbf"), 990), Some(400_000));
-        assert_eq!(first_big_range("", Some("kbf"), 990), None);
-        assert_eq!(first_big_range("kbf:1:65535\n", None, 990), None);
-        assert_eq!(first_big_range("kbf:1:65536\n", None, 990), None);
+        let text = "other:100000:65536\nbad line\nagent:x:65536\nagent:300000:100\n\
+                    agent:4294967295:65536\n990:400000:70000\nagent:500000:65536\n";
+        assert_eq!(first_big_range(text, Some("agent"), 990), Some(400_000));
+        assert_eq!(first_big_range("", Some("agent"), 990), None);
+        assert_eq!(first_big_range("agent:1:65535\n", None, 990), None);
+        assert_eq!(first_big_range("agent:1:65536\n", None, 990), None);
         assert_eq!(first_big_range("990:7:65536\n", None, 990), Some(7));
     }
 
@@ -450,8 +450,8 @@ mod tests {
     /// wrong range, and ranges that are enough only together being taken as one.
     #[test]
     fn a_users_ids_are_the_first_of_one_big_range_in_each_file() {
-        let uid_text = "kbf:100000:65536\n";
-        let gid_text = "kbf:200000:70000\n";
+        let uid_text = "agent:100000:65536\n";
+        let gid_text = "agent:200000:70000\n";
         let ids_files = files("ids", Some(uid_text), Some(gid_text));
         let ids = user_ids(&ids_files, 990, 991).expect("ids");
         assert_eq!(
@@ -463,7 +463,7 @@ mod tests {
                 sub_gid: 200_000
             }
         );
-        let split = "kbf:100000:40000\nkbf:200000:40000\n";
+        let split = "agent:100000:40000\nagent:200000:40000\n";
         let split_files = files("split", Some(split), Some(gid_text));
         let refused = user_ids(&split_files, 990, 991).expect_err("split");
         assert!(refused.to_string().contains("no single range"), "{refused}");
@@ -473,6 +473,6 @@ mod tests {
         let numeric_files = files("split-numeric", Some(numeric), Some(numeric));
         let refused = user_ids(&numeric_files, 4242, 4242).expect_err("split");
         assert!(refused.to_string().contains("user uid 4242"), "{refused}");
-        assert!(daemon_ids(&IdFiles::in_dir(Path::new("/nonexistent-kbf"))).is_err());
+        assert!(daemon_ids(&IdFiles::in_dir(Path::new("/nonexistent-ids"))).is_err());
     }
 }

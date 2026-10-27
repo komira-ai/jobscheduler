@@ -1,4 +1,4 @@
-//! `--lease-placement=numa-node`: each lease runs on the CPUs of one NUMA node.
+//! The `numa-node` lease placement: each lease runs on the CPUs of one NUMA node.
 //!
 //! The default, `none`, is what the driver always did: a lease may run on any CPU the
 //! daemon's cgroup may use. With `numa-node` the driver reads the node topology once at
@@ -14,7 +14,7 @@
 //! which runs such a lease alone) or more than the largest node holds ([`NodeMemory`]). It
 //! gets every CPU and memory node the daemon may use and logs `numa_node=all`.
 //!
-//! `--reserve-cpus` is a bandwidth limit on `actions/` (`cpu.max`), not a set of cores, so
+//! The reserved-CPU count is a bandwidth limit on `actions/` (`cpu.max`), not a set of cores, so
 //! the pinned CPUs are the node's CPUs (within what the daemon's cgroup may use) and the
 //! reserve is still taken off the leases' CPU time as before.
 //!
@@ -47,7 +47,7 @@ impl fmt::Display for Spot {
     }
 }
 
-/// How leases are placed on the node's CPUs (`--lease-placement`).
+/// How leases are placed on the node's CPUs (the lease placement setting).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LeasePlacement {
     /// Any CPU the daemon may use.

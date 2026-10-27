@@ -10,7 +10,7 @@ marked (not found) means a search of the named place did not find the thing; it 
 jobscheduler itself are named `js-*`; the map is in 10.2.
 
 Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-provider-fake`, `js-conformance`, `js-lease`,
-`js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry`, `js-contain` (the cgroup, delegation, NUMA and subordinate-id modules) and `js-agent` (session,
+`js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry` and `js-agent` (session,
 facts and a lifecycle over a `ContainerRuntime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
 describes future work. What exists in kbf today (the former section 4) is in [design/kbf-today.md](design/kbf-today.md); references of the
 form 4.n point there.
@@ -740,7 +740,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
 | `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend (5.14) |
-| `js-contain` (merged) | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs` and `subids.rs` of `kbf-driver-container` | node-local containment; `js-agent` depends on it. Moved with no REAPI types: a lease's booking is `js_types::Resources`; the cgroup's OOM outcome (`OomOutcome`), the usage counters (`CgroupUsage`) and the node's capacity (`Capacity`) are its own types; `memory_max` is the one function for a lease's memory cap. The OCI runner and the modules that name the CAS or the output tree are not moved yet. |
+| `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs` and `subids.rs` of `kbf-driver-container` | node-local containment; `js-agent` depends on it. In review, not merged yet (mark it (merged) in the pull request that merges it). The move keeps no REAPI types: a lease's booking is `js_types::Resources`; the cgroup's OOM outcome (`OomOutcome`), the usage counters (`CgroupUsage`) and the node's capacity (`Capacity`) are its own types; `memory_max` is the one function for a lease's memory cap. The OCI runner and the modules that name the CAS or the output tree are not moved yet. |
 | `js-sim` | `crates/kbf-sim*` | invariants and replay |
 
 `kbf-executor` is kbf's, not a jobscheduler crate (9.2). Every crate not marked (merged) is not on `main` yet; a merged crate's note
