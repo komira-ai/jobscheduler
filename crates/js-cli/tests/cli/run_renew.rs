@@ -198,3 +198,33 @@ fn a_lease_that_is_already_expired_by_the_clock_is_not_run() {
     assert_eq!(seen.len(), 2, "{seen:?}");
     assert!(seen[1].starts_with("DELETE /v1/leases/1-1"), "{seen:?}");
 }
+
+/// Asserts that a renewal that fails after the deadline has passed (the injected clock
+/// is 450s on, the deadline is at 400s) gives the lease up at once, without waiting for a
+/// deadline report: the command is stopped and `js` exits 7.
+#[test]
+fn a_renewal_that_fails_after_the_deadline_gives_the_lease_up() {
+    let mut h = Harness::new("renew_late");
+    let waiter = Manual::new();
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
+    let words = run_words(&[], &["sleep", "30"]);
+    let js = h.js.clone();
+    let got = scope(|s| {
+        let run = s.spawn(|| js.with(&words, services));
+        let _ends = EndsRun(signals.recv().unwrap(), ForwardedSignal::Terminate);
+        waiter.running();
+        h.stop();
+        h.advance(secs(450));
+        waiter.release();
+        run.join().unwrap()
+    });
+    assert_eq!(got.code, 7, "{}", got.err);
+    assert!(
+        got.err.contains(
+            "js: lease 1-1 could not be renewed before its deadline; stopped the command\n"
+        ),
+        "{}",
+        got.err
+    );
+    assert_eq!(waiter.intervals(), vec![secs(200), secs(30)]);
+}

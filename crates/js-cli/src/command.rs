@@ -123,21 +123,22 @@ impl Drop for Running {
 /// is killed leaves no command running. Linux only.
 #[cfg(target_os = "linux")]
 fn end_with_parent(command: &mut Command) {
-    use rustix::process::{getpid, getppid, set_parent_process_death_signal};
-
-    let parent = getpid();
+    let parent = rustix::process::getpid();
     // SAFETY: the closure runs in the forked child before the exec, where only
-    // async-signal-safe calls are allowed. It makes two system calls (`prctl` and
-    // `getppid`) through rustix and allocates nothing: an error is an OS error code.
+    // async-signal-safe calls are allowed, and it makes two system calls (`arm_death_signal`)
+    // and allocates nothing: an error is an OS error code.
     unsafe {
-        command.pre_exec(move || {
-            set_parent_process_death_signal(Some(Signal::KILL))?;
-            // The parent may have ended before the signal was asked for; then nothing
-            // would ever send it.
-            let alive = getppid() == Some(parent);
-            alive.then_some(()).ok_or_else(|| Errno::SRCH.into())
-        });
+        command.pre_exec(move || arm_death_signal(parent, Some(Signal::KILL)).map_err(Into::into));
     }
+}
+
+/// What the forked child does before the exec: asks for `signal` when its parent ends, and
+/// fails if the parent `parent` has ended already (the signal would never come).
+#[cfg(target_os = "linux")]
+fn arm_death_signal(parent: Pid, signal: Option<Signal>) -> Result<(), Errno> {
+    rustix::process::set_parent_process_death_signal(signal)?;
+    let alive = rustix::process::getppid() == Some(parent);
+    alive.then_some(()).ok_or(Errno::SRCH)
 }
 
 /// Other systems have no such signal; a `js` that is killed leaves the command running.
@@ -184,5 +185,23 @@ mod tests {
         let mut failing = vec![Err(Errno::INTR), Err(Errno::CHILD)];
         let got: Result<u8, Errno> = retry_interrupted(|| failing.remove(0));
         assert_eq!(got, Err(Errno::CHILD));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use rustix::process::{getpid, getppid};
+
+    use super::*;
+
+    /// Asserts that what the forked child does before the exec succeeds while the parent
+    /// it was given is the process's parent, and fails with "no such process" when it is
+    /// not (the parent has ended, and another process has been made the parent). The
+    /// signal asked for is none, so the test process itself is not affected.
+    #[test]
+    fn the_death_signal_is_armed_only_while_the_parent_lives() {
+        let parent = getppid().unwrap();
+        assert_eq!(arm_death_signal(parent, None), Ok(()));
+        assert_eq!(arm_death_signal(getpid(), None), Err(Errno::SRCH));
     }
 }
