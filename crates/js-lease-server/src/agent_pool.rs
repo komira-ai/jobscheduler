@@ -94,15 +94,14 @@ pub(crate) fn parse(text: &str) -> Result<PoolConfig, String> {
         .map_err(|err| format!("lost_retention: {err}"))
 }
 
-/// The class a name stands for: the shipped GPU class, or a class that books a whole
-/// host and asks nothing of the request beyond what the pool's shape offers.
+/// The class a name stands for: a shipped class (`whole-node`, or `gpu-host`, kept as
+/// an alias), or a class that books a whole host and asks nothing of the request
+/// beyond what the pool's shape offers.
 fn class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| format!("class: {err}"))?;
-    let shipped = ResourceClass::gpu_host();
-    Ok(match id == *shipped.id() {
-        true => shipped,
-        false => ResourceClass::new(id, Admission::BookAll, 0),
-    })
+    let shipped = [ResourceClass::whole_node(), ResourceClass::gpu_host()];
+    let found = shipped.into_iter().find(|class| *class.id() == id);
+    Ok(found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0)))
 }
 
 /// Refuses a `value` above `max`: a floor no hello could meet (the wire refuses a hello
@@ -179,6 +178,21 @@ mod tests {
         assert_eq!(retained, full);
         let timed = full.clone().with_timing(10_000, 60_000).unwrap();
         assert_eq!(timed, full);
+    }
+
+    /// Asserts the class names: `whole-node` and `gpu-host` load as the shipped classes
+    /// (both `Whole`, with their GPU minimums), and any other id loads as `BookAll`
+    /// with no minimum. A defect that dropped a shipped name would load it as BookAll.
+    #[test]
+    fn class_names_load_the_shipped_classes() {
+        assert_eq!(class("whole-node").unwrap(), ResourceClass::whole_node());
+        assert_eq!(class("gpu-host").unwrap(), ResourceClass::gpu_host());
+        let other = class("mac-host").unwrap();
+        assert_eq!(other.admission(), &Admission::BookAll);
+        assert_eq!(other.min_gpus(), 0);
+        let loaded = parse(&MINIMAL.replace("mac-host", "whole-node")).unwrap();
+        let named = parse(&MINIMAL.replace("mac-host", "gpu-host")).unwrap();
+        assert_ne!(loaded, named);
     }
 
     /// Every mistake is refused with a reason that names the setting: an unknown key, a
