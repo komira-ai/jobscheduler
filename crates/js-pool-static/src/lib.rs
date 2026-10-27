@@ -1,11 +1,12 @@
 //! A static pool provider: hosts an operator lists in a TOML file, leased one whole
 //! host at a time.
 //!
-//! The pool serves one class, `gpu-host` ([`js_types::ResourceClass::gpu_host`]),
-//! admitted `BookAll`: a lease holds a whole host, so nothing else runs on it. The pool
-//! refuses any other admission mode with `UnsupportedClass` (see
-//! [`StaticPool::with_classes`]) rather than leasing a whole host anyway. Its
-//! rules, in design terms:
+//! The pool serves `gpu-host` ([`js_types::ResourceClass::gpu_host`], admitted
+//! `BookAll`) unless [`StaticPool::with_classes`] names others, such as `whole-node`
+//! ([`js_types::ResourceClass::whole_node`], admitted `Whole`). In both a lease holds
+//! a whole host, so nothing else runs on it. The pool refuses an admission mode that does not book a whole host with
+//! `UnsupportedClass` rather than leasing a whole host anyway. Its rules, in design
+//! terms:
 //!
 //! - **Fit (6.1).** A host fits when its shape offers at least the requested
 //!   resources, with the requested GPU class, and reports every required capability.
