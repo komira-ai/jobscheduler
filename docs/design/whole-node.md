@@ -28,7 +28,7 @@ reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those
 | Name | Meaning now |
 |---|---|
 | kbf `LeaseKind::WholeMachine`, class `whole_machine` | kbf's name for this class; the consumer's configuration maps it to class `whole-node` (9.4) |
-| `gpu-host`, admitted `BookAll` (the merged lease service, D32) | the merged name of this class. A pool whose `class` is `gpu-host` loads as `whole-node`, and a lease row that says `gpu-host` is read as `whole-node`; the merged tests pass unchanged. It gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. |
+| `gpu-host`, admitted `BookAll` (the merged lease service, D32) | a **retained alias**: a whole-node class whose id stays `gpu-host` and whose `min_gpus` stays 1. It is still accepted, still reported under the id `gpu-host`, and still refuses a host without a GPU with the merged text (`class gpu-host needs at least 1 gpus`). Only its admission semantics unify with `whole-node`: it gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. Generic `whole-node` has `min_gpus` 0 (a pool of performance machines needs no GPU); GPU-ness of a request comes from its constraints (`gpus > 0`, `gpu_class`). No merged assertion changes: `classes()`, the error text and requests with class `gpu-host` are as merged. |
 | a node lease of class `action` or `vm` that books the shape of a host | not whole-node. It is a share whose size equals the host; nothing else fits beside it, but it gets no quiet start, no reservation, no drain and no cap, and it counts nothing against the whole-node caps. kbf's standing node leases (step 34b) are these. |
 
 The GPU path is this class: a GPU request is served only as a whole-node lease on a pool whose shape has a GPU (the Mac Studio machines of
@@ -105,7 +105,10 @@ exist. (The scheduler-side mark is `reserved`; the agent-announced phase `draini
 running lease is cut short by design: by that time every lease that was on the host at the reservation has ended). An operator may set it
 shorter. When it passes with the host still not quiet, the reservation is **given up**: the host returns to `serving`, nothing on it was
 touched, the request returns to the queue with that host excluded for it for `reserve_backoff`, and it reserves the cheapest other host by
-the rule above. If no other host is available the request waits unreserved until the back-off ends. Stopping other tenants' work was
+the rule above. If no other host is available the request waits unreserved until the back-off ends. Give-ups are counted per request:
+after `max_reserve_attempts` of them (default 2) the deadline of its next reservation is the pool's max wall time whatever
+`drain_deadline` says, and that reservation cannot be given up for a non-quiet host, since by then every lease on the host has ended.
+Load validation refuses nothing here; the counter alone makes the bound hold for every setting. Stopping other tenants' work was
 considered and rejected (D48): a deadline that kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's
 request destroy another's results; re-queueing wastes only the drain already spent, which the caps bound.
 
@@ -139,16 +142,18 @@ held. A request waiting unreserved counts toward nothing.
 |---|---|---|
 | `max_whole_node` | most hosts of the pool that are whole at once (reserved plus held) | dedicated pool: `max_machines`; mixed pool: none (class not offered) |
 | `max_draining` | most hosts reserved and not yet held at once | 1 |
-| `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 |
+| `max_whole_node_per_consumer` | most hosts one authenticated consumer has whole at once in the pool (K7: the caller's identity, not a request field) | 1 for a mixed pool whose lease API authenticates per-consumer identities; `max_whole_node` (no limit) in a dedicated pool, and wherever the API has no per-consumer identity (the merged single-token service: every client is one consumer). An operator may set 1 explicitly. |
 | `keep_for_ordinary` | fewest hosts of a mixed pool that are neither reserved nor held, so ordinary work always has them | 1 for a mixed pool, 0 for a dedicated one |
 | `allow_last_capable` | whether a reservation may start on the last unreserved capable host of an ordinary request queued ahead of it | false |
-| `drain_after`, `drain_deadline`, `reserve_backoff`, `prepare_timeout`, `max_replace` | times and the retry cap of sections 3 to 5 | see there |
+| `drain_after`, `drain_deadline`, `reserve_backoff`, `max_reserve_attempts`, `prepare_timeout`, `max_replace` | times and the retry caps of sections 3 to 5 | see there |
 
 **The effective ceiling** is `min(max_whole_node, capable_hosts - keep_for_ordinary)`, where `capable_hosts` are the pool's hosts that are
 capable for its ordinary class (tainted, denied and releasing hosts excluded; lost ones counted). A reservation starts only while whole
 hosts are below the ceiling, reserved hosts below `max_draining`, and the consumer below its limit; otherwise the request waits in queue
 order. When the ceiling falls (a host is lost for good, a host taints), **a held lease is never revoked**; reservations beyond the ceiling
-are dropped newest first, and none starts until the count is below the ceiling again.
+are dropped newest first at once, and none starts until the count is below the ceiling again. Because held leases stay, marks can for a
+time exceed `capable_hosts - keep_for_ordinary`, and the ordinary floor below is then restored only when enough held leases end: after at
+most the longest remaining max wall time among them (counted from their tokens).
 
 **The last capable host (D49).** The pool-level count `keep_for_ordinary` keeps hosts for ordinary work in general. A second rule protects
 work that depends on one host: a reservation does not start on host H when H is the only unreserved capable host (by facts and constraints)
@@ -163,14 +168,17 @@ limit is at least 1 where it is a maximum; a file that breaks this is refused (D
 
 **Why these and not others.** One cap (`max_whole_node`) alone does not stop one consumer taking every slot; the per-consumer limit does.
 A fraction alone does not protect a two-host pool; a count and a floor do. `max_draining` bounds idle capacity during drains (a draining
-host does no work), and the ceiling bounds the capacity held by granted leases. Ordinary work keeps at least `keep_for_ordinary` hosts at
-every step, and the unreserved remainder of the pool is never touched by this class.
+host does no work), and the ceiling bounds the capacity held by granted leases. No reservation ever starts below the ordinary floor of
+`keep_for_ordinary` hosts, and the unreserved remainder of the pool is never touched by this class.
 
 **Starvation bounds.** Ordinary work: in a mixed pool at least `keep_for_ordinary` capable hosts carry no mark at any step, so an ordinary
-request that fits such a host is placed as without this class; a queued ordinary request is delayed by whole-node work only by the
-hosts it holds. Whole-node work: a request holding a reservation is committed within `drain_deadline` or gives up; with the default
-deadline (the max wall time) a reserved host is empty by that time, because nothing new is placed on it, so the request is committed within
-the max wall time plus `prepare_timeout` for each of at most `max_replace` tries. A request without a reservation waits for a slot: each
+request that fits such a host is placed as without this class. The one exception is a fall of the ceiling (a host lost or tainted) while
+leases are held: the floor is then restored after at most the longest remaining max wall time of those held leases, and meanwhile no
+reservation exists beyond the ceiling. A queued ordinary request is delayed by whole-node work only by the
+hosts it holds. Whole-node work: a request holding a reservation is committed within `drain_deadline` or gives up; after at most
+`max_reserve_attempts` give-ups its reservation has the max wall time as deadline, and a reserved host is empty by then because nothing
+new is placed on it. So the request is committed within `max_reserve_attempts` times `drain_deadline`, plus the max wall time, plus
+`prepare_timeout` for each of at most `max_replace` tries, for every setting of `drain_deadline`. A request without a reservation waits for a slot: each
 slot is held for at most the whole-node lease's own max wall time plus its drain, so its wait is finite and a function of its queue
 position, the ceiling and the limits. These are properties of the injected clock, tested on it (R2).
 
@@ -239,10 +247,9 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
 ## 10. Wire and configuration, in one place
 
 Additive fields (R3), none new on the agent beyond the merged design: `HeartbeatReply.exclusive` (lease id) and `Heartbeat.exclusive_ready`
-(lease id); a renewal answer's `host_reserved`. Refusal constants: `exclusive-not-ready` (after `max_replace`), `exclusive-not-offered`
-(a pool that matches by class but whose caps can never give a node: validation normally prevents it), with `no-capable-host` and
-`no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` reads as
-`whole-node`, and `max_draining_fraction` of earlier drafts is replaced by `max_draining`.
+(lease id); a renewal answer's `host_reserved`. Refusal constants: `exclusive-not-ready` (after `max_replace`), with `no-capable-host` and
+`no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
+retained alias of section 1 (id `gpu-host`, `min_gpus` 1, whole-node admission), and `max_draining_fraction` of earlier drafts is replaced by `max_draining`.
 
 ## 11. Tests and invariants (13.1, 13.2, 13.3)
 
@@ -254,9 +261,12 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 - W3. **The token is never minted before the agent reports ready**; the TTL and the max wall time count from the token.
 - W4. A request holds at most one reservation; a host carries at most one; a held host is not reservable.
 - W5. **Caps are never exceeded:** whole hosts at most the effective ceiling (held leases are not revoked when it falls); reserved-not-held at
-  most `max_draining`; each consumer within its limit; at least `keep_for_ordinary` hosts of a mixed pool carry no mark.
+  most `max_draining`; each consumer within its limit; no reservation starts unless at least `keep_for_ordinary` hosts of a mixed pool
+  would stay unmarked. When the ceiling has fallen under held leases, unmarked hosts may be fewer until those leases end (at most the
+  longest remaining max wall time); reservations beyond the ceiling are dropped at once, and the test asserts both forms.
 - W6. **The drain is bounded:** every reservation ends, by commit, deadline give-up or cancel, by the deadline on the injected clock; a
-  give-up touches no work.
+  give-up touches no work; a request gives up at most `max_reserve_attempts` times, and its next reservation then carries the max wall
+  time as deadline and commits.
 - W7. **Nothing is killed for a reservation:** the scheduler stops no lease or run because of one.
 - W8. Refused only when no registered host could ever be given whole and no elastic provider could launch one (D35); a busy, lost, cordoned
   or reserved host is capable; a tainted or denied host is not.
@@ -271,9 +281,11 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 Cases: a drain of a host with three leases ending at different bounds picks the host with the smallest bound, then the fewest leases, then
 the lowest id; a give-up at the deadline re-queues on another host and the first is excluded for `reserve_backoff`; an agent that finds a
 VM at `preparing` destroys it and reports a finding; a timeout gives the lease up and the retries stop at `max_replace`; `gpu-host` configs
-and lease files from the merged service load as `whole-node` and its tests pass unchanged; a GPU request under class `action` is refused
-`no-matching-pool`; the example of 9: on a GPU pool of two hosts and a per-consumer limit of 1, a consumer's second request waits while
-another consumer's first is granted.
+and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
+pass unchanged, including two hosts taken with the one bearer token because the per-consumer default is no limit there; a GPU request
+under class `action` is refused `no-matching-pool`; with an explicit per-consumer limit of 1 on a GPU pool of two hosts and per-consumer
+identities, a consumer's second request waits while another consumer's first is granted; a `drain_deadline` shorter than the max wall time
+gives up `max_reserve_attempts` times and then commits.
 
 ## 12. Extraction steps
 
