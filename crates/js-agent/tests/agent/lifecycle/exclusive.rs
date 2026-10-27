@@ -415,3 +415,47 @@ fn a_finding_at_restore_taints_the_host() {
     );
     assert!(h.life.pending_taint().is_some());
 }
+
+/// Asserts the restart rule: a run taken over at start that belongs to the lease the first
+/// reply names proves the host was ready, so the hold starts ready. The consumer's own new
+/// start is admitted at once, and `prepare` answers ready without a run being quiet. It
+/// catches a restart that forgets a ready lease and refuses the consumer's starts.
+#[test]
+fn a_restart_while_ready_keeps_the_lease_ready() {
+    let mut h = Harness::new("ex-restart-ready");
+    h.start(of(LEASE, "a"));
+    h.restart().unwrap();
+    let events = h.life.apply(&granting(LEASE, vec![start(of(LEASE, "b"))]));
+    assert_eq!(names(&events), ["started b"]);
+    assert_eq!(prepare(&mut h).0, Quiet::Ready);
+}
+
+/// Asserts that runs taken over at start that belong to another lease than the one named
+/// prove nothing: the hold is prepared for as for any grant, the lease's own start is
+/// refused, and the host is busy until those runs are gone. It catches a rule that treats
+/// any adopted run as proof.
+#[test]
+fn a_restart_with_the_runs_of_another_lease_prepares_as_usual() {
+    let mut h = Harness::new("ex-restart-other");
+    h.start(of("other", "a"));
+    h.restart().unwrap();
+    let events = h.life.apply(&granting(LEASE, vec![start(of(LEASE, "b"))]));
+    assert_eq!(
+        names(&events),
+        [format!("refused b {}", refusal::NO_CAPACITY)]
+    );
+    assert_eq!(prepare(&mut h).0, Quiet::Busy);
+}
+
+/// Asserts that the proof is of the first reply only: a lease granted later, after the
+/// restart, is prepared for even though a run of that lease is held. It catches adopted
+/// leases that stay trusted for the life of the process.
+#[test]
+fn the_restart_rule_applies_to_the_first_reply_only() {
+    let mut h = Harness::new("ex-restart-first");
+    h.start(of(LEASE, "a"));
+    h.restart().unwrap();
+    h.life.apply(&reply(Vec::new()));
+    h.life.apply(&granting(LEASE, Vec::new()));
+    assert_eq!(prepare(&mut h).0, Quiet::Busy);
+}

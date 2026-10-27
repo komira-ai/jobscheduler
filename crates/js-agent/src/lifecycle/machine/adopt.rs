@@ -47,6 +47,11 @@ impl Lifecycle {
     /// scoped by the agent label); the listing removes nothing, so a container that was
     /// created and never started is evicted here like one whose labels are unreadable.
     ///
+    /// A restart while a whole-node lease was ready: when the first reply names a lease
+    /// that a run taken over here belongs to, the hold starts ready (see
+    /// [`Lifecycle::exclusive`]), because that run could only have been started once the
+    /// host was found quiet. With no such run the hold is prepared for as for any grant.
+    ///
     /// # Errors
     ///
     /// The runtime cannot list its containers. The caller must not say hello with an
@@ -77,6 +82,7 @@ impl Lifecycle {
             retired: Retired::default(),
             taint,
             exclusive: None,
+            adopted_leases: Vec::new(),
         };
         let mut events = Vec::new();
         this.owed_at_start(&mut events);
@@ -101,6 +107,7 @@ impl Lifecycle {
         // Booked only now, so that a container that cannot be removed never makes a
         // container that runs look like one that does not fit.
         this.stuck = stuck;
+        this.adopted_leases = this.jobs.iter().map(|job| job.lease_id.clone()).collect();
         Ok((this, events))
     }
 
