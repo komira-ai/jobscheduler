@@ -63,9 +63,9 @@ impl Settings {
     /// The same settings with the restart grace of reservation records: on open, every
     /// held record's deadline becomes the later of the stored deadline and the boot plus
     /// `boot_grace`, and every record may be claimed until `regain_grace` after the boot
-    /// ([`ReservationRecord::claim_by`]). Both default to zero. A restart therefore
-    /// never moves a deadline past `boot + boot_grace`: a restart loop that rewrites the
-    /// file cannot push the drain bound out for ever.
+    /// ([`ReservationRecord::claim_by`]). Both default to zero. A restored
+    /// deadline is `max(stored, boot + boot_grace)`, so a restart loop holds it at
+    /// `now + boot_grace` while the loop lasts and never grows it beyond that.
     ///
     /// This grace applies to reservation records only. Lease records have no restart
     /// grace in this crate; the lease-side grace is wired by the server step that

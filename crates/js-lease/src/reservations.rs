@@ -15,7 +15,8 @@ use crate::types::{Exclusion, ExclusionEnd, Held, ReservationRecord, Settings};
 /// The records of `document`, checked, with the restart grace applied at `boot`: the
 /// count matches, no request twice, every row valid. Each held deadline becomes the
 /// later of the stored one and `boot` plus the boot grace (never the stored one plus
-/// the grace, which a restart loop would push out for ever), and every record may be
+/// the grace, which each restart of a loop would grow again; a restart loop holds the
+/// deadline at now plus the grace while it lasts and never beyond), and every record may be
 /// claimed until `boot` plus the regain grace.
 /// Fields this build does not know are returned apart, by request id, to be written
 /// back. Any failure is an [`OpenError::Corrupt`] naming `path`.
