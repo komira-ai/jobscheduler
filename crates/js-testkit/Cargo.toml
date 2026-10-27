@@ -1,0 +1,48 @@
+[package]
+name = "js-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `kbf-act`, the program this crate's own tests run (see the library docs). Each
+# crate whose tests need the act verbs adds a bin like it under its own name, since
+# `CARGO_BIN_EXE_<name>` is set only for the bins of the package under test.
+[[bin]]
+name = "kbf-act"
+path = "src/bin/kbf-act.rs"
+test = false
+
+# `kbf-m2-act`, the program every action of the M2 sample project runs (the verbs are
+# `m2`'s, the tests are tests/m2_act.rs). In kbf the bin lives in the integration-test crate;
+# here it is built for this crate's own tests of `m2`.
+[[bin]]
+name = "kbf-m2-act"
+path = "src/bin/kbf-m2-act.rs"
+test = false
+
+[features]
+# `database`: a Postgres database a test owns. Off by default, so the crates that take this one
+# as a normal dependency (the test-only bins) carry no database client.
+postgres = ["dep:postgres"]
+
+# No kbf dependency: every crate may take this one as a dev-dependency (or a
+# dependency of a test-only bin) without a cycle. rustix makes its system calls
+# directly on Linux; libc is for the two calls rustix has no portable form of
+# (mkfifo, and signal to ignore one). `kbf-m2-act` still links statically.
+[dependencies]
+libc.workspace = true
+postgres = { workspace = true, optional = true }
+rustix = { workspace = true, features = ["process", "net"] }
+# `switch`: the forwarder tokio runs on the caller's runtime.
+tokio = { workspace = true, features = ["io-util", "net", "rt"] }
+
+[dev-dependencies]
+# This crate's own tests of `database` (the files in tests/ see only the features that are on).
+js-testkit = { path = "../js-testkit", features = ["postgres"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+
+[lints]
+workspace = true
