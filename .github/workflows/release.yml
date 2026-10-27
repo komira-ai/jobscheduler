@@ -1,79 +1,98 @@
-# Release: a pushed version tag builds js-lease-server and js, attests them and publishes
-# them as the assets of the GitHub release for that tag. GitHub-hosted runners only,
-# actions pinned to commit SHAs.
+# Continuous release: every push to main that passed `ci` and changed code that ships is
+# released as the next version, with no step by hand (docs/release.md). GitHub-hosted
+# runners only, actions pinned to commit SHAs.
 #
-# A pull request that changes this file, and a manual run, build the same assets and
-# write SHA256SUMS but never attest or publish: those jobs run only for a tag push.
-# Publishing needs no extra step: the owner pushes vX.Y.Z, which must equal the
-# workspace version.
+# What starts it. The completion of a `ci` run (`workflow_run`), and only one that
+# succeeded for a push to main of this repository: every job below tests the conclusion,
+# the event, the branch and the head repository of the run that started it, and works on
+# `workflow_run.head_sha`, the commit that passed `ci`. A pull request that changes this
+# file builds the same assets as a dry run (`plan` is told so with --dry-run) and never
+# attests, tags or publishes. No tag and no manual run starts a release.
+#
+# Which commit. A run started by `workflow_run` is at the tip of main (`github.sha`), and
+# that is the commit an attestation records. `plan` therefore releases the commit only
+# while main is still at it; if main has moved on, the newer push releases its change too,
+# since a release covers everything since the latest tag.
+#
+# The decision and the version are `cargo xtask release plan` (crates/xtask): a release
+# only when a file that ships changed since the latest `v*` tag, as the next patch
+# version, or the workspace version when that is above the tag. `cargo xtask release
+# stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
+# committed.
+#
+# Order: plan, build, sums, attest, verify, publish. The tag is made last, by `publish`,
+# once the files are built, attested and the attestations verified, so a failed run leaves
+# no tag. A re-run of a failed run adds what is missing and replaces nothing.
 #
 # Permissions are per job. Only `attest` holds id-token and attestations write, and only
 # `publish` holds contents write; neither runs repository code, only pinned actions,
-# `sha256sum` and `gh`.
+# `sha256sum`, `cmp` and `gh`.
 name: release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
   pull_request:
     paths: ['.github/workflows/release.yml']
-  workflow_dispatch:
 
 permissions: {}
 
+# One release at a time, none cancelled: a second waits for the first (GitHub keeps one
+# waiting run per group, and the newer replaces the older; the replaced push is released
+# by the newer one). Only a run that will release shares the group; any other (a `ci` run
+# that failed or was cancelled, a pull request) takes a group of its own so it cannot
+# replace the waiting one.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # The commit that passed `ci` (not `github.sha`, which for `workflow_run` is the tip of
+  # main); for a pull request, its merge commit.
+  COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
 
 jobs:
-  # Reads the workspace version and, for a tag push, fails unless the tag is v<version>
-  # and its commit is on main.
-  version:
+  # Whether to release, and as which version (crates/xtask, `release plan`).
+  plan:
+    # The run that started this one succeeded, for a push to main of this repository; or a
+    # pull request (a dry run).
+    if: ${{ github.event_name == 'pull_request' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      tag_exists: ${{ steps.plan.outputs.tag_exists }}
     steps:
+      # The whole history and every tag: the files changed since the latest tag.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          ref: ${{ env.COMMIT }}
           fetch-depth: 0
-      - name: A tag must point at a commit on main
-        if: ${{ github.ref_type == 'tag' }}
-        run: |
-          set -euo pipefail
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::the tagged commit $GITHUB_SHA is not on main"
-            exit 1
-          fi
+          persist-credentials: false
       - run: rustup toolchain install
-      - id: version
+      - id: plan
+        name: Plan the release
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          # Every crate takes the workspace version; the two released crates must agree.
-          meta="$(cargo metadata --locked --no-deps --format-version 1)"
-          version="$(jq -r '[.packages[] | select(.name == "js-cli" or .name == "js-lease-server") | .version] | unique | if length == 1 then .[0] else "mismatch" end' <<<"$meta")"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::js-cli and js-lease-server must share one X.Y.Z version, got '$version'"
-            exit 1
+          flags=()
+          if [ "$EVENT" = pull_request ]; then
+            flags+=(--dry-run)
           fi
-          if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "v$version" ]; then
-            echo "::error::tag '$REF_NAME' does not match the workspace version (expected v$version)"
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "workspace version $version"
+          cargo xtask release plan --head "$COMMIT" --tip "$GITHUB_SHA" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
 
   build:
-    needs: [version]
+    needs: [plan]
+    if: ${{ needs.plan.outputs.release == 'true' }}
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -89,13 +108,14 @@ jobs:
           # musl-tools.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            builds: js-lease-server:js-lease-server js-cli:js
+            builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
     env:
       TARGET: ${{ matrix.target }}
-      VERSION: ${{ needs.version.outputs.version }}
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
       - name: Install musl tools
         if: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
@@ -104,6 +124,10 @@ jobs:
           sudo apt-get install --yes --no-install-recommends musl-tools
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
+      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
+      # the binaries print it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: cargo xtask release stamp --to "$VERSION"
       - name: Build and package
         env:
           BUILDS: ${{ matrix.builds }}
@@ -140,10 +164,18 @@ jobs:
               done
               ;;
           esac
-          # Both binaries run on the build host and answer --version.
+          # Every binary runs on the build host and prints the release version.
           for entry in $BUILDS; do
             bin="${entry##*:}"
-            "target/$TARGET/release/$bin" --version
+            printed="$("target/$TARGET/release/$bin" --version)"
+            echo "$printed"
+            case "$printed" in
+              *" $VERSION") ;;
+              *)
+                echo "::error::$bin prints '$printed', not the release version $VERSION"
+                exit 1
+                ;;
+            esac
           done
         env:
           BUILDS: ${{ matrix.builds }}
@@ -156,7 +188,7 @@ jobs:
 
   # One SHA256SUMS over every asset, checked before anything is attested or published.
   sums:
-    needs: [version, build]
+    needs: [plan, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -168,11 +200,11 @@ jobs:
           path: dist
       - name: Write and check SHA256SUMS
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"
@@ -191,8 +223,8 @@ jobs:
 
   # Build provenance for every asset, from the checksums file. No repository code runs here.
   attest:
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
-    needs: [sums]
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, sums]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -207,10 +239,41 @@ jobs:
         with:
           subject-checksums: dist/SHA256SUMS
 
-  # Creates the release for the tag with the attested files. Nothing is rebuilt.
+  # The attestations as a user checks them (docs/release.md), before anything is tagged:
+  # made by this workflow, for the commit being released.
+  verify:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify every archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum --check --strict SHA256SUMS
+          for file in ./*.tar.gz; do
+            gh attestation verify "$file" --repo "$REPO" \
+              --signer-workflow "$REPO/.github/workflows/release.yml" \
+              --source-digest "$COMMIT"
+          done
+
+  # Tags the commit and creates the release with the attested files. Nothing is rebuilt.
+  # Create-only: the tag is made only when none names this commit, a release is created
+  # only when there is none, and a file is added only when the release lacks it. A file
+  # the release has that differs from this run's is an error, never replaced.
   publish:
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
-    needs: [version, sums, attest]
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    needs: [plan, sums, verify]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -219,17 +282,41 @@ jobs:
         with:
           name: release-assets
           path: dist
-      - name: Check, then create the release
+      - name: Check, tag, then create the release or add the files it lacks
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.version.outputs.version }}
           REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          TAG_EXISTS: ${{ needs.plan.outputs.tag_exists }}
         run: |
           set -euo pipefail
           cd dist
           sha256sum --check --strict SHA256SUMS
-          gh release create "$TAG" --repo "$REPO" --verify-tag \
-            --title "jobscheduler $VERSION" \
-            --notes "js-lease-server and js $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
-            ./*.tar.gz SHA256SUMS
+          if [ "$TAG_EXISTS" != true ]; then
+            # An annotated tag object, then the ref. The ref is created, never updated: a
+            # tag that exists makes this call fail.
+            tag_object="$(gh api "repos/$REPO/git/tags" -f tag="$TAG" -f message="jobscheduler $VERSION" -f object="$COMMIT" -f type=commit --jq .sha)"
+            gh api "repos/$REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$tag_object" --silent
+          fi
+          if ! gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" --verify-tag \
+              --title "jobscheduler $VERSION" --generate-notes \
+              --notes "js-lease-server, js and js-agent $VERSION. Verify the files with SHA256SUMS and gh attestation verify; see docs/release.md." \
+              ./*.tar.gz SHA256SUMS
+            exit 0
+          fi
+          # The release exists (a re-run): add the files it lacks. A file it has must be
+          # this run's, byte for byte, or the files of two builds would be mixed.
+          have="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
+          mkdir ../existing
+          for file in ./*.tar.gz SHA256SUMS; do
+            name="${file#./}"
+            if grep -qxF -- "$name" <<<"$have"; then
+              gh release download "$TAG" --repo "$REPO" --pattern "$name" --dir ../existing
+              cmp -- "$name" "../existing/$name"
+              echo "$name is on the release already: kept"
+            else
+              gh release upload "$TAG" --repo "$REPO" "$file"
+            fi
+          done

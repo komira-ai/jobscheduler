@@ -1618,9 +1618,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
+ "serde",
+ "serde_json",
  "sha2",
  "tar",
  "thiserror",
+ "toml",
  "ureq",
 ]
 
