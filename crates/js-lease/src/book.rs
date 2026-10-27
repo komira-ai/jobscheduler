@@ -12,9 +12,10 @@ use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey};
 
 use crate::clock::Timestamp;
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
+use crate::reservations;
 use crate::state::LeaseState;
 use crate::store::{self, Document, FORMAT_VERSION, StoredLease};
-use crate::types::{Booking, Boot, Lease, LeaseInfo, Settings};
+use crate::types::{Booking, Boot, Lease, LeaseInfo, ReservationRecord, Settings};
 
 /// What a tick does with one lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +233,10 @@ pub(crate) struct Book {
     term: u64,
     next_sequence: u64,
     leases: BTreeMap<LeaseId, Record>,
+    /// The reservation ledger by request id, and the fields of it this build does not
+    /// know, by request id.
+    ledger: BTreeMap<String, ReservationRecord>,
+    kept: BTreeMap<String, toml::Table>,
     /// The version the file had, and the fields of it this build does not know.
     version: u32,
     extra: toml::Table,
@@ -246,7 +251,12 @@ impl Book {
     /// volume is never mistaken for a first boot. Every boot takes the next term, so an
     /// id of an earlier boot is never issued again even if the file lost its last
     /// writes. The file is locked first, and a second table over it is refused.
-    pub(crate) fn load(settings: Settings, path: PathBuf, boot: Boot) -> Result<Self, OpenError> {
+    pub(crate) fn load(
+        settings: Settings,
+        path: PathBuf,
+        boot: Boot,
+        now: Timestamp,
+    ) -> Result<Self, OpenError> {
         let lock = store::lock(&path)?;
         let empty = Document {
             version: FORMAT_VERSION,
@@ -254,6 +264,8 @@ impl Book {
             next_sequence: 1,
             lease_count: 0,
             lease: Vec::new(),
+            reservation_count: 0,
+            reservation: Vec::new(),
             extra: toml::Table::new(),
         };
         let document = match (store::read(&path)?, boot) {
@@ -262,6 +274,7 @@ impl Book {
             (None, Boot::Resume) => return Err(OpenError::Missing { path }),
         };
         let leases = restore_all(&path, &document)?;
+        let (ledger, kept) = reservations::restore_all(&path, &document, &settings, now)?;
         let term = document.term.checked_add(1);
         let term = term.filter(|term| *term <= store::LARGEST);
         let term = term.ok_or_else(|| OpenError::TermExhausted { path: path.clone() })?;
@@ -272,6 +285,11 @@ impl Book {
             term,
             next_sequence: document.next_sequence.max(1),
             leases,
+            ledger: ledger
+                .into_iter()
+                .map(|r| (r.request_id.clone(), r))
+                .collect(),
+            kept,
             version: document.version,
             extra: document.extra,
             unsaved: false,
@@ -286,11 +304,30 @@ impl Book {
             next_sequence: self.next_sequence,
             lease_count: u64::try_from(self.leases.len()).unwrap_or(u64::MAX),
             lease: self.leases.values().map(Record::stored).collect(),
+            reservation_count: u64::try_from(self.ledger.len()).unwrap_or(u64::MAX),
+            reservation: (self.ledger.values())
+                .map(|record| reservations::stored(record, &self.kept))
+                .collect(),
             extra: self.extra.clone(),
         };
         let saved = store::write(&self.path, &document);
         self.unsaved = saved.is_err();
         saved
+    }
+
+    /// Replaces the ledger, the later of two records of one request winning, and marks
+    /// the file behind the table.
+    pub(crate) fn set_reservations(&mut self, records: Vec<ReservationRecord>) {
+        self.ledger = records
+            .into_iter()
+            .map(|r| (r.request_id.clone(), r))
+            .collect();
+        self.kept.retain(|id, _| self.ledger.contains_key(id));
+        self.unsaved = true;
+    }
+
+    pub(crate) fn reservations(&self) -> Vec<ReservationRecord> {
+        self.ledger.values().cloned().collect()
     }
 
     /// Whether the last save failed, so the file is behind the table.
