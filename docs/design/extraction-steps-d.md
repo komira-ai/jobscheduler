@@ -1,7 +1,7 @@
-# Extraction steps 23 to 47
+# Extraction steps 23 to 53
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
-data and the VM backend) follows them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
+data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
 numbers refer to design.md.
 
 **Phase D. New capability.**
@@ -54,7 +54,7 @@ numbers refer to design.md.
 
 **Phase F. Capabilities as data and the VM backend.** Steps 36 to 40 need no VM. Steps 41 to 47 need step 30b (reuse and integrity in the
 agent) and the merged lifecycle; step 43 also needs step 41b (the `vms` dimension). Step 36 can come before step 15; step 15 then moves kbf's comparators in as schema entries of the crate
-step 36 made. Steps 43 (the size fields) and 45 wait for D26.
+step 36 made. The size fields of step 43 wait for D26.
 
 36. `js-caps`: the typed model, the version order, the schema, the constraint evaluator with host and guest scope, and the refusal codes
     (5.13, [capabilities.md](capabilities.md)); no wire, no server. *Proves:* a case per op and kind that holds and one that does not;
@@ -87,14 +87,45 @@ step 36 made. Steps 43 (the size fields) and 45 wait for D26.
     on the fake; a failed destroy frees nothing and taints; no VM serves two runs; a restart destroys every clone; the guest never holds a
     writable host path.
 44. Mixed-host accounting (the `vms` dimension itself is step 41b): VM bookings in full, containers checked
-    against the total less VM memory, the offer rules of 5.15. *Proves:* the offer is never above total less booked less warm over seeded
-    runs; the example of 5.15; the previous pools load unchanged.
-45. The warm pool: `--vm-warm`, assignment, refill, maximum age, the failure brake, `warm_images`. Waits for D26. *Proves:* a warm VM is
-    never handed a job twice; assignment is irreversible; refill is one at a time and only into free capacity; age and the brake with an
-    injected clock.
+    against the total less VM memory, the offer rules of 5.15. *Proves:* the offer is never above total less booked over seeded runs; the
+    example of 5.15; the previous pools load unchanged.
+45. Several runs per lease: each run of a lease clones its own VM from its base image, and the lease's booking stays between runs.
+    *Proves:* a lease with two runs sees two VM ids and none between them; the booking is the same before, between and after; no VM id
+    serves two runs over seeded runs of the fake; a destroy that fails on the first run keeps the second from cloning and taints.
 46. The whole-node class: introduces the design's `Whole` mode (or shows that `BookAll` plus the selection rule suffices), the drain of a
-    host with its deadline and one-per-pool bound, the `exclusive` and `exclusive_ready` fields, the withheld lease token, drain of the
-    warm pool, `prepare_timeout` with the re-place cap, restore. *Proves:* the sequence of 5.15 on the fake agent; the token is not minted before the report; a timeout
+    host with its deadline and one-per-pool bound, the `exclusive` and `exclusive_ready` fields, the withheld lease token, the no-VM-running
+    check at `preparing`, `prepare_timeout` with the re-place cap, restore. *Proves:* the sequence of 5.15 on the fake agent; the token is not minted before the report; a timeout
     gives the lease up; an older client that ignores readiness still waits.
 47. The first real VM driver, disabled by default, on an operator's host; it passes the VM conformance suite there. *Proves:* the same
     suite as the fake; it is not run on shared CI.
+
+**Phase G. One service in Kubernetes** ([deployment.md](deployment.md)). Steps 48 to 51 change `js-lease-server` and `js-lease` and need
+no cluster; step 52 changes clients; step 53 is the first deployment and needs the go of R7. Each leaves the single-host
+`js-lease-server` working as it is.
+
+48. Readiness and shutdown. `/readyz` beside the merged `/healthz`: ready only after the lease file and the binding file are loaded under
+    the lock and the tick loop has run once; not ready while the process drains on `SIGTERM`. Liveness stays `/healthz`. *Proves:* not
+    ready before the load and after the drain begins, ready between; a second process over the same lease file fails at the lock and is
+    never ready; `/healthz` is unchanged for the merged callers.
+49. The restart grace (D34): after a boot no held lease expires before `--boot-grace` has passed on the table's clock, so a client has a
+    window to renew after an outage. *Proves:* with an injected clock, a lease whose expiry fell inside the outage survives the first ticks
+    after a boot and is renewable; it expires once the grace passes unrenewed; an `absent` observation still drops a lease at once and
+    `unknown` still keeps it; a lease file written before the change loads; the flag is optional and unset means today's behaviour.
+50. Verifying and moving state: a read-only `--verify-state` mode of `js-lease-server` that loads the lease file and the binding file,
+    checks them against each other (every held lease on a registered host has a binding) and prints the term, the lease count and the
+    binding count without writing. *Proves:* a truncated lease file is refused (its `lease_count` disagrees); a pair copied byte for byte
+    verifies and then boots with `--boot resume` with its leases and bindings intact and a higher term; a lease file without its binding
+    file is reported; nothing is written (the files are unchanged).
+51. The manifests and the image. `deploy/kubernetes/` holds the objects of [deployment.md](deployment.md) as plain manifests, and the
+    release gains a container image of `js-lease-server` built from the same static binary. *Proves:* a test reads the manifests and
+    asserts the rules (one replica, `Recreate`, a `ReadWriteOnce` volume, the token and join-token files mounted from Secrets and no
+    secret in `env`, configuration from a mounted file, both probes, resource requests, a `PodDisruptionBudget`, TLS flags set); no
+    manifest names a host or an address. Publishing the image to a registry is an upload and needs the go of R7.
+52. The client side. kbf's frontend and `js-cli` reach the service by its cluster name over TLS, retry an outage with back-off inside the
+    lease TTL, and re-read the lease on a new term. *Proves:* against a fake server that restarts, no placement changes inside the TTL; a
+    request that fails during the outage is repeated once and not duplicated (the acquire id); the client refuses a plain-HTTP address
+    that is not loopback.
+53. The first in-cluster deployment and the move from the single host, on a disposable cluster, disabled until the go (R7): the cut-over
+    of [deployment.md](deployment.md). *Proves:* leases held before the move are held after it; every agent re-hellos without a new join
+    token; a pod deleted under load loses no lease and no binding; a node drained under load comes back with the volume and the same
+    state; it is not run on shared CI.

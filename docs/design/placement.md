@@ -17,6 +17,8 @@ release on result acceptance or give-up; a re-sent report that drops the device 
 - At most one device lease per agent (`DEVICE_LEASES_PER_WORKER = 1`), because sandbox isolation between device leases is unproven. A
   class can raise this when its agent can prove isolation.
 - GPUs are whole-device only. Fractional GPUs are out of scope (D10).
+- GPUs exist only on the Mac Studio machines of the GPU pool (D32): the shape declares `gpu_class = "apple-m"` and `gpus = 1`, and a GPU
+  request is satisfiable only by that pool ([capabilities.md](capabilities.md), GPUs).
 
 A whole-machine request reserves a worker once queued, which stops small requests from starving it. Large non-whole requests have no
 reservation today (`docs/design/simulation.md`, scenario F1.5, documents this); R1 forbids adding reservation admission, so the design

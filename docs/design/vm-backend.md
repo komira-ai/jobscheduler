@@ -8,10 +8,11 @@ defined here. Capabilities and constraints (what picks a host and an image) are 
 `js-agent` runs a job in a container (the merged `ContainerRuntime`) or in a virtual machine. Two rules govern the VM path and are not
 options:
 
-1. **A fresh VM per lease. A VM is never reused.** Every VM that runs a job is created from a base image for that job and destroyed when
-   the job ends, whatever its outcome. A VM that has run a job is never returned to a pool, never handed a second job, never "cleaned".
-2. **The machine is reused; the VM is not.** The host serves many VM leases (and container jobs) in a row under the rules of 5.10; what is
-   fresh each time is the guest.
+1. **A fresh VM per run. A VM is never reused.** Every run gets a VM cloned from its base image for that run and destroyed when the run
+   ends, whatever its outcome. A lease may hold several runs; each has its own VM and no VM is reused between two of them. A VM that has
+   run a job is never handed a second job, never reverted, never "cleaned".
+2. **The machine is reused; the VM is not.** The host serves many leases and runs (VM or container) in a row under the rules of 5.10; what
+   is fresh each time is the guest. A warm pool, to hide the boot, is future work (below) and not designed here.
 
 ### Where it fits: one lifecycle, two backend traits
 
@@ -53,11 +54,10 @@ above, nothing else. A fake `VmRuntime` (13.1) is the executable spec.
 
 | Flag | Meaning |
 |---|---|
-| `--vms <n>` | the most VMs at once, warm ones included; the `vms` fact |
+| `--vms <n>` | the most VMs at once; the `vms` fact |
 | `--vm-driver <path>`, `--vm-store <dir>` | the driver program (absolute path, no `PATH` lookup, its own environment) and the directory holding base images and clones |
 | `--vm-network none\|nat` | the guest's network; `none` by default |
 | `--vm-boot-timeout`, `--vm-log-cap`, `--vm-transfer-cap` | bounds on boot, on spooled log bytes and on archives over the channel |
-| `--vm-warm <image>=<n>`, `--vm-warm-max-age`, `--vm-warm-max-failures` | the warm pool (below) |
 | `--vm-allow-shares`, `--vm-allow-writable-shares` | read-only virtual shares, and writable ones (both off) |
 
 ### `JobSpec`: additive fields (R3)
@@ -73,7 +73,7 @@ capability `vms >= 1` is the gate, and an agent refuses a `vm` job when its VM b
 New `failed_to_start` details, plain constants beside the merged ones: `vm-unavailable`, `image-unavailable` (not in the store, or its
 manifest digest differs from the digest the job pinned), `vm-clone-failed`, `vm-boot-timeout`, `vm-guest-protocol`.
 
-### Lifecycle of one VM run (cold start)
+### Lifecycle of one VM run
 
 | Step | What happens | Held state |
 |---|---|---|
@@ -100,7 +100,7 @@ is `failed`, and the lease is rerun elsewhere under the platform-fault budget (8
 **Restart.** A VM does not survive its agent in this design: on start the agent lists the clones in its store (`list_clones`), stops and
 destroys every one, records each as a finding, and reports no held run for them. The scheduler reruns the work (D3(b), N3). A driver
 whose VMs outlive the agent could allow re-adoption later as an optional capability, additively; it is not a v1 rule. The sweep runs
-before the first heartbeat of the new process and before the warm pool is filled.
+before the first heartbeat of the new process.
 
 ### The guest channel
 
@@ -135,31 +135,17 @@ credential in a guest and the guest has no route to the metadata endpoint or to 
 
 Destroying the VM *is* the cleanup of everything the guest did; nothing in the guest is checked or trusted afterwards. The host checks of
 5.12 still run after every VM job, with one addition (a minimum list may grow, 5.12): the **VM store check**: every directory in the store
-is either a base image, or the clone of a run the agent holds or a warm VM it holds, and nothing else; anything else, or a driver
+is either a base image, or the clone of a run the agent holds, and nothing else; anything else, or a driver
 process the agent does not account for, is a finding. A finding, a failed destroy or a check that cannot run taints the host as for a
 container; a host with a tainted flag takes no VM lease. A guest that breaks the channel protocol is not a taint (the guest is
-untrusted by design); its VM is destroyed. A warm VM that shows any anomaly before assignment is destroyed, never assigned. The
+untrusted by design); its VM is destroyed. The
 scheduler's own taint at grant (5.12) is unchanged and never applies to a VM job, because a VM job cannot be `host`.
 
-### Warm pool (optional, per agent)
+### Future work
 
-A warm pool trades host memory for start time. Off by default. `--vm-warm <image>=<n>` (repeatable; R4) asks the agent to hold `n` warm VMs
-of that base image.
-
-- **A warm VM is fresh.** It was cloned from the base image and booted after the agent started, its guest said `Ready`, and it has never been
-  handed a job, an input or an `Exec`. It is destroyed, not reused, once it is older than `--vm-warm-max-age` (the agent's clock; stale
-  leases and clocks in a long-idle guest) and replaced. A warm VM is not a held run; the scheduler never sees it as a lease.
-- **Assigning one is irreversible.** Each warm VM's metadata records the digest of the base image it was cloned from. A `Start` for
-  `base_image = X` takes a warm VM of X whose size fits the request (D26) and whose recorded digest equals the digest the `Start` pins; one
-  that differs is destroyed and the agent cold-boots. The chosen VM is marked assigned; from then on it is a cold VM at step 5. If none fits, the agent cold-boots (steps 2 to 4). An assigned VM never goes back.
-- **Refill** is one VM at a time, after the freed capacity is back and only when all hold: the agent is `serving`; the host's free capacity
-  covers the VM's full size (below); no exclusive lease is pending or held (below); the pool is below target. A refill that fails backs off
-  (the merged backoff) and after `--vm-warm-max-failures` failures in a row stops until the next image change, with a finding and
-  `warm_images` not listing the image.
-- **Warm VMs count fully.** A booted VM holds its CPUs and memory whether or not a job runs in it, so a warm VM counts against the host and
-  against the `vms` counter at its full size (5.15).
-- The agent advertises `warm_images` (a fact; capabilities.md), which Rank may prefer. It is never a constraint: a request is served
-  cold if no warm VM exists.
+A pool of pre-booted VMs could hide the boot of each run; it is not designed here, and it would have to keep true that a pooled VM has
+never been handed a job, that handing it out is irreversible, that it was cloned from the image digest the `Start` pins, and that it
+counts in full in the host's accounting (5.15) while it waits.
 
 ### Base images and priming
 
@@ -167,41 +153,40 @@ A base image is a directory in `--vm-store` holding a disk, platform auxiliary f
 version, and the profile facts of capabilities.md. **Names are immutable:** a name never denotes different content. An operator primes a
 new image (installs the OS, Xcode, the simulator runtimes and `js-guest`, captures it) and gives it a new name, outside the agent;
 creating images is not an agent feature. The agent's own permissions on the image directories are read-only. It verifies a digest when an
-image first appears and when its manifest changes, and an image that fails is dropped from `base_images`. `base_images`,
-`image_profiles` and `warm_images` are facts (capabilities.md): a new image is a capability change, reaching the scheduler at the next
+image first appears and when its manifest changes, and an image that fails is dropped from `base_images`. `base_images`
+and `image_profiles` are facts (capabilities.md): a new image is a capability change, reaching the scheduler at the next
 heartbeat. A `Start` pins the image digest; a mismatch is `image-unavailable`. When an image leaves `base_images` (digest failure, removal)
-or its manifest or digest changes, the agent destroys every warm VM cloned from the old content at once and leaves them out of
-`warm_images`; the refill failure brake above is lifted by that change, not by waiting.
+or its manifest or digest changes, a run already started keeps the VM it was cloned with and later runs of that name are refused until
+the new content verifies.
 
 ## 5.15 Sharing a host, caps, and the whole-node class
 
-**One accounting.** A host's capacity vector (`cpu_millis`, `memory_bytes`, `vms`, `gpus`) is shared by containers, VMs and warm VMs. The
-agent offers the scheduler what it is *willing to give* (the existing rule; generalising.md): the host total, less its own reservations,
-which are the warm VMs. The scheduler books leases against that offer; the agent's own accounting is the last word and refuses a `Start`
-that does not fit with `no-capacity`, as the merged lifecycle does.
+**One accounting.** A host's capacity vector (`cpu_millis`, `memory_bytes`, `vms`, `gpus`) is shared by containers and VMs. The
+agent offers the scheduler what it is *willing to give* (the existing rule; generalising.md): the host total less what is booked. The
+scheduler books leases against that offer; the agent's own accounting is the last word and refuses a `Start` that does not fit with
+`no-capacity`, as the merged lifecycle does.
 
 - A **VM** books its configured CPUs (whole cores), its configured memory and one `vms`, in full, from the moment it is cloned until it is
-  destroyed; no overcommit. A VM is admitted only if each of those fits in what is free, where free counts every *booking* (a container's
-  memory booking counts in full here although containers may oversubscribe among themselves) and every warm VM.
+  destroyed; no overcommit. It is admitted only if each of those fits in what is free, where free counts every *booking* (a container's
+  memory booking counts in full here although containers may oversubscribe among themselves). A lease that holds several runs holds the
+  size of its VMs for its whole term; between two runs no VM exists, and the next run's VM is cloned inside the same booking.
 - A **container** is admitted as 6.2 says (`Book`), except that the total its memory is checked against is the host total less the memory
-  of all VMs, warm ones included. A warm pool therefore shrinks what containers can be admitted to.
-- `vms` is both a fact (the ceiling, capabilities.md) and a booked dimension (how many are taken). Warm VMs count in it. The pool's
-  lease-count cap (`max_leases`) counts leases; a warm VM is not a lease.
-- **Order.** When a warm VM is assigned to a lease the agent moves its size from "reserved" to "booked" and raises its offer in the same
-  step; it never raises the offer before the assignment and never lowers it below what is booked. A refill lowers the offer only out of
-  free capacity. The error direction is always under-use, never overcommit. A capacity change is emitted with the next heartbeat.
+  of all VMs that exist.
+- `vms` is both a fact (the ceiling, capabilities.md) and a booked dimension (how many are taken). The pool's lease-count cap
+  (`max_leases`) counts leases, not VMs.
+- **Order.** The offer rises only after the VM is destroyed and the slot freed (the cleanup order of 5.14), and falls at admission, before
+  the clone. The error direction is always under-use, never overcommit. A capacity change is emitted with the next heartbeat.
 
-Example. A host with 12 CPUs and 64 GiB, `vms = 2`, one warm VM of 4 CPUs and 16 GiB. The offer is 8 CPUs, 48 GiB, 1 `vms`. A VM lease of
-4 CPUs and 16 GiB books against the offer (free: 4 CPUs, 32 GiB) and the agent assigns the warm VM: the reservation drops to zero, the
-offer rises to 12 CPUs, 64 GiB, 2 `vms` (booked: 4, 16, 1). The refill needs 4 CPUs and 16 GiB of real free capacity, finds it, boots one,
-and the offer drops to 8 and 48 again (free: 4 CPUs and 32 GiB). A container job asking 40 GiB is refused on this host while a VM is leased
-and one is warm: its memory is checked against 64 - 32 = 32 GiB.
+Example. A host with 12 CPUs and 64 GiB, `vms = 2`. A lease of 4 CPUs and 16 GiB books against the offer of 12 CPUs, 64 GiB, 2 `vms`;
+the offer is now 8, 48, 1. Its first run clones and boots a VM of that size (booked: 4, 16, 1) and destroys it at the end; only then does
+the slot free. The lease's second run clones a new VM; the booking is the same. A container job asking 56 GiB is refused on this host
+while a VM exists: its memory is checked against 64 - 16 = 48 GiB.
 
 ### Whole-node lease class (exclusive; for performance tests)
 
 A whole-node lease is the class `whole_machine` (the design's `Whole` mode of 6.2; it is not in the merged `Admission`, where `BookAll` gives
 the whole host today; step 46 either introduces `Whole` or shows that `BookAll` plus the selection and drain rules below is enough; kbf's
-class of that name): it books every dimension and needs the host to itself. A performance test must see no other job and no idle booted VM, so the host is made quiet before the lease is usable.
+class of that name): it books every dimension and needs the host to itself. A performance test must see no other job and no booted VM of another run, so the host is made quiet before the lease is usable.
 
 1. **Selection and drain.** The scheduler picks a host with no lease and no running job, commits the lease, and places nothing else on the
    host from that moment (the choice and any placement commit under the table lock, first one wins; 5.10). A busy pool may never have such a
@@ -212,19 +197,17 @@ class of that name): it books every dimension and needs the host to itself. A pe
    `preparing` and `prepare_timeout` cannot be outrun by a long job. A re-place after `prepare_timeout` is capped at `max_replace` tries per
    request with a back-off between them, after which the request fails `exclusive-not-ready` to the consumer.
 2. **Preparing.** The scheduler's next heartbeat reply tells the agent an exclusive lease is granted (an additive field, `exclusive`:
-   lease id). The agent announces the phase `preparing` (the merged phase; no new leases), **stops the warm pool and destroys every warm
-   VM**, stops refilling, and runs the post-job checks (the host was empty at the commit, so no job runs).
-   `warm_images` becomes empty.
+   lease id). The agent announces the phase `preparing` (the merged phase; no new leases), **confirms that no VM is running** (the host was empty at the commit, so
+   none should be; one found is a finding and is destroyed), and runs the post-job checks, including the VM store check.
 3. **Ready.** The agent reports `exclusive_ready: lease id` in the heartbeat (additive) and returns to `serving`. Until the scheduler has
    that report the lease stays `pending` and **the lease token is not minted**: the consumer cannot reach the agent, so a consumer that
    knows nothing about readiness (an older client) simply waits. The agent also accepts a `Start` for the lease from nobody but the
    leasee while the lease lasts. If the agent is not ready within the pool's `prepare_timeout` (an injected clock), the scheduler gives
    the lease up as not ready (`exclusive-not-ready`), tells the consumer, and the request is placed again; a finding on the way taints
    the host as usual.
-4. **During.** Nothing else is placed. The warm pool stays off. The leasee may run containers or VMs inside its node (a VM is then cold-
-   booted, and counts fully as always).
-5. **End.** On release the agent removes what remains, runs the checks, announces `restoring`, refills the warm pool toward its target,
-   and returns to `serving`; only then may the scheduler place other work on the host. A tainted host is replaced instead (5.12).
+4. **During.** Nothing else is placed. The leasee may run containers or VMs inside its node (each VM is fresh for its run and counts fully
+   as always).
+5. **End.** On release the agent removes what remains, runs the checks, announces `restoring` and returns to `serving`; only then may the scheduler place other work on the host. A tainted host is replaced instead (5.12).
 
 The agent's heartbeat is how readiness is signalled; there is no side channel. A whole-node request never takes a host that
 `share` leases are using; it waits for one to empty, or drains one by the rule in step 1 (a request that names a node queues for that node,
@@ -233,39 +216,37 @@ and drains it by the same rule). Tests: with a stream of share leases, a queued 
 
 ## D26. The macOS VM sizing question (open; another engineer is answering it)
 
-**Question.** Is a VM's CPU count and memory fixed (a few declared size classes) or dynamic (chosen for each lease)?
+**Question.** Is a VM's CPU count and memory fixed (a few declared size classes) or dynamic (chosen for each run)?
 
 **Facts both options rest on.**
 - On macOS the virtualization framework fixes a VM's CPU count and memory size when the VM is created; neither can be raised or lowered
   while it runs.
 - A memory balloon device can reclaim memory from a running guest to the host and give it back, but only up to the configured size: it
   cannot grow a VM past what was configured at creation.
-- A VM is cloned from a base image and booted for each lease, so *creating* a VM with any size at lease time is possible; what costs is
-  the boot (the cost of steps 2 to 4 of the lifecycle; not measured here), which the warm pool exists to hide, and a warm VM is booted
-  before the lease it will serve is known.
+- A VM is cloned from a base image and booted for each run, so *creating* a VM with any size at run time is possible; what costs is the
+  boot (the cost of steps 2 to 4 of the lifecycle; not measured here), paid on every run because no VM is reused.
 - Host memory committed to booted VMs is not available to anything else (5.15); the macOS host cannot overcommit guest memory in the way a
   Linux container host oversubscribes among containers.
 
 **Option A: fixed size classes.** The agent declares a small set of sizes (say `small`, `large`: CPUs, memory), set by flag. A lease
-names a class. Warm pool entries are per (image, class). *Warm pools:* every warm VM can serve any lease for its (image, class), so hit
-rates are high and a lease never gets a VM bigger than it asked for. *Caps:* bookings are a few quantized vectors, the `vms` counter and
-the arithmetic of 5.15 are simple, and the scheduler can reason about how many VMs of each class fit. *Cost:* a job that needs more than
-the biggest class cannot run in a VM; a job that needs less pays for a whole class; many classes dilute the warm pool.
+names a class and every VM of its runs is that size. *Caps:* bookings are a few quantized vectors, the `vms` counter and the arithmetic
+of 5.15 are simple, and the scheduler can reason about how many VMs of each class fit. *Cost:* a job that needs more than the biggest
+class cannot run in a VM; a job that needs less pays for a whole class.
 
-**Option B: dynamic, per lease.** A lease states CPUs and memory (within the host and the image). The VM is cloned and booted at that
-size. *Warm pools:* a warm VM exists at a size fixed in advance (the pool's declared warm profile), so it serves a lease only if the lease
-asks for no more than it has; the lease is then booked at the **VM's** size, not the request's, since the VM cannot shrink (its CPUs
-cannot be reduced at all; memory can be handed back to the host by the balloon but the configured size stays the ceiling). Any lease that
-no warm VM fits is cold-booted at exactly its size. *Caps:* bookings are arbitrary vectors, so fragmentation is the scheduler's
-problem (6.5 packing matters more), and a warm VM's full size is reserved whichever lease may or may not use it. An optional balloon could
-return the idle memory of a warm VM to the host and take it back at assignment, never past the configured size. *Cost:* more cold boots
-for sizes the pool does not hold; a more complex booking.
+**Option B: sizing per run.** A lease states CPUs and memory (within the host and the image), and each run's VM is cloned and booted at the
+size that run needs, within the lease's booking. *Caps:* bookings are arbitrary vectors, so fragmentation is the scheduler's problem (6.5
+packing matters more), and the lease's booking is the largest VM any of its runs will ask for. *Cost:* the VM cannot shrink (its CPUs
+cannot be reduced at all; memory can be handed back to the host by a balloon but the configured size stays the ceiling), so a run is
+booked at the size it was created with; the booking is more complex.
+
+**The trade-off is boot cost per run.** Under both options every run boots a VM. A is simpler to book and to reason about; B wastes less
+memory and refuses fewer jobs but books arbitrary vectors. Neither option changes the cost of a boot.
 
 **What each implies for the rest of the design.** The wire carries the VM's CPUs and memory in every VM job under both options, so the
-choice is policy and not a wire change. In A the warm-pool key is (image, class) and `vm_sizes` is agent configuration; in B the key is
-(image) with a declared warm profile and the lease carries its own sizes. The model of 5.15 holds for both: the booking is always the
-size the VM was created with. **To be decided by the project owner when the sizing answer arrives; this design needs no change in the
-lifecycle, the channel or the integrity rules either way.** Until then the steps that depend on it (the size fields in step 43, and step 45) are not started.
+choice is policy and not a wire change. In A `vm_sizes` is agent configuration; in B the lease carries its sizes. The model of 5.15 holds
+for both: the booking is always the size the VM was created with. **To be decided by the project owner when the sizing answer arrives;
+this design needs no change in the lifecycle, the channel or the integrity rules either way.** Until then the size fields of step 43 are
+not started.
 
 ## Tests (13.1, 13.2)
 
@@ -273,12 +254,10 @@ The fake `VmRuntime` is in memory with a controllable clock and scripted outcome
 that sends a bad frame, a second `Ready`, an oversized frame, floods of log frames, an unannounced exit (`Gone`), a destroy that fails,
 a leaked clone, an image whose digest changed, and a store that holds an unaccounted directory. Conformance cases (agent suite, Phase F
 of the steps): a VM is destroyed before the slot is freed, and a failed destroy frees nothing and taints; **no VM serves two runs** (the
-fake counts VM ids per run id and fails on a repeat); a warm VM is destroyed, not reused, at the max age; assignment is irreversible and a
-refused assignment cold-boots; a warm VM whose recorded digest differs from the `Start`'s is destroyed and the run cold-boots; dropping or
-changing an image destroys its warm VMs at once and removes them from `warm_images`; refill respects free capacity, one at a time, and the failure brake; warm VMs count in `vms` and in the
-offer, with the order of 5.15 (the offer is never above total less booked less warm at any step of a seeded run); a container job is
-refused when VM memory leaves too little; the whole-node sequence: warm VMs are gone, no refill, the token is not minted before
-`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a drain places nothing new and ends at its deadline, release
-refills; restart sweeps every clone; a `host` VM job and a GPU VM job are
+fake counts VM ids per run id and fails on a repeat, and a lease with two runs sees two VM ids); VMs count in `vms` and in the offer, with
+the order of 5.15 (the offer is never above total less booked at any step of a seeded run); a container job is refused when VM memory
+leaves too little; the whole-node sequence: no VM is running at `preparing`, a VM found there is a finding, the token is not minted before
+`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a drain places nothing new and ends at its deadline; restart
+sweeps every clone; a `host` VM job and a GPU VM job are
 refused; mounts are copied in and out and the guest never holds a writable host path; a hostile frame corpus ends the run and never
 taints. No test asserts elapsed time (R2): boots, ages and timeouts are counted on the injected clock.

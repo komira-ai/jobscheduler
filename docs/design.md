@@ -76,9 +76,13 @@ The decisions, in one place:
     and taints on any finding, and a tainted machine takes no work and is replaced, never cleared on the agent's word (5.12).
 15. **Capabilities are typed data; consumers translate into constraints.** An agent advertises scalars, version sets and counters; the
     scheduler matches equality, membership, version ranges and counters, and knows no consumer's words (5.13).
-16. **A VM per lease, never reused.** The machine is reused, the guest is not: a fresh VM is cloned, booted, used and destroyed for each
-    lease, with an optional warm pool of fresh unassigned VMs. VMs share a host with containers under the caps; a whole-node class gives a
-    performance test the host alone (5.14, 5.15).
+16. **A fresh VM per run, never reused.** The machine is reused, the guest is not: a VM is cloned, booted, used and destroyed for each
+    run, and a lease may hold several runs. VMs share a host with containers under the caps; a whole-node class gives a performance test
+    the host alone (5.14, 5.15).
+17. **GPUs only on the GPU pool.** GPUs exist only on the Mac Studio machines of the GPU pool (`gpu_class` `apple-m`); a GPU request is
+    satisfiable only there (D32, [design/capabilities.md](design/capabilities.md)).
+18. **One service in Kubernetes.** The target is one jobscheduler service (scheduler, lease API, agent API) with a single writer on a
+    volume; kbf is a client and `js-agent` registers with it. The single-host `js-lease-server` is the stepping stone (5.16, D33).
 
 ### 1.1 What this amendment deletes and adds
 
@@ -97,10 +101,13 @@ the merged crates (5.9); the fake aws and the fake agent's taint paths (13.1); s
 and risks K8 to K18. The pool keys `min` and `max` are renamed `min_machines` and `max_machines`.
 
 Added by the capabilities amendment: typed capabilities, a constraint language and refusal codes (5.13,
-[design/capabilities.md](design/capabilities.md)); a VM backend in `js-agent` with a fresh VM per lease, an optional warm pool, the guest
-channel and VM integrity (5.14); shared hosts and a whole-node class (5.15, [design/vm-backend.md](design/vm-backend.md)); the terms of
-section 3; steps 36 to 47; decisions D26 to D31 (D26 open); risks K19 to K27. Text moved to companions to keep this file short: 5.6,
-12.1 to 12.3 and steps 23 to 35.
+[design/capabilities.md](design/capabilities.md)); a VM backend in `js-agent` with a fresh VM per run, the guest channel and VM integrity
+(5.14); shared hosts and a whole-node class (5.15, [design/vm-backend.md](design/vm-backend.md)); the terms of section 3; steps 36 to 47;
+decisions D26 to D31 (D26 open); risks K19 to K27. Text moved to companions to keep this file short: 5.6, 12.1 to 12.3 and steps 23 to 35.
+
+Added by the refinement that followed: a fresh VM per run, the warm pool left as future work in [design/vm-backend.md](design/vm-backend.md);
+GPUs only on the GPU pool (D32); one service in Kubernetes: objects, state store, high availability, upgrades and the move from the single
+host (5.16, [design/deployment.md](design/deployment.md)); step 45 (now several runs per lease) and steps 48 to 53; D32 to D34; K28 to K31.
 
 ## 2. Goals and non-goals
 
@@ -166,10 +173,10 @@ Non-goals:
   string pairs today; the typed form is an additive field.
 - **Constraint.** One need of a request over one capability: key, op, value and scope (`host` or `guest`). A request's constraints all
   hold or the host does not match (5.13).
-- **Base image, VM, warm VM.** A *base image* is a named, immutable disk image primed by an operator, with a profile of facts. A *VM* is a
-  fresh clone of one, booted for one lease and destroyed after it; it is never reused. A *warm VM* is one booted ahead, never yet handed
-  a job; assigning it to a lease is irreversible (5.14).
-- **Whole-node lease.** The lease class `whole_machine`: the host is quiet and exclusive for the lease, warm VMs destroyed (5.15).
+- **Base image, VM, run.** A *base image* is a named, immutable disk image primed by an operator, with a profile of facts. A *run* is one
+  execution of a job inside a lease; a lease may hold several. A *VM* is a fresh clone of a base image, booted for one run and destroyed
+  after it; it is never reused, not even by the next run of the same lease (5.14).
+- **Whole-node lease.** The lease class `whole_machine`: the host is quiet and exclusive for the lease, with no VM running (5.15).
 - **Booking.** The amount of a pool's resource vector the scheduler counts as taken by a lease. A booking is not a limit; the limit is
   what the agent enforces (7.3).
 - **Request history.** What the scheduler has learned about past attempts of similar work: peak memory, CPU parallelism, kills,
@@ -457,7 +464,7 @@ job is `contained` (default) or `host`; a host job or any failed check taints it
 
 ### 5.13 Capabilities as data
 Text in [design/capabilities.md](design/capabilities.md). An agent advertises typed facts: scalars (`arch`, `os`, `os_version`), sets
-(`xcode`, `sim.ios`, `base_images`, `warm_images`) and counters (`vms`); the facts of each primed base image travel as its profile. They
+(`xcode`, `sim.ios`, `base_images`), counters (`vms`) and the GPU class (`gpu_class`); the facts of each primed base image travel as its profile. They
 ride an additive `facts` field of `Hello` (major 1 stays), refreshed by a full snapshot in the heartbeat when a revision changes,
 acknowledged like the taint; an old server ignores them, and a new agent mirrors its scalars into the legacy string map. A request carries
 up to 32 constraints that must all hold: equality and membership on text; `eq`, `gt`, `ge`, `lt`, `le`, `series`, `range` on versions (a
@@ -467,21 +474,27 @@ matches when one image's profile meets all its constraints. A malformed constrai
 constraints is kbf's configuration; the companion has the worked example.
 
 ### 5.14 The VM backend
-Text in [design/vm-backend.md](design/vm-backend.md). `js-agent` gains a VM runtime beside the container one. **A fresh VM per lease; a
+Text in [design/vm-backend.md](design/vm-backend.md). `js-agent` gains a VM runtime beside the container one. **A fresh VM per run; a
 VM is never reused:** it is cloned from a base image, booted, given its inputs over a guest channel, run, collected, stopped and
-destroyed, whatever the outcome; the host, not the VM, is reused (5.10). The lifecycle stays one state machine over a small `Sandbox`
+destroyed, whatever the outcome; a lease may hold several runs and each has its own VM; the host, not the VM, is reused (5.10). The lifecycle stays one state machine over a small `Sandbox`
 seam with two backend traits (`ContainerRuntime` unchanged, a new `VmRuntime`; D28). The guest channel is one hypervisor-tied stream per
 VM with bounded frames; nothing of the host is shared writable; the guest is untrusted. The cleanup order is the VM, the scratch, the
-checks, the slot; a failed destroy taints the host; destroying the VM is the cleanup of the guest. An optional warm pool per agent holds
-fresh booted VMs that have never held a job; assignment is irreversible. A base image is named, immutable and primed outside the agent;
-`base_images` is a capability.
+checks, the slot; a failed destroy taints the host; destroying the VM is the cleanup of the guest. A base image is named, immutable and primed outside the agent; `base_images` is a capability.
 
 ### 5.15 Sharing a host, and the whole-node class
-Text in [design/vm-backend.md](design/vm-backend.md). VMs, warm VMs and containers share one host's CPU, memory and `vms` counter: a booted
-VM counts in full whether or not a job runs in it; containers are admitted against the total less VM memory; the agent offers what it
-will give and never raises its offer before an assignment. A whole-node lease makes the host quiet before it is usable: the agent
-announces `preparing`, destroys the warm VMs, stops refilling and reports ready in its heartbeat, and the lease token is minted only
-then. The macOS VM sizing question (fixed or dynamic CPU and memory) is open as D26.
+Text in [design/vm-backend.md](design/vm-backend.md). VMs and containers share one host's CPU, memory and `vms` counter: a VM counts in
+full from clone to destroy; containers are admitted against the total less VM memory; the agent offers what it will give and raises its
+offer only after a VM is destroyed. A whole-node lease makes the host quiet before it is usable: the agent announces `preparing`, confirms
+that no VM is running and reports ready in its heartbeat, and the lease token is minted only then. The macOS VM sizing question (fixed
+size classes or sizing per run; the boot cost per run is the trade-off) is open as D26.
+
+### 5.16 Deployment: one service in Kubernetes
+Text in [design/deployment.md](design/deployment.md). The target is one jobscheduler service in a Kubernetes cluster: the scheduler, the
+lease API and the agent API in one process. The kbf frontend is a client that asks it for capacity; `js-agent`, the generic half of the
+kbf daemons, registers with it from every machine. Today's single-host `js-lease-server` is the stepping stone and the same binary. It
+runs as a `Deployment` of one replica under `Recreate`, with the lease file and the binding file on a volume that only one pod can use
+(D33), secrets and configuration as mounted files and TLS end to end. Durable, not highly available: a restart or a node loss is a bounded
+outage, leases survive in the file, agents re-hello, and a boot grace keeps leases from expiring unrenewed (D34). Servers upgrade first.
 
 ## 6. Placement
 
@@ -520,7 +533,7 @@ The class separates dimensions that *gate* admission from dimensions that are *c
 `Book({cpu_millis, gpus, vms})` as the gate set, bounded by the pool's separate lease-count cap (section 3); memory is gated only
 against the pool's total (a request above it does not fit; a request equal to it is exclusive), and the grant still counts the whole
 request, memory included, in the pool's booked total, on which `Rank` (`Load`) reads the memory share. This is today's behaviour (4.1),
-and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `Book({cpu_millis, memory_bytes, vms})` at the sizes the VM is created with (D26, open): a VM books its configured CPUs and memory in full, no overcommit, and shares a host with containers and warm VMs (5.15); the earlier intent to admit `Vm` as `BookAll` is superseded by 5.15. `WholeMachine` maps to `Whole`, the only class that takes the whole host. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the recommended admission is `BookAll` (D7); this is booking, not reservation, and per class, so it does not conflict with R1.
+and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `Book({cpu_millis, memory_bytes, vms})` at the sizes the VM is created with (D26, open): a VM books its configured CPUs and memory in full, no overcommit, and shares a host with containers (5.15); the earlier intent to admit `Vm` as `BookAll` is superseded by 5.15. `WholeMachine` maps to `Whole`, the only class that takes the whole host. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the recommended admission is `BookAll` (D7); this is booking, not reservation, and per class, so it does not conflict with R1.
 
 **Selecting pools.** A class says how a lease is admitted; it does not say where. A level-1 lease request (9.1) carries a class and label
 selectors, and the scheduler offers it the pools whose `class` is that class and whose labels satisfy every selector (equality on
@@ -664,7 +677,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-provider-fake` (merged) | new | the merged fake provider; becomes the fake aws at step 28 (13.1) |
 | `js-conformance` (merged) | new | the machinery; gains the two suites and their broken providers (13.2) |
 | `js-lease` (merged) | new | the lease table: states, TTL, reaper, lease file; gains `acquiring` and the pool name (5.9) |
-| `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; gains registration and the pool-scaler tick |
+| `js-lease-server` (merged) | new | level 1 over HTTP; `CapacitySource`; gains registration and the pool-scaler tick; is the service of 5.16 (readiness, boot grace and a state check at steps 48 to 50) |
 | `js-cli` (merged) | new | the level-1 client; gains pool selection |
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
@@ -676,7 +689,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
-| `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend and warm pool (5.14) |
+| `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend (5.14) |
 | `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs` of `kbf-driver-container` | node-local containment; `js-agent` depends on it |
 | `js-sim` | `crates/kbf-sim*` | invariants and replay |
 
@@ -759,7 +772,7 @@ launch failure, slow boot, an `acquire` accepted but answered Unknown, a `releas
 side: loss, fence, out-of-memory kill, node pressure, phase changes, unknown observations and slow starts, and the taint paths: a host
 job (also one that reports no taint), each post-job check finding something, a cleanup failure, and a taint report lost and resent. A fake
 VM runtime (in memory, scripted: clone failure, a boot that never says ready, hostile guest frames, an unannounced exit, a failed destroy,
-a leaked clone, a changed image) and the fake agent's warm pool and whole-node sequence are described in
+a leaked clone, a changed image) and the fake agent's whole-node sequence are described in
 [design/vm-backend.md](design/vm-backend.md). Starting points:
 `kbf_daemon::Runtime`'s fake in `crates/kbf-daemon/src/runtime.rs` and `crates/kbf-sim-cell`. The fakes are the executable spec, as in
 ucdk (`ucdk/crates/ucdk-provider-fake`).
@@ -768,20 +781,14 @@ ucdk (`ucdk/crates/ucdk-provider-fake`).
 `js-conformance` keeps its machinery (`Subject`, `Check::ALL`, `Verdict::NotApplicable`, which lists a check a subject cannot take part
 in and never skips it silently) and runs two suites, each over every implementation including the fakes.
 
-*Capacity-provider suite:*
-
-- `acquire` is idempotent on the acquire id; an Unknown `acquire` followed by a retry does not launch a second instance;
-- `release` reads back; releasing an absent instance is fine; a `release` answered Unknown frees nothing; Absent frees a booking once;
-- `list` returns only tagged instances, and a `list` error is not an empty list; tags are present on every created instance (the
-  follow-up named in the `js-conformance` crate doc); a quota or capacity error maps to `Refused`;
-- the pool never exceeds `max_machines` with acquires in flight, Unknown or tainted hosts counted, and a tainted instance is released and
-  replaced only after its release reads back Absent; a tainted static host is cordoned and a tainted registered id is refused at hello.
+*Capacity-provider suite:* in [design/invariants.md](design/invariants.md): `acquire` idempotent on the acquire id, `release` read back,
+`list` tagged and never an empty list on error, and the pool never above `max_machines`.
 
 *Agent suite:* the cases are in [design/agent-suite.md](design/agent-suite.md): start idempotency, cancel resend, stale and duplicate
 results, graded absence, validity bound and `NeverStarted`, unknown phase, usage on failure, each start-contract rule, the reuse and
 taint cases (container and scratch gone before the slot frees, the three consents for a host job, each post-job check, sticky and
 resent taint, no `Start` on a tainted host), the per-session rules, and the VM cases (no VM serves two runs, destroy before the slot frees,
-warm VMs destroyed and not reused, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
+one VM per run, the whole-node sequence; listed in [design/agent-suite.md](design/agent-suite.md)). A third suite, the
 **constraint suite** of [design/capabilities.md](design/capabilities.md), runs the evaluator over every op, kind and refusal code and the
 ordering properties of versions; the server and the kbf table both pass its worked example.
 The hooks **read the real state**: for the fakes, their internal tables; for aws, an independent `DescribeInstances` made apart from the
@@ -792,18 +799,11 @@ Conformance against a real account runs only in a sandbox account, on the owner'
 
 ### 13.3 Simulation
 The scheduler invariants I1 to I16 and L1 to L4 are checked after every input in seeded sweeps. For the kbf instantiation, the golden
-trace hashes (step 0) must be identical before and after each extraction PR. New invariants: an Unknown observation never frees a
-booking; an Absent observation frees it exactly once; a pool never launches two instances for one acquire id; a pool never exceeds `max_machines`
-(in-flight acquires and tainted hosts counted), never acquires more than `max_step` in a tick, and keeps `min_machines` hosts whether or
-not there is demand (never released at or below it); queued work that fits a freed slot is placed on that host before any acquire; a
-tainted host takes no lease and is never untainted by a hello, a heartbeat or a Result, even when the agent reports no taint after a host
-job (the scheduler tainted it itself); a tainted host id is refused at admission; a pool stops replacing after `max_taints_in_a_row`; a
-host holding a lease is never released, including when a lease commits between selection and release; a host in `releasing` takes no lease
-or placed job (run service, ucdk), selection and placement committing under the table lock, first one wins; a host's offer is never above
-its total less booked less warm VM size at any step, and a VM id serves one run only; a whole-node lease's token is never minted before
-the agent reports ready; a stale or repeated facts revision never changes what is stored; a pool with a failing boot stops
-acquiring after `max_boot_failures`; the reaper never releases an instance whose agent holds leases; every instance in `list` is a pool host or is being reaped. A kbf case: an out-of-memory kill at the top rung of a half-node
-lease is rerun in a whole-node lease (7.4).
+trace hashes (step 0) must be identical before and after each extraction PR. The new invariants are in
+[design/invariants.md](design/invariants.md): an Unknown observation never frees a booking and an Absent one frees it once; a pool never
+launches twice for one acquire id and never exceeds `max_machines` or `max_step`; a tainted host takes no lease; a host's offer is never
+above its total less booked, a VM id serves one run only, and a whole-node token is never minted before the agent reports ready; a GPU
+request is never granted a host without one (D32); a boot never reissues an id and a second table fails at the lock (5.16).
 
 ### 13.4 Request-history replay
 The replay harness of `kbf-estimator-replay` is the template; see [design/extraction-steps.md](design/extraction-steps.md).
@@ -833,12 +833,13 @@ step 16a; `js-provider` and `js-provider-fake` are the host-booking part of step
 Steps 23 to 35 (Phase D, new capability; Phase E, capacity providers and pools) and **Phase F, steps 36 to 47 (capabilities as data
 and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
 (38), needs and matching (39), kbf's table (40), the `Sandbox` seam (41), `VmRuntime` and its fake (42), the VM lifecycle (43), mixed-host
-accounting (44), the warm pool (45), whole-node readiness (46), the first real driver (47); steps 43 (sizes) and 45 wait for D26. All are in
-[design/extraction-steps-d.md](design/extraction-steps-d.md).
+accounting (44), several runs per lease (45), whole-node readiness (46), the first real driver (47); the size fields of step 43 wait for D26.
+**Phase G, steps 48 to 53 (one service in Kubernetes)**: readiness (48), the boot grace (49), the state check (50), manifests and image
+(51), the client side (52), the move from the single host (53). All are in [design/extraction-steps-d.md](design/extraction-steps-d.md).
 
 ## 15. Decisions
 
-Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to D31 with no gaps; D26 is open and has no recommendation yet.
+Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to D34 with no gaps; D26 is open and has no recommendation yet.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -897,12 +898,12 @@ package (10.3).
   event. (b) Keep the synchronous call with a timeout and answer every slow launch Unknown. Recommend (a).
 - **D20. Config format and validation.** One TOML file, `deny_unknown_fields`, validated whole at load, secrets as paths, no reload in
   the first slice (a restart re-reads it). Alternatives: one file per provider, or YAML. Recommend one TOML file, as `js-pool-static` does.
-- **D21. Who pays cold start.** (a) The queue: a request waits while an instance boots; (b) `min_machines` warm hosts per pool. Recommend (a) as the
+- **D21. Who pays cold start.** (a) The queue: a request waits while an instance boots; (b) `min_machines` idle hosts per pool. Recommend (a) as the
   default and `min_machines` as the owner's per-pool choice; the wait counts toward `UNSERVABLE_WAIT` (8.2).
 - **D22. Work-session topology.** (a) The agent dials the consumer; (b) the consumer dials the agent; (c) the scheduler relays. Recommend
   (a): agents only dial out, as the kbf daemon does today (4.4), and the scheduler stays out of the data path.
 - **D23. Machine reuse and release.** (a) One machine per job, terminated after it; (b) a machine serves jobs back to back and is
-  released after `idle_timeout`; (c) b plus a warm floor (`min_machines`). Recommend (b), (c) per pool at the owner's choice (D21). Reuse
+  released after `idle_timeout`; (c) b plus a floor of idle hosts (`min_machines`). Recommend (b), (c) per pool at the owner's choice (D21). Reuse
   is safe because the agent removes the container and scratch and checks the host after every job (5.10, 5.12).
 - **D24. Caps.** (a) `max_machines` only; (b) `max_machines` plus a per-tick `max_step`, bounded to real queued demand; (c) b plus a
   consumer cap. Recommend (c); the consumer cap is the consumer's own and is not read by the scheduler. This is overload protection, not
@@ -913,30 +914,42 @@ package (10.3).
   before the job runs. Recommend (c), host jobs off by default and needing consumer, pool and agent consent (5.12). The scheduler's record is of what it granted, not a check of the host, so it does not depend on an agent that may be compromised; the agent's report is the second path.
 - **D26. macOS VM sizing: fixed or dynamic CPU and memory. OPEN; another engineer is answering it, and the answer is folded in here.**
   Facts: the virtualization framework fixes a VM's CPU count and memory at creation; a memory balloon can only reclaim memory and give it
-  back, never grow a VM past its configured size; a VM is cloned and booted for each lease, so any size can be chosen at lease time, and
-  the boot cost is what a warm pool hides; booted VM memory is committed in full (5.15). (A) **Fixed size classes** declared by the agent;
-  a lease names a class; the warm pool is keyed (image, class), so any warm VM serves any lease of its key and no lease gets more than it
-  asked; bookings are a few quantized vectors; a job larger than the largest class cannot use a VM and a small job pays for a class.
-  (B) **Dynamic, per lease**: the lease states CPUs and memory and the VM is created at that size; a warm VM exists at a size fixed in
-  advance, serves only a lease that asks for no more, and is booked at the VM's size, not the request's; any other lease cold-boots; an
-  optional balloon returns idle warm memory but never exceeds the configured size; bookings are arbitrary, so packing matters more (6.5).
-  The wire carries the VM's size under both, and the lifecycle, the channel and the integrity rules do not change; only the size fields
-  (step 43) and the warm pool (step 45) wait. No recommendation until the answer arrives; detail in [design/vm-backend.md](design/vm-backend.md).
+  back, never grow a VM past its configured size; a VM is cloned and booted for each run, so any size can be chosen when the run starts;
+  booted VM memory is committed in full (5.15). (A) **Fixed size classes** declared by the agent; a lease names a class; bookings are a
+  few quantized vectors; a job larger than the largest class cannot use a VM and a small job pays for a class. (B) **Sizing per run**: the
+  lease states CPUs and memory and each run's VM is created at the size it needs, within the lease's booking; bookings are arbitrary, so
+  packing matters more (6.5). The trade-off is the boot cost per run, which neither option changes. The wire carries the VM's size under
+  both, and the lifecycle, the channel and the integrity rules do not change; only the size fields (step 43) wait. No recommendation
+  until the answer arrives; detail in [design/vm-backend.md](design/vm-backend.md).
 - **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
   `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
   scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
 - **D28. Runtime traits for VMs.** (a) Widen `ContainerRuntime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
   internal `Sandbox` seam; (c) a second lifecycle. Recommend (b): the stages, channel, destroy and restart rules differ, (a) forces optional
   parts on every backend and changes merged code, and (c) writes the cleanup order, results and slot accounting twice (5.14).
-- **D29. VM reuse. Settled by the project owner:** a fresh VM for each lease, never reused, with an optional warm pool of fresh booted VMs
-  per agent. Rejected: reverting a used VM to a snapshot or cleaning it in place, because what remains of a guest after a job cannot be
-  shown to be clean; destroying it can. The cost is a boot per lease, which the warm pool and D26 bear.
-- **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has drained
-  the warm pool and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test start
-  beside a booted idle VM, and the token gate needs no change in an older client (5.15).
+- **D29. VM reuse. Settled by the project owner:** a fresh VM for each run, cloned from its base image and destroyed after the run; a lease
+  may hold several runs and never reuses a VM between them. Rejected: reverting a used VM to a snapshot or cleaning it in place, because
+  what remains of a guest after a job cannot be shown to be clean; destroying it can. The cost is a boot per run, which D26 weighs.
+- **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has confirmed
+  that no VM is running and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test
+  start beside a booted VM, and the token gate needs no change in an older client (5.15).
 - **D31. Matching what is inside an image.** (a) The consumer names the image and constrains `base_images has <name>`; (b) each image has a
   profile and a `guest` scope matches when one image meets all the guest constraints. Recommend (b), with (a) always available: Xcode and
   runtimes are properties of the image the VM boots, and a consumer should ask for what it needs, not memorise image names (5.13).
+- **D32. GPU placement. Settled by the project owner:** GPUs exist only on the Mac Studio machines of the GPU pool (two today). Their shape
+  declares `gpu_class = "apple-m"` and `gpus = 1`; a GPU request (`gpus > 0` or a `gpu_class` constraint) is satisfiable only by that pool
+  and queues when its hosts are busy, with no acquire made for it. The whole-host GPU lease service (class `gpu-host`, `BookAll`) is the
+  only GPU path; a VM gets no GPU; container GPU jobs on Linux are not a current use ([design/capabilities.md](design/capabilities.md)).
+- **D33. Deployment shape and state store. Direction settled by the project owner; the store is chosen here.** The target is one service in
+  Kubernetes (scheduler, lease API, agent API) with kbf as a client and `js-agent` registering with it; the single-host `js-lease-server`
+  is the stepping stone. State: (a) the lease file and the binding file on a volume, one writer; (b) an external store with conditional
+  writes. Recommend (a): it is the merged persistence with its crash-safety rules (atomic replace, commit before act, the lock, fail-closed
+  boot, observe once) unchanged; the table is small; there is nothing more to operate. (b) when the service must survive a node or zone
+  loss without a minutes-long outage, when the rewrite shows (K29), or when a second replica is wanted. One replica under `Recreate`
+  (5.16, [design/deployment.md](design/deployment.md)).
+- **D34. Leases across a restart.** (a) As merged: the first tick after a boot expires every lease whose expiry passed in the outage;
+  (b) none expires before `--boot-grace` has passed after a boot (off by default); absent and unknown observations are unchanged.
+  Recommend (b), the grace set to the default TTL (step 49).
 
 ## 16. Risks
 
@@ -982,16 +995,5 @@ package (10.3).
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,
   `cooldown` and `max_machines`, and by `max_taints_in_a_row` stopping replacement with an alert (5.12).
-- **K19. A wrong constraint places work on a host that cannot run it, or on none.** Skipping an unknown op, reading an absent fact as zero,
-  or matching images one constraint at a time would. Mitigated by refusing unknown ops, absent-is-unmet, one-image guest scope, and the constraint suite (5.13).
-- **K20. Stale or false facts.** An agent that reports a runtime it lost, or a snapshot lost in transit, misleads placement. Mitigated by full
-  snapshots with an ack, the agent re-probing after each job, and the agent refusing a `Start` it cannot honour (`image-unavailable`); a fact never reaches a lease already granted. A server from before this change would skip `needs` and place unconstrained: the consumer reads the server's `features` and refuses to send `needs` or `runtime = vm` without `needs` support (10.3, capabilities.md).
-- **K21. A guest attacks the host through the channel or the hypervisor.** Mitigated by a bounded, fuzzed frame codec, no shared writable host
-  path, no network by default, no credential in a guest, host checks after every VM job, and taint on a failed destroy (5.14). A hypervisor escape is not
-  covered by any check here.
-- **K22. Warm VMs starve the host.** Idle booted VMs hold memory containers could use. Mitigated by counting them in full, refilling only into free capacity, one at a time, a failure brake, and a pool that is off by default (5.15).
-- **K23. Base image drift.** A mutable image would make two leases differ. Mitigated by immutable names, a digest pinned in the `Start` and verified (5.14).
-- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and a drain rule with a drain deadline and at most one draining host per pool (5.15, vm-backend.md).
-- **K25. Boot cost per lease.** A boot each time; bounded by the warm pool, whose hit rate D26 decides.
-- **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
-- **K27. Advertised facts are unverified claims.** A registered agent can claim any fact, `sandbox=vm` isolation included. Bounded: facts never override pool selection by class and labels, the lease token still binds one consumer, and a lie costs queueing, misplacement or refusal and the agent its taint and deny-file path; a consumer needing isolation leases from a pool whose operator it trusts (Trust, capabilities.md).
+- **K19 to K31** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), and for the
+  service one pod as one point of outage (K28), the whole-file rewrite (K29), the volume as the state (K30), root for secrets (K31).

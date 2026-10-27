@@ -37,8 +37,8 @@ sender that lists `16` and `16.0` is read as listing it once.
 | `xcode` | `set_version` | the versions of the Xcode applications installed |
 | `sim.ios`, `sim.tvos`, `sim.watchos`, `sim.visionos` | `set_version` | the simulator runtime versions installed, one key per platform |
 | `base_images` | `set_text` | the names of the primed VM base images the host holds (5.14) |
-| `warm_images` | `set_text` | the subset of `base_images` for which a warm VM is booted and unassigned right now (5.14); a rank hint, never a constraint |
-| `vms` | `count` | the most VMs the host runs at once, warm ones included |
+| `vms` | `count` | the most VMs the host runs at once |
+| `gpu_class` | `text` | the GPU the host's shape declares (`apple-m` on the Mac Studio machines of the GPU pool); absent on a host with no GPU (GPUs, below) |
 
 An agent reports a key only when it can: a probe that fails reports the key absent and a warning (as the merged GPU probe does). An
 operator may add or pin a fact the agent cannot probe with a repeatable flag `--cap key=value` (R4; the value is parsed by the key's
@@ -86,8 +86,8 @@ major 1 stays (the rules of `protocol.rs`: fields are only added; a receiver ign
 
 Facts are unverified claims. They come from an agent that has already passed the pool credential and the id binding (5.8), so a hostile
 agent can attract only work that the pool's consumers already hand to its pool: it cannot reach another pool or consumer, because a lease
-token binds it to one consumer. Facts never override pool selection by class and labels. A false `arch`, version set, image profile, `vms`,
-`warm_images` or `exclusive_ready` can at most cause queueing, misplacement or refusal, and a lie found out costs the agent its taint and the
+token binds it to one consumer. Facts never override pool selection by class and labels. A false `arch`, version set, image profile, `vms`, `gpu_class`
+or `exclusive_ready` can at most cause queueing, misplacement or refusal, and a lie found out costs the agent its taint and the
 deny-file path (5.12). The claim `sandbox=vm` is the one that is a security property (isolation), and the scheduler cannot check it: a
 consumer that needs isolation leases from a pool whose operator it trusts to run the VM backend (K27).
 
@@ -98,14 +98,14 @@ every hello, so the lease file does not hold it. A lease records, additively (R3
 A change reaches the scheduler at the next heartbeat; a change never touches a lease already granted (a runtime removed under a running
 job is the job's problem), and it applies to every grant after the revision is stored. The agent re-probes at start, after a job (the
 post-job check hook of 5.12 already runs then), after any VM store change, and every `--facts-interval`; it bumps the revision only when
-a value changed. `warm_images` changes with the warm pool and is the one fact that changes often.
+a value changed.
 
 ## Constraint language
 
 A request carries `needs`: a list of at most 32 constraints, all of which must hold (a conjunction; there is no `or` and no `not`; an
 alternative is a second request or the consumer's own retry, and `in` covers alternatives of one key). A constraint is
 `{ "key", "op", "value", "scope" }`; `scope` is `host` (the default when absent) or `guest` (the facts of an image profile). The profile schema is exactly `os`, `os_version`,
-`arch`, `xcode` and `sim.*`: a `guest` constraint on any other key (`vms`, `base_images`, `warm_images`, a namespaced key) is refused with
+`arch`, `xcode` and `sim.*`: a `guest` constraint on any other key (`vms`, `base_images`, `gpu_class`, a namespaced key) is refused with
 `constraint-bad-scope` at submit, and a `host` constraint on any key is meaningful (it reads the host's own facts).
 
 | Kind of the key | Ops | Value | True when |
@@ -129,7 +129,7 @@ alternative is a second request or the consumer's own retry, and `in` covers alt
    satisfy both, use one op (`has_range`).
 3. **Guest scope.** A host meets the `guest` constraints when at least one image in its `base_images` meets *all* of them against that
    image's profile (one image, not one per constraint). `host` constraints are evaluated on the host's own facts. The match returns the
-   eligible images; the grant names one: a warm image first, then the smallest name. A request with a `guest` constraint is a VM request;
+   eligible images; the grant names the smallest name. A request with a `guest` constraint is a VM request;
    its class must have a `vm` runtime (6.2), else `constraint-bad-scope`.
 4. **Evaluated when the grant is made**, under the table lock, on the newest stored facts, and only on hosts the placement pipeline
    already finds eligible (serving, not tainted, not releasing; 5.10). A constraint no host meets leaves the request queued and counts
@@ -177,6 +177,28 @@ the grant names it, and the `Start` of the VM job names it (5.14). A host holdin
 skipped: no image meets all the guest constraints, though each constraint alone is met by some image of some host. The same need run
 natively (a `host` job, off by default, 5.12) drops `sandbox=vm` and puts the three Xcode and OS constraints in `host` scope.
 
+## GPUs (D32)
+
+GPUs exist only on the Mac Studio machines of the GPU pool (two today). Nothing else in the fleet has one, and the design adds none.
+
+- **Shape and fact.** Their shape declares `gpu_class = "apple-m"` and `gpus = 1`: the machine's one GPU, leased with the host. `gpu_class`
+  is a `text` fact of the table above, taken from the shape; a host with no GPU does not report it, and a Linux shape declares `gpus = 0`.
+  The shape is the scheduler's own record of the pool (5.7), so the fact is not left to the agent's say-so alone (K27 still applies to a
+  registered host's other facts).
+- **A GPU request is satisfiable only by that pool.** A request is a GPU request when its booking asks `gpus > 0` or it constrains
+  `gpu_class`. It can match only hosts whose shape has a GPU, so only the GPU pool; selecting pools by class and labels (6.2) is
+  unchanged. A GPU request that no host can meet queues and counts toward the unservable wait (8.2). An elastic pool never covers it,
+  because no capacity provider has a GPU shape; a pool at `max_machines` is not the reason it waits.
+- **Classes.** The class that serves it today is `gpu-host`, admitted `BookAll`: one whole host per lease, GPU included. That
+  whole-host GPU lease service is the merged path and stays the only GPU path. Whole-device GPUs only (D10), and with one GPU per
+  machine there is nothing to assign among devices (`assignments` carries the device id as before).
+- **VMs get no GPU.** `gpu_indices` must be empty for a VM (`invalid-job`, 5.14); GPU work on those machines runs as a job of a
+  whole-host lease, not inside a guest.
+- **Not a current use: container GPU jobs on Linux.** No Linux host has a GPU, so a GPU request never reaches a container runtime, and
+  the agent's container GPU path (the merged GPU probe and device assignment) has nothing to serve in production. It stays in the code;
+  it is neither extended nor designed against here. A Linux GPU shape would be a new shape and a new `gpu_class` value, with no change in
+  the model.
+
 ## Tests (13.2)
 
 A table test per op and kind from the table above, with a case that holds and one that does not, and the ordering properties on generated
@@ -185,6 +207,8 @@ boundary `16.9.9` against `17`). Absent is unmet for every op. Each refusal code
 scope: three images, each meeting a different constraint, none meeting all, is no match. Wire: a golden hello with `facts` is skipped by a
 decoder of the previous crate version (the cross-version test of 13.6); a legacy-only hello still meets a scalar constraint; a
 conflicting legacy entry is `invalid-hello`; a heartbeat whose ack was lost is repeated and a repeat is ignored; a snapshot over each limit
-is refused; a version of exactly 39 bytes is accepted and 41 refused; a `guest` constraint on `vms`, `base_images`, `warm_images` and a
+is refused; a version of exactly 39 bytes is accepted and 41 refused; a `guest` constraint on `vms`, `base_images`, `gpu_class` and a
 namespaced key is `constraint-bad-scope`; a guest `os=linux` image never meets the worked example; a consumer given a server without the
-`needs` feature sends no `needs` and fails closed. The kbf translation table is tested in kbf with the example above.
+`needs` feature sends no `needs` and fails closed. The kbf translation table is tested in kbf with the example above. GPUs: over a fleet of one `apple-m` host and several `gpus = 0`
+hosts, a request with `gpus > 0` or `gpu_class eq apple-m` is granted only the GPU host; with the GPU host busy it queues and no
+acquire is made for it; a VM job with a GPU index is refused.

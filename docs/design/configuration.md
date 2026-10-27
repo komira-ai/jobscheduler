@@ -4,14 +4,25 @@ Companion to [docs/design.md](../design.md), section 5.7. The rules that govern 
 
 ```toml
 [[shape]]                                   # what one host offers; pools and providers refer to it by name
-name = "gpu-a100x8"
-gpu_class = "nvidia-a100"
+name = "mac-studio-gpu"                     # GPUs exist only on the Mac Studio machines of the GPU pool (D32)
+gpu_class = "apple-m"
 [shape.resources]
-cpu_millis = 96000
-memory_bytes = 1099511627776
-gpus = 8
+cpu_millis = 24000
+memory_bytes = 206158430208
+gpus = 1                                    # the machine's one GPU, leased with the whole host
 [shape.capabilities]
-isa = "x86-64-v3"
+os = "macos"
+arch = "aarch64"
+
+[[shape]]                                   # a shape with no GPU
+name = "linux-x86-16"
+[shape.resources]
+cpu_millis = 16000
+memory_bytes = 68719476736
+gpus = 0
+[shape.capabilities]
+os = "linux"
+arch = "x86_64"
 
 [[provider]]                                # operator-listed machines (the merged --pool-config hosts)
 name = "lab"
@@ -20,7 +31,7 @@ kind = "static"
 [[host]]                                    # the merged fields (id, gpu_class, resources, capabilities) plus the provider;
 provider = "lab"                            # `shape`, when given, supplies resources and capabilities
 id = "gpu-01"
-shape = "gpu-a100x8"
+shape = "mac-studio-gpu"
 
 [[provider]]                                # machines that register themselves (5.8)
 name = "edge"
@@ -37,28 +48,28 @@ region = "<region>"
 launch_template = "<launch-template-name>"  # the image, the agent bootstrap and the security group live here
 subnets = ["<subnet-a>", "<subnet-b>"]
 [provider.instance_types]                   # shape name to instance type
-gpu-a100x8 = "<instance-type>"
+linux-x86-16 = "<instance-type>"           # a cloud provider offers no GPU shape (D32)
 
 [[pool]]                                    # provider + shape + min_machines/max_machines + labels
 name = "gpu-lab"
 provider = "lab"
-shape = "gpu-a100x8"
+shape = "mac-studio-gpu"
 class = "gpu-host"
 labels = { tier = "gpu", site = "lab" }
 
 [[pool]]
 name = "gpu-edge"
 provider = "edge"
-shape = "gpu-a100x8"
+shape = "mac-studio-gpu"
 class = "gpu-host"
 max_machines = 8                            # never exceeded, in-flight and tainted hosts counted (5.11)
 join_token_file = "<path-to-token-file>"    # one file per registering pool; may hold several tokens, so rotation overlaps
 
 [[pool]]
-name = "gpu-burst"
+name = "cpu-burst"
 provider = "cloud"
-shape = "gpu-a100x8"
-class = "gpu-host"
+shape = "linux-x86-16"
+class = "action"
 min_machines = 0
 max_machines = 4                            # the provider never exceeds it (5.11)
 max_step = 2                                # most machines acquired in one tick; default 2
@@ -67,7 +78,7 @@ cooldown = "2m"                             # no re-acquire after a refusal, a b
 boot_timeout = "15m"
 max_taints_in_a_row = 3                     # replacement stops, with an alert, after this many (5.12)
 allow_host_jobs = false                     # default; true lets a consumer that also allows it run host jobs (5.12)
-labels = { tier = "gpu", site = "cloud" }
+labels = { tier = "cpu", site = "cloud" }
 ```
 
 A consumer picks pools in its own configuration, not the scheduler's. For kbf, a sketch of the section that maps its action classes
@@ -75,7 +86,7 @@ to selectors (the file is kbf's; the scheduler never reads it):
 
 ```toml
 [[scheduler.class]]
-kbf_class = "whole_machine"                 # leases a whole gpu host from any pool labelled tier=gpu
+kbf_class = "whole_machine"                 # leases a whole gpu host from any pool labelled tier=gpu (the GPU pool, D32)
 class = "gpu-host"
 labels = { tier = "gpu" }
 
@@ -89,7 +100,7 @@ ones; a pool may state the class its hosts serve, the time it waits for a whole-
 hosts are launched with (so the scaler can count a constrained request as demand); the agent's VM settings are flags (R4), not file keys:
 
 ```toml
-[[capability]]                              # beyond the built-in arch, os, os_version, xcode, sim.*, base_images, warm_images, vms
+[[capability]]                              # beyond the built-in arch, os, os_version, xcode, sim.*, base_images, vms
 key = "acme.metal"
 kind = "count"                              # text | version | set_text | set_version | count
 
@@ -108,7 +119,7 @@ arch = "aarch64"
 ```sh
 # the agent's own flags (5.14): the VM backend is off unless --vms is above zero
 js-agent --vms 2 --vm-driver <absolute-path> --vm-store <dir> --vm-network none \
-  --vm-boot-timeout 5m --vm-warm macos15-xcode16-a=1 --vm-warm-max-age 12h \
+  --vm-boot-timeout 5m \
   --cap acme.metal=1 --facts-interval 5m
 ```
 

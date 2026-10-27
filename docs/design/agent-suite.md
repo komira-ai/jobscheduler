@@ -27,8 +27,9 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
   run `vm-guest-protocol` and never taints; a read-write mount is copied back by the agent and the guest never holds a writable host path;
   an agent restart destroys every clone and reports none held; an image whose digest differs from the pinned one is `image-unavailable`;
   the VM store check finds an unaccounted directory;
-- warm pool: a warm VM has never been handed a job; assignment is irreversible; an aged warm VM is destroyed and replaced; refill is one
-  at a time into free capacity; the failure brake stops it; warm VMs count in `vms` and in the offer in the order of 5.15;
-- whole-node lease (5.15): preparing destroys every warm VM, refill stays off, the lease token is not minted before `exclusive_ready`, a
-  timeout gives the lease up as `exclusive-not-ready`, and release restores and refills.
+- one VM per run: a lease with two runs sees two VM ids, the first destroyed before the second is cloned; VMs count in `vms` and in the
+  offer in the order of 5.15;
+- whole-node lease (5.15): at `preparing` no VM is running (one found is a finding and is destroyed), the lease token is not minted before
+  `exclusive_ready`, a timeout gives the lease up as `exclusive-not-ready`, and release restores;
+- GPUs (D32): a request with `gpus > 0` is never started on an agent whose shape has none, and a VM job with a GPU index is refused.
 

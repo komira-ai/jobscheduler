@@ -4,10 +4,9 @@ Companion to [docs/design.md](../design.md), sections 5.4 and 5.8. Section numbe
 
 ## 5.10 Machine reuse
 
-*VM jobs.* The machine is reused exactly as below, but a VM is not: every VM job gets a fresh VM that is destroyed before the slot is freed,
-and a warm VM that is assigned runs one job and is destroyed after it, one that ages out is destroyed unassigned, and neither is reused (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
-"stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check. A host refill of the warm pool follows
-the freed slot and never delays it.
+*VM jobs.* The machine is reused exactly as below, but a VM is not: every VM run gets a fresh VM that is destroyed before the slot is freed
+and is never reused, not even by the next run of the same lease (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
+"stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check.
 
 A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs in a row before it is given up.
 
@@ -49,7 +48,7 @@ serving, `registering`, in-flight `acquire` (an intent recorded but not yet answ
 check is made under the table lock when the intent is recorded, so two scaler ticks cannot both pass it. A restart counts what `list`
 returns plus the open intents. A pool at `max_machines` leaves the demand queued (8.2).
 
-`min_machines` is the floor the scaler keeps whether or not there is demand (a warm floor, D21), and defaults to 0. It is never released below.
+`min_machines` is the floor the scaler keeps whether or not there is demand (a floor of idle hosts, D21), and defaults to 0. It is never released below.
 
 **Growth is bounded and follows real demand.** Each tick the scaler acquires at most `max_step` machines (default 2). It acquires only for
 queued demand that does not fit existing capacity: leases in `acquiring` that no free host, no host about to be freed and no
@@ -104,7 +103,7 @@ and none is removed without a decision:
   and group database against the baseline; the loaded kernel modules (`/proc/modules`) against the baseline;
 - *cleanup failure*: the container or its scratch directory could not be removed, a cgroup could not be emptied, or the slot could not be
   freed; for a VM job, the VM could not be stopped or its clone deleted;
-- *VM store* (an agent with a VM backend): a directory in the VM store that is neither a base image nor the clone of a run or warm VM the
+- *VM store* (an agent with a VM backend): a directory in the VM store that is neither a base image nor the clone of a run the
   agent holds, or a hypervisor driver process the agent does not account for (5.14).
 
 Any finding taints the host, whatever the job declared. A check that cannot run (an unreadable file) is a finding; it is never skipped.
