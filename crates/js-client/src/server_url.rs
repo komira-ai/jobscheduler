@@ -4,23 +4,27 @@ use std::net::IpAddr;
 
 use ureq::http::Uri;
 
-use crate::failure::Failure;
+use crate::error::ClientError;
 
 /// A checked server address: the scheme and authority to put in front of a route.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ServerUrl {
+pub struct ServerUrl {
     /// `http://host:port` or `https://host:port`, with no trailing slash.
-    pub(crate) base: String,
+    pub base: String,
     /// Whether the scheme is `https`.
-    pub(crate) https: bool,
+    pub https: bool,
 }
 
 impl ServerUrl {
     /// Checks `text`: an `https://` URL, or an `http://` one for a loopback host
     /// (`localhost`, `127.0.0.0/8`, `::1`) only, naming a host and optionally a port,
     /// with no user, path or query.
-    pub(crate) fn parse(text: &str) -> Result<Self, Failure> {
-        let refuse = |why: &str| Failure::flag("--server", format!("{text:?} {why}"));
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Flag`] naming `--server` when `text` breaks one of those rules.
+    pub fn parse(text: &str) -> Result<Self, ClientError> {
+        let refuse = |why: &str| ClientError::flag("--server", format!("{text:?} {why}"));
         let uri = text
             .parse::<Uri>()
             .map_err(|err| refuse(&format!("is not a URL: {err}")))?;

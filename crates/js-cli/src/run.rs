@@ -6,11 +6,11 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
+use js_client::Client;
 use rustix::process::Signal;
 
-use crate::api::{Freed, Lease};
+use crate::api::{Freed, Lease, Routes};
 use crate::cli::RunArgs;
-use crate::client::Client;
 use crate::command::{Running, watch_exit};
 use crate::events::{Clock, Event, Events, Services, Waiter};
 use crate::failure::{Failure, exit};
