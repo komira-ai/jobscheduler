@@ -130,6 +130,11 @@ lease table and the bindings in a database, with conditional writes (the `js-sta
   per-session rule of 5.4) and a client's renew of an unknown lease fails, so the client leases again and the work reruns under the
   platform-fault budget (8.1). Snapshots of the volume are taken on a schedule; a snapshot holds the old file or the new one for each
   file, and `--verify-state` (step 50) checks the pair against each other before a restore is trusted.
+- **A restore must not lower the term.** A snapshot holds a term below the ones the lost boots took, so booting it plainly would reissue
+  `(term, sequence)` pairs that stale holders still carry, and a renew of an old id could match a different lease. After a snapshot restore
+  the operator starts with `--term-floor N` (step 50), `N` strictly above the highest term the service logged at any boot (the pod's
+  logs and the agents' last-seen terms give it; a large margin costs nothing). After `--boot initialise` the same applies: the floor is
+  set above every term ever issued, so ids of the lost table are never valid again.
 - **The binding file is part of the state.** Without it the first hello for a host id after a restart would take the host's lease from
   anyone holding a join token (K10). The two files are always copied, restored and verified together.
 
@@ -191,8 +196,10 @@ Today's `js-lease-server` on one host is the stepping stone. The move needs no n
 and the agents' fence (above). Each step is reversible until the last.
 
 1. Prepare the objects with the pod at zero replicas: the volume, the Secrets (the **same** bearer token and join tokens, so no client
-   or agent is reissued a credential), the ConfigMap from the existing pool files, and a certificate whose subject names the address that
-   agents and clients already use.
+   or agent is reissued a credential), the ConfigMap from the existing pool files, and **the same certificate and private key** the old
+   server serves, copied into the TLS Secret. Agents pin the server's certificate (5.8), so a newly issued one would fail the pin on every
+   agent at step 5 and the move could not be reversed without restarting the old server. A new key or certificate is a separate change made
+   before the move, with the agents' pins overlapping (old and new accepted), and is not part of it.
 2. Stop the old server with `SIGTERM` and **disable** it, so no unit can restart it: two servers over two copies of the state are two
    tables.
 3. Copy the lease file and the binding file to the new volume (a one-off pod that mounts the claim), then run `--verify-state` on the copy.
@@ -200,8 +207,10 @@ and the agents' fence (above). Each step is reversible until the last.
 5. Move the name: the address agents and clients use now points at the service's external entry. Agents re-hello on their own; a client
    retries.
 6. Check that every agent is registered, that the leases held before are held, and that no `Cancel` was sent for a lease the old table
-   held. Only then remove the old files from the old host; until then they are the way back (stop the pod, point the name back, start the
-   old unit; leases made since are lost).
+   held. Only then remove the old files from the old host. Until then the way back is: stop the pod, copy the lease file and the binding
+   file **back from the pod's volume** over the old host's files (never revive the old files as they were: the old host would boot with the
+   term the pod's first boot already took, and ids issued since would be reissued), run `--verify-state`, point the name back and start the
+   old unit. If only the old files remain, start it with `--term-floor` above the pod's last logged term.
 
 ## Tests (13.1, 13.3)
 

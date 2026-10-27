@@ -99,8 +99,8 @@ step 36 made. The size fields of step 43 wait for D26.
 47. The first real VM driver, disabled by default, on an operator's host; it passes the VM conformance suite there. *Proves:* the same
     suite as the fake; it is not run on shared CI.
 
-**Phase G. One service in Kubernetes** ([deployment.md](deployment.md)). Steps 48 to 51 change `js-lease-server` and `js-lease` and need
-no cluster; step 52 changes clients; step 53 is the first deployment and needs the go of R7. Each leaves the single-host
+**Phase G. One service in Kubernetes** ([deployment.md](deployment.md)). Steps 48 to 50 change `js-lease-server` and `js-lease` and need
+no cluster; step 51 adds the manifests and the image; step 52 changes clients; step 53 is the first deployment and needs the go of R7. Each leaves the single-host
 `js-lease-server` working as it is.
 
 48. Readiness and shutdown. `/readyz` beside the merged `/healthz`: ready only after the lease file and the binding file are loaded under
@@ -113,7 +113,9 @@ no cluster; step 52 changes clients; step 53 is the first deployment and needs t
     `unknown` still keeps it; a lease file written before the change loads; the flag is optional and unset means today's behaviour.
 50. Verifying and moving state: a read-only `--verify-state` mode of `js-lease-server` that loads the lease file and the binding file,
     checks them against each other (every held lease on a registered host has a binding) and prints the term, the lease count and the
-    binding count without writing. *Proves:* a truncated lease file is refused (its `lease_count` disagrees); a pair copied byte for byte
+    binding count without writing. It gains `--term-floor N` for `--boot resume`: the new term is the greater of the stored term plus one
+    and `N`, so a restore or rollback can start strictly above every term ever issued. *Proves:* a floor above the stored term is the term
+    taken; a floor below it changes nothing; ids issued under a term below the floor are never issued again; *and also:* a truncated lease file is refused (its `lease_count` disagrees); a pair copied byte for byte
     verifies and then boots with `--boot resume` with its leases and bindings intact and a higher term; a lease file without its binding
     file is reported; nothing is written (the files are unchanged).
 51. The manifests and the image. `deploy/kubernetes/` holds the objects of [deployment.md](deployment.md) as plain manifests, and the
