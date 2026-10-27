@@ -116,7 +116,8 @@ fn a_sibling_that_shares_the_roots_name_as_a_prefix_is_outside() {
     }
 }
 
-/// Asserts that a canonical path with a comma, a colon or a control character is refused,
+/// Asserts that a canonical path with a comma, a colon, a double quote or a control
+/// character is refused,
 /// including when it is reached through a link in the root: a job that can write in a
 /// root can make a directory named `d,readonly=false` and a link to it, and a backend that
 /// builds `--mount type=bind,source=...` from the path would take the rest of the name as
@@ -126,9 +127,15 @@ fn a_sibling_that_shares_the_roots_name_as_a_prefix_is_outside() {
 fn a_canonical_path_a_mount_option_cannot_carry_is_refused() {
     let (dir, roots) = tree("mounts-option-chars");
     fs::create_dir(dir.path("data/work")).unwrap();
-    for (n, name) in ["d,readonly=false", "a:b", "tab\there", "line\nbreak"]
-        .into_iter()
-        .enumerate()
+    for (n, name) in [
+        "d,readonly=false",
+        "a:b",
+        "say\"hi",
+        "tab\there",
+        "line\nbreak",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let real = format!("work/{name}");
         fs::create_dir(dir.path(&format!("data/{real}"))).unwrap();

@@ -6,10 +6,11 @@
 //! fails says so in a [`RuntimeError`] whose text stays on the host: it is logged and
 //! kept in a finding, and never put into a message to the server.
 //!
-//! The calls run on the lifecycle's own worker thread, never on the session's heartbeat
-//! loop (see the [module](super) documentation), so a call may take as long as the runtime
-//! needs: a pull inside `create_and_start`, the grace of a `stop`. It delays the lifecycle's
-//! next step and nothing else.
+//! The calls are to run on the lifecycle's own worker thread, never on the session's
+//! heartbeat loop (see the [module](super) documentation). No such thread exists yet: it
+//! is a requirement on the change that wires the lifecycle to the session. Then a call may
+//! take as long as the runtime needs: a pull inside `create_and_start`, the grace of a
+//! `stop`. It delays the lifecycle's next step and nothing else.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
