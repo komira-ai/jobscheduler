@@ -87,6 +87,19 @@ the host it has and does not switch to a cheaper one later (no thrash). Two requ
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`.
 
+**Reservations survive a restart (D55).** A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
+*reservation record* holds: the request id, the host, the time reserved, the deadline, the request's two counters (`max_reserve_attempts`
+give-ups and `max_replace` prepare failures) and its host exclusions with their end times. The record outlives the reservation only
+while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
+cancelled or unclaimed. The queue itself is not persisted (the table holds leases, not requests); a consumer presents the same request id
+again after a restart, as it re-presents any request, and the scheduler binds it to its record, so the drain in progress continues with its
+original deadline (extended by the boot grace, as lease TTLs are) and the counters keep the bounds of sections 4 and 5 across any number of
+restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
+is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
+defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
+exists is dropped at boot. Cost: a few small rows, written with the same rewrite as the leases.
+
 ## 4. Draining
 
 From the moment a host is reserved, **nothing new is placed on it**: no new lease, no placed run, no new `Start` for a lease that did not
@@ -125,10 +138,40 @@ request destroy another's results; re-queueing wastes only the drain already spe
    `exclusive_ready: lease id` in the heartbeat and returns to `serving`. Only then does the scheduler **mint the lease token**; until then
    the lease stays `pending`, so a consumer that knows nothing about readiness (an older client) simply waits (D30). A scheduler-side taint
    recorded at the grant of a lease that allows host jobs (section 8) is not counted against quiet: it is the lease's own.
-3. **Not ready in time.** If the agent is not ready within `prepare_timeout`, the scheduler gives the lease up, tells the consumer, and the
-   request is placed again, at most `max_replace` times with a back-off between tries; after the last it fails `exclusive-not-ready`. A
-   finding on the way taints the host as usual and ends the reservation on it.
-4. **The clock starts at the token (D52).** The lease's TTL and its max wall time are counted from the moment the token is minted, not from
+3. **Not ready in time.** `prepare_timeout` (pool configuration, default 10 minutes) is one deadline counted from the commit of the lease:
+   the agent must report `exclusive_ready` or a refusal (item 4) before it. A silent agent (no `preparing` phase, no report, or a host that
+   goes lost in the interval) is the same case as one that is slow. When it passes, the scheduler gives the lease up, tells the consumer,
+   excludes that host for this request for `reserve_backoff`, and the request is placed again. A finding on the way taints the host as usual
+   and ends the reservation on it.
+4. **A readiness refusal is typed and acts at once.** The agent (or a readiness hook it runs, item 5) may instead report
+   `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of at most 256 bytes
+   of text. The detail is recorded with the lease and shown to the consumer; the scheduler never parses it. The scheduler acts on the code
+   at once and does not wait for `prepare_timeout`:
+
+   | Code | Meaning | Host | Request |
+   |---|---|---|---|
+   | `not-quiet` | something the agent cannot clear is running or open | excluded for this request for `reserve_backoff` | re-queued on another host |
+   | `noise-over-bound` | the consumer's noise check measured the host over its bound | as `not-quiet` | as `not-quiet` |
+   | `setup-failed` | the consumer's or the agent's setup step (for example a cpuset) did not complete | as `not-quiet` | as `not-quiet` |
+   | `host-unsafe` | the agent found something that makes the host unfit (a finding, 5.12) | tainted, as any finding | re-queued on another host |
+   | `unsupported` | the host cannot run the consumer's readiness step at all | excluded for this request for the rest of its life | re-queued on another host |
+
+   An unknown code (a newer agent) is read as `setup-failed` (R3). The codes are data in the scheduler's table of reasons, not branches in
+   its logic: each row is the pair (host effect, request effect) above, so a new code is a new row. Every row, and a timeout, is a
+   **prepare failure**: it ends the lease, clears the reservation on the host once the agent has restored it (section 8), and counts one
+   toward the request's `max_replace` (default 3). It does **not** count toward `max_reserve_attempts`, which counts only drain give-ups
+   (section 4); the two counters are separate and each is kept with the request (section 3). The request is re-queued on another eligible
+   host at once if one is available; otherwise it waits until the exclusion ends (the back-off). After `max_replace` prepare failures the
+   request fails `exclusive-not-ready`, and its detail names the last code and detail reported.
+5. **Environment measurement is the consumer's, and runs inside `preparing`.** Whether the host is *quiet in the scheduler's sense* (no
+   lease, no run, no VM, checks clean, not tainted) is all the scheduler's readiness means. Measuring the environment (timer noise, CPU
+   frequency, other tenants' traces on a shared machine) is **not** part of it: the scheduler does not read, store or judge any such
+   number. A consumer that needs one installs a readiness hook in the agent's configuration (a command the operator allowed, bounded by
+   `prepare_timeout`); the agent runs it during `preparing`, after its own checks, and reports `exclusive_ready` only when the hook
+   succeeds, or `exclusive_refused` with `noise-over-bound`, `not-quiet` or `setup-failed` when it does not. For kbf this is the noise
+   probe and the cpuset setup. The hook is the consumer's code on the host, under the consumer's consents (5.12); the scheduler sees only
+   its outcome.
+6. **The clock starts at the token (D52).** The lease's TTL and its max wall time are counted from the moment the token is minted, not from
    the commit: the consumer is not charged for the drain or for `prepare_timeout`, and a lease that never becomes ready never held the
    consumer's time. Renewal and the reaper are as for any lease (12.1): a renewal never extends it past the token time plus the max wall
    time.
@@ -241,14 +284,21 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
 - **kbf's own node leases** are shares and are the work a reservation drains. A kbf that needs a whole node on a host where it holds node
   leases should release them first; the scheduler does not stop them. kbf counts a whole-node lease in its `max_leased_machines` (its own
   cap) and answers `host_reserved` on a node lease by placing nothing new there and releasing when idle.
-- **Loss.** A whole-node lease lost mid-run (host lost, fenced, instance reclaimed) loses the run: the measurement is discarded, the platform
-  fault is recorded (8.1), and the run repeats in a new whole-node lease. A partial measurement is never used.
+- **Loss.** A whole-node lease that ends mid-run (host lost, tainted, instance reclaimed, fenced, or the lease ended by TTL or max wall
+  time) loses the run: the platform fault is recorded (8.1) and the scheduler tells the consumer the lease is gone. **The consumer repeats
+  the measurement**, in a new whole-node lease it requests itself. The scheduler cannot rerun an action (it never sees one, 9.1) and does
+  not try; it keeps no partial result. The consumer discards the partial measurement and never uses it.
+- **Measurement is the consumer's.** Noise, CPU frequency and other tenants' traces are measured by the consumer, in its readiness hook
+  during `preparing` (section 5, item 5) and in its own harness during the run. The scheduler's readiness is only that the host is quiet in
+  its table and its checks; it asserts nothing about the environment's fitness for a measurement.
 
 ## 10. Wire and configuration, in one place
 
 Additive fields (R3), none new on the agent beyond the merged design: `HeartbeatReply.exclusive` (lease id) and `Heartbeat.exclusive_ready`
-(lease id); a renewal answer's `host_reserved`. Refusal constants: `exclusive-not-ready` (after `max_replace`), with `no-capable-host` and
-`no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
+(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail of at most 256 bytes; section 5, item 4); a renewal answer's
+`host_reserved`; the reservation records in the lease file (section 3). All are additive: an old reader skips and keeps them, and an old
+agent never sends a refusal and so only ever times out. Refusal constants: `exclusive-not-ready` (after `max_replace`, with the last code
+and detail), with `no-capable-host` and `no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
 retained alias of section 1 (id `gpu-host`, `min_gpus` 1, whole-node admission), and `max_draining_fraction` of earlier drafts is replaced by `max_draining`.
 
 ## 11. Tests and invariants (13.1, 13.2, 13.3)
@@ -277,10 +327,24 @@ Invariants, checked at every step of seeded runs of the fake agent and the simul
 - W11. A `host_jobs` lease on a host that is not whole-node is refused.
 - W12. With elastic entries, a launch for a whole-node request is committed to it at registration, and a booting machine is released by the
   idle rule when a quiet host took the request first.
+- W13. **Reservations survive a restart.** After a restart over the same store, every reservation whose request is presented again within
+  `regain_grace` is the same (host, deadline plus boot grace, both counters, exclusions); none is lost, none is made twice, no host
+  carries two; an unclaimed record is dropped and its host returns to `serving`; a restart never resets `max_reserve_attempts` or
+  `max_replace`, so the bounds of W6 and W14 hold across restarts.
+- W14. **A prepare failure is acted on at once and counted once.** A typed refusal ends the lease without waiting for `prepare_timeout`,
+  excludes or taints the host as its row says, and counts one toward `max_replace` and none toward `max_reserve_attempts`; a request
+  fails `exclusive-not-ready` after `max_replace` of them and not before; an unknown code acts as `setup-failed`; no scheduler decision
+  depends on a measured value.
 
 Cases: a drain of a host with three leases ending at different bounds picks the host with the smallest bound, then the fewest leases, then
 the lowest id; a give-up at the deadline re-queues on another host and the first is excluded for `reserve_backoff`; an agent that finds a
-VM at `preparing` destroys it and reports a finding; a timeout gives the lease up and the retries stop at `max_replace`; `gpu-host` configs
+VM at `preparing` destroys it and reports a finding; a timeout (a silent agent) gives the lease up, excludes the host for
+`reserve_backoff` and the retries stop at `max_replace`; a `noise-over-bound` refusal re-queues the request on another host at once,
+without waiting for `prepare_timeout`, counts toward `max_replace` and not `max_reserve_attempts`, and the same request after a drain
+give-up counts the other way; `host-unsafe` taints and `unsupported` excludes for good; an unknown code acts as `setup-failed`; a
+detail over 256 bytes is cut; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
+keeps the host reserved with the same deadline once the request is presented again, and a restart loop does not reset the counters; an
+unclaimed record is dropped after `regain_grace`; a lease lost mid-run is reported gone and the scheduler issues no rerun; `gpu-host` configs
 and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
 pass unchanged, including two hosts taken with the one bearer token because the per-consumer default is no limit there; a GPU request
 under class `action` is refused `no-matching-pool`; with an explicit per-consumer limit of 1 on a GPU pool of two hosts and per-consumer
@@ -295,4 +359,4 @@ requests; 54 moves the GPU machines to registering into a `whole-node` pool.
 
 ## 13. Decisions and risks
 
-D46 to D52 and K37 to K39 are in [decisions.md](decisions.md) and [risks-f.md](risks-f.md).
+D46 to D55 and K37 to K41 are in [decisions.md](decisions.md) and [risks-f.md](risks-f.md).

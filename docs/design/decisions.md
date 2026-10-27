@@ -216,3 +216,20 @@ marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded deci
 - **D52. A whole-node lease's clock starts at the token.** The TTL and max wall time count from the minting of the token, not from the
   commit, so a consumer is not charged for the drain or the preparation; readiness is bounded by `prepare_timeout` and `max_replace`.
   Alternative: from the commit; rejected, since a consumer could lose its time before it could use the host.
+- **D53. Environment measurement and the rerun after a loss are the consumer's.** The scheduler's readiness is only that the host is quiet
+  in its table and its checks are clean. Noise, CPU frequency and other tenants' traces are measured by the consumer, in a readiness hook
+  the agent runs inside `preparing` before it reports ready; on loss of the host mid-run (lost, tainted, lease ended) the consumer repeats
+  the measurement, and the scheduler, which never sees an action, does not try. Alternatives: the scheduler measures noise (rejected: it
+  would own a number it cannot judge for every consumer); the scheduler reruns the action (rejected: impossible in two-level scheduling, 9.1).
+- **D54. Readiness refusals are typed and prepare failures have their own cap.** The agent or its hook may refuse with a code from a bounded
+  set (`not-quiet`, `noise-over-bound`, `setup-failed`, `host-unsafe`, `unsupported`; unknown reads as `setup-failed`) and a detail of at most
+  256 bytes, and the scheduler acts at once instead of waiting for `prepare_timeout`; each code is a data row (host effect, request effect).
+  A refusal or a timeout is a prepare failure and counts toward `max_replace` (default 3); drain give-ups count toward `max_reserve_attempts`
+  (default 2); the two are separate because one is the cost of waiting for a host and the other is a host or setup that does not work.
+  Alternatives: one shared counter (rejected: a noisy host would eat the drain budget and the reverse); only a timeout (rejected: a known
+  refusal would idle a host for up to ten minutes).
+- **D55. Reservations are persisted.** A reservation record (request id, host, deadline, both counters, exclusions) is written to the lease
+  file in the same atomic write as the leases, under the same single-writer rules (D33); after a restart a request presented again with its
+  id is bound to its record and the drain continues; an unclaimed record is dropped after `regain_grace`. Alternative: not persisted, so a
+  restart drops every mark and the drains restart; rejected, since a drain costs up to a max wall time of idle host, and a restart loop
+  would reset the give-up counter and defeat the bound of D48.

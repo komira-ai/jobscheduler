@@ -1,4 +1,4 @@
-# Risks K19 to K39
+# Risks K19 to K41
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -61,3 +61,10 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   something runs, and a performance result taken beside it is wrong. The scheduler's own table (no lease, no placed run) and the
   withheld token cover the work it knows of; a lie costs the agent its taint and deny-file path, and a consumer needing a trustworthy
   measurement leases from a pool whose operator it trusts (whole-node.md).
+- **K40. A refusing hook or agent starves a request.** A readiness hook that always refuses, or an agent that refuses falsely, can cycle a
+  request through hosts. Bounded: each refusal excludes the host for the request, counts toward `max_replace` (D54), and the request then
+  fails `exclusive-not-ready` with the last code and detail, so the consumer sees why. Residual: a hostile agent can waste up to `max_replace`
+  drains' worth of other hosts' idle time; it is already able to stall by silence (K39), and the taint path applies to `host-unsafe`.
+- **K41. A persisted reservation outlives its use.** A record kept across a restart can hold a host for a consumer that has gone. Bounded by
+  `regain_grace` after boot for an unclaimed record, by the drain deadline for a claimed one, and by deletion with the request (D55). Residual:
+  a restore from an old snapshot reads old marks; a record naming a missing host or request is dropped at boot.

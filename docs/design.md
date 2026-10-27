@@ -96,9 +96,9 @@ The decisions, in one place:
 The history of the earlier amendments (the first, capabilities, the refinement, the owner's review, rollout) is in
 [design/amendments.md](design/amendments.md).
 
-Added by the whole-node amendment, text in [design/whole-node.md](design/whole-node.md): the **whole-node lease class** (5.17, D46 to D52):
+Added by the whole-node amendment, text in [design/whole-node.md](design/whole-node.md): the **whole-node lease class** (5.17, D46 to D55):
 exclusive, quiet before the token, reserved by a drain of one host, capped per pool; the merged `gpu-host` and kbf's `whole_machine` are
-this class; host jobs only in it; steps 46 and 54 reworded, steps 56 to 58; K37 to K39. Deleted: `max_draining_fraction` (now
+this class; host jobs only in it; steps 46 and 54 reworded, steps 56 to 58; K37 to K41. Deleted: `max_draining_fraction` (now
 `max_draining`) and the drain text of 5.15, now in whole-node.md.
 
 ## 2. Goals and non-goals
@@ -890,9 +890,9 @@ version-pair check) follows. All are in [design/extraction-steps-d.md](design/ex
 
 ## 15. Decisions
 
-The full text of every decision, D1 to D52, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
+The full text of every decision, D1 to D55, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
 D35. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
-D52 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
+D55 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
 
 - D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
   restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
@@ -928,7 +928,7 @@ D52 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 - D46 giving a whole node is a lease class of its own, `whole-node` (direction settled; the merged `gpu-host` and kbf's `whole_machine` are
   it). D47 admission and reservation (queue under D35, one host per request, least drain). D48 the drain bound re-queues and never kills.
   D49 caps (`max_whole_node`, `max_draining`, per consumer, a floor for ordinary work). D50 elastic providers acquire before draining.
-  D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. Text in [design/whole-node.md](design/whole-node.md).
+  D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
 
 ## 16. Risks
 

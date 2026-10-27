@@ -108,7 +108,8 @@ step 36 made. The size fields of step 43 wait for D26.
     serves two runs over seeded runs of the fake; a destroy that fails on the first run keeps the second from cloning and taints.
 46. The whole-node class ([whole-node.md](whole-node.md)): the `Whole` admission and the class `whole-node` (the merged `gpu-host` is read
     as it), the commit on a quiet host only (reservation and drain are step 56), the `exclusive` and `exclusive_ready` fields, the withheld
-    lease token with the clock starting at it, the no-VM-running check at `preparing`, `prepare_timeout` with the re-place cap, restore.
+    lease token with the clock starting at it, the no-VM-running check at `preparing`, `prepare_timeout` with the re-place cap, the typed
+    `exclusive_refused` report acted on at once, the agent's readiness hook, restore.
     *Proves:* the sequence of 5.15 on the fake agent; no second lease or placement on a whole-node host; the token is not minted before the
     report; a timeout gives the lease up and the retries stop at the cap; an older client that ignores readiness still waits; a lease file
     and a pool written for `gpu-host` load and its tests pass unchanged.
@@ -172,7 +173,8 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
 
 56. Reservation and drain. A queued whole-node request takes a quiet host, else reserves exactly one (the cost order: latest end bound,
     fewest leases, lowest host id); the `reserved` mark places nothing new; the `host_reserved` flag on a renewal answer; the drain deadline,
-    give-up and `reserve_backoff`; cancel drops the reservation. *Proves:* with a stream of share requests a queued whole-node request is
+    give-up and `reserve_backoff`; cancel drops the reservation; the reservation records in the lease file, bound again to a request
+    presented after a restart. *Proves:* a restart mid-drain keeps the host, the deadline and the counters; with a stream of share requests a queued whole-node request is
     committed within its bound on the injected clock; a reserved host takes no new lease or placed run; nothing is stopped by a reservation
     (the leases and runs on the host are the same set at the give-up); the cost order on a host table with three different hosts; a request
     never holds two hosts and a host never two requests.
