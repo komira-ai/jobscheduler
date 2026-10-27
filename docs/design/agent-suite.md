@@ -29,7 +29,7 @@ Moved from design.md section 13.2. Section numbers refer to design.md.
   the VM store check finds an unaccounted directory;
 - one VM per run: a lease with two runs sees two VM ids, the first destroyed before the second is cloned; VMs count in `vms` and in the
   offer in the order of 5.15;
-- whole-node lease (5.15): at `preparing` no VM is running (one found is a finding and is destroyed), the lease token is not minted before
+- whole-node lease (5.17; the reservation, drain and cap tests are in [whole-node.md](whole-node.md), section 11): at `preparing` no VM is running (one found is a finding and is destroyed), the lease token is not minted before
   `exclusive_ready`, a timeout gives the lease up as `exclusive-not-ready`, and release restores;
 - GPUs (D32): a request with `gpus > 0` is never started on an agent whose shape has none, and a VM job with a GPU index is refused.
 

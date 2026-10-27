@@ -81,7 +81,7 @@ The decisions, in one place:
 16. **A fresh VM per run, never reused.** The machine is reused, the guest is not: a VM is cloned, booted, used and destroyed for each
     run, and a lease may hold several runs. VMs share a host with containers under the caps (5.14, 5.15).
 17. **GPUs only on the GPU pool.** GPUs exist only on the Mac Studio machines of the GPU pool (`gpu_class` `apple-m`); a GPU request is
-    satisfiable only there (D32, [design/capabilities.md](design/capabilities.md)).
+    satisfiable only there, as a whole-node lease (D32, 5.17, [design/capabilities.md](design/capabilities.md)).
 18. **One service in Kubernetes.** The target is one jobscheduler service (scheduler, lease API, agent API) with a single writer on a
     volume; kbf is a client and `js-agent` registers with it. The single-host `js-lease-server` is the stepping stone (5.16, D33).
 19. **The operator-listed pool is for testing; a request no host could ever serve is refused.** Production hosts register. A request
@@ -421,7 +421,7 @@ Rules, enforced when the file loads and refused with the key and the line:
 - Adding a key is additive (R3). A scheduler reads an older file unchanged.
 
 The merged `--pool-config` file keeps working as a **stepping stone**: it is a configuration with one implicit `static` provider, one pool
-of class `gpu-host` and the listed hosts, until a `--config` file is given (5.9). It is the operator-listed pool of the test provider, and
+of class `gpu-host` (read as `whole-node`, 5.17) and the listed hosts, until a `--config` file is given (5.9). It is the operator-listed pool of the test provider, and
 it goes away when the GPU machines run `js-agent` and register (step 54). The `--allow-test-providers` gate applies to a `--config`
 file; the merged `--pool-config` path needs no new flag until then.
 
@@ -470,7 +470,7 @@ tainted-set check, join credentials and the deny file, instance identity, lifecy
 [design/registration.md](design/registration.md). Proof of admission travels with the hello in message metadata, never in a log line.
 
 ### 5.9 The merged code and what it becomes
-The merged slice is a GPU-host lease service: the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
+The merged slice is a GPU-host lease service (the whole-node class before its reservation, quiet gate and caps, 5.17): the lease table (`js-lease`) books a whole host from a pool (`js-pool-static`) for a client
 on a TTL, through the `js-provider` trait. That is level 1 of two-level leasing (9.1) already. What it lacks is the machine side: nothing
 on `main` launches or terminates a machine, and there is no agent wire. The GPU-host service keeps working through every follow-up; each
 change below is additive and leaves the `--pool-config` file, the routes and the lease file readable. The operator-listed pool behind that
@@ -579,14 +579,14 @@ selectors, and the scheduler offers it the pools whose `class` is that class and
 each key; richer set selectors are additive later). The merged pool serves one class,
 `gpu-host`, which is the `whole-node` class (admitted `Whole`, 5.17): one whole host per lease; a share of a host needs `Book` admission on the pool (step 29). A request that
 matches no pool is refused (`no-matching-pool`); one that matches a pool at `max_machines` queues. The request's constraints (5.13) then
-pick a host, and for a VM class an image, inside the pools selected. A request for `host_jobs` is refused unless the pool allows them (5.12). The map from a consumer's own classes (kbf's `action`,
+pick a host, and for a VM class an image, inside the pools selected. A request for `host_jobs` is refused unless the pool allows them and the class is `whole-node` (5.12, D51). The map from a consumer's own classes (kbf's `action`,
 `whole_machine`, `vm`) to class and selectors is in the consumer's configuration (5.7, 9.4), never in the scheduler's. A mixed pool offers `whole-node` only
 when its `max_whole_node` is set (5.17).
 
 ### 6.3 Oversubscription and 6.4 Devices
 Both are in [design/placement.md](design/placement.md). In short: the `Book(Dims)` form carries kbf's rule that memory is checked once
 against the pool's total yet still counted in the booking, with the agent's hard limit and the pressure backstop as protection and a
-rerun elsewhere as recovery, while classes that need isolation use `BookAll`. Named devices are assigned from `assignments`; at most one
+rerun elsewhere as recovery, while classes that need isolation use `BookAll` (and one that needs the host exclusive and quiet, `Whole`, 5.17). Named devices are assigned from `assignments`; at most one
 device lease per agent and whole-device GPUs only (D10). For a machine lease the consumer applies both inside its lease (9.1). A
 whole-node request reserves exactly one host once queued, by draining it (5.17, [whole-node.md](design/whole-node.md)); large non-whole requests have no reservation, and R1 forbids adding one.
 

@@ -61,7 +61,7 @@ numbers refer to design.md.
     the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
 34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a pool of kbf's own hosts, which register
     through `js-agent` into a `default` provider; a node lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
-    floor of whole-node leases, more on queue depth, drained before release); each frontend leases only for the hosts it owns, as
+    floor of node leases, more on queue depth, drained before release; node leases are shares of a host's size, not the whole-node class of 46); each frontend leases only for the hosts it owns, as
     today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside the TTL
     changes no placement; the cross-version matrix with a frontend pair.
 35. The first real aws pool, disabled by default; enabling it needs the go in R7.

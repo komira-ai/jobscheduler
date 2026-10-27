@@ -48,6 +48,11 @@ holds leases; every instance in `list` is a pool host or is being reaped.
 
 Added for GPUs (D32): a request that asks for a GPU is never granted a host whose shape has none, and no acquire is made for it.
 
+Added for the whole-node class (5.17): W1 to W12 of [whole-node.md](whole-node.md), section 11: never two leases on a whole-node host; a
+reserved host takes no new work; the token never before ready; one reservation per request and per host; the caps (ceiling, draining,
+per consumer, the floor for ordinary work) never exceeded and a held lease never revoked; the drain bounded and nothing stopped for it;
+a host not bookable until restored and clean; the starvation bounds; host jobs only in a whole-node lease.
+
 Added for the service (5.16, [deployment.md](deployment.md)): a boot never issues an id from an earlier term; a second table over the
 same lease file fails at the lock; a lease held before a restart is held after it unless its host was observed absent; with the boot
 grace set, no held lease expires before the grace has passed on the table's clock, and an absent observation still drops a lease at once.

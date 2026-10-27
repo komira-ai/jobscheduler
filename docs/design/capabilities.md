@@ -192,8 +192,10 @@ GPUs exist only on the Mac Studio machines of the GPU pool (two today). Nothing 
   the unservable wait (8.2); a GPU request that **no** registered host could ever serve (no GPU host registered, or every one tainted
   after the grace) is refused with `no-capable-host` (D35, [providers.md](providers.md)). An elastic provider never covers it,
   because none has a GPU shape; a pool at `max_machines` is not the reason it waits.
-- **Classes.** The class that serves it today is `gpu-host`, admitted `BookAll`: one whole host per lease, GPU included. That
-  whole-host GPU lease service is the merged path and stays the only GPU path. Whole-device GPUs only (D10), and with one GPU per
+- **Classes.** The class that serves it is `whole-node` (5.17, [whole-node.md](whole-node.md)), admitted `Whole`: one whole host per lease,
+  GPU included, exclusive and quiet; `gpu-host` is the merged name of the class, and a pool of that class loads as `whole-node`. A GPU
+  request under any other class matches no GPU pool and is refused `no-matching-pool`. That whole-host GPU lease service is the merged
+  path and stays the only GPU path. Whole-device GPUs only (D10), and with one GPU per
   machine there is nothing to assign among devices (`assignments` carries the device id as before).
 - **VMs get no GPU.** `gpu_indices` must be empty for a VM (`invalid-job`, 5.14); GPU work on those machines runs as a job of a
   whole-host lease, not inside a guest.
