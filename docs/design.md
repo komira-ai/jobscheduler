@@ -53,8 +53,8 @@ The decisions, in one place:
 8. **ucdk Jobs may use jobscheduler as a second realization.** ucdk 1.0 launches directly against the cloud; jobscheduler is an
    optional realization of Job, bound to one (app, environment), with launch, status, logs and best-effort cancel mapped onto it (11).
 9. **Lease correctness is always on; quotas belong to the platform.** Every request passes the start-contract checks (a required
-   wall time, a stated fence, reserved label keys), which bound how long a lease can live, and a leftover sweep by label ends what a
-   lease leaves behind. jobscheduler has no tenant caps, budgets or spend limits: Kubernetes quotas and cloud-provider quotas already
+   wall time, a stated fence, reserved label keys), which bound how long a lease can live; a held lease has a TTL its client renews,
+   and the reaper frees a lease whose TTL has passed (12.1); and a leftover sweep by label ends what a lease leaves behind. jobscheduler has no tenant caps, budgets or spend limits: Kubernetes quotas and cloud-provider quotas already
    enforce them, and a second copy here would only disagree with the first. The usage record and the labels stay because sizing,
    cleanup and attribution need them (12).
 
@@ -691,6 +691,12 @@ Max wall time (required), max attempts, max resource size, max arguments size. T
 lease always ends: the wall time is the deadline of the attempt, and the fence (5.2) ends the lease when its provider cannot be heard.
 Checked at submit, as part of the start contract (5.2), and refused there. A refusal carries a plain constant code; no central code table
 is introduced until a second consumer needs one.
+
+**Lease TTL and the reaper.** A held lease also has a TTL: the client renews it before it lapses, and a renewal never extends it past
+its acquisition plus the max wall time. The reaper is a periodic tick, the only place time acts: it stops and frees every lease whose
+TTL has passed, and retries a start or a stop whose outcome was unknown, freeing a lease only when the provider is observed without it
+(5.6). So a client that disappears loses its lease at the end of its TTL, never later than its max wall time. The lease table in this
+repository (`js-lease`) implements this.
 
 ### 12.2 Usage record (always on)
 One record per lease: CPU-seconds, GB-seconds, GPU-seconds, peak memory with basis, wall phases, queue time, and whether it ran, was cached
