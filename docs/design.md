@@ -728,7 +728,8 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-provider-<kind>` | new | one crate per later kind; the core names none (5.7) |
 | `js-sched` | `crates/kbf-sched` | per-request placement, generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants; scope per D15 |
 | `js-caps` | new at step 36; `crates/kbf-caps/src/matching.rs` joins at step 15 | the typed model, version order, schema and constraint evaluator of 5.13; kbf keeps its key tables and host detection |
-| `js-guest-wire` | new | the frame codec of the guest channel, shared by the agent and the in-guest program (5.14) |
+| `js-guest-wire` (in review) | `wire.rs` and `frame.rs` of `crates/kbf-guest` | the codecs of the guest channel, shared by the agent and the in-guest program (5.14): the run protocol (`Hello`, `Run`, `Kill` and the guest's answers; version 1) and the probe frames. The bytes are the ones guest images already built speak |
+| `js-guest` (in review) | the rest of `crates/kbf-guest` | the program inside a macOS VM guest: it serves the run protocol on a Unix socket, runs one command per boot, and carries the guest's setup and probe verbs. The executable keeps the name `kbf-guest` |
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
 | `js-store` | generic rows of `farm/durable/*` | scheduling decisions over `js-state`; kbf extension rows stay |
