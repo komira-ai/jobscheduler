@@ -3,6 +3,7 @@
 //! is one non-generic function.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use crate::clock::Timestamp;
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::state::LeaseState;
 use crate::store::{self, Document, FORMAT_VERSION, StoredLease};
-use crate::types::{Lease, LeaseInfo, Settings};
+use crate::types::{Boot, Lease, LeaseInfo, Settings};
 
 /// What a tick does with one lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,7 @@ pub(crate) struct Record {
     request_labels: BTreeMap<String, String>,
     validation_run: Option<String>,
     labels: Labels,
+    extra: toml::Table,
 }
 
 /// The labels of a stored lease: the caller's, plus the validation run when it has one.
@@ -80,6 +82,7 @@ impl Record {
             request_labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             labels,
+            extra: stored.extra.clone(),
         })
     }
 
@@ -94,6 +97,7 @@ impl Record {
             ends_at_ms: self.ends_at.millis(),
             validation_run: self.validation_run.clone(),
             labels: self.request_labels.clone(),
+            extra: self.extra.clone(),
         }
     }
 
@@ -127,44 +131,90 @@ impl Record {
 pub(crate) struct Book {
     settings: Settings,
     path: PathBuf,
+    /// Held for the life of the book: the exclusive lock on the file.
+    _lock: fs::File,
     term: u64,
     next_sequence: u64,
     leases: BTreeMap<LeaseId, Record>,
+    /// The version the file had, and the fields of it this build does not know.
+    version: u32,
+    extra: toml::Table,
+    /// Set when a save failed and not yet cleared by one that worked: the file is
+    /// behind the table.
+    unsaved: bool,
 }
 
 impl Book {
-    /// Loads the table over `path`, or starts an empty one when there is no file. Every
-    /// boot takes the next term, so an id of an earlier boot is never issued again even
-    /// if the file lost its last writes.
-    pub(crate) fn load(settings: Settings, path: PathBuf) -> Result<Self, OpenError> {
+    /// Loads the table over `path`. A missing file is an empty table only when `boot`
+    /// is [`Boot::Initialise`]; otherwise it is [`OpenError::Missing`], so a lost state
+    /// volume is never mistaken for a first boot. Every boot takes the next term, so an
+    /// id of an earlier boot is never issued again even if the file lost its last
+    /// writes. The file is locked first, and a second table over it is refused.
+    pub(crate) fn load(settings: Settings, path: PathBuf, boot: Boot) -> Result<Self, OpenError> {
+        let lock = store::lock(&path)?;
         let empty = Document {
             version: FORMAT_VERSION,
             term: 0,
             next_sequence: 1,
+            lease_count: 0,
             lease: Vec::new(),
+            extra: toml::Table::new(),
         };
-        let document = store::read(&path)?.unwrap_or(empty);
+        let document = match (store::read(&path)?, boot) {
+            (Some(document), _) => document,
+            (None, Boot::Initialise) => empty,
+            (None, Boot::Resume) => return Err(OpenError::Missing { path }),
+        };
+        let counted = u64::try_from(document.lease.len()).ok();
+        if counted != Some(document.lease_count) {
+            let reason = format!(
+                "the file counts {} leases and holds {}",
+                document.lease_count,
+                document.lease.len()
+            );
+            return Err(store::corrupt(&path, reason));
+        }
         let restored = document.lease.iter().map(Record::restore);
         let restored = restored.collect::<Result<Vec<_>, _>>();
         let restored = restored.map_err(|reason| store::corrupt(&path, reason))?;
+        let mut leases = BTreeMap::new();
+        for record in restored {
+            let id = record.id;
+            if leases.insert(id, record).is_some() {
+                return Err(store::corrupt(&path, format!("lease {id} is listed twice")));
+            }
+        }
         Ok(Self {
             settings,
             path,
+            _lock: lock,
             term: document.term.saturating_add(1),
             next_sequence: document.next_sequence.max(1),
-            leases: restored.into_iter().map(|r| (r.id, r)).collect(),
+            leases,
+            version: document.version,
+            extra: document.extra,
+            unsaved: false,
         })
     }
 
-    /// Writes the table to its file.
-    pub(crate) fn save(&self) -> Result<(), SaveError> {
+    /// Writes the table to its file, and remembers whether that worked.
+    pub(crate) fn save(&mut self) -> Result<(), SaveError> {
         let document = Document {
-            version: FORMAT_VERSION,
+            version: self.version.max(FORMAT_VERSION),
             term: self.term,
             next_sequence: self.next_sequence,
+            lease_count: u64::try_from(self.leases.len()).unwrap_or(u64::MAX),
             lease: self.leases.values().map(Record::stored).collect(),
+            extra: self.extra.clone(),
         };
-        store::write(&self.path, &document)
+        let saved = store::write(&self.path, &document);
+        self.unsaved = saved.is_err();
+        saved
+    }
+
+    /// Whether the last save failed, so the file is behind the table.
+    pub(crate) fn unsaved(&self) -> bool {
+        self.unsaved
     }
 
     pub(crate) fn grant(&self, asked: Option<Duration>) -> Option<Duration> {
@@ -197,6 +247,7 @@ impl Book {
             request_labels: request.labels.clone(),
             validation_run: request.validation_run.clone(),
             labels: spec.labels().clone(),
+            extra: toml::Table::new(),
         };
         self.leases.insert(record.id, record.clone());
         record

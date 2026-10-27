@@ -38,6 +38,22 @@ pub enum OpenError {
         /// What the operating system said.
         source: io::Error,
     },
+    /// The file does not exist and the table was not asked to initialise it: either
+    /// this is a first boot that has to say so, or the state volume was lost.
+    #[error("lease file {}: does not exist (only a first boot may create it)", path.display())]
+    Missing {
+        /// The file.
+        path: PathBuf,
+    },
+    /// The lock beside the file could not be taken. An error of kind `WouldBlock`
+    /// means another table holds it: two tables over one file would issue the same ids.
+    #[error("lease file lock {}: cannot lock: {source}", path.display())]
+    Lock {
+        /// The lock file.
+        path: PathBuf,
+        /// What the operating system said.
+        source: io::Error,
+    },
     /// The file was read but is not a lease file, or holds a lease that is not valid.
     /// The table never starts empty over a file it cannot read.
     #[error("lease file {}: corrupt: {reason}", path.display())]
@@ -65,8 +81,10 @@ pub enum AcquireError {
     /// and the table resolves it by observing it; it is not held.
     #[error("lease {0} is pending: the provider did not answer the start")]
     Unconfirmed(LeaseId),
-    /// The lease file could not be written. The table keeps its state in memory, and
-    /// a lease the provider started ends by expiry if the client never learns of it.
+    /// The lease file could not be written before the provider was called, so it was
+    /// not called. The record stays pending in memory, retried by [`crate::LeaseTable::tick`]
+    /// and ended by its expiry. A save that fails after the provider answered is not an
+    /// error here: the client gets the answer and the tick report carries the failure.
     #[error(transparent)]
     Save(#[from] SaveError),
 }
@@ -102,8 +120,8 @@ pub enum ReleaseError {
     /// The table has no such lease.
     #[error("lease {0} is not known")]
     Unknown(LeaseId),
-    /// The lease file could not be written. The lease stays marked releasing in memory
-    /// and the next tick stops it.
+    /// The lease file could not be written before the stop. The lease stays marked
+    /// releasing in memory and the next tick stops it.
     #[error(transparent)]
     Save(#[from] SaveError),
 }

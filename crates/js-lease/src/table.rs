@@ -8,7 +8,7 @@ use crate::book::{Book, Seen, Step};
 use crate::clock::{Clock, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
-use crate::types::{Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+use crate::types::{Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
 
 /// The lease table over one provider. See the crate docs for the rules.
 ///
@@ -23,7 +23,10 @@ pub struct LeaseTable<P, C> {
 }
 
 impl<P: Provider, C: Clock> LeaseTable<P, C> {
-    /// Opens the table over the file at `path`, creating it when it does not exist.
+    /// Opens the table over the file at `path`, holding an exclusive lock beside it for
+    /// as long as the table lives (a second table over the same file is an
+    /// [`OpenError::Lock`]). A missing file is an [`OpenError::Missing`] unless `boot` is
+    /// [`Boot::Initialise`].
     ///
     /// Every lease in the file is restored with its state and the next sequence is
     /// kept; the table takes a new term for this boot. A lease stored as held is
@@ -34,8 +37,9 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         clock: C,
         settings: Settings,
         path: impl Into<PathBuf>,
+        boot: Boot,
     ) -> Result<Self, OpenError> {
-        let book = Book::load(settings, path.into())?;
+        let book = Book::load(settings, path.into(), boot)?;
         let mut table = Self {
             provider,
             clock,
@@ -71,7 +75,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         self.save()?;
         let ack = self.provider.start(spec);
         let settled = self.book.settle_start(record, ack);
-        self.save()?;
+        let _ = self.save();
         settled
     }
 
@@ -95,7 +99,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         marked.ok_or(ReleaseError::Unknown(*id))?;
         self.save()?;
         let freed = self.stop(id);
-        self.save()?;
+        let _ = self.save();
         match freed {
             true => Ok(ReleaseOutcome::Freed),
             false => Ok(ReleaseOutcome::Releasing),
@@ -106,7 +110,8 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// observed when the stop does not free it; a pending or held one whose expiry has
     /// passed is marked releasing and stopped as a release does; a pending one still
     /// in time is observed (present makes it held, absent drops it, unknown keeps it).
-    /// The file is written once at the end when anything changed.
+    /// The file is written once at the end when anything changed or an earlier save failed,
+    /// and a failure is reported in the result.
     pub fn tick(&mut self) -> TickReport {
         let now = self.clock.now();
         let mut report = TickReport::default();
@@ -137,7 +142,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         }
         report.pending = self.book.count(LeaseState::Pending);
         report.releasing = self.book.count(LeaseState::Releasing);
-        if report.changed() {
+        if report.changed() | self.book.unsaved() {
             report.save_error = self.save().err();
         }
         report
@@ -175,7 +180,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         self.book.settle_absence(id, &seen)
     }
 
-    fn save(&self) -> Result<(), SaveError> {
+    fn save(&mut self) -> Result<(), SaveError> {
         self.book.save()
     }
 }

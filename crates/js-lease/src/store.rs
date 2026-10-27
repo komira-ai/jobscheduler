@@ -11,7 +11,9 @@ use crate::error::{OpenError, SaveError};
 use crate::state::LeaseState;
 
 /// The version this build writes. Readers ignore the number and the fields they do
-/// not know, so a later version may add fields and an older build still loads it.
+/// not know, so a later version may add fields and an older build still loads it. A
+/// build keeps what it does not know and writes it back, with the version it read when
+/// that is higher, so an older build in between does not destroy a later one's data.
 pub(crate) const FORMAT_VERSION: u32 = 1;
 
 /// The whole file.
@@ -20,8 +22,14 @@ pub(crate) struct Document {
     pub version: u32,
     pub term: u64,
     pub next_sequence: u64,
+    /// How many `[[lease]]` tables follow. A file cut short (a partial restore) has
+    /// fewer and is refused instead of loading as a smaller table.
+    pub lease_count: u64,
     #[serde(default)]
     pub lease: Vec<StoredLease>,
+    /// Fields of a later version, kept as read.
+    #[serde(flatten)]
+    pub extra: toml::Table,
 }
 
 /// One lease as written.
@@ -39,6 +47,22 @@ pub(crate) struct StoredLease {
     pub validation_run: Option<String>,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    /// Fields of a later version, kept as read.
+    #[serde(flatten)]
+    pub extra: toml::Table,
+}
+
+/// Takes the exclusive lock of the table at `path`: a sibling `.lock` file, locked for
+/// as long as the returned file lives. A second table over the same path fails here
+/// with a `WouldBlock` error instead of issuing the same ids.
+pub(crate) fn lock(path: &Path) -> Result<fs::File, OpenError> {
+    let lock = sibling(path, ".lock");
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(false).write(true);
+    let locked = options
+        .open(&lock)
+        .and_then(|file| file.try_lock().map(|()| file).map_err(io::Error::from));
+    locked.map_err(|source| OpenError::Lock { path: lock, source })
 }
 
 /// Reads the document at `path`; `None` when there is no file.
@@ -79,7 +103,7 @@ pub(crate) fn write(path: &Path, document: &Document) -> Result<(), SaveError> {
 }
 
 fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = temp_path(path);
+    let temp = sibling(path, ".tmp");
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let dir = dir.unwrap_or(Path::new("."));
     fs::File::create(&temp)
@@ -88,8 +112,9 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .and_then(|()| fs::File::open(dir).and_then(|dir| dir.sync_all()))
 }
 
-fn temp_path(path: &Path) -> PathBuf {
+/// `path` with `suffix` appended to its file name, next to it.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(suffix);
     path.with_file_name(name)
 }

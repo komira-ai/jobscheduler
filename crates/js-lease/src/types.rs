@@ -10,7 +10,8 @@ use crate::state::LeaseState;
 ///
 /// A ttl the client asks for is clamped to `max_ttl`; a client that names none gets
 /// `default_ttl`. A zero ttl is refused. Neither bound replaces the request's maximum
-/// wall time, which bounds the whole life of a lease whatever the ttl.
+/// wall time, which bounds the whole life of a lease whatever the ttl (as the wall clock
+/// reads it; see the crate docs on a clock that steps).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     default_ttl: Duration,
@@ -108,7 +109,8 @@ pub struct TickReport {
     pub pending: usize,
     /// Leases still releasing after the tick.
     pub releasing: usize,
-    /// Set when the tick changed the table and the file could not be written.
+    /// Set when the tick wrote the file (it changed the table, or an earlier save had
+    /// failed) and could not.
     pub save_error: Option<SaveError>,
 }
 
@@ -118,4 +120,19 @@ impl TickReport {
         let lists = [&self.expired, &self.freed, &self.confirmed, &self.dropped];
         lists.iter().any(|list| !list.is_empty())
     }
+}
+
+/// What a missing lease file means when a table is opened.
+///
+/// The file is the only record of the ids already issued and of the leases the
+/// provider still holds. A table that started empty whenever the file was missing would
+/// restart at term 1 after a lost or unmounted state volume, reissue old ids and forget
+/// leases it never stopped. So creating the file is something the operator asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boot {
+    /// The file must exist: a missing file is an error.
+    Resume,
+    /// The first boot: a missing file starts an empty table. An existing file is
+    /// loaded as for [`Boot::Resume`].
+    Initialise,
 }
