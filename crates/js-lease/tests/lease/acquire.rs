@@ -11,7 +11,9 @@ use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::{Call, HostCapacity, Provider, RefusalCode};
 use js_types::{ClassId, LeaseId, ProviderId, Request, Resources};
 
-use crate::support::{Scratch, T0, at, clock, fresh, host, request, secs, settings, states};
+use crate::support::{
+    Scratch, T0, at, clock, fresh, gpu_host_request, host, request, secs, settings, states,
+};
 
 /// Asserts that the same flow works on the static pool, that two acquires never get the
 /// same host, and that a third is refused when every host is booked.
@@ -23,7 +25,7 @@ fn two_acquires_never_share_a_host_on_the_pool() {
         LeaseTable::open(pool, clock(), settings(), scratch.file(), Boot::Initialise).unwrap();
     let wanted = || Request {
         resources: Resources::new(1000, 1, 1, Some("nvidia-a100".into())).unwrap(),
-        ..request(3600)
+        ..gpu_host_request(3600)
     };
     let a = table.acquire(wanted(), None).unwrap();
     let b = table.acquire(wanted(), None).unwrap();

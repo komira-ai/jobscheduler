@@ -81,11 +81,12 @@ fn shape() -> Shape {
 pub fn fake() -> FakeProvider {
     let hosts = vec![(host("h1"), shape()), (host("h2"), shape())];
     FakeProvider::new(ProviderId::new("fake").unwrap(), hosts)
+        .with_class(ResourceClass::whole_node())
 }
 
 pub fn request(max_wall_secs: u64) -> Request {
     Request {
-        class: ClassId::new("gpu-host").unwrap(),
+        class: ClassId::new("whole-node").unwrap(),
         resources: Resources::new(1000, 1, 1, Some("g".into())).unwrap(),
         capabilities: BTreeMap::new(),
         max_wall: secs(max_wall_secs),
@@ -122,7 +123,7 @@ pub fn states<P: Provider>(table: &LeaseTable<P, ManualClock>) -> Vec<(LeaseId, 
 }
 
 pub fn provider_classes() -> Vec<ResourceClass> {
-    vec![ResourceClass::gpu_host()]
+    vec![ResourceClass::whole_node()]
 }
 
 pub fn open_err(path: &Path) -> OpenError {
@@ -148,6 +149,14 @@ pub fn plain_class() -> ResourceClass {
 /// A fake that also serves [`plain_class`].
 pub fn fake_with_plain() -> FakeProvider {
     fake().with_class(plain_class())
+}
+
+/// A request of the `gpu-host` class, which is admitted `BookAll`, not whole-node.
+pub fn gpu_host_request(max_wall_secs: u64) -> Request {
+    Request {
+        class: ClassId::new("gpu-host").unwrap(),
+        ..request(max_wall_secs)
+    }
 }
 
 /// A request of the `plain` class.

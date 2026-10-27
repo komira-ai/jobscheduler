@@ -8,8 +8,8 @@ use js_provider::{Call, Provider, StartSpec};
 use js_types::LeaseId;
 
 use crate::support::{
-    Scratch, T0, at, clock, fake, fake_with_plain, open_err, plain_class, plain_request, request,
-    secs, settings, states,
+    Scratch, T0, at, clock, fake, fake_with_plain, gpu_host_request, open_err, plain_class,
+    plain_request, request, secs, settings, states,
 };
 
 fn id() -> LeaseId {
@@ -155,6 +155,25 @@ fn a_whole_lease_started_at_once_has_todays_timestamps() {
     assert_eq!(info(&table).ends_at, at(T0 + 3_600_000));
 }
 
+/// Asserts that a `gpu-host` lease is admitted `BookAll`, so it is not whole-node: its
+/// start is granted with a token at once, and one that answers Unknown is not given the
+/// whole-node waiting rules. It fails if `gpu-host` were `Whole`.
+#[test]
+fn a_gpu_host_lease_is_not_pending_when_none_exists() {
+    let (mut table, _clock, scratch) = table("gpu_host", settings());
+    let lease = table.acquire(gpu_host_request(3600), None).unwrap();
+    assert_eq!(states(&table), vec![(lease.id, LeaseState::Held)]);
+    assert_eq!(lease.expires_at, at(T0 + 60_000));
+    assert_eq!(info(&table).ends_at, at(T0 + 3_600_000));
+    table.release(&lease.id).unwrap();
+
+    table.provider_mut().script_unknown(Call::Start, true);
+    table.acquire(gpu_host_request(3600), None).unwrap_err();
+    assert_eq!(info(&table).expires_at, at(T0 + 60_000));
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert!(!text.contains("whole"));
+}
+
 /// Regression pin: a lease of a class that is not whole-node keeps its exact timestamps
 /// whether it starts at once or pending: the ttl counts from the commit, a pending one
 /// expires at the ttl, and an observation that confirms it moves nothing.
@@ -242,7 +261,11 @@ fn an_old_file_loads_as_not_whole() {
     let scratch = Scratch::new("whole_old");
     fs::write(scratch.file(), OLD_PENDING).unwrap();
     let mut provider = fake();
-    let spec = StartSpec::new(id(), request(3600), &[js_types::ResourceClass::gpu_host()]);
+    let spec = StartSpec::new(
+        id(),
+        request(3600),
+        &[js_types::ResourceClass::whole_node()],
+    );
     provider.start(spec.unwrap());
     let clock = clock();
     let boot = Boot::Resume;
@@ -289,7 +312,7 @@ fn unknown_fields_survive_beside_the_whole_fields() {
         format!("{OLD_PENDING}whole = true\nttl_ms = 60000\nwall_ms = 3600000\npriority = 3\n");
     fs::write(scratch.file(), text).unwrap();
     let mut provider = fake();
-    let classes = [plain_class(), js_types::ResourceClass::gpu_host()];
+    let classes = [plain_class(), js_types::ResourceClass::whole_node()];
     provider.start(StartSpec::new(id(), request(3600), &classes).unwrap());
     let clock = clock();
     let boot = Boot::Resume;
