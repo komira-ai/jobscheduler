@@ -1,9 +1,9 @@
-//! What `kbf --version --json` prints, and the one parser of it.
+//! What a build's `--version --json` prints, and the one parser of it.
 //!
-//! The object is the build's own report (`crates/kbf-cli/src/version.rs` writes it). Two
+//! The object is the build's own report (the binary's version command writes it). Two
 //! readers hold the same bytes: the installer, which runs the staged binary and reads what it
 //! prints, and the release store, which keeps the same bytes per platform as the release's
-//! version facts (`kbf-<commit>-<platform>.version.json`) and offers them to nodes. They read
+//! version facts (one `.version.json` file per commit and platform) and offers them to nodes. They read
 //! them with [`Version::parse`], so a document one accepts the other accepts.
 
 use serde::Deserialize;
@@ -53,7 +53,7 @@ impl VersionFault {
     }
 }
 
-/// What `--version --json` prints. A field this type does not name is ignored: a newer kbf
+/// What `--version --json` prints. A field this type does not name is ignored: a newer build
 /// adds fields, and an installer that refused them would be unable to stage any build after
 /// it (adding `seq` did that). A field named twice, a required one missing and a wrong type
 /// are still refused (serde's derive rejects a repeated known field). `platform` (the
@@ -88,7 +88,7 @@ pub struct Version {
     /// How far this build carries what the installer reports to the frontend: at least 1 when
     /// it reads `available` and `release_source` from `status.json` and sends them on. `None`
     /// for a build that predates the field, which relays nothing of the sort. The level a
-    /// host needs is the installer's (`kbf_installer::binary::RELAY_NEEDED`), not this type's.
+    /// host needs is the installer's own required relay level, not this type's.
     #[serde(default)]
     pub relay: Option<u64>,
     /// The number of commits behind the build's commit, which puts two builds of one branch
@@ -166,7 +166,7 @@ pub struct TooNew {
 /// Whether an installer that understands `supported` may take a component that declared
 /// `declared`: `Err` when any of its numbers is past what the installer understands, the first
 /// in the order `protocol`, `min_protocol`, `state_schema` (the rule behind upgrading the
-/// installer before a kbf that raises one).
+/// installer before a build that raises one).
 ///
 /// # Errors
 /// [`TooNew`], naming the number.
@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    /// Catches an installer that strands on a field a newer kbf adds to `--version --json`: a
+    /// Catches an installer that strands on a field a newer build adds to `--version --json`: a
     /// field this `Version` does not name is ignored and the named fields still parse. Adding
     /// `seq` was refused by every installer built before it; the next field must not be.
     /// Nested values (an object, an array) in an unknown field are skipped too.
@@ -313,7 +313,7 @@ mod tests {
         }
     }
 
-    /// Catches the `seq` that `kbf --version --json` prints (the number of commits behind the
+    /// Catches the `seq` that `--version --json` prints (the number of commits behind the
     /// build) not being read, and a `seq` that is read as something else than the number: 0
     /// ("could not count") is a value, not an absent field. Both real shapes parse: the one
     /// a build before `seq` printed and the one a build after prints.
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(err.code(), "version-unreadable");
     }
 
-    /// Catches the `relay` that `kbf --version --json` prints (how far the build relays what
+    /// Catches the `relay` that `--version --json` prints (how far the build relays what
     /// the installer reports) not being read, a build that predates it refused instead of
     /// read as `None`, and a level that is text accepted.
     ///
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(err.code(), "version-unreadable");
     }
 
-    /// Catches the `commit_full` that `kbf --version --json` prints (the 40 hex digits of the
+    /// Catches the `commit_full` that `--version --json` prints (the 40 hex digits of the
     /// build's commit) not being read, a build that predates it or does not know its commit
     /// refused instead of read as `None`, and a value that is not text accepted.
     ///
@@ -445,7 +445,7 @@ mod tests {
 
     /// Catches an installer that takes a component declaring more than it understands, in any
     /// one of the three numbers (each tried alone, the others equal), and one that refuses a
-    /// component declaring no more (equal, or less: an installer ahead of the kbf it takes is
+    /// component declaring no more (equal, or less: an installer ahead of the build it takes is
     /// the order the rule asks for). The refusal names the number and both values.
     ///
     /// Asserts that each of the three comparisons is made; that equal numbers are understood;
