@@ -2,7 +2,8 @@
 //! SIGTERM after finishing; and its refusals exit 2.
 
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use rustix::process::{Pid, Signal, kill_process};
 
@@ -10,23 +11,44 @@ use crate::support::{Scratch, TOKEN, base_args, lease_body, request};
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js-lease-server");
 
+/// How long the test waits for the program to print its address before it gives up.
+/// Only a hang reaches it; a program that is working prints at once.
+const START_LIMIT: Duration = Duration::from_secs(60);
+
+/// A child process that is killed and reaped when the guard is dropped, so a failed
+/// assertion leaves no server behind holding its files.
+struct Guard(Child);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Asserts that the real program prints the address it listens on, answers requests
 /// with the system clock and a timer, and on SIGTERM stops with status 0.
 #[tokio::test]
 async fn the_program_serves_and_stops_on_sigterm() {
     let scratch = Scratch::new("binary");
     let args = base_args(&scratch);
-    let mut child = Command::new(PROGRAM)
-        .args(&args[1..])
-        .args(["--tick", "1h"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
+    let mut child = Guard(
+        Command::new(PROGRAM)
+            .args(&args[1..])
+            .args(["--tick", "1h"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let stdout = child.0.stdout.take().unwrap();
+    let (first, line) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut text);
+        let _ = first.send(text);
+    });
+    let line = line.recv_timeout(START_LIMIT).unwrap();
     let addr = line
         .trim()
         .strip_prefix("listening on ")
@@ -40,9 +62,9 @@ async fn the_program_serves_and_stops_on_sigterm() {
     let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
     assert_eq!(made.status, 201, "{}", made.body);
 
-    let pid = Pid::from_child(&child);
+    let pid = Pid::from_child(&child.0);
     kill_process(pid, Signal::TERM).unwrap();
-    let status = child.wait().unwrap();
+    let status = child.0.wait().unwrap();
     assert!(status.success(), "{status:?}");
     let saved = std::fs::read_to_string(scratch.state()).unwrap();
     assert!(saved.contains("lease_count = 1"));

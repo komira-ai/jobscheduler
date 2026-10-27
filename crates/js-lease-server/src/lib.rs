@@ -23,16 +23,21 @@
 //! | `--state-file <path>` | the lease file |
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]) |
-//! | `--token-file <path>` | required, mode 0600 or 0400 |
+//! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII (trailing whitespace is dropped) |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
 //! | `--tick` | how often the table is ticked, `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither |
+//! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
+//! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
+//! | `--header-timeout` | a client's time to send a request head, from the connection's start and after each response, `30s` |
+//! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2.
 //!
 //! # API
 //!
-//! Every route but `/healthz` needs `Authorization: Bearer <token>`; a missing or wrong
+//! Every route but `/healthz` needs `Authorization: Bearer <token>` (the scheme in any
+//! letter case); a missing or wrong
 //! token is a 401 with an empty body. Bodies are JSON, at most 64 KiB. Errors are
 //! `{"error": "<code>"}` (a 400 adds `"reason"`).
 //!
@@ -48,16 +53,47 @@
 //! not the JSON the route takes a 400, a body over the cap a 413, and a lease file that
 //! cannot be written a 500 (`state-write-failed`; the cause is in the log).
 //!
-//! The table sits behind one async mutex, locked for the table call alone and never
-//! across an await.
+//! A 500 `state-write-failed` says the lease file could not be written, and what the
+//! request left behind depends on the route:
+//!
+//! - `POST /v1/leases`: the file could not be written before the provider was called,
+//!   so the provider was not called and no host was started. The lease is not granted
+//!   and the client has no id. The record stays pending in memory, is listed until the
+//!   next tick, and that tick finds nothing on the provider and drops it; it is never
+//!   started later. The client may retry the acquire.
+//! - `POST /v1/leases/{id}/renew`: the new expiry took effect in memory only. The lease
+//!   is held and the client may renew again; a restart before the next successful
+//!   write loses the extension.
+//! - `DELETE /v1/leases/{id}`: the lease is marked releasing in memory and the provider
+//!   was not asked to stop it yet. The next tick stops it. Treat the lease as released.
+//!
+//! The table sits behind one async mutex, taken for the table call alone and never held
+//! across an await. A table call is synchronous: it writes and syncs the lease file and
+//! calls the provider on a runtime worker thread, with the lock held, so every other
+//! request and the tick wait for it. That is cheap for the static pool; a provider that
+//! can take long (one that calls over a network) must bound its own calls, see
+//! [`CapacitySource`].
+//!
+//! # Limits
+//!
+//! Before any token is checked a client can hold only so much. At most
+//! `--max-connections` connections are open (the permit is taken before a connection is
+//! accepted and kept until it closes), a TLS handshake that is not finished in
+//! `--handshake-timeout` is dropped, and a connection whose request head has not arrived
+//! in `--header-timeout` is closed. A client that sends its head and then stalls on the
+//! body does so with a valid token, since the token is checked on the head; it holds a
+//! connection until it finishes or the server stops. A failed accept (descriptors used
+//! up, say) is logged and retried after 100 ms.
 //!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
 //! ticks the table at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
-//! ([`Running::save_errors`]). On SIGTERM or ctrl-c the server finishes the requests in
-//! flight, ticks once more and exits 0.
+//! ([`Running::save_errors`]). On SIGTERM or ctrl-c the server stops accepting, gives the requests
+//! in flight `--drain-timeout` to finish (a connection still open then is cut), ticks
+//! once more and exits 0. A second signal while it drains is not needed: the drain is
+//! bounded.
 
 mod adapt;
 mod api;
@@ -84,7 +120,7 @@ use tokio::sync::mpsc;
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, StaticPoolSource};
-pub use config::{BootMode, Cli, Config, TlsFiles, Token, parse_duration};
+pub use config::{BootMode, Cli, Config, Limits, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};

@@ -177,6 +177,7 @@ async fn shutdown_finishes_requests_in_flight() {
     let args = crate::support::base_args(&scratch);
     let h = Harness::with(scratch, args, Some(Box::new(pool))).await;
     let state = h.scratch.state();
+    let addr = h.addr();
     let mut stream = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
     let body = lease_body().to_string();
     let head = format!(
@@ -190,7 +191,9 @@ async fn shutdown_finishes_requests_in_flight() {
     inside.recv().unwrap();
 
     let stopping = tokio::spawn(h.running.shutdown());
-    for _ in 0..50 {
+    // The listener closes when the server begins to stop: connections are refused
+    // from then on, and the request in flight is still waiting on the provider.
+    while tokio::net::TcpStream::connect(addr).await.is_ok() {
         tokio::task::yield_now().await;
     }
     assert!(!stopping.is_finished());

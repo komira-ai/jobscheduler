@@ -1,14 +1,16 @@
 //! The flags, and the checks that decide whether the server may start.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use js_lease::{Boot, Settings};
+use rustix::fs::OFlags;
+use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
 use crate::capacity::{CapacitySource, StaticPoolSource};
@@ -55,6 +57,45 @@ pub struct Cli {
     /// The PEM private key of the certificate.
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
+    /// The most connections held open at once, handshaking, idle or busy. At the cap
+    /// the server stops accepting until one ends.
+    #[arg(long, default_value = "256", value_parser = clap::value_parser!(u16).range(1..))]
+    pub max_connections: u16,
+    /// How long a TLS client has to finish its handshake.
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    pub handshake_timeout: Duration,
+    /// How long a client has to send the head of a request, from the connection's
+    /// start and again after each response on it.
+    #[arg(long, default_value = "30s", value_parser = parse_duration)]
+    pub header_timeout: Duration,
+    /// How long a stop waits for the requests in flight before it cuts what is left.
+    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    pub drain_timeout: Duration,
+}
+
+/// What a client may hold open (see the module doc of `listener`). The flags set
+/// these; the defaults are what the flags default to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The most connections open at once.
+    pub max_connections: u16,
+    /// How long a TLS handshake may take.
+    pub handshake_timeout: Duration,
+    /// How long the head of a request may take to arrive.
+    pub header_timeout: Duration,
+    /// How long a stop waits for requests in flight.
+    pub drain_timeout: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_connections: 256,
+            handshake_timeout: Duration::from_secs(10),
+            header_timeout: Duration::from_secs(30),
+            drain_timeout: Duration::from_secs(10),
+        }
+    }
 }
 
 /// What a missing lease file means (`--boot`).
@@ -134,6 +175,7 @@ pub struct Config {
     pub(crate) tick: Duration,
     pub(crate) token: Token,
     pub(crate) tls: Option<TlsFiles>,
+    pub(crate) limits: Limits,
     pub(crate) capacity: Box<dyn CapacitySource>,
 }
 
@@ -153,6 +195,12 @@ impl Config {
             tick: cli.tick,
             token,
             tls,
+            limits: Limits {
+                max_connections: cli.max_connections,
+                handshake_timeout: cli.handshake_timeout,
+                header_timeout: cli.header_timeout,
+                drain_timeout: cli.drain_timeout,
+            },
             capacity: Box::new(StaticPoolSource::new(cli.pool_config)),
         })
     }
@@ -161,6 +209,12 @@ impl Config {
     /// `--pool-config` names.
     pub fn with_capacity_source(mut self, capacity: Box<dyn CapacitySource>) -> Self {
         self.capacity = capacity;
+        self
+    }
+
+    /// The same configuration with other connection limits than the flags gave.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -194,37 +248,59 @@ fn tls_files(cli: &Cli) -> Result<Option<TlsFiles>, StartupError> {
     }
 }
 
+/// Whether a token file may be trusted: a regular file, owned by the user running the
+/// server (`euid`), that nobody else can read or write (mode 0600 or 0400).
+fn trusted_token_file(is_file: bool, mode: u32, owner: u32, euid: u32) -> bool {
+    is_file & matches!(mode, 0o600 | 0o400) & (owner == euid)
+}
+
+/// The token a file's bytes hold: its content without trailing whitespace, which must
+/// be one run of printable ASCII (an HTTP header value cannot carry anything else, so
+/// any other token could never match a request).
+fn parse_token(bytes: &[u8]) -> Result<Token, &'static str> {
+    let token = bytes.trim_ascii_end();
+    match (token.is_empty(), token.iter().all(u8::is_ascii_graphic)) {
+        (true, _) => Err("is empty"),
+        (false, false) => {
+            Err("must hold one token of printable ASCII with no space or line break inside it")
+        }
+        (false, true) => Ok(Token(token.to_vec())),
+    }
+}
+
 /// Reads the token from `path` after checking, on the open file, that it is a regular
-/// file only its owner can use. The token is the file's content without trailing
-/// whitespace and is not empty.
+/// file owned by the server's user that only that user can use. The file is opened
+/// without blocking, so a named pipe at the path is refused instead of waited on; a
+/// symbolic link is followed (secret mounts are links) and the checks are on what it
+/// leads to.
 fn read_token(path: &Path) -> Result<Token, StartupError> {
     let refuse = StartupError::because("--token-file");
-    let mut file = File::open(path).map_err(|err| refuse(format!("{}: {err}", path.display())))?;
+    let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
+    let opened = OpenOptions::new()
+        .read(true)
+        .custom_flags(nonblocking)
+        .open(path);
+    let mut file = opened.map_err(|err| refuse(format!("{}: {err}", path.display())))?;
     let meta = file
         .metadata()
         .map_err(StartupError::because("--token-file"))?;
     let mode = meta.permissions().mode() & 0o777;
-    let private = meta.is_file() & matches!(mode, 0o600 | 0o400);
-    if !private {
+    let euid = geteuid().as_raw();
+    if !trusted_token_file(meta.is_file(), mode, meta.uid(), euid) {
         return Err(StartupError::new(
             "--token-file",
             format!(
-                "{} must be a regular file readable only by its owner (mode 0600 or 0400), not mode {mode:04o}",
-                path.display()
+                "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
+                path.display(),
+                meta.uid()
             ),
         ));
     }
     let mut bytes = Vec::new();
     let read = file.read_to_end(&mut bytes);
     read.map_err(StartupError::because("--token-file"))?;
-    let token = bytes.trim_ascii_end();
-    match token.is_empty() {
-        true => Err(StartupError::new(
-            "--token-file",
-            format!("{} is empty", path.display()),
-        )),
-        false => Ok(Token(token.to_vec())),
-    }
+    parse_token(&bytes)
+        .map_err(|reason| StartupError::new("--token-file", format!("{} {reason}", path.display())))
 }
 
 #[cfg(test)]
@@ -240,5 +316,58 @@ mod tests {
         assert!(!token.matches(b"s3cret!"));
         assert!(!token.matches(b""));
         assert_eq!(format!("{token:?}"), "Token(..)");
+    }
+
+    /// Asserts that a token file is trusted only when it is a regular file, owner-only
+    /// in mode, and owned by the user running the server: each condition alone refuses.
+    #[test]
+    fn a_token_file_must_be_the_servers_own_private_file() {
+        assert!(trusted_token_file(true, 0o600, 1000, 1000));
+        assert!(trusted_token_file(true, 0o400, 1000, 1000));
+        assert!(!trusted_token_file(false, 0o600, 1000, 1000));
+        assert!(!trusted_token_file(true, 0o640, 1000, 1000));
+        assert!(!trusted_token_file(true, 0o600, 0, 1000));
+        assert!(!trusted_token_file(true, 0o600, 1000, 0));
+    }
+
+    /// Asserts that a token is the content without trailing whitespace, and that empty
+    /// content and any space, line break, control or non-ASCII byte inside the token
+    /// is refused: no header value could ever equal such a token.
+    #[test]
+    fn a_token_is_one_run_of_printable_ascii() {
+        assert!(parse_token(b"abc-123\n").unwrap().matches(b"abc-123"));
+        assert_eq!(parse_token(b" \r\n").err(), Some("is empty"));
+        for bad in [
+            &b"two\nlines\n"[..],
+            b"has space",
+            b" leading",
+            b"tab\tinside",
+            b"nul\0byte",
+            "caf\u{e9}".as_bytes(),
+        ] {
+            let reason = parse_token(bad).err().unwrap();
+            assert!(reason.contains("printable ASCII"), "{bad:?}");
+        }
+    }
+
+    /// Asserts that the default limits are what the flags default to, so the two
+    /// cannot drift apart.
+    #[test]
+    fn the_default_limits_are_the_flag_defaults() {
+        let cli = Cli::try_parse_from([
+            "js-lease-server",
+            "--state-file=a",
+            "--boot=resume",
+            "--pool-config=b",
+            "--token-file=c",
+        ])
+        .unwrap();
+        let from_flags = Limits {
+            max_connections: cli.max_connections,
+            handshake_timeout: cli.handshake_timeout,
+            header_timeout: cli.header_timeout,
+            drain_timeout: cli.drain_timeout,
+        };
+        assert_eq!(from_flags, Limits::default());
     }
 }

@@ -5,6 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
+use clap::Parser;
 use js_lease_server::{SharedClock, channel_ticker, parse_duration, run, start};
 
 use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, replace, request};
@@ -248,4 +249,89 @@ async fn other_start_refusals_name_their_flag() {
     let (_, ticker) = channel_ticker();
     let started = start(config(args).unwrap(), SharedClock::new(clock()), ticker).await;
     assert_eq!(flag_of(started), "--listen");
+}
+
+/// Asserts that a named pipe at the token path is refused at once, naming
+/// `--token-file`, instead of the start waiting for a writer that never comes.
+#[test]
+fn a_named_pipe_as_token_file_is_refused() {
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let scratch = Scratch::new("token_fifo");
+    let pipe = scratch.path("pipe");
+    mknodat(CWD, &pipe, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+    let args = replace(base_args(&scratch), "--token-file", pipe);
+    assert_eq!(flag_of(config(args)), "--token-file");
+}
+
+/// Asserts that a symbolic link to an owner-only token file is followed (secret mounts
+/// are links), and that the checks are on the file it leads to: a link to a loose file
+/// is refused.
+#[test]
+fn a_symlinked_token_file_is_checked_at_its_target() {
+    use std::os::unix::fs::symlink;
+    let scratch = Scratch::new("token_symlink");
+    let args = base_args(&scratch);
+    let good = scratch.path("good-link");
+    symlink(scratch.path("token"), &good).unwrap();
+    assert!(config(replace(args.clone(), "--token-file", good)).is_ok());
+    let loose = scratch.write("loose", TOKEN, 0o644);
+    let bad = scratch.path("bad-link");
+    symlink(loose, &bad).unwrap();
+    assert_eq!(
+        flag_of(config(replace(args, "--token-file", bad))),
+        "--token-file"
+    );
+}
+
+/// Asserts that a token that no header value could equal is refused at start with the
+/// reason, rather than accepted and then answering 401 to everyone: a line break, a
+/// space or a non-ASCII byte inside it.
+#[test]
+fn a_token_no_header_can_carry_is_refused() {
+    let scratch = Scratch::new("token_unusable");
+    let args = base_args(&scratch);
+    for (name, text) in [
+        ("lines", "first\nsecond\n"),
+        ("inner-space", "two words"),
+        ("leading-space", " token"),
+        ("non-ascii", "caf\u{e9}"),
+    ] {
+        let path = scratch.write(name, text, 0o600);
+        let err = config(replace(args.clone(), "--token-file", path))
+            .err()
+            .unwrap();
+        assert_eq!(err.flag(), "--token-file", "{name}");
+        assert!(err.reason().contains("printable ASCII"), "{name}: {err}");
+    }
+}
+
+/// Asserts that the connection limits are flags, that a zero connection cap or a zero
+/// duration is refused by the parser, and that the values given reach the server.
+#[test]
+fn connection_limits_are_flags() {
+    let scratch = Scratch::new("limit_flags");
+    for bad in [
+        "--max-connections=0",
+        "--max-connections=70000",
+        "--handshake-timeout=0",
+        "--header-timeout=0s",
+        "--drain-timeout=soon",
+    ] {
+        let args = args_with(&scratch, &[bad]);
+        assert!(js_lease_server::Cli::try_parse_from(args).is_err(), "{bad}");
+    }
+    let args = args_with(
+        &scratch,
+        &[
+            "--max-connections=7",
+            "--handshake-timeout=3",
+            "--header-timeout=2m",
+            "--drain-timeout=1h",
+        ],
+    );
+    let cli = js_lease_server::Cli::try_parse_from(args).unwrap();
+    assert_eq!(cli.max_connections, 7);
+    assert_eq!(cli.handshake_timeout.as_secs(), 3);
+    assert_eq!(cli.header_timeout.as_secs(), 120);
+    assert_eq!(cli.drain_timeout.as_secs(), 3600);
 }

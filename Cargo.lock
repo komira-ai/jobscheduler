@@ -133,7 +133,6 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sync_wrapper",
- "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -594,6 +593,8 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "clap",
+ "hyper",
+ "hyper-util",
  "js-lease",
  "js-pool-static",
  "js-provider",
@@ -1293,7 +1294,6 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "sync_wrapper",
- "tokio",
  "tower-layer",
  "tower-service",
 ]

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use clap::Parser;
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{
-    CapacitySource, Cli, Config, Running, SharedClock, StartupError, TickHandle, channel_ticker,
-    start,
+    CapacitySource, Cli, Config, Limits, Running, SharedClock, StartupError, TickHandle,
+    channel_ticker, start,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
@@ -139,11 +139,23 @@ impl Harness {
         args: Vec<OsString>,
         source: Option<Box<dyn CapacitySource>>,
     ) -> Self {
-        quiet_logs();
         let mut config = config(args).unwrap();
         if let Some(source) = source {
             config = config.with_capacity_source(source);
         }
+        Self::over(scratch, config).await
+    }
+
+    /// A server on the base flags with these connection limits.
+    pub async fn limited(name: &str, limits: Limits) -> Self {
+        let scratch = Scratch::new(name);
+        let config = config(base_args(&scratch)).unwrap().with_limits(limits);
+        Self::over(scratch, config).await
+    }
+
+    /// A server on `config`.
+    pub async fn over(scratch: Scratch, config: Config) -> Self {
+        quiet_logs();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
         let running = start(config, SharedClock::new(clock.clone()), ticker)
@@ -278,15 +290,27 @@ pub async fn request(
 /// server closes. A reset after the reply started does not lose what was read: a
 /// server that answers without reading a large body closes on unread data.
 pub async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: S,
+    stream: S,
     method: &str,
     path: &str,
     token: Option<&str>,
     body: Option<&[u8]>,
 ) -> Reply {
+    let authorization = token.map(|token| format!("Bearer {token}"));
+    exchange_authorized(stream, method, path, authorization.as_deref(), body).await
+}
+
+/// Like [`exchange`], with the whole `Authorization` header value given.
+pub async fn exchange_authorized<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    body: Option<&[u8]>,
+) -> Reply {
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
-    if let Some(token) = token {
-        head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+    if let Some(value) = authorization {
+        head.push_str(&format!("Authorization: {value}\r\n"));
     }
     let body = body.unwrap_or_default();
     head.push_str(&format!("Content-Length: {}\r\n\r\n", body.len()));

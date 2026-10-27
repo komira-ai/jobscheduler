@@ -1,25 +1,37 @@
-//! The accepted connections of the server, plain or over TLS.
+//! The accepted connections of the server, plain or over TLS, and the limits on what a
+//! client may hold open.
+//!
+//! One loop accepts and one task serves each connection, from its TLS handshake to its
+//! last response. A client that stalls its handshake delays nobody. Every connection
+//! holds a permit of a counted gate from before it is accepted until it ends, so the
+//! number of connections (handshaking, idle or busy) never passes
+//! [`Limits::max_connections`]; at the cap the loop stops accepting and the kernel
+//! queues the rest. A client that opens a connection and sends no request head is
+//! dropped after [`Limits::header_timeout`], one that stalls its handshake after
+//! [`Limits::handshake_timeout`].
 
+use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::serve::Listener;
+use axum::Router;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_rustls::TlsAcceptor;
+use tracing::warn;
 
+use crate::config::Limits;
 use crate::util::or_pending;
-
-/// How long a client has to finish its TLS handshake.
-pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the accept loop waits after an accept fails (out of descriptors, say)
 /// before it tries again.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+pub(crate) const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 
 /// A byte stream, plain or TLS.
 pub(crate) trait Duplex: AsyncRead + AsyncWrite + Send {}
@@ -29,113 +41,201 @@ impl<T: AsyncRead + AsyncWrite + Send> Duplex for T {}
 /// A connection ready for HTTP.
 pub(crate) type Io = Pin<Box<dyn Duplex>>;
 
-/// The listener the HTTP server accepts from. A task accepts the TCP connections and
-/// finishes each one's TLS handshake on a task of its own, so a client that stalls its
-/// handshake delays nobody; the server receives the connections that got through.
-pub(crate) struct Incoming {
-    ready: mpsc::Receiver<(Io, SocketAddr)>,
-    addr: SocketAddr,
-    pump: JoinHandle<()>,
+/// Where connections come from: a listening socket, or a test's stand-in for one.
+pub(crate) trait Accept {
+    /// The next connection, or why there is none.
+    fn accept(&self) -> impl Future<Output = io::Result<TcpStream>> + Send;
 }
 
-impl Incoming {
-    /// Starts accepting on `listener`, over TLS when `tls` is set.
-    pub(crate) fn new(listener: TcpListener, addr: SocketAddr, tls: Option<TlsAcceptor>) -> Self {
-        let (sender, ready) = mpsc::channel(16);
-        let pump = tokio::spawn(accept_loop(listener, tls, sender));
-        Self::from_parts(ready, addr, pump)
-    }
-
-    pub(crate) fn from_parts(
-        ready: mpsc::Receiver<(Io, SocketAddr)>,
-        addr: SocketAddr,
-        pump: JoinHandle<()>,
-    ) -> Self {
-        Self { ready, addr, pump }
+impl Accept for TcpListener {
+    async fn accept(&self) -> io::Result<TcpStream> {
+        TcpListener::accept(self).await.map(|(stream, _)| stream)
     }
 }
 
-impl Drop for Incoming {
-    fn drop(&mut self) {
-        self.pump.abort();
+/// The next connection of `source`. A failed accept (descriptors used up, say) is
+/// logged and retried after `backoff`, so it neither ends the server nor spins.
+pub(crate) async fn accept_stream<A: Accept>(source: &A, backoff: Duration) -> TcpStream {
+    loop {
+        match source.accept().await {
+            Ok(stream) => return stream,
+            Err(err) => {
+                warn!(error = %err, "cannot accept a connection");
+                tokio::time::sleep(backoff).await;
+            }
+        }
     }
 }
 
-impl Listener for Incoming {
-    type Io = Io;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Io, SocketAddr) {
-        or_pending(self.ready.recv().await).await
-    }
-
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        Ok(self.addr)
-    }
+/// The next connection of `listener` and the permit that counts it. Waiting for the
+/// permit first is what stops the accepting at the cap.
+async fn accept_counted(
+    listener: &TcpListener,
+    gate: &Arc<Semaphore>,
+) -> (TcpStream, OwnedSemaphorePermit) {
+    let permit = or_pending(gate.clone().acquire_owned().await.ok()).await;
+    (accept_stream(listener, ACCEPT_BACKOFF).await, permit)
 }
 
-async fn accept_loop(
+/// Serves `app` on `listener` until `stop` fires (or its sender is dropped), then
+/// drains: no new connections, each connection finishes the request it is serving, and
+/// the connections still open after `limits.drain_timeout` are cut.
+pub(crate) async fn serve(
     listener: TcpListener,
     tls: Option<TlsAcceptor>,
-    sender: mpsc::Sender<(Io, SocketAddr)>,
+    app: Router,
+    limits: Limits,
+    mut stop: oneshot::Receiver<()>,
 ) {
+    let gate = Arc::new(Semaphore::new(usize::from(limits.max_connections)));
+    let (graceful, _) = watch::channel(());
+    let (cut, _) = watch::channel(());
     loop {
-        let accepted = listener.accept().await;
-        let backoff = accepted.is_err().then_some(ACCEPT_BACKOFF);
-        accepted.into_iter().for_each(|(stream, peer)| {
-            tokio::spawn(handshake(stream, peer, tls.clone(), sender.clone()));
+        let next = tokio::select! {
+            _ = &mut stop => None,
+            accepted = accept_counted(&listener, &gate) => Some(accepted),
+        };
+        let Some((stream, permit)) = next else { break };
+        let task = connection(
+            stream,
+            tls.clone(),
+            app.clone(),
+            limits,
+            graceful.subscribe(),
+        );
+        let mut cut = cut.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = task => {}
+                _ = cut.changed() => {}
+            }
+            drop(permit);
         });
-        tokio::time::sleep(backoff.unwrap_or_default()).await;
+    }
+    drop(listener);
+    let _ = graceful.send(());
+    let all = u32::from(limits.max_connections);
+    let drained = tokio::time::timeout(limits.drain_timeout, gate.acquire_many(all)).await;
+    if drained.is_err() {
+        warn!("connections still open at the end of the drain are cut");
+        let _ = cut.send(());
     }
 }
 
-/// Finishes the connection's handshake, if it is a TLS one, and hands it to the server.
-/// A client that fails or stalls its handshake is dropped.
-async fn handshake(
+/// One connection: its handshake, then its requests, until it ends or `stopping`
+/// fires and the request in flight is answered.
+async fn connection(
     stream: TcpStream,
-    peer: SocketAddr,
     tls: Option<TlsAcceptor>,
-    sender: mpsc::Sender<(Io, SocketAddr)>,
+    app: Router,
+    limits: Limits,
+    stopping: watch::Receiver<()>,
 ) {
-    let io: Option<Io> = match tls {
+    let io = handshake(stream, tls, limits.handshake_timeout).await;
+    if let Some(io) = io {
+        talk(io, app, limits.header_timeout, stopping).await;
+    }
+}
+
+/// Finishes the connection's handshake, if it is a TLS one. A client that fails or
+/// stalls its handshake gets `None`.
+async fn handshake(stream: TcpStream, tls: Option<TlsAcceptor>, limit: Duration) -> Option<Io> {
+    match tls {
         None => Some(Box::pin(stream)),
         Some(acceptor) => {
-            let shaken = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+            let shaken = tokio::time::timeout(limit, acceptor.accept(stream)).await;
             shaken
                 .ok()
                 .and_then(Result::ok)
                 .map(|tls| Box::pin(tls) as Io)
         }
-    };
-    if let Some(io) = io {
-        let _ = sender.send((io, peer)).await;
+    }
+}
+
+/// Speaks HTTP/1.1 on `io` until the client is done. When `stopping` fires the request
+/// in flight is answered (with `Connection: close`) and an idle connection is closed.
+/// An error on the connection (a reset, a head that did not arrive in time) ends it.
+async fn talk(io: Io, app: Router, header_timeout: Duration, mut stopping: watch::Receiver<()>) {
+    let served = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_timeout)
+        .serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
+    let mut served = pin!(served);
+    tokio::select! {
+        _ = served.as_mut() => {}
+        _ = stopping.changed() => {
+            served.as_mut().graceful_shutdown();
+            let _ = served.await;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
 
     use super::*;
 
-    /// Asserts that a listener whose accept task has ended stays pending, so the server
-    /// goes on until it is told to stop instead of ending or spinning.
-    #[test]
-    fn accept_stays_pending_without_a_pump() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
+    /// A source whose first accepts fail, then hands out connections of a real listener.
+    struct Flaky {
+        failures: AtomicUsize,
+        listener: TcpListener,
+    }
+
+    impl Accept for Flaky {
+        async fn accept(&self) -> io::Result<TcpStream> {
+            let left = self.failures.load(Ordering::SeqCst);
+            match left {
+                0 => Accept::accept(&self.listener).await,
+                _ => {
+                    self.failures.store(left - 1, Ordering::SeqCst);
+                    Err(io::Error::other("out of descriptors"))
+                }
+            }
+        }
+    }
+
+    async fn listening() -> (TcpListener, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
             .unwrap();
-        runtime.block_on(async {
-            let (sender, ready) = mpsc::channel(1);
-            drop(sender);
-            let addr: SocketAddr = ([127, 0, 0, 1], 1).into();
-            let mut incoming =
-                Incoming::from_parts(ready, addr, tokio::spawn(std::future::ready(())));
-            assert_eq!(incoming.local_addr().unwrap(), addr);
-            let mut accept = std::pin::pin!(incoming.accept());
-            let mut cx = Context::from_waker(Waker::noop());
-            assert!(matches!(accept.as_mut().poll(&mut cx), Poll::Pending));
-        });
+        (listener, client)
+    }
+
+    /// Asserts that a failed accept is retried, not fatal: after two failures the
+    /// connection that was waiting is returned, and the failures were consumed.
+    #[tokio::test]
+    async fn a_failed_accept_is_retried() {
+        let (listener, client) = listening().await;
+        let source = Flaky {
+            failures: AtomicUsize::new(2),
+            listener,
+        };
+        let stream = accept_stream(&source, Duration::ZERO).await;
+        assert_eq!(source.failures.load(Ordering::SeqCst), 0);
+        assert_eq!(stream.peer_addr().unwrap(), client.local_addr().unwrap());
+    }
+
+    /// Asserts that the accept loop takes a slot of the gate for each connection and
+    /// gives it back when the connection ends, and that with no slot free it does not
+    /// accept: the future stays pending even though a client is waiting.
+    #[tokio::test]
+    async fn a_connection_holds_a_slot_and_no_slot_means_no_accept() {
+        let (listener, _client) = listening().await;
+        let gate = Arc::new(Semaphore::new(1));
+        let full = gate.clone().acquire_owned().await.unwrap();
+
+        let mut refused = Box::pin(accept_counted(&listener, &gate));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(matches!(refused.as_mut().poll(&mut cx), Poll::Pending));
+        drop(refused);
+        drop(full);
+
+        let (stream, permit) = accept_counted(&listener, &gate).await;
+        assert_eq!(gate.available_permits(), 0);
+        drop((stream, permit));
+        assert_eq!(gate.available_permits(), 1);
     }
 }

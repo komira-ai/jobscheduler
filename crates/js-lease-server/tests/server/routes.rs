@@ -278,3 +278,26 @@ async fn unwritable_state_is_500() {
         assert_eq!(reply.json(), json!({ "error": "state-write-failed" }));
     }
 }
+
+/// Asserts what a 500 on an acquire leaves behind: the provider was never asked to
+/// start, so the refused lease is only a pending record that is listed until the next
+/// tick and is dropped by it, and no host is held. Once the file can be written again
+/// both hosts of the pool are still free.
+#[tokio::test]
+async fn a_failed_acquire_never_starts_the_lease() {
+    let h = Harness::new("acquire_500").await;
+    let blocker = h.scratch.path("leases.toml.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    let refused = h.call("POST", "/v1/leases", Some(&lease_body())).await;
+    assert_eq!(refused.status, 500);
+    let listed = h.call("GET", "/v1/leases", None).await.json();
+    assert_eq!(listed["leases"][0]["state"], "pending");
+
+    std::fs::remove_dir(&blocker).unwrap();
+    h.ticks.step().await;
+    assert!(ids(&h.call("GET", "/v1/leases", None).await).is_empty());
+    for _ in 0..2 {
+        let made = h.call("POST", "/v1/leases", Some(&lease_body())).await;
+        assert_eq!(made.status, 201, "{}", made.body);
+    }
+}

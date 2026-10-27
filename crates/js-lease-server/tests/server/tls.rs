@@ -15,7 +15,7 @@ use tokio_rustls::TlsConnector;
 use crate::support::{
     Harness, Scratch, TOKEN, args_with, config, exchange, lease_body, replace, request,
 };
-use js_lease_server::{SharedClock, channel_ticker, start};
+use js_lease_server::{Limits, SharedClock, channel_ticker, start};
 
 /// A certificate for 127.0.0.1 and its key, as PEM text.
 fn test_identity() -> (String, String) {
@@ -54,6 +54,11 @@ async fn tls_request(
 
 /// A server with TLS flags from freshly generated test files.
 async fn tls_server(name: &str, listen: &str) -> (Harness, String) {
+    tls_server_limited(name, listen, None).await
+}
+
+/// A server with TLS flags and, when given, these connection limits.
+async fn tls_server_limited(name: &str, listen: &str, limits: Option<Limits>) -> (Harness, String) {
     let scratch = Scratch::new(name);
     let (cert, key) = test_identity();
     let cert_file = scratch.write("test-only-cert.pem", &cert, 0o644);
@@ -68,7 +73,11 @@ async fn tls_server(name: &str, listen: &str) -> (Harness, String) {
         ],
     );
     let args = replace(args, "--listen", listen);
-    (Harness::with(scratch, args, None).await, cert)
+    let mut config = config(args).unwrap();
+    if let Some(limits) = limits {
+        config = config.with_limits(limits);
+    }
+    (Harness::over(scratch, config).await, cert)
 }
 
 /// Asserts that a client trusting the certificate gets answers over TLS (health,
@@ -172,4 +181,39 @@ async fn bad_tls_files_are_refused() {
             .unwrap();
         assert_eq!(err.flag(), flag, "{cert:?} {key:?}: {err}");
     }
+}
+
+/// Asserts that a client that connects to the TLS port and sends nothing delays nobody:
+/// while its connection stays open, a trusted client completes a handshake and gets
+/// answers. The silent connection is still open at the end.
+#[tokio::test]
+async fn a_stalled_handshake_delays_nobody() {
+    let (h, cert) = tls_server("tls_stalled", "127.0.0.1:0").await;
+    let silent = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
+    let connector = connector(&cert);
+
+    let health = tls_request(h.addr(), &connector, "GET", "/healthz", None, None).await;
+    assert_eq!(health.status, 200);
+    let listed = tls_request(h.addr(), &connector, "GET", "/v1/leases", Some(TOKEN), None).await;
+    assert_eq!(listed.status, 200);
+    assert!(silent.peer_addr().is_ok());
+}
+
+/// Asserts that a connection that never finishes its handshake is closed by the server
+/// once `handshake_timeout` has passed: the client reads the end of the stream with no
+/// byte sent to it, and the server serves on.
+#[tokio::test]
+async fn a_stalled_handshake_is_dropped_at_its_timeout() {
+    let limits = Limits {
+        handshake_timeout: std::time::Duration::from_millis(20),
+        ..Limits::default()
+    };
+    let (h, cert) = tls_server_limited("tls_handshake_timeout", "127.0.0.1:0", Some(limits)).await;
+    let mut silent = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
+    let mut seen = Vec::new();
+    silent.read_to_end(&mut seen).await.unwrap();
+    assert!(seen.is_empty());
+
+    let health = tls_request(h.addr(), &connector(&cert), "GET", "/healthz", None, None).await;
+    assert_eq!(health.status, 200);
 }

@@ -4,6 +4,7 @@
 
 mod auth;
 mod binary;
+mod limits;
 mod restart;
 mod routes;
 mod startup;

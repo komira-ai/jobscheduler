@@ -15,6 +15,16 @@ use crate::error::StartupError;
 /// register themselves are a future source, a second implementation of this trait that
 /// returns a provider backed by those registrations; the server needs no change for it,
 /// and it is not built here.
+///
+/// # Blocking
+///
+/// The server calls the provider from the request handlers and the tick loop on a
+/// runtime worker thread, one call at a time, with the table lock held: every other
+/// request and the tick wait for a call to return, and a few slow calls stall the
+/// server. A provider must therefore return promptly, and one that talks to a network
+/// must apply its own timeout and report the call as unanswered
+/// (`Unknown`, as [`js_provider::StartAck`] and its siblings spell it) when it expires. The static
+/// pool never leaves memory.
 pub trait CapacitySource {
     /// The provider, or the flag that made it impossible to build.
     fn provider(&self) -> Result<Box<dyn Provider + Send>, StartupError>;

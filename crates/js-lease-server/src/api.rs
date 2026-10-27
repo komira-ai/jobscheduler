@@ -97,11 +97,18 @@ async fn authenticate(State(shared): State<Arc<Shared>>, request: Request, next:
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(bearer);
     match given.is_some_and(|given| shared.token.matches(given.as_bytes())) {
         true => next.run(request).await,
         false => StatusCode::UNAUTHORIZED.into_response(),
     }
+}
+
+/// The token of an `Authorization` value of the form `Bearer <token>`; the scheme is
+/// matched without regard to case (RFC 9110 section 11.1).
+fn bearer(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }
 
 async fn healthz() -> &'static str {
@@ -173,4 +180,23 @@ async fn list(State(shared): State<Arc<Shared>>) -> Response {
     let leases = shared.table.lock().await.list();
     let leases = leases.into_iter().map(Into::into).collect();
     json(StatusCode::OK, &LeaseList { leases })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that the Bearer scheme is read in any letter case, that the token is
+    /// what follows the first space, and that another scheme or no space is no token.
+    #[test]
+    fn the_bearer_scheme_is_case_insensitive() {
+        for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+            assert_eq!(bearer(&format!("{scheme} abc")), Some("abc"));
+        }
+        assert_eq!(bearer("Bearer a b"), Some("a b"));
+        assert_eq!(bearer("Bearer "), Some(""));
+        assert_eq!(bearer("Basic abc"), None);
+        assert_eq!(bearer("Bearerabc"), None);
+        assert_eq!(bearer(""), None);
+    }
 }

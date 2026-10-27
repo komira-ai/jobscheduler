@@ -1,6 +1,5 @@
 //! Starting the server, running it, and stopping it.
 
-use std::future::IntoFuture;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use crate::adapt::{BoxedProvider, SharedClock};
 use crate::api::{Shared, router};
 use crate::config::Config;
 use crate::error::StartupError;
-use crate::listener::Incoming;
+use crate::listener::serve;
 use crate::ticker::Ticker;
 use crate::tls;
 
@@ -26,7 +25,7 @@ pub struct Running {
     addr: SocketAddr,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
-    serving: JoinHandle<io::Result<()>>,
+    serving: JoinHandle<()>,
     ticking: Ticking,
 }
 
@@ -66,18 +65,19 @@ pub async fn start<T: Ticker>(
     );
     let shared = Arc::new(Shared::new(table, config.token));
     let (stop, stopped) = oneshot::channel::<()>();
-    let incoming = Incoming::new(listener, addr, acceptor);
-    let serve = axum::serve(incoming, router(shared.clone()))
-        .with_graceful_shutdown(async move {
-            let _ = stopped.await;
-        })
-        .into_future();
+    let serving = serve(
+        listener,
+        acceptor,
+        router(shared.clone()),
+        config.limits,
+        stopped,
+    );
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
     Ok(Running {
         addr,
         shared,
         stop,
-        serving: tokio::spawn(serve),
+        serving: tokio::spawn(serving),
         ticking,
     })
 }
@@ -112,16 +112,12 @@ impl Running {
         self.shared.save_errors()
     }
 
-    /// Stops the server: no new connections, the requests in flight finish, the table
-    /// is ticked once more (so an expiry that fell due is stopped before the process
-    /// ends) and the lease table is released.
+    /// Stops the server: no new connections, the requests in flight finish (those still
+    /// open after `--drain-timeout` are cut), the table is ticked once more (so an expiry
+    /// that fell due is stopped before the process ends) and the lease table is released.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
-        let served = self
-            .serving
-            .await
-            .map_err(io::Error::other)
-            .and_then(|result| result);
+        let served = self.serving.await.map_err(io::Error::other);
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         self.shared.tick().await;

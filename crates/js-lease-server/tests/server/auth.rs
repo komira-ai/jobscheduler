@@ -1,6 +1,6 @@
 //! The bearer token in front of every route but health.
 
-use crate::support::{Harness, TOKEN, request};
+use crate::support::{Harness, TOKEN, exchange_authorized, request};
 
 /// Asserts that a request with no token, a wrong token, a token of another length, a
 /// token under another scheme or a token in another header is a 401 with an empty body,
@@ -48,4 +48,22 @@ async fn raw_header(addr: std::net::SocketAddr, header: &str) -> u16 {
     let mut raw = Vec::new();
     let _ = stream.read_to_end(&mut raw).await;
     crate::support::parse_reply(&raw).status
+}
+
+/// Asserts that the Bearer scheme is accepted in any letter case with the right token
+/// and still refused with a wrong one (RFC 9110: an authentication scheme is not case
+/// sensitive).
+#[tokio::test]
+async fn the_scheme_is_case_insensitive() {
+    let h = Harness::new("auth_scheme_case").await;
+    for scheme in ["Bearer", "bearer", "BEARER"] {
+        let stream = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
+        let value = format!("{scheme} {TOKEN}");
+        let reply = exchange_authorized(stream, "GET", "/v1/leases", Some(&value), None).await;
+        assert_eq!(reply.status, 200, "{scheme}");
+        let stream = tokio::net::TcpStream::connect(h.addr()).await.unwrap();
+        let wrong = format!("{scheme} nope");
+        let reply = exchange_authorized(stream, "GET", "/v1/leases", Some(&wrong), None).await;
+        assert_eq!(reply.status, 401, "{scheme}");
+    }
 }
