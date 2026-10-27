@@ -7,6 +7,8 @@
 //! lease, [`Labels`] carry the reserved `jobscheduler.dev/` schema, and [`Request`] is
 //! what a caller asks for.
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 mod class;
 mod ids;
 mod labels;

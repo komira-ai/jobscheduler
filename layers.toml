@@ -1,0 +1,42 @@
+# The workspace's layers, bottom first (checked by `cargo test -p xtask --test layering`,
+# docs/layering.md). A crate may depend, through [dependencies] and [build-dependencies],
+# only on a crate of its own layer or a lower one. Every workspace crate is in exactly one
+# layer; a crate that is added to the workspace is added here in the same pull request.
+#
+# `pure`: the layer's crates take time and I/O as inputs, so each denies
+# `clippy::disallowed_methods` and `clippy::disallowed_types` (clippy.toml) in its
+# src/lib.rs. `planned`: names reserved for crates that have not arrived yet.
+#
+# `single_source`: packages that exist once, from this workspace. A second copy (a git or
+# registry one) would make the types of one different from the types of the other.
+single_source = ["js-types"]
+
+[[layer]]
+name = "types"
+pure = true
+crates = ["js-types"]
+
+# Cores that decide and hold no clock, socket or hashed collection.
+[[layer]]
+name = "pure"
+pure = true
+crates = ["js-agent-wire", "js-pool-static", "js-provider", "js-provider-fake"]
+planned = ["js-caps", "js-sim", "js-sizing", "js-sched"]
+
+# Code that keeps state, reads a clock or does I/O, and is used by servers and nodes.
+[[layer]]
+name = "runtime"
+crates = ["js-client", "js-lease", "js-registry"]
+planned = ["js-contain", "js-state", "js-store", "js-testkit"]
+
+# Servers: what answers hosts and clients.
+[[layer]]
+name = "server"
+crates = ["js-lease-server"]
+planned = ["js-coordinator", "js-server-core"]
+
+# Programs, their libraries and the repository's tools.
+[[layer]]
+name = "app"
+crates = ["js-agent", "js-cli", "js-conformance", "js-coverage", "xtask"]
+planned = ["js-host", "js-host-install", "js-installer", "js-node", "js-node-bin", "js-updater"]

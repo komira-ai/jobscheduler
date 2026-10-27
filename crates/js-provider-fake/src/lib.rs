@@ -11,6 +11,8 @@
 //! high-water mark.
 //! [`FakeProvider::booked`] reads the host table directly, for conformance hooks.
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_provider::{
