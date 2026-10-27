@@ -212,3 +212,56 @@ fn a_restart_adopts_its_own_containers_with_their_age() {
     assert_eq!(results[0].run_id, "r1");
     assert_eq!(results.len(), 1);
 }
+
+/// Asserts that a `create` whose outcome is unknown leaves nothing a restarted agent
+/// could take for a running job. The call is killed after the daemon made the container
+/// and the removal by name fails too, so the container stays, labelled as the agent's: the
+/// start is reported `failed_to_start`, and the next process, which lists the containers
+/// first, finds it never started, removes it and adopts nothing. It catches the orphan
+/// that held its booking until the wall time and was then reported `timed_out`.
+#[test]
+fn a_restart_does_not_adopt_what_a_killed_create_left() {
+    let mut w = World::new("orphan", "linux");
+    w.docker.ambiguous_create(Err(()));
+    w.docker.fail("rm", 1);
+    w.start("r1");
+    assert_eq!(w.outcomes(), [Outcome::FailedToStart]);
+    assert_eq!(w.docker.ids().len(), 1, "the cleanup failed too");
+    let (life, events) = Lifecycle::adopt(
+        w.config.clone(),
+        Box::new(open_at(&w.docker, "linux", thirty_seconds_on)),
+        Box::new(NoChecks),
+        Box::new(w.clock.clone()),
+    )
+    .unwrap();
+    assert_eq!(names(&events), Vec::<String>::new());
+    assert!(w.docker.ids().is_empty(), "the orphan was removed");
+    assert_eq!(life.free().cpu_millis, 4000, "nothing is booked for it");
+
+    let mut clean = World::new("orphan-clean", "linux");
+    clean.docker.ambiguous_create(Err(()));
+    clean.start("r2");
+    assert_eq!(clean.outcomes(), [Outcome::FailedToStart]);
+    assert!(clean.docker.ids().is_empty(), "removed at once, by name");
+}
+
+/// Asserts that a container the engine calls `dead` (it failed to remove it) ends its job
+/// as failed whatever exit code it kept, a code of 0 included, and never as succeeded.
+/// It catches work reported done that may not have finished.
+#[test]
+fn a_dead_container_never_reports_success() {
+    let mut w = World::new("dead", "linux");
+    w.start("r1");
+    w.docker.say("inspect", "dead 0 false");
+    w.life.step();
+    assert_eq!(w.outcomes(), [Outcome::Failed]);
+    assert_eq!(w.life.results()[0].exit_code, None);
+
+    let mut coded = World::new("dead-coded", "linux");
+    coded.start("r2");
+    coded.docker.say("inspect", "dead 2 false");
+    coded.life.step();
+    let results = coded.life.results();
+    assert_eq!(results[0].outcome, Outcome::Failed);
+    assert_eq!(results[0].exit_code, Some(2));
+}

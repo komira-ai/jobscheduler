@@ -94,9 +94,10 @@ impl Harness {
         Ok(events)
     }
 
-    /// The scratch directory of a run.
+    /// The scratch directory of a run, by the canonical path the scratch root keeps.
     pub fn scratch_of(&self, run_id: &str) -> PathBuf {
-        self.dir.path("scratch").join(run_id)
+        let root = fs::canonicalize(self.dir.path("scratch")).unwrap();
+        root.join(run_id)
     }
 
     /// Applies a reply of the commands.

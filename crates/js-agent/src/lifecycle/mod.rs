@@ -59,8 +59,12 @@
 //!   out until the taint of design 5.12 exists; it is the integrity-check change's to add.
 //! - **Mount roots are read-write.** A root is whatever directory the operator names, and
 //!   a job's `ro` flag is the message's. A root that is read-only for every job is a later
-//!   flag. A job that holds a read-write mount can write in its root, which is why the
-//!   backend must open mounts by descriptor (see [`MountRoots`]).
+//!   flag. A job that holds a read-write mount can write in its root, so it can swap a
+//!   directory of the root for a link while another job's mount is being set up. A
+//!   container daemon binds by path and cannot use a descriptor the agent opened, so the
+//!   backend reads back where each mount was bound and refuses a container whose mounts
+//!   differ; the time between the agent's resolution and the daemon's bind stays open (see
+//!   [`MountRoots`]).
 //! - **Held and retired state is in memory.** After a restart an unacknowledged result
 //!   whose container was removed is lost, and the agent forgets which run ids it was told
 //!   to stop; a late `Start` for one of them runs. Containers that still exist are
@@ -104,7 +108,7 @@ use std::time::Duration;
 use js_agent_wire::Hello;
 
 use crate::cli::Cli;
-use crate::cli_runtime::Settings;
+use crate::cli_runtime::{Flags, Settings};
 
 pub use machine::{Lifecycle, RETIRED_CAP};
 pub use mounts::{MountError, MountRoots};
@@ -406,9 +410,18 @@ impl Local {
                 .map(ScratchRoot::open)
                 .transpose()?,
             container: Settings::from_flags(
-                cli.container_bin.as_deref(),
-                cli.container_network.as_deref(),
-                cli.container_user.as_deref(),
+                &Flags {
+                    bin: cli.container_bin.as_deref(),
+                    network: cli.container_network.as_deref(),
+                    user: cli.container_user.as_deref(),
+                    host: cli.container_host.as_deref(),
+                    pull: cli.container_pull.as_deref(),
+                    tmp_size: cli.container_tmp_size.as_deref(),
+                },
+                (
+                    rustix::process::geteuid().as_raw(),
+                    rustix::process::getegid().as_raw(),
+                ),
             )
             .map_err(|why| why.to_string())?,
         })

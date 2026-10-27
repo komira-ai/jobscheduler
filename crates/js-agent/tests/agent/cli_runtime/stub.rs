@@ -24,9 +24,11 @@ const STUB: &str = r#"#!/bin/sh
 case "$1" in
 --version) echo "Docker version 27.3.1, build ce12230" ;;
 create|ps) echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ;;
+info) echo true ;;
 inspect)
   case "$*" in
-  *Config.Labels*) echo '{"jobscheduler.dev/run-id":"r1","jobscheduler.dev/created-ms":"1000000"}' ;;
+  *Config.Labels*) echo 'running {"jobscheduler.dev/run-id":"r1","jobscheduler.dev/created-ms":"1000000"}' ;;
+  *Mounts*) echo '[{"Type":"bind","Source":"/work/scratch/r1","Destination":"/scratch","Mode":"","RW":true},{"Type":"bind","Source":"/srv/in","Destination":"/mnt/data/in","Mode":"","RW":false}]' ;;
   *) echo "exited 3 false" ;;
   esac ;;
 esac
@@ -100,8 +102,11 @@ fn cli_runtime_argv_snapshot() {
     let state = "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}";
     let expected: Vec<Vec<String>> = vec![
         strings(&["--version"]),
+        strings(&["info", "--format", "{{.SwapLimit}}"]),
         strings(&[
             "create",
+            "--name",
+            "js-r1",
             "--label",
             "jobscheduler.dev/agent=h-0123456789abcdef",
             "--label",
@@ -125,7 +130,7 @@ fn cli_runtime_argv_snapshot() {
             "--mount",
             "type=bind,src=/work/scratch/r1,dst=/scratch",
             "--mount",
-            "type=bind,src=/srv/in,dst=/mnt/data/in,readonly",
+            "type=bind,src=/srv/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -134,13 +139,28 @@ fn cli_runtime_argv_snapshot() {
             "jobs",
             "--read-only",
             "--tmpfs",
-            "/tmp",
+            "/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "--ulimit",
+            "core=0",
+            "--ipc",
+            "private",
+            "--pull",
+            "never",
             "--user",
             "1000:1000",
             "--",
             "registry.example/job:1",
             "--go",
             "x y",
+        ]),
+        strings(&[
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            "{{json .Mounts}}",
+            "--",
+            ID,
         ]),
         strings(&["start", "--", ID]),
         strings(&[
@@ -169,7 +189,7 @@ fn cli_runtime_argv_snapshot() {
             "--type",
             "container",
             "--format",
-            "{{json .Config.Labels}}",
+            "{{.State.Status}} {{json .Config.Labels}}",
             "--",
             ID,
         ]),

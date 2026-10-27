@@ -50,14 +50,16 @@ pub fn platform(os: &str) -> Platform {
 
 /// A runtime over `world` on `os`, with `now` as its wall clock.
 pub fn open_at(world: &Scripted, os: &str, now: fn() -> u64) -> CliRuntime {
-    CliRuntime::open(
-        settings(),
-        HOST,
-        &platform(os),
-        now,
-        Box::new(world.clone()),
-    )
-    .unwrap()
+    open_as(world, os, settings(), now)
+}
+
+/// A runtime over `world` on `os` with `set` as its settings.
+pub fn open_with(world: &Scripted, os: &str, set: Settings) -> CliRuntime {
+    open_as(world, os, set, made_at)
+}
+
+fn open_as(world: &Scripted, os: &str, set: Settings, now: fn() -> u64) -> CliRuntime {
+    CliRuntime::open(set, HOST, &platform(os), now, Box::new(world.clone())).unwrap()
 }
 
 /// A Docker runtime over `world` on Linux.

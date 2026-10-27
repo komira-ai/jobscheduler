@@ -3,13 +3,14 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{
-    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, hardening_args, label_args, limits_to_args,
+    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, Settings, hardening_args, label_args,
+    limits_to_args,
 };
 
-use super::{mount, settings, spec};
+use super::{BIN, mount, settings, spec};
 
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -61,6 +62,11 @@ fn limits_to_args_table() {
             base("64.000", "1073741824", "100"),
         ),
         (
+            "smallest cpu",
+            row(1, 1 << 30, Some(100)),
+            base("0.001", "1073741824", "100"),
+        ),
+        (
             "small memory",
             row(1500, 6 << 20, Some(1)),
             base("1.500", "6291456", "1"),
@@ -73,37 +79,94 @@ fn limits_to_args_table() {
     ];
     for (name, job, expected) in rows {
         for engine in [Engine::Docker, Engine::Podman] {
-            assert_eq!(limits_to_args(engine, &job).unwrap(), expected, "{name}");
+            assert_eq!(
+                limits_to_args(engine, &job, true).unwrap(),
+                expected,
+                "{name}"
+            );
         }
     }
 }
 
+/// Asserts that a limit of 0 is refused here and not only by the wire's range check:
+/// the engines read 0 for CPUs, memory and processes as "no limit", so a 0 that reached
+/// them would give the job the whole machine. It catches a limit that is dropped by the
+/// engine and not enforced, whichever way the job reached the runtime.
+#[test]
+fn a_limit_of_zero_is_refused() {
+    for (name, cpu_millis, memory_bytes, pids) in [
+        ("cpu", 0, 1 << 30, Some(100)),
+        ("memory", 1000, 0, Some(100)),
+        ("pids", 1000, 1 << 30, Some(0)),
+    ] {
+        let mut job = spec("r1");
+        (job.cpu_millis, job.memory_bytes, job.pids) = (cpu_millis, memory_bytes, pids);
+        for engine in [Engine::Docker, Engine::Podman] {
+            let said = limits_to_args(engine, &job, true);
+            assert_eq!(said, Err(ArgsError::ZeroLimit), "{name}");
+        }
+    }
+    assert!(
+        ArgsError::ZeroLimit
+            .to_string()
+            .contains("cpu, memory and pids")
+    );
+}
+
 /// Asserts that every contained job gets the hardening whatever it asked for: all
-/// capabilities dropped, no new privileges, no network by default, a read-only root with
-/// a tmpfs `/tmp`, a user that is not root, and no `--rm` (the lifecycle removes the
-/// container after it has read the result). It catches a flag dropped from the list, a
-/// default network that reaches out, and a container that removes itself before its
-/// result is read.
+/// capabilities dropped, no new privileges, no network by default, a read-only root
+/// with a `/tmp` that is a tmpfs which cannot run programs or hold devices or set-uid
+/// files and is limited in size, no core dumps, a private IPC namespace (and for Podman,
+/// the only one of the two that takes the value, a private PID namespace), no pull, a
+/// user that is not root, and no `--rm` (the lifecycle removes the container after it
+/// has read the result). It catches a flag dropped from the list, a default network that
+/// reaches out, a `/tmp` that is not `noexec` on Podman, and a container that removes
+/// itself before its result is read.
 #[test]
 fn hardening_flags_always_present() {
-    let args = hardening_args(&settings());
+    let docker = hardening_args(&settings(), Engine::Docker);
+    let common = [
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--ulimit",
+        "core=0",
+        "--ipc",
+        "private",
+    ];
+    let tail = ["--pull", "never", "--user", "65534:65534"];
+    assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
+    assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
+
+    let podman = hardening_args(&settings(), Engine::Podman);
     assert_eq!(
-        args,
-        strings(&[
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--network",
-            "none",
-            "--read-only",
-            "--tmpfs",
-            "/tmp",
-            "--user",
-            "65534:65534"
-        ])
+        podman,
+        strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
     );
-    assert!(!args.iter().any(|arg| arg == "--rm"));
+}
+
+/// Asserts that the settings reach the hardening list: the network, the user, the pull
+/// policy and the size of `/tmp`. It catches a flag that is checked and not used.
+#[test]
+fn hardening_follows_the_settings() {
+    let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
+        .unwrap()
+        .with_pull(Some("missing"))
+        .unwrap()
+        .with_tmp_size(Some("2g"))
+        .unwrap();
+    let args = hardening_args(&set, Engine::Docker);
+    let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
+    assert_eq!(value("--network"), "jobs");
+    assert_eq!(value("--user"), "5:6");
+    assert_eq!(value("--pull"), "missing");
+    assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }
 
 /// Asserts that the Docker flag names the exact indices and nothing else, that Podman
@@ -114,13 +177,13 @@ fn hardening_flags_always_present() {
 fn gpu_flag_lists_exact_indices() {
     let mut job = spec("r1");
     job.gpu_indices = vec![0, 2];
-    let docker = limits_to_args(Engine::Docker, &job).unwrap();
+    let docker = limits_to_args(Engine::Docker, &job, true).unwrap();
     let at = docker.iter().position(|arg| arg == "--gpus").unwrap();
     assert_eq!(docker[at + 1], "\"device=0,2\"");
     assert!(!docker.iter().any(|arg| arg.contains("all")));
     assert!(!docker.iter().any(|arg| arg == "--device"));
 
-    let podman = limits_to_args(Engine::Podman, &job).unwrap();
+    let podman = limits_to_args(Engine::Podman, &job, false).unwrap();
     let devices: Vec<&String> = podman
         .windows(2)
         .filter(|pair| pair[0] == "--device")
@@ -134,52 +197,67 @@ fn gpu_flag_lists_exact_indices() {
     );
 
     job.gpu_indices = vec![1];
-    let one = limits_to_args(Engine::Docker, &job).unwrap();
+    let one = limits_to_args(Engine::Docker, &job, true).unwrap();
     assert!(one.contains(&"\"device=1\"".to_owned()));
 
     job.gpu_indices = Vec::new();
     for engine in [Engine::Docker, Engine::Podman] {
-        let none = limits_to_args(engine, &job).unwrap();
+        let none = limits_to_args(engine, &job, true).unwrap();
         assert!(!none.iter().any(|a| a == "--gpus" || a == "--device"));
     }
 }
 
+fn mounts_of(args: &[String]) -> Vec<&String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--mount")
+        .map(|pair| &pair[1])
+        .collect()
+}
+
 /// Asserts that a read-only mount is read-only and a read-write one is not, that the
-/// scratch directory is mounted read-write at `/scratch`, and that a path with `:` (the
-/// separator `-v` would split on) is carried whole. It catches a read-only flag that is
-/// dropped, which would let a job write to a directory it was only to read.
+/// scratch directory is mounted read-write at `/scratch`, that no `-v` is used, and that
+/// a read-only bind is recursively read-only (and its propagation private) when the
+/// engine takes the option, so that a mount inside it stays read-only too; for an engine
+/// that does not, the plain `readonly` is all that is passed. It catches a read-only flag
+/// that is dropped, which would let a job write to a directory it was only to read, and
+/// the option sent to an engine that rejects it.
 #[test]
 fn mount_ro_honoured() {
     let mut job = spec("r1");
     job.mounts = vec![
         mount("/srv/data/in", "/mnt/data/in", true),
         mount("/srv/data/out", "/mnt/data/out", false),
-        mount("/srv/a:b", "/mnt/data/a:b", true),
     ];
-    let args = limits_to_args(Engine::Docker, &job).unwrap();
-    let mounts: Vec<&String> = args
-        .windows(2)
-        .filter(|pair| pair[0] == "--mount")
-        .map(|pair| &pair[1])
-        .collect();
+    let args = limits_to_args(Engine::Docker, &job, true).unwrap();
     assert_eq!(
-        mounts,
+        mounts_of(&args),
         [
             "type=bind,src=/work/scratch/r1,dst=/scratch",
-            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly",
+            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
-            "type=bind,src=/srv/a:b,dst=/mnt/data/a:b,readonly",
         ]
     );
     assert_eq!(SCRATCH_TARGET, "/scratch");
     assert!(!args.iter().any(|arg| arg == "-v" || arg == "--volume"));
+
+    let old = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&old),
+        [
+            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly",
+            "type=bind,src=/srv/data/out,dst=/mnt/data/out",
+        ]
+    );
 }
 
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
-/// value is refused, and nothing is built: a comma, a double quote, a newline, a path
-/// that is relative, one that is not UTF-8, in the source and in the target, and in the
-/// scratch directory. The wire refuses such paths already; this is the second check. It
-/// catches `src=/data,src=/etc` and `dst=/x,readonly=false` reaching the runtime.
+/// value is refused, and nothing is built: a comma, a double quote, a colon (the
+/// separator of the short form, which the mount roots refuse too, so the claim that it is
+/// refused twice holds), a newline, a path that is relative, one that is not UTF-8, in
+/// the source and in the target, and in the scratch directory. The wire refuses such
+/// paths already; this is the second check. It catches `src=/data,src=/etc` and
+/// `dst=/x,readonly=false` reaching the runtime.
 #[test]
 fn mount_injection_is_refused() {
     let bad_host = [
@@ -188,30 +266,42 @@ fn mount_injection_is_refused() {
         "/srv/a\nb",
         "srv/relative",
         "/srv/a,",
+        "/srv/a:b",
     ];
     for host in bad_host {
         let mut job = spec("r1");
         job.mounts = vec![mount(host, "/mnt/data/a", false)];
-        let said = limits_to_args(Engine::Docker, &job);
+        let said = limits_to_args(Engine::Docker, &job, true);
         assert_eq!(said, Err(ArgsError::MountPath), "{host:?}");
     }
-    for target in ["/mnt/a,dst=/etc", "/mnt/a\"", "/mnt/a\0", "mnt/relative"] {
+    for target in [
+        "/mnt/a,dst=/etc",
+        "/mnt/a\"",
+        "/mnt/a\0",
+        "mnt/relative",
+        "/mnt/a:b",
+    ] {
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/a", target, true)];
-        let said = limits_to_args(Engine::Podman, &job);
+        let said = limits_to_args(Engine::Podman, &job, true);
         assert_eq!(said, Err(ArgsError::MountPath), "{target:?}");
     }
     let mut job = spec("r1");
     job.mounts = vec![mount("/srv/a", "/mnt/a", false)];
     job.mounts[0].host = PathBuf::from(OsStr::from_bytes(b"/srv/\xff"));
     assert_eq!(
-        limits_to_args(Engine::Docker, &job),
+        limits_to_args(Engine::Docker, &job, true),
         Err(ArgsError::MountPath)
     );
     let mut job = spec("r1");
     job.scratch = PathBuf::from("/work/scratch,x=y/r1");
     assert_eq!(
-        limits_to_args(Engine::Docker, &job),
+        limits_to_args(Engine::Docker, &job, true),
+        Err(ArgsError::MountPath)
+    );
+    job.scratch = PathBuf::from("/work/scratch:x/r1");
+    assert_eq!(
+        limits_to_args(Engine::Docker, &job, true),
         Err(ArgsError::MountPath)
     );
 }

@@ -48,11 +48,16 @@ pub enum MountError {
 /// job that holds a read-write mount inside a root can write in that root while another
 /// job's mount is being set up: it can replace `shared/x`, checked as a directory of the
 /// root, by a link to `/` between the check and the bind. Roots are read-write today, so
-/// the window is real, not only the operator's to open. The backend must close it by
-/// opening each mount by file descriptor and handing the runtime that descriptor's path
-/// (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, or an equivalent that cannot
-/// follow a link out of the root), or by re-verifying the mount after the bind. Until the
-/// backend does, a root shared by jobs of different trust is shared at their risk.
+/// the window is real, not only the operator's to open. A backend that talks to a
+/// container daemon cannot close it by opening the mount by file descriptor: the daemon is
+/// another process and binds the path it is given (a `/proc/self/fd` path of the agent
+/// means nothing to it). Such a backend re-verifies the mount after the bind, reading back
+/// where the daemon bound it ([`CliRuntime`](crate::cli_runtime::CliRuntime) does, and
+/// removes a container whose mounts differ). What stays open is the time between the
+/// resolution here and the daemon's bind, and a link changed back after the bind: a root
+/// shared by jobs of different trust is shared at their risk. A backend that binds in its
+/// own process can close it fully by opening the mount with `openat2` and
+/// `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MountRoots {
     roots: BTreeMap<String, PathBuf>,

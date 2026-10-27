@@ -168,6 +168,15 @@ impl CommandRunner for FakeCommands {
             .cloned()
             .unwrap_or_else(|| Err(format!("{program}: not found")))
     }
+
+    fn run_in(
+        &self,
+        program: &str,
+        args: &[&str],
+        _env: &[(&str, &str)],
+    ) -> Result<String, String> {
+        self.run(program, args)
+    }
 }
 
 /// Files and their text. A file not listed does not exist.

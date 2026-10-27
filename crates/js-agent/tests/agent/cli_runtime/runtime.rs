@@ -1,19 +1,29 @@
 //! `CliRuntime` over a runner that answers like the command line: every call, every
 //! answer, and every failure.
 
+use std::cell::RefCell;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use js_agent::cli_runtime::{CliError, CliRuntime, Engine, unix_ms};
+use js_agent::cli_runtime::{CliError, CliRuntime, Engine, hand_over, unix_ms};
 use js_agent::lifecycle::{
     ContainerId, ContainerRuntime, Exit, Found, RuntimeError, Status, label,
 };
 use js_agent_wire::Isolation;
 
-use super::scripted::Scripted;
+use super::scripted::{Bind, Change, Env, Scripted};
 use super::{
-    HOST, created, docker, made_at, mount, open, open_at, platform, settings, spec,
+    BIN, HOST, created, docker, made_at, mount, open, open_at, open_with, platform, settings, spec,
     thirty_seconds_on,
 };
+use crate::support::Scratch;
+
+/// The `PATH` every call of the engine is given.
+const PINNED_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// The `/tmp` of a container with the defaults.
+const TMPFS: &str = "/tmp:rw,noexec,nosuid,nodev,size=64m";
 
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -24,6 +34,15 @@ fn start(rt: &mut CliRuntime, world: &Scripted, run_id: &str) -> ContainerId {
     let id = rt.create_and_start(&spec(run_id)).unwrap();
     assert_eq!(Some(id.0.clone()), world.id_of(run_id));
     id
+}
+
+/// The first subcommand of every call, in order.
+fn subs(world: &Scripted) -> Vec<String> {
+    world
+        .calls()
+        .into_iter()
+        .map(|call| call[0].clone())
+        .collect()
 }
 
 /// Asserts that the program is told apart by what `--version` prints, whatever the file
@@ -76,9 +95,12 @@ fn the_engine_is_found_by_its_version() {
     );
 }
 
-/// Asserts the whole `create` argv of a job with a GPU, mounts and labels: the order of
-/// the groups, that the agent's labels are there, and that the image and the command
-/// line are the last entries after `--`. It is the shape the documentation promises.
+/// Asserts the whole `create` argv of a job with a GPU, mounts and labels: the name, the
+/// order of the groups, that the agent's labels are there, that the hardening is spelled
+/// out (a `/tmp` that cannot run programs, no core dumps, a private IPC namespace, no
+/// pull), that a read-only bind is recursively read-only, and that the image and the
+/// command line are the last entries after `--`. It is the shape the documentation
+/// promises, and the order of calls: the mounts are read back before the start.
 #[test]
 fn create_builds_the_documented_argv() {
     let world = docker();
@@ -89,6 +111,8 @@ fn create_builds_the_documented_argv() {
     rt.create_and_start(&job).unwrap();
     let expected = strings(&[
         "create",
+        "--name",
+        "js-r1",
         "--label",
         "jobscheduler.dev/agent=h-0123456789abcdef",
         "--label",
@@ -112,7 +136,7 @@ fn create_builds_the_documented_argv() {
         "--mount",
         "type=bind,src=/work/scratch/r1,dst=/scratch",
         "--mount",
-        "type=bind,src=/srv/in,dst=/mnt/data/in,readonly",
+        "type=bind,src=/srv/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -121,7 +145,13 @@ fn create_builds_the_documented_argv() {
         "none",
         "--read-only",
         "--tmpfs",
-        "/tmp",
+        TMPFS,
+        "--ulimit",
+        "core=0",
+        "--ipc",
+        "private",
+        "--pull",
+        "never",
         "--user",
         "65534:65534",
         "--",
@@ -130,13 +160,16 @@ fn create_builds_the_documented_argv() {
         "x y",
     ]);
     assert_eq!(created(&world, "r1"), expected);
-    let calls = world.calls();
-    assert_eq!(calls[1], expected, "after the --version call");
-    assert_eq!(calls[2][0], "start");
+    assert_eq!(world.calls_of("create"), [expected]);
+    assert_eq!(
+        subs(&world),
+        ["--version", "info", "create", "inspect", "start"]
+    );
 }
 
 /// Asserts that a Podman runtime is given the same job with CDI devices in place of
-/// `--gpus`, and nothing else different.
+/// `--gpus`, its own `--pid private` (Docker takes no such value), no Docker-only mount
+/// option, and nothing else different; and that no `info` call is made for it.
 #[test]
 fn podman_gets_cdi_devices_and_the_rest_alike() {
     let podman = Scripted::new("podman version 5.2.1");
@@ -151,12 +184,43 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     .unwrap();
     let mut job = spec("r1");
     job.gpu_indices = vec![3];
+    job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
     rt.create_and_start(&job).unwrap();
     let args = created(&podman, "r1");
     let at = args.iter().position(|a| a == "--device").unwrap();
     assert_eq!(args[at + 1], "nvidia.com/gpu=3");
     assert!(!args.contains(&"--gpus".to_owned()));
     assert!(args.contains(&"--read-only".to_owned()));
+    let at = args.iter().position(|a| a == "--pid").unwrap();
+    assert_eq!(args[at + 1], "private");
+    assert!(args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly".to_owned()));
+    assert_eq!(subs(&podman), ["--version", "create", "inspect", "start"]);
+}
+
+/// Asserts that the recursive read-only option is passed only to a Docker that takes it
+/// (version 25 and later, read from `--version`), and that an older Docker, a version the
+/// agent cannot read, and Podman are given the plain `readonly`. It catches the option
+/// sent to an engine that rejects it, which would refuse every job with a read-only mount.
+#[test]
+fn only_a_docker_that_takes_it_gets_recursive_readonly_binds() {
+    let readonly = "type=bind,src=/srv/in,dst=/mnt/data/in,readonly";
+    let recursive = format!("{readonly},bind-recursive=readonly,bind-propagation=rprivate");
+    for (version, expected) in [
+        ("Docker version 25.0.0, build 1", recursive.as_str()),
+        ("Docker version 100.1.2, build 1", recursive.as_str()),
+        ("Docker version 24.0.7, build afdd53b", readonly),
+        ("Docker version unknown", readonly),
+        ("Docker 27", readonly),
+        ("podman version 5.2.1", readonly),
+    ] {
+        let world = Scripted::new(version);
+        let mut rt = open_with(&world, "linux", settings());
+        let mut job = spec("r1");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        rt.create_and_start(&job).unwrap();
+        let args = created(&world, "r1");
+        assert!(args.contains(&expected.to_owned()), "{version}: {args:?}");
+    }
 }
 
 /// Asserts that nothing a job names can become an option or a second command: its image
@@ -212,7 +276,10 @@ fn the_job_cannot_reach_the_runtimes_options() {
             ("--cap-drop", "ALL"),
             ("--security-opt", "no-new-privileges"),
             ("--network", "none"),
-            ("--tmpfs", "/tmp"),
+            ("--tmpfs", TMPFS),
+            ("--ulimit", "core=0"),
+            ("--ipc", "private"),
+            ("--pull", "never"),
             ("--user", "65534:65534"),
         ];
         for (flag, value) in pairs {
@@ -249,8 +316,10 @@ fn the_agents_own_labels_win() {
     assert_eq!(labels.len(), 5);
 }
 
-/// Asserts that the network and user flags reach the container: a named network instead
-/// of none, and the configured uid and gid.
+/// Asserts that the network, user, pull policy and `/tmp` size flags reach the
+/// container: a named network instead of none, the configured uid and gid, `--pull
+/// missing`, and the size in the tmpfs option. It catches a flag that is checked and then
+/// ignored.
 #[test]
 fn a_configured_network_and_user_are_used() {
     let world = docker();
@@ -259,6 +328,10 @@ fn a_configured_network_and_user_are_used() {
         Some("jobs"),
         Some("2000:3000"),
     )
+    .unwrap()
+    .with_pull(Some("missing"))
+    .unwrap()
+    .with_tmp_size(Some("1g"))
     .unwrap();
     let mut rt = CliRuntime::open(
         set,
@@ -277,26 +350,67 @@ fn a_configured_network_and_user_are_used() {
     };
     assert_eq!(value("--network"), "jobs");
     assert_eq!(value("--user"), "2000:3000");
+    assert_eq!(value("--pull"), "missing");
+    assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=1g");
 }
 
 /// Asserts the refusals that create nothing and run nothing: a host job, a mount path
-/// that is not safe, and a label key that is not. It catches a host job run in a
-/// container, and a refused job that still reaches the runtime.
+/// that is not safe, a label key that is not, and a run id that cannot be a container
+/// name. It catches a host job run in a container, and a refused job that still reaches
+/// the runtime.
 #[test]
 fn refused_jobs_reach_the_runtime_not_at_all() {
     let world = docker();
     let mut rt = open(&world);
+    let before = world.calls().len();
     let mut host = spec("r1");
     host.isolation = Isolation::Host;
     let mut bad_mount = spec("r2");
     bad_mount.mounts = vec![mount("/srv/a,src=/etc", "/mnt/a", false)];
     let mut bad_label = spec("r3");
     bad_label.labels.insert("a=b".to_owned(), "v".to_owned());
-    let said = [host, bad_mount, bad_label].map(|job| rt.create_and_start(&job).unwrap_err());
+    let bad_name = spec("r 4");
+    let said =
+        [host, bad_mount, bad_label, bad_name].map(|job| rt.create_and_start(&job).unwrap_err());
     assert_eq!(said[0].0, "only a contained job runs in a container");
     assert!(said[1].0.contains("mount path"), "{}", said[1].0);
     assert!(said[2].0.contains("label key"), "{}", said[2].0);
-    assert_eq!(world.calls().len(), 1, "only --version was run");
+    assert_eq!(said[3].0, "the run id cannot be made a container name");
+    assert_eq!(
+        world.calls().len(),
+        before,
+        "only the opening calls were run"
+    );
+}
+
+/// Asserts that a container is named after its run, `js-<run id>`, right after `create`:
+/// the name is what a failed create is cleaned up by. A run id with a character outside
+/// `[A-Za-z0-9._-]`, an empty one, and one that would make the name longer than 128 bytes
+/// are refused before any call, while the longest that fits is taken. It catches a name
+/// the engine would refuse (a failure after the pull), and a name that is not derived from
+/// the run, which cannot be found again.
+#[test]
+fn a_container_is_named_after_its_run() {
+    let world = docker();
+    let mut rt = open(&world);
+    rt.create_and_start(&spec("r1")).unwrap();
+    let args = created(&world, "r1");
+    assert_eq!(args[..3], strings(&["create", "--name", "js-r1"])[..]);
+    let longest = "a".repeat(125);
+    for run in ["a.b_c-d", longest.as_str()] {
+        rt.create_and_start(&spec(run)).unwrap();
+        assert!(world.names().contains(&format!("js-{run}")), "{run}");
+    }
+    let creates = world.calls_of("create").len();
+    let too_long = "a".repeat(126);
+    for run in ["", "a b", "a/b", "a:b", "a=b", "\u{e9}", too_long.as_str()] {
+        let said = rt.create_and_start(&spec(run)).unwrap_err();
+        assert_eq!(
+            said.0, "the run id cannot be made a container name",
+            "{run:?}"
+        );
+    }
+    assert_eq!(world.calls_of("create").len(), creates);
 }
 
 /// Asserts that a GPU job on a Mac is refused whether the lifecycle asks first
@@ -349,10 +463,12 @@ fn a_failed_start_removes_the_container() {
 }
 
 /// Asserts that a `create` that fails (the nonzero exit is the error, its text is the
-/// program's and its status) leaves nothing and tries nothing else, and that a `create`
-/// that prints something other than an id is an error before `start` is called, for
-/// each kind of wrong output: empty, not hexadecimal, too short, too long. It catches an
-/// id taken from output that is not one and then put in later arguments.
+/// program's and its status) tries nothing else but the cleanup by name, and that a
+/// `create` that prints something other than an id is an error before `start` is called,
+/// for each kind of wrong output: empty, not hexadecimal, too short, too long, an id of
+/// 12 digits (only the whole 64 are accepted, because every later comparison is against
+/// the 64 the engine lists). It catches an id taken from output that is not one and then
+/// put in later arguments.
 #[test]
 fn create_failures_are_typed_and_start_nothing() {
     let world = docker();
@@ -367,6 +483,7 @@ fn create_failures_are_typed_and_start_nothing() {
         "\n",
         "not-an-id\n",
         "abc123\n",
+        "0123456789ab\n",
         long.as_str(),
         "ABCDEF0123456789",
     ] {
@@ -375,21 +492,236 @@ fn create_failures_are_typed_and_start_nothing() {
         assert_eq!(said.0, "create: unreadable output", "{printed:?}");
     }
     assert_eq!(world.calls_of("start").len(), 0);
-    let id = "0123456789ab";
-    world.say("create", &format!("Unable to find image locally\n{id}\n"));
-    world.say("start", "");
-    let started = rt.create_and_start(&spec("r1")).unwrap();
-    assert_eq!(started.0, id, "the id is the last line");
+    assert!(world.ids().is_empty());
+}
+
+/// Asserts that the id of a container is the last line `create` printed, so the lines a
+/// pull prints before it do not matter.
+#[test]
+fn the_id_is_the_last_line_of_create() {
+    let world = docker();
+    let mut rt = open(&world);
+    world.preface("create", "Unable to find image locally\nPulling fs layer\n");
+    let id = start(&mut rt, &world, "r1");
+    assert_eq!(id.0.len(), 64);
+}
+
+/// Asserts that a `create` whose outcome is not known leaves nothing behind: the call is
+/// killed after the daemon made the container (a nonzero exit), or it exits 0 and prints
+/// something that is no id (nothing, a message, an id of 12 digits). In each case the
+/// container is removed by the name the agent gave it, `start` is never called, the error
+/// is the create's, and a second start of the same run can use the name again. Before
+/// this, a labelled container nobody knew stayed on the host, and a restarted agent
+/// adopted it as a running job. It catches an orphan after a timeout.
+#[test]
+fn an_ambiguous_create_is_cleaned_up_by_name() {
+    let cases: [(Result<&str, ()>, &str); 4] = [
+        (Err(()), "create: /bin/sh: exit status: 1"),
+        (Ok(""), "create: unreadable output"),
+        (Ok("Unable to find image\n"), "create: unreadable output"),
+        (Ok("0123456789ab\n"), "create: unreadable output"),
+    ];
+    for (outcome, text) in cases {
+        let world = docker();
+        let mut rt = open(&world);
+        world.ambiguous_create(outcome);
+        let said = rt.create_and_start(&spec("r1")).unwrap_err();
+        assert_eq!(said.0, text, "{outcome:?}");
+        assert!(
+            world.ids().is_empty(),
+            "{outcome:?}: the orphan was removed"
+        );
+        assert_eq!(
+            world.calls_of("rm"),
+            [strings(&["rm", "--force", "--volumes", "--", "js-r1"])],
+            "{outcome:?}"
+        );
+        assert!(world.calls_of("start").is_empty(), "{outcome:?}");
+        start(&mut rt, &world, "r1");
+        assert_eq!(world.ids().len(), 1, "the name was free again");
+    }
+}
+
+/// Asserts what the error says when the orphan cannot be removed: the removal failed and
+/// the container is still listed (so the note names the failure), or the removal failed
+/// and the listing failed too (the agent cannot say), and that the container then stays
+/// visible to the next listing as the agent's own. It catches a cleanup failure that is
+/// swallowed.
+#[test]
+fn a_cleanup_that_fails_is_reported() {
+    let world = docker();
+    let mut rt = open(&world);
+    world.ambiguous_create(Err(()));
+    world.fail("rm", 1);
+    let said = rt.create_and_start(&spec("r1")).unwrap_err();
+    assert_eq!(
+        said.0,
+        "create: /bin/sh: exit status: 1; the container could not be removed: rm: /bin/sh: exit status: 1"
+    );
+    assert_eq!(world.ids().len(), 1);
+
+    world.ambiguous_create(Ok(""));
+    world.fail("rm", 1);
+    world.fail("ps", 1);
+    let said = rt.create_and_start(&spec("r2")).unwrap_err();
+    assert_eq!(
+        said.0,
+        "create: unreadable output; the container could not be removed: ps: /bin/sh: exit status: 1"
+    );
+}
+
+/// Asserts that the mounts are read back after `create` and before `start`: every bind
+/// the daemon made has the source the agent resolved, the destination and the access it
+/// asked for, and there is no bind it did not ask for. A job that swapped a directory of
+/// a mount root for a link while the daemon bound it (the daemon binds by path, and the
+/// agent cannot give it a descriptor) leaves a different source; the container is then
+/// removed, `start` is not called and the error says the mounts differ. Other mounts
+/// (the tmpfs) are not looked at. It catches a mount outside its root that goes
+/// unnoticed.
+#[test]
+fn the_mounts_are_read_back_before_the_start() {
+    let swap = |index: usize, change: fn(&mut Bind)| {
+        move |binds: &mut Vec<Bind>| change(&mut binds[index])
+    };
+    let cases: Vec<(&str, Change)> = vec![
+        (
+            "source swapped",
+            Box::new(swap(1, |b| b.0 = "/etc".to_owned())),
+        ),
+        (
+            "scratch moved",
+            Box::new(swap(0, |b| b.0 = "/home/x".to_owned())),
+        ),
+        ("made writable", Box::new(swap(1, |b| b.2 = true))),
+        (
+            "other target",
+            Box::new(swap(1, |b| b.1 = "/mnt/data/x".to_owned())),
+        ),
+        (
+            "extra bind",
+            Box::new(|binds: &mut Vec<Bind>| {
+                binds.push(("/".to_owned(), "/host".to_owned(), true))
+            }),
+        ),
+        (
+            "bind missing",
+            Box::new(|binds: &mut Vec<Bind>| {
+                binds.pop();
+            }),
+        ),
+    ];
+    for (name, change) in cases {
+        let world = docker();
+        let mut rt = open(&world);
+        world.tamper(change);
+        let mut job = spec("r1");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        let said = rt.create_and_start(&job).unwrap_err();
+        assert_eq!(
+            said.0, "the mounts of the container are not the ones the agent resolved",
+            "{name}"
+        );
+        assert!(world.ids().is_empty(), "{name}: the container was removed");
+        assert!(world.calls_of("start").is_empty(), "{name}");
+        assert_eq!(world.calls_of("rm").len(), 1, "{name}");
+    }
+}
+
+/// Asserts the call that reads the mounts back (the container type, the format that asks
+/// for them as JSON, the id after `--`), that a container whose mounts are as asked is
+/// started, and what happens when the answer cannot be used: not JSON, entries without
+/// the fields, a container the runtime lost in between, or a removal that fails after a
+/// mismatch. It catches a read-back that trusts an answer it did not understand.
+#[test]
+fn the_mount_read_back_and_its_failures() {
+    let world = docker();
+    let mut rt = open(&world);
+    let id = start(&mut rt, &world, "r1");
+    let inspect = &world.calls_of("inspect")[0];
+    assert_eq!(
+        inspect[..],
+        strings(&[
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            "{{json .Mounts}}",
+            "--",
+            &id.0
+        ])[..]
+    );
+
+    for printed in [
+        "garbage",
+        "{\"a\":1}",
+        "[1]",
+        "[{}]",
+        "[{\"Type\":\"bind\"}]",
+        "[{\"Type\":\"bind\",\"Source\":5,\"Destination\":\"/b\",\"RW\":true}]",
+        "[{\"Type\":\"bind\",\"Source\":\"/a\",\"RW\":true}]",
+        "[{\"Type\":\"bind\",\"Source\":\"/a\",\"Destination\":\"/b\"}]",
+        "[{\"Type\":\"bind\",\"Source\":\"/a\",\"Destination\":\"/b\",\"RW\":\"yes\"}]",
+        "[{\"Type\":\"bind\",\"Source\":\"/a\",\"RW\":true,\"Destination\":5}]",
+        "[{\"Type\":1,\"Source\":\"/a\",\"Destination\":\"/b\",\"RW\":true}]",
+    ] {
+        let world = docker();
+        let mut rt = open(&world);
+        world.say("inspect", printed);
+        let said = rt.create_and_start(&spec("r2")).unwrap_err();
+        assert_eq!(said.0, "inspect: unreadable output", "{printed:?}");
+        assert!(world.ids().is_empty(), "{printed:?}");
+    }
+
+    let world = docker();
+    let mut rt = open(&world);
+    world.say("inspect", "null\n");
+    let said = rt.create_and_start(&spec("r3")).unwrap_err();
+    assert_eq!(
+        said.0,
+        "the mounts of the container are not the ones the agent resolved"
+    );
+
+    let world = docker();
+    let mut rt = open(&world);
+    world.fail("inspect", 1);
+    let said = rt.create_and_start(&spec("r4")).unwrap_err();
+    assert_eq!(said.0, "inspect: /bin/sh: exit status: 1");
+    assert!(world.ids().is_empty(), "removed when the read-back failed");
+
+    // The runtime lost the container between the create and the read-back.
+    let world = docker();
+    let mut rt = open(&world);
+    world.fail("inspect", 1);
+    world.say("ps", "");
+    let said = rt.create_and_start(&spec("r6")).unwrap_err();
+    assert_eq!(said.0, "inspect: unreadable output");
+    assert!(world.calls_of("start").is_empty());
+
+    let world = docker();
+    let mut rt = open(&world);
+    world.tamper(|binds| binds[0].0 = "/etc".to_owned());
+    world.fail("rm", 1);
+    let said = rt.create_and_start(&spec("r5")).unwrap_err();
+    assert!(
+        said.0
+            .contains("; the container could not be removed: rm: "),
+        "{}",
+        said.0
+    );
+    assert_eq!(world.ids().len(), 1, "the leak is reported, not hidden");
 }
 
 /// Asserts what `poll` makes of each state the runtime prints, and what it does when it
 /// cannot tell: running and the states that mean it still exists, exited with its code
 /// and the memory controller's flag, a container the runtime no longer has as `Gone`
 /// (not an error), and an error for a failure while it is there, for output that is not
-/// three words, for a code that is not a number and for a state it does not know. It
-/// catches a gone container taken for a failure (the job would be polled for ever), a
-/// failure taken for gone (the job would end as failed while it runs) and an unknown
-/// state taken for running.
+/// three words, for a code that is not a number and for a state it does not know. A
+/// `dead` container (one the daemon failed to remove) is a failure and never a success:
+/// it keeps its code when it has one, and a code of 0 is not taken for a success, so it
+/// is reported as gone, which ends the job as failed. It catches a gone container taken
+/// for a failure (the job would be polled for ever), a failure taken for gone (the job
+/// would end as failed while it runs), an unknown state taken for running and a dead
+/// container reported `succeeded`.
 #[test]
 fn poll_maps_every_state() {
     let world = docker();
@@ -406,9 +738,15 @@ fn poll_maps_every_state() {
         ("configured 0 false", Ok(Status::Running)),
         ("exited 3 false\n", ok(3, false)),
         ("dead 1 false", ok(1, false)),
+        ("dead 0 false", Ok(Status::Gone)),
+        ("dead 0 true", ok(0, true)),
         ("stopped 0 false", ok(0, false)),
         ("exited 137 true", ok(137, true)),
         ("exited -1 false", ok(-1, false)),
+        (
+            "dead x false",
+            Err(RuntimeError("inspect: unreadable output".to_owned())),
+        ),
         (
             "exited x false",
             Err(RuntimeError("inspect: unreadable output".to_owned())),
@@ -476,6 +814,34 @@ fn a_missing_container_is_gone_and_a_failing_one_is_an_error() {
     assert_eq!(world.calls().len(), calls, "no call with a bad id");
 }
 
+/// Asserts that an id of fewer than 64 digits is refused before any call by every verb,
+/// even when it is the front of the id of a container that is there. `ps --no-trunc`
+/// prints 64 digits and the agent compares whole lines, so a short id whose `inspect`,
+/// `stop` or `rm` failed would be read as "gone" while the container runs. It catches that
+/// confusion, and a listing that accepts a short id the engine printed.
+#[test]
+fn a_short_id_is_refused_while_the_container_is_there() {
+    let world = docker();
+    let mut rt = open(&world);
+    let id = start(&mut rt, &world, "r1");
+    let short = ContainerId(id.0[..12].to_owned());
+    let calls = world.calls().len();
+    assert_eq!(rt.poll(&short).unwrap_err().0, "not a container id");
+    let stop = rt.stop(&short, Duration::from_secs(1)).unwrap_err();
+    assert_eq!(stop.0, "not a container id");
+    assert_eq!(rt.remove(&short).unwrap_err().0, "not a container id");
+    assert_eq!(world.calls().len(), calls, "no call was made");
+    assert_eq!(
+        world.ids(),
+        std::slice::from_ref(&id.0),
+        "the container is still there"
+    );
+
+    world.say_once("ps", &format!("{}\n", short.0));
+    let said = rt.list_labelled().unwrap_err();
+    assert_eq!(said.0, "not a container id");
+}
+
 /// Asserts the `inspect` call itself: a container type, the format that asks for the
 /// state, and the id after `--`. It catches an id that could be read as an option.
 #[test]
@@ -484,7 +850,7 @@ fn poll_asks_for_the_container_state_after_dashes() {
     let mut rt = open(&world);
     let id = start(&mut rt, &world, "r1");
     rt.poll(&id).unwrap();
-    let inspect = &world.calls_of("inspect")[0];
+    let inspect = world.calls_of("inspect").pop().unwrap();
     assert_eq!(
         inspect[..4],
         strings(&["inspect", "--type", "container", "--format"])[..]
@@ -612,13 +978,62 @@ fn ps_filter_finds_only_labelled() {
     );
     assert_eq!(found[0].labels["team"], "ml", "the labels come back whole");
     assert_eq!(found[0].id.0, world.id_of("mine").unwrap());
+    let inspect = world.calls_of("inspect").pop().unwrap();
+    assert_eq!(inspect[4], "{{.State.Status}} {{json .Config.Labels}}");
+}
+
+/// Asserts that a container that was created and never started is removed when the agent
+/// lists its containers, and is not handed to the lifecycle: it holds no process and no
+/// job, but its labels say it is a running one, so taking it over would hold its booking
+/// until the wall time and report a job that never ran as timed out. That is what an
+/// ambiguous create whose cleanup failed leaves behind. A removal that fails is an error
+/// (the list is not complete), and Podman's own name for the state is treated the same.
+/// It catches an orphan adopted as running.
+#[test]
+fn a_container_never_started_is_removed_on_adoption() {
+    let world = docker();
+    let mut rt = open(&world);
+    start(&mut rt, &world, "live");
+    let orphan = world.leak_created(&[
+        (label::RUN, "orphan"),
+        (label::AGENT, HOST),
+        (label::CREATED_MS, "1000000"),
+    ]);
+    let found = rt.list_labelled().unwrap();
+    assert_eq!(by_run(&found), [("live".to_owned(), 0)]);
+    assert!(!world.ids().contains(&orphan), "the orphan was removed");
+    assert_eq!(
+        world.calls_of("rm"),
+        [strings(&["rm", "--force", "--volumes", "--", &orphan])]
+    );
+
+    world.leak_created(&[(label::RUN, "again"), (label::AGENT, HOST)]);
+    world.fail("rm", 1);
+    let said = rt.list_labelled().unwrap_err();
+    assert_eq!(said.0, "rm: /bin/sh: exit status: 1");
+    assert_eq!(
+        rt.list_labelled().unwrap().len(),
+        1,
+        "removed at the next listing"
+    );
+
+    let podman = Scripted::new("podman version 5.2.1");
+    let mut rt = open_with(&podman, "linux", settings());
+    let id = podman.leak(&[(label::RUN, "p"), (label::AGENT, HOST)]);
+    podman.say("inspect", "configured {}\n");
+    assert_eq!(rt.list_labelled().unwrap(), []);
+    assert!(!podman.ids().contains(&id));
 }
 
 /// Asserts that the age of a listed container is the time since the agent made it, on
 /// the wall clock: a runtime opened 30 seconds later reports 30000 ms; a clock that went
-/// back reports 0 and not a huge number; and a container without a creation time (or
-/// with one that is not a number) is as old as it can be, so its job is over its limit
-/// and not given a fresh one. It catches a restart that gives every job a new wall time.
+/// back reports 0 and not a huge number, however far back (a creation time of the
+/// largest number) and a clock far ahead does not overflow; and a container without a
+/// creation time (or with one that is not a number) is as old as it can be, so its job is
+/// over its limit and not given a fresh one. The stamp is the wall clock because the
+/// engines print their own times in formats that differ; a step of the clock therefore
+/// moves the age (documented). It catches a restart that gives every job a new wall time
+/// and arithmetic that wraps.
 #[test]
 fn the_age_of_a_listed_container_comes_from_its_creation_time() {
     let world = docker();
@@ -633,6 +1048,17 @@ fn the_age_of_a_listed_container_comes_from_its_creation_time() {
     }
     let earlier = open_at(&world, "linux", back).list_labelled().unwrap();
     assert_eq!(by_run(&earlier), [("r1".to_owned(), 0)]);
+    fn far_ahead() -> u64 {
+        u64::MAX
+    }
+    let ahead = open_at(&world, "linux", far_ahead).list_labelled().unwrap();
+    assert_eq!(by_run(&ahead), [("r1".to_owned(), u64::MAX - 1_000_000)]);
+    let max = u64::MAX.to_string();
+    world.leak(&[
+        (label::RUN, "from-the-future"),
+        (label::AGENT, HOST),
+        (label::CREATED_MS, &max),
+    ]);
     world.leak(&[(label::RUN, "no-time"), (label::AGENT, HOST)]);
     world.leak(&[
         (label::RUN, "bad-time"),
@@ -644,6 +1070,7 @@ fn the_age_of_a_listed_container_comes_from_its_creation_time() {
         by_run(&all),
         [
             ("bad-time".to_owned(), u64::MAX),
+            ("from-the-future".to_owned(), 0),
             ("no-time".to_owned(), u64::MAX),
             ("r1".to_owned(), 0),
         ]
@@ -652,10 +1079,11 @@ fn the_age_of_a_listed_container_comes_from_its_creation_time() {
 
 /// Asserts the list's failures: `ps` failing is an error (the agent must not say it
 /// holds nothing), an id that `ps` prints which is not an id is an error and never goes
-/// into an argument, labels that are not a JSON object of text are an error, and `null`
-/// (a container with no labels) reads as none. A container that disappears between the
-/// two calls is skipped. It catches a list that silently drops containers it could not
-/// read and so lets the server requeue running work.
+/// into an argument, an answer that is not a state and the labels as JSON, or labels
+/// that are not a JSON object of text, are an error, and `null` (a container with no
+/// labels) reads as none. A container that disappears between the two calls is skipped.
+/// It catches a list that silently drops containers it could not read and so lets the
+/// server requeue running work.
 #[test]
 fn list_failures_are_errors_and_a_vanished_container_is_skipped() {
     let world = docker();
@@ -668,12 +1096,19 @@ fn list_failures_are_errors_and_a_vanished_container_is_skipped() {
     let said = rt.list_labelled().unwrap_err();
     assert_eq!(said.0, "not a container id");
 
-    for printed in ["[1,2]", "{\"a\":1}", "garbage", ""] {
+    for printed in [
+        "running [1,2]",
+        "running {\"a\":1}",
+        "running garbage",
+        "running ",
+        "garbage",
+        "",
+    ] {
         world.say("inspect", printed);
         let said = rt.list_labelled().unwrap_err();
         assert_eq!(said.0, "inspect: unreadable output", "{printed:?}");
     }
-    world.say("inspect", "null\n");
+    world.say("inspect", "running null\n");
     let found = rt.list_labelled().unwrap();
     assert_eq!(found.len(), 1);
     assert!(found[0].labels.is_empty());
@@ -686,6 +1121,179 @@ fn list_failures_are_errors_and_a_vanished_container_is_skipped() {
     world.say_once("ps", &format!("{}\n", id2.0));
     world.vanish("r2");
     assert_eq!(rt.list_labelled().unwrap(), []);
+}
+
+/// Asserts that the engine is run with an environment of its own: every call, the
+/// `--version` that opens the runtime included, goes through the runner's environment
+/// call with exactly one variable, the pinned `PATH`, and with an engine host also
+/// `DOCKER_HOST` and `CONTAINER_HOST` set to it, in that order and nothing else. None
+/// goes through the call that passes the agent's environment on. It catches `LD_PRELOAD`,
+/// `DOCKER_CONFIG`, `DOCKER_CONTEXT` or a `PATH` of the agent's steering the engine.
+#[test]
+fn the_engine_runs_with_a_pinned_path_and_nothing_inherited() {
+    let exercise = |world: &Scripted, rt: &mut CliRuntime| {
+        let id = start(rt, world, "r1");
+        rt.poll(&id).unwrap();
+        rt.stop(&id, Duration::from_secs(1)).unwrap();
+        rt.list_labelled().unwrap();
+        rt.remove(&id).unwrap();
+    };
+    let pinned = |extra: &[(&str, &str)]| -> Env {
+        let mut env = vec![("PATH".to_owned(), PINNED_PATH.to_owned())];
+        env.extend(
+            extra
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+        );
+        Some(env)
+    };
+
+    let world = docker();
+    let mut rt = open(&world);
+    exercise(&world, &mut rt);
+    let envs = world.envs();
+    assert_eq!(envs.len(), world.calls().len());
+    assert!(envs.len() > 8);
+    assert!(envs.iter().all(|env| *env == pinned(&[])), "{envs:?}");
+
+    let world = docker();
+    let uri = "unix:///run/engine/engine.sock";
+    let set = settings().with_host(Some(uri)).unwrap();
+    let mut rt = open_with(&world, "linux", set);
+    exercise(&world, &mut rt);
+    let expected = pinned(&[("DOCKER_HOST", uri), ("CONTAINER_HOST", uri)]);
+    let envs = world.envs();
+    assert!(envs.len() > 8);
+    assert!(envs.iter().all(|env| *env == expected), "{envs:?}");
+}
+
+/// Asserts that the system runner started with an environment gives the program exactly
+/// that environment: the program prints what it received, and nothing of the test
+/// process's own environment (`HOME`, `PATH`, `CARGO_*`) is there. It catches a runner
+/// that adds the given variables to the inherited ones.
+#[test]
+fn the_system_runner_gives_a_program_only_the_environment_it_is_given() {
+    use js_agent::CommandRunner;
+    let runner = js_agent::cli_runtime::system_runner(Duration::from_secs(10));
+    let said = runner
+        .run_in("/usr/bin/env", &[], &[("PATH", "/p"), ("A", "1")])
+        .unwrap();
+    let mut lines: Vec<&str> = said.lines().collect();
+    lines.sort_unstable();
+    assert_eq!(lines, ["A=1", "PATH=/p"]);
+    let none = runner.run_in("/usr/bin/env", &[], &[]).unwrap();
+    assert_eq!(none, "");
+    let inherited = runner.run("/usr/bin/env", &[]).unwrap();
+    assert!(
+        inherited.contains("PATH="),
+        "run still passes the environment on"
+    );
+}
+
+thread_local! {
+    static GIVEN: RefCell<Vec<(PathBuf, u32, u32)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn record(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    GIVEN.with(|given| given.borrow_mut().push((path.to_path_buf(), uid, gid)));
+    Ok(())
+}
+
+fn refuse(_path: &Path, _uid: u32, _gid: u32) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::PermissionDenied))
+}
+
+fn given() -> Vec<(PathBuf, u32, u32)> {
+    GIVEN.with(|given| given.borrow().clone())
+}
+
+/// Asserts that an agent that runs as root gives the run's scratch directory to the
+/// container's user before the container is created (the directory is `0700` and the
+/// agent's, so the container's user could not write it), and that an agent whose own
+/// user is the container's gives nothing away. A directory that cannot be given away is
+/// an error before anything is created. It catches the default configuration mounting
+/// `/scratch` read-write for a process that cannot write it.
+#[test]
+fn the_scratch_goes_to_the_containers_user_when_the_agent_is_root() {
+    let world = docker();
+    let root = js_agent::cli_runtime::Settings::new(Path::new(BIN), None, Some("2000:3000"))
+        .unwrap()
+        .with_agent(0, 0)
+        .unwrap();
+    let mut rt = open_with(&world, "linux", root.clone()).with_chown(record);
+    rt.create_and_start(&spec("r1")).unwrap();
+    assert_eq!(given(), [(PathBuf::from("/work/scratch/r1"), 2000, 3000)]);
+
+    let own = root.with_agent(2000, 3000).unwrap();
+    let mut rt = open_with(&world, "linux", own).with_chown(record);
+    rt.create_and_start(&spec("r2")).unwrap();
+    assert_eq!(given().len(), 1, "nothing was given away");
+
+    let root = settings().with_agent(0, 0).unwrap();
+    let mut rt = open_with(&world, "linux", root).with_chown(refuse);
+    let creates = world.calls_of("create").len();
+    let said = rt.create_and_start(&spec("r3")).unwrap_err();
+    assert_eq!(said.0, "scratch: permission denied");
+    assert_eq!(
+        world.calls_of("create").len(),
+        creates,
+        "nothing was created"
+    );
+}
+
+/// Asserts that the real hand-over works on a directory (to the owner it already has,
+/// which any user may do), does not follow a link, and fails for a path that is not there.
+#[test]
+fn hand_over_changes_the_owner_of_the_directory_itself() {
+    let dir = Scratch::new("cli-hand-over");
+    let (uid, gid) = (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    );
+    let run = dir.path("run");
+    std::fs::create_dir(&run).unwrap();
+    hand_over(&run, uid, gid).unwrap();
+    let link = dir.path("link");
+    std::os::unix::fs::symlink(&run, &link).unwrap();
+    hand_over(&link, uid, gid).unwrap();
+    assert!(hand_over(&dir.path("absent"), uid, gid).is_err());
+}
+
+/// Asserts that a Docker engine that reports no swap limit support is warned about when
+/// the runtime opens (`--memory-swap` is then ignored and a job can use swap beyond its
+/// memory limit), and that nothing is said when it supports them, when the answer cannot
+/// be had, or for Podman, whose `info` does not say. It catches a limit the operator
+/// believes in that the host does not enforce.
+#[test]
+fn an_engine_without_swap_limits_is_warned_about() {
+    let world = docker();
+    world.say("info", "false\n");
+    let rt = open(&world);
+    assert_eq!(
+        rt.warnings(),
+        [
+            "the engine reports no swap limit support: --memory-swap is ignored, so a job can use swap beyond its memory limit"
+        ]
+    );
+    assert_eq!(
+        world.calls_of("info"),
+        [strings(&["info", "--format", "{{.SwapLimit}}"])]
+    );
+    for printed in ["true\n", "weird\n"] {
+        let world = docker();
+        world.say("info", printed);
+        assert!(open(&world).warnings().is_empty(), "{printed:?}");
+    }
+    let world = docker();
+    world.fail("info", 1);
+    assert!(open(&world).warnings().is_empty());
+    let podman = Scripted::new("podman version 5.2.1");
+    assert!(
+        open_with(&podman, "linux", settings())
+            .warnings()
+            .is_empty()
+    );
+    assert!(podman.calls_of("info").is_empty());
 }
 
 /// The wall clock the program stamps containers with reads a plausible time, and the

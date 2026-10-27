@@ -52,9 +52,11 @@ pub struct ContainerId(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedMount {
     /// The canonical host path, below the root the mount names, as it was when the agent
-    /// resolved it. A backend must not trust it to be the same path at the moment it binds:
-    /// it opens the path by file descriptor, beneath the root, and binds that (see
-    /// [`MountRoots`](super::MountRoots)).
+    /// resolved it. A backend must not trust it to be the same path at the moment it binds.
+    /// A container daemon binds by path and cannot use a descriptor the agent opened, so a
+    /// backend of that kind reads back where the daemon bound each mount and refuses the
+    /// container when it differs; the time between the resolution and the bind stays open
+    /// (see [`MountRoots`](super::MountRoots)).
     pub host: PathBuf,
     /// The path inside the container: `/mnt/<root name>/<rel>`.
     pub target: String,
@@ -102,12 +104,15 @@ pub struct Exit {
 /// What a poll found of a container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
-    /// It runs, or it is created and about to: there is no state between a created
-    /// container and a running one, so a backend reports a created container as running.
+    /// It runs, or it is created and about to: the agent polls only a container it has
+    /// started, so a backend reports a created one as running. (One that was created and
+    /// never started, found after a restart, is no job: see
+    /// [`ContainerRuntime::list_labelled`].)
     Running,
     /// It has exited.
     Exited(Exit),
-    /// The runtime no longer has it: it was removed from outside, or the host lost it. The
+    /// The runtime no longer has it: it was removed from outside, or the host lost it, or
+    /// it holds only what the runtime could not remove and no exit status to trust. The
     /// job ends as failed (or as stopped or timed out, when the agent was ending it).
     Gone,
 }
@@ -163,13 +168,12 @@ pub trait ContainerRuntime {
     /// The runtime cannot remove it.
     fn remove(&mut self, id: &ContainerId) -> Result<(), RuntimeError>;
 
-    /// Every container carrying the agent's run label ([`label::RUN`]), running or
-    /// exited.
-    ///
-    /// One agent owns a runtime: nothing scopes the label to an agent instance, so every
-    /// container carrying it is treated as this agent's own, and the agent may adopt it or
-    /// stop and remove it. Do not point two agents, or another tool that sets the label,
-    /// at one runtime.
+    /// Every container carrying the run label ([`label::RUN`]) and this agent's label
+    /// ([`label::AGENT`], the host id the backend puts on every container it makes), running
+    /// or exited. The agent label scopes the list: two agents sharing one runtime never see
+    /// each other's containers, and the agent may adopt, stop and remove every one it is
+    /// given. A container that was created and never started holds no job, whatever its
+    /// labels say; a backend removes it and leaves it out.
     ///
     /// # Errors
     ///

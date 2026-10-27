@@ -242,9 +242,8 @@ impl Lifecycle {
     /// order the runtime lists them in. When the offer is lower than at the last start,
     /// the jobs that no longer fit are therefore the newest, and they are evicted.
     ///
-    /// One agent owns a runtime: the run label is not scoped to an agent instance, so every
-    /// container carrying it is treated as this agent's own, including the removal of those
-    /// that cannot be adopted.
+    /// What the runtime lists is the agent's own ([`ContainerRuntime::list_labelled`] is
+    /// scoped by the agent label), including the removal of those that cannot be adopted.
     ///
     /// # Errors
     ///

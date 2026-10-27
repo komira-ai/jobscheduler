@@ -73,18 +73,40 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
     /// The absolute path of the `docker` or `podman` program that runs container jobs.
-    /// It is started by exactly this path, never looked up on the `PATH`; without it the
-    /// agent runs no container.
+    /// It is started by exactly this path, never looked up on the `PATH`, with an
+    /// environment of its own (a fixed `PATH` and `--container-host`, nothing the agent
+    /// inherited); without it the agent runs no container. A job that names a GPU needs
+    /// the NVIDIA container toolkit with Docker, and with Podman a CDI specification
+    /// (`nvidia.com/gpu=<index>`) the operator has generated.
     #[arg(long, value_name = "PATH")]
     pub container_bin: Option<PathBuf>,
     /// The network containers join: the name of a user-defined network. By default
-    /// `none`, no network at all. `host` is refused. Needs `--container-bin`.
+    /// `none`, no network at all. `host` is refused. Any named network gives the job
+    /// egress to whatever that network reaches, the host's metadata endpoint included;
+    /// the agent warns at start. Needs `--container-bin`.
     #[arg(long, value_name = "NAME")]
     pub container_network: Option<String>,
     /// The `<uid>:<gid>` containers run as, both above zero. By default `65534:65534`.
-    /// Needs `--container-bin`.
+    /// The run's scratch directory is private to the agent: an agent that runs as root
+    /// gives it to this user, any other agent refuses to start unless this is its own
+    /// `<uid>:<gid>`. Needs `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
+    /// The engine to talk to, as `unix:///<path>`, `tcp://<address>` or `ssh://<address>`;
+    /// given to the program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By
+    /// default none is given and the engine uses its own default. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "URI")]
+    pub container_host: Option<String>,
+    /// When a job's image is pulled: `never` (the default: the image must be on the host,
+    /// so a job cannot make the host reach a registry of its choosing) or `missing`.
+    /// Needs `--container-bin`.
+    #[arg(long, value_name = "never|missing")]
+    pub container_pull: Option<String>,
+    /// The size of each container's `/tmp`, such as `64m` (the default) or `1g`. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "SIZE")]
+    pub container_tmp_size: Option<String>,
 }
 
 /// `name=path` split at the first `=`.

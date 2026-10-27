@@ -14,7 +14,9 @@
 //! environment it does not control, and what a helper prints becomes the host's offer. The
 //! trust assumption is that those directories are writable by root only, as on a stock
 //! Linux or macOS system; a host where an unprivileged user can replace `/usr/bin/nvidia-smi`
-//! has bigger problems than the agent can solve.
+//! has bigger problems than the agent can solve. The helpers get the agent's environment
+//! ([`CommandRunner::run`]); the container engine does not: it is started with
+//! [`CommandRunner::run_in`], whose environment is exactly the one given.
 //!
 //! # Bounds
 //!
@@ -71,6 +73,10 @@ pub trait CommandRunner {
     /// Runs `program` with `args` and returns its standard output when it exits with
     /// status 0. The error says which program failed and how, never what it printed.
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String>;
+
+    /// Like [`CommandRunner::run`], but the program's environment is exactly `env`: the
+    /// environment of the agent is not passed on.
+    fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String>;
 }
 
 /// Reads a text file.
@@ -144,22 +150,44 @@ impl Default for SystemCommands {
     }
 }
 
-impl CommandRunner for SystemCommands {
-    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+impl SystemCommands {
+    /// Starts `program` and supervises it. `env` is the whole environment of the program
+    /// when given, and the agent's own when not.
+    fn start(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: Option<&[(&str, &str)]>,
+    ) -> Result<String, String> {
         let named = |err: io::Error| format!("{program}: {err}");
         io::pipe().map_err(named).and_then(|(reader, writer)| {
-            // The command (and with it the parent's copy of the pipe's write end) is gone
-            // at the end of this statement, so the reader sees the end of the output.
-            let spawned = Command::new(program)
+            let mut command = Command::new(program);
+            command
                 .args(args)
                 .stdin(Stdio::null())
                 .stdout(writer)
-                .stderr(Stdio::null())
-                .spawn();
+                .stderr(Stdio::null());
+            if let Some(env) = env {
+                command.env_clear().envs(env.iter().copied());
+            }
+            let spawned = command.spawn();
+            // The command (and with it the parent's copy of the pipe's write end) is gone
+            // here, so the reader sees the end of the output.
+            drop(command);
             spawned
                 .map_err(named)
                 .and_then(|child| self.supervise(program, child, reader))
         })
+    }
+}
+
+impl CommandRunner for SystemCommands {
+    fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
+        self.start(program, args, None)
+    }
+
+    fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
+        self.start(program, args, Some(env))
     }
 }
 
@@ -550,12 +578,22 @@ mod tests {
         fn run(&self, program: &str, _args: &[&str]) -> Result<String, String> {
             Err(format!("{program}: not found"))
         }
+
+        fn run_in(
+            &self,
+            program: &str,
+            args: &[&str],
+            _env: &[(&str, &str)],
+        ) -> Result<String, String> {
+            self.run(program, args)
+        }
     }
 
     /// Asserts that a host where `getconf` is absent and the standard library cannot count
     /// the CPUs either fails with both reasons, which the public seams cannot arrange.
     #[test]
     fn no_getconf_and_no_standard_count_names_both() {
+        assert_eq!(Absent.run_in("x", &[], &[]), Err("x: not found".to_owned()));
         let said = cpu_millis(&Absent, || Err(io::Error::other("no count"))).unwrap_err();
         assert_eq!(
             said,
