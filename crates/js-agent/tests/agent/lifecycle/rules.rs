@@ -105,6 +105,28 @@ fn the_memory_of_stopped_runs_is_bounded() {
     );
 }
 
+/// Asserts that a stop repeated for the same unknown run takes one place in the memory of
+/// stopped runs: after it, as many other ids as fit beside it are stopped, and the first
+/// still cannot start. It catches a repeated stop that is remembered twice and pushes the
+/// run out of the memory early.
+#[test]
+fn a_repeated_stop_takes_one_place_in_the_memory() {
+    let mut h = Harness::new("retired-repeat");
+    h.stop("dup");
+    h.stop("dup");
+    let others: Vec<String> = (0..RETIRED_CAP - 1).map(|n| format!("y{n}")).collect();
+    for chunk in others.chunks(1000) {
+        let stops = chunk
+            .iter()
+            .map(|run_id| Command::Stop {
+                run_id: run_id.clone(),
+            })
+            .collect();
+        h.apply(stops);
+    }
+    assert_eq!(names(&h.start(job("dup"))), ["skipped dup Retired"]);
+}
+
 /// Asserts that a start that waited longer than its `valid_for_ms` on the agent's clock
 /// (here because the starts before it in the reply took long) is dropped with no result,
 /// no held run and no container; that a start that waited exactly its `valid_for_ms`
