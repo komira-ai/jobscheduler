@@ -616,7 +616,7 @@ pub const FORBIDDEN: &[&str] = &[
 /// `cargo metadata` for the workspace at `root`, as JSON (resolved against `Cargo.lock`).
 /// Output that is not JSON comes back as `null`, which [`check_closure`] refuses.
 pub fn cargo_metadata(root: &Path) -> Result<serde_json::Value, Error> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let cargo = std::env::var_os("CARGO").unwrap_or("cargo".into());
     let out = std::process::Command::new(cargo)
         .args(["metadata", "--format-version", "1", "--locked"])
         .current_dir(root)
