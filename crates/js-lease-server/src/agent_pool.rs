@@ -217,7 +217,7 @@ fn whole_node(raw: &RawPool, admission: &Admission) -> Result<Option<WholeNodeCo
 
 /// Like [`millis`], but `0` is a value: the setting is "none".
 fn millis_or_zero(field: &str, text: &Option<String>, default: u64) -> Result<u64, String> {
-    let zero = |text: &String| text.trim_end_matches(['s', 'm', 'h']).parse::<u64>() == Ok(0);
+    let zero = |text: &String| matches!(text.as_str(), "0" | "0s" | "0m" | "0h");
     match text.as_ref().is_some_and(zero) {
         true => Ok(0),
         false => millis(field, text.clone(), default),
@@ -510,6 +510,8 @@ mod tests {
             (whole("drain_deadline = \"0\""), "drain_deadline"),
             (whole("drain_deadline = \"soon\""), "drain_deadline"),
             (whole("drain_after = \"soon\""), "drain_after"),
+            (whole("drain_after = \"0ms\""), "drain_after"),
+            (whole("drain_after = \"0smh\""), "drain_after"),
             (
                 whole("max_draining_fraction = 0.5"),
                 "max_draining_fraction",
