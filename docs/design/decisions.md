@@ -1,8 +1,8 @@
-# Decisions D1 to D45
+# Decisions D1 to D52
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D45 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -96,15 +96,16 @@ marked settled. The ids run D1 to D45 with no gaps. D26 is open. Superseded deci
   what remains of a guest after a job cannot be shown to be clean; destroying it can. The cost is a boot per run, which D26 weighs.
 - **D30. Readiness of a whole-node lease.** (a) Assume the host is quiet at the grant; (b) the agent reports ready after it has confirmed
   that no VM is running and finished running work, and the lease token is minted only then. Recommend (b): (a) lets a performance test
-  start beside a booted VM, and the token gate needs no change in an older client (5.15).
+  start beside a booted VM, and the token gate needs no change in an older client (5.15). The whole class, its drain and its caps are
+  D46 to D52 ([whole-node.md](whole-node.md)); the "quiet" of (b) there also covers no run, clean checks and no taint.
 - **D31. Matching what is inside an image.** (a) The consumer names the image and constrains `base_images has <name>`; (b) each image has a
   profile and a `guest` scope matches when one image meets all the guest constraints. Recommend (b), with (a) always available: Xcode and
   runtimes are properties of the image the VM boots, and a consumer should ask for what it needs, not memorise image names (5.13).
 - **D32. GPU placement. Settled by the project owner; amended by D35.** GPUs exist only on the Mac Studio machines of the GPU pool (two
   today). Their shape declares `gpu_class = "apple-m"` and `gpus = 1`; a GPU request (`gpus > 0` or a `gpu_class` constraint) is
   satisfiable only by that pool. It queues when its registered hosts are busy, with no acquire made for it, and (D35) is refused with
-  `no-capable-host` when no registered GPU host could ever serve it. The whole-host GPU lease service (class `gpu-host`, `BookAll`) is the
-  only GPU path; its hosts register through `js-agent` (D36); a VM gets no GPU; container GPU jobs on Linux are not a current use
+  `no-capable-host` when no registered GPU host could ever serve it. The whole-host GPU lease service (the merged class `gpu-host`, now the
+  whole-node class of D46, whose pool `class = "gpu-host"` loads as `whole-node`) is the only GPU path; its hosts register through `js-agent` (D36); a VM gets no GPU; container GPU jobs on Linux are not a current use
   ([capabilities.md](capabilities.md)).
 - **D33. Deployment shape and state store. Direction settled by the project owner; the store is chosen here.** The target is one service in
   Kubernetes (scheduler, lease API, agent API) with kbf as a client and `js-agent` registering with it; the single-host `js-lease-server`
@@ -179,3 +180,39 @@ marked settled. The ids run D1 to D45 with no gaps. D26 is open. Superseded deci
   first, not a coordinator service map. (3) jobscheduler releasing faster than kbf with urgent agent fixes: package coupling hurts (K35),
   and the options are reopened. (4) The kbf helper's single signer not extending to jobscheduler's release signer: a security decision
   for the owner before any option (K36).
+- **D46. Giving a whole node is a lease class of its own. Direction settled by the project owner; the rules are chosen here.** (a) A large
+  resource request under `Book` or `BookAll`; (b) a class `whole-node` with its own admission `Whole`: exclusive, quiet, reserved by a
+  drain, capped. Adopted: (b). A big request is placed beside other work, starts on any state, is never drained for and has no cap; the
+  owner's requirement (nothing else placed for the lease, drained first, the shape for GPU testing) is a different promise. `BookAll` stays
+  for ucdk Job classes (D7) without reservation, quiet or cap. kbf's `whole_machine` and the merged `gpu-host` are this class (a pool
+  `class = "gpu-host"` loads as `whole-node`); the GPU path on the Mac Studio machines is a whole-node lease, and a GPU request under any
+  other class matches no GPU pool (D32). A node lease that books a whole shape under `Book` is not whole-node. Text in
+  [whole-node.md](whole-node.md).
+- **D47. Admission and reservation of a whole-node request.** Eligible hosts are the capable hosts of D41 in the matching pools; the request
+  is refused only when no registered host could ever be given whole and no elastic provider could launch one (`no-capable-host`, D35), else
+  queued in queue order. It takes a quiet host at once, else (after `drain_after`, default zero) reserves exactly one host: the least worst-case
+  drain (the latest end bound of its leases and runs), then the fewest leases, then the lowest host id; it takes any host that becomes quiet
+  first and does not switch to a cheaper one otherwise. Alternatives: reserve every eligible host (idles the pool), or wait for a quiet host
+  with no reservation (starves, which R1's one allowed reservation exists to prevent). Recommend as stated.
+- **D48. The drain bound: re-queue, never kill.** After `drain_deadline` the reservation is given up, the host returns to `serving` with its
+  work untouched, and the request reserves another host, the first excluded for `reserve_backoff`. The default deadline is the pool's max
+  wall time, by which every lease on the host at the reservation has ended. Options: (a) re-queue on another host; (b) stop the running work
+  after a grace; (c) wait without a bound. Recommend (a): (b) silently destroys other tenants' results for one consumer's convenience, and
+  (c) lets a request hold a host and idle it for ever. The scheduler stops nothing for a reservation; the renewal answer carries
+  `host_reserved` (additive) so a cooperating consumer releases early.
+- **D49. Caps.** Per pool: `max_whole_node` (reserved plus held), `max_draining` (default 1), `max_whole_node_per_consumer` (default 1),
+  `keep_for_ordinary` (default 1 in a mixed pool, 0 in a dedicated one); the effective ceiling is the least of `max_whole_node` and capable
+  hosts less `keep_for_ordinary`. A reservation does not start on the last unreserved capable host of an ordinary request queued ahead of
+  it unless `allow_last_capable` is set. A held lease is never revoked when the ceiling falls. A mixed pool with no `max_whole_node` does not
+  offer the class. Options: a fraction of the pool (rejected: no protection in a two-host pool), a global cap (rejected: one consumer takes
+  every slot). Protecting only older queued work keeps the rule from starving the whole-node request.
+- **D50. Elastic providers: acquire before draining.** When an entry of the pool's hierarchy can launch a machine that meets the request, the
+  request acquires one rather than reserving a busy host (D39's two passes; a launch idles nothing, a drain idles a host for up to a max
+  wall time). The machine is committed to the request at registration. A quiet host that appears while it boots takes the request and the
+  machine is released by the idle rule (D40). Alternative: drain first and acquire as a fallback; rejected as slower and idle-making.
+- **D51. Host jobs only in a whole-node lease.** A lease may carry `host_jobs` only if it is whole-node, in addition to the three consents
+  of 5.12. Options: (a) any class, as 5.12 said; (b) whole-node only. Recommend (b): a host job taints its host unconditionally, and in a
+  share that would destroy other consumers' work for a taint they did not cause.
+- **D52. A whole-node lease's clock starts at the token.** The TTL and max wall time count from the minting of the token, not from the
+  commit, so a consumer is not charged for the drain or the preparation; readiness is bounded by `prepare_timeout` and `max_replace`.
+  Alternative: from the commit; rejected, since a consumer could lose its time before it could use the host.

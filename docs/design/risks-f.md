@@ -1,4 +1,4 @@
-# Risks K19 to K36
+# Risks K19 to K39
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -11,7 +11,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   covered by any check here.
 - **K22. VMs starve containers on the host.** A booted VM holds its CPUs and memory in full for its run. Mitigated by counting it in full, the offer rule, the `vms` ceiling and containers admitted against the total less VM memory (5.15).
 - **K23. Base image drift.** A mutable image would make two leases differ. Mitigated by immutable names, a digest pinned in the `Start` and verified (5.14).
-- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and a drain rule with a drain deadline and at most one draining host per pool (5.15, vm-backend.md).
+- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and the reservation, drain bound and caps of the whole-node class (5.17, [whole-node.md](whole-node.md); K38).
 - **K25. Boot cost per run.** A boot for every run, since no VM is reused. Bounded by the size choice of D26; a warm pool is future work.
 - **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
 - **K27. Advertised facts are unverified claims.** A registered agent can claim any fact, `sandbox=vm` isolation included. Bounded: facts never override pool selection by class and labels, the lease token still binds one consumer, and a lie costs queueing, misplacement or refusal and the agent its taint and deny-file path; a consumer needing isolation leases from a pool whose operator it trusts (Trust, capabilities.md).
@@ -49,3 +49,15 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   signed by another key is not installable by it, and widening the trust (a second signer, or one shared signer) widens who can put code
   on every host. Not solved by this design: it is a security decision for the owner before any option that ships jobscheduler packages
   through the helper (D45). Until then the agent ships only inside the kbf package.
+- **K37. A host job burns a registered host.** A whole-node lease that allows host jobs taints its host at the grant (D51); a registered
+  host stays tainted until an operator reimages it, so a dedicated GPU or performance pool of few machines loses capacity for each such
+  lease. Mitigated by host jobs off by default and needing four consents, by GPU and performance runs being `contained`, and by an elastic
+  machine being replaced. Not mitigated: a pool that allows host jobs on its only machines.
+- **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work until it is quiet, up to its
+  `drain_deadline`, and a consumer that ignores `host_reserved` keeps its lease to its TTL or max wall time (D48). Bounded by `max_draining`,
+  the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the give-up and back-off, and by acquiring a machine in an
+  elastic pool before draining (D50). Residual: a pool of long leases pays most of a max wall time of idle per whole-node lease.
+- **K39. Quiet is the agent's claim.** The readiness report is the agent's own (K17, K27): a wrong or hostile agent can say it is quiet while
+  something runs, and a performance result taken beside it is wrong. The scheduler's own table (no lease, no placed run) and the
+  withheld token cover the work it knows of; a lie costs the agent its taint and deny-file path, and a consumer needing a trustworthy
+  measurement leases from a pool whose operator it trusts (whole-node.md).
