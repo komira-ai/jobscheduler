@@ -46,6 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read};
 use std::num::NonZeroUsize;
 use std::os::unix::fs::MetadataExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
@@ -53,7 +54,7 @@ use std::thread;
 use std::time::Duration;
 
 use js_agent_wire::{GpuDevice, Hello, Phase, ProtocolRange, WireShape};
-use rustix::process::{Pid, Signal, kill_process};
+use rustix::process::{Pid, Signal, kill_process, kill_process_group};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -110,17 +111,38 @@ const COLLECT_WAIT: Duration = Duration::from_secs(5);
 /// The machine's own commands: the one place `std::process` runs. A helper is waited for
 /// at most `limit` for its output and `limit` again for its exit, and at most `cap` bytes
 /// of its output are accepted; a helper that breaks either bound is killed by its pid and
-/// collected, and the call fails (see the module documentation).
+/// collected, and the call fails (see the module documentation). A runner made by
+/// [`SystemCommands::grouped`] starts each program as the leader of a process group of its
+/// own and kills the whole group, so a program that left a process behind holding its
+/// output does not leak it.
 #[derive(Debug, Clone, Copy)]
 pub struct SystemCommands {
     limit: Duration,
     cap: usize,
+    group: bool,
 }
 
 impl SystemCommands {
     /// A runner with its own bounds, for a test that must not wait [`PROBE_LIMIT`].
     pub const fn bounded(limit: Duration, cap: usize) -> Self {
-        Self { limit, cap }
+        Self {
+            limit,
+            cap,
+            group: false,
+        }
+    }
+
+    /// Like [`SystemCommands::bounded`], but each program leads a process group of its own
+    /// and an overrun kills the group (SIGKILL), not only the program. The readiness hook
+    /// runs this way: it is an operator's script that may start helpers, and a helper that
+    /// holds the output open would otherwise outlive the call. A helper that makes a
+    /// session or group of its own is out of reach.
+    pub const fn grouped(limit: Duration, cap: usize) -> Self {
+        Self {
+            limit,
+            cap,
+            group: true,
+        }
     }
 
     /// Waits for what `child` prints and for its exit, killing it when it overruns.
@@ -132,8 +154,9 @@ impl SystemCommands {
         // This thread owns the child from here on and always collects it, so the caller
         // never blocks on a process that does not die.
         thread::spawn(move || watch(child, reader, cap, &printed, &exited));
+        let group = self.group;
         let give_up = |ran: Ran| {
-            kill(pid);
+            kill(pid, group);
             let _ = exit.recv_timeout(COLLECT_WAIT);
             ran
         };
@@ -166,6 +189,9 @@ impl SystemCommands {
                     .stdin(Stdio::null())
                     .stdout(writer)
                     .stderr(Stdio::null());
+                if self.group {
+                    command.process_group(0);
+                }
                 if let Some(env) = env {
                     command.env_clear().envs(env.iter().copied());
                 }
@@ -270,11 +296,16 @@ fn watch(
     let _ = exited.send(status);
 }
 
-/// Sends SIGKILL to the process `pid`. A process that is already gone is not an error.
-fn kill(pid: u32) {
+/// Sends SIGKILL to the process `pid`, or to the process group it leads when `group`. A
+/// process that is already gone is not an error.
+fn kill(pid: u32, group: bool) {
     let pid = i32::try_from(pid).ok().and_then(Pid::from_raw);
     pid.into_iter().for_each(|pid| {
-        let _ = kill_process(pid, Signal::KILL);
+        let _ = if group {
+            kill_process_group(pid, Signal::KILL)
+        } else {
+            kill_process(pid, Signal::KILL)
+        };
     });
 }
 

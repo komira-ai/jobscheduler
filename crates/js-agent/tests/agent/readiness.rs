@@ -298,3 +298,54 @@ fn the_real_runner_starts_the_hook_as_documented() {
     };
     assert_eq!(code, RefusalReason::Unsupported);
 }
+
+/// Whether the process `pid` is gone: no such process, or only a zombie nobody has
+/// collected yet (its parent was the hook's shell, which has exited).
+fn is_gone(pid: i32) -> bool {
+    let alive = rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
+    let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+    });
+    !alive || zombie
+}
+
+/// Asserts that a hook which starts a long-running helper holding its standard output and
+/// then exits is refused as `not-quiet` when its output never ends, and that the helper
+/// does not outlive the call: the runner kills the hook's whole process group, not only the
+/// hook. It catches a runner that kills the direct child alone and leaks the helper (and
+/// the thread waiting for the output).
+#[test]
+fn an_overrun_kills_the_helper_the_hook_left_holding_its_output() {
+    let dir = Scratch::new("readiness-group");
+    let pid_file = dir.path("helper.pid");
+    let script = format!(
+        "#!/bin/sh\nsleep 1000000 &\necho $! > {}\nexit 0\n",
+        pid_file.display()
+    );
+    let path = dir.write("hook", &script, 0o755);
+    let hook = ReadinessHook::new(path.to_str().unwrap(), &[]).unwrap();
+    let verdict = hook.run(&hook_runner(Duration::from_millis(500)));
+    assert_eq!(
+        verdict,
+        refused(
+            RefusalReason::NotQuiet,
+            "the readiness hook did not finish before prepare_timeout"
+        )
+    );
+    let pid: i32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // The kernel and the helper's new parent reap it; wait a bounded number of polls.
+    let gone = (0..200).any(|_| {
+        let gone = is_gone(pid);
+        if !gone {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        gone
+    });
+    assert!(gone, "the helper {pid} is still running");
+}

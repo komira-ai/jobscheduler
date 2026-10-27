@@ -15,8 +15,10 @@
 //! variable carries anything of the scheduler's (no lease id, no token, no session
 //! secret). It is bounded by the `prepare_timeout` the agent counts from the grant
 //! ([`hook_runner`]): at most that long for its output to end and at most that long again
-//! for its exit, so twice `prepare_timeout` in the worst case. It is killed and collected
-//! when it overruns.
+//! for its exit, so twice `prepare_timeout` in the worst case. It leads a process group of
+//! its own; when it overruns, the whole group is killed (SIGKILL) and the hook collected,
+//! so a helper it started and left holding its output does not leak. A helper that makes
+//! a session or process group of its own is out of reach.
 //!
 //! # The answer
 //!
@@ -34,7 +36,10 @@
 //!
 //! The detail of a refusal is the first line of the hook's standard output, cut to
 //! [`limits::MAX_REFUSAL_DETAIL`] bytes at a character boundary; a hook that printed no
-//! line gets a fixed text. The agent reads nothing else from the output. The hook runs
+//! line gets a fixed text. The agent reads nothing else from the output.
+//!
+//! That line goes to the scheduler verbatim (cut to the byte bound), so a hook must not
+//! print a secret, a token or anything else that must not leave the host. The hook runs
 //! only for a host the agent's own checks found quiet and clean ([`Hooked`]), once per
 //! `exclusive` grant.
 
@@ -75,9 +80,11 @@ impl HookRunner for SystemCommands {
 }
 
 /// The runner a hook runs under: it waits at most `prepare_timeout` for the output and as
-/// long again for the exit, and accepts [`PROBE_OUTPUT_CAP`] bytes of output.
+/// long again for the exit, and accepts [`PROBE_OUTPUT_CAP`] bytes of output. The hook
+/// leads a process group of its own, and an overrun kills the group, so a helper it left
+/// running with the output open does not outlive the call.
 pub const fn hook_runner(prepare_timeout: Duration) -> SystemCommands {
-    SystemCommands::bounded(prepare_timeout, PROBE_OUTPUT_CAP)
+    SystemCommands::grouped(prepare_timeout, PROBE_OUTPUT_CAP)
 }
 
 /// What the hook said about the host.

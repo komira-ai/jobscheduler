@@ -158,7 +158,9 @@ pub struct Cli {
     /// whole-node lease, after its own checks: exit 0 reports the host ready, other exit
     /// statuses refuse the lease with a typed reason (75 `noise-over-bound`, 76
     /// `not-quiet`, 77 `setup-failed`, 78 `unsupported`; any other `setup-failed`), and
-    /// the first line it prints is the refusal's detail. It gets an environment of its
+    /// the first line it prints is the refusal's detail, sent to the scheduler verbatim (cut
+    /// to a byte bound), so it must not print secrets. It runs in a process group of its own,
+    /// which is killed when the hook overruns. It gets an environment of its
     /// own and nothing of the scheduler's, and `prepare_timeout` for its output to end and
     /// as long again for its exit (twice that in the worst case).
     #[arg(long, value_name = "PATH")]
