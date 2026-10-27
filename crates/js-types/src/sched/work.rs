@@ -91,6 +91,10 @@ impl WorkKey {
 /// way: a node's `vms` is how many VMs may run on it at once. A node's `vms` is
 /// filled from its `vm.slots` report (at most two), and a VM lease (`kbf-lease=vm`) books
 /// one of them together with its CPUs and memory.
+///
+/// Not the crate root's [`crate::Resources`]: that one names its dimensions, this one
+/// has fixed axes. They stay apart until the scheduler moves into this repository, when
+/// a later change makes them one type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Resources {
     /// CPU in thousandths of a core (1000 = one core).

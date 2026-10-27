@@ -8,6 +8,10 @@ use std::fmt;
 /// grants within that term. Leases order by `(term, seq)`: every lease granted by a
 /// later leader is newer than every lease granted by an earlier one, whatever their
 /// `seq`. A worker uses this order to tell a stale grant from a current one.
+///
+/// Not the crate root's [`crate::LeaseId`]: the two have different fields and print
+/// differently (`1.9` here, `1-9` there). They stay apart until the scheduler moves into
+/// this repository, when a later change makes them one type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LeaseId {
     // Field order is the ordering: the derives compare `term` first, then `seq`.
