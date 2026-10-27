@@ -58,10 +58,19 @@
 //! expires_at_ms = 1060000
 //! ends_at_ms = 4600000      # acquired_at plus the request's maximum wall time
 //! validation_run = "val-7"  # optional
+//! whole = true              # optional: a whole-node class; absent means not whole
+//! ttl_ms = 60000            # a pending whole lease only: the granted ttl ...
+//! wall_ms = 3600000         # ... and maximum wall time, both counted from ready
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
 //! ```
+//!
+//! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
+//! expiry is the settings' prepare timeout, not its ttl, and when the provider is first
+//! seen to have it ready (a start answered `Started`, or an observation of `Present`)
+//! its expiry becomes that moment plus the ttl and its end that moment plus the maximum
+//! wall time. A file without these fields loads as not whole.
 //!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.

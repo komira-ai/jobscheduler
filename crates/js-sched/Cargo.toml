@@ -1,0 +1,19 @@
+[package]
+name = "js-sched"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+js-caps = { path = "../js-caps" }
+js-sizing = { path = "../js-sizing" }
+js-types = { path = "../js-types" }
+
+[dev-dependencies]
+js-sim = { path = "../js-sim" }
+
+[lints]
+workspace = true

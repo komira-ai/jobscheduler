@@ -6,7 +6,9 @@ use js_lease::RenewError;
 use js_provider::Call;
 use js_types::LeaseId;
 
-use crate::support::{T0, at, fresh, request, secs};
+use crate::support::{
+    Scratch, T0, at, clock, fake_with_plain, fresh, open, plain_request, request, secs,
+};
 
 /// Asserts that a lease lapses only when the clock passes its expiry and a tick runs:
 /// before the tick a renew is refused as expired, the tick stops it on the provider and
@@ -55,12 +57,16 @@ fn renew_is_capped_at_the_max_wall_time() {
 }
 
 /// Asserts that a pending lease whose expiry passes before it resolves is stopped on
-/// the provider, so a start that landed late does not leave a booking behind.
+/// the provider, so a start that landed late does not leave a booking behind. The class
+/// is not whole-node, so the ttl bounds the wait (a whole-node lease waits for the
+/// prepare timeout instead; see the whole module).
 #[test]
 fn pending_lease_past_expiry_is_stopped() {
-    let (mut table, clock, _scratch) = fresh("pending_expiry");
+    let scratch = Scratch::new("pending_expiry");
+    let clock = clock();
+    let mut table = open(fake_with_plain(), &clock, &scratch);
     table.provider_mut().script_unknown(Call::Start, true);
-    table.acquire(request(3600), None).unwrap_err();
+    table.acquire(plain_request(3600), None).unwrap_err();
     assert_eq!(table.provider().booked().len(), 1);
     clock.advance(secs(60));
     let report = table.tick();

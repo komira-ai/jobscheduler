@@ -83,7 +83,7 @@ fn the_file_has_the_documented_shape() {
     let text = fs::read_to_string(scratch.file()).unwrap();
     let expected = "version = 1\nterm = 1\nnext_sequence = 2\nlease_count = 1\n\n[[lease]]\nterm = 1\n\
         sequence = 1\nstate = \"held\"\nhost = \"h1\"\nacquired_at_ms = 1000000\n\
-        expires_at_ms = 1060000\nends_at_ms = 4600000\nvalidation_run = \"val-7\"\n\n\
+        expires_at_ms = 1060000\nends_at_ms = 4600000\nvalidation_run = \"val-7\"\nwhole = true\n\n\
         [lease.labels]\nteam = \"infra\"\n";
     assert_eq!(text, expected);
     assert!(!scratch.dir.join("leases.toml.tmp").exists());
