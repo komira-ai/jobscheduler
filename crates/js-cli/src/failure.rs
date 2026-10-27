@@ -1,5 +1,7 @@
 //! What ends a command without success, and the exit status each kind has.
 
+use js_client::ClientError;
+
 use crate::events::ForwardedSignal;
 
 /// The exit statuses of `js`.
@@ -80,6 +82,15 @@ pub(crate) enum Failure {
     /// A signal ended `lease run` while it waited for the lease; nothing was started.
     #[error("interrupted by {} before the lease was held; asked the server to release it", .0.name())]
     Interrupted(ForwardedSignal),
+}
+
+impl From<ClientError> for Failure {
+    fn from(err: ClientError) -> Self {
+        match err {
+            ClientError::Flag { flag, why } => Self::flag(flag, why),
+            ClientError::Server(why) => Self::Server(why),
+        }
+    }
 }
 
 impl Failure {

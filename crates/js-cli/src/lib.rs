@@ -125,7 +125,6 @@
 
 mod api;
 mod cli;
-mod client;
 mod command;
 mod events;
 mod failure;
@@ -133,10 +132,8 @@ mod leases;
 mod render;
 mod renewals;
 mod run;
-mod server_url;
 mod signals;
 mod tag;
-mod token;
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -145,8 +142,8 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use cli::{Action, Cli, Command};
-use client::{Client, REQUEST_LIMIT};
 use failure::Failure;
+use js_client::{Client, REQUEST_LIMIT};
 use render::Render;
 
 pub use events::{

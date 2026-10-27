@@ -9,7 +9,7 @@ use std::path::Path;
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 
-use crate::failure::Failure;
+use crate::error::ClientError;
 
 /// The most a token file may hold; a token is a short line.
 const MAX_TOKEN_FILE: u64 = 4096;
@@ -25,8 +25,14 @@ struct Probe {
 /// The `Authorization` header value for the token in `path`. The file must be a regular
 /// file owned by the user running `js` that nobody else can read or write (mode 0600 or
 /// 0400), and hold one token of printable ASCII (trailing whitespace is dropped).
-pub(crate) fn bearer(path: &Path) -> Result<String, Failure> {
-    let refuse = |why: String| Failure::flag("--token-file", format!("{} {why}", path.display()));
+///
+/// # Errors
+///
+/// [`ClientError::Flag`] naming `--token-file` when the file cannot be read, is not
+/// owner-only, or does not hold a token.
+pub fn bearer(path: &Path) -> Result<String, ClientError> {
+    let refuse =
+        |why: String| ClientError::flag("--token-file", format!("{} {why}", path.display()));
     let probe = probe(path).map_err(|err| refuse(format!("cannot be read: {err}")))?;
     if !trusted(&probe, geteuid().as_raw()) {
         return Err(refuse(format!(

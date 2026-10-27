@@ -12,13 +12,12 @@ name = "js"
 path = "src/main.rs"
 
 [dependencies]
+js-client = { path = "../js-client" }
 clap.workspace = true
-rustix = { workspace = true, features = ["fs", "process", "rand"] }
-rustls.workspace = true
+rustix = { workspace = true, features = ["process", "rand"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "signal"] }
-ureq.workspace = true
 
 [dev-dependencies]
 js-lease = { path = "../js-lease" }

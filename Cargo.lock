@@ -571,6 +571,7 @@ name = "js-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "js-client",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
@@ -579,10 +580,20 @@ dependencies = [
  "js-types",
  "rcgen",
  "rustix",
- "rustls",
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "js-client"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustix",
+ "rustls",
+ "serde_json",
+ "thiserror",
  "ureq",
 ]
 
