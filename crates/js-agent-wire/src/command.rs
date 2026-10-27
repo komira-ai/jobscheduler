@@ -271,7 +271,13 @@ pub enum Command {
         /// The run to stop.
         run_id: String,
     },
-    /// Stop one run the server no longer holds a lease for, and do not report it.
+    /// Stop one run the server holds no live record of, and do not report it.
+    ///
+    /// The server sends it for every run the agent lists that the server has no live
+    /// record of. That is a run of a lease that has ended, and also a run whose record the
+    /// server lost (a server restart forgets its runs, and the lease can still hold the
+    /// host). In both cases the work is lost: the agent kills the run and sends no result,
+    /// so nothing tells the server or the lease holder what became of it.
     Cancel {
         /// The run to cancel.
         run_id: String,

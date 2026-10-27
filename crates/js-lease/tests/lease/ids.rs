@@ -56,6 +56,20 @@ fn the_last_sequence_is_issued_and_the_next_is_refused() {
     }
 }
 
+/// Asserts that the table reports the term it issues ids in: 1 on the first boot of a
+/// file and one more on every boot after, the number a caller puts into ids of its own so
+/// that none repeats after a restart.
+#[test]
+fn the_table_reports_the_term_of_its_boot() {
+    let scratch = Scratch::new("term_reported");
+    let first = open_with(fake(), &scratch);
+    assert_eq!(first.term(), 1);
+    drop(first);
+    let boot = Boot::Resume;
+    let second = LeaseTable::open(fake(), clock(), settings(), scratch.file(), boot).unwrap();
+    assert_eq!(second.term(), 2);
+}
+
 /// Asserts the term limit: a file whose term is the largest it can hold cannot be opened
 /// for another boot, because the next term could not be written, and the file is not
 /// touched; one term below it opens and takes the limit.

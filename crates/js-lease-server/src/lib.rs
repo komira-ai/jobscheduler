@@ -56,7 +56,10 @@
 //! client acquired it. A lease has no owner the server checks. Share the token only with
 //! parties that trust each other with every host of the pool. Per-tenant leases (each
 //! tenant with a token of its own that sees and changes only its own leases; the design
-//! document lists the shared token as a risk) are a follow-up and not built here.
+//! document lists the shared token as a risk) are a follow-up and not built here. The run
+//! routes extend that model to code execution: isolation between tenants is lease-id
+//! secrecy under the one shared client token, and lease ids are sequential, so whoever
+//! holds the token can queue work on, read and stop the runs of any lease.
 //!
 //! | request | answers |
 //! |---|---|
@@ -64,7 +67,7 @@
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms}`; 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
-//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase` and `agent_version` are those of a registered host |
+//! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -113,7 +116,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
-//! | `POST /v1/agent/heartbeat` | 200 `{commands: [], result_acks: [], taint_ack: false}`; 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
+//! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
 //!
 //! A leasing client asks for a lease as ever and is given a static host first, a
 //! registered one when the static pool has none; it cannot tell which it got except by
@@ -150,9 +153,81 @@
 //! as trusted as the holders of its join tokens: a lease is a whole machine that the
 //! pool's holders run.
 //!
-//! **Not built.** Commands to hosts (a heartbeat is answered with none), results and
-//! taint reports in heartbeats (read and ignored), the agent itself, several pools,
-//! a deny list of host ids.
+//! **Taint.** The first taint a heartbeat reports is kept for the host (`taint` in
+//! `GET /v1/hosts`) and acknowledged with `taint_ack: true`, but only once it is in the
+//! state file, so an agent that stops reporting it has not left the server able to lose it
+//! in a restart; when the file cannot be written the host is tainted at once and the reply
+//! says `taint_ack: false`, so the agent reports again. A start the agent refuses with the
+//! detail `host-tainted` taints the host the same way, since an agent that cannot write
+//! its own marker (a full disk) may never report. A tainted host is sent no start, takes
+//! no new run (409 `host-tainted`), takes no new lease (a request only it could serve is
+//! `no-capacity`; a lease already on it is untouched until it ends), still counts toward
+//! `max_machines`, is never forgotten for being silent, and keeps its
+//! taint across its own hello and a server restart (the `.agents` file holds it, see
+//! "Restart"). The runs it already holds finish: their stops are sent, their results are
+//! acknowledged, and the budget returns when the host stops listing them. Nothing clears a
+//! taint: an operator stops the server and removes the `taint_` keys of the host's entry
+//! in the `.agents` file.
+//!
+//! **Not built.** Clearing a taint, the agent's side of the runs below, several pools, a
+//! deny list of host ids.
+//!
+//! # Runs
+//!
+//! With agents on, a client that holds a lease on a registered host can queue container
+//! runs on it. This API is interim: it is removed when the run service replaces it.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
+//! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
+//! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
+//!
+//! - **Delivery.** A run is carried to the host on its next heartbeat reply as a start, and
+//!   again on every reply until the host lists the run in its heartbeat. A stop is a
+//!   retained intent sent on every reply until the host no longer lists the run. A run the
+//!   host lists that the server holds no live record of is answered with a cancel and
+//!   never adopted. At most 1024 commands go in a reply, stops first, then cancels, then
+//!   starts.
+//! - **Results** ride in the heartbeat and each gets an acknowledgement: `ACCEPTED`,
+//!   `DUPLICATE`, `STALE` (the lease has moved on, or the server has no record of the
+//!   run: a result of a run the server forgot at a restart is likewise `STALE` and is
+//!   dropped), `UNKNOWN_LEASE`, or `MISMATCH` (a run of another host, or named under
+//!   another lease). An accepted result is shown by `GET`. At most 256 finished runs
+//!   are kept per host (`MAX_FINISHED_RUNS`): beyond that the oldest finished run, and
+//!   with it its result, is evicted and reads `unknown-run`.
+//! - **Bounds.** The sum of the limits of a host's live runs fits the shape the lease
+//!   booked, and at most 256 runs are live at once; a run that does not fit is refused
+//!   `no-capacity`, not queued. A run is bounded by the lease: the server keeps the instant
+//!   the lease ended when the run was queued, and every start is made from the time left
+//!   at the moment it is sent. Its wall limit is the one asked for (that, when none is
+//!   asked), cut to the time left then, so the wall cap is recomputed on every send, and
+//!   the agent may start it for no longer than that either. A renewal does not stretch a
+//!   run already queued, so a client that renews cannot run a job past the lease time it
+//!   queued it under. Once that time is up no start is sent: a run the host has not listed
+//!   gets a stop (the agent then retires its id) and, when the host still does not list it,
+//!   reads `never-started` and gives its budget back, whether or not the lease lives on.
+//!   Host isolation is refused until the scheduler records the taint such a job leaves.
+//! - **Reuse.** A run's limits return to the lease only when the host no longer lists the
+//!   run, which it does after cleanup. When a lease ends (a release or its expiry) with
+//!   live runs, the booking is free at once but the host takes no new lease, and shows
+//!   `releasing` in `GET /v1/hosts`, until a heartbeat lists none; each live run is sent a
+//!   stop meanwhile.
+//! - **Run ids** are minted by the server from the lease table's term and a counter, so
+//!   one is never reused, a restart included.
+//! - **Restart.** Runs are in memory only. A restart forgets them; a host that lists one
+//!   in its hello or heartbeat is told to cancel it, and takes no new lease until it
+//!   lists none. A held run with no server record is cancelled even when its lease still
+//!   holds the host, and the agent kills a cancelled run without a result: its work is
+//!   lost and nothing tells the lease holder, except that `GET` and `DELETE` of its run id
+//!   (minted in an earlier boot, see the term in the id) answer 410 `run-forgotten`,
+//!   where an id the lease never had is 404 `unknown-run`. Persisting runs is later work,
+//!   as are queueing and placement.
+//! - **A host that was lost** before it listed a queued run never starts it: the run
+//!   reads `never-started` once the host is heard again.
+//!
+//! A host out of the serving phase is sent no start, and takes no new run (`no-capacity`).
 //!
 //! # Limits
 //!
@@ -208,7 +283,9 @@
 //! admitted with. The server keeps the bindings in a file of its own beside the lease
 //! file, `<state file>.agents` (TOML, mode 0600, replaced whole, keys it does not know
 //! ignored), written when a hello admits a host and again at a tick when it differs, and
-//! reads it at start. It holds SHA-256 digests of join tokens, not tokens. The file is
+//! reads it at start. It holds SHA-256 digests of join tokens, not tokens, and the taint of
+//! each host that reported one: such a host is put back at start as an awaiting host (and
+//! counts toward `max_machines`) whether or not it holds a lease. The file is
 //! not part of the lease file, so the lease file's format and the static-only start are
 //! unchanged. A file that is present and unreadable, or not private, is a refused start
 //! naming `--state-file`. A missing file means no bindings: a lease on a registered host
@@ -243,6 +320,7 @@ mod io_timeout;
 mod layered;
 mod listener;
 mod rate;
+mod run_api;
 mod server;
 mod ticker;
 mod tls;

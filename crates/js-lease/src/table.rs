@@ -153,6 +153,13 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         self.book.list()
     }
 
+    /// The term of this boot: the first boot of a file takes 1 and every later boot the
+    /// next. A caller that mints its own ids puts the term in them, so an id of an earlier
+    /// boot is never issued again even though the caller keeps nothing across a restart.
+    pub fn term(&self) -> u64 {
+        self.book.term()
+    }
+
     /// The provider, for reads such as its capacity.
     pub fn provider(&self) -> &P {
         &self.provider

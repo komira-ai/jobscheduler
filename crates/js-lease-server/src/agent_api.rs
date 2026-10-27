@@ -125,13 +125,26 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    agents
+    // The reply carries the starts, stops and cancels for this host and the verdict on
+    // each result, and acknowledges a taint report. The agent stops reporting once it is
+    // acknowledged, so the report must be in the state file first: when it cannot be
+    // written the reply does not acknowledge it, and the agent reports again.
+    let mut reply = agents
         .registry
         .heartbeat(&heartbeat, &who)
         .map_err(|refusal| Refused::of(&refusal))?;
-    // No commands are sent yet, and the results and taint a heartbeat may carry are not
-    // acknowledged: nothing starts a run on a registered host.
-    Ok(Json(HeartbeatReply::default()))
+    // A start refused as host-tainted taints the host too, with nothing to acknowledge
+    // there: the file is made current and a failure is retried by the next tick.
+    let refused = heartbeat
+        .results
+        .iter()
+        .any(|result| result.detail.as_deref() == Some(refusal::HOST_TAINTED));
+    if reply.taint_ack {
+        reply.taint_ack = agents.save_bindings().await;
+    } else if refused {
+        agents.save_bindings().await;
+    }
+    Ok(Json(reply))
 }
 
 /// The body of a request, or the refusal for a body that is over the cap (413) or could
