@@ -236,6 +236,8 @@ impl Agent {
             held: self.life.held(),
             results: self.life.results(),
             taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.life.apply(&reply);
