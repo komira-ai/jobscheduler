@@ -184,6 +184,12 @@ fn args_are_bounded() {
     assert_eq!(spec.validate(), Ok(()));
 }
 
+fn distinct_mounts(count: usize) -> Vec<Mount> {
+    (0..count)
+        .map(|i| mount("cache", &format!("m{i}")))
+        .collect()
+}
+
 fn mount(root: &str, rel: &str) -> Mount {
     Mount {
         root_name: root.into(),
@@ -215,15 +221,24 @@ fn mounts_stay_under_a_named_root() {
         Rule::TooLong,
         refusal::INVALID_MOUNT,
     );
-    for rel in ["/etc", "../x", "a/../../b", "..", "a/.."] {
+    for rel in ["/etc", "/", "../x", "a/../../b", "..", "a/..", "a/../b"] {
         let err = mount("cache", rel).validate().unwrap_err();
         expect(err, "mounts.rel", Rule::Escapes, refusal::INVALID_MOUNT);
     }
-    for rel in [".", "./", "./."] {
+    for rel in [".", "./", "./.", "./a/b", "a/./b", "a//b", "a/", "a/."] {
         let err = mount("cache", rel).validate().unwrap_err();
         expect(err, "mounts.rel", Rule::Empty, refusal::INVALID_MOUNT);
     }
-    for rel in ["a:b", "a,b", "x:/host:rw", "a\nb", "a\tb", "a\u{7f}"] {
+    for rel in [
+        "a:b",
+        "a,b",
+        "x:/host:rw",
+        "a\nb",
+        "a\tb",
+        "a\u{7f}",
+        "a\\b",
+        "\\",
+    ] {
         let err = mount("cache", rel).validate().unwrap_err();
         expect(err, "mounts.rel", Rule::BadChars, refusal::INVALID_MOUNT);
     }
@@ -235,15 +250,24 @@ fn mounts_stay_under_a_named_root() {
         .validate()
         .unwrap_err();
     expect(err, "mounts.rel", Rule::TooLong, refusal::INVALID_MOUNT);
-    for rel in ["a", "./a/b", "a..b", "..a", &long(MAX_REL_LEN)] {
+    for rel in [
+        "a",
+        "a/b",
+        "a.b/c",
+        "a..b",
+        "..a",
+        "a.",
+        ".a/b",
+        &long(MAX_REL_LEN),
+    ] {
         assert_eq!(mount("cache", rel).validate(), Ok(()), "{rel:?}");
     }
     let err = check(|j| j.mounts.push(mount("cache", "../x")));
     expect(err, "mounts.rel", Rule::Escapes, refusal::INVALID_MOUNT);
-    let err = check(|j| j.mounts = vec![mount("cache", "x"); MAX_MOUNTS + 1]);
+    let err = check(|j| j.mounts = distinct_mounts(MAX_MOUNTS + 1));
     expect(err, "mounts", Rule::TooMany, refusal::INVALID_MOUNT);
     let mut spec = job();
-    spec.mounts = vec![mount("cache", "x"); MAX_MOUNTS];
+    spec.mounts = distinct_mounts(MAX_MOUNTS);
     assert_eq!(spec.validate(), Ok(()));
 }
 

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_types::{LabelError, Labels};
+use js_types::{Labels, RESERVED_PREFIX};
 
 use crate::error::{Rule, ValidationError};
 use crate::limits;
@@ -38,15 +38,9 @@ impl At {
 pub(crate) fn ident_byte(byte: u8) -> bool {
     matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
 }
-
-/// An OCI reference: ident plus `:`, `/`, `@` and `+`.
-pub(crate) fn image_byte(byte: u8) -> bool {
-    matches!(byte, b':' | b'/' | b'@' | b'+') || ident_byte(byte)
-}
-
-/// A label key: lower case, so the reserved prefix cannot be spelled around.
-pub(crate) fn label_key_byte(byte: u8) -> bool {
-    matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' | b'/')
+/// `[a-z0-9]`.
+pub(crate) fn lower_alnum(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'0'..=b'9')
 }
 
 /// A non-empty token of at most `max` bytes, every byte in `allowed`, the first an ASCII
@@ -81,8 +75,7 @@ pub(crate) fn opt_ident(at: At, value: Option<&String>) -> Result<(), Validation
     value.map_or(Ok(()), |text| ident(at, text))
 }
 
-/// Non-empty text of at most `max` bytes with no control or
-/// format character.
+/// Non-empty text of at most `max` bytes with no control or format character.
 pub(crate) fn text(at: At, value: &str, max: usize) -> Result<(), ValidationError> {
     if value.is_empty() {
         return Err(at.fail(Rule::Empty));
@@ -90,30 +83,46 @@ pub(crate) fn text(at: At, value: &str, max: usize) -> Result<(), ValidationErro
     if value.len() > max {
         return Err(at.fail(Rule::TooLong));
     }
-    if value.chars().any(|c| c.is_control() || is_format(c)) {
+    if value.chars().any(hidden) {
         return Err(at.fail(Rule::BadChars));
     }
     Ok(())
 }
 
-/// Unicode format and separator characters (general category Cf, plus U+2028 and
-/// U+2029): none draws a glyph, but each can reorder or hide the text around it.
-const FORMAT_RANGES: [(u32, u32); 13] = [
+/// A character that must not appear in text a person or a log may read: a control
+/// character, a format character or a line or paragraph separator.
+pub(crate) fn hidden(c: char) -> bool {
+    c.is_control() || is_format(c)
+}
+
+/// The Unicode format characters (general category Cf) of Unicode 16.0, as listed by
+/// UCD 16.0.0 (the data `regex-syntax` 0.8.11 and `unicode-general-category` 1.1.0 are
+/// generated from), and U+2028 and U+2029 (categories Zl and Zp). None draws a glyph,
+/// but each can reorder or hide the text around it. The tests name a code point at both
+/// ends of every range and one just outside each.
+const FORMAT_RANGES: [(u32, u32); 21] = [
     (0x00AD, 0x00AD),
     (0x0600, 0x0605),
     (0x061C, 0x061C),
     (0x06DD, 0x06DD),
     (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
     (0x180E, 0x180E),
     (0x200B, 0x200F),
     (0x2028, 0x202E),
-    (0x2060, 0x206F),
+    (0x2060, 0x2064),
+    (0x2066, 0x206F),
     (0xFEFF, 0xFEFF),
     (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
     (0xE0001, 0xE0001),
     (0xE0020, 0xE007F),
 ];
-
 fn is_format(c: char) -> bool {
     let code = u32::from(c);
     FORMAT_RANGES
@@ -156,19 +165,57 @@ pub(crate) fn distinct<T: Ord>(
     Ok(())
 }
 
-/// A set of labels: at most [`limits::MAX_LABELS`], keys of [`label_key_byte`] bounded in
-/// length, then `js-types`' own rules for the reserved prefix and the values. A reserved
-/// key reports [`refusal::RESERVED_LABEL`]; any other fault reports the code of `at`.
+/// A label key: `name` or `prefix/name`, with at most one `/`. The prefix is a DNS name
+/// (dot-separated labels of lower-case letters, digits and `-`, each starting and ending
+/// with a letter or digit) and the name starts with a lower-case letter or digit, then
+/// holds `[a-z0-9._-]`. A key under the reserved prefix (or the prefix alone) reports
+/// [`refusal::RESERVED_LABEL`]; any other fault reports the code of `at`.
+fn label_key(at: At, key: &str) -> Result<(), ValidationError> {
+    let reserved = key.starts_with(RESERVED_PREFIX) || key == RESERVED_PREFIX.trim_end_matches('/');
+    if reserved {
+        return Err(ValidationError::new(
+            at.field,
+            Rule::Reserved,
+            refusal::RESERVED_LABEL,
+        ));
+    }
+    if key.len() > limits::MAX_LABEL_KEY_LEN {
+        return Err(at.fail(Rule::TooLong));
+    }
+    let (prefix, name) = key
+        .split_once('/')
+        .map_or((None, key), |(prefix, name)| (Some(prefix), name));
+    token(at, name, limits::MAX_LABEL_KEY_LEN, label_name_byte)?;
+    if !prefix.is_none_or(is_dns_name) {
+        return Err(at.fail(Rule::BadChars));
+    }
+    Ok(())
+}
+
+/// `[a-z0-9._-]`.
+fn label_name_byte(byte: u8) -> bool {
+    matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
+}
+
+/// Dot-separated DNS labels: non-empty, `[a-z0-9-]`, a letter or digit at both ends.
+fn is_dns_name(name: &str) -> bool {
+    name.split('.').all(|part| {
+        let bytes = part.as_bytes();
+        let edge = |byte: Option<&u8>| byte.is_some_and(|b| lower_alnum(*b));
+        let inside = bytes.iter().all(|b| lower_alnum(*b) || *b == b'-');
+        [edge(bytes.first()), edge(bytes.last()), inside]
+            .into_iter()
+            .all(|ok| ok)
+    })
+}
+
+/// A set of labels: at most [`limits::MAX_LABELS`], each key as [`label_key`] says, then
+/// `js-types`' own rules for the values.
 pub(crate) fn labels(at: At, map: &BTreeMap<String, String>) -> Result<(), ValidationError> {
     count(at, map.len(), limits::MAX_LABELS)?;
     for key in map.keys() {
-        token(at, key, limits::MAX_LABEL_KEY_LEN, label_key_byte)?;
+        label_key(at, key)?;
     }
-    Labels::from_caller(map).map_err(|fault| match fault {
-        LabelError::Reserved(_) => {
-            ValidationError::new(at.field, Rule::Reserved, refusal::RESERVED_LABEL)
-        }
-        _ => at.fail(Rule::BadChars),
-    })?;
+    Labels::from_caller(map).map_err(|_| at.fail(Rule::BadChars))?;
     Ok(())
 }

@@ -27,6 +27,15 @@
 //! a field name and a rule alone, and [`ValidationError::code`] is the stable output a
 //! peer matches on (the codes are in [`refusal`]).
 //!
+//! That claim is about [`ValidationError`] only. A serde decode error does echo peer
+//! text (it names the unknown variant or the value it could not read, in full), so a
+//! transport must never forward or log the error of a failed decode; it answers with a
+//! fixed refusal instead. Inside a [`HeartbeatReply`] a command that fails to decode
+//! reads as [`Command::Unknown`] and its error is dropped here.
+//!
+//! A reply is validated command by command ([`ReplyCheck`]): one refused start never
+//! costs a stop or cancel beside it, and the agent acts on every valid command.
+//!
 //! # Protocol version
 //!
 //! See [`protocol`]: a hello states the majors the agent speaks, a welcome names the one
@@ -58,7 +67,12 @@
 //!   first sent (and where the server fills `valid_for_ms`);
 //! - the sum of several jobs' limits against one shape, and checks against pool state
 //!   (the pool's shape, `max_machines`, the tainted set, the credential binding): the
-//!   server's registry.
+//!   server's registry;
+//! - the `Usage` message (what a run measurably used, with the `basis` of the
+//!   measurement) and the per-message extension slot design 5.2 and 10.3 describe: the
+//!   run-delivery change, the first that has a measured run to report and a field a
+//!   major could not add on its own. Neither exists in this crate yet, so nothing here
+//!   reports usage.
 //!
 //! # Layout
 //!
@@ -72,6 +86,7 @@ mod command;
 mod error;
 mod heartbeat;
 mod hello;
+mod image;
 pub mod limits;
 pub mod protocol;
 pub mod refusal;
@@ -79,7 +94,8 @@ pub mod refusal;
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use error::{Rule, ValidationError};
 pub use heartbeat::{
-    Ack, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, ResultAck, RunResult, Taint,
+    Ack, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusedCommand, ReplyCheck,
+    ResultAck, RunResult, Taint,
 };
 pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,

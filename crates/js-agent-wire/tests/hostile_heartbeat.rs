@@ -7,8 +7,8 @@ use common::{broken, expect, heartbeat, long, result, welcome};
 use js_agent_wire::limits::*;
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Ack, Command, Heartbeat, HeartbeatReply, HeldRun, HeldState, HelloReply, Outcome,
-    ProtocolRange, Refused, ResultAck, Rule, RunResult, Taint, ValidationError, Welcome,
+    Heartbeat, HeldRun, HeldState, HelloReply, Outcome, ProtocolRange, Refused, Rule, RunResult,
+    Taint, ValidationError, Welcome,
 };
 
 fn check(edit: impl FnOnce(&mut Heartbeat)) -> ValidationError {
@@ -114,7 +114,7 @@ fn heartbeat_results_are_bounded() {
     assert!(bad.validate().is_err());
 }
 
-/// A success with a non-zero exit code, and a failure with exit code zero, are refused;
+/// A success with a non-zero exit code, and a failure or a failed start with exit code zero, are refused;
 /// the consistent pairs and a missing code pass. It catches a result that contradicts
 /// itself and would be recorded as a clean run.
 #[test]
@@ -128,6 +128,7 @@ fn outcome_must_agree_with_exit_code() {
         with(Outcome::Succeeded, Some(1)),
         with(Outcome::Succeeded, Some(-1)),
         with(Outcome::Failed, Some(0)),
+        with(Outcome::FailedToStart, Some(0)),
     ] {
         expect(
             bad.validate().unwrap_err(),
@@ -141,6 +142,8 @@ fn outcome_must_agree_with_exit_code() {
         with(Outcome::Succeeded, None),
         with(Outcome::Failed, Some(2)),
         with(Outcome::Failed, None),
+        with(Outcome::FailedToStart, Some(125)),
+        with(Outcome::FailedToStart, None),
         with(Outcome::Killed, Some(137)),
         with(Outcome::Unknown, Some(0)),
     ] {
@@ -188,80 +191,6 @@ fn taint_is_bounded() {
         Taint {
             reason: String::new(),
             ..bare
-        }
-        .validate()
-        .is_err()
-    );
-}
-
-fn reply_check(edit: impl FnOnce(&mut HeartbeatReply)) -> ValidationError {
-    broken(&reply(), edit, HeartbeatReply::validate)
-}
-
-fn reply() -> HeartbeatReply {
-    HeartbeatReply {
-        commands: vec![
-            Command::Stop {
-                run_id: "r1".into(),
-            },
-            Command::Unknown,
-        ],
-        result_acks: vec![ResultAck {
-            run_id: "r1".into(),
-            ack: Ack::Accepted,
-        }],
-        taint_ack: false,
-    }
-}
-
-/// A reply with more commands or acknowledgements than the cap, a command that is invalid
-/// and an acknowledgement with a bad run id are refused; the caps pass. It catches a
-/// server (or an impostor) sending an agent an unbounded command list.
-#[test]
-fn reply_is_bounded_and_every_entry_validated() {
-    let err = reply_check(|r| r.commands = vec![Command::Unknown; MAX_COMMANDS + 1]);
-    expect(err, "commands", Rule::TooMany, refusal::INVALID_REPLY);
-    let err = reply_check(|r| {
-        r.commands.push(Command::Cancel {
-            run_id: "../x".into(),
-        })
-    });
-    expect(err, "run_id", Rule::BadChars, refusal::INVALID_REPLY);
-    let ack = ResultAck {
-        run_id: "r".into(),
-        ack: Ack::Stale,
-    };
-    let err = reply_check(|r| r.result_acks = vec![ack.clone(); MAX_RESULTS + 1]);
-    expect(err, "result_acks", Rule::TooMany, refusal::INVALID_REPLY);
-    let err = reply_check(|r| r.result_acks[0].run_id = "a b".into());
-    expect(
-        err,
-        "result_acks.run_id",
-        Rule::BadChars,
-        refusal::INVALID_REPLY,
-    );
-    let mut ok = reply();
-    ok.commands = vec![Command::Unknown; MAX_COMMANDS];
-    ok.result_acks = (0..MAX_RESULTS)
-        .map(|i| ResultAck {
-            run_id: format!("r{i}"),
-            ..ack.clone()
-        })
-        .collect();
-    assert_eq!(ok.validate(), Ok(()));
-    assert_eq!(HeartbeatReply::default().validate(), Ok(()));
-    assert_eq!(
-        ResultAck {
-            run_id: "r".into(),
-            ack: Ack::Mismatch
-        }
-        .validate(),
-        Ok(())
-    );
-    assert!(
-        ResultAck {
-            run_id: String::new(),
-            ack: Ack::Mismatch
         }
         .validate()
         .is_err()
@@ -374,27 +303,4 @@ fn refusal_and_hello_reply_are_checked() {
     bad.grace_ms = 0;
     assert!(HelloReply::Welcome(bad).validate().is_err());
     assert!(HelloReply::Refused(refused("", None)).validate().is_err());
-}
-
-/// Two starts in one reply that name the same run id or the same GPU index, and two
-/// acknowledgements for one run, are refused; distinct ones pass. It catches a reply that
-/// starts a run twice or hands one device to two jobs, which the contract forbids.
-#[test]
-fn reply_entries_do_not_overlap() {
-    let start = |run: &str, gpus: &[u32]| {
-        let mut spec = common::job();
-        spec.run_id = run.into();
-        spec.gpu_indices = gpus.to_vec();
-        Command::Start(Box::new(spec))
-    };
-    let err = reply_check(|r| r.commands = vec![start("a", &[0]), start("a", &[1])]);
-    expect(err, "commands", Rule::Duplicate, refusal::INVALID_REPLY);
-    let err = reply_check(|r| r.commands = vec![start("a", &[0, 1]), start("b", &[1])]);
-    expect(err, "commands", Rule::Duplicate, refusal::INVALID_REPLY);
-    let ack = reply().result_acks[0].clone();
-    let err = reply_check(|r| r.result_acks = vec![ack.clone(), ack]);
-    expect(err, "result_acks", Rule::Duplicate, refusal::INVALID_REPLY);
-    let mut ok = reply();
-    ok.commands = vec![start("a", &[0]), start("b", &[1])];
-    assert_eq!(ok.validate(), Ok(()));
 }

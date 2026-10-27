@@ -1,6 +1,8 @@
 //! Keeping a session: [`Heartbeat`] up, [`HeartbeatReply`] down, and the results that
 //! ride in the heartbeat until the server acknowledges them.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
@@ -43,7 +45,7 @@ pub struct HeldRun {
 pub enum Outcome {
     /// The job exited with status zero.
     Succeeded,
-    /// The job exited with a nonzero status.
+    /// The job exited with a nonzero status; an exit status of zero is refused.
     Failed,
     /// The job was stopped or cancelled.
     Killed,
@@ -51,7 +53,7 @@ pub enum Outcome {
     TimedOut,
     /// The job passed its memory limit.
     OutOfMemory,
-    /// No container could be started; no job ran.
+    /// No container could be started; no job ran, so an exit status of zero is refused.
     FailedToStart,
     /// An outcome this version does not know; kept so the rest of the message decodes.
     #[serde(other)]
@@ -189,7 +191,7 @@ impl RunResult {
             (Outcome::Succeeded, Some(code)) if code != 0 => {
                 Err(at.field("results.exit_code").fail(Rule::Inconsistent))
             }
-            (Outcome::Failed, Some(0)) => {
+            (Outcome::Failed | Outcome::FailedToStart, Some(0)) => {
                 Err(at.field("results.exit_code").fail(Rule::Inconsistent))
             }
             _ => Ok(()),
@@ -254,28 +256,68 @@ impl ResultAck {
     }
 }
 
+/// One command of a reply that failed validation, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefusedCommand {
+    /// Where the command sits in [`HeartbeatReply::commands`].
+    pub index: usize,
+    /// The rule it broke; [`ValidationError::code`] is the refusal code for it.
+    pub error: ValidationError,
+}
+
+/// What [`HeartbeatReply::validate`] found, command by command.
+///
+/// **The agent acts on every command in `commands`, and on every `Stop` and `Cancel`
+/// among them even when a `Start` of the same reply is in `refused`.** One bad command
+/// never costs the commands beside it: a stop is retained intent the server resends only
+/// until the run leaves the held list, and a reply with a start the agent cannot accept
+/// (an over-long image, or one cap a newer server has raised) must still stop the run
+/// the stop names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyCheck<'a> {
+    /// The commands that passed, in the order the reply lists them. An unknown command
+    /// passes and is in here; the agent skips it.
+    pub commands: Vec<&'a Command>,
+    /// The commands that did not pass: refused one by one, never acted on.
+    pub refused: Vec<RefusedCommand>,
+    /// Whether the acknowledgements are acceptable (at most [`limits::MAX_RESULTS`], each
+    /// with a good run id, none twice). When this is an error the agent ignores
+    /// `result_acks` and still acts on `commands`.
+    pub acks: Result<(), ValidationError>,
+}
+
 impl HeartbeatReply {
-    /// Checks the reply the way the agent must before it acts on it: at most
-    /// [`limits::MAX_COMMANDS`] commands, each valid (an unknown one passes and is
-    /// skipped), no run id and no GPU index named by two starts, and at most [`limits::MAX_RESULTS`] acknowledgements, each with a good
-    /// run id, none twice.
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    /// Checks the reply the way the agent must before it acts on it.
+    ///
+    /// The reply as a whole is refused (`Err`) only when it lists more than
+    /// [`limits::MAX_COMMANDS`] commands: nothing in it is then read. Otherwise every
+    /// command is checked on its own ([`Command::validate`]) and a start that names a run
+    /// id or a GPU index an earlier accepted start of the reply already names is refused
+    /// too; see [`ReplyCheck`] for what the agent does with the answer.
+    pub fn validate(&self) -> Result<ReplyCheck<'_>, ValidationError> {
         let at = At::new("reply", refusal::INVALID_REPLY);
         check::count(
             at.field("commands"),
             self.commands.len(),
             limits::MAX_COMMANDS,
         )?;
-        for command in &self.commands {
-            command.validate()?;
+        let mut taken = Taken::default();
+        let mut commands = Vec::new();
+        let mut refused = Vec::new();
+        for (index, command) in self.commands.iter().enumerate() {
+            match taken.admit(at.field("commands"), command) {
+                Ok(()) => commands.push(command),
+                Err(error) => refused.push(RefusedCommand { index, error }),
+            }
         }
-        let starts = self.commands.iter().filter_map(|command| match command {
-            Command::Start(spec) => Some(spec),
-            _ => None,
-        });
-        let commands = at.field("commands");
-        check::distinct(commands, starts.clone().map(|spec| spec.run_id.as_str()))?;
-        check::distinct(commands, starts.flat_map(|spec| spec.gpu_indices.iter()))?;
+        Ok(ReplyCheck {
+            commands,
+            refused,
+            acks: self.check_acks(at),
+        })
+    }
+
+    fn check_acks(&self, at: At) -> Result<(), ValidationError> {
         check::count(
             at.field("result_acks"),
             self.result_acks.len(),
@@ -287,7 +329,30 @@ impl HeartbeatReply {
         check::distinct(
             at.field("result_acks"),
             self.result_acks.iter().map(|ack| ack.run_id.as_str()),
-        )?;
+        )
+    }
+}
+
+/// The run ids and GPU indices the accepted starts of a reply name.
+#[derive(Default)]
+struct Taken<'a> {
+    runs: BTreeSet<&'a str>,
+    gpus: BTreeSet<u32>,
+}
+
+impl<'a> Taken<'a> {
+    /// Checks one command and, when it is a start, records what it names.
+    fn admit(&mut self, at: At, command: &'a Command) -> Result<(), ValidationError> {
+        command.validate()?;
+        let Command::Start(spec) = command else {
+            return Ok(());
+        };
+        let gpu_taken = spec.gpu_indices.iter().any(|gpu| self.gpus.contains(gpu));
+        if gpu_taken || self.runs.contains(spec.run_id.as_str()) {
+            return Err(at.fail(Rule::Duplicate));
+        }
+        self.runs.insert(spec.run_id.as_str());
+        self.gpus.extend(spec.gpu_indices.iter().copied());
         Ok(())
     }
 }
