@@ -145,9 +145,14 @@ pub struct ExclusiveRefusal {
     pub lease_id: String,
     /// Why, as a code from the bounded set.
     pub code: RefusalReason,
-    /// Free text for a person, at most [`limits::MAX_REFUSAL_DETAIL`] bytes with no
-    /// control or format character; may be empty. The scheduler never parses it.
-    #[serde(default)]
+    /// Free text for a person. Decoding cuts a detail over
+    /// [`limits::MAX_REFUSAL_DETAIL`] bytes to the longest prefix within the bound that
+    /// ends on a character boundary and accepts the heartbeat, so a long detail never
+    /// costs the beat's results, held list or the refusal code. [`ExclusiveRefusal::validate`]
+    /// does not cut: it refuses a detail over the bound, a sender's own check. An empty
+    /// detail is accepted without the text check; a non-empty one holds no control or
+    /// format character. The scheduler never parses it.
+    #[serde(default, deserialize_with = "cut_detail")]
     pub detail: String,
 }
 
@@ -502,6 +507,21 @@ impl<'a> Taken<'a> {
 /// does not know, or a start whose isolation it cannot classify) reads as
 /// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
 /// the one it cannot classify.
+fn cut_detail<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut text = String::deserialize(deserializer)?;
+    if text.len() > limits::MAX_REFUSAL_DETAIL {
+        let mut end = limits::MAX_REFUSAL_DETAIL;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(text)
+}
+
 fn commands_or_unknown<'de, D>(deserializer: D) -> Result<Vec<Command>, D::Error>
 where
     D: Deserializer<'de>,

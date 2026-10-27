@@ -49,6 +49,9 @@ pub struct Lifecycle {
     /// The whole-node lease the server told this host to prepare for, and whether the host
     /// has been found quiet for it (see `exclusive`).
     exclusive: Option<exclusive::Hold>,
+    /// The leases of the runs taken over at start, until the first reply is followed: a
+    /// restart while a lease was ready (see `exclusive`).
+    adopted_leases: Vec<String>,
 }
 
 impl Lifecycle {

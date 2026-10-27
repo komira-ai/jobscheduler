@@ -664,3 +664,53 @@ fn the_notes_read_plainly() {
         "the whole-node lease ended: restoring the host"
     );
 }
+
+/// Asserts the restart rule through the session: the agent restarted while the lease was
+/// ready, with the consumer's run adopted and the first reply naming the lease. The consumer's
+/// new start for the lease is admitted, the beat after the announcement reports ready, and
+/// no refusal is sent even after `prepare_timeout` has passed on the clock. It catches a
+/// restart that leaves the host `preparing` with a run it cannot quiet, then refuses a lease
+/// that is in use as `not-quiet`.
+#[test]
+fn a_restart_while_ready_reports_ready_and_never_refuses() {
+    let harness = Rc::new(RefCell::new(Harness::new("sess-restart-ready")));
+    let own = |run: &str| {
+        let mut spec = job(run);
+        spec.lease_id = LEASE.to_owned();
+        spec
+    };
+    harness.borrow_mut().start(own("a"));
+    harness.borrow_mut().restart().unwrap();
+    let replies = vec![
+        welcome(1),
+        granted(Some(LEASE), vec![Command::Start(Box::new(own("b")))]),
+        names(LEASE),
+        names(LEASE),
+        names(LEASE),
+    ];
+    let (script, sent) = Script::new(replies);
+    let mut tap = Tap {
+        inner: script,
+        harness: Rc::clone(&harness),
+    };
+    let mut wired = Wired(Rc::clone(&harness));
+    let clock = harness.borrow().clock.clone();
+    let mut session =
+        Session::new(hello("h1"), &mut tap, lowest()).with_quiesce(&mut wired, &clock, TIMEOUT);
+    session.tick(); // hello
+    session.tick(); // the grant, with the consumer's start
+    assert_eq!(harness.borrow().fake.created().len(), 2, "b was admitted");
+    clock.advance(TIMEOUT.as_millis() as u64 + 1);
+    session.tick(); // announced
+    session.tick(); // asks: ready
+    session.tick();
+    assert_eq!(
+        lines(&sent),
+        [
+            "serving",
+            "preparing",
+            "serving ready=whole-1",
+            "serving ready=whole-1"
+        ]
+    );
+}

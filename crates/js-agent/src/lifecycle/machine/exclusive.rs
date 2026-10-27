@@ -12,6 +12,8 @@
 //! checks, run once more with nothing live, find nothing. A finding taints the host as
 //! after any job. The VM check of the design (5.1) is not here: no VM backend exists.
 
+use std::mem;
+
 use js_agent_wire::refusal;
 
 use super::Lifecycle;
@@ -69,8 +71,12 @@ impl Lifecycle {
     }
 
     /// Follows the `exclusive` of a reply: a lease that is not the one held starts a new
-    /// hold, not yet ready; none ends it.
+    /// hold, not yet ready; none ends it. The first reply after a restart is the exception:
+    /// a lease that a run taken over at start belongs to is ready at once, since the agent
+    /// only starts a run of the lease after it found the host quiet, and the consumer is
+    /// using the host.
     pub(super) fn follow(&mut self, lease: Option<&str>) {
+        let adopted = mem::take(&mut self.adopted_leases);
         let same = self
             .exclusive()
             .zip(lease)
@@ -78,7 +84,7 @@ impl Lifecycle {
         if !same {
             self.exclusive = lease.map(|lease| Hold {
                 lease: lease.to_owned(),
-                ready: false,
+                ready: adopted.iter().any(|adopted| adopted == lease),
             });
         }
     }
