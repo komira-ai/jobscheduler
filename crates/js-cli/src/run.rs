@@ -46,7 +46,6 @@ pub(crate) fn run(
         waiter,
         clock,
         signals,
-        request_limit: _,
     } = services;
     let events = Events::new();
     signals(events.signaller())
@@ -137,7 +136,9 @@ impl Drop for Held<'_> {
 ///
 /// The renewals are timed by [`Schedule`] from the expiry of each answer of the server:
 /// a renewal is tried at a third of the time left, and the lease is lost at the deadline,
-/// one such period short of the expiry, when none has succeeded. A renewal runs on a
+/// one such period short of the expiry, when none has succeeded; a renewal that failed
+/// without a refusal is tried again after a sixth of the period (at least a second) until
+/// one succeeds or the deadline comes. A renewal runs on a
 /// thread of its own, so a slow one blocks neither a signal nor the command's exit. A
 /// lost lease (the server says it is gone, or the deadline comes) sends the command's
 /// group SIGTERM and starts the grace period; the loop goes on forwarding signals, and
@@ -209,7 +210,8 @@ enum Verdict {
 
 /// What a renewal's result means at `now` (the injected clock, in milliseconds): the
 /// next wait after a renewal that worked, or one that failed for a reason that is not the
-/// server saying the lease is gone (it is reported and tried again, unless the deadline
+/// server saying the lease is gone (it is reported and tried again after a short retry
+/// interval, [`Schedule::retry`], unless the deadline
 /// has come); the failure that ends the run when the server has dropped the lease or the
 /// deadline has come.
 fn verdict(
@@ -229,7 +231,7 @@ fn verdict(
             let _ = writeln!(err, "js: could not renew lease {id}: {other}");
             match schedule.lapsed(now) {
                 true => Verdict::Lost(Failure::LeaseUnrenewed(id.to_owned())),
-                false => Verdict::Next(schedule.pause(now)),
+                false => Verdict::Next(schedule.retry(now)),
             }
         }
     }

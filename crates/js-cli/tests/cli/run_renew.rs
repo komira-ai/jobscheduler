@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::thread::scope;
+use std::time::Duration;
 
 use js_cli::ForwardedSignal;
 
@@ -50,12 +51,15 @@ fn the_period_follows_the_ttl_the_server_grants() {
     }
 }
 
+/// The wait before a renewal is tried again: a sixth of the 200s period.
+const RETRY: Duration = Duration::from_nanos(33_333_333_333);
+
 /// Asserts that a server that cannot be reached until the deadline (one period short of
 /// the expiry, here 400s of the 600s of the default ttl) loses the lease at the deadline
-/// and not later: the one renewal that was tried failed and was reported, the wait that
-/// followed was the time left to the deadline, and the command was stopped, `js` exiting
-/// 7 with the injected clock (and the server's, which it is) still 200s before the lease
-/// would be expired.
+/// and not later: the one renewal that was tried, at 380s, failed and was reported, the
+/// wait that followed was the 20s left to the deadline (less than a retry interval), and
+/// the command was stopped, `js` exiting 7 with the injected clock (and the server's,
+/// which it is) still 200s before the lease would be expired.
 #[test]
 fn a_lease_that_cannot_be_renewed_is_given_up_before_the_server_expires_it() {
     let mut h = Harness::new("renew_deadline");
@@ -68,9 +72,9 @@ fn a_lease_that_cannot_be_renewed_is_given_up_before_the_server_expires_it() {
         let _ends = EndsRun(signals.recv().unwrap(), ForwardedSignal::Terminate);
         waiter.running();
         h.stop();
-        h.advance(secs(200));
+        h.advance(secs(380));
         waiter.step();
-        h.advance(secs(200));
+        h.advance(secs(20));
         waiter.release();
         run.join().unwrap()
     });
@@ -91,7 +95,7 @@ fn a_lease_that_cannot_be_renewed_is_given_up_before_the_server_expires_it() {
         got.err
     );
     // The period, the time left to the deadline, and then the grace period of the stop.
-    assert_eq!(waiter.intervals(), vec![secs(200), secs(200), secs(30)]);
+    assert_eq!(waiter.intervals(), vec![secs(200), secs(20), secs(30)]);
     let expires = T0 + 600_000;
     let at_loss = js_lease::Clock::now(&h.clock).millis();
     assert_eq!(at_loss, T0 + 400_000);
@@ -100,6 +104,105 @@ fn a_lease_that_cannot_be_renewed_is_given_up_before_the_server_expires_it() {
         got.err.contains(&format!("expires {expires}\n")),
         "{}",
         got.err
+    );
+}
+
+/// Asserts that a renewal that fails at 200s is tried again after a sixth of the period
+/// (33.333s) and not left to the next period: the retry, which finds the clock at the
+/// deadline (400s) and fails too, is reported as the second failure and gives the lease
+/// up at once, without a wait for the deadline; the waits are the period, the retry
+/// interval and the grace period of the stop.
+#[test]
+fn a_failed_renewal_is_tried_again_after_a_sixth_of_the_period() {
+    let mut h = Harness::new("renew_retry_lost");
+    let waiter = Manual::new();
+    let (services, signals) = h.js.services_with_signals(waiter.clone());
+    let words = run_words(&[], &["sleep", "30"]);
+    let js = h.js.clone();
+    let got = scope(|s| {
+        let run = s.spawn(|| js.with(&words, services));
+        let _ends = EndsRun(signals.recv().unwrap(), ForwardedSignal::Terminate);
+        waiter.running();
+        h.stop();
+        h.advance(secs(200));
+        waiter.step();
+        h.advance(secs(200));
+        waiter.release();
+        run.join().unwrap()
+    });
+    assert_eq!(got.code, 7, "{}", got.err);
+    assert_eq!(
+        got.err
+            .matches("js: could not renew lease 1-1: cannot talk to")
+            .count(),
+        2,
+        "{}",
+        got.err
+    );
+    assert!(
+        got.err.contains("could not be renewed before its deadline"),
+        "{}",
+        got.err
+    );
+    assert_eq!(waiter.intervals(), vec![secs(200), RETRY, secs(30)]);
+}
+
+/// Asserts that one renewal that fails (a 500) does not cost the lease: the next try, a
+/// retry interval later and before the deadline, succeeds, the failure is reported once,
+/// the period that follows is the one the new expiry sets, and the command completes
+/// with exit 0 and the lease released.
+#[test]
+fn a_renewal_that_succeeds_on_the_retry_keeps_the_lease() {
+    let scratch = Scratch::new("renew_retry_ok");
+    let expires = T0 + 600_000;
+    let held = format!(r#"{{"id":"1-1","host":"gpu-01","expires_at_ms":{expires}}}"#);
+    let renewed = format!(r#"{{"expires_at_ms":{expires}}}"#);
+    let (url, log) = sequence(vec![
+        http("201 Created", &held),
+        http("500 Internal Server Error", r#"{"error":"boom"}"#),
+        http("200 OK", &renewed),
+        http("200 OK", "{}"),
+    ]);
+    let js = against(&url, &scratch);
+    let waiter = Manual::new();
+    let go = fifo(&scratch, "go");
+    let words = run_words(&[], &["sh", "-c", r#"read line < "$0""#, path_str(&go)]);
+    let got = scope(|s| {
+        let run = s.spawn(|| js.with(&words, js.services(waiter.clone())));
+        waiter.running();
+        waiter.step();
+        waiter.step();
+        fs::write(&go, "done\n").unwrap();
+        run.join().unwrap()
+    });
+    assert_eq!(got.code, 0, "{}", got.err);
+    assert_eq!(
+        got.err.matches("js: could not renew").count(),
+        1,
+        "{}",
+        got.err
+    );
+    assert!(
+        got.err
+            .contains("js: could not renew lease 1-1: unexpected answer 500 (boom)\n"),
+        "{}",
+        got.err
+    );
+    assert!(!got.err.contains("deadline"), "{}", got.err);
+    assert_eq!(waiter.intervals(), vec![secs(200), RETRY, secs(200)]);
+    let seen = log.lock().unwrap().clone();
+    let lines: Vec<&str> = seen
+        .iter()
+        .map(|line| line.trim_end_matches(" HTTP/1.1"))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![
+            "POST /v1/leases",
+            "POST /v1/leases/1-1/renew",
+            "POST /v1/leases/1-1/renew",
+            "DELETE /v1/leases/1-1"
+        ]
     );
 }
 

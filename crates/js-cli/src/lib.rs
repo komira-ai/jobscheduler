@@ -64,7 +64,9 @@
 //! wait), so a ttl the server clamps or defaults is followed. The renewal runs on a
 //! thread of its own: a slow one blocks neither a signal nor the command's exit. A
 //! renewal that fails for a reason other than the server saying the lease is gone (404 or
-//! 409) is reported on stderr and tried again; the lease is given up at the deadline, one
+//! 409) is reported on stderr and tried again after a sixth of the period (at least one
+//! second), as often as a try ends before the deadline, until one succeeds; a refusal is
+//! the loss of the lease at once. The lease is given up at the deadline, one
 //! such period before the server would expire it, and the command is stopped (below)
 //! while the lease is still the server's to release. A request is limited to 30 seconds,
 //! and a renewal to the time left before the deadline when that is shorter.
@@ -143,7 +145,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use cli::{Action, Cli, Command};
-use client::Client;
+use client::{Client, REQUEST_LIMIT};
 use failure::Failure;
 use render::Render;
 
@@ -209,8 +211,7 @@ fn dispatch(
 ) -> Result<u8, Failure> {
     let server = cli.need_server()?;
     let token_file = cli.need_token_file()?;
-    let limit = services.request_limit;
-    let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), limit)?;
+    let client = Client::connect(server, token_file, cli.ca_cert.as_deref(), REQUEST_LIMIT)?;
     let Command::Lease(action) = cli.command;
     match action {
         Action::Acquire(args) => leases::acquire(&client, render, &args, &*services.waiter, out),

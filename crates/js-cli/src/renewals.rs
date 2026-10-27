@@ -35,7 +35,9 @@ pub(crate) struct Pause {
 /// time a renewal is tried at, and the deadline by which one must have succeeded.
 ///
 /// A renewal is tried when a third of the time left (at most `--renew-every`, at least a
-/// second) has passed, so a ttl the server clamps is handled: only its answers count. The
+/// second) has passed, so a ttl the server clamps is handled: only its answers count. A
+/// renewal that fails without a refusal is tried again after a sixth of the period (at
+/// least a second), as often as that ends before the deadline. The
 /// lease is given up at the deadline, one such period before the server expires it, with
 /// time still to stop the command; the period is the one the last answer set. Every time
 /// is the injected clock's, in milliseconds since the epoch, as the server's are.
@@ -77,15 +79,33 @@ impl Schedule {
         now_ms >= self.deadline_ms()
     }
 
-    /// The next wait at `now_ms` (before the deadline): a period then a renewal, unless
-    /// that would not end before the deadline, and then the time to the deadline and
-    /// the report of it.
+    /// How long after a renewal that failed (and was not refused) the next try is: a
+    /// sixth of the period, at least [`MIN_PERIOD`], so that a few tries fit between a
+    /// failure and the deadline.
+    fn retry_interval(&self) -> Duration {
+        (self.period / 6).max(MIN_PERIOD)
+    }
+
+    /// The next wait at `now_ms` (before the deadline) after a renewal that worked: a
+    /// period then a renewal, unless that would not end before the deadline, and then
+    /// the time to the deadline and the report of it.
     pub(crate) fn pause(&self, now_ms: u64) -> Pause {
+        self.pause_for(now_ms, self.period)
+    }
+
+    /// The next wait at `now_ms` after a renewal that failed: [`Self::retry_interval`]
+    /// then a renewal, or the time to the deadline and the report of it when the try
+    /// would not end before the deadline.
+    pub(crate) fn retry(&self, now_ms: u64) -> Pause {
+        self.pause_for(now_ms, self.retry_interval())
+    }
+
+    fn pause_for(&self, now_ms: u64, wait: Duration) -> Pause {
         let to_deadline = Duration::from_millis(self.deadline_ms().saturating_sub(now_ms));
-        match self.period < to_deadline {
+        match wait < to_deadline {
             true => Pause {
-                interval: self.period,
-                then: Then::Renew(to_deadline - self.period),
+                interval: wait,
+                then: Then::Renew(to_deadline - wait),
             },
             false => Pause {
                 interval: to_deadline,
@@ -204,6 +224,40 @@ mod tests {
             Pause {
                 interval: secs(100),
                 then: Then::Deadline
+            }
+        );
+    }
+
+    /// Asserts that a retry waits a sixth of the period (a second at least) and then
+    /// renews, limited to what is left of the time to the deadline, and that one that
+    /// would not end before the deadline waits for the deadline and reports it.
+    #[test]
+    fn a_retry_waits_a_sixth_of_the_period_and_never_passes_the_deadline() {
+        let ms = 1_000_000;
+        let schedule = Schedule::new(ms + 600_000, ms, None);
+        let sixth = Duration::from_nanos(33_333_333_333);
+        assert_eq!(schedule.retry_interval(), sixth);
+        assert_eq!(
+            schedule.retry(ms + 200_000),
+            Pause {
+                interval: sixth,
+                then: Then::Renew(secs(200) - sixth)
+            }
+        );
+        assert_eq!(
+            schedule.retry(ms + 380_000),
+            Pause {
+                interval: secs(20),
+                then: Then::Deadline
+            }
+        );
+        let short = Schedule::new(ms + 3_000, ms, None);
+        assert_eq!(short.retry_interval(), secs(1));
+        assert_eq!(
+            short.retry(ms),
+            Pause {
+                interval: secs(1),
+                then: Then::Renew(secs(1))
             }
         );
     }

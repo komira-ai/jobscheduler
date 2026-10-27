@@ -90,7 +90,8 @@ pub(crate) enum Action {
     /// stops what it left running (SIGTERM, then SIGKILL after --stop-grace), releases
     /// the lease and exits with the command's status (128 plus the signal for a command
     /// a signal ended). If a renewal finds the lease gone, or none has succeeded before
-    /// the deadline short of the server's expiry, it stops the command the same way and
+    /// the deadline short of the server's expiry (a failed renewal is tried again after a
+    /// sixth of the period, at least a second, until then), it stops the command the same way and
     /// exits 7; a command that cannot be started exits 127. The held-lease line is
     /// printed on stderr, so the command owns stdout.
     Run(RunArgs),

@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rustix::process::Signal;
 
-use crate::client::REQUEST_LIMIT;
 use crate::failure::Failure;
 use crate::signals;
 
@@ -170,27 +169,16 @@ pub struct Services {
     pub(crate) waiter: Arc<dyn Waiter>,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) signals: SignalSource,
-    pub(crate) request_limit: Duration,
 }
 
 impl Services {
-    /// Services over this waiter, clock and signal source, with the default limit of 30
-    /// seconds on a request.
+    /// Services over this waiter, clock and signal source.
     pub fn new(waiter: Arc<dyn Waiter>, clock: Arc<dyn Clock>, signals: SignalSource) -> Self {
         Self {
             waiter,
             clock,
             signals,
-            request_limit: REQUEST_LIMIT,
         }
-    }
-
-    /// These services with `limit` as the longest a request may take from first byte to
-    /// last, connect and TLS included (30 seconds unless set).
-    #[must_use]
-    pub fn with_request_limit(mut self, limit: Duration) -> Self {
-        self.request_limit = limit;
-        self
     }
 
     /// The program's own: a sleeping thread, the system clock and tokio's signal

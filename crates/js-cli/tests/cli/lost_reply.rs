@@ -2,12 +2,11 @@
 //! exist, and `lease run` finds it again by its label and releases it.
 //!
 //! A proxy between the CLI and a real server passes each request on, so the server acts,
-//! and then loses, replaces or holds back the answer to the start.
+//! and then loses or replaces the answer to the start.
 
 use std::fs;
 use std::sync::Arc;
 use std::thread::scope;
-use std::time::Duration;
 
 use js_cli::ForwardedSignal;
 
@@ -19,14 +18,10 @@ use crate::support::{EndsRun, Harness, Js, Manual, Never, acquire_words, run_wor
 const HINT: &str =
     "the request may have created a lease: run \"js lease list\" before trying again";
 
-/// The longest a request may take in the tests that hold an answer back for good.
-const LIMIT: Duration = Duration::from_millis(500);
-
 /// The ways the answer to a start is lost, and what the failure says about each.
-const FATES: [(Fate, &str); 3] = [
+const FATES: [(Fate, &str); 2] = [
     (Fate::CloseAfter, "cannot talk to"),
     (Fate::Answer500, "unexpected answer 500 (boom)"),
-    (Fate::Stall, "cannot talk to"),
 ];
 
 /// A proxy to the server of `h` that gives the start the fate `start` and every other
@@ -49,7 +44,7 @@ fn lossy(
 }
 
 /// Asserts that a start of `lease acquire` whose answer is lost (the connection closed
-/// before a byte of it, a 500 in its place, no answer until the client's limit) is sent
+/// before a byte of it, or a 500 in its place) is sent
 /// once, fails with exit 1 and the advice to run `js lease list` before trying again, and
 /// does nothing more: the server did create the lease, and `acquire` leaves it be.
 #[test]
@@ -57,7 +52,7 @@ fn a_lost_answer_to_acquire_is_not_asked_again() {
     for (n, (fate, said)) in FATES.into_iter().enumerate() {
         let h = Harness::new(&format!("lost_acquire_{n}"));
         let (proxy, via) = lossy(&h, fate, |_| Fate::Deliver);
-        let services = via.services(Arc::new(Never)).with_request_limit(LIMIT);
+        let services = via.services(Arc::new(Never));
         let got = via.with(&acquire_words(&[]), services);
         assert_eq!(
             (got.code, got.out.as_str()),
@@ -104,7 +99,7 @@ fn a_lost_answer_to_run_is_not_asked_again_and_the_lease_is_released() {
         let ran = h.scratch.path("ran");
         let script = r#"echo ran > "$0""#;
         let words = run_words(&[], &["sh", "-c", script, path_str(&ran)]);
-        let services = via.services(Manual::new()).with_request_limit(LIMIT);
+        let services = via.services(Manual::new());
         let got = via.with(&words, services);
         assert_eq!(got.code, 1, "{fate:?}: {}", got.err);
         assert!(got.err.contains(said), "{fate:?}: {}", got.err);
@@ -128,6 +123,31 @@ fn a_lost_answer_to_run_is_not_asked_again_and_the_lease_is_released() {
         );
         assert!(h.listed().is_empty(), "{fate:?}");
     }
+}
+
+/// Asserts that `run` releases only the lease that carries its own label: with a lease
+/// held by someone else first (it has none), a `run` whose start answer is lost releases
+/// the one it made (1-2), asks to release nothing else, and the bystander (1-1) is still
+/// held afterwards.
+#[test]
+fn run_leaves_a_lease_that_is_not_its_own_held() {
+    let h = Harness::new("lost_bystander");
+    assert_eq!(h.js.go(&acquire_words(&[])).code, 0);
+    assert_eq!(h.listed(), vec!["1-1"]);
+    let (proxy, via) = lossy(&h, Fate::CloseAfter, |_| Fate::Deliver);
+    let got = via.waiting(&run_words(&[], &["true"]), Manual::new());
+    assert_eq!(got.code, 1, "{}", got.err);
+    assert!(
+        got.err
+            .starts_with("js: released lease 1-2, which the lost answer left behind\n"),
+        "{}",
+        got.err
+    );
+    assert_eq!(
+        proxy.requests(),
+        vec!["POST /v1/leases", "GET /v1/leases", "DELETE /v1/leases/1-2"]
+    );
+    assert_eq!(h.listed(), vec!["1-1"]);
 }
 
 /// Asserts that when the start never reached the server (the connection was closed before

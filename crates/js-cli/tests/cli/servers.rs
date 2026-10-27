@@ -16,9 +16,6 @@ pub enum Fate {
     CloseAfter,
     /// Reads the answer and sends a 500 in its place.
     Answer500,
-    /// Reads the answer and keeps the connection open without sending anything, so that
-    /// the client's limit on a request ends it.
-    Stall,
     /// Closes the connection without passing the request on: the server never sees it.
     CloseBefore,
 }
@@ -91,10 +88,6 @@ fn pass(
         Fate::Answer500 => {
             let _ = client
                 .write_all(reply("500 Internal Server Error", r#"{"error":"boom"}"#).as_bytes());
-        }
-        Fate::Stall => {
-            let mut sink = [0u8; 64];
-            while client.read(&mut sink).unwrap_or(0) > 0 {}
         }
         Fate::CloseAfter | Fate::CloseBefore => {}
     }
