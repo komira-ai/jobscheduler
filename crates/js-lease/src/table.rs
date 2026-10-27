@@ -114,8 +114,11 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
 
     /// The one place time acts. For every lease: a releasing one is stopped again, and
     /// observed when the stop does not free it; a pending or held one whose expiry has
-    /// passed is marked releasing and stopped as a release does; a pending one still
-    /// in time is observed (present makes it held, absent drops it, unknown keeps it).
+    /// passed is marked releasing and stopped as a release does, except that a pending
+    /// whole lease at its prepare deadline is observed first, so the provider can end it
+    /// as a failed prepare, and is expired only if that observation still has no answer;
+    /// a pending one still in time is observed (present makes it held, absent drops it,
+    /// unknown keeps it).
     /// The file is written once at the end when anything changed or an earlier save failed,
     /// and a failure is reported in the result.
     pub fn tick(&mut self) -> TickReport {

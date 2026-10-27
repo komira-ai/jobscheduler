@@ -72,6 +72,16 @@
 //! its expiry becomes that moment plus the ttl and its end that moment plus the maximum
 //! wall time. A file without these fields loads as not whole.
 //!
+//! The prepare timeout is also the provider's own deadline for a failed prepare, and the
+//! provider decides what a missed one means (it counts the failure and holds it against
+//! the host). So a tick that finds a pending whole lease at its deadline observes it
+//! first, which lets the provider end it; only a lease the provider still has no answer
+//! for after that observation is expired, by the tick after. A ready report that reaches
+//! the provider within one tick of the deadline can therefore lose to the deadline; that
+//! is benign, since the host is restored when the lease is stopped. The note that the
+//! deadline has been observed is kept in memory: after a restart the lease is observed
+//! once more.
+//!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
 //!

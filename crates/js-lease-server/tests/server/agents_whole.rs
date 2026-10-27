@@ -184,20 +184,60 @@ async fn an_operator_prepare_timeout_reaches_the_lease_table() {
     assert_eq!(lease["state"], "held", "{lease}");
 }
 
-/// Asserts the prepare deadline over HTTP and the second try. The only host's agent is
-/// silent: the lease is pending one second before `prepare_timeout` and dropped by the
-/// very tick that follows the deadline (the lease table and the registry agree on the
-/// instant, the tick needs no second pass); the same request then goes to the other
-/// host, which the silent one's failure excluded. It catches a lease left pending past
-/// its deadline and a retry that picks the host that just failed.
-#[tokio::test]
-async fn a_silent_agent_loses_the_lease_at_the_deadline_and_the_retry_goes_elsewhere() {
-    let h = start_with("whole_silent", "prepare_timeout = \"60s\"\ngrace = \"2h\"").await;
-    let first = join(&h, "burst-1").await;
-    let second = join(&h, "burst-2").await;
+/// The request `whole_body()` makes, as the registry keys its records.
+fn whole_request() -> js_types::Request {
+    let resources = js_types::Resources::new(1000, 1024, 1, Some("nvidia-a100".into()));
+    js_types::Request {
+        class: js_types::ClassId::new("whole-node").unwrap(),
+        resources: resources.unwrap(),
+        capabilities: [("isa".to_string(), "x86-64-v3".to_string())].into(),
+        max_wall: secs(7200),
+        labels: [("team".to_string(), "infra".to_string())].into(),
+        validation_run: None,
+    }
+}
+
+/// The registry's record of `whole_request()`.
+fn record(h: &Harness) -> Option<js_registry::RequestRecord> {
+    h.running
+        .registry()
+        .unwrap()
+        .request_record(&whole_request())
+}
+
+/// Posts a whole-node lease that must be answered 202, and returns its id.
+async fn ask(h: &Harness) -> String {
     let asked = h.call("POST", "/v1/leases", Some(&whole_body())).await;
     assert_eq!(asked.status, 202, "{}", asked.body);
-    let id = asked.json()["id"].as_str().unwrap().to_string();
+    asked.json()["id"].as_str().unwrap().to_string()
+}
+
+/// Two heartbeats of `session`: the second follows any stop the first crossed, so the
+/// host is serving with nothing held and can take a lease again.
+async fn settle(h: &Harness, session: &Session) {
+    beat(h, session).await;
+    beat(h, session).await;
+}
+
+/// Asserts the prepare deadline over HTTP, as the registry sees it, and the second try.
+/// Two hosts; the agent of the host that took the lease is silent (it hears of the lease
+/// and never reports ready). One second before `prepare_timeout` the lease is pending;
+/// the tick at the deadline drops it, and the registry has ended it as a failed prepare:
+/// the request has one `prepare_failures` and the silent host is excluded for
+/// `reserve_backoff` from the deadline. The same request then goes to the other host. It
+/// catches a lease the table stops at its deadline without the registry hearing of a
+/// failed prepare (no count, no exclusion), a lease left pending past its deadline, and
+/// a retry that picks the host that just failed.
+#[tokio::test]
+async fn a_silent_agent_fails_the_prepare_and_the_retry_goes_elsewhere() {
+    let h = start_with(
+        "whole_silent",
+        "prepare_timeout = \"60s\"\nreserve_backoff = \"120s\"\ngrace = \"2h\"",
+    )
+    .await;
+    let first = join(&h, "burst-1").await;
+    let second = join(&h, "burst-2").await;
+    let id = ask(&h).await;
     let named = |reply: &crate::support::Reply| reply.json()["exclusive"] == json!(id);
     let (one, two) = (beat(&h, &first).await, beat(&h, &second).await);
     let failed = if named(&one) { "burst-1" } else { "burst-2" };
@@ -206,13 +246,23 @@ async fn a_silent_agent_loses_the_lease_at_the_deadline_and_the_retry_goes_elsew
     h.clock.advance(secs(59));
     h.ticks.step().await;
     assert!(listed(&h, &id).await.is_some());
+    assert_eq!(record(&h), None);
     h.clock.advance(secs(1));
     h.ticks.step().await;
     assert!(listed(&h, &id).await.is_none(), "dropped at the deadline");
+    let kept = record(&h).expect("the failed prepare is recorded");
+    assert_eq!(kept.prepare_failures, 1);
+    assert!(!kept.terminal);
+    let until = js_lease::Timestamp::from_millis(T0 + 60_000 + 120_000);
+    let host = js_types::HostId::new(failed).unwrap();
+    let excluded = [(host, js_registry::Exclusion::Until(until))];
+    assert_eq!(kept.exclusions, excluded.into());
+    let reason = kept.last.expect("the failure is recorded").code;
+    assert_eq!(reason, "prepare-timeout");
 
-    let again = h.call("POST", "/v1/leases", Some(&whole_body())).await;
-    assert_eq!(again.status, 202, "{}", again.body);
-    let retry = again.json()["id"].as_str().unwrap().to_string();
+    settle(&h, &first).await;
+    settle(&h, &second).await;
+    let retry = ask(&h).await;
     let (one, two) = (beat(&h, &first).await, beat(&h, &second).await);
     let (on_first, on_second) = (
         one.json()["exclusive"] == json!(retry),
@@ -221,6 +271,76 @@ async fn a_silent_agent_loses_the_lease_at_the_deadline_and_the_retry_goes_elsew
     let went = if on_first { "burst-1" } else { "burst-2" };
     assert!(on_first != on_second, "{} {}", one.body, two.body);
     assert_ne!(went, failed);
+}
+
+/// Asserts that the exclusion is what keeps the retry off the silent host: the pool has
+/// only that host, so the same request is refused 409 `no-capacity` (nothing is placed
+/// and nothing is pending) until `reserve_backoff` has passed since the deadline, and is
+/// placed there, 202, from the first moment it has. It catches a failed prepare that
+/// excludes nothing (the retry would be placed at once, again and again) and an exclusion
+/// that lasts longer or shorter than `reserve_backoff`.
+#[tokio::test]
+async fn a_silent_host_is_left_out_of_the_retry_for_reserve_backoff() {
+    let h = start_with(
+        "whole_backoff",
+        "prepare_timeout = \"60s\"\nreserve_backoff = \"120s\"\ngrace = \"2h\"",
+    )
+    .await;
+    let me = join(&h, "burst-1").await;
+    let id = ask(&h).await;
+    assert_eq!(beat(&h, &me).await.json()["exclusive"], json!(id));
+    h.clock.advance(secs(60));
+    h.ticks.step().await;
+    assert!(listed(&h, &id).await.is_none());
+    settle(&h, &me).await;
+
+    let refused = h.call("POST", "/v1/leases", Some(&whole_body())).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.json(), json!({ "error": "no-capacity" }));
+    h.clock.advance(secs(119));
+    settle(&h, &me).await;
+    let refused = h.call("POST", "/v1/leases", Some(&whole_body())).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(
+        h.call("GET", "/v1/leases", None).await.json()["leases"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    h.clock.advance(secs(1));
+    let retry = ask(&h).await;
+    assert_eq!(beat(&h, &me).await.json()["exclusive"], json!(retry));
+}
+
+/// Asserts the bound on silent tries. With `max_replace = 2` and a host whose agent never
+/// reports ready, the second missed deadline makes the request terminal with two
+/// `prepare_failures`, and the next ask for it is refused 409 and clears the record,
+/// even after the exclusion has run out. It catches a deadline that is never counted
+/// (the request would be placed on the silent host without bound).
+#[tokio::test]
+async fn a_request_is_terminal_after_max_replace_silent_prepares() {
+    let h = start_with(
+        "whole_terminal",
+        "prepare_timeout = \"60s\"\nreserve_backoff = \"10s\"\nmax_replace = 2\ngrace = \"2h\"",
+    )
+    .await;
+    let me = join(&h, "burst-1").await;
+    for tries in 1..=2 {
+        let id = ask(&h).await;
+        assert_eq!(beat(&h, &me).await.json()["exclusive"], json!(id));
+        h.clock.advance(secs(60));
+        h.ticks.step().await;
+        assert!(listed(&h, &id).await.is_none());
+        let kept = record(&h).unwrap();
+        assert_eq!(kept.prepare_failures, tries);
+        assert_eq!(kept.terminal, tries == 2);
+        h.clock.advance(secs(10));
+        settle(&h, &me).await;
+    }
+    let refused = h.call("POST", "/v1/leases", Some(&whole_body())).await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(record(&h), None);
 }
 
 /// Asserts that a class booked as a whole host (`gpu-host`) is not gated: on a
