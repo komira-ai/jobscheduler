@@ -4,15 +4,21 @@
 //!
 //! In order, the first rule that applies decides:
 //!
-//! 1. `--tip` (the commit main is at when the run starts) is not `--head`: not released.
-//!    The attestation of a build records the commit the workflow run is at, which for a run
-//!    started by another workflow is the tip of main, not the commit that passed. A build
-//!    of an older commit would be attested as another one, so a newer push releases (its
-//!    change is measured from the latest tag, so nothing is lost).
-//! 2. No `v*` release tag exists: released, as the workspace version.
-//! 3. The latest tag names `--head`: a re-run of a release that was started. Released,
-//!    as that tag's version; the tag is kept as it is.
-//! 4. Some path changed between the latest tag and `--head` ships ([`super::is_shipped`]):
+//! 1. `--tip` (main's tip, read from the GitHub API by the workflow when the job runs) is
+//!    not `--head`: not released. The attestation of a build records the commit the
+//!    workflow run is at, which for a run started by another workflow is the tip of main,
+//!    not the commit that passed, and a re-run of an old run keeps its old `--head`. A
+//!    build of an older commit would be attested as another one, or published as the
+//!    newest version, so the newer push releases (its change is measured from the latest
+//!    tag, so nothing is lost).
+//! 2. A `v*` tag is at a commit that has `--head` as an ancestor, not at `--head` itself:
+//!    a later release exists, so this commit is not released.
+//! 3. No `v*` tag is merged into `--head`: released, as the workspace version. A tag on
+//!    another branch is not a release of this history and is ignored.
+//! 4. The latest merged tag names `--head`: a re-run of a release that was started.
+//!    Released, as that tag's version; the tag is kept as it is.
+//! 5. Some path changed between the latest merged tag and `--head` ships
+//!    ([`super::is_shipped`], or a file a shipped source includes, [`super::include`]):
 //!    released, as [`super::next`]. Otherwise not released.
 //!
 //! `--dry-run` (a pull request that changes the workflow) takes the same decision and then
@@ -22,11 +28,15 @@
 //! appends them to `--output` (on Actions, `GITHUB_OUTPUT`). The version and tag are those
 //! the release would have, whether or not it is released.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::{Error, Metadata, Version, first_shipped, latest, next, read, workspace_version};
+use super::{
+    Error, Metadata, Version, first_shipped, include, is_shipped, latest, next, read,
+    workspace_version,
+};
 
 /// The arguments of `release plan`.
 #[derive(clap::Args)]
@@ -34,7 +44,8 @@ pub struct PlanArgs {
     /// The commit that passed `ci`, a full SHA (on Actions, the workflow run's `head_sha`).
     #[arg(long)]
     pub head: String,
-    /// The commit main is at now (on Actions, `GITHUB_SHA`).
+    /// The commit main is at now, as the GitHub API says when the job runs (not
+    /// `GITHUB_SHA`, which a re-run keeps).
     #[arg(long)]
     pub tip: String,
     /// A checkout at `--head` holding the whole history and every tag.
@@ -112,11 +123,21 @@ fn capture(program: &Path, dir: &Path, args: &[&str]) -> Result<String, Error> {
 }
 
 /// The decision, before `--dry-run`.
-fn decide(a: &PlanArgs, tagged: Option<Version>) -> Result<Verdict, Error> {
+///
+/// `tagged` is the latest release tag merged into `--head`; `later` the latest one at a
+/// commit that has `--head` as a proper ancestor.
+fn decide(a: &PlanArgs, tagged: Option<Version>, later: Option<Version>) -> Result<Verdict, Error> {
     if a.tip != a.head {
         return Ok(Verdict::skip(format!(
             "main is at {} now, past {}: the push that moved it releases this change",
             a.tip, a.head
+        )));
+    }
+    if let Some(later) = later {
+        return Ok(Verdict::skip(format!(
+            "{} is a release past {}: a newer release exists",
+            later.tag(),
+            a.head
         )));
     }
     let Some(tagged) = tagged else {
@@ -149,7 +170,12 @@ fn decide(a: &PlanArgs, tagged: Option<Version>) -> Result<Verdict, Error> {
         &["metadata", "--no-deps", "--format-version", "1"],
     )?;
     let dirs = Metadata::parse(&json)?.shipped_dirs(&a.ship)?;
-    Ok(match first_shipped(&changed, &dirs) {
+    let sources = capture(&a.git, &a.repo_dir, &["ls-files", "-z", "--", "*.rs"])?;
+    let mut included = BTreeSet::new();
+    for source in sources.split('\0').filter(|path| is_shipped(path, &dirs)) {
+        included.extend(include::targets(source, &read(&a.repo_dir.join(source))?)?);
+    }
+    Ok(match first_shipped(&changed, &dirs, &included) {
         Some(path) => Verdict::release(format!("{path} changed since {tag}")),
         None => Verdict::skip(format!("nothing that ships changed since {tag}")),
     })
@@ -164,10 +190,25 @@ pub fn run(a: &PlanArgs) -> Result<String, Error> {
             actual: at.trim().to_owned(),
         });
     }
-    let tags = capture(&a.git, &a.repo_dir, &["tag", "--list", "v*"])?;
-    let tagged = latest(tags.lines());
+    let merged = capture(
+        &a.git,
+        &a.repo_dir,
+        &["tag", "--list", "v*", "--merged", &a.head],
+    )?;
+    let tagged = latest(merged.lines());
+    // A tag at a commit that contains `--head` and is not merged into it is past it.
+    let containing = capture(
+        &a.git,
+        &a.repo_dir,
+        &["tag", "--list", "v*", "--contains", &a.head],
+    )?;
+    let later = latest(
+        containing
+            .lines()
+            .filter(|tag| !merged.lines().any(|m| m == *tag)),
+    );
     let cargo = workspace_version(&read(&a.repo_dir.join("Cargo.toml"))?)?;
-    let mut verdict = decide(a, tagged)?;
+    let mut verdict = decide(a, tagged, later)?;
     if a.dry_run {
         verdict = Verdict {
             release: true,

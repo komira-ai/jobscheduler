@@ -121,6 +121,78 @@ fn a_compiled_in_file_outside_src_releases() {
     }
 }
 
+/// Catches a file that is compiled in (`include_str!`, `include_bytes!`, `include!`) from
+/// a place the blanket exclusions cover (`examples/`, markdown, `tests/`) not releasing:
+/// what a shipped source includes ships, whatever its location; the same kind of file that
+/// nothing includes, and the sources of tests, still do not.
+#[test]
+fn a_file_a_shipped_source_includes_releases_wherever_it_is() {
+    let repo = Repo::new("included");
+    repo.write(
+        "crates/app/src/lib.rs",
+        "pub const A: &str = include_str!(\"../examples/sample.toml\");\n\
+         pub const B: &[u8] = include_bytes!(\n    \"../help.md\"\n);\n\
+         include!(\"./gen/table.rs\");\n\
+         pub const C: &str = include_str!(\"../../lib/tests/data.txt\");\n",
+    );
+    repo.write("crates/app/src/gen/table.rs", "// table\n");
+    repo.write("crates/app/examples/sample.toml", "a = 1\n");
+    repo.write("crates/app/examples/unused.toml", "a = 1\n");
+    repo.write("crates/app/help.md", "help\n");
+    repo.write("crates/lib/tests/data.txt", "data\n");
+    // A test may include whatever it likes, in any form: it is not compiled into a binary.
+    repo.write(
+        "crates/app/tests/t.rs",
+        "include_str!(concat!(\"a\", \"b\"));\n",
+    );
+    repo.commit("includes");
+    repo.tag("v0.1.0");
+    for path in [
+        "crates/app/examples/sample.toml",
+        "crates/app/help.md",
+        "crates/lib/tests/data.txt",
+    ] {
+        repo.write(path, "changed\n");
+        repo.commit("change an included file");
+        let said = plan::run(&repo.plan()).expect("plan");
+        assert_eq!(field(&said, "release"), "true", "{path}");
+        assert_eq!(
+            field(&said, "reason"),
+            format!("{path} changed since v0.1.0")
+        );
+        repo.git(&["tag", "-d", "v0.1.0"]);
+        repo.tag("v0.1.0");
+    }
+    repo.write("crates/app/examples/unused.toml", "changed\n");
+    repo.commit("change a file nothing includes");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "release"), "false");
+}
+
+/// Catches an include that cannot be read as a path being skipped: the plan cannot tell
+/// what such a source compiles in, so it fails rather than ship less; and a source it
+/// cannot read fails too.
+#[test]
+fn an_include_that_is_not_a_plain_path_fails_the_plan() {
+    let repo = released("include-bad");
+    repo.write(
+        "crates/app/src/lib.rs",
+        "pub const A: &str = include_str!(concat!(env!(\"X\"), \"/a.toml\"));\n",
+    );
+    repo.commit("computed include");
+    let Err(Error::Include { file, line }) = plan::run(&repo.plan()) else {
+        panic!("a computed include should fail the plan")
+    };
+    assert_eq!((file.as_str(), line), ("crates/app/src/lib.rs", 1));
+
+    repo.write("crates/app/src/lib.rs", "");
+    repo.write("crates/app/src/extra.rs", "");
+    repo.commit("fixed, and a source added");
+    std::fs::remove_file(repo.dir.join("crates/app/src/extra.rs")).expect("remove");
+    let result = plan::run(&repo.plan());
+    assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
+}
+
 /// Catches a minor or major bump that is ignored (the release would be a patch above the
 /// tag), and one that is repeated (after the bump is released, the next push must be a
 /// patch above it, not the bumped number again).
@@ -227,6 +299,103 @@ fn a_commit_main_has_moved_past_is_not_released() {
             "0".repeat(40)
         )
     );
+}
+
+/// Catches a re-run of an old release run that publishes an old commit as the newest
+/// version: a commit that a later release tag is at or above is not released, whether or
+/// not that commit has its own tag, even when the tip it is told is the commit itself.
+#[test]
+fn a_commit_below_a_later_release_is_not_released() {
+    for (name, tag_old) in [("below-untagged", false), ("below-tagged", true)] {
+        let repo = released(name);
+        repo.write("crates/app/src/lib.rs", "// first\n");
+        let old = repo.commit("first");
+        if tag_old {
+            repo.tag("v0.1.1");
+        }
+        repo.write("crates/app/src/lib.rs", "// second\n");
+        repo.commit("second");
+        repo.tag("v0.1.2");
+        repo.git(&["checkout", "--quiet", &old]);
+        let said = plan::run(&repo.plan()).expect("plan");
+        assert_eq!(field(&said, "release"), "false", "{name}");
+        assert_eq!(
+            field(&said, "reason"),
+            format!("v0.1.2 is a release past {old}: a newer release exists"),
+            "{name}"
+        );
+    }
+}
+
+/// Catches a re-run of an old release run when the live tip is told truthfully: main is
+/// at the newer commit, so the old commit is not released.
+#[test]
+fn a_rerun_of_an_old_release_run_finds_main_moved() {
+    let repo = released("old-run");
+    repo.write("crates/app/src/lib.rs", "// first\n");
+    let old = repo.commit("first");
+    repo.tag("v0.1.1");
+    repo.write("crates/app/src/lib.rs", "// second\n");
+    let newer = repo.commit("second");
+    repo.tag("v0.1.2");
+    repo.git(&["checkout", "--quiet", &old]);
+    let mut args = repo.plan();
+    args.tip = newer.clone();
+    let said = plan::run(&args).expect("plan");
+    assert_eq!(field(&said, "release"), "false");
+    assert_eq!(
+        field(&said, "reason"),
+        format!("main is at {newer} now, past {old}: the push that moved it releases this change")
+    );
+}
+
+/// Catches the range starting at a tag the commit does not contain: a higher tag on a
+/// side branch (or pushed by mistake) is not the latest release of this history, so the
+/// version counts from the highest tag merged into the commit.
+#[test]
+fn a_higher_tag_that_is_not_merged_is_ignored() {
+    let repo = released("side-tag");
+    repo.git(&["checkout", "--quiet", "-b", "side"]);
+    repo.write("crates/lib/src/lib.rs", "// side\n");
+    repo.commit("side");
+    repo.tag("v0.9.0");
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.write("crates/app/src/lib.rs", "// main\n");
+    repo.commit("main");
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "release"), "true");
+    assert_eq!(field(&said, "version"), "0.1.1");
+    assert_eq!(field(&said, "tag_exists"), "false");
+    assert_eq!(
+        field(&said, "reason"),
+        "crates/app/src/lib.rs changed since v0.1.0"
+    );
+}
+
+/// Catches a file that left a shipped directory going unnoticed: git reports a move as a
+/// rename and shows only the new name, so the old name (in a shipped directory) must be
+/// listed too. Deleting a shipped file changes the binary as well.
+#[test]
+fn moving_or_deleting_a_shipped_file_releases() {
+    for (name, destination) in [("move-out", Some("docs/helper.txt")), ("delete", None)] {
+        let repo = Repo::new(name);
+        let text = "// a helper that is long enough\n// to be recognised as the same file\n";
+        repo.write("crates/lib/src/helper.rs", text);
+        repo.commit("helper");
+        repo.tag("v0.1.0");
+        repo.git(&["rm", "--quiet", "crates/lib/src/helper.rs"]);
+        if let Some(to) = destination {
+            repo.write(to, text);
+        }
+        repo.commit("remove the helper from the crate");
+        let said = plan::run(&repo.plan()).expect("plan");
+        assert_eq!(field(&said, "release"), "true", "{name}");
+        assert_eq!(
+            field(&said, "reason"),
+            "crates/lib/src/helper.rs changed since v0.1.0",
+            "{name}"
+        );
+    }
 }
 
 /// Catches a dry run that is skipped for the very change it is meant to exercise (a pull

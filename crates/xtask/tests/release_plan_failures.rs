@@ -25,8 +25,8 @@ fn fake_git(dir: &std::path::Path, name: &str, needle: &str, reply: &str) -> Pat
 }
 
 /// Catches a plan that carries on, or reports success, when a command it depends on
-/// fails: every command in turn (the checkout, the tags, the tag's commit, the diff and the
-/// workspace metadata) failing is an error naming the command, and one that prints bytes
+/// fails: every command in turn (the checkout, the tags merged into the head, the tags
+/// containing it, the tag's commit, the diff and the workspace metadata) failing is an error naming the command, and one that prints bytes
 /// that are not text is refused.
 #[test]
 fn every_failing_command_fails_the_plan() {
@@ -38,7 +38,14 @@ fn every_failing_command_fails_the_plan() {
     std::fs::create_dir_all(&bin).expect("bin");
 
     let boom = "echo boom >&2; exit 1";
-    for needle in ["rev-parse", "tag --list", "rev-list", "diff"] {
+    for needle in [
+        "rev-parse",
+        "--merged",
+        "--contains",
+        "rev-list",
+        "diff",
+        "ls-files",
+    ] {
         let mut args = repo.plan();
         args.git = fake_git(
             &bin,

@@ -13,7 +13,8 @@
 //! `examples/`, markdown and `Cargo.lock`; so do the root `Cargo.toml`, `Cargo.lock`,
 //! `rust-toolchain.toml` and everything under `.cargo/`. Everything else does not: docs,
 //! markdown, `.github/`, and the crates no shipped binary depends on (`xtask`,
-//! `js-coverage`, `js-conformance`).
+//! `js-coverage`, `js-conformance`). A file in one of the excluded places that a shipped
+//! source includes (`include_str!` and its kin, read by [`include`]) ships too.
 //!
 //! The version: one patch above the latest tag, unless the workspace version in
 //! `Cargo.toml` is above it, which is used as is. No tag yet: the workspace version.
@@ -25,6 +26,7 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+pub mod include;
 pub mod plan;
 pub mod stamp;
 
@@ -84,6 +86,15 @@ pub enum Error {
     /// A workspace member's manifest is not below the workspace root.
     #[error("the manifest of {0} is not below the workspace root")]
     OutsideWorkspace(String),
+    /// A shipped source includes a file by something other than a plain string literal, so
+    /// the file it compiles in cannot be told.
+    #[error("{file}:{line}: an include whose path is not a plain string literal")]
+    Include {
+        /// The source file.
+        file: String,
+        /// The line of the include.
+        line: usize,
+    },
     /// The checkout is not at the commit the run is about.
     #[error("the checkout is at {actual}, not at --head {expected}")]
     WrongCheckout {
@@ -244,7 +255,8 @@ const CARGO_DIR: &str = ".cargo/";
 /// a root build input (including everything under `.cargo/`), or a file of a shipped crate.
 /// Everything in a shipped crate ships (a file can be `include_str!`'d from anywhere in
 /// it) except what is never compiled into a binary: `tests/`, `benches/`, `examples/`,
-/// markdown outside `src/`, and a crate-level `Cargo.lock` (cargo reads the workspace's).
+/// markdown outside `src/`, and a crate-level `Cargo.lock` (cargo reads the workspace's);
+/// a file of those kinds that a shipped source includes still ships ([`first_shipped`]).
 pub fn is_shipped(path: &str, dirs: &BTreeSet<String>) -> bool {
     ROOT_FILES.contains(&path)
         || path.starts_with(CARGO_DIR)
@@ -266,12 +278,18 @@ fn crate_file_ships(rest: &str) -> bool {
         || rest == "Cargo.lock")
 }
 
-/// The first of `changed` that ships, if any.
-pub fn first_shipped<'a>(changed: &'a [String], dirs: &BTreeSet<String>) -> Option<&'a str> {
+/// The first of `changed` that ships, if any: a path [`is_shipped`] accepts, or one of
+/// `included`, the files the shipped sources compile in ([`include::targets`]), whatever
+/// their location.
+pub fn first_shipped<'a>(
+    changed: &'a [String],
+    dirs: &BTreeSet<String>,
+    included: &BTreeSet<String>,
+) -> Option<&'a str> {
     changed
         .iter()
         .map(String::as_str)
-        .find(|path| is_shipped(path, dirs))
+        .find(|path| is_shipped(path, dirs) || included.contains(*path))
 }
 
 /// The root manifest as far as the workspace version.

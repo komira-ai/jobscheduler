@@ -233,9 +233,70 @@ fn only_compiled_files_of_shipped_crates_and_the_root_inputs_ship() {
 fn the_first_shipped_path_is_named() {
     let shipped = dirs(&["crates/a"]);
     let mixed = strings(&["docs/x.md", "crates/a/src/lib.rs", "Cargo.lock"]);
-    assert_eq!(first_shipped(&mixed, &shipped), Some("crates/a/src/lib.rs"));
-    assert_eq!(first_shipped(&strings(&["docs/x.md"]), &shipped), None);
-    assert_eq!(first_shipped(&[], &shipped), None);
+    let none = BTreeSet::new();
+    assert_eq!(
+        first_shipped(&mixed, &shipped, &none),
+        Some("crates/a/src/lib.rs")
+    );
+    assert_eq!(
+        first_shipped(&strings(&["docs/x.md"]), &shipped, &none),
+        None
+    );
+    assert_eq!(first_shipped(&[], &shipped, &none), None);
+    // An included file ships although its place would not.
+    let included = dirs(&["crates/a/help.md"]);
+    let docs = strings(&["docs/x.md", "crates/a/help.md"]);
+    assert_eq!(
+        first_shipped(&docs, &shipped, &included),
+        Some("crates/a/help.md")
+    );
+}
+
+/// Catches an include read wrongly: each macro, a path across lines and with `..` and `.`,
+/// and the macro named in prose, are read; a path that is not a plain literal is an error
+/// naming the line.
+#[test]
+fn includes_are_read_as_paths_from_the_source() {
+    let text = "const A: &str = include_str!(\"../a.toml\");\n\
+                const B: &[u8] = include_bytes!(\n  \"./data/b.bin\"\n);\n\
+                include!(\"gen/../c.rs\");\n\
+                // include_str! reads a file; so does include_bytes! in the docs\n";
+    let mut found = include::targets("crates/x/src/deep/lib.rs", text).expect("includes");
+    found.sort();
+    assert_eq!(
+        found,
+        [
+            "crates/x/src/a.toml",
+            "crates/x/src/deep/c.rs",
+            "crates/x/src/deep/data/b.bin"
+        ]
+    );
+    assert_eq!(include::targets("a.rs", "fn main() {}"), Ok(vec![]));
+    // Not a string literal, a raw string and an escape cannot be resolved.
+    for (bad, line) in [
+        ("\n\ninclude_str!(concat!(\"a\", \"b\"));", 3),
+        ("include_bytes!(r\"a\");", 1),
+        ("include!(\"a\\\\b\");", 1),
+        ("include_str!(", 1),
+        ("include_str!(\"unterminated", 1),
+    ] {
+        assert_eq!(
+            include::targets("a.rs", bad),
+            Err(Error::Include {
+                file: "a.rs".to_owned(),
+                line
+            }),
+            "{bad}"
+        );
+    }
+    assert!(
+        Error::Include {
+            file: "a.rs".into(),
+            line: 2
+        }
+        .to_string()
+        .starts_with("a.rs:2:")
+    );
 }
 
 const MANIFEST: &str = r#"[workspace]
