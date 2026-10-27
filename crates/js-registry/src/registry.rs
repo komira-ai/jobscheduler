@@ -498,6 +498,7 @@ impl Registry {
         );
         Ok(HeartbeatReply {
             taint_ack: heartbeat.taint.is_some(),
+            exclusive: None,
             ..reply
         })
     }

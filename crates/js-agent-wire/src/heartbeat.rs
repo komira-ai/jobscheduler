@@ -92,6 +92,84 @@ pub struct Taint {
     pub check: Option<String>,
 }
 
+/// Why a host will not take a whole-node lease (design 5.4). The scheduler acts on the
+/// code only and never parses the detail.
+///
+/// An unknown code text decodes as [`RefusalReason::SetupFailed`]: a refusal this version
+/// cannot classify still counts as a failed prepare, never as a success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub enum RefusalReason {
+    /// The host is not quiet: other work runs on it.
+    NotQuiet,
+    /// The host's noise is over the pool's bound.
+    NoiseOverBound,
+    /// The agent's setup (checks or the readiness hook) failed. Also what a code this
+    /// version does not know reads as.
+    SetupFailed,
+    /// The host is not safe to hand over whole.
+    HostUnsafe,
+    /// The host cannot serve a whole-node lease at all.
+    Unsupported,
+}
+
+impl From<String> for RefusalReason {
+    fn from(text: String) -> Self {
+        match text.as_str() {
+            "not-quiet" => Self::NotQuiet,
+            "noise-over-bound" => Self::NoiseOverBound,
+            "host-unsafe" => Self::HostUnsafe,
+            "unsupported" => Self::Unsupported,
+            _ => Self::SetupFailed,
+        }
+    }
+}
+
+impl From<RefusalReason> for String {
+    fn from(reason: RefusalReason) -> Self {
+        let text = match reason {
+            RefusalReason::NotQuiet => "not-quiet",
+            RefusalReason::NoiseOverBound => "noise-over-bound",
+            RefusalReason::SetupFailed => "setup-failed",
+            RefusalReason::HostUnsafe => "host-unsafe",
+            RefusalReason::Unsupported => "unsupported",
+        };
+        text.to_string()
+    }
+}
+
+/// An agent's refusal of an exclusive lease it was told to prepare for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExclusiveRefusal {
+    /// The lease the refusal is for.
+    pub lease_id: String,
+    /// Why, as a code from the bounded set.
+    pub code: RefusalReason,
+    /// Free text for a person, at most [`limits::MAX_REFUSAL_DETAIL`] bytes with no
+    /// control or format character; may be empty. The scheduler never parses it.
+    #[serde(default)]
+    pub detail: String,
+}
+
+impl ExclusiveRefusal {
+    /// Checks the lease id and the detail.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("exclusive_refused", refusal::INVALID_HEARTBEAT))
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::ident(at.field("exclusive_refused.lease_id"), &self.lease_id)?;
+        if self.detail.is_empty() {
+            return Ok(());
+        }
+        check::text(
+            at.field("exclusive_refused.detail"),
+            &self.detail,
+            limits::MAX_REFUSAL_DETAIL,
+        )
+    }
+}
+
 /// The periodic message, agent to server.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
@@ -119,6 +197,15 @@ pub struct Heartbeat {
     /// The taint report, until the server acknowledges it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<Taint>,
+    /// The lease id of the exclusive lease the host has finished preparing for; the
+    /// scheduler mints the lease token only on seeing it. Not sent together with
+    /// [`Heartbeat::exclusive_refused`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_ready: Option<String>,
+    /// The host's refusal of an exclusive lease. Not sent together with
+    /// [`Heartbeat::exclusive_ready`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_refused: Option<ExclusiveRefusal>,
 }
 
 /// The server's verdict on a [`RunResult`].
@@ -164,6 +251,10 @@ pub struct HeartbeatReply {
     /// Whether the taint report was recorded; the agent then stops sending it.
     #[serde(default)]
     pub taint_ack: bool,
+    /// The lease id of an exclusive lease granted to this host: the agent is to prepare
+    /// for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<String>,
 }
 
 impl HeldRun {
@@ -244,6 +335,8 @@ impl fmt::Debug for Heartbeat {
             .field("held", &self.held)
             .field("results", &self.results)
             .field("taint", &self.taint)
+            .field("exclusive_ready", &self.exclusive_ready)
+            .field("exclusive_refused", &self.exclusive_refused)
             .finish()
     }
 }
@@ -269,10 +362,22 @@ impl Heartbeat {
             results,
             self.results.iter().map(|result| result.run_id.as_str()),
         )?;
-        match &self.taint {
-            Some(taint) => taint.check(at),
-            None => Ok(()),
+        if let Some(taint) = &self.taint {
+            taint.check(at)?;
         }
+        self.check_exclusive(at)
+    }
+
+    /// The lease id of a ready or refused report, and that the two are not both sent.
+    fn check_exclusive(&self, at: At) -> Result<(), ValidationError> {
+        check::opt_ident(at.field("exclusive_ready"), self.exclusive_ready.as_ref())?;
+        if let Some(refused) = &self.exclusive_refused {
+            refused.check(at)?;
+            if self.exclusive_ready.is_some() {
+                return Err(at.field("exclusive_refused").fail(Rule::Inconsistent));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -315,6 +420,9 @@ pub struct ReplyCheck<'a> {
     /// with a good run id, none twice). When this is an error the agent ignores
     /// `result_acks` and still acts on `commands`.
     pub acks: Result<(), ValidationError>,
+    /// Whether the lease id of `exclusive` is acceptable. When this is an error the agent
+    /// does not prepare and still acts on `commands`.
+    pub exclusive: Result<(), ValidationError>,
 }
 
 impl HeartbeatReply {
@@ -346,6 +454,7 @@ impl HeartbeatReply {
             commands,
             refused,
             acks: self.check_acks(at),
+            exclusive: check::opt_ident(at.field("exclusive"), self.exclusive.as_ref()),
         }
     }
 
