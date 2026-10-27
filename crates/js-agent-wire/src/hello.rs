@@ -1,12 +1,16 @@
-//! Opening a session: [`Hello`], its answer [`Welcome`], and the parts they share with
-//! the heartbeat ([`Phase`]).
+//! Opening a session: [`Hello`], its answer [`HelloReply`] (a [`Welcome`] or a [`Refused`]),
+//! and the parts they share with the heartbeat ([`Phase`]).
 
 use std::collections::BTreeMap;
 
-use js_types::{HostId, IdError, LabelError, Labels, Resources, Shape, TypeError};
+use js_types::{HostId, ProviderId, Resources, Shape, TypeError};
 use serde::{Deserialize, Serialize};
 
+use crate::check::{self, At};
+use crate::error::{Rule, ValidationError};
 use crate::heartbeat::HeldRun;
+use crate::limits;
+use crate::protocol::{self, ProtocolRange};
 use crate::refusal;
 
 /// What a host announces about itself (design 5.3). A host takes new work only in
@@ -64,28 +68,33 @@ impl From<Phase> for String {
 }
 
 /// The capacity vector of a host on the wire: what [`js_types::Resources`] holds, as
-/// plain fields.
+/// plain fields, and the lease-count cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireShape {
-    /// Thousandths of a CPU core.
+    /// Thousandths of a CPU core; at most [`limits::MAX_CPU_MILLIS`].
     pub cpu_millis: u64,
-    /// Bytes of memory.
+    /// Bytes of memory; at most [`limits::MAX_MEMORY_BYTES`].
     pub memory_bytes: u64,
-    /// Whole GPU devices.
+    /// Whole GPU devices; at most [`limits::MAX_GPUS`].
     pub gpus: u64,
     /// The class of the GPUs; required exactly when `gpus` is above zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_class: Option<String>,
+    /// The most leases the host takes at once, when the host caps them; from 1 to
+    /// [`limits::MAX_LEASE_CAP`]. Absent means the host states no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_leases: Option<u64>,
 }
 
 impl WireShape {
-    /// The wire form of a resource vector.
+    /// The wire form of a resource vector, with no lease-count cap.
     pub fn from_resources(resources: &Resources) -> Self {
         Self {
             cpu_millis: resources.cpu_millis(),
             memory_bytes: resources.memory_bytes(),
             gpus: resources.gpus(),
             gpu_class: resources.gpu_class().map(str::to_string),
+            max_leases: None,
         }
     }
 
@@ -97,6 +106,24 @@ impl WireShape {
             self.gpus,
             self.gpu_class.clone(),
         )
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        let cpu = at.field("shape.cpu_millis");
+        check::range(cpu, self.cpu_millis, 0, limits::MAX_CPU_MILLIS)?;
+        let memory = at.field("shape.memory_bytes");
+        check::range(memory, self.memory_bytes, 0, limits::MAX_MEMORY_BYTES)?;
+        let gpus = at.field("shape.gpus");
+        check::range(gpus, self.gpus, 0, limits::MAX_GPUS)?;
+        let class = at.field("shape.gpu_class");
+        check::opt_ident(class, self.gpu_class.as_ref())?;
+        if (self.gpus > 0) != self.gpu_class.is_some() {
+            return Err(class.fail(Rule::Inconsistent));
+        }
+        if let Some(cap) = self.max_leases {
+            check::range(at.field("shape.max_leases"), cap, 1, limits::MAX_LEASE_CAP)?;
+        }
+        Ok(())
     }
 }
 
@@ -113,22 +140,51 @@ pub struct GpuDevice {
     pub memory_bytes: u64,
 }
 
+impl GpuDevice {
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        let uuid = at.field("gpu_devices.uuid");
+        check::text(uuid, &self.uuid, limits::MAX_GPU_TEXT_LEN)?;
+        let model = at.field("gpu_devices.model");
+        check::text(model, &self.model, limits::MAX_GPU_TEXT_LEN)?;
+        let memory = at.field("gpu_devices.memory_bytes");
+        check::range(memory, self.memory_bytes, 0, limits::MAX_MEMORY_BYTES)
+    }
+}
+
+/// Where a launched instance says it runs: the provider's id and the instance id the
+/// provider gave it. The proof of that identity travels in the transport, not here; the
+/// server matches the two against the instance it launched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceIdentity {
+    /// The provider's id, as in `js-types` provider ids.
+    pub provider: String,
+    /// The provider's id for the instance, such as an instance id.
+    pub instance_id: String,
+}
+
 /// The first message of a session, agent to server (design 5.2). Proof of admission is
 /// not a field: it travels in the transport's headers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
+    /// The majors the agent speaks (see [`crate::protocol`]). Absent means major 1.
+    #[serde(default = "protocol::first_major_range")]
+    pub protocol: ProtocolRange,
     /// The host's id.
     pub host_id: String,
     /// The pool the host asks to join.
     pub pool: String,
     /// The agent's version text.
     pub agent_version: String,
+    /// The provider identity of a launched instance; absent for a machine that joins
+    /// with the pool's join credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<InstanceIdentity>,
     /// What the host offers.
     pub shape: WireShape,
     /// Typed facts the host reports, such as `os`.
     #[serde(default)]
     pub capabilities: BTreeMap<String, String>,
-    /// The GPU devices behind `shape.gpus`.
+    /// The GPU devices behind `shape.gpus`; when listed, as many as `shape.gpus`.
     #[serde(default)]
     pub gpu_devices: Vec<GpuDevice>,
     /// Labels the operator set on the host; none may use the reserved prefix.
@@ -142,33 +198,6 @@ pub struct Hello {
     pub held: Vec<HeldRun>,
 }
 
-/// Why a [`Hello`] is refused.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum HelloError {
-    /// The host id is empty, long or outside the id alphabet.
-    #[error("host_id: {0}")]
-    HostId(IdError),
-    /// An id the hello must name is empty.
-    #[error("{0} must not be empty")]
-    EmptyId(&'static str),
-    /// A label is refused by the label rules (reserved prefix, empty key, bad value).
-    #[error("labels: {0}")]
-    Label(LabelError),
-    /// The shape counts GPUs without a class, or names a class for no GPUs.
-    #[error("shape: {0}")]
-    Shape(TypeError),
-}
-
-impl HelloError {
-    /// The refusal code that goes on the wire for this error.
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::Label(LabelError::Reserved(_)) => refusal::RESERVED_LABEL,
-            _ => refusal::INVALID_HELLO,
-        }
-    }
-}
-
 impl Hello {
     /// The shape the host offers: its resource vector and its capabilities.
     pub fn to_shape(&self) -> Result<Shape, TypeError> {
@@ -176,32 +205,181 @@ impl Hello {
         Ok(Shape::new(resources, self.capabilities.clone()))
     }
 
-    /// Checks the hello: a valid host id, a pool and run ids that are not empty, labels
-    /// free of the reserved prefix, and a GPU class named exactly when there are GPUs.
-    pub fn validate(&self) -> Result<(), HelloError> {
-        HostId::new(&self.host_id).map_err(HelloError::HostId)?;
-        if self.pool.is_empty() {
-            return Err(HelloError::EmptyId("pool"));
+    /// The protocol major to answer with: the newest both sides speak. A range that is
+    /// empty, or shares no major with this crate's, is refused; the second reports
+    /// [`refusal::UNSUPPORTED_PROTOCOL`] so the agent can tell it from a malformed hello.
+    pub fn negotiate(&self) -> Result<u32, ValidationError> {
+        self.protocol.check("protocol", refusal::INVALID_HELLO)?;
+        self.protocol
+            .negotiate(&ProtocolRange::THIS)
+            .ok_or_else(|| {
+                ValidationError::new(
+                    "protocol",
+                    Rule::UnsupportedProtocol,
+                    refusal::UNSUPPORTED_PROTOCOL,
+                )
+            })
+    }
+
+    /// Checks the hello against every bound of [`crate::limits`]: the protocol range, the
+    /// ids, the shape, GPU facts, labels and capabilities, and the held runs (no run id
+    /// twice). The server calls it on every hello before it looks at the pool or the
+    /// credential; `validate` reads no state.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.negotiate()?;
+        let at = At::new("hello", refusal::INVALID_HELLO);
+        check_host_id(at.field("host_id"), &self.host_id)?;
+        check::ident(at.field("pool"), &self.pool)?;
+        check::text(
+            at.field("agent_version"),
+            &self.agent_version,
+            limits::MAX_VERSION_LEN,
+        )?;
+        if let Some(instance) = &self.instance {
+            instance.check(at)?;
         }
-        if self.held.iter().any(|held| held.run_id.is_empty()) {
-            return Err(HelloError::EmptyId("held run_id"));
+        self.shape.check(at)?;
+        self.check_capabilities(at.field("capabilities"))?;
+        self.check_gpu_devices(at.field("gpu_devices"))?;
+        check::labels(at.field("labels"), &self.labels)?;
+        crate::heartbeat::check_held(at.field("held"), &self.held)
+    }
+
+    fn check_capabilities(&self, at: At) -> Result<(), ValidationError> {
+        check::count(at, self.capabilities.len(), limits::MAX_CAPABILITIES)?;
+        for (key, value) in &self.capabilities {
+            check::token(at, key, limits::MAX_CAPABILITY_KEY_LEN, check::ident_byte)?;
+            check::text(at, value, limits::MAX_CAPABILITY_VALUE_LEN)?;
         }
-        Labels::from_caller(&self.labels).map_err(HelloError::Label)?;
-        self.to_shape().map_err(HelloError::Shape)?;
         Ok(())
     }
+
+    fn check_gpu_devices(&self, at: At) -> Result<(), ValidationError> {
+        check::count(at, self.gpu_devices.len(), limits::MAX_GPUS as usize)?;
+        let listed = !self.gpu_devices.is_empty();
+        let unequal = self.gpu_devices.len() as u64 != self.shape.gpus;
+        if [listed, unequal].into_iter().all(|both| both) {
+            return Err(at.fail(Rule::Inconsistent));
+        }
+        check::distinct(at, self.gpu_devices.iter().map(|device| device.index))?;
+        for device in &self.gpu_devices {
+            device.check(at)?;
+        }
+        Ok(())
+    }
+}
+
+impl InstanceIdentity {
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        let provider = at.field("instance.provider");
+        check::ident(provider, &self.provider)?;
+        ProviderId::new(&self.provider).map_err(|_| provider.fail(Rule::BadChars))?;
+        check::ident(at.field("instance.instance_id"), &self.instance_id)
+    }
+}
+
+/// A host id: the id alphabet and cap of [`check::ident`], and the stricter rules of
+/// `js-types` host ids (lower case, at most 63 bytes).
+pub(crate) fn check_host_id(at: At, value: &str) -> Result<(), ValidationError> {
+    check::ident(at, value)?;
+    HostId::new(value).map_err(|_| at.fail(Rule::BadChars))?;
+    Ok(())
 }
 
 /// The server's answer to an accepted [`Hello`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Welcome {
+    /// The protocol major both sides speak from here on. Absent means major 1.
+    #[serde(default = "protocol::first_major")]
+    pub protocol: u32,
     /// The session. Every heartbeat names it; a heartbeat for another epoch is stale.
     pub epoch: u64,
-    /// How often the agent heartbeats, in milliseconds.
+    /// How often the agent heartbeats, in milliseconds: above zero, at most
+    /// [`limits::MAX_HEARTBEAT_INTERVAL_MS`].
     pub heartbeat_interval_ms: u64,
     /// How long the server waits in silence before it treats the host as lost, in
-    /// milliseconds. It exceeds two heartbeat intervals ([`crate::grace_covers_heartbeats`]).
+    /// milliseconds. It exceeds two heartbeat intervals ([`crate::grace_covers_heartbeats`])
+    /// and is at most [`limits::MAX_GRACE_MS`].
     pub grace_ms: u64,
     /// The pool the host was admitted to.
     pub pool: String,
+}
+
+impl Welcome {
+    /// Checks the welcome the way the agent must before it acts on it: a server (or
+    /// whoever answers in its place) is not trusted to send a zero interval that would
+    /// make the agent spin, a grace shorter than the interval, or a protocol the agent
+    /// does not speak.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        let at = At::new("welcome", refusal::INVALID_WELCOME);
+        let speaks = ProtocolRange::THIS;
+        let protocol = at.field("protocol");
+        check::range(
+            protocol,
+            u64::from(self.protocol),
+            u64::from(speaks.min),
+            u64::from(speaks.max),
+        )?;
+        let interval = at.field("heartbeat_interval_ms");
+        check::range(
+            interval,
+            self.heartbeat_interval_ms,
+            1,
+            limits::MAX_HEARTBEAT_INTERVAL_MS,
+        )?;
+        let grace = at.field("grace_ms");
+        check::range(grace, self.grace_ms, 1, limits::MAX_GRACE_MS)?;
+        if !crate::grace_covers_heartbeats(self.heartbeat_interval_ms, self.grace_ms) {
+            return Err(grace.fail(Rule::Inconsistent));
+        }
+        check::ident(at.field("pool"), &self.pool)
+    }
+}
+
+/// A refusal of a hello: the constant code of [`crate::refusal`] and no host is created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refused {
+    /// Why the hello was refused. A code this version does not know is still a refusal.
+    pub code: String,
+    /// For [`refusal::UNSUPPORTED_PROTOCOL`]: the majors the server speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported: Option<ProtocolRange>,
+}
+
+impl Refused {
+    /// Checks the refusal: a short code and a sane range.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        let at = At::new("refused", refusal::INVALID_WELCOME);
+        check::token(
+            at.field("code"),
+            &self.code,
+            limits::MAX_CODE_LEN,
+            check::ident_byte,
+        )?;
+        match &self.supported {
+            Some(range) => range.check("supported", refusal::INVALID_WELCOME),
+            None => Ok(()),
+        }
+    }
+}
+
+/// What the server answers a hello with: a welcome, or a refusal. The transport maps a
+/// refusal to its own status; the body is the same either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HelloReply {
+    /// The host is admitted.
+    Welcome(Welcome),
+    /// The host is not admitted.
+    Refused(Refused),
+}
+
+impl HelloReply {
+    /// Checks whichever answer this is.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        match self {
+            Self::Welcome(welcome) => welcome.validate(),
+            Self::Refused(refused) => refused.validate(),
+        }
+    }
 }

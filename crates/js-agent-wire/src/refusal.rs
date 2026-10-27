@@ -5,18 +5,18 @@
 //! it. A later change adds a code; it never changes or removes one. The
 //! `refusal_codes_snapshot` test fails on a rename.
 
-/// A hello whose body is malformed: a bad host id, an empty id or a malformed shape.
+/// A hello whose body is malformed: a bad id, list, label or shape.
 pub const INVALID_HELLO: &str = "invalid-hello";
 /// A hello (or run) whose labels use a key under the reserved `jobscheduler.dev/`
 /// prefix.
 pub const RESERVED_LABEL: &str = "reserved-label";
 /// A job whose wall-time limit is zero.
 pub const WALL_TIME_NOT_POSITIVE: &str = "wall-time-not-positive";
-/// A job spec with an empty run id or lease id.
+/// A job spec with a malformed id, argument list, limit or label.
 pub const INVALID_JOB: &str = "invalid-job";
-/// A job whose image name is empty.
+/// A job whose image name is empty, too long or outside the image alphabet.
 pub const INVALID_IMAGE: &str = "invalid-image";
-/// A job with a mount that is absolute, climbs with `..` or names no root.
+/// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.
 pub const HOST_LIVE: &str = "host-live";
@@ -38,3 +38,13 @@ pub const HOST_NOT_REGISTERED: &str = "host-not-registered";
 pub const LIMITS_EXCEED_SHAPE: &str = "limits-exceed-shape";
 /// A host job where host jobs are not allowed.
 pub const HOST_JOBS_NOT_ALLOWED: &str = "host-jobs-not-allowed";
+/// A hello whose protocol range shares no major with the server's (see
+/// [`crate::protocol`]).
+pub const UNSUPPORTED_PROTOCOL: &str = "unsupported-protocol";
+/// A heartbeat whose body is malformed: a bad id, list or result.
+pub const INVALID_HEARTBEAT: &str = "invalid-heartbeat";
+/// A welcome whose body is malformed: a zero interval, a grace that does not cover the
+/// interval, a pool or protocol the agent cannot accept.
+pub const INVALID_WELCOME: &str = "invalid-welcome";
+/// A reply whose commands or acknowledgements are malformed.
+pub const INVALID_REPLY: &str = "invalid-reply";

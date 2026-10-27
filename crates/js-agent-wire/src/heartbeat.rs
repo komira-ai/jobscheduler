@@ -4,8 +4,12 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::check::{self, At};
 use crate::command::Command;
+use crate::error::{Rule, ValidationError};
 use crate::hello::Phase;
+use crate::limits;
+use crate::refusal;
 
 /// Where a held run is in its life on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +150,135 @@ pub struct HeartbeatReply {
     /// Whether the taint report was recorded; the agent then stops sending it.
     #[serde(default)]
     pub taint_ack: bool,
+}
+
+impl HeldRun {
+    /// Checks the run id.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("held", refusal::INVALID_HEARTBEAT))
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::ident(at.field("held.run_id"), &self.run_id)
+    }
+}
+
+/// The held list of a hello or heartbeat: at most [`limits::MAX_HELD`] entries, each with
+/// a good run id, no run id twice.
+pub(crate) fn check_held(at: At, held: &[HeldRun]) -> Result<(), ValidationError> {
+    check::count(at, held.len(), limits::MAX_HELD)?;
+    for run in held {
+        run.check(at)?;
+    }
+    check::distinct(at, held.iter().map(|run| run.run_id.as_str()))
+}
+
+impl RunResult {
+    /// Checks the ids, the detail text, and that the exit status agrees with the outcome:
+    /// a success exits with 0, a failure does not.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("results", refusal::INVALID_HEARTBEAT))
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::ident(at.field("results.run_id"), &self.run_id)?;
+        check::ident(at.field("results.lease_id"), &self.lease_id)?;
+        let detail = at.field("results.detail");
+        check::opt_text(detail, self.detail.as_ref(), limits::MAX_DETAIL_LEN)?;
+        match (self.outcome, self.exit_code) {
+            (Outcome::Succeeded, Some(code)) if code != 0 => {
+                Err(at.field("results.exit_code").fail(Rule::Inconsistent))
+            }
+            (Outcome::Failed, Some(0)) => {
+                Err(at.field("results.exit_code").fail(Rule::Inconsistent))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Taint {
+    /// Checks the reason, the run id and the check name.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("taint", refusal::INVALID_HEARTBEAT))
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::text(
+            at.field("taint.reason"),
+            &self.reason,
+            limits::MAX_TAINT_TEXT_LEN,
+        )?;
+        check::opt_ident(at.field("taint.run_id"), self.run_id.as_ref())?;
+        check::opt_text(
+            at.field("taint.check"),
+            self.check.as_ref(),
+            limits::MAX_TAINT_TEXT_LEN,
+        )
+    }
+}
+
+impl Heartbeat {
+    /// Checks the heartbeat against every bound of [`crate::limits`]: the host id, the
+    /// held runs and results (no run id twice in either) and the taint. It reads no
+    /// state: whether the epoch is current and whether the host is known is the
+    /// server's. The server calls it on every heartbeat before it acts on one.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        let at = At::new("heartbeat", refusal::INVALID_HEARTBEAT);
+        crate::hello::check_host_id(at.field("host_id"), &self.host_id)?;
+        check_held(at.field("held"), &self.held)?;
+        let results = at.field("results");
+        check::count(results, self.results.len(), limits::MAX_RESULTS)?;
+        for result in &self.results {
+            result.check(at)?;
+        }
+        check::distinct(
+            results,
+            self.results.iter().map(|result| result.run_id.as_str()),
+        )?;
+        match &self.taint {
+            Some(taint) => taint.check(at),
+            None => Ok(()),
+        }
+    }
+}
+
+impl ResultAck {
+    /// Checks the run id.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("result_acks", refusal::INVALID_REPLY))
+    }
+
+    fn check(&self, at: At) -> Result<(), ValidationError> {
+        check::ident(at.field("result_acks.run_id"), &self.run_id)
+    }
+}
+
+impl HeartbeatReply {
+    /// Checks the reply the way the agent must before it acts on it: at most
+    /// [`limits::MAX_COMMANDS`] commands, each valid (an unknown one passes and is
+    /// skipped), and at most [`limits::MAX_RESULTS`] acknowledgements, each with a good
+    /// run id.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        let at = At::new("reply", refusal::INVALID_REPLY);
+        check::count(
+            at.field("commands"),
+            self.commands.len(),
+            limits::MAX_COMMANDS,
+        )?;
+        for command in &self.commands {
+            command.validate()?;
+        }
+        check::count(
+            at.field("result_acks"),
+            self.result_acks.len(),
+            limits::MAX_RESULTS,
+        )?;
+        for ack in &self.result_acks {
+            ack.check(at)?;
+        }
+        Ok(())
+    }
 }
 
 /// Decodes the commands one by one. A command that does not decode (a kind this version
