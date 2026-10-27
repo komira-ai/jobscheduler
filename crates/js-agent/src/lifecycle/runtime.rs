@@ -157,6 +157,11 @@ pub trait ContainerRuntime {
     /// Every container carrying the agent's run label ([`label::RUN`]), running or
     /// exited.
     ///
+    /// One agent owns a runtime: nothing scopes the label to an agent instance, so every
+    /// container carrying it is treated as this agent's own, and the agent may adopt it or
+    /// stop and remove it. Do not point two agents, or another tool that sets the label,
+    /// at one runtime.
+    ///
     /// # Errors
     ///
     /// The runtime cannot list.

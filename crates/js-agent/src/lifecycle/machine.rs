@@ -190,6 +190,10 @@ impl Lifecycle {
     /// taken over before it (a GPU not offered, or one already booked), and any beyond the
     /// number of runs a heartbeat can list. Nothing is left running without a booking.
     ///
+    /// One agent owns a runtime: the run label is not scoped to an agent instance, so every
+    /// container carrying it is treated as this agent's own, including the removal of those
+    /// that cannot be adopted.
+    ///
     /// # Errors
     ///
     /// The runtime cannot list its containers. The caller must not say hello with an
