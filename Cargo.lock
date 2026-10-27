@@ -854,6 +854,7 @@ dependencies = [
  "postgres",
  "rusqlite",
  "rustix",
+ "sha2",
  "thiserror",
  "tokio",
  "tracing",

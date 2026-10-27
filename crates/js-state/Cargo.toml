@@ -39,6 +39,8 @@ js-state = { path = "../js-state", features = ["test-database", "test-support"] 
 # A child held between fork and exec, for the tests of what releases the file lock, and the
 # test server's URL (`database::server_url`) for the Postgres tests.
 js-testkit = { path = "../js-testkit", features = ["postgres"] }
+# The digest of the first migration's file (tests/migration_identity.rs).
+sha2.workspace = true
 
 [lints]
 workspace = true
