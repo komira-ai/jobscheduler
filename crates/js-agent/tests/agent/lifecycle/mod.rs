@@ -6,7 +6,7 @@
 
 mod adopt;
 mod cleanup;
-mod fake;
+pub mod fake;
 mod flags;
 mod mounts;
 mod results;
@@ -58,20 +58,7 @@ impl Harness {
     pub fn with(name: &str, options: Options) -> Self {
         let dir = Scratch::new(&format!("life-{name}"));
         let scratch = dir.path("scratch");
-        fs::create_dir(&scratch).unwrap();
-        fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::create_dir(dir.path("data")).unwrap();
-        let config = Config {
-            capacity: Capacity {
-                cpu_millis: 4000,
-                memory_bytes: 8 << 30,
-                gpus: BTreeSet::from([0, 1]),
-            },
-            allow_host_jobs: options.allow_host_jobs,
-            mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
-            scratch: ScratchRoot::open(&scratch).unwrap(),
-            stop_grace: GRACE,
-        };
+        let config = config_in(&dir, options.allow_host_jobs);
         let (clock, log) = (ManualClock::default(), Log::default());
         let fake = FakeRuntime::new(&log, &clock);
         let checks = hook(&log, &fake, &scratch, &options.findings);
@@ -146,6 +133,26 @@ impl Harness {
     /// The run ids held, in order.
     pub fn held(&self) -> Vec<String> {
         self.life.held().into_iter().map(|run| run.run_id).collect()
+    }
+}
+
+/// The lifecycle's configuration under `dir`: four CPUs, 8 GiB and GPUs 0 and 1, a
+/// private scratch root and one mount root `data`.
+pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
+    let scratch = dir.path("scratch");
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir(dir.path("data")).unwrap();
+    Config {
+        capacity: Capacity {
+            cpu_millis: 4000,
+            memory_bytes: 8 << 30,
+            gpus: BTreeSet::from([0, 1]),
+        },
+        allow_host_jobs,
+        mounts: MountRoots::new(&[("data".to_owned(), dir.path("data"))]).unwrap(),
+        scratch: ScratchRoot::open(&scratch).unwrap(),
+        stop_grace: GRACE,
     }
 }
 

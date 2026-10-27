@@ -9,6 +9,7 @@
 
 mod backoff;
 mod binary;
+mod cli_runtime;
 mod container;
 mod drive;
 mod e2e;

@@ -25,6 +25,9 @@
 //! | `--allow-host-jobs` | accept a start with `isolation = host`; off by default, and without it such a start creates nothing and is refused |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; without it no container runs |
+//! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; needs `--container-bin` |
+//! | `--container-user <uid:gid>` | the user containers run as, both above zero; by default `65534:65534`; needs `--container-bin` |
 //!
 //! The job flags are checked at start and a wrong one ends the agent with exit status 2.
 //! What they configure is the [`lifecycle`], which no change has connected to the session
@@ -91,6 +94,7 @@
 
 mod backoff;
 mod cli;
+pub mod cli_runtime;
 mod container;
 mod facts;
 mod host;

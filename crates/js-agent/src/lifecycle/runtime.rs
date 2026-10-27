@@ -1,5 +1,6 @@
-//! The container runtime the lifecycle drives: what a backend (Docker or Podman, in a
-//! later change) must do, and the plain data that crosses the seam.
+//! The container runtime the lifecycle drives: what a backend (Docker or Podman, see
+//! [`CliRuntime`](crate::cli_runtime::CliRuntime)) must do, and the plain data that
+//! crosses the seam.
 //!
 //! The trait is small on purpose. Every call is blocking and idempotent where it can be
 //! (`stop` and `remove` of a container that is already gone succeed), and a call that
@@ -28,6 +29,13 @@ pub mod label {
     pub const GPUS: &str = "jobscheduler.dev/gpus";
     /// The wall-time limit in milliseconds.
     pub const WALL_MS: &str = "jobscheduler.dev/wall-ms";
+    /// The id the agent registered under. A runtime puts it on every container it makes
+    /// and lists only the containers that carry it, so two agents sharing one runtime
+    /// never adopt each other's jobs.
+    pub const AGENT: &str = "jobscheduler.dev/agent";
+    /// When a runtime made the container, in milliseconds since the Unix epoch; a
+    /// runtime that can read it back reports a restarted container's age from it.
+    pub const CREATED_MS: &str = "jobscheduler.dev/created-ms";
 }
 
 /// A container's id as the runtime names it. Opaque to the agent.
@@ -152,4 +160,10 @@ pub trait ContainerRuntime {
     ///
     /// The runtime cannot list.
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError>;
+
+    /// Whether a container made here can use a GPU. A start that names a GPU where this
+    /// is false is refused (`gpu-unsupported`) and creates nothing.
+    fn supports_gpus(&self) -> bool {
+        true
+    }
 }

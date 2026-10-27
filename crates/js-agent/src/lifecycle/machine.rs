@@ -347,6 +347,12 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if !spec.gpu_indices.is_empty() && !self.runtime.supports_gpus() {
+            return Err(no(
+                detail::GPU_UNSUPPORTED,
+                "containers on this host cannot use a GPU",
+            ));
+        }
         let (offered, want) = (&self.config.capacity, &spec.limits);
         let exists = [
             want.cpu_millis <= offered.cpu_millis,

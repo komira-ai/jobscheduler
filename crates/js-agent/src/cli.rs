@@ -70,6 +70,19 @@ pub struct Cli {
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
+    /// The absolute path of the `docker` or `podman` program that runs container jobs.
+    /// It is started by exactly this path, never looked up on the `PATH`; without it the
+    /// agent runs no container.
+    #[arg(long, value_name = "PATH")]
+    pub container_bin: Option<PathBuf>,
+    /// The network containers join: the name of a user-defined network. By default
+    /// `none`, no network at all. `host` is refused. Needs `--container-bin`.
+    #[arg(long, value_name = "NAME")]
+    pub container_network: Option<String>,
+    /// The `<uid>:<gid>` containers run as, both above zero. By default `65534:65534`.
+    /// Needs `--container-bin`.
+    #[arg(long, value_name = "UID:GID")]
+    pub container_user: Option<String>,
 }
 
 /// `name=path` split at the first `=`.

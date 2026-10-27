@@ -17,7 +17,8 @@
 //! - **A start that must be refused creates nothing** and is answered with a result of
 //!   outcome `failed_to_start` and the refusal code as its detail, held like any other
 //!   result: a host job on an agent without `--allow-host-jobs`
-//!   (`host-jobs-not-allowed`), a job larger than the machine or naming a GPU index it
+//!   (`host-jobs-not-allowed`), a job that names a GPU where the runtime's containers
+//!   cannot use one (`gpu-unsupported`), a job larger than the machine or naming a GPU index it
 //!   does not offer (`limits-exceed-shape`), one that does not fit what is free or
 //!   names a booked GPU (`no-capacity`), and a mount that names no root, does not exist
 //!   or leaves its root (`invalid-mount`).
@@ -55,6 +56,7 @@ use std::time::Duration;
 use js_agent_wire::Hello;
 
 use crate::cli::Cli;
+use crate::cli_runtime::Settings;
 
 pub use machine::{Lifecycle, RETIRED_CAP};
 pub use mounts::{MountError, MountRoots};
@@ -70,6 +72,9 @@ pub mod detail {
     pub const SCRATCH_FAILED: &str = "scratch-failed";
     /// The runtime could not create or start the container.
     pub const RUNTIME_FAILED: &str = "runtime-failed";
+    /// The job names a GPU and the runtime's containers cannot use one (a container on a
+    /// Mac cannot reach the Apple GPU). Nothing is created.
+    pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
 }
 
 /// The codes of a [`Finding`].
@@ -256,11 +261,15 @@ pub struct Local {
     pub mounts: MountRoots,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
+    /// `--container-bin`, `--container-network` and `--container-user`, when containers
+    /// are enabled by `--container-bin`.
+    pub container: Option<Settings>,
 }
 
 impl Local {
     /// Checks the job flags of `cli`: every mount root exists and is canonicalised, the
-    /// scratch root is private to the user running the agent.
+    /// scratch root is private to the user running the agent, the container runtime is
+    /// an absolute path to an executable file.
     ///
     /// # Errors
     ///
@@ -274,6 +283,12 @@ impl Local {
                 .as_deref()
                 .map(ScratchRoot::open)
                 .transpose()?,
+            container: Settings::from_flags(
+                cli.container_bin.as_deref(),
+                cli.container_network.as_deref(),
+                cli.container_user.as_deref(),
+            )
+            .map_err(|why| why.to_string())?,
         })
     }
 }
