@@ -256,13 +256,6 @@ fn a_mac_with_an_amd_gpu_offers_none() {
 fn missing_cpu_or_memory_facts_are_errors() {
     let cases = [
         (
-            linux_host()
-                .commands
-                .with(CPU_CMD, Err("getconf: not found")),
-            linux_host(),
-            "cannot count the CPUs: getconf: not found",
-        ),
-        (
             linux_host().commands.with(CPU_CMD, Ok("many\n")),
             linux_host(),
             "cannot count the CPUs: getconf did not print a number",
@@ -307,6 +300,33 @@ fn missing_cpu_or_memory_facts_are_errors() {
         let said = detect(&host.platform, &host.commands, &host.files).unwrap_err();
         assert_eq!(said, expected);
     }
+}
+
+/// Asserts that a host without `getconf` is still counted, by the standard library, with
+/// a warning that names the failure and the stand-in, on both platforms and in the text
+/// the program prints (a `getconf` that prints no number stays an error, see
+/// `missing_cpu_or_memory_facts_are_errors`). It catches a start that fails on a minimal
+/// image, and a fallback that is silent.
+#[test]
+fn a_missing_getconf_falls_back_to_the_standard_count_with_a_warning() {
+    let counted = std::thread::available_parallelism().unwrap().get() as u64;
+    let note = "getconf: not found; counted the CPUs with the standard library instead";
+    for mut host in [linux_host(), mac_host()] {
+        host.commands = host.commands.with(CPU_CMD, Err("getconf: not found"));
+        let found = detect(&host.platform, &host.commands, &host.files).unwrap();
+        assert_eq!(found.cpu_millis, counted * 1000);
+        assert_eq!(found.warnings, [note]);
+    }
+    let mut host = linux_host();
+    host.commands = host.commands.with(CPU_CMD, Err("getconf: not found"));
+    let (ran, sent, _) = run_scripted(&[], &host, vec![crate::support::welcome(1)], 1);
+    assert_eq!(ran.status(), crate::support::code(0), "{}", ran.err);
+    assert!(
+        ran.err.contains(&format!("js-agent: warning: {note}")),
+        "{}",
+        ran.err
+    );
+    assert_eq!(sent.borrow()[0].1["shape"]["cpu_millis"], counted * 1000);
 }
 
 /// Asserts the machine id comes from `/etc/machine-id` on Linux and from the platform
@@ -442,6 +462,22 @@ fn a_probe_that_prints_too_much_is_killed_and_collected() {
     assert_eq!(edge.run("printf", &["abcde"]).unwrap(), "abcde");
     let said = edge.run("printf", &["abcdef"]).unwrap_err();
     assert_eq!(said, "printf: printed more than 5 bytes");
+}
+
+/// Asserts that the cap is enforced while the output is read: a program that prints
+/// without end (`/usr/bin/yes`, which never exits and never closes its output) is refused
+/// as too chatty, not as timed out, and its process is gone when the runner returns. The
+/// limit is far above the time the refusal takes, so a runner that reads without a bound
+/// (and so never sees the cap) ends by the limit and fails the message check. It catches
+/// an unbounded read.
+#[test]
+fn a_probe_that_prints_without_end_is_refused_at_the_cap() {
+    let dir = Scratch::new("probe_endless");
+    let file = dir.path("pid");
+    let runner = SystemCommands::bounded(Duration::from_secs(5), 1024);
+    let said = run_script(&runner, "echo $$ > \"$0\"; exec /usr/bin/yes", &file).unwrap_err();
+    assert_eq!(said, "sh: printed more than 1024 bytes");
+    assert!(test_kill_process(pid_in(&file)).is_err(), "still running");
 }
 
 /// The runner the program uses is bounded by default: a program that prints a megabyte

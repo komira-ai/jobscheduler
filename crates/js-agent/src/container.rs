@@ -8,6 +8,22 @@ use crate::facts::FileReader;
 /// Where the cgroup v2 hierarchy is mounted.
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
+/// A warning when `/proc/self/cgroup` has cgroup v1 lines and no version 2 line: the limits
+/// such a process may be under are not read, so the offer is the machine's totals.
+pub(crate) fn warning(files: &dyn FileReader) -> Option<String> {
+    files
+        .read("/proc/self/cgroup")
+        .ok()
+        .filter(|text| {
+            let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            !lines.is_empty() && lines.iter().all(|line| !line.starts_with("0::"))
+        })
+        .map(|_| {
+            "/proc/self/cgroup is cgroup v1, whose limits are not read; offering the machine's totals"
+                .to_owned()
+        })
+}
+
 /// The directories of the cgroup the process is in and of each cgroup above it, up to the
 /// root: a limit on any of them binds the process. Empty when `/proc/self/cgroup` has no
 /// version 2 line (`0::<path>`).

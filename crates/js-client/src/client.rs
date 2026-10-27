@@ -1,5 +1,6 @@
 //! The HTTP client: one agent per command, bound to one server and one token.
 
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +23,7 @@ pub const REQUEST_LIMIT: Duration = Duration::from_secs(30);
 const REPLY_LIMIT: u64 = 1024 * 1024;
 
 /// What the server answered: a status and the JSON body (`null` when the body was empty
-/// or not JSON).
-#[derive(Debug)]
+/// or not JSON). Its `Debug` text leaves the body out: a welcome holds a session secret.
 pub struct Reply {
     /// The HTTP status.
     pub status: u16,
@@ -32,6 +32,16 @@ pub struct Reply {
     /// The wait a `Retry-After` header asked for, when it holds whole seconds. The
     /// date form of the header reads as absent.
     pub retry_after: Option<Duration>,
+}
+
+impl fmt::Debug for Reply {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.debug_struct("Reply")
+            .field("status", &self.status)
+            .field("body", &format_args!("<redacted>"))
+            .field("retry_after", &self.retry_after)
+            .finish()
+    }
 }
 
 /// A connection to one lease server. It holds the token and never prints it: it has no

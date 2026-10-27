@@ -87,6 +87,67 @@ fn the_lowest_limit_on_the_way_to_the_root_wins() {
     assert_eq!(found(&host), (1500, GIB));
 }
 
+/// Asserts that the container's own cgroup binds when it is the lowest: its quota (0.5 CPU)
+/// and memory limit (512 MiB) are below its parent's (1.5 CPUs, 1 GiB) and grandparent's
+/// (2 GiB). It catches a walk up the path that starts at the parent.
+#[test]
+fn the_containers_own_limit_wins_when_it_is_the_lowest() {
+    let host = in_cgroup(
+        "/kube/pod/ctr",
+        &[
+            ("/kube/pod/ctr/cpu.max", "50000 100000\n"),
+            ("/kube/pod/ctr/memory.max", "536870912\n"),
+            ("/kube/pod/cpu.max", "150000 100000\n"),
+            ("/kube/pod/memory.max", "1073741824\n"),
+            ("/kube/memory.max", "2147483648\n"),
+        ],
+    );
+    assert_eq!(found(&host), (500, GIB / 2));
+}
+
+/// Asserts that a process in cgroup v1 (version 1 lines and no `0::` line) gets a warning
+/// that its limits are not read, and the host's totals; that a hybrid file with a `0::`
+/// line, a pure version 2 file, an absent file and an empty one say nothing; and that a
+/// Mac never reads the file.
+#[test]
+fn cgroup_v1_is_warned_about_and_only_then() {
+    let v1_text = "12:cpu,cpuacct:/docker/abc\n1:name=systemd:/docker/abc\n";
+    let warned = |text: Option<&str>, host: Host| {
+        let mut host = host;
+        if let Some(text) = text {
+            host.files = host.files.with("/proc/self/cgroup", text);
+        }
+        let found = detect(&host.platform, &host.commands, &host.files).unwrap();
+        found.warnings
+    };
+    let expected = [
+        "/proc/self/cgroup is cgroup v1, whose limits are not read; offering the machine's totals",
+    ];
+    assert_eq!(warned(Some(v1_text), linux_host()), expected);
+    assert!(warned(Some(&format!("{v1_text}0::/\n")), linux_host()).is_empty());
+    assert!(warned(Some("0::/\n"), linux_host()).is_empty());
+    assert!(warned(Some("\n"), linux_host()).is_empty());
+    assert!(warned(None, linux_host()).is_empty());
+    assert!(warned(Some(v1_text), mac_host()).is_empty());
+
+    let (ran, _, _) = run_scripted(
+        &[],
+        &{
+            let mut host = linux_host();
+            host.files = host.files.with("/proc/self/cgroup", v1_text);
+            host
+        },
+        vec![welcome(1)],
+        1,
+    );
+    assert!(
+        ran.err
+            .contains(&format!("js-agent: warning: {}", expected[0])),
+        "{}",
+        ran.err
+    );
+}
+
 /// Asserts that files the agent cannot make sense of are not limits: a cgroup v1 line, an
 /// unreadable `/proc/self/cgroup`, a zero period, text where a number should be, and an
 /// empty file offer the host's totals instead of ending the start.

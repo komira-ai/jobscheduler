@@ -33,12 +33,16 @@
 //! (`cpu.max`) and memory limit (`memory.max`) of its own cgroup and of each cgroup above
 //! it (cgroup v2, found through `/proc/self/cgroup`), and the CPUs it may run on
 //! (`Cpus_allowed_list` of `/proc/self/status`: `taskset`, a cpuset, a container's
-//! `--cpuset-cpus`). A file that is absent or unreadable is no limit, as is cgroup v1.
-//! On macOS the totals are the offer. A flag can lower the result further and never
+//! `--cpuset-cpus`). A file that is absent or unreadable is no limit, as is cgroup v1 (a
+//! `/proc/self/cgroup` with version 1 lines and no `0::` line), which is reported as a
+//! warning because the limits it may hold are not read. When `getconf` is absent the
+//! standard library's CPU count stands in, with a warning. On macOS the totals are the
+//! offer. A flag can lower the result further and never
 //! raise it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read};
+use std::num::NonZeroUsize;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -269,25 +273,35 @@ pub fn detect(
     runner: &dyn CommandRunner,
     files: &dyn FileReader,
 ) -> Result<Detected, String> {
-    let cpu = cpu_millis(runner)
-        .map(|host| within(platform, host, || container::cpu_millis(files)))
+    let cpu = cpu_millis(runner, thread::available_parallelism)
+        .map(|(host, note)| {
+            (
+                within(platform, host, || container::cpu_millis(files)),
+                note,
+            )
+        })
         .map_err(|why| format!("cannot count the CPUs: {why}"));
     let memory = memory_bytes(platform, runner, files)
         .map(|host| within(platform, host, || container::memory_bytes(files)))
         .map_err(|why| format!("cannot size memory: {why}"));
     let probed = probe_gpus(platform, runner);
-    let warnings = probed
+    let gpu_warning = probed
         .as_ref()
         .err()
-        .map(|why| format!("GPU probe failed ({why}); offering no GPU"))
-        .into_iter()
-        .collect();
-    cpu.and_then(|cpu_millis| {
+        .map(|why| format!("GPU probe failed ({why}); offering no GPU"));
+    let cgroup_warning = match platform.is_macos() {
+        true => None,
+        false => container::warning(files),
+    };
+    cpu.and_then(|(cpu_millis, cpu_note)| {
         memory.map(|memory_bytes| Detected {
             cpu_millis,
             memory_bytes,
             gpus: probed.unwrap_or_else(|_| Gpus::none()),
-            warnings,
+            warnings: [cpu_note, cgroup_warning, gpu_warning]
+                .into_iter()
+                .flatten()
+                .collect(),
         })
     })
 }
@@ -309,12 +323,23 @@ fn number(text: &str, what: &str) -> Result<u64, String> {
         .map_err(|_| format!("{what} did not print a number"))
 }
 
-/// Online CPUs, as `getconf` counts them on Linux and macOS alike, in thousandths.
-fn cpu_millis(runner: &dyn CommandRunner) -> Result<u64, String> {
-    runner
-        .run(GETCONF, &["_NPROCESSORS_ONLN"])
-        .and_then(|text| number(&text, "getconf"))
-        .map(|cpus| cpus.saturating_mul(1000))
+/// Online CPUs, as `getconf` counts them on Linux and macOS alike, in thousandths. When
+/// `getconf` cannot be run or fails, `count` (the standard library's count) stands in and
+/// the second value says so, for a warning; `getconf` printing no number is still an error.
+fn cpu_millis(
+    runner: &dyn CommandRunner,
+    count: fn() -> io::Result<NonZeroUsize>,
+) -> Result<(u64, Option<String>), String> {
+    match runner.run(GETCONF, &["_NPROCESSORS_ONLN"]) {
+        Ok(text) => number(&text, "getconf").map(|cpus| (cpus.saturating_mul(1000), None)),
+        Err(why) => count()
+            .map_err(|err| format!("{why}; the standard library cannot count them either: {err}"))
+            .map(|cpus| (cpus.get() as u64 * 1000, Some(fallback_note(&why)))),
+    }
+}
+
+fn fallback_note(why: &str) -> String {
+    format!("{why}; counted the CPUs with the standard library instead")
 }
 
 fn memory_bytes(
@@ -513,4 +538,28 @@ pub fn host_id(machine_id: &str) -> String {
     hash.update(machine_id.as_bytes());
     let digest = hash.finalize();
     format!("h-{}", hex::encode(&digest[..16]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Absent;
+
+    impl CommandRunner for Absent {
+        fn run(&self, program: &str, _args: &[&str]) -> Result<String, String> {
+            Err(format!("{program}: not found"))
+        }
+    }
+
+    /// Asserts that a host where `getconf` is absent and the standard library cannot count
+    /// the CPUs either fails with both reasons, which the public seams cannot arrange.
+    #[test]
+    fn no_getconf_and_no_standard_count_names_both() {
+        let said = cpu_millis(&Absent, || Err(io::Error::other("no count"))).unwrap_err();
+        assert_eq!(
+            said,
+            "/usr/bin/getconf: not found; the standard library cannot count them either: no count"
+        );
+    }
 }

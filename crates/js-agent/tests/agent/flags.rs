@@ -153,11 +153,12 @@ fn host_id_problems_are_refused_before_the_hello() {
     assert!(said.contains("pass --host-id"), "{said}");
 }
 
-/// Asserts that a probe whose figure the agent cannot guess ends the start with status 2.
+/// Asserts that a probe whose figure the agent cannot guess ends the start with status 2:
+/// a `getconf` that prints no number (an absent one is counted by the standard library).
 #[test]
 fn undetectable_cpu_is_refused() {
     let mut host = linux_host();
-    host.commands = Default::default();
+    host.commands = host.commands.with(crate::support::CPU_CMD, Ok("many\n"));
     let said = refused(&["--host-id", "h"], &host);
     assert!(said.contains("cannot count the CPUs"), "{said}");
 }

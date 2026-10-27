@@ -244,3 +244,20 @@ fn errors_print_as_their_text() {
     assert_eq!(flag.to_string(), "--server: is required");
     assert_eq!(ClientError::Server("down".to_owned()).to_string(), "down");
 }
+
+/// Asserts that the debug text of a reply shows the status and the wait but not the body,
+/// which can hold a session secret. It catches a derived `Debug` that prints the body.
+#[test]
+fn a_reply_prints_without_its_body() {
+    let reply = Reply {
+        status: 200,
+        body: json!({ "session": "sess-secret-0001" }),
+        retry_after: Some(Duration::from_secs(3)),
+    };
+    let text = format!("{reply:?}");
+    assert!(!text.contains("sess-secret-0001"), "{text}");
+    assert_eq!(
+        text,
+        "Reply { status: 200, body: <redacted>, retry_after: Some(3s) }"
+    );
+}
