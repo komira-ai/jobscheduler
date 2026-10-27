@@ -68,6 +68,9 @@ pub(crate) fn assemble(
             let path = state_path(state_file);
             let bindings = agent_state::load(&path)?;
             let registry = Registry::new(pool, clock.clone());
+            for (host, binding) in &bindings {
+                registry.restore_tainted(host, binding.clone());
+            }
             let source = LayeredSource::new(static_pool, registry.clone(), bindings.clone());
             let agents = Agents {
                 registry,
@@ -91,6 +94,18 @@ impl Agents {
     pub(crate) fn mint_run_id(&self, term: u64) -> String {
         let count = self.runs_minted.fetch_add(1, Ordering::SeqCst);
         format!("run-{term}-{}", count.saturating_add(1))
+    }
+
+    /// Whether `run_id` was minted in a boot before the one whose term is `term`: such a
+    /// run was held in memory by a server that has since restarted, so it is forgotten
+    /// whatever became of its work. An id that is not of the form [`Agents::mint_run_id`]
+    /// makes is not forgotten, only unknown.
+    pub(crate) fn is_forgotten(run_id: &str, term: u64) -> bool {
+        let minted = run_id
+            .strip_prefix("run-")
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(minted, _)| minted.parse::<u64>().ok());
+        minted.is_some_and(|minted| minted < term)
     }
 
     /// How many times the agent side could not read or write one of its files since the
@@ -120,13 +135,36 @@ impl Agents {
     /// Makes the file of bindings hold what the registry has bound, on the pool for
     /// blocking calls: the write is synced to disk. A host that was admitted stays
     /// admitted when this fails; the lease on it would then survive a restart without
-    /// its binding, until the next tick writes it.
-    pub(crate) async fn save_bindings(self: &Arc<Self>) {
+    /// its binding, until the next tick writes it. True when the file holds what the
+    /// registry has bound (a taint report is acknowledged only then).
+    pub(crate) async fn save_bindings(self: &Arc<Self>) -> bool {
         let this = Arc::clone(self);
         let saved = blocking(move || this.store.save(|| this.registry.bindings())).await;
-        if let Err(err) = saved {
+        if let Err(err) = &saved {
             self.errors.fetch_add(1, Ordering::SeqCst);
             error!(error = %err, "cannot write the agent state file");
+        }
+        saved.is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only an id this server makes, of a term below the current one, is forgotten; an id of
+    /// this term or a later one, and any other text, is not. It catches a run id of the
+    /// current boot answered `run-forgotten`, and text that is no run id answered so.
+    #[test]
+    fn only_an_id_of_an_earlier_term_is_forgotten() {
+        assert!(Agents::is_forgotten("run-1-1", 2));
+        assert!(Agents::is_forgotten("run-3-77", 4));
+        assert!(!Agents::is_forgotten("run-2-1", 2));
+        assert!(!Agents::is_forgotten("run-3-1", 2));
+        for odd in [
+            "", "ghost", "run-", "run-1", "run-x-1", "run--1", "xrun-1-1",
+        ] {
+            assert!(!Agents::is_forgotten(odd, 9), "{odd}");
         }
     }
 }

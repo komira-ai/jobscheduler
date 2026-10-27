@@ -1,6 +1,6 @@
 use std::fmt;
 
-use js_agent_wire::InstanceIdentity;
+use js_agent_wire::{InstanceIdentity, Taint};
 use sha2::Digest;
 
 /// What a host presented to be admitted, reduced to its SHA-256 digest.
@@ -67,19 +67,35 @@ impl fmt::Debug for Credential {
 /// instance holds at the level of the pool credential only: a holder of the pool's token
 /// can say hello for such an id once the host is lost. Per-host tokens or client
 /// certificates close that later (design D18).
+///
+/// A binding also carries the taint the host reported, when it has, so that what a caller
+/// persists for a host id holds it too ([`Binding::with_taint`]). The taint plays no part
+/// in who may say hello.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     credential: Credential,
     instance: Option<InstanceIdentity>,
+    taint: Option<Taint>,
 }
 
 impl Binding {
-    /// A binding to `credential`, and to `instance` when there is one.
+    /// A binding to `credential`, and to `instance` when there is one, with no taint.
     pub fn new(credential: Credential, instance: Option<InstanceIdentity>) -> Self {
         Self {
             credential,
             instance,
+            taint: None,
         }
+    }
+
+    /// This binding with `taint` as the host's reported taint.
+    pub fn with_taint(self, taint: Option<Taint>) -> Self {
+        Self { taint, ..self }
+    }
+
+    /// The taint the host reported, when it has.
+    pub fn taint(&self) -> Option<&Taint> {
+        self.taint.as_ref()
     }
 
     /// The credential the host id is bound to.

@@ -129,7 +129,9 @@ pub enum Ack {
     Accepted,
     /// The result was recorded earlier.
     Duplicate,
-    /// The lease has moved on; the result is dropped.
+    /// The lease has moved on, or the server holds no record of the run (it forgot it at a
+    /// restart, while the lease can still hold the host); the result is dropped either
+    /// way. The two are not told apart.
     Stale,
     /// The server holds no such lease.
     UnknownLease,

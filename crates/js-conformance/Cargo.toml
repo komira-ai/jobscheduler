@@ -13,6 +13,7 @@ js-provider = { path = "../js-provider" }
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+js-agent = { path = "../js-agent" }
 js-agent-wire = { path = "../js-agent-wire" }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }

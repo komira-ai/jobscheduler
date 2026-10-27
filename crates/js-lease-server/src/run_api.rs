@@ -7,7 +7,14 @@
 //! The run service of the design replaces these routes.
 //!
 //! Runs are in memory only. A restart forgets them, and the hosts that still run any are
-//! told to cancel them when they say hello again.
+//! told to cancel them when they say hello again: a run that was running is killed with no
+//! result, and its work is lost. A client that asks after such a run (`GET` or `DELETE` of
+//! a run id minted before the restart) is told `410 run-forgotten`, so it can tell a run
+//! the restart took from one that never existed (`404 unknown-run`).
+//!
+//! Tenant isolation is lease-id secrecy under one shared client token: whoever holds the
+//! token and knows a lease id (they are sequential) can queue, read and stop that lease's
+//! runs. The routes check that a run belongs to the lease in the path, and nothing else.
 
 use std::sync::Arc;
 
@@ -18,7 +25,7 @@ use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, post};
+use axum::routing::{get, post};
 use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
@@ -45,7 +52,7 @@ pub(crate) fn router(shared: Arc<Shared>, agents: Arc<Agents>) -> Router {
     };
     Router::new()
         .route("/v1/leases/{id}/runs", post(start).get(list))
-        .route("/v1/leases/{id}/runs/{run_id}", delete(stop))
+        .route("/v1/leases/{id}/runs/{run_id}", get(show).delete(stop))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(from_fn_with_state(shared, authenticate))
         .with_state(api)
@@ -135,10 +142,20 @@ impl From<RunRefusal> for ApiError {
             RunRefusal::HostNotRegistered
             | RunRefusal::HostLost
             | RunRefusal::NotHeld
+            | RunRefusal::HostTainted
             | RunRefusal::NoCapacity
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
+    }
+}
+
+/// The 410 for a run id minted before the current boot: the server that held the run has
+/// restarted and forgot it, and the work it was doing is lost.
+fn remembered(run_id: &str, term: u64) -> Result<(), ApiError> {
+    match Agents::is_forgotten(run_id, term) {
+        true => Err(ApiError::coded(StatusCode::GONE, "run-forgotten")),
+        false => Ok(()),
     }
 }
 
@@ -158,7 +175,9 @@ fn find(leases: Vec<LeaseInfo>, id: &LeaseId) -> Result<LeaseInfo, ApiError> {
 ///
 /// The lease must be held, with time left. The run is bounded by that time: its wall limit
 /// is the one asked for, cut to what the lease has left (that, when none is asked), and the
-/// agent may start it for no longer than the lease has left either. A later renewal does
+/// agent may start it for no longer than the lease has left either. The registry keeps the
+/// instant the lease ends and cuts both again from the time left at each send, so a start
+/// delivered late carries less, and none is sent once that time is up. A later renewal does
 /// not stretch a run already queued. The table's lock is held across the registry's call,
 /// so a release cannot slip in between the check and the queueing.
 async fn start(
@@ -216,9 +235,28 @@ async fn list(State(api): State<RunApi>, Path(id): Path<String>) -> Result<Respo
     Ok(json(StatusCode::OK, &RunList { runs }))
 }
 
+/// One run of the lease, as the list shows it. A run id of an earlier boot is 410
+/// `run-forgotten` (the server restarted and the run's work is lost); an id the lease
+/// does not have is 404 `unknown-run`.
+async fn show(
+    State(api): State<RunApi>,
+    Path((id, run_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
+    let table = api.shared.table().lock().await;
+    find(table.list(), &id)?;
+    remembered(&run_id, table.term())?;
+    let runs = api.agents.registry.runs_of(&id);
+    let mut runs = runs.into_iter();
+    let run = runs
+        .find(|run| run.run_id == run_id)
+        .ok_or(RunRefusal::UnknownRun)?;
+    Ok(json(StatusCode::OK, &RunEntry::from(run)))
+}
+
 /// Asks for a run to stop: a retained intent, carried on every heartbeat reply until the
 /// host no longer lists the run. The answer is 202 whatever the run's state; a run that
-/// has ended stays as it is.
+/// has ended stays as it is. A run id of an earlier boot is 410 `run-forgotten`.
 async fn stop(
     State(api): State<RunApi>,
     Path((id, run_id)): Path<(String, String)>,
@@ -226,6 +264,7 @@ async fn stop(
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let table = api.shared.table().lock().await;
     find(table.list(), &id)?;
+    remembered(&run_id, table.term())?;
     let run = api.agents.registry.stop_run(&id, &run_id)?;
     info!(lease = %id, run = %run.run_id, "run stop asked for");
     let accepted = Accepted {

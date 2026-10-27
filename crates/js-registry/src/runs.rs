@@ -2,7 +2,13 @@
 //! reply carries down, and what the results and the held lists that come back change.
 //!
 //! The records are in memory only. A restart forgets every one of them, and a host that
-//! lists such a run as held is told to cancel it, never adopted.
+//! lists such a run as held is told to cancel it, never adopted. The agent kills a
+//! cancelled run without a word: no result comes back, so the run's work is lost and
+//! nothing tells the lease holder, who finds the run unknown (see [`crate::Registry`]).
+//!
+//! A run is bounded by the lease end it was queued with. The bound is kept as an instant
+//! and every start is made from the time left at the moment it is sent, so a start that
+//! is delivered late carries less time, and none goes out once the time is up.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +26,9 @@ use js_types::{HostId, LeaseId, Resources};
 pub const MAX_LIVE_RUNS: usize = 256;
 
 /// The most finished runs kept per host, so a lease holder can still read a result after
-/// the run has left the host. The oldest go first.
+/// the run has left the host. The oldest go first: a host that finishes more runs than
+/// this under one lease loses the oldest result, and the run is then unknown to the
+/// lease.
 pub const MAX_FINISHED_RUNS: usize = 256;
 
 const _: () = assert!(
@@ -39,7 +47,8 @@ pub enum RunState {
     /// The host lists the run and its container runs.
     Running,
     /// The container has exited and the host still lists the run, until the server has
-    /// acknowledged the result.
+    /// acknowledged the result. A run that was asked to stop reads `Exited` too once its
+    /// result is held.
     Exited,
     /// A stop was asked for and the run is still live: the stop goes out on every reply
     /// until the host no longer lists the run.
@@ -110,6 +119,10 @@ pub enum RunRefusal {
     /// work in its phase, or it holds as many live runs as [`MAX_LIVE_RUNS`] allows.
     #[error("the run does not fit the lease's capacity")]
     NoCapacity,
+    /// The host reported that it can no longer be trusted clean, so it takes no new run.
+    /// Its live runs still finish.
+    #[error("the host is tainted")]
+    HostTainted,
     /// The run id is already in use. A caller that mints ids never sees it.
     #[error("the run id is in use")]
     RunExists,
@@ -131,6 +144,7 @@ impl RunRefusal {
             Self::LimitsExceedShape => refusal::LIMITS_EXCEED_SHAPE,
             Self::HostJobsNotAllowed => refusal::HOST_JOBS_NOT_ALLOWED,
             Self::NoCapacity => refusal::NO_CAPACITY,
+            Self::HostTainted => refusal::HOST_TAINTED,
             Self::RunExists => "run-exists",
             Self::UnknownRun => "unknown-run",
         }
@@ -188,6 +202,9 @@ struct Run {
     stop: Stop,
     result: Option<RunResult>,
     order: u64,
+    /// The instant (milliseconds on the registry's clock) the run's bound ends: the lease
+    /// end it was queued with. `None` for a run queued without a bound.
+    ends: Option<u64>,
 }
 
 impl Run {
@@ -203,15 +220,39 @@ impl Run {
     }
 
     fn state(&self) -> RunState {
-        match (self.life, self.stop) {
-            (Life::Queued | Life::Held(_), Stop::Wanted | Stop::Sent) => RunState::Stopping,
-            (Life::Queued, Stop::No) => RunState::Queued,
-            (Life::Held(HeldState::Starting), Stop::No) => RunState::Starting,
-            (Life::Held(HeldState::ExitedUnacked), Stop::No) => RunState::Exited,
-            (Life::Held(HeldState::Running | HeldState::Unknown), Stop::No) => RunState::Running,
-            (Life::Ended, _) => RunState::Ended,
-            (Life::NeverStarted, _) => RunState::NeverStarted,
+        match (self.life, self.stop, self.result.is_some()) {
+            (Life::Held(HeldState::ExitedUnacked), _, true) => RunState::Exited,
+            (Life::Queued | Life::Held(_), Stop::Wanted | Stop::Sent, _) => RunState::Stopping,
+            (Life::Queued, Stop::No, _) => RunState::Queued,
+            (Life::Held(HeldState::Starting), Stop::No, _) => RunState::Starting,
+            (Life::Held(HeldState::ExitedUnacked), Stop::No, _) => RunState::Exited,
+            (Life::Held(HeldState::Running | HeldState::Unknown), Stop::No, _) => RunState::Running,
+            (Life::Ended, _, _) => RunState::Ended,
+            (Life::NeverStarted, _, _) => RunState::NeverStarted,
         }
+    }
+
+    /// Whether the run was queued with a bound that has passed without the host listing
+    /// it: the run can no longer be started, so it is stopped (the stop retires its id on
+    /// the host) and then given up when the host still does not list it.
+    fn lapsed(&self, now: u64) -> bool {
+        let unlisted = self.life == Life::Queued;
+        let past = self.ends.is_some_and(|ends| now >= ends);
+        [unlisted, past].into_iter().all(|ok| ok)
+    }
+
+    /// The start for this run as it can be acted on at `now`: the lease time left cuts
+    /// both how long the agent may still start it for and how long it may run. Only for a
+    /// run that has not [lapsed](Run::lapsed), which has time left; a bound of zero would
+    /// read as no bound on the agent.
+    fn start_at(&self, now: u64) -> JobSpec {
+        let mut spec = self.spec.clone();
+        if let Some(ends) = self.ends {
+            let left = ends.saturating_sub(now);
+            spec.valid_for_ms = left;
+            spec.limits.wall_ms = spec.limits.wall_ms.min(left);
+        }
+        spec
     }
 
     fn view(&self) -> RunView {
@@ -284,16 +325,19 @@ impl Runs {
     }
 
     /// Queues `spec` as a run of `lease` on `host`, which has taken `beats` heartbeats in
-    /// its session. The caller has vetted the job and checked the host and the lease; this
-    /// checks what is left of the lease's budget: the live runs of the host, their
-    /// limits and their GPU indices together with this run's must fit `shape`.
+    /// its session, at `now`. The caller has vetted the job and checked the host and the
+    /// lease; this checks what is left of the lease's budget: the live runs of the host,
+    /// their limits and their GPU indices together with this run's must fit `shape`.
+    ///
+    /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
+    /// bound that long after `now`.
     pub(crate) fn admit(
         &mut self,
         host: &HostId,
         lease: &LeaseId,
         mut spec: JobSpec,
         shape: &Resources,
-        beats: u64,
+        (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
         if self.map.contains_key(&spec.run_id) {
             return Err(RunRefusal::RunExists);
@@ -319,7 +363,9 @@ impl Runs {
             return Err(RunRefusal::NoCapacity);
         }
         spec.heartbeat_seq = beats;
+        let bound = Some(spec.valid_for_ms).filter(|bound| *bound > 0);
         let run = Run {
+            ends: bound.map(|bound| now.saturating_add(bound)),
             host: host.clone(),
             lease: *lease,
             spec,
@@ -374,14 +420,15 @@ impl Runs {
         }
     }
 
-    /// The reply to a heartbeat of `host`: its list is taken, each result is answered,
-    /// and the commands go out.
+    /// The reply to a heartbeat of `host` received at `now`: its list is taken, each
+    /// result is answered, and the commands go out. A tainted host is sent no start; its
+    /// live runs finish and their results are answered as ever.
     pub(crate) fn answer(
         &mut self,
         host: &HostId,
         heartbeat: &Heartbeat,
-        gap: bool,
-        book: &HostBook,
+        (gap, tainted): (bool, bool),
+        (book, now): (&HostBook, u64),
     ) -> HeartbeatReply {
         self.sync(host, &heartbeat.held, gap);
         let mut result_acks = Vec::new();
@@ -393,7 +440,8 @@ impl Runs {
             });
         }
         let serving = heartbeat.phase == js_agent_wire::Phase::Serving;
-        let commands = self.commands(host, serving, &heartbeat.held);
+        let starts = [serving, !tainted].into_iter().all(|ok| ok);
+        let commands = self.commands(host, (starts, now), &heartbeat.held);
         self.sweep(host, book);
         HeartbeatReply {
             commands,
@@ -433,8 +481,16 @@ impl Runs {
     /// The commands for `host`, most urgent first and at most [`limits::MAX_COMMANDS`]:
     /// a stop for each live run a stop was asked for (all of them fit, see
     /// [`MAX_LIVE_RUNS`]), a cancel for each held run that is not a live run of this host,
-    /// then a start for each queued run, unless the host is not serving.
-    fn commands(&mut self, host: &HostId, serving: bool, held: &[HeldRun]) -> Vec<Command> {
+    /// then a start for each queued run, unless `starts` is false (the host is not serving
+    /// or is tainted). Each start is made at `now` from the lease time left, and none goes
+    /// for a run whose time is up: that run is stopped instead, since the host will never
+    /// list it, and is given up once the stop has gone out.
+    fn commands(
+        &mut self,
+        host: &HostId,
+        (starts_ok, now): (bool, u64),
+        held: &[HeldRun],
+    ) -> Vec<Command> {
         let mut mine = self
             .map
             .values_mut()
@@ -445,9 +501,12 @@ impl Runs {
         let mut stops = Vec::new();
         let mut starts = Vec::new();
         for run in mine {
+            if run.lapsed(now) {
+                run.ask_stop();
+            }
             match (run.stop, run.life) {
-                (Stop::No, Life::Queued) if serving => {
-                    starts.push(Command::Start(Box::new(run.spec.clone())));
+                (Stop::No, Life::Queued) if starts_ok => {
+                    starts.push(Command::Start(Box::new(run.start_at(now))));
                 }
                 (Stop::No, _) => {}
                 _ => {

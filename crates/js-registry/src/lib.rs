@@ -62,7 +62,16 @@
 //!   leaves the host's held list, which the host does only after cleanup. When a lease is
 //!   stopped with live runs, the booking is freed at once but the host is not bookable
 //!   until a heartbeat lists none of them. Run records are in memory only: a restart
-//!   forgets them, and nothing here is persisted.
+//!   forgets them, and nothing here is persisted. A host that lists a run the registry
+//!   has no record of (after a restart, say) is told to cancel it, and the agent kills it
+//!   without a result: the work is lost, even though its lease may still hold the host.
+//!   A run is started from the lease time it has left at each reply, and not at all once
+//!   that is gone.
+//! - **Taint.** The first taint a host reports is kept with its binding
+//!   ([`Binding::taint`], [`Registry::bindings`]), so that a caller that persists
+//!   bindings keeps it across a restart ([`Registry::restore_tainted`]). A tainted host
+//!   is sent no start, takes no new run, and is never forgotten for being silent; its
+//!   live runs finish and are acknowledged. The registry never clears a taint.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
 //!   that the agent's next hello completes. The seat takes the binding the caller

@@ -619,6 +619,7 @@ dependencies = [
 name = "js-conformance"
 version = "0.1.0"
 dependencies = [
+ "js-agent",
  "js-agent-wire",
  "js-lease",
  "js-lease-server",

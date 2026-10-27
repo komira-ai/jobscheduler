@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Phase, Welcome};
+use js_agent_wire::refusal as refusal_code;
+use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::{HostBook, SeatError};
 use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
@@ -48,6 +49,10 @@ pub struct HostView {
     /// ended, or runs it lists that the server does not know. It takes no new lease until
     /// a heartbeat shows none.
     pub releasing: bool,
+    /// The taint the host reported, once it has: it can no longer be trusted clean, so it
+    /// is sent no start and takes no new run. It is kept across a restart and is not
+    /// cleared by anything in this crate.
+    pub taint: Option<Taint>,
 }
 
 #[derive(Debug)]
@@ -68,12 +73,19 @@ struct Record {
     held: BTreeSet<String>,
     /// The heartbeats taken in this session.
     beats: u64,
+    /// The first taint the host reported. It outlives a session and, through the file of
+    /// bindings, a restart.
+    taint: Option<Taint>,
 }
 
 impl Record {
+    /// A host put back after a restart. The taint a binding carries is the host's own, and
+    /// the binding kept is the bare one, so the taint has a single home.
     fn awaiting(binding: Option<Binding>, seated: Timestamp) -> Self {
+        let taint = binding.as_ref().and_then(|bound| bound.taint().cloned());
         Self {
-            binding,
+            binding: binding.map(|bound| bound.with_taint(None)),
+            taint,
             epoch: 0,
             session: None,
             phase: Phase::Quarantined,
@@ -115,12 +127,15 @@ impl Record {
 
     /// Whether the host has been silent for longer than the grace period and the
     /// retention together, counted from when it was last heard or, for a host never heard
-    /// (awaiting), from when it was seated.
+    /// (awaiting), from when it was seated. A tainted host is never out of retention: it
+    /// keeps its place, and its taint, until an operator deals with it.
     fn out_of_retention(&self, now: Timestamp, grace_ms: u64, retention_ms: u64) -> bool {
         let kept_for = grace_ms.saturating_add(retention_ms);
-        self.heard
+        let silent = self
+            .heard
             .or(self.seated)
-            .is_some_and(|since| now.millis().saturating_sub(since.millis()) > kept_for)
+            .is_some_and(|since| now.millis().saturating_sub(since.millis()) > kept_for);
+        [silent, self.taint.is_none()].into_iter().all(|ok| ok)
     }
 }
 
@@ -305,6 +320,7 @@ impl Registry {
         }
         let known = state.records.get(&host);
         let kept_binding = known.and_then(|record| record.binding.clone());
+        let kept_taint = known.and_then(|record| record.taint.clone());
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -355,6 +371,7 @@ impl Registry {
                 labels: hello.labels.clone(),
                 held,
                 beats: 0,
+                taint: kept_taint,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -398,6 +415,19 @@ impl Registry {
     /// queued run (not while the host is out of the serving phase), at most
     /// [`js_agent_wire::limits::MAX_COMMANDS`] in that order; and an acknowledgement
     /// for each result it carries. A refused heartbeat changes no run.
+    ///
+    /// A run queued with a bound ([`Registry::queue_run`]) is started from the time that
+    /// bound has left at each reply, and is not started at all once the bound has passed:
+    /// it is then stopped, and given up as never started when the host still does not list
+    /// it after that.
+    ///
+    /// **Taint.** The first taint report a host sends is kept, and the reply says
+    /// `taint_ack` whenever the heartbeat carries one. The caller must make the taint
+    /// durable ([`Registry::bindings`]) before it lets the acknowledgement go, since the
+    /// agent stops reporting once it has it. A tainted host is sent no start, takes no new
+    /// run ([`RunRefusal::HostTainted`]), and is never forgotten for being silent; the
+    /// runs it already holds finish, their results are acknowledged, and their stops are
+    /// sent as for any host. Nothing here clears a taint.
     pub fn heartbeat(
         &self,
         heartbeat: &Heartbeat,
@@ -443,21 +473,50 @@ impl Registry {
             .iter()
             .map(|run| run.run_id.clone())
             .collect();
-        Ok(runs.answer(&host, heartbeat, gap, book))
+        // An agent that refuses a start because its host is tainted may be unable to write
+        // its own marker (a full disk), so that refusal taints the host here as a report
+        // would. It is the host's fault: the result is answered like any other.
+        let refused = heartbeat.results.iter().find(|result| {
+            let by_host = result.detail.as_deref() == Some(refusal_code::HOST_TAINTED);
+            by_host && result.outcome == Outcome::FailedToStart
+        });
+        let reported = heartbeat.taint.clone().or_else(|| {
+            refused.map(|result| Taint {
+                reason: refusal_code::HOST_TAINTED.to_string(),
+                run_id: Some(result.run_id.clone()),
+                check: None,
+            })
+        });
+        record.taint = record.taint.take().or(reported);
+        let reply = runs.answer(
+            &host,
+            heartbeat,
+            (gap, record.taint.is_some()),
+            (book, now.millis()),
+        );
+        Ok(HeartbeatReply {
+            taint_ack: heartbeat.taint.is_some(),
+            ..reply
+        })
     }
 
     /// Queues `spec` as a run of `lease` on `host`, to go out on the host's next
     /// heartbeat reply. The caller (the transport) has found that the lease is held on
     /// `host`, filled `spec.run_id` with an id it minted and bounded `spec.limits.wall_ms`
     /// and `spec.valid_for_ms` by the lease's remaining time; the registry fills
-    /// `lease_id` and `heartbeat_seq`.
+    /// `lease_id` and `heartbeat_seq`. A `spec.valid_for_ms` above zero is the time the
+    /// lease has left: the registry keeps the instant it ends and makes every start from
+    /// the time left then, so the wall limit and the validity of a start that goes out
+    /// late are cut again to what is left (`spec.limits.wall_ms` is the most the run may
+    /// have). Zero is no bound.
     ///
     /// Refused, in this order: [`RunRefusal::HostNotRegistered`] for a host that did not
     /// register itself; the job when it breaks a wire rule ([`RunRefusal::Invalid`]),
     /// asks for host isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the
     /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
-    /// registry's booking of `host` is not `lease`; [`RunRefusal::NoCapacity`] when the
+    /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
+    /// host that reported a taint; [`RunRefusal::NoCapacity`] when the
     /// host is out of the serving phase or the run does not fit what is left of the
     /// booked shape (the limits of the host's live runs, the GPU indices they hold, and
     /// [`crate::MAX_LIVE_RUNS`]); [`RunRefusal::RunExists`] for an id in use. A refusal
@@ -491,10 +550,14 @@ impl Registry {
         if book.read(lease) != booked {
             return Err(RunRefusal::NotHeld);
         }
+        if record.taint.is_some() {
+            return Err(RunRefusal::HostTainted);
+        }
         if record.phase != Phase::Serving {
             return Err(RunRefusal::NoCapacity);
         }
-        runs.admit(host, lease, spec, shape.resources(), record.beats)
+        let seen = (record.beats, now.millis());
+        runs.admit(host, lease, spec, shape.resources(), seen)
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop
@@ -525,13 +588,35 @@ impl Registry {
         self.lock().reserved.clone()
     }
 
-    /// What every known host id is bound to, in id order. A caller that persists bindings
-    /// writes this, so that a restart can hand them to [`crate::RegisteredProvider::seat`].
+    /// What every known host id is bound to, in id order, with the taint the host
+    /// reported when it has. A caller that persists bindings writes this, so that a restart
+    /// can hand the bindings to [`crate::RegisteredProvider::seat`] and the tainted hosts
+    /// to [`Registry::restore_tainted`].
     pub fn bindings(&self) -> BTreeMap<HostId, Binding> {
         let state = self.lock();
         let bound = state.records.iter();
-        let bound = bound.filter_map(|(id, record)| Some((id.clone(), record.binding.clone()?)));
+        let bound = bound.filter_map(|(id, record)| {
+            let binding = record.binding.clone()?;
+            Some((id.clone(), binding.with_taint(record.taint.clone())))
+        });
         bound.collect()
+    }
+
+    /// Puts back a host that reported a taint before a restart, whether or not it holds a
+    /// lease: an awaiting host, bound as it was and tainted, that counts toward the pool's
+    /// limit and is not forgotten for being silent. A host the registry already knows is
+    /// left as it is. `binding` is what [`Registry::bindings`] returned for it; one that
+    /// carries no taint is ignored, since a host that was never tainted is put back by
+    /// [`crate::RegisteredProvider::seat`] when it holds a lease and by nothing else.
+    pub fn restore_tainted(&self, host: &HostId, binding: Binding) {
+        let now = self.shared.clock.now();
+        let mut guard = self.lock_at(now);
+        let State { book, records, .. } = &mut *guard;
+        if binding.taint().is_none() || records.contains_key(host) {
+            return;
+        }
+        book.insert_host(host.clone(), self.shared.config.shape().clone());
+        records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 
     /// Every host the registry holds, in id order.
@@ -550,6 +635,7 @@ impl Registry {
             agent_version: record.agent_version.clone(),
             epoch: record.epoch,
             releasing: !booked.contains_key(id) & !record.quiet(&state.runs, id),
+            taint: record.taint.clone(),
         });
         views.collect()
     }

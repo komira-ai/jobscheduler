@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use js_agent_wire::Taint;
 use js_provider::HostCapacity;
 use js_registry::{HostState, HostView};
 use js_types::{HostId, LeaseId, Shape};
@@ -47,6 +48,10 @@ struct HostEntry {
     /// no new lease yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     releasing: Option<bool>,
+    /// Set for a registered host that reported a taint: `{reason, run_id?, check?}`. It
+    /// is sent no start and takes no new run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    taint: Option<Taint>,
 }
 
 fn shape_view(shape: &Shape) -> ShapeView {
@@ -77,6 +82,7 @@ impl HostEntry {
             labels: BTreeMap::new(),
             agent_version: None,
             releasing: None,
+            taint: None,
         }
     }
 
@@ -98,6 +104,7 @@ impl HostEntry {
             labels: host.labels,
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
+            taint: host.taint,
         }
     }
 }

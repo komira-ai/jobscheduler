@@ -18,7 +18,15 @@
 //! credential = "<64 hex digits: SHA-256 of the join token>"
 //! instance_provider = "aws"      # with instance_id, when the first hello named one
 //! instance_id = "i-0abc"
+//! taint_reason = "residue"       # when the host reported a taint
+//! taint_run_id = "run-3-1"       # optional, with taint_reason
+//! taint_check = "tmp-files"      # optional, with taint_reason
 //! ```
+//!
+//! A taint is kept here so that a restart does not make a host that reported one clean. A
+//! host with a taint stays in the file, and the server keeps it, until an operator stops
+//! the server and removes the three `taint_` keys of its entry: nothing in the server
+//! clears a taint.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,7 +35,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use js_agent_wire::InstanceIdentity;
+use js_agent_wire::{InstanceIdentity, Taint};
 use js_registry::{Binding, Credential};
 use js_types::HostId;
 use serde::{Deserialize, Serialize};
@@ -56,16 +64,26 @@ struct Entry {
     instance_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    taint_check: Option<String>,
 }
 
 impl Entry {
     fn of(id: &HostId, binding: &Binding) -> Self {
         let instance = binding.instance();
+        let taint = binding.taint();
         Self {
             id: id.to_string(),
             credential: binding.credential().to_hex(),
             instance_provider: instance.map(|instance| instance.provider.clone()),
             instance_id: instance.map(|instance| instance.instance_id.clone()),
+            taint_reason: taint.map(|taint| taint.reason.clone()),
+            taint_run_id: taint.and_then(|taint| taint.run_id.clone()),
+            taint_check: taint.and_then(|taint| taint.check.clone()),
         }
     }
 
@@ -81,7 +99,16 @@ impl Entry {
             }),
             _ => return Err("an instance has only one of provider and id".to_string()),
         };
-        Ok((id, Binding::new(credential, instance)))
+        let taint = match (self.taint_reason, self.taint_run_id, self.taint_check) {
+            (None, None, None) => None,
+            (Some(reason), run_id, check) => Some(Taint {
+                reason,
+                run_id,
+                check,
+            }),
+            _ => return Err("a taint has a run or a check but no reason".to_string()),
+        };
+        Ok((id, Binding::new(credential, instance).with_taint(taint)))
     }
 }
 
@@ -249,6 +276,44 @@ mod tests {
         assert!(!text.contains("token-a"), "{text}");
         assert!(!text.contains("token-b"), "{text}");
         assert_eq!(parse("version = 1\n").unwrap(), BTreeMap::new());
+    }
+
+    /// A taint, with and without its run and check, reads back as written, and a host
+    /// without one reads back without. It catches a restart that makes a tainted host
+    /// clean, and one that taints a host that was not.
+    #[test]
+    fn a_taint_survives_the_file() {
+        let taint = |run_id: Option<&str>, check: Option<&str>| Taint {
+            reason: "residue".to_string(),
+            run_id: run_id.map(str::to_string),
+            check: check.map(str::to_string),
+        };
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            host("a"),
+            bound("t", None).with_taint(Some(taint(None, None))),
+        );
+        bindings.insert(
+            host("b"),
+            bound("t", None).with_taint(Some(taint(Some("run-1-1"), Some("tmp")))),
+        );
+        bindings.insert(host("c"), bound("t", None));
+        let text = render(&bindings).unwrap();
+        assert_eq!(parse(&text).unwrap(), bindings);
+        assert_eq!(text.matches("taint_reason").count(), 2, "{text}");
+    }
+
+    /// A run or a check of a taint with no reason is a file that cannot be read as
+    /// written. It catches a taint that loads as no taint.
+    #[test]
+    fn a_taint_without_a_reason_is_refused() {
+        for extra in ["taint_run_id = \"r\"\n", "taint_check = \"c\"\n"] {
+            let text = format!(
+                "version = 1\n[[host]]\nid = \"a\"\ncredential = \"{CREDENTIAL}\"\n{extra}"
+            );
+            let reason = parse(&text).unwrap_err();
+            assert!(reason.contains("taint"), "{reason}");
+        }
     }
 
     /// A later version's keys, at the top and in an entry, are ignored whatever the
