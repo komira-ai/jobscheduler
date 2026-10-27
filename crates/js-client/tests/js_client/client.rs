@@ -6,7 +6,7 @@ use std::time::Duration;
 use js_client::{Client, ClientError, REQUEST_LIMIT, Reply};
 use serde_json::{Value, json};
 
-use crate::support::{Cert, Fake, Scratch, closed_port, json_reply, text_reply};
+use crate::support::{Cert, Fake, Scratch, hangup_url, json_reply, text_reply};
 
 const LIMIT: Duration = Duration::from_secs(20);
 
@@ -117,12 +117,13 @@ fn a_body_that_is_not_json_reads_as_null() {
     fake.requests();
 }
 
-/// Asserts that a server nobody listens on is a server failure naming its address and
-/// never the token.
+/// Asserts that a server that hangs up without a reply is a server failure naming its
+/// address and never the token. Catches a lost connection reported as success, and an
+/// address leaked or the token echoed in the message.
 #[test]
 fn an_unreachable_server_is_a_server_failure() {
     let dir = Scratch::new("client_down");
-    let url = closed_port();
+    let url = hangup_url();
     let client = Client::connect(&url, &token_file(&dir), None, REQUEST_LIMIT).unwrap();
     let err = client.get("/v1/leases").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -497,6 +497,44 @@ pub fn canned(reply: &str) -> String {
         }
     });
     format!("http://{addr}")
+}
+
+/// A port that every loopback name the tests use answers on and then hangs up: the
+/// request is read and the connection closed with no reply, so a client fails with a
+/// transport error, never a refusal.
+///
+/// This stands in for "a port nothing listens on". Binding a port and dropping the
+/// listener is not that: another process can take the freed port before the client
+/// connects. Here the sockets stay bound for the life of the test process, so no other
+/// process can hold the port on an address the clients dial. `127.0.0.1` picks the port;
+/// `127.9.9.9` and `::1` are bound on the same port where the host has them (an address
+/// the host lacks cannot be dialled either) and a port taken on either is replaced.
+pub fn hangup_port() -> u16 {
+    for _ in 0..100 {
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = first.local_addr().unwrap().port();
+        let mut bound = vec![first];
+        let mut taken = false;
+        for host in ["127.9.9.9", "::1"] {
+            match TcpListener::bind((host, port)) {
+                Ok(listener) => bound.push(listener),
+                Err(err) if err.kind() == ErrorKind::AddrNotAvailable => {}
+                Err(_) => taken = true,
+            }
+        }
+        if taken {
+            continue;
+        }
+        for listener in bound {
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    read_request(&mut stream.unwrap());
+                }
+            });
+        }
+        return port;
+    }
+    panic!("no port free on every loopback address after 100 tries");
 }
 
 /// A reply with this status line and body, ended by closing the connection.
