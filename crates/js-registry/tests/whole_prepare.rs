@@ -369,8 +369,7 @@ fn the_request_fails_not_ready_after_max_replace_failures() {
     let kept = record(&fx);
     assert_eq!((kept.prepare_failures, kept.give_ups), (2, 0));
     assert!(kept.terminal);
-    let spent = StartAck::Refused(RefusalCode::ExclusiveNotReady);
-    assert_eq!(provider.start(whole_spec(3)), spent);
+    assert_eq!(provider.start(whole_spec(3)), no_capacity());
     assert!(provider.booked().is_empty());
 }
 
