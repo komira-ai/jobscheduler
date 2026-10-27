@@ -34,6 +34,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         id_files: files,
         check_search: false,
         id_tool_path: Some(id_tools(dir, 0o4755, 0o4755).into_os_string()),
+        init_dest: init::DEFAULT_DEST.to_owned(),
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
     }
@@ -266,8 +267,8 @@ fn the_start_removes_the_unpacks_a_killed_daemon_left() {
 fn the_helper_root_is_made_once_and_again_without_error() {
     let base = scratch("rootfs");
     let dir = base.join("root");
-    helper::prepare_rootfs(&dir).expect("made");
-    helper::prepare_rootfs(&dir).expect("made again");
+    helper::prepare_rootfs(&dir, "/js/daemon").expect("made");
+    helper::prepare_rootfs(&dir, "/js/daemon").expect("made again");
     for (name, target) in [
         ("bin", "usr/bin"),
         ("sbin", "usr/sbin"),
@@ -299,11 +300,11 @@ fn the_helper_root_is_made_once_and_again_without_error() {
     }
     std::fs::set_permissions(closed.join("root"), std::fs::Permissions::from_mode(0o500))
         .expect("chmod");
-    assert!(helper::prepare_rootfs(&closed.join("root")).is_err());
+    assert!(helper::prepare_rootfs(&closed.join("root"), "/js/daemon").is_err());
     std::fs::set_permissions(closed.join("root"), std::fs::Permissions::from_mode(0o700))
         .expect("chmod");
     std::fs::write(closed.join("a-file"), b"x").expect("file");
-    assert!(helper::prepare_rootfs(&closed.join("a-file/root")).is_err());
+    assert!(helper::prepare_rootfs(&closed.join("a-file/root"), "/js/daemon").is_err());
 }
 
 /// Catches a helper's configuration running a shell, mapping the wrong namespace,
@@ -636,4 +637,62 @@ async fn a_failed_unpack_is_reported_and_leaves_no_blobs() {
     let left = names(&scratch.join("oci-images"));
     assert!(left.iter().all(|n| !n.ends_with("-blobs")), "{left:?}");
     assert!(!left.contains(&"a".repeat(64)), "{left:?}");
+}
+
+/// Catches the helper names a caller configures not reaching the helpers: with another
+/// binary path and other mode arguments, the job's argv, the bind of the host binary,
+/// and the mount points of the helper root carry exactly those and none of the defaults.
+#[test]
+fn configured_helper_names_are_the_only_names_in_the_helpers() {
+    let modes = helper::HelperModes {
+        give: "give".to_owned(),
+        whole: "--all".to_owned(),
+        unpack: "unpack".to_owned(),
+        binary: "/other/bin/host".to_owned(),
+    };
+    let give = helper::give_job(&modes, Path::new("/d"), "1:1", None, &[Path::new("/a")]);
+    assert_eq!(
+        give.args,
+        ["/other/bin/host", "give", "1:1", "-", "--all", "/t/0"]
+    );
+    let unpack = helper::unpack_job(
+        &modes,
+        Path::new("/d"),
+        Path::new("/s"),
+        Path::new("/b"),
+        &[],
+    );
+    assert_eq!(unpack.args[..2], ["/other/bin/host", "unpack"]);
+    let ids = DaemonIds {
+        uid: 990,
+        gid: 991,
+        sub_uid: 100_000,
+        sub_gid: 200_000,
+    };
+    let config = helper::config(Path::new("/r"), &ids, Mapping::Setup, "/x/h", &give);
+    let text = serde_json::to_string(&config).expect("json");
+    assert!(
+        text.contains(r#""destination":"/other/bin/host""#),
+        "{text}"
+    );
+    assert!(!text.contains("/js/daemon"), "{text}");
+    let dir = scratch("modes-root");
+    helper::prepare_rootfs(&dir, &modes.binary).expect("made");
+    assert!(dir.join("other/bin/host").is_file());
+    assert!(!dir.join("js").exists());
+}
+
+/// Catches a configured init path not reaching the bundle a lease is made with.
+#[tokio::test]
+async fn the_bundle_names_the_init_where_the_config_says() {
+    let dir = scratch("init-dest");
+    let mut config = config(&dir, true);
+    config.init_dest = "/dev/other-init".to_owned();
+    let oci = start(&config, &dir.join("scratch")).expect("started");
+    let mut spec = crate::container::tests::spec();
+    spec.dir = dir.join("lease");
+    oci.create(&spec).await.expect("bundle");
+    let text = std::fs::read_to_string(spec.dir.join("bundle/config.json")).expect("config");
+    assert!(text.contains("/dev/other-init"), "{text}");
+    assert!(!text.contains("/dev/js-init"), "{text}");
 }

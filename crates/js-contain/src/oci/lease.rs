@@ -95,6 +95,7 @@ impl Oci {
             ids: &self.ids,
             arch: self.arch,
             init: &self.init,
+            init_dest: &self.init_dest,
         };
         let bytes = spec::render(&spec::action_config(spec, &placement)?)?;
         let bundle = spec.dir.join("bundle");

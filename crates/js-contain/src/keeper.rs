@@ -15,32 +15,33 @@
 //! start's sweep removed it). The container, the lease cgroup and the scratch directory
 //! stay for that sweep; nothing in them runs.
 //!
-//! The keeper process itself is the embedding binary's own mode, started by a
-//! [`KeeperLauncher`]; this module holds what is the same for every launcher: the handle
-//! that owns the process. It must ignore SIGHUP, SIGINT and SIGTERM, so a service manager
-//! that stops the daemon's unit with SIGTERM does not stop it before it has read
-//! end-of-file. The daemon removes the keeper (SIGKILL, then reaps it) once the lease is
-//! cleaned.
+//! The keeper process itself is the embedding binary's own mode, described by a
+//! [`KeeperLauncher`]; this module starts it and owns it. The handle puts the keeper in a
+//! process group of its own (a signal sent to the daemon's group does not reach it) and
+//! waits for the process to say it runs as a keeper before it returns. The process must
+//! ignore SIGHUP, SIGINT and SIGTERM, so a service manager that stops the daemon's unit
+//! with SIGTERM does not stop it before it has read end-of-file. The daemon removes the
+//! keeper (SIGKILL, then reaps it) once the lease is cleaned.
 
-use std::io;
+use std::io::{self, Read as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::Child;
+use std::process::{Child, Command, Stdio};
 
 /// How many times, a second apart, the keeper writes `cgroup.kill`.
 pub const KILL_TRIES: u32 = 30;
 
-/// How a keeper process is started: by the embedding binary, which owns the code the
-/// process runs.
+/// What the embedding binary supplies: the keeper process and how it says it is ready.
 pub trait KeeperLauncher {
-    /// Starts a keeper that, once the end of its stdin that this process holds is closed,
-    /// writes `1` to the file `kill` up to `tries` times a second apart, and returns once
-    /// the process is running as a keeper (it has answered that it is). Its stdin must be
-    /// a pipe, it must be in a process group of its own, and it must ignore SIGHUP,
-    /// SIGINT and SIGTERM.
-    ///
-    /// # Errors
-    /// The process could not be started, or did not answer as a keeper.
-    fn launch(&self, kill: &Path, tries: u32) -> io::Result<Child>;
+    /// The command line of a keeper that, once the end of its stdin that the daemon holds
+    /// is closed, writes `1` to the file `kill` up to `tries` times a second apart. It must
+    /// ignore SIGHUP, SIGINT and SIGTERM and write [`KeeperLauncher::ready`] to its stdout
+    /// once it does. The handle sets its stdin and stdout to pipes, its stderr to null
+    /// and its process group; the launcher sets the rest.
+    fn command(&self, kill: &Path, tries: u32) -> Command;
+
+    /// What the keeper writes to its stdout when it runs as a keeper.
+    fn ready(&self) -> &[u8];
 }
 
 /// One lease's keeper. Dropped, it is SIGKILLed and reaped without writing anything:
@@ -52,13 +53,33 @@ pub struct Keeper {
 
 impl Keeper {
     /// Starts the keeper of the cgroup whose `cgroup.kill` is `kill`, with `launcher`
-    /// ([`KILL_TRIES`] tries), and returns once it runs as a keeper.
+    /// ([`KILL_TRIES`] tries), in a process group of its own, and returns once it has
+    /// said it runs as a keeper.
     ///
     /// # Errors
-    /// The keeper could not be started, or its program did not answer as a keeper.
+    /// The keeper could not be started, or its program did not answer as a keeper (the
+    /// process is killed and reaped).
     pub fn watch(launcher: &impl KeeperLauncher, kill: &Path) -> io::Result<Self> {
-        let child = launcher.launch(kill, KILL_TRIES).map_err(cannot_start)?;
-        Ok(Self { child })
+        let mut command = launcher.command(kill, KILL_TRIES);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let child = command.spawn().map_err(cannot_start)?;
+        // Dropped on an error below, the keeper is killed and reaped.
+        let mut this = Self { child };
+        let ready = launcher.ready();
+        let mut answer = vec![0; ready.len()];
+        // Piped above, so there is a stdout to read.
+        let stdout = this.child.stdout.as_mut().expect("stdout is piped");
+        let read = stdout.read_exact(&mut answer);
+        if read.is_err() || answer != ready {
+            return Err(cannot_start(io::Error::other(
+                "the keeper's program did not answer as a keeper",
+            )));
+        }
+        Ok(this)
     }
 
     /// What a daemon's death does: closes the daemon's end of the keeper's stdin.
@@ -87,31 +108,42 @@ impl Drop for Keeper {
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use std::process::{Command, Stdio};
 
-    /// A launcher whose keeper is `cat`: it holds its stdin pipe and ends when the pipe
-    /// closes, as a keeper does. It records what it was asked.
-    struct Cat {
+    /// A launcher whose keeper is a stand-in program that holds its stdin pipe and ends
+    /// when the pipe closes, as a keeper does. It records what it was asked.
+    struct Stand {
         program: &'static str,
+        args: &'static [&'static str],
+        ready: &'static [u8],
         asked: RefCell<Vec<(std::path::PathBuf, u32)>>,
     }
 
-    impl Cat {
-        fn new() -> Self {
+    impl Stand {
+        /// `cat`, which says nothing: ready is the empty answer.
+        fn cat() -> Self {
+            Self::of("cat", &[], b"")
+        }
+
+        fn of(program: &'static str, args: &'static [&'static str], ready: &'static [u8]) -> Self {
             Self {
-                program: "cat",
+                program,
+                args,
+                ready,
                 asked: RefCell::default(),
             }
         }
     }
 
-    impl KeeperLauncher for Cat {
-        fn launch(&self, kill: &Path, tries: u32) -> io::Result<Child> {
+    impl KeeperLauncher for Stand {
+        fn command(&self, kill: &Path, tries: u32) -> Command {
             self.asked.borrow_mut().push((kill.to_owned(), tries));
-            Command::new(self.program)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .spawn()
+            let mut command = Command::new(self.program);
+            command.args(self.args);
+            command
+        }
+
+        fn ready(&self) -> &[u8] {
+            self.ready
         }
     }
 
@@ -122,7 +154,7 @@ mod tests {
     /// test waits for that end, so a keeper that went on would hang it).
     #[test]
     fn a_keeper_runs_while_held_and_ends_when_its_pipe_closes() {
-        let launcher = Cat::new();
+        let launcher = Stand::cat();
         let mut keeper = Keeper::watch(&launcher, Path::new("/k/cgroup.kill")).expect("keeper");
         assert_eq!(
             *launcher.asked.borrow(),
@@ -144,10 +176,7 @@ mod tests {
     /// that does not say what failed.
     #[test]
     fn a_keeper_that_cannot_start_is_an_error() {
-        let launcher = Cat {
-            program: "/nonexistent-keeper/program",
-            asked: RefCell::default(),
-        };
+        let launcher = Stand::of("/nonexistent-keeper/program", &[], b"");
         let error = Keeper::watch(&launcher, Path::new("/k")).expect_err("no program");
         assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
         assert!(
@@ -156,12 +185,45 @@ mod tests {
         );
     }
 
+    /// Catches the readiness wait missing from the handle: a program that does not say
+    /// what the launcher says it says is no keeper (`printf` says `other`, not `ready`),
+    /// the process is reaped, and the one that does say it is accepted.
+    #[test]
+    fn a_program_that_does_not_answer_as_a_keeper_is_an_error() {
+        let wrong = Stand::of("printf", &["other\n"], b"ready\n");
+        let error = Keeper::watch(&wrong, Path::new("/k")).expect_err("not a keeper");
+        assert!(
+            error.to_string().contains("did not answer as a keeper"),
+            "{error}"
+        );
+        let silent = Stand::of("true", &[], b"ready\n");
+        assert!(
+            Keeper::watch(&silent, Path::new("/k")).is_err(),
+            "no answer at all"
+        );
+        let right = Stand::of("printf", &["ready\n"], b"ready\n");
+        Keeper::watch(&right, Path::new("/k")).expect("answers");
+    }
+
+    /// Catches a keeper left in the daemon's process group (a signal to the group would
+    /// end it before the daemon's death does): its group is its own pid.
+    #[test]
+    fn the_keeper_is_in_a_process_group_of_its_own() {
+        let launcher = Stand::cat();
+        let keeper = Keeper::watch(&launcher, Path::new("/k")).expect("keeper");
+        let pid = rustix::process::Pid::from_raw(i32::try_from(keeper.child.id()).expect("pid"))
+            .expect("a pid");
+        let group = rustix::process::getpgid(Some(pid)).expect("group");
+        assert_eq!(group, pid);
+        assert_ne!(group, rustix::process::getpgrp());
+    }
+
     /// Catches a keeper whose drop (the daemon removing it once the lease is cleaned)
     /// leaves the process behind: dropped, it is killed and reaped before the drop
     /// returns, so its pid is gone.
     #[test]
     fn a_dropped_keeper_is_killed_and_reaped() {
-        let launcher = Cat::new();
+        let launcher = Stand::cat();
         let keeper = Keeper::watch(&launcher, Path::new("/k")).expect("keeper");
         let pid = keeper.child.id();
         let proc = std::path::PathBuf::from(format!("/proc/{pid}"));

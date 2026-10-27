@@ -4,7 +4,7 @@
 //! The binary is built statically by `build.rs`, so it runs in any image. The driver
 //! writes it to `<scratch>/oci-bin/js-init` (the scratch directory is searchable by
 //! others; an installed or built daemon's directory may not be) and binds it read-only
-//! at [`DEST`], in the container's own `/dev` (a `tmpfs` made fresh per container, so
+//! at [`super::OciConfig::init_dest`], in the container's own `/dev` (a `tmpfs` made fresh per container, so
 //! the image's root is never written to).
 
 use std::os::unix::fs::PermissionsExt as _;
@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 /// The program, empty on a target that runs no containers.
 const BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/js-init"));
 
-/// Where the container sees it.
-pub const DEST: &str = "/dev/js-init";
+/// Where the container sees it unless the caller says otherwise
+/// ([`super::OciConfig::init_dest`]).
+pub const DEFAULT_DEST: &str = "/dev/js-init";
 
 /// The file in a lease directory the init writes why the program could not be started
 /// to (its stdin: the container's other processes cannot reach it).

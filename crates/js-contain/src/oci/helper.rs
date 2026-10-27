@@ -48,6 +48,9 @@ pub struct HelperModes {
     pub whole: String,
     /// The argument that selects the unpack mode.
     pub unpack: String,
+    /// Where the host binary is bound read-only inside a helper: an absolute path whose
+    /// parent directory the helper root gets a mount point for.
+    pub binary: String,
 }
 
 impl Default for HelperModes {
@@ -56,6 +59,7 @@ impl Default for HelperModes {
             give: "__give-dirs".to_owned(),
             whole: "--whole".to_owned(),
             unpack: "__unpack-layers".to_owned(),
+            binary: "/js/daemon".to_owned(),
         }
     }
 }
@@ -63,9 +67,6 @@ impl Default for HelperModes {
 /// How many directories the helper root has mount points for (`/t/0` to `/t/7`); more
 /// work too, with the mount point made inside the shared root by `crun`.
 const BIND_POINTS: usize = 8;
-
-/// Where the daemon's own binary is bound, for the helper modes.
-const DAEMON_BINARY: &str = "/js/daemon";
 
 /// The job that gives `whole` trees (every entry) and `dirs` (directories only, if any)
 /// to `owner` (`uid:gid` in the helper's namespace), with this daemon's binary `daemon`.
@@ -77,11 +78,7 @@ pub(crate) fn give_job(
     whole: &[&Path],
 ) -> Job {
     let mut binds = Vec::new();
-    let mut args = vec![
-        DAEMON_BINARY.to_owned(),
-        modes.give.clone(),
-        owner.to_owned(),
-    ];
+    let mut args = vec![modes.binary.clone(), modes.give.clone(), owner.to_owned()];
     args.push(match dirs {
         Some(dir) => {
             binds.push(Bind {
@@ -103,6 +100,7 @@ pub(crate) fn give_job(
     Job {
         binds,
         daemon: Some(daemon.to_owned()),
+        bind: modes.binary.clone(),
         args,
     }
 }
@@ -115,6 +113,7 @@ pub(crate) fn remove_job(dir: &Path) -> Job {
             writable: true,
         }],
         daemon: None,
+        bind: String::new(),
         args: ["/usr/bin/find", "/t/0", "-mindepth", "1", "-delete"]
             .map(str::to_owned)
             .to_vec(),
@@ -134,7 +133,7 @@ pub(crate) fn unpack_job(
     layers: &[String],
 ) -> Job {
     let mut args = vec![
-        DAEMON_BINARY.to_owned(),
+        modes.binary.clone(),
         modes.unpack.clone(),
         bound_at(0),
         bound_at(1),
@@ -152,6 +151,7 @@ pub(crate) fn unpack_job(
             },
         ],
         daemon: Some(daemon.to_owned()),
+        bind: modes.binary.clone(),
         args,
     }
 }
@@ -167,8 +167,10 @@ pub(crate) struct Bind {
 /// What a helper runs: the directories it works on and the command.
 pub(crate) struct Job {
     pub binds: Vec<Bind>,
-    /// The daemon's binary, bound read-only at [`DAEMON_BINARY`], if the job runs it.
+    /// The daemon's binary, bound read-only at [`Job::bind`], if the job runs it.
     pub daemon: Option<PathBuf>,
+    /// Where it is bound ([`HelperModes::binary`]); empty if the job runs none.
+    pub bind: String,
     pub args: Vec<String>,
 }
 
@@ -202,7 +204,7 @@ pub(crate) fn config(
         bind_at(Path::new("/etc/ld.so.cache"), "/etc/ld.so.cache", false),
     ];
     if let Some(daemon) = &job.daemon {
-        mounts.push(bind_at(daemon, DAEMON_BINARY, false));
+        mounts.push(bind_at(daemon, &job.bind, false));
     }
     for (i, bind) in job.binds.iter().enumerate() {
         mounts.push(bind_at(&bind.source, &bound_at(i), bind.writable));
@@ -279,14 +281,21 @@ const USR_LINKS: [(&str, &str); 4] = [
 ///
 /// # Errors
 /// A directory or link cannot be made.
-pub(crate) fn prepare_rootfs(dir: &Path) -> std::io::Result<()> {
-    for point in ["dev", "usr", "etc", "js"] {
+pub(crate) fn prepare_rootfs(dir: &Path, binary: &str) -> std::io::Result<()> {
+    let binary = binary.trim_start_matches('/');
+    let binary_dir = Path::new(binary).parent().unwrap_or(Path::new(""));
+    for point in [
+        Path::new("dev"),
+        Path::new("usr"),
+        Path::new("etc"),
+        binary_dir,
+    ] {
         std::fs::create_dir_all(dir.join(point))?;
     }
     for i in 0..BIND_POINTS {
         std::fs::create_dir_all(dir.join(bound_at(i).trim_start_matches('/')))?;
     }
-    for file in ["etc/ld.so.cache", "js/daemon"] {
+    for file in ["etc/ld.so.cache", binary] {
         std::fs::OpenOptions::new()
             .create(true)
             .append(true)

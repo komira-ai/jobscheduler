@@ -18,7 +18,6 @@ use oci_spec::runtime::{
 use super::hardening::{
     CAPABILITIES, MASKED_PATHS, READONLY_PATHS, SeccompError, held_capabilities, seccomp,
 };
-use super::init;
 use crate::container::{ACTION_ID, ContainerSpec};
 use crate::subids::DaemonIds;
 
@@ -43,7 +42,7 @@ pub(crate) const WRITABLE: [(&str, &str); 4] = [
 pub(crate) const WRITABLE_DIR: &str = "rw";
 
 /// The mount options of the exec-root overlay, pinned: no metacopy, redirects only
-/// recorded and never followed (`nofollow`), no index or xino (a stub or redirect planted
+/// recorded and never followed (`nofollow`), no index or xino (a stub or redirect placed
 /// in the upper layer cannot change what collection reads), and `userxattr` because the
 /// overlay is mounted inside a user namespace. The kernel refuses `userxattr` together
 /// with `redirect_dir=off` or `on` ("conflicting options"): `nofollow` is the one
@@ -54,12 +53,38 @@ pub(crate) const OVERLAY_OPTIONS: &str =
 /// Why a configuration could not be built.
 #[derive(Debug, thiserror::Error)]
 pub enum SpecError {
+    /// `exec_root` or the init's path is not an absolute, normalized path (or the init's
+    /// is not inside `/dev`).
+    #[error("{what} {path:?} is not an absolute path without empty, `.` or `..` parts")]
+    Path {
+        /// Which setting.
+        what: &'static str,
+        /// Its value.
+        path: String,
+    },
     /// The seccomp profile could not be built.
     #[error(transparent)]
     Seccomp(#[from] SeccompError),
     /// The configuration could not be written as JSON.
     #[error("config.json: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+/// Checks that `path` starts with `under` and continues with parts that are not empty,
+/// `.` or `..` (so it is not `under` alone, and has no trailing slash): a mount destination
+/// or working directory built from it cannot leave the place it names.
+fn normalized(what: &'static str, path: &str, under: &str) -> Result<(), SpecError> {
+    let ok = path
+        .strip_prefix(under)
+        .is_some_and(|rest| rest.split('/').all(|p| !matches!(p, "" | "." | "..")));
+    if ok {
+        Ok(())
+    } else {
+        Err(SpecError::Path {
+            what,
+            path: path.to_owned(),
+        })
+    }
 }
 
 /// What a builder of `oci-spec` makes. Every type here has a default for each field, so
@@ -109,11 +134,13 @@ pub(crate) struct Placement<'a> {
     pub arch: &'a str,
     /// The container's first process (`init`), on the node.
     pub init: &'a Path,
+    /// Where the container sees the init: an absolute path inside its `/dev`.
+    pub init_dest: &'a str,
 }
 
 /// The mounts of a job: the standard ones of `crun spec --rootless`, the `hosts`, `hostname` and `resolv.conf` files,
 /// the exec-root overlay, the shared trees read-only inside it, and [`WRITABLE`].
-fn mounts(spec: &ContainerSpec, init: &Path) -> Vec<Mount> {
+fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
     let shm = format!("size={}m", spec.limits.shm_mib);
     let open = ["rbind", "ro", "nosuid", "noexec", "nodev"];
     let mut mounts = vec![
@@ -151,7 +178,7 @@ fn mounts(spec: &ContainerSpec, init: &Path) -> Vec<Mount> {
         ),
         // Into the `/dev` above, a `tmpfs` made for this container: no mount point in the
         // image. Executable (no `noexec`): it is the container's first process.
-        bind(init, init::DEST, &["rbind", "ro", "nosuid", "nodev"]),
+        bind(init, init_dest, &["rbind", "ro", "nosuid", "nodev"]),
         bind(&spec.dir.join("etc/hosts"), "/etc/hosts", &open),
         bind(&spec.dir.join("etc/hostname"), "/etc/hostname", &open),
         bind(&spec.dir.join("etc/resolv.conf"), "/etc/resolv.conf", &open),
@@ -193,8 +220,8 @@ fn mounts(spec: &ContainerSpec, init: &Path) -> Vec<Mount> {
 
 /// The container's `process.args`: the init, then `--` and the job's own argv. The
 /// init runs the job as its child and reaps what the job leaves orphaned.
-fn init_argv(argv: &[String]) -> Vec<String> {
-    [init::DEST, "--"]
+fn init_argv(init_dest: &str, argv: &[String]) -> Vec<String> {
+    [init_dest, "--"]
         .into_iter()
         .map(str::to_owned)
         .chain(argv.iter().cloned())
@@ -252,11 +279,14 @@ pub(crate) fn environment(env: &[(String, String)]) -> Vec<String> {
 /// No memory or CPU limit is set here: the lease cgroup carries them.
 ///
 /// # Errors
-/// The seccomp profile cannot be resolved for the node's architecture.
+/// `spec.exec_root` or the init's path is not a normalized absolute path, or the seccomp
+/// profile cannot be resolved for the node's architecture.
 pub(crate) fn action_config(
     spec: &ContainerSpec,
     placement: &Placement<'_>,
 ) -> Result<Spec, SpecError> {
+    normalized("exec_root", &spec.exec_root, "/")?;
+    normalized("init path", placement.init_dest, "/dev/")?;
     let held = held_capabilities();
     let capabilities = built(
         LinuxCapabilitiesBuilder::default()
@@ -278,7 +308,7 @@ pub(crate) fn action_config(
             .user(built(
                 UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
             ))
-            .args(init_argv(&spec.argv))
+            .args(init_argv(placement.init_dest, &spec.argv))
             .env(environment(&spec.env))
             .cwd(PathBuf::from(cwd))
             .capabilities(capabilities)
@@ -327,7 +357,7 @@ pub(crate) fn action_config(
             .root(root)
             .hostname(HOSTNAME)
             .process(process)
-            .mounts(mounts(spec, placement.init))
+            .mounts(mounts(spec, placement.init, placement.init_dest))
             .linux(linux)
             .build(),
     ))
@@ -380,6 +410,7 @@ mod tests {
             ids: &ids(),
             arch: "amd64",
             init: Path::new("/scratch/oci-bin/js-init"),
+            init_dest: "/dev/js-init",
         };
         let config = action_config(spec, &placement).expect("config");
         serde_json::from_slice(&render(&config).expect("render")).expect("json")
@@ -418,6 +449,7 @@ mod tests {
                 ids: &ids(),
                 arch: "amd64",
                 init: Path::new("/scratch/oci-bin/js-init"),
+                init_dest: "/dev/js-init",
             };
             render(&action_config(&spec(), &placement).expect("config")).expect("render")
         };
@@ -455,6 +487,69 @@ mod tests {
             .collect();
         assert!(options.contains(&"ro"), "{options:?}");
         assert!(!options.contains(&"noexec"), "{options:?}");
+    }
+
+    /// The config of `spec` with the init at `init_dest`.
+    fn config_with(spec: &ContainerSpec, init_dest: &str) -> Result<Value, SpecError> {
+        let rootfs = PathBuf::from("/scratch/oci-images/aaaa/rootfs");
+        let placement = Placement {
+            rootfs: &rootfs,
+            cgroup: "/js.slice/actions/lease-1-2",
+            ids: &ids(),
+            arch: "amd64",
+            init: Path::new("/scratch/oci-bin/js-init"),
+            init_dest,
+        };
+        let config = action_config(spec, &placement)?;
+        Ok(serde_json::from_slice(&render(&config).expect("render")).expect("json"))
+    }
+
+    /// Catches the names a caller configures not reaching the config, or the defaults
+    /// leaking in beside them: with another exec root and init path, the overlay, the
+    /// shared mounts, the working directory and the init's mount and `process.args` carry
+    /// exactly those names and none of the defaults.
+    #[test]
+    fn configured_names_are_the_only_names_in_the_config() {
+        let mut spec = spec();
+        spec.exec_root = "/other/root".to_owned();
+        spec.shared = vec![SharedMount {
+            path: "lib".to_owned(),
+            source: PathBuf::from("/scratch/trees/bb"),
+        }];
+        let config = config_with(&spec, "/dev/other-init").expect("config");
+        let text = config.to_string();
+        assert!(!text.contains("/job/root"), "{text}");
+        assert!(!text.contains("/dev/js-init"), "{text}");
+        assert_eq!(config["process"]["cwd"], "/other/root/pkg");
+        assert_eq!(config["process"]["args"][0], "/dev/other-init");
+        let mounts = config["mounts"].as_array().expect("mounts");
+        let dests: Vec<&str> = mounts
+            .iter()
+            .filter_map(|m| m["destination"].as_str())
+            .collect();
+        for want in ["/other/root", "/other/root/lib", "/dev/other-init"] {
+            assert!(dests.contains(&want), "{want} not in {dests:?}");
+        }
+    }
+
+    /// Catches an exec root or init path that could name another place than it says
+    /// (relative, `/`, empty, `.` or `..` parts, a trailing slash), or an init outside
+    /// `/dev`: each is refused with the setting's name, and a good one is accepted.
+    #[test]
+    fn exec_root_and_init_path_must_be_normalized_absolute_paths() {
+        for bad in ["", "/", "root", "/a/../b", "/a/./b", "/a//b", "/a/", "/.."] {
+            let mut spec = spec();
+            spec.exec_root = bad.to_owned();
+            let why = config_with(&spec, "/dev/js-init")
+                .expect_err(bad)
+                .to_string();
+            assert!(why.starts_with("exec_root "), "{bad}: {why}");
+        }
+        for bad in ["/dev/../x", "js-init", "/tmp/init", "/dev/", "/dev"] {
+            let why = config_with(&spec(), bad).expect_err(bad).to_string();
+            assert!(why.starts_with("init path "), "{bad}: {why}");
+        }
+        config_with(&spec(), "/dev/a/b-init").expect("nested under /dev");
     }
 
     /// Catches a working directory that is not the exec root when the job names none (a

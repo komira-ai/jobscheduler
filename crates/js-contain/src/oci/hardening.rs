@@ -95,7 +95,7 @@ const PROFILE: &str = include_str!("seccomp.json");
 /// change, which is what a reviewer reads.
 #[cfg(test)]
 pub(crate) const PROFILE_SHA256: &str =
-    "e2bbdceda151ab5482a7ffeca6a8650ab5d111c8ed65ba7fb8f5ca2b95bcef67";
+    "ade1fa9f5ea569f899c8e3ff4b1d94032d72de6cd1888c012240b87c571594d8";
 
 /// The architecture name containers/common filters on (Go's `GOARCH`) for Rust's
 /// `std::env::consts::ARCH`; `None` for one the profile has no filter for.

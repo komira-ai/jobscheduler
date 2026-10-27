@@ -71,7 +71,10 @@ pub struct OciConfig {
     /// [`helper::HelperModes`] (descriptor-relative ownership changes that never follow a
     /// symlink, and the unpack of an image's layers). By default the running executable.
     pub daemon: PathBuf,
-    /// The arguments that select those modes of `daemon`.
+    /// Where the container sees its init (absolute, inside `/dev`): also its name in the
+    /// process table.
+    pub init_dest: String,
+    /// The arguments that select those modes of `daemon`, and where it is bound.
     pub helper_modes: helper::HelperModes,
     /// Applied to every command line the backend starts (`crun` itself): the caller
     /// removes from the environment what no container runtime should inherit, such as the
@@ -96,6 +99,7 @@ impl Default for OciConfig {
             id_files: IdFiles::system(),
             check_search: true,
             id_tool_path: std::env::var_os("PATH"),
+            init_dest: init::DEFAULT_DEST.to_owned(),
             helper_modes: helper::HelperModes::default(),
             scrub_env: crun::no_scrub,
         }
@@ -246,6 +250,7 @@ pub struct Oci {
     crun: crun::Crun,
     daemon: PathBuf,
     modes: helper::HelperModes,
+    init_dest: String,
     /// The container init (`init`), installed under the scratch directory.
     init: PathBuf,
     source: Arc<dyn image::ImageSource>,
@@ -308,7 +313,11 @@ impl Oci {
             search_check(scratch)?;
         }
         let helper_root = scratch.join("oci-helper");
-        at(&helper_root, helper::prepare_rootfs(&helper_root)).map_err(prepare)?;
+        at(
+            &helper_root,
+            helper::prepare_rootfs(&helper_root, &config.helper_modes.binary),
+        )
+        .map_err(prepare)?;
         let daemon =
             at(scratch, helper::install_daemon(scratch, &config.daemon)).map_err(prepare)?;
         let init = at(scratch, init::install(scratch)).map_err(prepare)?;
@@ -316,6 +325,7 @@ impl Oci {
             crun: crun::Crun::new(config.runtime.clone(), config.scrub_env),
             daemon,
             modes: config.helper_modes.clone(),
+            init_dest: config.init_dest.clone(),
             init,
             source,
             ids,
