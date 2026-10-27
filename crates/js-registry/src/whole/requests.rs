@@ -133,6 +133,13 @@ impl Requests {
         self.placed.insert(lease, key);
     }
 
+    /// Whether a lease other than `lease` is committed for the request under `key`.
+    pub(crate) fn held_by_other(&self, key: &RequestKey, lease: &LeaseId) -> bool {
+        self.placed
+            .iter()
+            .any(|(held, kept)| (kept == key) & (held != lease))
+    }
+
     /// The lease ended; it no longer stands for its request.
     pub(crate) fn release(&mut self, lease: &LeaseId) {
         self.placed.remove(lease);
