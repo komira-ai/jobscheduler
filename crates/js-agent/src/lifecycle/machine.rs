@@ -8,7 +8,9 @@ use js_agent_wire::{
     RunResult, limits, refusal,
 };
 
-use super::runtime::{ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount};
+use super::runtime::{
+    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, Status,
+};
 use super::{
     Capacity, CheckHook, Clock, Config, Event, Finding, RuntimeError, Skip, code, detail, label,
 };
@@ -17,6 +19,11 @@ use super::{
 /// for one of them runs nothing. The oldest is forgotten first; a start for a run older
 /// than the last [`RETIRED_CAP`] is the server's to stop sending.
 pub const RETIRED_CAP: usize = limits::MAX_HELD;
+
+/// The most jobs the agent holds, each listed in the held runs of a heartbeat. A job
+/// carries at most one result, so the results stay within the wire limit as well.
+const MAX_JOBS: usize = limits::MAX_HELD;
+const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
 
 /// Where a job is. The container's id travels with the stages that need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,21 +107,22 @@ impl Job {
     }
 }
 
-/// The outcome of a container that exited, and the exit status when the job's own exit
-/// is what ended it.
-fn outcome(cause: Option<Cause>, exit: Exit) -> (Outcome, Option<i32>) {
+/// The outcome of a container that exited (`Some`) or vanished (`None`), and the exit
+/// status when the job's own exit is what ended it.
+fn outcome(cause: Option<Cause>, exit: Option<Exit>) -> (Outcome, Option<i32>) {
     match (cause, exit) {
         (Some(Cause::TimedOut), _) => (Outcome::TimedOut, None),
         (Some(Cause::Stopped), _) => (Outcome::Killed, None),
         (
             None,
-            Exit {
+            Some(Exit {
                 code,
                 oom_killed: true,
-            },
+            }),
         ) => (Outcome::OutOfMemory, Some(code)),
-        (None, Exit { code: 0, .. }) => (Outcome::Succeeded, Some(0)),
-        (None, Exit { code, .. }) => (Outcome::Failed, Some(code)),
+        (None, Some(Exit { code: 0, .. })) => (Outcome::Succeeded, Some(0)),
+        (None, Some(Exit { code, .. })) => (Outcome::Failed, Some(code)),
+        (None, None) => (Outcome::Failed, None),
     }
 }
 
@@ -393,6 +401,13 @@ impl Lifecycle {
             });
             return;
         }
+        if self.jobs.len() >= MAX_JOBS {
+            events.push(Event::Skipped {
+                run_id: run_id.clone(),
+                why: Skip::Full,
+            });
+            return;
+        }
         let mounts = match self.admit(spec) {
             Ok(mounts) => mounts,
             Err((wire, why)) => {
@@ -455,13 +470,15 @@ impl Lifecycle {
         };
         // The exit is looked at first: a job that finished by itself before its limit is
         // reported as it finished, even when the agent looks late. A runtime that cannot
-        // say is no reason to let the job run past its limit.
+        // say is no reason to let the job run past its limit. A container that is gone has
+        // nothing to stop, and the job ends as if it had exited.
         let mut seen = runtime.poll(&id);
-        if !matches!(seen, Ok(Some(_))) {
+        if !matches!(seen, Ok(Status::Exited(_))) {
             if job.cause.is_none() && now >= job.deadline_ms {
                 job.cause = Some(Cause::TimedOut);
             }
-            if job.cause.is_some() && !job.stop_sent {
+            let gone = matches!(seen, Ok(Status::Gone));
+            if job.cause.is_some() && !job.stop_sent && !gone {
                 match runtime.stop(&id, config.stop_grace) {
                     Ok(()) => {
                         job.stop_sent = true;
@@ -472,8 +489,12 @@ impl Lifecycle {
             }
         }
         match seen {
-            Ok(None) => {}
-            Ok(Some(exit)) => {
+            Ok(Status::Running) => {}
+            Ok(ended @ (Status::Exited(_) | Status::Gone)) => {
+                let exit = match ended {
+                    Status::Exited(exit) => Some(exit),
+                    _ => None,
+                };
                 let (how, status) = outcome(job.cause, exit);
                 if !job.silent {
                     job.result = Some(job.report(how, status, None));

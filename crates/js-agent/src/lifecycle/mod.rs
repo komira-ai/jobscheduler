@@ -59,7 +59,8 @@ use crate::cli::Cli;
 pub use machine::{Lifecycle, RETIRED_CAP};
 pub use mounts::{MountError, MountRoots};
 pub use runtime::{
-    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, label,
+    ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
+    label,
 };
 pub use scratch::ScratchRoot;
 
@@ -138,6 +139,9 @@ pub enum Skip {
     Stale,
     /// The run was finished, or stopped, earlier.
     Retired,
+    /// The agent already holds as many runs as a heartbeat can list, so it took on no
+    /// more; the server may send the start again once results are acknowledged.
+    Full,
 }
 
 /// What [`Lifecycle`] did, in order. The caller logs these; a test reads them as the

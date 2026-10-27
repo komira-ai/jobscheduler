@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use js_agent::lifecycle::{
     CheckHook, Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError,
-    label,
+    Status, label,
 };
 
 /// A clock that moves only when a test says so. Clones share one reading.
@@ -123,6 +123,14 @@ impl FakeRuntime {
         found.expect("no such container").exit = Some(exit);
     }
 
+    /// The container of `run_id` disappears while it runs, as if removed from outside.
+    pub fn vanish(&self, run_id: &str) {
+        self.state
+            .borrow_mut()
+            .containers
+            .retain(|_, c| c.run_id != run_id);
+    }
+
     /// Adds a container that was there before the agent, with exactly these labels.
     pub fn leak(&self, labels: &[(&str, &str)], running_ms: u64) -> String {
         let mut state = self.state.borrow_mut();
@@ -205,12 +213,15 @@ impl ContainerRuntime for FakeRuntime {
         Ok(ContainerId(id))
     }
 
-    fn poll(&mut self, id: &ContainerId) -> Result<Option<Exit>, RuntimeError> {
+    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError> {
         if self.fails("poll") {
             return Err(err("poll"));
         }
         let state = self.state.borrow();
-        Ok(state.containers.get(&id.0).and_then(|c| c.exit))
+        Ok(match state.containers.get(&id.0) {
+            None => Status::Gone,
+            Some(c) => c.exit.map_or(Status::Running, Status::Exited),
+        })
     }
 
     fn stop(&mut self, id: &ContainerId, grace: Duration) -> Result<(), RuntimeError> {

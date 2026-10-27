@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use js_agent::lifecycle::{RETIRED_CAP, label};
+use js_agent_wire::limits::{MAX_COMMANDS, MAX_HELD, MAX_RESULTS};
 use js_agent_wire::{Command, HeldRun, HeldState, Isolation, Outcome};
 use serde_json::json;
 
@@ -339,6 +340,74 @@ fn a_runtime_that_cannot_poll_does_not_extend_the_limit() {
     assert_eq!(h.fake.stops().len(), 1);
     h.life.step();
     assert_eq!(h.life.results()[0].outcome, Outcome::TimedOut);
+}
+
+/// Asserts that a container the runtime no longer has ends its job: it is reported
+/// `failed` with no exit status, goes through the usual cleanup, and gives its slot back;
+/// a vanished container of a job being stopped is `killed` and of one past its limit
+/// `timed_out`. It catches a job wedged in `running` with its slot booked for good.
+#[test]
+fn a_container_that_vanishes_ends_its_job() {
+    let mut h = Harness::new("vanished");
+    h.start(job("r1"));
+    h.fake.vanish("r1");
+    let events = names(&h.life.step());
+    assert_eq!(events[0], "result r1");
+    assert_eq!(events[1..], cleanup("r1"));
+    let result = &h.life.results()[0];
+    assert_eq!(result.outcome, Outcome::Failed);
+    assert_eq!(result.exit_code, None);
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    assert!(!h.scratch_of("r1").exists());
+
+    h.start(job("r2"));
+    h.start(job("r3"));
+    h.fake.vanish("r2");
+    h.fake.vanish("r3");
+    h.stop("r2");
+    h.clock.advance(60_000);
+    h.life.step();
+    let outcomes: Vec<Outcome> = h.life.results().iter().map(|r| r.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [Outcome::Failed, Outcome::Killed, Outcome::TimedOut]
+    );
+    assert_eq!(h.life.free().cpu_millis, 4000);
+}
+
+/// Asserts that starts that are refused cannot grow what the agent holds past what a
+/// heartbeat can list: after as many unacknowledged results as the wire allows, the next
+/// start is skipped with no record, the held and result lists stay within the limits, and
+/// an acknowledgement makes room for it. It catches a server that fills the agent's memory
+/// with refused starts, and a heartbeat the server must reject.
+#[test]
+fn refused_starts_cannot_outgrow_the_wire_limits() {
+    let mut h = Harness::new("held-cap");
+    let mut spec = job("x");
+    spec.isolation = Isolation::Host;
+    for chunk in (0..MAX_HELD).collect::<Vec<_>>().chunks(MAX_COMMANDS) {
+        let starts = chunk
+            .iter()
+            .map(|n| {
+                let mut one = spec.clone();
+                one.run_id = format!("x{n}");
+                Command::Start(Box::new(one))
+            })
+            .collect();
+        h.apply(starts);
+    }
+    assert_eq!(h.life.held().len(), MAX_HELD);
+    assert_eq!(h.life.results().len(), MAX_RESULTS);
+    spec.run_id = "extra".to_owned();
+    assert_eq!(names(&h.start(spec.clone())), ["skipped extra Full"]);
+    assert_eq!(h.life.held().len(), MAX_HELD);
+    assert_eq!(h.life.results().len(), MAX_RESULTS);
+    h.ack("x0", "ACCEPTED");
+    assert_eq!(
+        names(&h.start(spec)),
+        ["refused extra host-jobs-not-allowed"]
+    );
+    assert_eq!(h.life.held().len(), MAX_HELD);
 }
 
 /// Asserts that a stop that the runtime refuses is a finding and is asked for again at

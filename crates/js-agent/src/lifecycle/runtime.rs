@@ -82,6 +82,18 @@ pub struct Exit {
     pub oom_killed: bool,
 }
 
+/// What a poll found of a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// It runs.
+    Running,
+    /// It has exited.
+    Exited(Exit),
+    /// The runtime no longer has it: it was removed from outside, or the host lost it. The
+    /// job ends as failed (or as stopped or timed out, when the agent was ending it).
+    Gone,
+}
+
 /// A labelled container found on the host, for re-adoption after a restart. Whether it
 /// still runs is found by polling it, like any other.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,12 +122,14 @@ pub trait ContainerRuntime {
     /// The image cannot be had, the container cannot be created or it cannot start.
     fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError>;
 
-    /// Whether the container has exited, without waiting: `None` while it runs.
+    /// Whether the container runs, has exited or is gone, without waiting. A backend maps
+    /// the runtime's "no such container" to [`Status::Gone`], not to an error: an error
+    /// means the runtime could not say, and the job is polled again.
     ///
     /// # Errors
     ///
     /// The runtime cannot say.
-    fn poll(&mut self, id: &ContainerId) -> Result<Option<Exit>, RuntimeError>;
+    fn poll(&mut self, id: &ContainerId) -> Result<Status, RuntimeError>;
 
     /// Asks the container to stop, and kills it when it has not exited after `grace`.
     ///
