@@ -243,7 +243,7 @@ fn the_scratch_root_must_be_private() {
         !again.join("leftover").exists(),
         "a stale directory is replaced"
     );
-    symlink(&dir.path("file"), again.join("link")).unwrap();
+    symlink(dir.path("file"), again.join("link")).unwrap();
     scratch.remove("r1").unwrap();
     assert!(!made.exists());
     assert!(
