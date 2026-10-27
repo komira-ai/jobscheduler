@@ -4,8 +4,9 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_lease_server::{CapacitySource, StartupError};
-use js_provider::{Call, Provider};
+use js_lease::Booking;
+use js_lease_server::{CapacitySource, Seated, StartupError};
+use js_provider::Call;
 use js_provider_fake::FakeProvider;
 use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::json;
@@ -20,7 +21,7 @@ fn secs(n: u64) -> Duration {
 struct Scripted(Vec<(Call, bool)>);
 
 impl CapacitySource for Scripted {
-    fn provider(&self) -> Result<Box<dyn Provider + Send>, StartupError> {
+    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
         let resources = Resources::new(64_000, 1 << 30, 8, Some("nvidia-a100".into())).unwrap();
         let caps = BTreeMap::from([("isa".to_string(), "x86-64-v3".to_string())]);
         let shape = Shape::new(resources, caps);
@@ -29,7 +30,7 @@ impl CapacitySource for Scripted {
         for (call, landed) in &self.0 {
             fake.script_unknown(*call, *landed);
         }
-        Ok(Box::new(fake))
+        Ok(Seated::all(Box::new(fake)))
     }
 }
 

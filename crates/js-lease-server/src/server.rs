@@ -4,15 +4,16 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use js_lease::LeaseTable;
+use js_lease::{LeaseTable, read_bookings};
 use js_provider::Provider;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::api::{Shared, router};
+use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
 use crate::listener::serve;
@@ -39,7 +40,9 @@ pub async fn start<T: Ticker>(
     clock: SharedClock,
     ticker: T,
 ) -> Result<Running, StartupError> {
-    let provider = config.capacity.provider()?;
+    let bookings =
+        read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
+    let Seated { provider, unseated } = config.capacity.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
     let bound = TcpListener::bind(config.listen)
         .await
@@ -56,6 +59,15 @@ pub async fn start<T: Ticker>(
         js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
         _ => StartupError::new("--state-file", err),
     })?;
+    for lost in &unseated {
+        warn!(
+            lease = %lost.booking.lease,
+            host = %lost.booking.host,
+            state = %lost.booking.state,
+            reason = %lost.reason,
+            "the lease file's booking cannot be restored; the provider does not know the lease, so the table drops it"
+        );
+    }
     info!(
         %addr,
         provider = %table.provider().id(),

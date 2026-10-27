@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use js_lease::{ManualClock, Timestamp};
+use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
-    CapacitySource, Cli, Config, Limits, Running, SharedClock, StartupError, TickHandle,
+    CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
     channel_ticker, start,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
@@ -214,9 +214,12 @@ impl SharedPool {
 struct SharedProvider(Arc<std::sync::Mutex<StaticPool>>, Option<Gate>);
 
 impl CapacitySource for SharedPool {
-    fn provider(&self) -> Result<Box<dyn Provider + Send>, StartupError> {
+    fn provider(&self, _bookings: &[Booking]) -> Result<Seated, StartupError> {
         let gate = self.gate.lock().unwrap().take();
-        Ok(Box::new(SharedProvider(self.pool.clone(), gate)))
+        Ok(Seated::all(Box::new(SharedProvider(
+            self.pool.clone(),
+            gate,
+        ))))
     }
 }
 
@@ -366,4 +369,70 @@ pub fn first_labels(reply: &Reply) -> BTreeMap<String, String> {
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
         .collect()
+}
+
+/// What the server logs on the calling thread, kept as text until the capture is
+/// dropped. A server started inside the test's own task logs on that thread, so a test
+/// on the default (current thread) runtime sees all of it.
+pub struct LogCapture {
+    text: Arc<std::sync::Mutex<Vec<u8>>>,
+    _scope: tracing::subscriber::DefaultGuard,
+}
+
+/// A writer into the shared buffer of a [`LogCapture`].
+struct Lines(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Lines {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    pub fn start() -> Self {
+        let text = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = text.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Lines(sink.clone()))
+            .finish();
+        Self {
+            text,
+            _scope: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    /// Everything logged so far.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.text.lock().unwrap()).into_owned()
+    }
+}
+
+/// A lease file at term 1 holding these leases, each `(sequence, state, host)`, all
+/// acquired at `T0` and due 600 seconds later.
+pub fn lease_file(leases: &[(u64, &str, Option<&str>)]) -> String {
+    let mut text = format!(
+        "version = 1\nterm = 1\nnext_sequence = {}\nlease_count = {}\n",
+        leases.len() + 1,
+        leases.len()
+    );
+    for (sequence, state, host) in leases {
+        text.push_str(&format!(
+            "\n[[lease]]\nterm = 1\nsequence = {sequence}\nstate = \"{state}\"\n"
+        ));
+        if let Some(host) = host {
+            text.push_str(&format!("host = \"{host}\"\n"));
+        }
+        text.push_str(&format!(
+            "acquired_at_ms = {T0}\nexpires_at_ms = {}\nends_at_ms = {}\n",
+            T0 + 600_000,
+            T0 + 7_200_000
+        ));
+    }
+    text
 }

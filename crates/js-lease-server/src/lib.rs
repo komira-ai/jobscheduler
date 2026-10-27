@@ -85,6 +85,24 @@
 //! connection until it finishes or the server stops. A failed accept (descriptors used
 //! up, say) is logged and retried after 100 ms.
 //!
+//! # Restart
+//!
+//! The lease file is the record of the leases, and for the static pool it is also the
+//! record of the pool's bookings: the pool is built again from `--pool-config` at every
+//! start and holds its bookings in memory only. So before the table looks at a held
+//! lease, the server reads the hosts the file names ([`js_lease::read_bookings`]) and
+//! asks the [`CapacitySource`] to seat each lease on its host again, in lease id order.
+//! A lease the source seats is observed present, stays held on the same host, and the
+//! host is not leased to anyone else; it can be renewed and released as before.
+//!
+//! A booking the source cannot seat is logged at warn level with the lease, the host,
+//! the state and the reason, and the table then finds the provider ignorant of it and
+//! drops it: a host the pool file no longer lists, or a host the file gives to two
+//! leases (the lower id keeps it). Edit the pool file with that in mind: removing a
+//! host from it ends the leases on it at the next start. A source that keeps its own
+//! state across restarts (a provider that is a service, or hosts that agents report) is
+//! free to ignore the bookings it is given.
+//!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
@@ -119,7 +137,7 @@ use tokio::sync::mpsc;
 
 pub use adapt::SharedClock;
 pub use api::BODY_LIMIT;
-pub use capacity::{CapacitySource, StaticPoolSource};
+pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use config::{BootMode, Cli, Config, Limits, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
 pub use server::{Running, start};
