@@ -124,7 +124,7 @@ impl SystemCommands {
     }
 
     /// Waits for what `child` prints and for its exit, killing it when it overruns.
-    fn supervise(&self, program: &str, child: Child, reader: PipeReader) -> Result<String, String> {
+    fn supervise(&self, child: Child, reader: PipeReader) -> Ran {
         let pid = child.id();
         let (printed, output) = mpsc::channel();
         let (exited, exit) = mpsc::channel();
@@ -132,25 +132,73 @@ impl SystemCommands {
         // This thread owns the child from here on and always collects it, so the caller
         // never blocks on a process that does not die.
         thread::spawn(move || watch(child, reader, cap, &printed, &exited));
-        let give_up = |why: String| {
+        let give_up = |ran: Ran| {
             kill(pid);
             let _ = exit.recv_timeout(COLLECT_WAIT);
-            format!("{program}: {why}")
+            ran
         };
-        let timed_out = || give_up(format!("timed out after {:?}", self.limit));
-        output
-            .recv_timeout(self.limit)
-            .map_err(|_| timed_out())
-            .and_then(|bytes| match bytes.len() > cap {
-                true => Err(give_up(format!("printed more than {cap} bytes"))),
-                false => Ok(bytes),
+        let Ok(bytes) = output.recv_timeout(self.limit) else {
+            return give_up(Ran::TimedOut);
+        };
+        if bytes.len() > cap {
+            return give_up(Ran::Overflow);
+        }
+        match exit.recv_timeout(self.limit) {
+            Err(_) => give_up(Ran::TimedOut),
+            Ok(status) => Ran::Exited {
+                code: status.code,
+                text: status.text,
+                stdout: String::from_utf8_lossy(&bytes).into_owned(),
+            },
+        }
+    }
+
+    /// Starts `program` and supervises it, saying how it ended. `env` is the whole
+    /// environment of the program when given, and the agent's own when not.
+    pub fn ran(&self, program: &str, args: &[&str], env: Option<&[(&str, &str)]>) -> Ran {
+        let failed = |err: io::Error| Ran::Spawn(err.to_string());
+        io::pipe()
+            .map_err(failed)
+            .and_then(|(reader, writer)| {
+                let mut command = Command::new(program);
+                command
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(writer)
+                    .stderr(Stdio::null());
+                if let Some(env) = env {
+                    command.env_clear().envs(env.iter().copied());
+                }
+                let spawned = command.spawn();
+                // The command (and with it the parent's copy of the pipe's write end) is
+                // gone here, so the reader sees the end of the output.
+                drop(command);
+                spawned
+                    .map_err(failed)
+                    .map(|child| self.supervise(child, reader))
             })
-            .and_then(|bytes| {
-                exit.recv_timeout(self.limit)
-                    .map_err(|_| timed_out())
-                    .and_then(|status| status.map_err(|why| format!("{program}: {why}")))
-                    .map(|()| String::from_utf8_lossy(&bytes).into_owned())
-            })
+            .unwrap_or_else(|ran| ran)
+    }
+
+    /// [`SystemCommands::ran`] as the [`CommandRunner`] reports it: the output when the
+    /// program exited with status 0, otherwise an error that names the program.
+    fn start(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: Option<&[(&str, &str)]>,
+    ) -> Result<String, String> {
+        match self.ran(program, args, env) {
+            Ran::Exited {
+                code: Some(0),
+                stdout,
+                ..
+            } => Ok(stdout),
+            Ran::Exited { text, .. } => Err(format!("{program}: {text}")),
+            Ran::TimedOut => Err(format!("{program}: timed out after {:?}", self.limit)),
+            Ran::Overflow => Err(format!("{program}: printed more than {} bytes", self.cap)),
+            Ran::Spawn(why) => Err(format!("{program}: {why}")),
+        }
     }
 }
 
@@ -161,35 +209,24 @@ impl Default for SystemCommands {
     }
 }
 
-impl SystemCommands {
-    /// Starts `program` and supervises it. `env` is the whole environment of the program
-    /// when given, and the agent's own when not.
-    fn start(
-        &self,
-        program: &str,
-        args: &[&str],
-        env: Option<&[(&str, &str)]>,
-    ) -> Result<String, String> {
-        let named = |err: io::Error| format!("{program}: {err}");
-        io::pipe().map_err(named).and_then(|(reader, writer)| {
-            let mut command = Command::new(program);
-            command
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(writer)
-                .stderr(Stdio::null());
-            if let Some(env) = env {
-                command.env_clear().envs(env.iter().copied());
-            }
-            let spawned = command.spawn();
-            // The command (and with it the parent's copy of the pipe's write end) is gone
-            // here, so the reader sees the end of the output.
-            drop(command);
-            spawned
-                .map_err(named)
-                .and_then(|child| self.supervise(program, child, reader))
-        })
-    }
+/// How a program the runner started ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    /// It exited, or was ended by a signal, within the bounds.
+    Exited {
+        /// The exit status, none when a signal ended it or it could not be collected.
+        code: Option<i32>,
+        /// How the system describes the end, such as `exit status: 3`.
+        text: String,
+        /// What it printed (lossy UTF-8), at most the runner's cap.
+        stdout: String,
+    },
+    /// It did not print or exit within the runner's limit and was killed and collected.
+    TimedOut,
+    /// It printed more than the runner's cap and was killed and collected.
+    Overflow,
+    /// It could not be started; the system's reason.
+    Spawn(String),
 }
 
 impl CommandRunner for SystemCommands {
@@ -202,25 +239,35 @@ impl CommandRunner for SystemCommands {
     }
 }
 
+/// How a started program ended, as `watch` reports it.
+struct Status {
+    code: Option<i32>,
+    text: String,
+}
+
 /// Reads at most `cap` and one more byte of the child's output, reports it, then waits for
-/// the child to exit and reports whether it succeeded (the text of the failure when not).
-/// It does both however the reads and the wait end, so the child is always collected.
+/// the child to exit and reports how it ended. It does both however the reads and the wait
+/// end, so the child is always collected.
 fn watch(
     mut child: Child,
     reader: PipeReader,
     cap: usize,
     printed: &Sender<Vec<u8>>,
-    exited: &Sender<Result<(), String>>,
+    exited: &Sender<Status>,
 ) {
     let mut bytes = Vec::new();
     let most = u64::try_from(cap).unwrap_or(u64::MAX).saturating_add(1);
     let _ = reader.take(most).read_to_end(&mut bytes);
     let _ = printed.send(bytes);
-    let lost = (false, "could not be collected".to_owned());
-    let (success, text) = child
-        .wait()
-        .map_or(lost, |status| (status.success(), status.to_string()));
-    let _ = exited.send(success.then_some(()).ok_or(text));
+    let lost = Status {
+        code: None,
+        text: "could not be collected".to_owned(),
+    };
+    let status = child.wait().map_or(lost, |status| Status {
+        code: status.code(),
+        text: status.to_string(),
+    });
+    let _ = exited.send(status);
 }
 
 /// Sends SIGKILL to the process `pid`. A process that is already gone is not an error.

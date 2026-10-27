@@ -18,10 +18,10 @@ use crate::lifecycle::fake::ManualClock;
 use crate::lifecycle::{Harness, Options, job};
 use crate::support::{Reply, Script, Sent, beat_ok, hello, lowest, reply, welcome};
 
-const LEASE: &str = "whole-1";
+pub const LEASE: &str = "whole-1";
 
 /// How long the session waits for a run it did not know of, in these tests.
-const TIMEOUT: Duration = Duration::from_secs(60);
+pub const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A heartbeat reply that names `lease` (or none) and carries `commands`.
 fn granted(lease: Option<&str>, commands: Vec<Command>) -> Reply {
@@ -33,7 +33,7 @@ fn granted(lease: Option<&str>, commands: Vec<Command>) -> Reply {
     reply(200, serde_json::to_value(body).unwrap())
 }
 
-fn names(lease: &str) -> Reply {
+pub fn names(lease: &str) -> Reply {
     granted(Some(lease), Vec::new())
 }
 
@@ -59,13 +59,13 @@ fn line(body: &Value) -> String {
 }
 
 /// The line of each heartbeat sent so far.
-fn lines(sent: &Sent) -> Vec<String> {
+pub fn lines(sent: &Sent) -> Vec<String> {
     let sent = sent.borrow();
     let beats = sent.iter().filter(|(path, _)| path == HEARTBEAT_PATH);
     beats.map(|(_, body)| line(body)).collect()
 }
 
-fn note(step: &Step) -> Option<Note> {
+pub fn note(step: &Step) -> Option<Note> {
     match step {
         Step::Wait { note, .. } => note.clone(),
         Step::Fatal(fatal) => panic!("fatal: {fatal}"),
@@ -74,20 +74,20 @@ fn note(step: &Step) -> Option<Note> {
 
 /// What the session asked of a scripted host.
 #[derive(Default)]
-struct Asked {
-    prepared: usize,
-    restored: usize,
+pub struct Asked {
+    pub prepared: usize,
+    pub restored: usize,
 }
 
 /// A host that answers from lists (busy when a list is used up) and counts the questions.
-struct Probe {
+pub struct Probe {
     prepare: VecDeque<Quiet>,
     restore: VecDeque<Restored>,
     asked: Rc<RefCell<Asked>>,
 }
 
 impl Probe {
-    fn new(prepare: Vec<Quiet>, restore: Vec<Restored>) -> (Self, Rc<RefCell<Asked>>) {
+    pub fn new(prepare: Vec<Quiet>, restore: Vec<Restored>) -> (Self, Rc<RefCell<Asked>>) {
         let asked = Rc::new(RefCell::new(Asked::default()));
         let probe = Self {
             prepare: prepare.into(),
@@ -110,7 +110,7 @@ impl Quiesce for Probe {
     }
 }
 
-fn unsafe_host(detail: &str) -> Quiet {
+pub fn unsafe_host(detail: &str) -> Quiet {
     Quiet::Unsafe {
         detail: detail.to_owned(),
     }
