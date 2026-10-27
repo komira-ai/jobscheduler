@@ -61,6 +61,14 @@ impl Exclusive {
         *self == Self::Free
     }
 
+    /// When the lease that holds the host (committed or ready) was committed.
+    pub(crate) fn held_since(&self) -> Option<Timestamp> {
+        match self {
+            Self::Committed { at, .. } | Self::Ready { at, .. } => Some(*at),
+            Self::Free | Self::Restoring { .. } => None,
+        }
+    }
+
     /// The lease id the heartbeat reply names, while a lease holds the host.
     pub(crate) fn granted(&self) -> Option<String> {
         match self {

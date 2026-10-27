@@ -16,10 +16,16 @@ use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
+use crate::whole::caps::Capability;
+use crate::whole::cost::HostLoad;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::queue::{Verdict, WaitList};
 use crate::whole::reasons::{Cause, HostEffect};
-use crate::whole::requests::{Failure, NotReady, RequestKey, RequestRecord, Requests, Rules};
+use crate::whole::requests::{
+    Failure, NotReady, RequestKey, RequestRecord, Requests, Rules, whole_settings,
+};
+use crate::whole::reserve::{self, HostFacts, Marks, Pass, Reservation};
+use crate::whole_config::WholeNodeConfig;
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +92,9 @@ struct Record {
     taint: Option<Taint>,
     /// Where the host stands in a whole-node lease; `Free` for a host that never held one.
     exclusive: Exclusive,
+    /// The last lease started on the host and the latest it can end: its start plus its
+    /// max wall time. A lease put back after a restart has none, and counts as ending now.
+    bound: Option<(LeaseId, Timestamp)>,
 }
 
 impl Record {
@@ -106,6 +115,7 @@ impl Record {
             held: BTreeSet::new(),
             beats: 0,
             exclusive: Exclusive::Free,
+            bound: None,
         }
     }
 
@@ -166,6 +176,8 @@ struct State {
     requests: Requests,
     /// The whole-node requests that found no free host and wait for one.
     waiting: WaitList,
+    /// The hosts set aside for waiting requests.
+    marks: Marks,
 }
 
 /// The parts of the state a failed prepare changes besides the host's own record.
@@ -289,6 +301,7 @@ impl Registry {
             runs: Runs::default(),
             requests: Requests::default(),
             waiting: WaitList::default(),
+            marks: Marks::default(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -317,6 +330,8 @@ impl Registry {
         let config = &self.shared.config;
         state.forget_lost(now, config.grace_ms(), config.lost_retention_ms());
         state.waiting.expire(now, Rules::of(config).regain_grace_ms);
+        let State { marks, waiting, .. } = &mut *state;
+        marks.retain_waiting(waiting);
         state
     }
 
@@ -354,6 +369,66 @@ impl Registry {
                 ending.fail(record, host, lease, Cause::Timeout, "");
             }
         }
+        // Nothing waits and nothing is set aside: there is nothing to place or to drop.
+        if state.waiting.is_empty() & state.marks.is_empty() {
+            return;
+        }
+        let settings = whole_settings(&self.shared.config);
+        let hosts = self.host_facts(state, now);
+        self.place_waiting(state, &settings, &hosts, now);
+    }
+
+    /// Every host as the reservation pass reads it, in id order. Every host is booked as
+    /// the pool's shape.
+    fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
+        let booked = state.book.booked();
+        let grace_ms = self.grace_ms();
+        let facts = state.records.iter().map(|(id, record)| {
+            let live = record.state(now, grace_ms) == HostState::Live;
+            let capability = match (record.taint.is_some(), live) {
+                (true, _) => Capability::Tainted,
+                (false, true) => Capability::Capable,
+                (false, false) => Capability::Lost,
+            };
+            let quiet = record.quiet(&state.runs, id);
+            let lease = booked.get(id);
+            let ends = lease.and_then(|lease| record.bound.filter(|(held, _)| held == lease));
+            HostFacts {
+                id: id.clone(),
+                capability,
+                open: record.bookable(now, grace_ms, quiet) & lease.is_none(),
+                held: record.exclusive.held_since(),
+                load: HostLoad {
+                    id: id.to_string(),
+                    leases: usize::from(lease.is_some()),
+                    end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
+                },
+            }
+        });
+        facts.collect()
+    }
+
+    /// Sets hosts aside for the waiting requests, in queue order (see
+    /// [`crate::whole::reserve`]). Gives up and commits nothing else, and stops nothing.
+    fn place_waiting(
+        &self,
+        state: &mut State,
+        settings: &WholeNodeConfig,
+        hosts: &[HostFacts],
+        now: Timestamp,
+    ) {
+        let State {
+            marks,
+            waiting,
+            requests,
+            ..
+        } = state;
+        let pass = Pass {
+            now,
+            settings,
+            hosts,
+        };
+        reserve::advance(marks, waiting, requests, pass);
     }
 
     /// The record of a whole-node request: its failed prepares, the hosts left out of its
@@ -388,6 +463,13 @@ impl Registry {
     /// Takes whole-node request `id` off the wait list at once; whether it was waiting.
     pub fn cancel_request(&self, id: &RequestId) -> bool {
         self.lock().waiting.cancel(id)
+    }
+
+    /// The hosts set aside for waiting whole-node requests, in host order. A host is set
+    /// aside for one request and a request holds one host. A request's next start commits
+    /// its lease on the host it holds; until then the host takes no other start.
+    pub fn reservations(&self) -> Vec<Reservation> {
+        self.lock().marks.reservations()
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -459,6 +541,7 @@ impl Registry {
         let kept_binding = known.and_then(|record| record.binding.clone());
         let kept_taint = known.and_then(|record| record.taint.clone());
         let kept_exclusive = known.map_or(Exclusive::Free, |record| record.exclusive.after_hello());
+        let kept_bound = known.and_then(|record| record.bound);
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -511,6 +594,7 @@ impl Registry {
                 beats: 0,
                 taint: kept_taint,
                 exclusive: kept_exclusive,
+                bound: kept_bound,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -822,19 +906,13 @@ impl Registry {
         let now = self.shared.clock.now();
         let grace = self.grace_ms();
         let mut guard = self.lock_at(now);
-        let State {
-            book,
-            records,
-            runs,
-            requests,
-            waiting,
-            ..
-        } = &mut *guard;
+        let state = &mut *guard;
         let lease = spec.lease();
         let key = RequestKey::of(spec);
-        let held = book.read(&lease);
+        let held = state.book.read(&lease);
         let pending = match &held {
-            Observed::Present { host } => records
+            Observed::Present { host } => state
+                .records
                 .get(host)
                 .is_some_and(|record| record.exclusive.awaits_ready()),
             Observed::Absent | Observed::Unknown => false,
@@ -843,22 +921,85 @@ impl Registry {
             return StartAck::Unknown;
         }
         // A request that used up its tries is not placed again.
-        let spent = requests.record(&key).is_some_and(|record| record.terminal);
+        let spent = state
+            .requests
+            .record(&key)
+            .is_some_and(|record| record.terminal);
         if spent {
             return StartAck::Refused(RefusalCode::ExclusiveNotReady);
         }
         let gate = HostBook::class_gate(classes, spec);
+        let whole = matches!(spec.class().admission(), Admission::Whole);
+        let fresh = !matches!(held, Observed::Present { .. });
+        // The pool's shape fits the request or no host ever will: the book answers
+        // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
+        // so that happens for a request the pool's shape fits only when no host is listed
+        // yet. A host could still join, which is capacity, not fit.
+        let floor = self.shared.config.shape();
+        let wanted = spec.request();
+        let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
+        // A whole-node request that fits the pool is refused for lack of a host only when
+        // no host could ever be given whole; otherwise it waits, if it has an id.
+        let capable = state.book.hosts().iter().any(|host| {
+            let fits = host
+                .shape
+                .satisfies(&wanted.resources, &wanted.capabilities);
+            let clean = state
+                .records
+                .get(&host.host)
+                .is_some_and(|record| record.taint.is_none());
+            let barred = state.requests.barred_for_life(&key, &host.host);
+            [fits, clean, !barred].into_iter().all(|ok| ok)
+        });
+        let queueing = [whole, fresh, fits_pool, gate.is_none()];
+        let regain = Rules::of(&self.shared.config).regain_grace_ms;
+        let place = spec
+            .request_id()
+            .filter(|_| queueing.into_iter().all(|ok| ok));
+        let verdict = place.map(|id| state.waiting.present(id, wanted, capable, now, regain));
+        let settings = whole_settings(&self.shared.config);
+        let hosts = self.host_facts(state, now);
+        self.place_waiting(state, &settings, &hosts, now);
+        let pass = Pass {
+            now,
+            settings: &settings,
+            hosts: &hosts,
+        };
+        let room = reserve::has_room(&state.marks, &pass, true);
+        let State {
+            book,
+            records,
+            runs,
+            requests,
+            waiting,
+            marks,
+            ..
+        } = state;
         let eligible = |id: &HostId, _: &Shape| {
             let record = records.get(id);
             let barred = requests.excluded(&key, id, now);
             let bookable =
                 record.is_some_and(|record| record.bookable(now, grace, record.quiet(runs, id)));
-            bookable & !barred
+            let allowed = reserve::may_start(marks.holder(id), whole, spec.request_id(), room);
+            [bookable, !barred, allowed].into_iter().all(|ok| ok)
         };
         let ack = book.start_where(spec, gate, &eligible);
-        let whole = matches!(spec.class().admission(), Admission::Whole);
-        let fresh = !matches!(held, Observed::Present { .. });
-        let commit = [whole, fresh].into_iter().all(|ok| ok);
+        let started = matches!(ack, StartAck::Started { .. });
+        let ended = matches!(ack, StartAck::Refused(RefusalCode::LeaseEnded));
+        let commit = [started, whole, fresh].into_iter().all(|ok| ok);
+        // A request that is placed, or whose lease had ended, waits no more.
+        if [commit, ended].into_iter().any(|leaves| leaves) {
+            spec.request_id().into_iter().for_each(|id| {
+                waiting.cancel(id);
+            });
+        }
+        if let (StartAck::Started { host }, true) = (&ack, fresh) {
+            let end = now.plus(wanted.max_wall);
+            let record = records.get_mut(host);
+            record.into_iter().for_each(|record| {
+                record.bound = Some((lease, end));
+            });
+        }
         if let (StartAck::Started { host }, true) = (&ack, commit) {
             // The host was eligible, so it has a record.
             let record = records.get_mut(host);
@@ -866,47 +1007,20 @@ impl Registry {
                 record.exclusive = Exclusive::Committed { lease, at: now };
             });
             requests.commit(lease, key);
-            spec.request_id().into_iter().for_each(|id| {
-                waiting.cancel(id);
-            });
             return StartAck::Unknown;
         }
-        // The book answers `NoFit` when no listed host fits. Every host is booked as the
-        // pool's shape, so that happens for a request the pool's shape fits only when
-        // no host is listed yet: a host could still join, which is capacity, not fit.
-        let floor = self.shared.config.shape();
-        let wanted = spec.request();
-        let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
         let declined = matches!(
             ack,
             StartAck::Refused(RefusalCode::NoFit | RefusalCode::NoCapacity)
         );
         match (ack, fits_pool, whole && declined) {
-            (_, true, true) => {
-                // A whole-node request that fits the pool: no host could ever be given
-                // whole is the one refusal for lack of a host; otherwise it waits.
-                let capable = book.hosts().iter().any(|host| {
-                    let fits = host
-                        .shape
-                        .satisfies(&wanted.resources, &wanted.capabilities);
-                    let clean = records
-                        .get(&host.host)
-                        .is_some_and(|record| record.taint.is_none());
-                    let barred = requests.barred_for_life(&key, &host.host);
-                    fits & clean & !barred
-                });
-                let grace = Rules::of(&self.shared.config).regain_grace_ms;
-                let place = spec
-                    .request_id()
-                    .map(|id| waiting.present(id, capable, now, grace));
-                match (place, capable) {
-                    (Some(Verdict::Waiting(_)), _) => StartAck::Unknown,
-                    (Some(Verdict::Unservable), _) | (None, false) => {
-                        StartAck::Refused(RefusalCode::NoCapableHost)
-                    }
-                    (None, true) => StartAck::Refused(RefusalCode::NoCapacity),
+            (_, true, true) => match (verdict, capable) {
+                (Some(Verdict::Waiting(_)), _) => StartAck::Unknown,
+                (Some(Verdict::Unservable), _) | (None, false) => {
+                    StartAck::Refused(RefusalCode::NoCapableHost)
                 }
-            }
+                (None, true) => StartAck::Refused(RefusalCode::NoCapacity),
+            },
             (StartAck::Refused(RefusalCode::NoFit), true, false) => {
                 StartAck::Refused(RefusalCode::NoCapacity)
             }
