@@ -425,6 +425,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-lease"
+version = "0.0.1"
+dependencies = [
+ "js-pool-static",
+ "js-provider",
+ "js-provider-fake",
+ "js-types",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "js-pool-static"
 version = "0.0.1"
 dependencies = [
