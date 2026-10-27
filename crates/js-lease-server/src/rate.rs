@@ -25,6 +25,8 @@ struct Bucket {
     /// The instant the next hello is counted from: the moment the bucket last had its
     /// latest whole hello added, so a part of an interval already waited is kept.
     since: u64,
+    /// The instant a refusal of this credential was last announced (logged), if ever.
+    announced: Option<u64>,
 }
 
 impl Bucket {
@@ -32,6 +34,7 @@ impl Bucket {
         Self {
             available: limit.burst,
             since: now,
+            announced: None,
         }
     }
 
@@ -64,9 +67,20 @@ impl Bucket {
     }
 }
 
+/// A hello that was held to the limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// How long until the credential may say hello again.
+    pub(crate) wait: Duration,
+    /// Whether this refusal is the one to log: the first of its credential, then at most
+    /// one in each interval, so a holder of a token cannot fill the log at the speed of
+    /// its requests.
+    pub(crate) announce: bool,
+}
+
 /// A bucket for each credential that has said hello. Only a credential the transport
-/// authenticated reaches it, so the map holds at most one entry per join token the
-/// server has ever accepted.
+/// authenticated reaches it, so the map holds at most one entry per join token in the
+/// file ([`HelloLimiter::retain`] drops those of tokens that left it).
 pub(crate) struct HelloLimiter {
     limit: HelloLimit,
     clock: SharedClock,
@@ -82,14 +96,42 @@ impl HelloLimiter {
         }
     }
 
-    /// Counts one hello of `who`: `Ok` when it may go on, else the time to wait.
-    pub(crate) fn admit(&self, who: &Credential) -> Result<(), Duration> {
+    /// Counts one hello of `who`: `Ok` when it may go on, else the refusal.
+    pub(crate) fn admit(&self, who: &Credential) -> Result<(), Held> {
         let now = self.clock.now().millis();
+        let interval = u64::try_from(self.limit.interval.as_millis()).unwrap_or(u64::MAX);
         let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
         let bucket = buckets
             .entry(who.clone())
             .or_insert_with(|| Bucket::full(self.limit, now));
-        bucket.take(self.limit, now).map_err(Duration::from_millis)
+        bucket.take(self.limit, now).map_err(|wait| {
+            let quiet = bucket
+                .announced
+                .is_some_and(|last| now.saturating_sub(last) < interval);
+            if !quiet {
+                bucket.announced = Some(now);
+            }
+            Held {
+                wait: Duration::from_millis(wait),
+                announce: !quiet,
+            }
+        })
+    }
+
+    /// Drops the buckets of every credential not in `keep`: the join tokens that have
+    /// left the token file. A token that comes back starts with a full bucket.
+    pub(crate) fn retain(&self, keep: &[Credential]) {
+        let mut buckets = self.buckets.lock().unwrap_or_else(PoisonError::into_inner);
+        buckets.retain(|who, _| keep.contains(who));
+    }
+
+    /// How many credentials have a bucket.
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.buckets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -166,9 +208,69 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(limiter.admit(&a), Ok(()));
         }
-        assert_eq!(limiter.admit(&a), Err(Duration::from_secs(10)));
+        let wait = |limiter: &HelloLimiter, who| limiter.admit(who).map_err(|held| held.wait);
+        assert_eq!(wait(&limiter, &a), Err(Duration::from_secs(10)));
         assert_eq!(limiter.admit(&b), Ok(()));
         clock.advance(Duration::from_secs(10));
         assert_eq!(limiter.admit(&a), Ok(()));
+    }
+
+    /// A refusal is announced for its credential the first time and then at most once in
+    /// each interval, however many follow, and each credential has its own count. It
+    /// catches a limiter that announces every refusal (a token holder fills the log at
+    /// the speed of its requests), one that never announces, and one that shares the
+    /// announcement between credentials (a noisy token hides another's).
+    #[test]
+    fn a_refusal_is_announced_once_per_credential_per_interval() {
+        let clock = ManualClock::new(Timestamp::from_millis(0));
+        let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock.clone()));
+        let (a, b) = (Credential::of_token("a"), Credential::of_token("b"));
+        let announced = |who| {
+            limiter
+                .admit(who)
+                .map(|()| false)
+                .unwrap_or_else(|h| h.announce)
+        };
+        for _ in 0..3 {
+            assert!(!announced(&a));
+            assert!(!announced(&b));
+        }
+        assert!(announced(&a));
+        for _ in 0..5 {
+            assert!(!announced(&a));
+        }
+        assert!(announced(&b));
+        clock.advance(Duration::from_secs(9));
+        assert!(!announced(&a));
+        clock.advance(Duration::from_secs(1));
+        // One hello is earned back and spent; the next refusal is a new interval's.
+        assert_eq!(limiter.admit(&a), Ok(()));
+        assert!(announced(&a));
+        assert!(!announced(&a));
+    }
+
+    /// Dropping the credentials a token file no longer holds drops their buckets and
+    /// keeps the rest, so a token that is rotated out does not leave a bucket behind and
+    /// one that comes back starts full. It catches a limiter that only ever grows and a
+    /// retain that drops the buckets still in use.
+    #[test]
+    fn buckets_of_credentials_that_left_are_dropped() {
+        let clock = ManualClock::new(Timestamp::from_millis(0));
+        let limiter = HelloLimiter::new(LIMIT, SharedClock::new(clock));
+        let (a, b) = (Credential::of_token("a"), Credential::of_token("b"));
+        for _ in 0..3 {
+            limiter.admit(&a).unwrap();
+        }
+        limiter.admit(&b).unwrap();
+        assert_eq!(limiter.tracked(), 2);
+        limiter.retain(std::slice::from_ref(&b));
+        assert_eq!(limiter.tracked(), 1);
+        for _ in 0..3 {
+            assert_eq!(limiter.admit(&a), Ok(()));
+        }
+        assert_eq!(limiter.tracked(), 2);
+        assert!(limiter.admit(&b).is_ok());
+        assert!(limiter.admit(&b).is_ok());
+        assert!(limiter.admit(&b).is_err());
     }
 }

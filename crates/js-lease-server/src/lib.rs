@@ -140,7 +140,13 @@
 //! A holder of a token can still say hello for an id that is not instance-bound once the
 //! host is lost, and can fill `max_machines` with made-up ids; hellos are limited per
 //! token (`--agent-hello-burst`, `--agent-hello-interval`) to slow that, not to stop it.
-//! Per-host credentials close it and are not built. The registered hosts of a pool are
+//! Per-host credentials close it and are not built. The limit is one bucket for each join
+//! token, shared by every agent of the pool that uses it, so a holder of the token can
+//! spend the bucket and make the pool's other agents get 429 `rate-limited` on their
+//! hellos until it refills: that is the per-host credential gap (design D18) again, not
+//! something the limit prevents. A refusal is logged once per token per interval, and
+//! the bucket of a token that has left the token file is dropped at the next tick that
+//! reads the file. The registered hosts of a pool are
 //! as trusted as the holders of its join tokens: a lease is a whole machine that the
 //! pool's holders run.
 //!
@@ -190,7 +196,10 @@
 //! static pool does not list is seated on the registry as an *awaiting* host: its lease
 //! is held and observes `Unknown` (never `Absent`, so the table keeps it), the host takes
 //! no new lease, and it counts toward `max_machines`, until its agent says hello again.
-//! That hello is admitted as any other and the lease then observes `Present`. An agent
+//! That hello is admitted as any other and the lease then observes `Present`. An awaiting
+//! host whose lease has ended and whose agent has not returned is forgotten, binding
+//! included, once the grace period and `lost_retention` have passed since the restart
+//! that seated it; the next tick writes the file of bindings without it. An agent
 //! whose heartbeat reaches a restarted server is answered 409 `unknown-host` and says
 //! hello.
 //!
@@ -255,6 +264,8 @@ pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use config::{BootMode, Cli, Config, Limits, MIN_TOKEN_BYTES, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
+#[doc(hidden)]
+pub use layered::LayeredProvider;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 

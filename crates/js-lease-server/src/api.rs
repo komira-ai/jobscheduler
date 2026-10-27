@@ -80,7 +80,7 @@ impl Shared {
         let report = self.table.lock().await.tick();
         self.record(&report);
         if let Some(agents) = &self.agents {
-            agents.refresh();
+            agents.refresh().await;
         }
         report
     }

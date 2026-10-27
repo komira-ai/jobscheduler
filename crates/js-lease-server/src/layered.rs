@@ -28,13 +28,18 @@ use crate::error::StartupError;
 ///   `Unknown` if any does, else `Absent`.
 /// - **Capacity** lists every child's hosts by id. Host ids are unique across children:
 ///   the registry refuses a hello for an id the static pool lists.
-pub(crate) struct LayeredProvider {
+///
+/// Public (and hidden from the documentation) only so that the conformance suite can
+/// run over a layer of a static pool and a registry; the server builds it through
+/// `LayeredSource`.
+pub struct LayeredProvider {
     id: ProviderId,
     children: Vec<Box<dyn Provider + Send>>,
 }
 
 impl LayeredProvider {
-    pub(crate) fn new(id: ProviderId, children: Vec<Box<dyn Provider + Send>>) -> Self {
+    /// A layer over `children`, asked in order.
+    pub fn new(id: ProviderId, children: Vec<Box<dyn Provider + Send>>) -> Self {
         Self { id, children }
     }
 }

@@ -72,9 +72,14 @@ async fn limit_hello(
 ) -> Response {
     match agents.limiter.admit(&who) {
         Ok(()) => next.run(request).await,
-        Err(wait) => {
-            let seconds = retry_after(wait);
-            warn!(seconds, "agent hello held to the rate limit");
+        Err(held) => {
+            let seconds = retry_after(held.wait);
+            if held.announce {
+                warn!(
+                    seconds,
+                    "agent hello held to the rate limit; further ones are not logged until the next interval"
+                );
+            }
             let reply = Refused::new(StatusCode::TOO_MANY_REQUESTS, refusal::RATE_LIMITED);
             ([(header::RETRY_AFTER, seconds.to_string())], reply).into_response()
         }
@@ -103,7 +108,7 @@ async fn hello(
         warn!(code = refusal.code(), "agent hello refused");
         Refused::of(&refusal)
     })?;
-    agents.save_bindings();
+    agents.save_bindings().await;
     info!(host = %hello.host_id, epoch = welcome.epoch, "agent admitted");
     Ok(Json(welcome))
 }
