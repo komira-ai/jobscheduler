@@ -118,6 +118,7 @@ fn scalar_bounds() {
 #[test]
 fn minute_record_bounds() {
     let ok = minute("1-1", 0, 1, 1, 1);
+    let next = minute("1-1", 1, 1, 1, 1);
     let cases = [
         (minute("1-2", TAIL_MINUTE, 5, 9, 1), true),
         (minute("1-2", TAIL_MINUTE + 1, 5, 9, 1), false),
@@ -128,14 +129,14 @@ fn minute_record_bounds() {
     ];
     for (record, kept) in cases {
         let got = vetted(with(
-            vec![ok.clone(), record.clone(), ok.clone()],
+            vec![ok.clone(), record.clone(), next.clone()],
             vec![],
             vec![],
         ));
         let (len, want) = if kept {
-            (3, drops(0, 1, 0))
+            (3, drops(0, 0, 0))
         } else {
-            (1, drops(1, 1, 0))
+            (2, drops(1, 0, 0))
         };
         assert_eq!(got.minutes.len(), len, "{record:?}");
         assert_eq!(got.dropped, want, "{record:?}");
