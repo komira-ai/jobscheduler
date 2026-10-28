@@ -448,6 +448,7 @@ mod tests {
             memory_bytes: mem,
             limit_bytes: mem,
             cold: false,
+            retry: false,
             key_hash: 0,
         }
     }

@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +25,8 @@ pub struct Racing {
     down: AtomicBool,
     unreadable: Mutex<Option<String>>,
     ack_lost: AtomicBool,
+    asked: Mutex<Vec<Txn>>,
+    lease_scans: AtomicUsize,
 }
 
 impl Racing {
@@ -37,7 +39,21 @@ impl Racing {
             down: AtomicBool::new(false),
             unreadable: Mutex::new(None),
             ack_lost: AtomicBool::new(false),
+            asked: Mutex::new(Vec::new()),
+            lease_scans: AtomicUsize::new(0),
         })
+    }
+
+    /// How many times every `lease/` row has been scanned.
+    pub fn lease_scans(&self) -> usize {
+        self.lease_scans.load(Ordering::SeqCst)
+    }
+
+    /// Every transaction the store was asked to apply since the last call, in order, as it
+    /// was asked: whether it committed or not. The transactions of a landing are not among
+    /// them.
+    pub fn asked(&self) -> Vec<Txn> {
+        std::mem::take(&mut *self.asked.lock().expect("lock"))
     }
 
     /// The next write is applied and then reported as failed, as a connection lost after the
@@ -73,6 +89,10 @@ impl Store for Racing {
         if self.down.load(Ordering::SeqCst) {
             return Err(StoreError::Failed("the store is down".to_owned()));
         }
+        self.asked
+            .lock()
+            .expect("lock")
+            .extend(batch.iter().cloned());
         let names = |key: &str| {
             let mut ops = batch.iter().flat_map(Txn::ops);
             ops.any(|op| op.key_cond().is_some_and(|(named, _)| named == key))
@@ -98,6 +118,8 @@ impl Store for Racing {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.lease_scans
+            .fetch_add(usize::from(prefix == "lease/"), Ordering::SeqCst);
         self.inner.scan_prefix(prefix)
     }
 
