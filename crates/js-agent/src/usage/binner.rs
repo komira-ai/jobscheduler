@@ -258,7 +258,7 @@ impl Binner {
         let fresh = LeaseState {
             started: lease.started_usec,
             last_mono: now,
-            last_cpu: lease.cpu_usage_usec,
+            last_cpu: 0,
             open: Open::new((now - lease.started_usec) / MINUTE_USEC, ws),
         };
         let Some(mut state) = self.leases.remove(id) else {
