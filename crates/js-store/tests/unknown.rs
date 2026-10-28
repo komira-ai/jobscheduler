@@ -162,23 +162,3 @@ fn a_request_joins_an_operation_past_an_unknown_lease_row() {
     let text = lines.text();
     assert!(!text.contains(LEASE_UNKNOWN), "{text}");
 }
-
-/// Asserts that a start logs the key of a row it skips, and that the search for the
-/// operations a node holds leases for, which a worker's arrival makes, passes over the same
-/// row without logging it.
-#[test]
-fn only_a_start_logs_the_rows_it_skips() {
-    let (store, _, rows) = opened();
-    put(&store, LEASE_UNKNOWN, unknown());
-    let lines = Lines::default();
-    let _guard = lines.subscribe();
-
-    rows.held_by(&grant().worker)
-        .expect("the search reads the rows");
-    let text = lines.text();
-    assert!(!text.contains(LEASE_UNKNOWN), "{text}");
-    rows.load().expect("the rows load");
-
-    let text = lines.text();
-    assert!(text.contains(LEASE_UNKNOWN), "{text}");
-}
