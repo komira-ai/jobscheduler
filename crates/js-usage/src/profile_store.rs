@@ -13,7 +13,7 @@ use std::sync::Arc;
 use js_state::{Cond, Store, StoreError, Txn};
 use thiserror::Error;
 
-use crate::codec::{self, CodecError};
+use crate::codec::{self, RowError};
 use crate::curves::{ProfileCurves, STALE_DAYS};
 use crate::fit::{Fit, fit};
 use crate::key::ProfileKey;
@@ -39,7 +39,7 @@ pub enum ProfileError {
         /// The key whose row it is.
         key: String,
         /// What is wrong with it.
-        source: CodecError,
+        source: RowError,
     },
     /// Another writer changed the row between this one's read and write, twice.
     #[error("profile row {0} was changed by another writer")]

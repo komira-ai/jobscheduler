@@ -16,7 +16,7 @@ pub const ROW_VERSION: u8 = 1;
 
 /// Why a stored value is not a profile row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-pub enum CodecError {
+pub enum RowError {
     /// The version byte is not [`ROW_VERSION`].
     #[error("profile row version {0} is not supported")]
     Version(u8),
@@ -84,59 +84,59 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn byte(&mut self) -> Result<u8, CodecError> {
-        let (&first, rest) = self.rest.split_first().ok_or(CodecError::Truncated)?;
+    fn byte(&mut self) -> Result<u8, RowError> {
+        let (&first, rest) = self.rest.split_first().ok_or(RowError::Truncated)?;
         self.rest = rest;
         Ok(first)
     }
 
-    fn varint(&mut self) -> Result<u64, CodecError> {
+    fn varint(&mut self) -> Result<u64, RowError> {
         let mut value = 0u64;
         for i in 0..10 {
             let b = self.byte()?;
             let low = u64::from(b & 0x7f);
             // The tenth byte carries only the top bit of a u64.
             if i == 9 && low > 1 {
-                return Err(CodecError::Range);
+                return Err(RowError::Range);
             }
             value |= low << (7 * i);
             if b & 0x80 == 0 {
                 return Ok(value);
             }
         }
-        Err(CodecError::Range)
+        Err(RowError::Range)
     }
 }
 
 /// The row stored in `bytes`.
 ///
 /// # Errors
-/// [`CodecError`] when `bytes` is not a version-1 row.
-pub fn decode(bytes: &[u8]) -> Result<Row, CodecError> {
+/// [`RowError`] when `bytes` is not a version-1 row.
+pub fn decode(bytes: &[u8]) -> Result<Row, RowError> {
     let mut r = Reader { rest: bytes };
     let version = r.byte()?;
     if version != ROW_VERSION {
-        return Err(CodecError::Version(version));
+        return Err(RowError::Version(version));
     }
     let last_used_day = r.varint()?;
     let runs = usize::from(r.byte()?);
     if runs > RING_RUNS {
-        return Err(CodecError::TooMany);
+        return Err(RowError::TooMany);
     }
     let mut ring = Ring::new();
     for _ in 0..runs {
-        let wall_minutes = u32::try_from(r.varint()?).map_err(|_| CodecError::Range)?;
+        let wall_minutes = u32::try_from(r.varint()?).map_err(|_| RowError::Range)?;
         let flags = r.byte()?;
         let count = usize::from(r.byte()?);
         if count > BUCKETS {
-            return Err(CodecError::TooMany);
+            return Err(RowError::TooMany);
         }
         let mut buckets = Vec::with_capacity(count);
         for _ in 0..count {
             buckets.push(match r.varint()? {
                 0 => None,
                 cores => Some(Bucket {
-                    cores_milli: u32::try_from(cores - 1).map_err(|_| CodecError::Range)?,
+                    cores_milli: u32::try_from(cores - 1).map_err(|_| RowError::Range)?,
                     ws_bytes: r.varint()?,
                 }),
             });
@@ -148,7 +148,7 @@ pub fn decode(bytes: &[u8]) -> Result<Row, CodecError> {
         });
     }
     if !r.rest.is_empty() {
-        return Err(CodecError::Trailing);
+        return Err(RowError::Trailing);
     }
     Ok(Row {
         last_used_day,
@@ -216,8 +216,8 @@ mod tests {
     fn another_version_is_refused() {
         let mut bytes = encode(1, &sample());
         bytes[0] = 2;
-        assert_eq!(decode(&bytes), Err(CodecError::Version(2)));
-        assert_eq!(decode(&[0]), Err(CodecError::Version(0)));
+        assert_eq!(decode(&bytes), Err(RowError::Version(2)));
+        assert_eq!(decode(&[0]), Err(RowError::Version(0)));
     }
 
     /// Catches: a short value decoding to a partial row, at every cut point.
@@ -227,7 +227,7 @@ mod tests {
         for cut in 0..bytes.len() {
             assert_eq!(
                 decode(&bytes[..cut]),
-                Err(CodecError::Truncated),
+                Err(RowError::Truncated),
                 "cut at {cut}"
             );
         }
@@ -238,13 +238,13 @@ mod tests {
     fn bytes_after_the_last_run_are_refused() {
         let mut bytes = encode(1, &sample());
         bytes.push(0);
-        assert_eq!(decode(&bytes), Err(CodecError::Trailing));
+        assert_eq!(decode(&bytes), Err(RowError::Trailing));
     }
 
     /// Catches: a corrupt count making the decoder build a ring no writer could.
     #[test]
     fn more_runs_or_buckets_than_a_ring_holds_are_refused() {
-        assert_eq!(decode(&[1, 0, 33]), Err(CodecError::TooMany));
+        assert_eq!(decode(&[1, 0, 33]), Err(RowError::TooMany));
         let mut ring = Ring::new();
         ring.push(&RunSeries {
             minutes: series(&[(1, 1)]).minutes,
@@ -253,9 +253,9 @@ mod tests {
         let mut bytes = encode(0, &ring);
         // [version, day, runs, wall, flags, buckets, ...]
         bytes[5] = 65;
-        assert_eq!(decode(&bytes), Err(CodecError::TooMany));
+        assert_eq!(decode(&bytes), Err(RowError::TooMany));
         bytes[5] = 64;
-        assert_eq!(decode(&bytes), Err(CodecError::Truncated));
+        assert_eq!(decode(&bytes), Err(RowError::Truncated));
     }
 
     /// Catches: a varint of eleven bytes or with bits past the 64th wrapping silently, and
@@ -267,23 +267,23 @@ mod tests {
             decode(&[
                 1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80
             ]),
-            Err(CodecError::Range)
+            Err(RowError::Range)
         );
         assert_eq!(
             decode(&[
                 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02
             ]),
-            Err(CodecError::Range)
+            Err(RowError::Range)
         );
         // Wall minutes past u32.
         assert_eq!(
             decode(&[1, 0, 1, 0x80, 0x80, 0x80, 0x80, 0x10, 0, 0]),
-            Err(CodecError::Range)
+            Err(RowError::Range)
         );
         // Cores past u32 (varint 2^32 + 1 = cores 2^32).
         assert_eq!(
             decode(&[1, 0, 1, 1, 0, 1, 0x81, 0x80, 0x80, 0x80, 0x10, 0]),
-            Err(CodecError::Range)
+            Err(RowError::Range)
         );
     }
 }

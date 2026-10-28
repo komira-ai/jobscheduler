@@ -32,6 +32,20 @@
 //! never compared across nodes), wall minutes since the Unix epoch (the rows of a node
 //! series; the caller supplies them), and the store's own clock (expiry, not used here).
 
+pub mod error;
+pub mod input;
+pub mod minute;
+pub mod prune;
+pub mod recorder;
+pub mod store;
+
+pub use error::{CodecError, UsageError};
+pub use input::{ClockIn, LoadIn, MinuteIn, TAIL_MINUTE};
+pub use minute::NodeMinute;
+pub use prune::{NODE_RETENTION_MINUTES, PruneStats};
+pub use recorder::{Counters, DropReason, Limits, Observed, Recorder};
+pub use store::{NodeBuffer, NodeSeries};
+
 mod codec;
 mod convert;
 mod curves;
@@ -42,7 +56,7 @@ mod ring;
 #[cfg(test)]
 mod testkit;
 
-pub use codec::{CodecError, ROW_VERSION};
+pub use codec::{ROW_VERSION, RowError};
 pub use curves::{KeyMap, ProfileCurves, STALE_DAYS};
 pub use fit::{DILATE_MINUTES, Fit, MIN_RUNS_FOR_CURVE, fit, p90};
 pub use key::{BadKey, MAX_KEY_LEN, ProfileKey};
