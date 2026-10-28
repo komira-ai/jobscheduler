@@ -1,0 +1,302 @@
+# What the server does with no scheduler flag. Do not edit by hand: regenerate on
+# purpose (see tests/server/gpu_path_pin.rs) and justify each changed line.
+
+== flags ==
+--agent-hello-burst default=60 required=false
+--agent-hello-interval default=1s required=false
+--agent-pool-config default=none required=false
+--agent-token-file default=none required=false
+--boot default=none required=true values=initialise|resume
+--default-ttl default=600s required=false
+--drain-timeout default=10s required=false
+--handshake-timeout default=10s required=false
+--header-timeout default=10s required=false
+--listen default=127.0.0.1:7300 required=false
+--max-connections default=256 required=false
+--max-requests default=100 required=false
+--max-ttl default=3600s required=false
+--pool-config default=none required=false
+--read-timeout default=30s required=false
+--state-file default=none required=true
+--tick default=5s required=false
+--tls-cert default=none required=false
+--tls-key default=none required=false
+--token-file default=none required=true
+--write-timeout default=10s required=false
+
+== routes ==
+GET /healthz
+  no token: 200 ok
+  wrong token: 200 ok
+  valid token: 200 ok
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000}
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000}
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 409 {"error":"no-capacity"}
+GET /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]}
+GET /v1/hosts
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]}
+POST /v1/leases/1-1/renew
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"expires_at_ms":1600000}
+POST /v1/leases/9-9/renew
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-lease"}
+GET /v1/leases/1-1/renew
+  no token: 401
+  wrong token: 401
+  valid token: 405
+POST /v1/leases/1-1/runs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/leases/1-1/runs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/leases/1-1/runs/r1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+DELETE /v1/leases/1-1/runs/r1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+POST /v1/agent/hello
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+POST /v1/agent/heartbeat
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/sched/jobs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+POST /v1/sched/jobs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/sched/jobs/1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+DELETE /v1/sched/jobs/1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/nothing
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+DELETE /v1/leases/1-1
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"state":"freed"}
+DELETE /v1/leases/1-1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-lease"}
+PUT /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 405
+
+== routes-with-agents ==
+GET /healthz
+  no token: 200 ok
+  wrong token: 200 ok
+  valid token: 200 ok
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000}
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000}
+POST /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 409 {"error":"no-capacity"}
+GET /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]}
+GET /v1/hosts
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]}
+POST /v1/leases/1-1/renew
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"expires_at_ms":1600000}
+POST /v1/leases/9-9/renew
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-lease"}
+GET /v1/leases/1-1/renew
+  no token: 401
+  wrong token: 401
+  valid token: 405
+POST /v1/leases/1-1/runs
+  no token: 401
+  wrong token: 401
+  valid token: 400 {"error":"bad-request","reason":"the body is JSON, but not what this route takes (line 1, column 2)"}
+GET /v1/leases/1-1/runs
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"runs":[]}
+GET /v1/leases/1-1/runs/r1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-run"}
+DELETE /v1/leases/1-1/runs/r1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-run"}
+POST /v1/agent/hello
+  no token: 401
+  wrong token: 401
+  valid token: 401
+POST /v1/agent/heartbeat
+  no token: 401
+  wrong token: 401
+  valid token: 401
+GET /v1/sched/jobs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+POST /v1/sched/jobs
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/sched/jobs/1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+DELETE /v1/sched/jobs/1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+GET /v1/nothing
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"not-found"}
+DELETE /v1/leases/1-1
+  no token: 401
+  wrong token: 401
+  valid token: 200 {"state":"freed"}
+DELETE /v1/leases/1-1
+  no token: 401
+  wrong token: 401
+  valid token: 404 {"error":"unknown-lease"}
+PUT /v1/leases
+  no token: 401
+  wrong token: 401
+  valid token: 405
+
+== state-files ==
+without agent flags
+  before start: (empty)
+  after start: leases.toml leases.toml.lock
+  after acquire: leases.toml leases.toml.lock
+  after shutdown: leases.toml leases.toml.lock
+with agent flags
+  before start: (empty)
+  after start: leases.toml leases.toml.lock
+  after acquire: leases.toml leases.toml.lock
+  after an agent joins: leases.toml leases.toml.agents leases.toml.lock
+  after shutdown: leases.toml leases.toml.agents leases.toml.lock
+
+== lease-file ==
+after start
+version = 1
+term = 1
+next_sequence = 1
+lease_count = 0
+lease = []
+
+after acquire
+version = 1
+term = 1
+next_sequence = 2
+lease_count = 1
+
+[[lease]]
+term = 1
+sequence = 1
+state = "held"
+host = "gpu-01"
+acquired_at_ms = 1000000
+expires_at_ms = 1600000
+ends_at_ms = 8200000
+
+[lease.labels]
+team = "infra"
+
+after renew
+version = 1
+term = 1
+next_sequence = 2
+lease_count = 1
+
+[[lease]]
+term = 1
+sequence = 1
+state = "held"
+host = "gpu-01"
+acquired_at_ms = 1000000
+expires_at_ms = 1700000
+ends_at_ms = 8200000
+
+[lease.labels]
+team = "infra"
+
+after tick
+version = 1
+term = 1
+next_sequence = 2
+lease_count = 1
+
+[[lease]]
+term = 1
+sequence = 1
+state = "held"
+host = "gpu-01"
+acquired_at_ms = 1000000
+expires_at_ms = 1700000
+ends_at_ms = 8200000
+
+[lease.labels]
+team = "infra"
+
+after release
+version = 1
+term = 1
+next_sequence = 2
+lease_count = 0
+lease = []
+
+after shutdown
+version = 1
+term = 1
+next_sequence = 2
+lease_count = 0
+lease = []
