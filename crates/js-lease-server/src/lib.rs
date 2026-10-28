@@ -188,7 +188,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`, `work_key? {class, dedup}` (the work the run does, which a clean run's cost curve is learned under). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `invalid-mount`, `invalid-job`, `invalid-work-key` (an empty class, or a part over 256 bytes), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
 //! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
@@ -313,8 +313,9 @@
 //! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
 //! outcome `succeeded` or `failed`) are handed to the sink with their series once the
 //! host has sent two more beats, so the lease's last partial minute is not lost, if a
-//! [`KeySource`] names the work they did; the server has no key of its own, so by default
-//! no run is learned from and `runs_without_key` counts them. The seam types and
+//! [`KeySource`] names the work they did; by default that is the `work_key` the client gave
+//! when it queued the run, so a run queued without one is not learned from and
+//! `runs_without_key` counts it. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
 //! ([`Config::with_usage_sink`], [`Config::with_key_source`]); this build links no store,
 //! so the sink it starts with takes every reading and keeps nothing.

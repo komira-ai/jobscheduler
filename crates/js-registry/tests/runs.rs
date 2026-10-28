@@ -10,6 +10,7 @@ use js_agent_wire::{
 };
 use js_provider::{Provider, RefusalCode, StartAck};
 use js_registry::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, PoolConfig, RunRefusal, RunState, RunView};
+use js_types::sched::WorkKey;
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 use support::*;
 
@@ -700,5 +701,41 @@ fn states_have_stable_names() {
     ];
     for (state, name) in names {
         assert_eq!(state.as_str(), name);
+    }
+}
+
+/// Asserts that a run queued with a work key answers it, by id and in its view, and that a
+/// run queued without one, and a run the registry does not know, answer none; and that the
+/// start the host is sent is the same job whether or not a key was named. It catches a key
+/// lost between the queue and the result, a key given to the wrong run, and a key that
+/// leaks onto the wire to the agent.
+#[test]
+fn a_work_key_stays_with_its_run_and_never_reaches_the_host() {
+    let (fx, epoch) = leased();
+    let key = WorkKey::new("builds", "ab12/34");
+    let keyed = fx
+        .registry
+        .queue_keyed_run(&host("a"), &lease(1), job("r1", 500), Some(key.clone()))
+        .unwrap();
+    assert_eq!(keyed.work_key, Some(key.clone()));
+    let plain = queue(&fx, "r2", 500).unwrap();
+    assert_eq!(plain.work_key, None);
+    assert_eq!(fx.registry.work_key_of("r1"), Some(key.clone()));
+    assert_eq!(fx.registry.work_key_of("r2"), None);
+    assert_eq!(fx.registry.work_key_of("r3"), None);
+    let listed = fx.registry.runs_of(&lease(1));
+    assert_eq!(listed[0].work_key, Some(key));
+    assert_eq!(listed[1].work_key, None);
+    let reply = beat(&fx, "a", epoch, &[]);
+    assert_eq!(words(&reply), ["start r1", "start r2"]);
+    for command in &reply.commands {
+        let Command::Start(spec) = command else {
+            panic!("a start was expected");
+        };
+        let wire = serde_json::to_string(spec).unwrap();
+        assert!(
+            !wire.contains("work_key") && !wire.contains("builds"),
+            "{wire}"
+        );
     }
 }

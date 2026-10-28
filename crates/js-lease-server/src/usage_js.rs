@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use js_registry::Registry;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
@@ -33,7 +34,8 @@ use tracing::info;
 
 use crate::error::StartupError;
 use crate::usage::{
-    HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
+    HostLimits, KeySource, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault,
+    UsageSink,
 };
 
 /// Where the usage store is and how large the profile part of it may grow.
@@ -79,6 +81,17 @@ struct Inner {
 /// The profile name of an action key (see [`profile_key`]), for admission's curves.
 pub(crate) fn key_map(key: &WorkKey) -> Option<ProfileKey> {
     ProfileKey::parse(&profile_key(key)).ok()
+}
+
+/// The key source the server runs on: the work key the client named when it queued the
+/// run, held by the registry beside the run, under its profile name. A run queued without
+/// a work key has no key, and is counted as a run without one.
+pub(crate) struct RegistryKeys(pub(crate) Registry);
+
+impl KeySource for RegistryKeys {
+    fn key_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.0.work_key_of(run_id).as_ref().and_then(key_map)
+    }
 }
 
 /// Minutes in a day.

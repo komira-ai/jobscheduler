@@ -30,6 +30,7 @@ use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
+use js_types::sched::WorkKey;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -75,6 +76,37 @@ struct RunBody {
     isolation: Isolation,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
+    /// What work the run does, when the client knows: the key its cost curve is learned
+    /// under. Absent means the run teaches the server nothing.
+    #[serde(default)]
+    work_key: Option<WorkKeyBody>,
+}
+
+/// The longest part of a work key (class or dedup text), in bytes. Keys are kept in
+/// memory beside the run, so they are bounded like the rest of a body.
+const MAX_WORK_KEY_PART: usize = 256;
+
+/// The work key of a [`RunBody`]: [`WorkKey`]'s two plain-text parts.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkKeyBody {
+    class: String,
+    dedup: String,
+}
+
+impl WorkKeyBody {
+    /// The key, or the 422 `invalid-work-key` when the class is empty or a part is longer
+    /// than [`MAX_WORK_KEY_PART`].
+    fn into_key(self) -> Result<WorkKey, ApiError> {
+        let fits = |part: &str| part.len() <= MAX_WORK_KEY_PART;
+        match !self.class.is_empty() && fits(&self.class) && fits(&self.dedup) {
+            true => Ok(WorkKey::new(self.class, self.dedup)),
+            false => Err(ApiError::coded(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid-work-key",
+            )),
+        }
+    }
 }
 
 /// The limits of a [`RunBody`]. The wall time is bounded by what the lease has left
@@ -188,6 +220,7 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    let work_key = body.work_key.map(WorkKeyBody::into_key).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -217,7 +250,10 @@ async fn start(
         heartbeat_seq: 0,
         valid_for_ms: left.min(limits::MAX_VALID_FOR_MS),
     };
-    let queued = api.agents.registry.queue_run(&host, &id, spec)?;
+    let queued = api
+        .agents
+        .registry
+        .queue_keyed_run(&host, &id, spec, work_key)?;
     info!(lease = %id, host = %host, run = %run_id, "run queued");
     let accepted = Accepted {
         run_id,

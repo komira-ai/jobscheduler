@@ -18,6 +18,7 @@ use js_agent_wire::{
 };
 use js_pool_static::HostBook;
 use js_provider::Observed;
+use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, Resources};
 
 /// The most runs a host may hold live at once: queued, starting, running or exited but
@@ -89,6 +90,8 @@ pub struct RunView {
     pub state: RunState,
     /// The result the host reported and the server accepted, once there is one.
     pub result: Option<RunResult>,
+    /// The work the lease holder said the run does, when it said.
+    pub work_key: Option<WorkKey>,
 }
 
 /// Why a run was not queued, or not stopped. Each has a constant code
@@ -203,6 +206,7 @@ struct Run {
     host: HostId,
     lease: LeaseId,
     spec: JobSpec,
+    work_key: Option<WorkKey>,
     life: Life,
     stop: Stop,
     result: Option<RunResult>,
@@ -267,6 +271,7 @@ impl Run {
             host: self.host.clone(),
             state: self.state(),
             result: self.result.clone(),
+            work_key: self.work_key.clone(),
         }
     }
 
@@ -346,7 +351,8 @@ impl Runs {
     /// their limits and their GPU indices together with this run's must fit `shape`.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
-    /// bound that long after `now`.
+    /// bound that long after `now`. `work_key` is what the lease holder named the run's
+    /// work; the registry keeps it beside the run and never sends it to the host.
     pub(crate) fn admit(
         &mut self,
         host: &HostId,
@@ -385,6 +391,7 @@ impl Runs {
             host: host.clone(),
             lease: *lease,
             spec,
+            work_key,
             life: Life::Queued,
             stop: Stop::No,
             result: None,
@@ -394,6 +401,12 @@ impl Runs {
         let view = run.view();
         self.map.insert(run.spec.run_id.clone(), run);
         Ok(view)
+    }
+
+    /// The work key the lease holder named for run `run_id`, when the run is known and
+    /// was queued with one.
+    pub(crate) fn work_key_of(&self, run_id: &str) -> Option<WorkKey> {
+        self.map.get(run_id).and_then(|run| run.work_key.clone())
     }
 
     /// Asks every live run of `lease` to stop: the lease ended or is being released.
@@ -621,7 +634,7 @@ mod tests {
         let book = HostBook::new();
         let shape = Resources::new(4000, 8 << 30, 0, None).unwrap();
         let mut runs = Runs::default();
-        runs.admit(&host, &LeaseId::new(1, 1), job(), &shape, (0, 0))
+        runs.admit(&host, &LeaseId::new(1, 1), (job(), None), &shape, (0, 0))
             .unwrap();
         let held = |unready| Standing {
             gap: false,

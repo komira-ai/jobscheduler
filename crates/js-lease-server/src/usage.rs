@@ -144,8 +144,8 @@ impl UsageSink for NoUsage {
     }
 }
 
-/// Which key of work a run was. The server has no key of its own for a run: the owner of
-/// admission supplies one.
+/// Which key of work a run was. By default the server answers from the work key the client
+/// named when it queued the run; a caller may supply another source.
 pub trait KeySource: Send + Sync {
     /// The key of the work run `run_id` did, or `None` when it has none (no profile is
     /// learned from it).

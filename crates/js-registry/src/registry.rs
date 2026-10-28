@@ -6,6 +6,7 @@ use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, T
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
+use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
 
 use crate::config::PoolConfig;
@@ -759,7 +760,20 @@ impl Registry {
         &self,
         host: &HostId,
         lease: &LeaseId,
+        spec: JobSpec,
+    ) -> Result<RunView, RunRefusal> {
+        self.queue_keyed_run(host, lease, spec, None)
+    }
+
+    /// [`Registry::queue_run`] for a run whose work the lease holder named: `work_key` is
+    /// kept beside the run (in memory, like the run) and is what [`Registry::work_key_of`]
+    /// answers. It is not part of the job, so the host never receives it.
+    pub fn queue_keyed_run(
+        &self,
+        host: &HostId,
+        lease: &LeaseId,
         mut spec: JobSpec,
+        work_key: Option<WorkKey>,
     ) -> Result<RunView, RunRefusal> {
         spec.lease_id = lease.to_string();
         let now = self.shared.clock.now();
@@ -790,7 +804,13 @@ impl Registry {
             return Err(RunRefusal::NoCapacity);
         }
         let seen = (record.beats, now.millis());
-        runs.admit(host, lease, spec, shape.resources(), seen)
+        runs.admit(host, lease, (spec, work_key), shape.resources(), seen)
+    }
+
+    /// The work key the run `run_id` was queued with, or `None` when it was queued without
+    /// one or the registry does not know the run (a restart forgets every run).
+    pub fn work_key_of(&self, run_id: &str) -> Option<WorkKey> {
+        self.lock().runs.work_key_of(run_id)
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop
