@@ -384,6 +384,61 @@ fn a_cpu_limited_cgroup_is_the_fallback() {
     assert!(!view(&r, "a").fallback);
 }
 
+/// Catches: the CPU-limited fallback not told apart from the others (a node whose actions
+/// cgroup has a limit looks like any stale or unmeasured worker), or counted for a worker
+/// that is not in the fallback for that reason: `limited` reports a CPU limit and is
+/// counted, `stale` went silent and `fresh` is measured and neither is, `new` never sent
+/// a reading and is not, `gone` reported a limit and was then lost and is not. In shadow
+/// mode no worker is counted, and the limit's end takes the count back to zero.
+#[test]
+fn a_cpu_limited_worker_is_counted_apart_from_the_other_fallbacks() {
+    let (mut r, held) = measured(1_000, GIB);
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 0);
+    let mut limited = r.reading("a", 1_000, GIB, held.clone());
+    limited.actions_cpu_limited = true;
+    r.ms += W_MS;
+    r.beat("a", Some(limited));
+    assert_eq!(r.s.fallback_workers(), 1);
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 1);
+    r.window("a", 1_000, GIB, &held);
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 0);
+
+    // A second node, never measured, and a third gone silent: fallbacks, not counted.
+    r.up("new", node());
+    r.up("stale", node());
+    r.baseline("stale");
+    r.window("stale", 0, 0, &[]);
+    r.ms += 4 * W_MS;
+    r.window("a", 1_000, GIB, &held);
+    r.tick();
+    assert_eq!(r.s.fallback_workers(), 2);
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 0);
+
+    // A limited node that is lost is not counted.
+    r.up("gone", node());
+    r.baseline("gone");
+    let mut limited = r.reading("gone", 0, 0, Vec::new());
+    limited.actions_cpu_limited = true;
+    r.beat("gone", Some(limited));
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 1);
+    r.ms += 10 * 60 * 1_000;
+    r.window("a", 1_000, GIB, &held);
+    assert_eq!(r.s.load_counters().fallback_cpu_limited, 0);
+
+    // Shadow mode charges nobody by measurement, so there is no fallback to count.
+    let mut shadow = Rig::new(LoadConfig {
+        mode: js_sched::PlacementLoad::Shadow,
+        ..LoadConfig::default()
+    });
+    shadow.up("a", node());
+    shadow.baseline("a");
+    let mut limited = shadow.reading("a", 0, 0, Vec::new());
+    limited.actions_cpu_limited = true;
+    shadow.ms += W_MS;
+    shadow.beat("a", Some(limited));
+    assert_eq!(shadow.s.load_counters().fallback_cpu_limited, 0);
+}
+
 /// Catches: a reading out of order accepted (a counter going back would read as a huge
 /// rise or a negative window), a dropped reading leaving the old baseline to compare the
 /// next with, and a worker believed before two readings in a row: the dropped one sends
