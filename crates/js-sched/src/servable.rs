@@ -381,6 +381,7 @@ impl Servable {
             lease: LeaseFacts {
                 lease: attempt.lease,
                 cold: attempt.cost.cold,
+                retry: attempt.cost.retry,
             },
             hosts,
         };

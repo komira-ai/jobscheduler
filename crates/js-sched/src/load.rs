@@ -165,6 +165,9 @@ pub struct LeaseFacts {
     /// Whether its action key is cold (no learned cost). A cold key's memory is held to
     /// the larger miss factor.
     pub cold: bool,
+    /// Whether the lease is a rerun up the memory ladder (`LeaseCost::retry`). Its memory
+    /// is held to the larger miss factor too: the last run missed.
+    pub retry: bool,
 }
 
 /// What the score needs to know about one candidate worker, besides its curves.
@@ -561,7 +564,7 @@ impl Scorer {
         let tc = host.cpu_capacity_millis;
         let tm = host.memory_capacity_bytes;
         let fit_slots = usize::from(host.fit_minutes).clamp(1, HORIZON);
-        let (num, den) = if lease.cold {
+        let (num, den) = if lease.cold || lease.retry {
             COLD_MEMORY_MISS
         } else {
             WARM_MEMORY_MISS
