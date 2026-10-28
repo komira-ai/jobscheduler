@@ -40,6 +40,12 @@ pub fn current() -> LoadConfig {
     CURRENT.with(Cell::get)
 }
 
+/// Whether the running test is under the booked rule: a test that keeps an exact
+/// layout assertion under the booked rule branches on it.
+pub fn is_booked() -> bool {
+    current().mode == PlacementLoad::Off
+}
+
 /// Runs `body` with [`current`] giving `config`.
 pub fn under(config: LoadConfig, body: fn()) {
     CURRENT.with(|c| c.set(config));
@@ -57,14 +63,25 @@ macro_rules! both_rules {
 
             fn run() $body
 
+            // The canary: each variant checks the rule it runs under before the body.
+            fn as_booked() {
+                assert_eq!(booked::current().mode, js_sched::PlacementLoad::Off);
+                run();
+            }
+
+            fn as_load() {
+                assert_eq!(booked::current().mode, js_sched::PlacementLoad::On);
+                run();
+            }
+
             #[test]
             fn booked_rule() {
-                booked::under(booked::booked(), run);
+                booked::under(booked::booked(), as_booked);
             }
 
             #[test]
             fn load_rule() {
-                booked::under(js_sched::LoadConfig::default(), run);
+                booked::under(js_sched::LoadConfig::default(), as_load);
             }
         }
     )*};

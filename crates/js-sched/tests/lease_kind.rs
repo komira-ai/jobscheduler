@@ -250,6 +250,12 @@ fn waiting_whole_machine_leases_hold_different_workers() {
     assert_eq!((grants.len(), on("a")), (9, 0));
     let (emptier, fuller) = if on("c") < on("b") { ("c", "b") } else { ("b", "c") };
     assert!(on(emptier) < on(fuller), "{} {}", on("b"), on("c"));
+    if booked::is_booked() {
+        // The spread: five and four. Under load the split is the packing's (the first
+        // worker takes eight of the nine before its cores run out), so only the
+        // inequality holds there.
+        assert_eq!((on(fuller), on(emptier)), (5, 4));
+    }
 
     for n in 10..=12 {
         h.submit(u64::from(n), whole(n));
@@ -360,6 +366,10 @@ fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
     let on = |name: &str| grants.iter().filter(|g| g.worker == w(name)).count();
     let (emptier, fuller) = if on("a") < on("b") { ("a", "b") } else { ("b", "a") };
     assert!(on(emptier) < on(fuller), "{} {}", on("a"), on("b"));
+    if booked::is_booked() {
+        // The spread: five and four; under load the split is the packing's.
+        assert_eq!((on(fuller), on(emptier)), (5, 4));
+    }
 
     h.submit(10, whole(10));
     assert!(h.grants().is_empty());

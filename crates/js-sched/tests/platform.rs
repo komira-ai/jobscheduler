@@ -154,6 +154,9 @@ fn an_action_goes_only_to_a_worker_that_satisfies_its_platform() {
         [(0, "b-linux"), (1, "a-mac"), (2, "b-linux")]
     );
     assert_eq!(placed.len(), 4);
+    if booked::is_booked() {
+        assert_eq!(placed[3], (3, "a-mac"), "the least booked, first by name");
+    }
     assert_eq!(placed[3].0, 3);
     assert!(["a-mac", "b-linux"].contains(&placed[3].1), "{placed:?}");
 }

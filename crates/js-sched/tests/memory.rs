@@ -539,6 +539,11 @@ fn a_busy_node_kill_reruns_with_the_same_ask_and_records_node_pressure() {
     // goes to one that fits, which of the two is placement's choice.
     assert_eq!(runs[..2], [first.clone(), second.clone()]);
     let third = start.worker.clone();
+    if booked::is_booked() {
+        // The booked rule: first by name among equals, and the first by name that fits
+        // once both are avoided.
+        assert_eq!((first.as_str(), third.as_str()), ("busy", "busy"));
+    }
     assert!(third == first || third == second, "{third}");
     let mut all = runs[..2].to_vec();
     all.push(third.clone());
