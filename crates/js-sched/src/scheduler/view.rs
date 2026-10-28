@@ -9,7 +9,7 @@ use js_types::sched::{
 };
 
 use super::{OpState, Scheduler};
-use crate::admission::{LoadCounters, LoadView, Prediction, clamped, new_charge};
+use crate::admission::{LoadCounters, LoadView, Prediction};
 use crate::cordon::Cordon;
 use crate::input::Request;
 
@@ -279,16 +279,15 @@ impl Scheduler {
             return None;
         }
         let (cost, profile) = self.charging(operation, request);
-        let cost = clamped(cost, &w.capacity);
-        let profile = profile.filter(|_| !w.exclusive(request));
         let left = w
             .load_state
             .left(self.now, &w.capacity, &self.admission.cfg);
-        Some(new_charge(
-            &cost,
-            profile.as_deref(),
+        Some(crate::servable::charge_on(
+            w,
+            request,
+            cost,
+            profile.as_ref(),
             &left,
-            &w.capacity,
             slot,
         ))
     }

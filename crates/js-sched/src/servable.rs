@@ -25,11 +25,11 @@ use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
     Admission, Blocked, Left, PlacementLoad, Profile, Ratio, Refusal, ShadowChoice, binding,
-    clamped, pick,
+    clamped, new_charge, pick,
 };
 use crate::cordon::Cordons;
 use crate::input::Request;
-use crate::load::{Charge, FlatLoad, HostFacts, LeaseFacts, Load, least_loaded};
+use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
 use crate::scheduler::Worker;
 
 /// Whether some live worker could run a request, ignoring what is booked.
@@ -106,6 +106,25 @@ pub(crate) struct Servable {
     /// For each platform request and lease kind seen this round, the indices into
     /// `live` of the workers that serve the kind and satisfy the request.
     memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
+}
+
+/// The new lease's charge `slot` minutes ahead on `worker` as the predicate counts it, as
+/// `(millicores, bytes)`, where `left` is what the worker is charged now. It is the one
+/// function behind `Scheduler::charge_at` and the figures the score reads, so the two
+/// cannot differ. `cost` is the lease's cost before the clamp to the worker; `profile` is
+/// how it is charged over time, which an action that would own the worker whole is not
+/// (it is charged flat).
+pub(crate) fn charge_on(
+    worker: &Worker,
+    request: &Request,
+    cost: LeaseCost,
+    profile: Option<&Arc<Profile>>,
+    left: &Left,
+    slot: usize,
+) -> (u64, u64) {
+    let cost = clamped(cost, &worker.capacity);
+    let profile = profile.filter(|_| !worker.exclusive(request));
+    new_charge(&cost, profile.map(|p| &**p), left, &worker.capacity, slot)
 }
 
 /// Whether a node that offers `caps` runs a driver serving `kind`.
@@ -214,14 +233,14 @@ impl Servable {
         let chosen = if by_load {
             let (admitted, why) = Self::admitted(adm, workers, &candidates, attempt, now);
             blocked = why;
-            Self::scored(adm, workers, &admitted, attempt)
+            Self::scored(adm, workers, &admitted, attempt, now)
         } else {
             // Shadow: log what the score and the previous rule would choose among the
             // workers the predicate admits, then place by the booked rule as `Off` does.
             if adm.cfg.mode == PlacementLoad::Shadow && request.kind == LeaseKind::Action {
                 let (admitted, _) = Self::admitted(adm, workers, &candidates, attempt, now);
                 let previous = least_loaded(&Self::loads(&admitted)).cloned();
-                let scored = Self::scored(adm, workers, &admitted, attempt).cloned();
+                let scored = Self::scored(adm, workers, &admitted, attempt, now).cloned();
                 adm.log_shadow(ShadowChoice {
                     lease: attempt.lease,
                     previous,
@@ -363,11 +382,20 @@ impl Servable {
     /// admitted worker would be owned whole, the least loaded is taken. Nothing is scored
     /// for a single candidate. Only an action reaches here: its callers place by load,
     /// or log the shadow choice, for actions only.
+    ///
+    /// The score reads each worker's left side and the new lease's charge at every slot
+    /// (minutes `0..=HORIZON` and `H+`), the figures [`Scheduler::load_at`] and
+    /// [`Scheduler::charge_at`] give; at slot 0 they are what the predicate admitted the
+    /// lease with. A lease charged flat reads the same at every slot.
+    ///
+    /// [`Scheduler::load_at`]: crate::Scheduler::load_at
+    /// [`Scheduler::charge_at`]: crate::Scheduler::charge_at
     fn scored<'a>(
         adm: &mut Admission,
         workers: &BTreeMap<WorkerId, Worker>,
         admitted: &[Passed<'a>],
         attempt: &Attempt<'_>,
+        now: FarmTime,
     ) -> Option<&'a WorkerId> {
         let request = attempt.request;
         let shared: Vec<&Passed<'a>> = admitted
@@ -393,17 +421,37 @@ impl Servable {
                     new_key_millis: 0,
                     uncovered_leases: w.load_state.uncovered_leases(),
                 };
-                let left = Charge {
-                    cpu_millis: p.left.cpu,
-                    memory_bytes: p.left.mem,
-                };
+                // The figures the predicate charges at every slot; slot 0 is what it
+                // admitted the lease with (`p.left`, `p.cost`).
+                let mut left = [Charge::default(); SLOTS];
+                let mut new = [Charge::default(); SLOTS];
+                for at in 0..SLOTS {
+                    let (cpu_millis, memory_bytes) =
+                        w.load_state.left_at(at, now, &w.capacity, &adm.cfg);
+                    left[at] = Charge {
+                        cpu_millis,
+                        memory_bytes,
+                    };
+                    let (cpu_millis, memory_bytes) = charge_on(
+                        w,
+                        request,
+                        attempt.cost,
+                        attempt.profile.as_ref(),
+                        &p.left,
+                        at,
+                    );
+                    new[at] = Charge {
+                        cpu_millis,
+                        memory_bytes,
+                    };
+                }
                 (
                     p.name.clone(),
-                    FlatLoad::host(&w.capacity, left, &p.cost, facts),
+                    SlotHost::new(&w.capacity, left, new, p.cost.cpu_millis, facts),
                 )
             })
             .collect();
-        let model = FlatLoad {
+        let model = SlotLoad {
             lease: LeaseFacts {
                 lease: attempt.lease,
                 cold: attempt.cost.cold,
