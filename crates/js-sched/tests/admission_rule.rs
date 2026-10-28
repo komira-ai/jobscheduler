@@ -122,6 +122,39 @@ fn a_worker_that_has_measured_keeps_the_sub_core_charge_when_stale() {
     assert_eq!(view(&light, "a").left_cpu_millis, 8_750);
 }
 
+/// Catches: the CPU limit read as exclusive (`>=`): a lease landing exactly on
+/// `C * (1 + s_cpu)` (8800 on 8 cores) is admitted, and one milli over waits.
+#[test]
+fn a_lease_landing_exactly_on_the_cpu_limit_is_admitted_and_one_milli_over_is_not() {
+    for (last, admitted) in [(300, true), (301, false)] {
+        let mut r = Rig::on();
+        r.up("a", node());
+        r.baseline("a");
+        assert_eq!(fill(&mut r, 17, warm(500, 0)).len(), 17);
+        r.action(1_000, GIB, Some(warm(last, 0)));
+        assert_eq!(leases(&r.tick()).len(), usize::from(admitted), "{last} m");
+    }
+}
+
+/// Catches: the working set added to the fallback's memory sum. A worker whose signal
+/// went stale is charged the predicted memory of its leases alone: beside a stale
+/// reading of 30 GiB in use and leases predicted at no memory, 4 GiB still fits 32 GiB.
+#[test]
+fn the_fallback_memory_sum_leaves_the_working_set_out() {
+    let (mut r, _) = measured(1_000, 30 * GIB);
+    assert!(
+        view(&r, "a").left_memory_bytes >= 30 * GIB,
+        "fresh, the working set counts"
+    );
+    r.ms += 3 * W_MS + 1;
+    r.tick();
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_memory_bytes, 0);
+    r.action(500, 4 * GIB, Some(warm(500, 4 * GIB)));
+    assert_eq!(leases(&r.tick()).len(), 1);
+}
+
 /// Catches: the measurement ignored, or believed below the floor. Eight leases predicted at
 /// 500 m (4000) with 1000 m measured are charged `f` of 4000 = 3000, so 11 more of 500 m
 /// fit under 8800, and the floor binds in that window.
