@@ -20,6 +20,15 @@
 //! reached the situations it is about, so a check that cannot fail shows up as a
 //! failed sweep, not a green one.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement (`check.rs`; `../load_reference/mod.rs` for the load rule). The generators
+//! are the same; a scenario whose subject is the booked layout asserts the load rule's
+//! equivalent under load (F1.1 fills each worker to its planned limit, F1.2 counts the
+//! cores charged, F1.5 bounds the wait of a held request). The golden trace hashes are
+//! the booked rule's. `KBF_SIM_RULE=booked` selects the rule of a replay or the long
+//! sweep (`load` by default).
+//!
 //! A failure names the scenario, the seed, the input step, the invariant and the
 //! command that replays it:
 //!

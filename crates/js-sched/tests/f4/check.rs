@@ -4,7 +4,8 @@
 //!
 //! The shadow is a reference model written from the scheduler's documented rules, not
 //! from its code: placement in queue order, each operation to the least loaded worker
-//! with room (I11), the unservable verdict and its wait
+//! with room under the booked rule, or where `load_reference` puts it under placement by
+//! load (I11), the unservable verdict and its wait
 //! (I10, L2), expiry after G and reconciliation with the running set (I3, I9, L3),
 //! dedup and promotion (I13), and the log-order result rule (I5). Each input's
 //! effects are compared with what the model expects, and the scheduler's observable

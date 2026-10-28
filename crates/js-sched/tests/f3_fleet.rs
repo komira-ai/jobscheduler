@@ -20,6 +20,11 @@
 //! turns every kind of act on or off per seed. F3.5, F3.6 and F3.9 needed the rollout
 //! driver, which is gone.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement; the golden trace hashes are the booked rule's, and `KBF_SIM_RULE=booked`
+//! selects the rule of a replay or the long sweep (`load` by default).
+//!
 //! A failing check prints its replay command:
 //! `KBF_SIM_RULE=load KBF_SIM_SCENARIO=<name> KBF_SIM_SEED=<n> cargo test -p js-sched --test f3_fleet -- --ignored --exact replay`.
 //! The long sweep: `cargo test -p js-sched --release --test f3_fleet -- --ignored --exact swarm_long`.

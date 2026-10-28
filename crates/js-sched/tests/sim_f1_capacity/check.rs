@@ -2,9 +2,8 @@
 //! checked after every input (catalog section 4, `docs/design/simulation.md`).
 //!
 //! The shadow is written from the scheduler's contract, not from its code: it keeps
-//! its own queue, bookings, leases and dedup map, and its own reference placement (the
-//! least loaded worker with room) and unservable verdict, and compares the scheduler's
-//! effects and public state with them
+//! its own queue, bookings, leases and dedup map, and its own reference placement and
+//! unservable verdict, and compares the scheduler's effects and public state with them
 //! after each input. Nothing here calls `Resources::fits` or `saturating_sub`: a
 //! defect there must not also bend the reference.
 //!
@@ -18,7 +17,16 @@
 //! but F1 feeds none, so F1 does not exercise them. Not checked here: I9 (drain states)
 //! and I12 (no daemon model in the in-process world).
 //!
-//! I6 is checked per axis the request uses: a grant is allowed when, on the CPU and GPU
+//! The reference placement is the one of the rule the test runs under. Under the booked
+//! rule it is the least loaded worker with room, written here. Under placement by load it is
+//! `load_reference` (the design's predicate, score and head hold, written from the design
+//! and calling nothing in `js-sched`), and I6 is that rule's limit: a worker is charged
+//! cores up to a tenth over its own, never more, and GPUs and VM slots within its count;
+//! I11 holds each round's grants to the reference placement exactly. Everything else (I1 to
+//! I5, I7, I8, I10, I13, I14, L1, L2, and the bookings the scheduler reports) does not
+//! depend on the rule and is checked the same under both.
+//!
+//! I6, booked rule, is checked per axis the request uses: a grant is allowed when, on the CPU and GPU
 //! axes on which the request is not zero, what is booked plus the request fits the
 //! capacity. Memory is not booked against a worker (an action's memory is the limit it
 //! first runs under): the request needs a worker with that much memory, and an action

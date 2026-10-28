@@ -44,6 +44,11 @@
 //! promotion, a lease requeued on a new session, a paused drain, ...), so a check that
 //! never fires is noticed.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement; the golden trace hashes are the booked rule's, and `KBF_SIM_RULE=booked`
+//! selects the rule of a replay or the long sweep (`load` by default).
+//!
 //! CI runs 16 seeds of 2,000 operations: about 5 s of test time in a debug build on
 //! the dev box, under a minute on a CI runner. A failing check prints its seed and a
 //! replay command (`--nocapture` so a replay that passes still prints what it

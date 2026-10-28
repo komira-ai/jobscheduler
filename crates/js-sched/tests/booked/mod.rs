@@ -7,9 +7,10 @@
 //! worker placement picked (a test follows the worker a start names).
 //!
 //! A test that asserts the booked layout itself (the least booked worker, then the fewest
-//! leases, then the first by name: the spread, a lost run's budget on a named node, the
-//! reference-model simulations) stays on the booked rule through [`booked`], the rollback
-//! switch. Placement by load is tested by the `admission_*`, `load_*` and score suites.
+//! leases, then the first by name: the spread) stays on the booked rule through [`booked`],
+//! the rollback switch. The reference-model simulations (F1, F3, F4) run under both rules,
+//! each against its own reference placement (the load rule's is `load_reference`).
+//! Placement by load is also tested by the `admission_*`, `load_*` and score suites.
 
 #![allow(
     dead_code,

@@ -4,9 +4,10 @@
 //!
 //! The shadow is a reference model, not a copy of the scheduler's state: it keeps its
 //! own cordons and drains, its own bookings, liveness, holdings and queue, computes the
-//! placement round (each operation to the least loaded worker with room, the first by
-//! name of equals) and each queued operation's verdict, and compares what the scheduler
-//! did with that.
+//! placement round and each queued operation's verdict, and compares what the scheduler
+//! did with that. The placement round is the rule the test runs under: under the booked
+//! rule each operation goes to the least loaded worker with room (the first by name of
+//! equals); under placement by load, to where `load_reference` puts it (`round.rs`).
 //!
 //! Checked: I1 (lease ids unique, increasing), I2 (`Start` only for the current,
 //! committed grant), I3 (one holding per operation; `leases_on` is the holdings), I4
@@ -15,7 +16,8 @@
 //! never sends a stale or fenced result, because a worker that goes down drops its
 //! runs, so here I5 proves only that the outcome is passed through: a scheduler that
 //! accepts a fenced result is F2's to catch), I6 (bookings
-//! fit at a grant; `booked` is the sum of the holdings), I7 (grants go to a live worker
+//! fit at a grant, under the load rule the cores charged within a tenth over the worker's;
+//! `booked` is the sum of the holdings), I7 (grants go to a live worker
 //! whose last reported capabilities satisfy the platform), I8 (no grant to a cordoned
 //! worker, across sessions), I9 (a lease is given up only when its worker went down
 //! after the grant or was down at it; the cordon and drain state is the reference's
