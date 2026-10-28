@@ -194,7 +194,7 @@ impl NodeLoad {
                     || m.cpu_mean_millis > m.cpu_peak_window_millis
                 {
                     Verdict::Invalid
-                } else if !seen.insert((m.lease_id.clone(), m.minute)) {
+                } else if !seen.insert((m.lease_id.clone(), 0u16)) {
                     Verdict::Duplicate
                 } else {
                     Verdict::Keep
