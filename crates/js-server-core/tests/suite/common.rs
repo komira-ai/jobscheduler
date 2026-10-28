@@ -87,13 +87,15 @@ pub enum Hook {
     },
     /// `settle`, so the order against the report hooks shows.
     Settle(LeaseId),
+    /// `stream_open`, which the core asks while it claims a node before a feed.
+    StreamOpen(WorkerId),
 }
 
 /// An adapter that keeps what its hooks were told.
 #[derive(Default)]
 pub struct Rig {
     /// The clock and report hooks, and settles, in the order they were called.
-    pub hooks: Vec<Hook>,
+    pub hooks: Mutex<Vec<Hook>>,
     pub trace: Trace,
     pub calls: Vec<Call>,
     /// The streams whose connection is open.
@@ -124,11 +126,15 @@ impl Rig {
     fn note(&self, line: String) {
         self.trace.lock().expect("trace").push(line);
     }
+
+    fn hook(&self, hook: Hook) {
+        self.hooks.lock().expect("hooks").push(hook);
+    }
 }
 
 impl Adapter for Rig {
     fn clock(&mut self, now: FarmTime) {
-        self.hooks.push(Hook::Clock(now));
+        self.hook(Hook::Clock(now));
     }
 
     fn before_report(
@@ -139,7 +145,7 @@ impl Adapter for Rig {
         report: &Report,
     ) {
         let sched = view.sched();
-        self.hooks.push(Hook::Before {
+        self.hook(Hook::Before {
             now,
             worker: worker.clone(),
             report: *report,
@@ -159,7 +165,7 @@ impl Adapter for Rig {
         answers: &[Answer],
         taken: Taken,
     ) {
-        self.hooks.push(Hook::After {
+        self.hook(Hook::After {
             now,
             worker: worker.clone(),
             report: *report,
@@ -173,6 +179,7 @@ impl Adapter for Rig {
     }
 
     fn stream_open(&self, worker: &WorkerId, stream: Stream) -> bool {
+        self.hook(Hook::StreamOpen(worker.clone()));
         self.open.contains(&(worker.clone(), stream))
     }
 
@@ -231,7 +238,7 @@ impl Adapter for Rig {
 
     fn settle(&mut self, _: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery {
         self.note(format!("settle {}", answer.lease));
-        self.hooks.push(Hook::Settle(answer.lease));
+        self.hook(Hook::Settle(answer.lease));
         self.parked.remove(&answer.lease);
         self.kept.insert(answer.operation);
         self.calls.push(Call::Settle {
@@ -570,7 +577,7 @@ fn open(state: &OpState) -> bool {
 
 /// The clock and report hooks the rig was called through, and settles, in order.
 pub fn hooks(core: &Core<Rig>) -> Vec<Hook> {
-    core.with(|_, rig| rig.hooks.clone())
+    core.with(|_, rig| rig.hooks.lock().expect("hooks").clone())
 }
 
 /// The lines of `trace` so far.

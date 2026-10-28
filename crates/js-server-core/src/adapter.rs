@@ -119,8 +119,10 @@ pub trait Adapter: Send {
     /// of the report: a stale or duplicate one (that a [`Core::standing`](crate::Core::standing)
     /// check let through before a concurrent change) is seen here too, and is
     /// [`Taken::Refused`] or [`Taken::Dropped`] in `after_report`. A report that `standing`
-    /// refused is not passed to `Core::report` by the host, and calls neither. Does nothing
-    /// by default.
+    /// refused is not passed to `Core::report` by the host, and calls neither. A fenced core
+    /// ([`Core::fence`](crate::Core::fence)) is hooked too, with no [`Adapter::clock`] call
+    /// before it or between the hooks: it feeds nothing, so `after_report` gets no answers
+    /// and `Taken::Refused(Reason::Stale)`. Does nothing by default.
     fn before_report(
         &mut self,
         _view: &View<'_>,
@@ -133,7 +135,8 @@ pub trait Adapter: Send {
     /// `worker`'s `report` was fed, and `taken` says how the scheduler took it; `answers`
     /// are the operations it finished (this one, or others a held answer released), not
     /// yet settled: [`Adapter::settle`] follows for each. `now` is the same farm time
-    /// `before_report` was given. Called once for each
+    /// `before_report` was given. On a fenced core nothing was fed, `answers` is empty and
+    /// `taken` is `Taken::Refused(Reason::Stale)`. Called once for each
     /// [`Core::report`](crate::Core::report), after the matching
     /// [`Adapter::before_report`]. Does nothing by default.
     fn after_report(

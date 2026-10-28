@@ -4,6 +4,7 @@
 use crate::common::{
     Gate, Hook, Trace, at, beat, block_on, core, gated, hooks, lease, submit, up, worker,
 };
+use crate::stored::Setup;
 use js_server_core::{Attempt, Reason, Report, Standing, Taken};
 use js_types::sched::{Outcome, ResultRef};
 
@@ -123,9 +124,27 @@ fn a_report_that_is_not_answered_is_hooked_once_with_how_it_was_taken() {
             .filter(|hook| matches!(hook, Hook::Before { .. } | Hook::After { .. }))
             .collect()
     };
-    let taken_as = |hook: &Hook| match hook {
-        Hook::After { taken, answers, .. } => Some((*taken, answers.len())),
-        _ => None,
+    // The pair of hooks for `report` at `now`, with no answer: the operation open (or not)
+    // with its waiters before, and `taken` after.
+    let pair = |now: u64, report: Report, (open_before, open_after): (bool, bool), taken| {
+        let waiters = vec![admitted.waiter];
+        [
+            Hook::Before {
+                now: at(now),
+                worker: node.clone(),
+                report,
+                open: open_before,
+                waiters,
+            },
+            Hook::After {
+                now: at(now),
+                worker: node.clone(),
+                report,
+                answers: Vec::new(),
+                taken,
+                open: open_after,
+            },
+        ]
     };
 
     let seen = hooks(&core).len();
@@ -141,21 +160,24 @@ fn a_report_that_is_not_answered_is_hooked_once_with_how_it_was_taken() {
 
     // Unknown lease: fed, refused.
     block_on(core.report(at(12), &node, report(lease(1, 9)), |_| {}));
-    let hooked = report_hooks(seen);
-    assert_eq!(hooked.len(), 2, "one before and one after: {hooked:?}");
-    assert!(matches!(hooked[0], Hook::Before { open: true, .. }));
     assert_eq!(
-        taken_as(&hooked[1]),
-        Some((Taken::Refused(Reason::UnknownLease), 0))
+        report_hooks(seen),
+        pair(
+            12,
+            report(lease(1, 9)),
+            (true, true),
+            Taken::Refused(Reason::UnknownLease)
+        )
     );
 
     // Finish waits to be written: taken, not answered.
     gate.finishes(Attempt::Transient);
     let seen = hooks(&core).len();
     block_on(core.report(at(20), &node, report(lease(1, 0)), |_| {}));
-    let hooked = report_hooks(seen);
-    assert_eq!(hooked.len(), 2);
-    assert_eq!(taken_as(&hooked[1]), Some((Taken::Held, 0)));
+    assert_eq!(
+        report_hooks(seen),
+        pair(20, report(lease(1, 0)), (true, false), Taken::Held)
+    );
 
     // Written later: settled, with no report hook of its own.
     gate.finishes(Attempt::Taken);
@@ -167,7 +189,80 @@ fn a_report_that_is_not_answered_is_hooked_once_with_how_it_was_taken() {
     // The copy of an answered result.
     let seen = hooks(&core).len();
     block_on(core.report(at(40), &node, report(lease(1, 0)), |_| {}));
-    let hooked = report_hooks(seen);
-    assert_eq!(hooked.len(), 2);
-    assert_eq!(taken_as(&hooked[1]), Some((Taken::Dropped, 0)));
+    assert_eq!(
+        report_hooks(seen),
+        pair(40, report(lease(1, 0)), (false, false), Taken::Dropped)
+    );
+}
+
+/// Catches: a clock call that follows a hook of the feed it belongs to. A node whose claim
+/// the store refused is claimed again at the next feed, which asks the adapter whether the
+/// node's stream is open; the clock of that feed comes before that question.
+#[test]
+fn the_clock_comes_before_the_claim_a_feed_makes() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    setup.store.set_down(true);
+    let stream = up(&core, 0, "node-a", "d1");
+    setup.store.set_down(false);
+
+    let seen = hooks(&core).len();
+    block_on(core.tick(at(1)));
+    let fed = since(&core, seen);
+    assert_eq!(
+        fed.first(),
+        Some(&Hook::Clock(at(1))),
+        "{fed:?} after {stream:?}"
+    );
+    assert!(
+        fed.contains(&Hook::StreamOpen(worker("node-a"))),
+        "the claim asked about the stream: {fed:?}"
+    );
+}
+
+/// Catches: a fenced core that stops hooking a report, or one that tells the clock for a
+/// feed it does not make. A fenced core feeds nothing: the report is hooked, no clock
+/// call falls between the hooks, `after_report` gets no answer and `Taken::Refused(Stale)`,
+/// and a tick tells no clock either.
+#[test]
+fn a_fenced_core_hooks_a_report_with_no_clock_and_no_answer() {
+    let core = core();
+    up(&core, 0, "node-a", "d1");
+    let admitted = submit(&core, 10, 1);
+    let node = worker("node-a");
+    core.fence();
+    let report = Report {
+        operation: admitted.operation,
+        lease: lease(1, 0),
+        outcome: done(),
+    };
+    let seen = hooks(&core).len();
+    assert_eq!(
+        block_on(core.report(at(20), &node, report, |_| {})),
+        Taken::Refused(Reason::Stale)
+    );
+    assert_eq!(
+        since(&core, seen),
+        [
+            Hook::Before {
+                now: at(20),
+                worker: node.clone(),
+                report,
+                open: true,
+                waiters: vec![admitted.waiter],
+            },
+            Hook::After {
+                now: at(20),
+                worker: node,
+                report,
+                answers: Vec::new(),
+                taken: Taken::Refused(Reason::Stale),
+                open: true,
+            },
+        ]
+    );
+
+    let seen = hooks(&core).len();
+    block_on(core.tick(at(30)));
+    assert!(since(&core, seen).is_empty(), "a fenced tick feeds nothing");
 }
