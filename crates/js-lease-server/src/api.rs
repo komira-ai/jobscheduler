@@ -12,6 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport};
 use js_provider::Provider;
+use js_registry::Registry;
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -59,6 +60,11 @@ impl Shared {
     /// first and the registry's lock second, as every caller does.
     pub(crate) fn table(&self) -> &Mutex<Table> {
         &self.table
+    }
+
+    /// A handle on the agent registry; `None` without agent flags.
+    pub(crate) fn registry(&self) -> Option<Registry> {
+        self.agents.as_ref().map(|agents| agents.registry.clone())
     }
 
     /// How many times the agent side could not read or write its files; 0 without agents.
