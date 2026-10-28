@@ -1,4 +1,4 @@
-use js_types::{LabelError, Labels, LeaseId, Request, RequestError, ResourceClass};
+use js_types::{LabelError, Labels, LeaseId, Request, RequestError, RequestId, ResourceClass};
 
 /// A plain, constant code for a refusal. No central code table exists beyond this
 /// enum; a provider may add a code and may never remove a start-contract one.
@@ -24,6 +24,13 @@ pub enum RefusalCode {
     /// The lease id was stopped, and a stopped lease id never starts again: the start
     /// is a late or duplicate one and books nothing.
     LeaseEnded,
+    /// A whole-node request that no registered host could ever be given whole: none is
+    /// live, lost within retention or awaiting, untainted and of a fitting shape. Waiting
+    /// will not help, unlike [`RefusalCode::NoCapacity`].
+    NoCapableHost,
+    /// A whole-node request that used up its tries to get a host ready: it will not be
+    /// placed again.
+    ExclusiveNotReady,
 }
 
 impl RefusalCode {
@@ -49,6 +56,8 @@ impl RefusalCode {
             Self::NoFit => "no-fit",
             Self::NoCapacity => "no-capacity",
             Self::LeaseEnded => "lease-ended",
+            Self::NoCapableHost => "no-capable-host",
+            Self::ExclusiveNotReady => "exclusive-not-ready",
         }
     }
 }
@@ -74,6 +83,7 @@ pub struct StartSpec {
     class: ResourceClass,
     request: Request,
     labels: Labels,
+    request_id: Option<RequestId>,
 }
 
 impl StartSpec {
@@ -99,7 +109,21 @@ impl StartSpec {
             class,
             request,
             labels,
+            request_id: None,
         })
+    }
+
+    /// This spec carrying the id the consumer gave the request. A provider that queues
+    /// reads it to tell a repeat of a request from a new one; it is never persisted by
+    /// the lease table, and a spec without one is unchanged.
+    pub fn with_request_id(mut self, id: RequestId) -> Self {
+        self.request_id = Some(id);
+        self
+    }
+
+    /// The consumer's id for the request, if it gave one.
+    pub fn request_id(&self) -> Option<&RequestId> {
+        self.request_id.as_ref()
     }
 
     /// The lease this attempt runs under.
@@ -205,10 +229,32 @@ mod tests {
             RefusalCode::NoFit,
             RefusalCode::NoCapacity,
             RefusalCode::LeaseEnded,
+            RefusalCode::NoCapableHost,
+            RefusalCode::ExclusiveNotReady,
         ];
         let names: std::collections::BTreeSet<_> = codes.iter().map(|c| c.as_str()).collect();
         assert_eq!(names.len(), codes.len());
         assert_eq!(RefusalCode::NoFit.as_str(), "no-fit");
         assert_eq!(RefusalCode::LeaseEnded.as_str(), "lease-ended");
+        assert_eq!(RefusalCode::NoCapableHost.as_str(), "no-capable-host");
+        assert_eq!(
+            RefusalCode::ExclusiveNotReady.as_str(),
+            "exclusive-not-ready"
+        );
+    }
+
+    /// Asserts that a spec has no request id until one is given, that the id given is
+    /// read back, and that giving one changes nothing else of the spec.
+    #[test]
+    fn the_request_id_is_optional_and_changes_nothing_else() {
+        let plain = make(request()).unwrap();
+        assert_eq!(plain.request_id(), None);
+        let id = RequestId::new("r-1").unwrap();
+        let named = plain.clone().with_request_id(id.clone());
+        assert_eq!(named.request_id(), Some(&id));
+        assert_eq!(
+            (named.lease(), named.request(), named.labels()),
+            (plain.lease(), plain.request(), plain.labels())
+        );
     }
 }

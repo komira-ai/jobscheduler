@@ -18,7 +18,14 @@ use crate::registry::Registry;
 ///   grace period) and serving, and whose booked shape fits the request. A host that
 ///   is lost, awaiting, draining, quarantined, tainted or in any other phase than
 ///   serving takes no new lease. With no host to book it answers `NoCapacity` for a
-///   request the pool's shape fits, `NoFit` for one it cannot.
+///   request the pool's shape fits, `NoFit` for one it cannot. A whole-node request
+///   (`Admission::Whole`) that fits the pool answers `NoCapableHost` when no known host
+///   could ever be given whole (none is untainted and of a fitting shape), and
+///   `Unknown` (accepted, waiting) when its start carries a request id and some host
+///   could, however busy; see [`crate::Registry::queue_position`]. Without a request
+///   id it answers `NoCapacity` and the consumer retries. A request that used up its
+///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
+///   record, so the next start of the request is a fresh one).
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost

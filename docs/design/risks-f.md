@@ -1,4 +1,4 @@
-# Risks K19 to K41
+# Risks K19 to K48
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -68,3 +68,30 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K41. A persisted reservation outlives its use.** A record kept across a restart can hold a host for a consumer that has gone. Bounded by
   `regain_grace` after boot for an unclaimed record, by the drain deadline for a claimed one, and by deletion with the request (D55). Residual:
   a restore from an old snapshot reads old marks; a record naming a missing host or request is dropped at boot.
+- **K42. A spot market that flaps churns hosts.** Interruptions taint and replace hosts in a loop, and a replacement may be interrupted
+  too. A reclaim taint is excluded from `max_taints_in_a_row` and `max_boot_failures` (D59), so those brakes still mean a bad job class or
+  a bad image. The loop is bounded by `max_step`, `cooldown`, `max_machines` and the provider shares, and steered by the capacity signal
+  of D60 (a recently interrupted option sorts later) and by a tier that holds another cloud or an on-demand provider. Residual: a pool
+  whose every option is interrupted pays boots and reruns until the market settles; the platform-fault budget bounds the reruns (8.1).
+- **K43. A shared host is a larger blast radius.** One host loss, reclaim, taint or kernel fault ends many jobs of many consumers at once,
+  where a machine per job would lose one. Mitigated by the notice and drain of D59, the platform-fault budget for reruns, taint on any
+  finding, and the choice of a host size (the shape is a floor; an operator sizes hosts for the loss they accept). Not mitigated: an
+  unannounced loss of a full host.
+- **K44. A declared VM capability is wrong.** A launch option that says `virt = nested` and cannot run a VM would waste a boot per
+  attempt. Mitigated by the agent's probe (D58: the host reports zero slots and an alert), by the failure being recorded per option so the
+  option cools down, and by a conformance case with a lying option. Residual: the first launch of a wrong option is wasted.
+- **K45. Stale or wrong price and capacity data choose badly.** Data that is old, or wrong by mistake or by a hostile provider crate,
+  picks an expensive or unavailable option. It cannot refuse a request or exceed a cap (D60); the cost is a worse choice or a refused
+  acquire that cools the option down. The data is read once per tick on the injected clock, so a bad choice is reproducible in a test.
+- **K46. A tier member that launches and never registers.** A cloud whose machines boot but cannot reach the scheduler would take the
+  demand of its tier every time it sorted first. Mitigated by the boot timeout and the failure brake of its entry (5.8, providers.md), so after
+  `max_boot_failures` in a row that member is passed over (a brake, not a cost limit), and by the alert it raises.
+- **K47. A swap delays the victim's machine and overshoots.** The victim drains for up to `swap_drain_grace` (D63), so the cost is that
+  delay; work is lost only for a job still running past the grace, which is then rerun without failing and without charge. The biggest type
+  may be more than the load needed (D62). Bounded by one swap per window and per victim, by the victim choice that prefers hosts that empty
+  within the grace and by the protected hosts (D64), by `max_evictions` per request, and by launching before draining (a refused launch
+  loses nothing). Residual: jobs longer than the grace lose their progress once per eviction, and a lasting overshoot is undone only by the
+  scale-down of D65.
+- **K48. The cap is crossed by one machine during a swap.** The swap's launch is counted with the victim until the victim reads back Absent,
+  so the count is `max_machines + 1` for up to the drain grace (D62). Bounded by one swap per victim (H10); a terminate that reads back
+  Unknown holds the extra machine until it is resolved (5.6), and the reaper's release retry applies (12.1).

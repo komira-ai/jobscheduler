@@ -139,6 +139,13 @@ impl Running {
         self.addr
     }
 
+    /// A handle on the agent registry (the same registry the routes and the tick use),
+    /// for reading what it records, such as [`js_registry::Registry::request_record`];
+    /// `None` without agent flags.
+    pub fn registry(&self) -> Option<js_registry::Registry> {
+        self.shared.registry()
+    }
+
     /// How many ticks failed to write the lease file since the server started.
     pub fn save_errors(&self) -> u64 {
         self.shared.save_errors()

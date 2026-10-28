@@ -28,7 +28,7 @@ Definitions are infrastructure, runs are runtime events. Launcher first (D5).
 | ucdk Job field | Request field |
 |---|---|
 | image, args, environment | payload; the `image` runs as a container on the agent; secret references resolved by the executor, never stored in the record |
-| size (abstract CPU and memory) | resource vector, rounded up to a pool shape, shown in the plan; the booking and the ceiling (11.3) |
+| size (abstract CPU and memory) | resource vector, booked on a host of a pool whose shape holds it, where many Jobs share the host (D56); shown in the plan; the booking and the ceiling (11.3) |
 | max_retries | one budget over every failed attempt (8.1) |
 | timeout | per-attempt deadline enforced by the agent |
 | trigger schedule | one owner per realization (below) |
