@@ -756,3 +756,5 @@ fn a_chosen_worker_says_how_it_was_decided() {
     let one = Scorer::default().choose_among(&fake, &refs[..1]).unwrap();
     assert!(!one.scored);
 }
+
+mod explained;

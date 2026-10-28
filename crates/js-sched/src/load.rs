@@ -39,14 +39,15 @@ use js_types::sched::{LeaseId, Resources, WorkerId};
 /// of it booked is still the one to avoid. (A cap would make every such worker a tie,
 /// exactly when the farm is busy.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Load {
+pub struct Load {
     share: Share,
     leases: usize,
 }
 
 impl Load {
     /// The load of a worker of `capacity` that has `booked` booked in `leases` leases.
-    pub(crate) fn new(booked: Resources, capacity: Resources, leases: usize) -> Self {
+    #[must_use]
+    pub fn new(booked: Resources, capacity: Resources, leases: usize) -> Self {
         let cpu = Share::new(booked.cpu_millis, capacity.cpu_millis);
         let memory = Share::new(booked.memory_bytes, capacity.memory_bytes);
         // A node with no lease cap (or a cap of 0) has no lease share to be short of.
@@ -205,6 +206,23 @@ pub struct ScoreConfig {
     balance: u32,
     slack_tol_ppm: u64,
     key_share_ppm: u64,
+    fit: FitShape,
+}
+
+/// How key 5, the fit, is computed. Keys 1 to 4 and the tie-breaks are the same in every
+/// shape; only the fit changes, so a harness can run every shape through one code path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FitShape {
+    /// The weighted sum of `2 * min^2 + b * (max - min)^2` over the lease's `L` minutes.
+    #[default]
+    Squared,
+    /// The same sum without the squares: `2 * min + b * (max - min)`, a weighted sum of
+    /// the residuals themselves.
+    Linear,
+    /// The squared fit with both the new lease's charge and the host's load replaced, at
+    /// each of the `L` fit slots, by their mean over those slots (`area / L`, floor
+    /// division): the fit of a lease and a host that were charged flat.
+    Flat,
 }
 
 impl ScoreConfig {
@@ -220,7 +238,21 @@ impl ScoreConfig {
             balance,
             slack_tol_ppm,
             key_share_ppm,
+            fit: FitShape::Squared,
         })
+    }
+
+    /// This config with the fit computed as `fit`.
+    #[must_use]
+    pub const fn with_fit(mut self, fit: FitShape) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    /// How the fit is computed.
+    #[must_use]
+    pub const fn fit(&self) -> FitShape {
+        self.fit
     }
 }
 
@@ -232,6 +264,7 @@ impl ScoreConfig {
             balance: cfg.score_balance.min(MAX_BALANCE),
             slack_tol_ppm: cfg.score_slack_tol_ppm,
             key_share_ppm: u64::from(cfg.key_share_percent.min(100)) * 10_000,
+            fit: FitShape::Squared,
         }
     }
 }
@@ -243,6 +276,7 @@ impl Default for ScoreConfig {
             balance: 1,
             slack_tol_ppm: 10_000,
             key_share_ppm: 250_000,
+            fit: FitShape::Squared,
         }
     }
 }
@@ -262,7 +296,108 @@ pub struct ScoreKey {
     worker: WorkerId,
 }
 
+/// Which rule told the chosen worker from the next best.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DecidedBy {
+    /// Key 1 to 5 (the number): the first key on which the two differed.
+    Key(u8),
+    /// Tie-break 1 to 5 (the number): keys 1 to 5 were equal and this was the first
+    /// tie-break on which the two differed. 1 is fewer uncovered leases, 2 the larger
+    /// CPU capacity, 3 the larger headroom over the next five minutes, 4 the hash of
+    /// lease and worker, 5 the worker id.
+    TieBreak(u8),
+    /// There was one candidate.
+    Only,
+}
+
 impl ScoreKey {
+    /// Key 1: the weighted overshoot beyond 100% plus the tolerance, over every slot.
+    #[must_use]
+    pub const fn slack(&self) -> u128 {
+        self.slack
+    }
+
+    /// Key 2: a memory miss would not fit at some slot.
+    #[must_use]
+    pub const fn memory_unsafe(&self) -> bool {
+        self.memory_unsafe
+    }
+
+    /// Key 3: the worker is in fallback or measured above its predictions.
+    #[must_use]
+    pub const fn distrusted(&self) -> bool {
+        self.distrusted
+    }
+
+    /// Key 4: the lease's key would exceed its share of the worker.
+    #[must_use]
+    pub const fn concentrated(&self) -> bool {
+        self.concentrated
+    }
+
+    /// Key 5: the fit, in the shape the scorer's config names.
+    #[must_use]
+    pub const fn fit(&self) -> u128 {
+        self.fit
+    }
+
+    /// Tie-break 1: the worker's leases not covered by its last measurement.
+    #[must_use]
+    pub const fn uncovered(&self) -> u32 {
+        self.uncovered
+    }
+
+    /// Tie-break 2: the worker's CPU capacity in millicores (larger wins).
+    #[must_use]
+    pub const fn cpu_capacity_millis(&self) -> u64 {
+        self.larger_cpu.0
+    }
+
+    /// Tie-break 3: the smallest CPU headroom over the next five minutes (larger wins).
+    #[must_use]
+    pub const fn near_headroom_millis(&self) -> i128 {
+        self.larger_near_headroom.0
+    }
+
+    /// Tie-break 4: the hash of lease and worker (smaller wins).
+    #[must_use]
+    pub const fn hash(&self) -> u64 {
+        self.hash
+    }
+
+    /// Tie-break 5: the worker.
+    #[must_use]
+    pub const fn worker(&self) -> &WorkerId {
+        &self.worker
+    }
+
+    /// The first rule, in the order keys 1 to 5 then the tie-breaks, on which `self` and
+    /// `other` differ. Two keys of different workers always differ in the last.
+    #[must_use]
+    pub fn decided_by(&self, other: &Self) -> DecidedBy {
+        if self.slack != other.slack {
+            DecidedBy::Key(1)
+        } else if self.memory_unsafe != other.memory_unsafe {
+            DecidedBy::Key(2)
+        } else if self.distrusted != other.distrusted {
+            DecidedBy::Key(3)
+        } else if self.concentrated != other.concentrated {
+            DecidedBy::Key(4)
+        } else if self.fit != other.fit {
+            DecidedBy::Key(5)
+        } else if self.uncovered != other.uncovered {
+            DecidedBy::TieBreak(1)
+        } else if self.larger_cpu != other.larger_cpu {
+            DecidedBy::TieBreak(2)
+        } else if self.larger_near_headroom != other.larger_near_headroom {
+            DecidedBy::TieBreak(3)
+        } else if self.hash != other.hash {
+            DecidedBy::TieBreak(4)
+        } else {
+            DecidedBy::TieBreak(5)
+        }
+    }
+
     /// Whether keys 1 to 5 are equal: only the tie-breaks tell the two apart.
     fn same_primary_keys(&self, other: &Self) -> bool {
         (
@@ -350,6 +485,41 @@ impl Scorer {
                 tie_break: false,
             });
         }
+        let (key, worker, runner_up) = self.rank(model, candidates)?;
+        Some(Choice {
+            worker,
+            scored: true,
+            slack_used: key.slack > 0,
+            distrusted: key.distrusted,
+            concentrated: key.concentrated,
+            tie_break: runner_up.is_some_and(|r| r.same_primary_keys(&key)),
+        })
+    }
+
+    /// As [`Scorer::choose`], with the rule that decided: the first key (or tie-break) on
+    /// which the chosen worker differs from the next best, or [`DecidedBy::Only`] for a
+    /// single candidate, which is taken and not scored. The worker is the one `choose`
+    /// returns for the same inputs.
+    pub fn choose_explained<'a, M: PredictedLoad>(
+        &mut self,
+        model: &M,
+        candidates: &'a [WorkerId],
+    ) -> Option<(&'a WorkerId, DecidedBy)> {
+        if let [only] = candidates {
+            return Some((only, DecidedBy::Only));
+        }
+        let refs: Vec<&'a WorkerId> = candidates.iter().collect();
+        let (key, worker, runner_up) = self.rank(model, &refs)?;
+        let by = runner_up.map_or(DecidedBy::Only, |r| key.decided_by(&r));
+        Some((worker, by))
+    }
+
+    /// The best key among two or more `candidates`, its worker, and the next best key.
+    fn rank<'a, M: PredictedLoad>(
+        &mut self,
+        model: &M,
+        candidates: &[&'a WorkerId],
+    ) -> Option<(ScoreKey, &'a WorkerId, Option<ScoreKey>)> {
         let mut best: Option<(ScoreKey, &'a WorkerId)> = None;
         let mut runner_up: Option<ScoreKey> = None;
         for &worker in candidates {
@@ -368,14 +538,7 @@ impl Scorer {
             }
         }
         let (key, worker) = best?;
-        Some(Choice {
-            worker,
-            scored: true,
-            slack_used: key.slack > 0,
-            distrusted: key.distrusted,
-            concentrated: key.concentrated,
-            tie_break: runner_up.is_some_and(|r| r.same_primary_keys(&key)),
-        })
+        Some((key, worker, runner_up))
     }
 
     /// The key of `worker` for the lease of `model`.
@@ -396,6 +559,9 @@ impl Scorer {
         let mut slack = 0u128;
         let mut memory_unsafe = false;
         let mut fit = 0u128;
+        // The sums over the fit slots of the load and the new lease's charge: CPU load,
+        // memory load, CPU charge, memory charge (for the `Flat` shape).
+        let mut area = [0u128; 4];
         let mut near = i128::MAX;
         for slot in 0..SLOTS {
             let load = model.load(worker, slot);
@@ -409,11 +575,34 @@ impl Scorer {
             memory_unsafe |= padded > u128::from(tm);
             if slot < fit_slots {
                 let (lo, hi) = (xc.min(xm), xc.max(xm));
-                fit += w * (2 * lo * lo + balance * (hi - lo) * (hi - lo));
+                fit += match self.config.fit {
+                    FitShape::Squared | FitShape::Flat => {
+                        w * (2 * lo * lo + balance * (hi - lo) * (hi - lo))
+                    }
+                    FitShape::Linear => w * (2 * lo + balance * (hi - lo)),
+                };
+                for (sum, v) in area.iter_mut().zip([
+                    load.cpu_millis,
+                    load.memory_bytes,
+                    new.cpu_millis,
+                    new.memory_bytes,
+                ]) {
+                    *sum += u128::from(v);
+                }
             }
             if slot < NEAR_SLOTS {
                 near = near.min(i128::from(tc) - i128::from(load.cpu_millis));
             }
+        }
+        if self.config.fit == FitShape::Flat {
+            // `p_bar = area / L` at every fit slot, for the load and for the new lease.
+            let mean = |sum: u128| u64::try_from(sum / fit_slots as u128).unwrap_or(u64::MAX);
+            let [lc, lm, nc, nm] = area.map(mean);
+            let (xc, _) = residual(tc, lc, nc);
+            let (xm, _) = residual(tm, lm, nm);
+            let (lo, hi) = (xc.min(xm), xc.max(xm));
+            let per_slot = 2 * lo * lo + balance * (hi - lo) * (hi - lo);
+            fit = (0..fit_slots).map(weight).sum::<u128>() * per_slot;
         }
         self.evaluations += EVALUATIONS_PER_WORKER;
 
@@ -478,7 +667,8 @@ fn fnv1a(parts: &[&[u8]]) -> u64 {
 
 /// The least loaded of `admitted` by the previous ranking, the first of equals. Kept for
 /// the shadow log and for a lease that bypasses scoring.
-pub(crate) fn least_loaded<'a>(admitted: &[(&'a WorkerId, Load)]) -> Option<&'a WorkerId> {
+#[must_use]
+pub fn least_loaded<'a>(admitted: &[(&'a WorkerId, Load)]) -> Option<&'a WorkerId> {
     admitted
         .iter()
         .min_by_key(|(_, load)| *load)

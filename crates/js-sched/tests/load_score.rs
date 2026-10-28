@@ -4,7 +4,7 @@
 #[path = "load_rig/mod.rs"]
 mod load_rig;
 
-use js_sched::{EVALUATIONS_PER_WORKER, Event, LoadConfig, PlacementLoad};
+use js_sched::{EVALUATIONS_PER_WORKER, Event, Load, LoadConfig, PlacementLoad, least_loaded};
 use js_types::sched::{LeaseKind, Resources, StartLease, WorkKey};
 
 use load_rig::{GIB, Rig, w, warm};
@@ -229,4 +229,44 @@ fn shadow_logs_the_previous_choice_beside_the_scored_one() {
         "best fit differs from the spread"
     );
     assert!(r.s.take_shadow_choices().is_empty(), "taken once");
+}
+
+/// Shows: the public `least_loaded` over the figures a worker's load view gives is the
+/// choice the shadow log records as the previous rule's, for workers of different sizes
+/// and loads, at every placement of a run (so a sim can use the function as its baseline).
+#[test]
+fn the_public_least_loaded_rule_is_the_shadow_logs_previous_choice() {
+    let mut r = Rig::new(LoadConfig {
+        mode: PlacementLoad::Shadow,
+        ..LoadConfig::default()
+    });
+    let capacity = |name: &str| match name {
+        "a" => Resources::new(8_000, 32 * GIB),
+        "b" => Resources::new(16_000, 64 * GIB),
+        _ => Resources::new(4_000, 16 * GIB),
+    };
+    for name in ["a", "b", "c"] {
+        r.up(name, capacity(name));
+    }
+    let mut differs_from_first = false;
+    for i in 0..9u64 {
+        r.action(500 + 250 * (i % 4), 2 * GIB, Some(warm(500 + 250 * (i % 4), GIB)));
+        let loads: Vec<(js_types::sched::WorkerId, Load)> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let view = r.s.load_view(&w(name)).expect("registered");
+                let left = Resources::new(view.left_cpu_millis, view.left_memory_bytes);
+                let held = r.held(name).len();
+                (w(name), Load::new(left, capacity(name), held))
+            })
+            .collect();
+        let refs: Vec<_> = loads.iter().map(|(n, l)| (n, *l)).collect();
+        let want = least_loaded(&refs).cloned();
+        assert_eq!(r.tick().len(), 1);
+        let log = r.s.take_shadow_choices();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].previous, want, "placement {i}");
+        differs_from_first |= want != Some(w("a"));
+    }
+    assert!(differs_from_first, "the rule moved off the first worker");
 }
