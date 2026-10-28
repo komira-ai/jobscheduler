@@ -326,20 +326,31 @@ const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
 
 /// Whether `path` is gone, polling until `limit` has passed.
 fn wait_gone(path: &Path, limit: Duration) -> bool {
-    let deadline = Instant::now() + limit;
+    wait_gone_by(path, limit, Instant::now, nap)
+}
+
+/// The pause between two looks at the path.
+fn nap() {
+    std::thread::sleep(Duration::from_millis(10));
+}
+
+/// [`wait_gone`] with the clock and the pause given, so a test drives each side of the loop.
+fn wait_gone_by(path: &Path, limit: Duration, now: impl Fn() -> Instant, pause: impl Fn()) -> bool {
+    let deadline = now() + limit;
     loop {
         if !path.exists() {
             return true;
         }
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        pause();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::time::Duration;
 
     use super::*;
@@ -489,20 +500,78 @@ mod tests {
         assert!(why.starts_with("crun delete: "), "{why}");
     }
 
+    /// A pause that counts its calls in `calls`.
+    fn counting(calls: &Cell<u32>) -> impl Fn() + '_ {
+        move || calls.set(calls.get() + 1)
+    }
+
     /// Catches a wait for a path that ends at the wrong time: an absent path is gone at
-    /// once, a present one is not gone when the limit is zero, and one removed by another
-    /// thread while waited for is seen to go.
+    /// once, and a present one is not gone when the limit is zero.
     #[test]
-    fn the_wait_for_a_path_to_go_ends_when_it_goes_or_at_the_limit() {
+    fn the_wait_for_a_path_to_go_ends_at_once_or_at_the_limit() {
         let dir = crate::unit_dir("crun-gone");
         let path = dir.join("state");
         assert!(wait_gone(&path, Duration::ZERO));
         std::fs::create_dir(&path).expect("mkdir");
         assert!(!wait_gone(&path, Duration::ZERO));
-        let removing = path.clone();
-        let remover = std::thread::spawn(move || std::fs::remove_dir(removing));
-        assert!(wait_gone(&path, Duration::from_secs(60)));
-        remover.join().expect("thread").expect("removed");
+    }
+
+    /// Catches a wait that does not look again after a pause: the path goes during the
+    /// first pause, and the wait returns true after exactly that one pause.
+    #[test]
+    fn the_wait_for_a_path_sees_it_go_after_a_pause() {
+        let dir = crate::unit_dir("crun-gone-after-pause");
+        let path = dir.join("state");
+        std::fs::create_dir(&path).expect("mkdir");
+        let pauses = Cell::new(0);
+        let gone = wait_gone_by(&path, Duration::from_secs(60), Instant::now, || {
+            pauses.set(pauses.get() + 1);
+            std::fs::remove_dir(&path).expect("removed");
+        });
+        assert!(gone);
+        assert_eq!(pauses.get(), 1);
+    }
+
+    /// Catches a wait that never gives up or gives up early: with a clock that moves one
+    /// second per reading and a 3 s limit, a path that stays is given up on after exactly
+    /// two pauses.
+    #[test]
+    fn the_wait_for_a_path_gives_up_at_the_limit_by_the_clock() {
+        let dir = crate::unit_dir("crun-gone-limit");
+        let path = dir.join("state");
+        std::fs::create_dir(&path).expect("mkdir");
+        let start = Instant::now();
+        let readings = Cell::new(0u32);
+        let clock = || {
+            let at = readings.get();
+            readings.set(at + 1);
+            start + Duration::from_secs(u64::from(at))
+        };
+        let pauses = Cell::new(0);
+        let gone = wait_gone_by(&path, Duration::from_secs(3), clock, counting(&pauses));
+        assert!(!gone);
+        assert_eq!(pauses.get(), 2);
+    }
+
+    /// Catches a wait that looks at the clock or pauses for a path that is already gone.
+    #[test]
+    fn the_wait_for_an_absent_path_does_not_pause() {
+        let dir = crate::unit_dir("crun-gone-absent");
+        let pauses = Cell::new(0);
+        let gone = wait_gone_by(
+            &dir.join("none"),
+            Duration::from_secs(60),
+            Instant::now,
+            counting(&pauses),
+        );
+        assert!(gone);
+        assert_eq!(pauses.get(), 0);
+    }
+
+    /// The real pause returns (it sleeps a few milliseconds).
+    #[test]
+    fn the_real_pause_returns() {
+        nap();
     }
 
     /// The `Io` hook `crun run` is given has nothing to close once the child has the
