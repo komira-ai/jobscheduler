@@ -26,6 +26,8 @@ is capped per pool and per consumer). Large non-whole requests have no
 reservation today (`docs/design/simulation.md`, scenario F1.5, documents this); R1 forbids adding reservation admission, so the design
 adds none and the scenario is kept as a known behaviour.
 
+The rule that replaces the CPU and memory part of 6.3 for actions, from measured and predicted load, is in [placement-by-load.md](placement-by-load.md). It is the default placement for actions, and it plans a node to capacity plus a small tunable CPU slack.
+
 ## 6.6 Many jobs on one host: the placement rule over hosts a provider brought
 
 A host is sized to hold many jobs (5.18, [hosts.md](hosts.md)). The rule that packs them is the pipeline of 6.1 and the rank of 6.5, not a
