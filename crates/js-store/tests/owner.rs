@@ -3,11 +3,8 @@
 //! owner may make, and the look at the owner row that a heartbeat's acknowledgement waits
 //! on. Each test stands two handles over one store for two frontends.
 //!
-//! The writes of a lease are the transactions of a grant, a lease given up and a result.
-//! The grant and the result are this crate's ([`Rows::granted`], [`Rows::finished`]); the
-//! lease given up belongs to a later row of this crate, so the tests make a stand-in that
-//! touches the same rows under the same conditions: it is built, checked with
-//! [`Rows::guard`] and committed with [`Rows::commit_owned`], as the transaction is.
+//! The writes of a lease are the transactions of a grant, a lease given up and a result
+//! ([`Rows::granted`], [`Rows::requeued`], [`Rows::finished`]).
 
 mod common;
 
@@ -15,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, Request};
+use js_sched::{DaemonInstance, Floor, FloorChange, Request, Requeue, RequeueReason};
 use js_state::{Cond, Store, Txn};
 use js_store::keys;
 use js_store::test_support::{TestCodec, TestExt};
@@ -106,21 +103,27 @@ fn finish(rows: &Rows, operation: u64, seq: u64) -> Result<(), StateError> {
     rows.finished(OperationId(operation), LeaseId::new(5, seq), &ending)
 }
 
-/// A stand-in for the lease `(5, seq)` of `operation` on node-a given up: the lease rows
-/// go and the operation is queued again.
-fn give_up(rows: &Rows, store: &Racing, operation: u64, seq: u64) -> Result<(), StateError> {
-    let lease = store.get(&keys::lease(LeaseId::new(5, seq))).expect("read");
-    let version = lease.expect("a lease").version;
-    let txn = Txn::new()
-        .delete(keys::lease(LeaseId::new(5, seq)), Cond::Version(version))
-        .delete(keys::lease_by_op(OperationId(operation)), Cond::Any)
-        .put(
-            keys::queue(OperationId(operation)),
-            Vec::new(),
-            Cond::Absent,
-        );
-    let txn = rows.guard(txn, &node())?;
-    rows.commit_owned(&node(), txn)
+/// The give-up of the lease `(5, seq)` of `operation` on node-a.
+fn requeue(operation: u64, seq: u64) -> Requeue {
+    Requeue {
+        operation: OperationId(operation),
+        lease: LeaseId::new(5, seq),
+        worker: node(),
+        reason: RequeueReason::Silent,
+    }
+}
+
+/// `rows` gives the lease `(5, seq)` of `operation` on node-a up: the lease rows go and the
+/// operation is queued again.
+fn give_up(rows: &Rows, operation: u64, seq: u64) -> Result<(), StateError> {
+    let kept = FloorChange::default();
+    rows.requeued(&requeue(operation, seq), None, None, &kept, None)
+}
+
+/// Queues operation `operation` with its `op/` row, which a give-up needs to find.
+fn submit(rows: &Rows, operation: u64) {
+    let submitted = rows.submit(OperationId(operation), &request(), &[], None);
+    submitted.expect("submit");
 }
 
 fn is_stale<T>(result: &Result<T, StateError>) -> bool {
@@ -219,12 +222,12 @@ fn a_frontend_a_daemon_has_left_grants_its_node_nothing() {
 fn a_lease_is_given_up_and_finished_only_by_the_owner_of_its_node() {
     let (store, _, [left, taker]) = frontends([1, 2]);
     left.arrive(&node(), at(0)).expect("a Hello");
-    queue(&store, 4);
+    submit(&left, 4);
     grant(&left, 4, 0, "node-a").expect("a grant");
     taker.arrive(&node(), at(1)).expect("moved");
     let txns = store.commit_stats().txns;
 
-    let given_up = give_up(&left, &store, 4, 0);
+    let given_up = give_up(&left, 4, 0);
     let finished = finish(&left, 4, 0);
 
     assert!(is_stale(&given_up), "{given_up:?}");
@@ -244,13 +247,45 @@ fn a_lease_is_given_up_and_finished_only_by_the_owner_of_its_node() {
 fn the_owner_of_a_node_gives_its_lease_up() {
     let (store, _, [first]) = frontends([1]);
     first.arrive(&node(), at(0)).expect("a Hello");
-    queue(&store, 4);
+    submit(&first, 4);
     grant(&first, 4, 0, "node-a").expect("a grant");
 
-    give_up(&first, &store, 4, 0).expect("a give-up");
+    give_up(&first, 4, 0).expect("a give-up");
 
     assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (1, 0));
     assert_eq!(rows(&store, "lease-by-op/"), 0);
+}
+
+/// Asserts that a lease given up by the frontend a daemon has left, which is refused as
+/// stale, still writes the floor the kill raised: a floor is the scheduler's, and the refused
+/// give-up is not tried again. The lease and the queue stay as the owner has them; and that a
+/// give-up that changes no floor writes nothing when it is refused.
+#[test]
+fn a_give_up_refused_for_the_owner_still_writes_the_floors() {
+    let (store, _, [left, taker]) = frontends([1, 2]);
+    left.arrive(&node(), at(0)).expect("a Hello");
+    submit(&left, 4);
+    grant(&left, 4, 0, "node-a").expect("a grant");
+    taker.arrive(&node(), at(1)).expect("moved");
+    let floors = FloorChange {
+        raised: Some(Floor {
+            key: request().key,
+            ask: 2 << 30,
+            stamp: 1,
+        }),
+        ..FloorChange::default()
+    };
+    let none = FloorChange::default();
+
+    let unchanged = left.requeued(&requeue(4, 0), None, None, &none, None);
+    assert!(is_stale(&unchanged), "{unchanged:?}");
+    assert_eq!(rows(&store, "floor/"), 0, "a refusal wrote a floor");
+
+    let refused = left.requeued(&requeue(4, 0), None, None, &floors, None);
+
+    assert!(is_stale(&refused), "{refused:?}");
+    assert_eq!(rows(&store, "floor/"), 1);
+    assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (0, 1));
 }
 
 /// Asserts that a frontend whose node's owner row is gone writes nothing for the node: it

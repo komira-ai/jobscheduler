@@ -44,7 +44,7 @@ use crate::requeue::{Requeue, RequeueReason};
 use crate::servable::{Attempt, Placed, Servable, Verdict};
 use memory::{MemoryLadder, MemoryState};
 
-/// At most this many leases are granted per [`Event::Tick`] (one log flush per round).
+/// At most this many leases are granted per [`crate::Event::Tick`] (one log flush per round).
 pub const PLACEMENT_ROUND: usize = 256;
 
 /// How long a queued operation may wait while no live worker can run it (none
@@ -545,6 +545,7 @@ impl Scheduler {
                 not_whole: key_raised,
                 cost,
                 lease,
+                fit_minutes: self.admission.fit_minutes(id),
             };
             let mut blocked = None;
             let fitted = placed.len() < round && {
@@ -588,6 +589,7 @@ impl Scheduler {
                     not_whole: key_raised,
                     cost,
                     lease,
+                    fit_minutes: self.admission.fit_minutes(id),
                 };
                 let kept = self.head_holds.get(&id);
                 if let Some(name) =
