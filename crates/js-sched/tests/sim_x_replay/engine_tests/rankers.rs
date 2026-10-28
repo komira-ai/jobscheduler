@@ -3,7 +3,7 @@
 use super::flat;
 use crate::engine::model::{HostState, Pool};
 use crate::engine::predicate::Params;
-use crate::engine::rankers::{
+use crate::engine::rules::{
     Choose, Pick, Random, Ranker, least_loaded_standin, load_of, splitmix64, stream_seed,
 };
 

@@ -6,8 +6,8 @@ use std::sync::OnceLock;
 use super::{EvenTruth, TableBeliefs, busy, embedded, flat, row, run, small_config};
 use crate::engine::fixture::Row;
 use crate::engine::model::Belief;
-use crate::engine::rankers::{LeastLoaded, Random};
 use crate::engine::replay::{Replay, replay};
+use crate::engine::rules::{LeastLoaded, Random};
 
 /// One host of 4 threads and 1000 MiB, and three leases of 100 s at 1 core.
 fn kill_world(mem: [u64; 3], starts_ms: [u64; 3]) -> (Vec<Row>, TableBeliefs) {

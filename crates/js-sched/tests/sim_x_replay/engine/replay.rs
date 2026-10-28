@@ -27,7 +27,7 @@ use super::fixture::Row;
 use super::metrics::{Fnv, Metrics, Recorder, SCAN_REFUSALS, oversize_rows};
 use super::model::{Beliefs, HostState, MINUTE_TICKS, Pool, Truth, WINDOW_TICKS};
 use super::predicate::{Params, Refusal, admit};
-use super::rankers::{Choose, Ranker};
+use super::rules::{Choose, Ranker};
 
 /// What a replay is run with.
 #[derive(Clone, Debug)]

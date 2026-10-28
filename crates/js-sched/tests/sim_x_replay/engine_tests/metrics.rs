@@ -8,8 +8,8 @@ use crate::engine::metrics::{
     nearest_rank, oversize_rows,
 };
 use crate::engine::model::Pool;
-use crate::engine::rankers::{Choose, LeastLoaded, Pick, Ranker};
 use crate::engine::replay::Config;
+use crate::engine::rules::{Choose, LeastLoaded, Pick, Ranker};
 
 /// Catches: a percentile off by one rank, taken by interpolation, or over an empty or
 /// one-element set: nearest rank is the `ceil(p n)`-th smallest.

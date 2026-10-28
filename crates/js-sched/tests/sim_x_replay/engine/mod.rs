@@ -14,7 +14,8 @@
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | present |
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
-//! | `rankers` | the compared placement rules (the previous rule and a random one) | present |
+//! | `rankers` | the score rankers 3, 4, 5 and FW5 over one scorer, the decided-key shares, the decides-differently counters and the placement-sequence hash; imports `adapter` only | present |
+//! | `rules` | the compared placement rules (the previous rule and a random one) | present |
 //! | `replay` | the loop: arrivals, rounds, truth, kills and the metrics | present |
 //! | `report`, `control` | the report and the control | planned |
 //!
@@ -32,7 +33,8 @@ pub mod adapter;
 pub mod metrics;
 pub mod model;
 pub mod predicate;
-pub mod rankers;
 pub mod replay;
+pub mod rules;
 
 pub mod fixture;
+pub mod rankers;
