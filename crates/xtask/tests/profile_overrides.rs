@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 /// The packages whose simulations run in CI test builds.
 const OPTIMISED: [&str; 4] = ["js-sched", "js-sim", "js-sizing", "js-types"];
 
-
 /// The repository root.
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
