@@ -352,7 +352,7 @@ mod tests {
     /// A handler that is entered and never answers.
     async fn hold(State(held): State<Arc<Held>>) {
         held.entered.notify_one();
-        std::future::pending::<()>().await;
+        std::future::pending::<()>().await
     }
 
     /// Asserts that `serve` returns only after the connections it cut have been dropped:
