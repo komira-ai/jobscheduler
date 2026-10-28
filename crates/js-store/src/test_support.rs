@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use js_sched::Request;
 use js_state::{Cond, Store, Txn};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{LeaseGrant, OperationId};
 
 use crate::{Ext, RowCodec, StateError, Value, WorkerUp, keys};
@@ -26,6 +27,17 @@ impl TestCodec {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The value of the `lease/` row of `grant` as a binary that did not keep costs wrote
+    /// it ([`Value::LegacyLease`]): the cost is not kept, and reads back as the default.
+    #[must_use]
+    pub fn legacy_lease(&self, grant: &LeaseGrant) -> Vec<u8> {
+        let placeholder = LeaseGrant {
+            cost: LeaseCost::default(),
+            ..grant.clone()
+        };
+        self.encode("legacy-lease", Value::LegacyLease(placeholder))
     }
 
     /// The bytes of `value`, which the codec keeps to read back.
