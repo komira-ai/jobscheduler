@@ -10,7 +10,7 @@ use js_agent::{
 use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
-use super::{plan, start, start_answer, starts};
+use super::{plan, rescue, start, start_answer, starts};
 use crate::support::{Scratch, Script, beat_ok, hello, lowest, refused, reply, welcome};
 
 /// The drain the sessions of these tests carry; none of them drains.
@@ -276,7 +276,9 @@ fn a_worker_that_ended_ends_the_session() {
 #[test]
 fn a_reply_that_finds_the_worker_gone_ends_the_session_without_the_end_mark() {
     let machine = FakeMachine::new();
-    let worker = Worker::orphaned(machine.clock.clone(), Snapshot::default());
+    let dir = Scratch::new("jobs-session-orphan");
+    let rescue = rescue(&dir, &machine);
+    let worker = Worker::orphaned(machine.clock.clone(), Snapshot::default(), rescue);
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Gone);
     assert!(!worker.handle().settle(), "nobody reads the queue");
     assert!(!worker.ended(), "the thread never set the mark");

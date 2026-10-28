@@ -12,7 +12,7 @@ use js_agent_wire::{HeldRun, HeldState};
 use serde_json::{Value, json};
 
 use super::fake::{Build, FakeMachine};
-use super::{private, start, start_answer, starts, user};
+use super::{private, rescue, start, start_answer, starts, user};
 use crate::bounds::{Capped, WakeBudget};
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Reply, Scratch, Script, ScriptConnector, beat_ok, code, flags,
@@ -303,7 +303,9 @@ fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
         held: vec![running],
         ..Snapshot::default()
     };
-    let worker = Worker::orphaned(machine.clock.clone(), held);
+    let dir = Scratch::new("jobs-drain-orphan");
+    let rescue = rescue(&dir, &machine);
+    let worker = Worker::orphaned(machine.clock.clone(), held, rescue);
     let replies = vec![
         welcome(1),
         reply(200, start_answer(&["r2"])),

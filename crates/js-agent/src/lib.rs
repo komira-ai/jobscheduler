@@ -100,7 +100,12 @@
 //! the session (it restarted) gets one hello at once.
 //!
 //! A refusal that asking again cannot change ends the agent with exit status 2 and the
-//! server's code on stderr: 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! server's code on stderr (with `--container-bin` the agent first stops the containers it
+//! holds, bounded, and the results it could not send are lost; the same when the job worker
+//! stops, which ends it with status 1, except that the stop does not go through the
+//! worker; a container that could not be stopped is named on stderr, and the agent relies
+//! on its supervisor, for example systemd `Restart=`, and on the next process adopting it;
+//! see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
 //! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
@@ -196,8 +201,8 @@ pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, Plan, QUEUE, STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot,
-    Worker, stall_bound,
+    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_MAX, Rescue, STALL_CALLS_MAX, STALL_MARGIN,
+    STEP_EVERY, Snapshot, Worker, stall_bound,
 };
 
 /// The exit statuses of `js-agent`.

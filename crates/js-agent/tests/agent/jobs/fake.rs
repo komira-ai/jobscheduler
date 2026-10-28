@@ -52,6 +52,8 @@ struct State {
     failing: BTreeMap<&'static str, u32>,
     /// `create_and_start` waits while this is set.
     hold_creates: bool,
+    /// `list_labelled` waits while this is set.
+    hold_lists: bool,
     /// How many `create_and_start` calls have begun.
     entered: u32,
     /// The calls, in order: `create r1`, `stop r1`, `remove r1`, `list`.
@@ -124,9 +126,17 @@ impl World {
         self.lock().hold_creates = true;
     }
 
-    /// Lets the held `create_and_start` calls go on.
+    /// From now on `list_labelled` waits for [`World::release`].
+    pub fn hold_lists(&self) {
+        self.lock().hold_lists = true;
+    }
+
+    /// Lets the held `create_and_start` and `list_labelled` calls go on.
     pub fn release(&self) {
-        self.lock().hold_creates = false;
+        let mut state = self.lock();
+        state.hold_creates = false;
+        state.hold_lists = false;
+        drop(state);
         self.0.changed.notify_all();
     }
 
@@ -246,7 +256,19 @@ impl ContainerRuntime for Runtime {
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
-        let mut state = self.0.lock();
+        let world = &self.0;
+        let mut state = world.lock();
+        while state.hold_lists {
+            let (held, waited) = world
+                .0
+                .changed
+                .wait_timeout(state, HANG_GUARD)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = held;
+            if waited.timed_out() {
+                break;
+            }
+        }
         state.log.push("list".to_owned());
         if state.fails("list") {
             return Err(failed("list"));

@@ -16,6 +16,25 @@
 //! listed nothing has been sent, when that time has passed, or at a second stop request.
 //! What is left then is not dropped: a run whose container still exists is adopted by the
 //! next process of the agent, which lists it first, and its result is sent from there.
+//!
+//! # The other ends
+//!
+//! The agent never leaves a container without somebody to enforce its wall limit if it can
+//! help it:
+//!
+//! - **The server refuses the host for good** ([`Exit::Fatal`], for example a revoked
+//!   token): no heartbeat can be sent, so there is no drain. The worker is closed, asked to
+//!   stop every run, and waited for until none runs, for a bounded time; what it did not
+//!   stop is stopped through the runtime directly, as below. The exit status is the
+//!   refusal's. The results of the stopped runs are not sent and the server would not take
+//!   them, so they may be lost.
+//! - **The job worker is gone or stalled** ([`Exit::Failed`]): the worker cannot be asked,
+//!   so the agent makes a runtime of its own, lists its containers by their label and stops
+//!   them, each call bounded by the runner's limit and the stop grace, the whole bounded in
+//!   time. A container that could not be stopped is named in the log. The agent then relies
+//!   on its supervisor (for example systemd `Restart=`) to start a new process, which
+//!   adopts what still exists.
+//! - Without `--container-bin` there is no worker and both ends are as they were.
 
 use std::io::Write;
 use std::time::Duration;
@@ -58,8 +77,8 @@ pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn
         let step = session.tick();
         print(session, log);
         match step {
-            Step::Fatal(fatal) => return Exit::Fatal(fatal),
-            Step::Failed(why) => return Exit::Failed(why),
+            Step::Fatal(fatal) => return refused(session, fatal, log),
+            Step::Failed(why) => return failed(session, why, log),
             Step::Wait { after, note } => {
                 note.iter().for_each(|note| {
                     let _ = writeln!(log, "js-agent: {note}; next in {}ms", after.as_millis());
@@ -70,6 +89,25 @@ pub fn drive(session: &mut Session<'_>, sleeper: &mut dyn Sleeper, log: &mut dyn
             }
         }
     }
+}
+
+/// The end after a refusal for good: the jobs are stopped first, see the module
+/// documentation.
+fn refused(session: &Session<'_>, fatal: Fatal, log: &mut dyn Write) -> Exit {
+    session.wind_down_jobs().iter().for_each(|line| {
+        let _ = writeln!(log, "js-agent: {line}");
+    });
+    print(session, log);
+    Exit::Fatal(fatal)
+}
+
+/// The end after the worker's end: the containers are stopped without the worker, see the
+/// module documentation.
+fn failed(session: &Session<'_>, why: String, log: &mut dyn Write) -> Exit {
+    session.rescue_jobs().iter().for_each(|line| {
+        let _ = writeln!(log, "js-agent: {line}");
+    });
+    Exit::Failed(why)
 }
 
 /// The lines the session's worker wants printed.
@@ -110,8 +148,8 @@ fn drain_jobs(
         let step = session.tick();
         print(session, log);
         let after = match step {
-            Step::Fatal(fatal) => return Exit::Fatal(fatal),
-            Step::Failed(why) => return Exit::Failed(why),
+            Step::Fatal(fatal) => return refused(session, fatal, log),
+            Step::Failed(why) => return failed(session, why, log),
             Step::Wait { after, note } => {
                 note.iter().for_each(|note| {
                     let _ = writeln!(log, "js-agent: {note}");
