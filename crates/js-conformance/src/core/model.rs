@@ -321,6 +321,7 @@ impl CoreHarness for ReferenceCore {
             self.feed(Event::Heartbeat {
                 worker: WorkerId::new(worker),
                 running: running.to_vec(),
+                load: None,
             });
         }
     }
