@@ -147,7 +147,7 @@ impl Outbox {
 
     /// The heartbeat that carried the last load taken went through.
     pub fn delivered(&self) {
-        let _ = self.lock();
+        
     }
 
     /// The heartbeat that carried the last load taken did not go through: keep its minutes.
