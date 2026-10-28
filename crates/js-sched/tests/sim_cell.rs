@@ -513,7 +513,14 @@ impl StateMachine for Cell {
                     }
                     let worker = WorkerId::new(from.as_str());
                     l.send(from, Msg::Ack { sent_at, session });
-                    l.feed(now, SchedEvent::Heartbeat { worker, running })
+                    l.feed(
+                        now,
+                        SchedEvent::Heartbeat {
+                            worker,
+                            running,
+                            load: None,
+                        },
+                    )
                 }
                 Msg::Started { operation, lease } => {
                     l.feed(now, SchedEvent::Started { operation, lease })

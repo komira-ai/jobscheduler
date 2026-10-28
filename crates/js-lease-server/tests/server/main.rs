@@ -11,6 +11,7 @@ mod agents_tokens;
 mod agents_whole;
 mod auth;
 mod binary;
+mod gpu_path_pin;
 mod limits;
 mod restart;
 mod routes;

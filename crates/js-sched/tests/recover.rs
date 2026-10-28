@@ -71,6 +71,7 @@ fn heartbeat(s: &mut Scheduler, secs: u64, name: &str, running: Vec<LeaseId>) {
     let event = Event::Heartbeat {
         worker: node(name),
         running,
+        load: None,
     };
     assert!(feed(s, secs, event).is_empty());
 }
@@ -91,6 +92,7 @@ fn leased(operation: u64, request: Request, seq: u64, worker: &str) -> Recovered
         lease: Some(RecoveredLease {
             lease: LeaseId::new(TERM, seq),
             worker: node(worker),
+            cost: None,
         }),
         ..queued(operation, request)
     }

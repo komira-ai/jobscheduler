@@ -1,0 +1,11 @@
+# The `meta/` rows of a store opened by one frontend, as js-store writes them: the key, when the
+# store's clock expires it (`-` for a row that does not) and the value as hex. The four lines
+# are the lines of the farm server's golden file of scheduler rows for the same calls (a store
+# that is shared, opened under term 0x0102030405060708, with one block of operation ids
+# reserved from 4 and one block of lease sequences from 0), copied unchanged. A change to this
+# file needs a reason: a store written by an earlier release holds these rows as they are,
+# and the release after this one must read them.
+meta/epoch expires_ns=- value=0102030405060708
+meta/generation expires_ns=- value=7368617265642d77726974657273
+meta/next_op expires_ns=- value=0000000000000404
+meta/next_seq expires_ns=- value=0000000000000400

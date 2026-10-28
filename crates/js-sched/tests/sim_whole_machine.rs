@@ -146,6 +146,7 @@ impl World {
                     lease: start.lease,
                     operation: start.operation,
                     worker: start.worker,
+                    cost: Default::default(),
                 };
                 self.running.entry(self.now + runs).or_default().push(grant);
                 Vec::new()
@@ -207,7 +208,11 @@ impl World {
         for (name, _) in WORKERS {
             let worker = WorkerId::new(name);
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if active && self.rng.chance(Chance::percent(30)) {
             self.submit(LeaseKind::Action, Qos::Ci);

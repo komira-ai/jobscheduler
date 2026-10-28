@@ -8,6 +8,7 @@ use js_types::sched::{
 };
 
 use super::{HANDOVER_GRACE, Scheduler, Worker};
+use crate::admission::WorkerLoad;
 use crate::input::{Event, Input};
 
 /// The grant, if `record` is a lease record.
@@ -90,6 +91,9 @@ impl StateMachine for Scheduler {
                         w.caps = caps;
                         w.last_heard = now;
                         w.session += 1;
+                        // The readings of the session before say nothing about this one:
+                        // its `seq` starts again.
+                        w.load_state.new_session();
                     }
                     None => {
                         let mut fresh = Worker {
@@ -99,6 +103,7 @@ impl StateMachine for Scheduler {
                             leases: 0,
                             whole: false,
                             devices: BTreeSet::new(),
+                            load_state: WorkerLoad::default(),
                             last_heard: now,
                             session: 0,
                             instance,
@@ -126,9 +131,23 @@ impl StateMachine for Scheduler {
                 }
                 Vec::new()
             }
-            Event::Heartbeat { worker, running } => match self.workers.get_mut(&worker) {
+            Event::Heartbeat {
+                worker,
+                running,
+                load,
+            } => match self.workers.get_mut(&worker) {
                 Some(w) => {
                     w.last_heard = w.last_heard.max(self.now);
+                    if let Some(load) = load {
+                        let adm = &mut self.admission;
+                        w.load_state.accept(
+                            load,
+                            self.now,
+                            &w.capacity,
+                            &adm.cfg,
+                            &mut adm.counters,
+                        );
+                    }
                     self.reconcile(&worker, &running)
                 }
                 None => Vec::new(),

@@ -111,7 +111,9 @@ pub fn event(event: &Event) -> String {
             text::resources(capacity),
             caps(c),
         ),
-        Event::Heartbeat { worker, running } => format!(
+        Event::Heartbeat {
+            worker, running, ..
+        } => format!(
             "heartbeat(worker={worker} running={})",
             text::list(running, |l| text::lease(*l))
         ),

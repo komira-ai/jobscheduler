@@ -88,6 +88,7 @@ fn every_event_has_its_fixed_spelling() {
         lease: lease(),
         operation: OperationId(7),
         worker: worker(),
+        cost: Default::default(),
     });
     let resources = "res(cpu=4000 mem=8 gpus=0 vms=0 leases=-)";
     let cases: Vec<(Event, String)> = vec![
@@ -116,6 +117,7 @@ fn every_event_has_its_fixed_spelling() {
             Event::Heartbeat {
                 worker: worker(),
                 running: vec![lease(), LeaseId { term: 1, seq: 5 }],
+                load: None,
             },
             "heartbeat(worker=w1 running=[1.4; 1.5])".to_owned(),
         ),

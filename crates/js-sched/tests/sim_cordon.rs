@@ -129,6 +129,7 @@ impl World {
                     lease: start.lease,
                     operation: start.operation,
                     worker: start.worker,
+                    cost: Default::default(),
                 };
                 let ends = self.now + self.rng.between(5, 60);
                 self.running.entry(ends).or_default().push(grant);
@@ -188,7 +189,11 @@ impl World {
         for name in WORKERS {
             let worker = WorkerId::new(name);
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if active && self.rng.chance(Chance::percent(20)) {
             let n = self.next;

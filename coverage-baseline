@@ -17,9 +17,13 @@ js-caps               0      0
 js-cli                0      0
 js-client             0      0
 js-conformance        0      0
+js-contain            0      0
 js-coverage           0      0
+js-guest              0      0
+js-guest-wire         0      0
 js-lease              0      0
 js-lease-server       0      0
+js-mac-session        0      0
 js-pool-static        0      0
 js-provider           0      -
 js-provider-fake      0      0
@@ -28,6 +32,7 @@ js-sched              0      0
 js-sim                0      0
 js-sizing             0      0
 js-state              0      0
+js-store              0      0
 js-testkit            0      0
 js-types              0      0
 xtask                 0      0

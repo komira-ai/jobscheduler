@@ -65,6 +65,7 @@ fn heartbeat(s: &mut Scheduler, secs: u64, running: Vec<LeaseId>) -> Vec<Effect>
     let event = Event::Heartbeat {
         worker: WorkerId::new(NODE),
         running,
+        load: None,
     };
     feed(s, secs, event)
 }
@@ -278,6 +279,7 @@ fn losses_the_store_holds_count_toward_the_cap() {
             lease: Some(RecoveredLease {
                 lease: LeaseId::new(TERM, 5),
                 worker: WorkerId::new(NODE),
+                cost: None,
             }),
             losses: before,
             fate: None,

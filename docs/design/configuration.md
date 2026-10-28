@@ -38,7 +38,7 @@ region = "<region>"
 launch_template = "<launch-template-name>"  # the image, the agent bootstrap and the security group live here
 subnets = ["<subnet-a>", "<subnet-b>"]
 [provider.instance_types]                   # shape name to instance type
-linux-x86-16 = "<instance-type>"           # a cloud provider offers no GPU shape (D32)
+linux-x86-16 = "<instance-type>"           # a cloud provider offers no GPU shape (D32); launch options, price and VM facts: hosts.md
 
 [[pool]]                                    # providers (in order) + shape + max_machines + labels; there is no minimum (D38)
 name = "gpu"                                # the GPU machines run js-agent and register (D32, D36); no elastic provider has a GPU shape
@@ -115,6 +115,9 @@ js-agent --vms 2 --vm-driver <absolute-path> --vm-store <dir> --vm-network none 
   --vm-boot-timeout 5m \
   --cap acme.metal=1 --facts-interval 5m
 ```
+
+A pool lists providers in order, and an entry may be a tier of equal providers (several clouds, hosts.md section 8): `providers =
+["registered", ["cloud-a", "cloud-b"], "cloud"]`; a flat list means what it did.
 
 A pool specifies `max_machines` and no minimum: `min_machines` and `min` are refused with a message saying so (5.7, D38). `provider = "x"` is
 shorthand for a one-entry `providers`, except that an elastic `x` gets the `default` provider in front of it (5.8).

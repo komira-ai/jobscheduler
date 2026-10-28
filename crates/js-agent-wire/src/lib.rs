@@ -90,6 +90,8 @@
 //! carries [`RunResult`]s up until each is acknowledged. [`refusal`] holds the codes a
 //! refusal carries.
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 mod check;
 mod command;
 mod error;
