@@ -261,19 +261,6 @@ fn the_sink_reads_back_rows_and_profiles() {
     assert!(sink.node_rows(&host(), 150, 200, all).unwrap().is_empty());
 }
 
-/// Asserts that a usage file that cannot be opened (its directory does not exist) refuses
-/// the start and names `--usage-db`. It catches a server that starts without its store
-/// and silently records nothing.
-#[test]
-fn a_usage_file_that_will_not_open_refuses_the_start_naming_the_flag() {
-    let setup = StoreSetup {
-        db: PathBuf::from("/nonexistent-usage-directory/usage.db"),
-        profile_store_bytes: 1 << 20,
-    };
-    let refused = open(&setup, 0).err().unwrap();
-    assert_eq!(refused.flag(), "--usage-db");
-}
-
 /// Asserts that a start whose usage file cannot be opened is refused with the flag that
 /// names the file, and so is one whose stored profiles cannot be read. It catches a
 /// server that starts without usage after the operator asked for it, and a refusal
