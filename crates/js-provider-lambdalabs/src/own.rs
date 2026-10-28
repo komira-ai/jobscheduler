@@ -65,6 +65,11 @@ impl SchedulerId {
         valid_id(text, 64).map(Self)
     }
 
+    /// An id the crate made itself from letters, digits and `-`.
+    pub(crate) fn made(text: &str) -> Self {
+        Self(text.to_owned())
+    }
+
     /// The id as text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -76,6 +81,11 @@ impl SchedulerId {
 pub struct AcquireId(String);
 
 impl AcquireId {
+    /// An id the crate made itself from letters, digits and `-`.
+    pub(crate) fn made(text: String) -> Self {
+        Self(text)
+    }
+
     /// The id `text`.
     ///
     /// # Errors
