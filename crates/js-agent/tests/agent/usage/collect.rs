@@ -127,7 +127,10 @@ fn running(id: &str, seconds: u64) -> RunningLease {
 }
 
 fn names(minutes: &[LeaseMinute]) -> Vec<(&str, u16, u32)> {
-    let each = |m: &LeaseMinute| (m.lease_id.as_str(), m.minute, m.cpu_mean_millis);
+    let each = |m| {
+        let m: &LeaseMinute = m;
+        (m.lease_id.as_str(), m.minute, m.cpu_mean_millis)
+    };
     minutes.iter().map(each).collect()
 }
 

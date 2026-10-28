@@ -5,7 +5,6 @@
 
 use std::time::Duration;
 
-use js_agent::usage::UsageClock;
 use js_agent::{FileReader, Machine, Platform, RuntimeBuild, System};
 
 use crate::support::Scratch;
