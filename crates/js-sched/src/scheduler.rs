@@ -1,5 +1,6 @@
 //! The scheduler state machine.
 
+mod commit;
 mod fault;
 mod give_up;
 mod handoff;
@@ -23,7 +24,7 @@ pub use snapshot::{
     platform_label,
 };
 pub use state::OpState;
-pub use whole::WholeMark;
+pub use whole::{WholeMark, WholeWait};
 pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
@@ -33,9 +34,8 @@ use std::time::Duration;
 
 use js_types::sched::usage::{CurveSource, LeaseCost, RunEnd};
 use js_types::sched::{
-    Answer, ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind,
-    OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord, StartLease,
-    WaiterId, Waiting, WorkKey, WorkerId,
+    ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId,
+    Outcome, Qos, RefusalRecord, Resources, WaiterId, Waiting, WorkKey, WorkerId,
 };
 
 use js_whole::WholeNodeConfig;
@@ -343,7 +343,12 @@ impl Scheduler {
     /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
     /// and booking alone.
     ///
-    /// A worker that fits (one with no lease) is taken at once. A request that fits
+    /// A worker that fits (one with no lease) is taken at once while the ceiling and the
+    /// floor kept for ordinary work allow one more whole worker (`max_draining` does not
+    /// apply: the take drains nothing, and the last-capable rule is not read: an older
+    /// ordinary request a quiet worker could run is placed on it first). A request that
+    /// holds a mark takes it whatever the caps, as its mark is already counted; any other
+    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that fits
     /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
     /// and marks it ([`Scheduler::whole_mark`]) with a deadline from
     /// [`js_whole::cost::reserve_deadline`] (the longest it may run is the one given with
@@ -352,6 +357,20 @@ impl Scheduler {
     /// worker barred to the request for `reserve_backoff`, and another held if there is
     /// one. Nothing running is stopped. The marks, counts and back-offs are in memory
     /// only; a recovered scheduler has none, so every count restarts at zero.
+    ///
+    /// A new mark is made only while the caps allow it: whole workers (marks and held
+    /// whole-machine leases, never a head's hold) below `max_whole_node` and below the
+    /// capable workers less `keep_for_ordinary`, marks on busy workers below
+    /// `max_draining`, and the worker not the last one an older ordinary request that
+    /// waits could run on, unless `allow_last_capable` (then the next worker by drain cost
+    /// is tried). A request a cap stops holds nothing and [`Scheduler::whole_wait`] says
+    /// which. The pool is every worker that serves whole-machine leases: all but a
+    /// quarantined or draining one counts as capable, a lost one too. When the ceiling falls
+    /// below the whole workers, the newest marks beyond it are dropped (no give-up
+    /// counted), never a held lease. `max_whole_node_per_consumer` is not enforced
+    /// here: no request, waiter or qos names a consumer, so the setting is ignored. The
+    /// lease server or the registry, where the caller's identity exists, enforces it.
+    /// Workers of every platform count toward one ceiling and one `max_draining`.
     #[must_use]
     pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
         self.whole_node = Some(config);
@@ -590,10 +609,10 @@ impl Scheduler {
         let mut stuck = Vec::new();
         let mut reserved = BTreeSet::new();
         let mut reservations = BTreeMap::new();
-        let mut marks = BTreeMap::new();
+        let mut whole = self.whole_round();
         let mut head_holds = BTreeMap::new();
         let mut held_pools = BTreeSet::new();
-        for &(_, id) in &self.queue {
+        for (position, &(_, id)) in (0u64..).zip(&self.queue) {
             let op = &self.ops[&id];
             let request = &op.request;
             // A memory a key floor gave it never owns a worker whole while another could
@@ -623,16 +642,30 @@ impl Scheduler {
                 fit_minutes,
             };
             let mut blocked = None;
-            let fitted = placed.len() < round && {
-                let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
-                blocked = fit.blocked;
-                fit.placed.map(|p| placed.push((id, p))).is_some()
-            };
+            // A whole-machine request over a cap takes no quiet worker; it waits as any
+            // request that cannot be placed does.
+            let fitted = placed.len() < round
+                && (request.kind != LeaseKind::WholeMachine || self.quiet_take(&whole, id))
+                && {
+                    let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
+                    blocked = fit.blocked;
+                    fit.placed.map(|p| placed.push((id, p))).is_some()
+                };
             let verdict = if fitted {
                 Verdict::Servable
             } else {
                 servable.verdict(&self.workers, request)
             };
+            // A whole-machine request that is placed, or cannot be served, has no hold to
+            // count; one that fits ahead of the rest counts as a whole worker.
+            if request.kind == LeaseKind::WholeMachine && (fitted || verdict != Verdict::Servable) {
+                self.drain.marks.remove(&id);
+                if fitted {
+                    whole.placed_whole();
+                }
+            } else if !fitted && request.kind != LeaseKind::WholeMachine {
+                whole.waiting_ordinary(position, id);
+            }
             if !fitted && request.kind == LeaseKind::WholeMachine && verdict == Verdict::Servable {
                 let held = match &self.whole_node {
                     None => servable.reserve(
@@ -646,21 +679,23 @@ impl Scheduler {
                     Some(cfg) => {
                         let turn = self.drain.turn(id, op.queued_at, now, cfg);
                         turn.and_then(|turn| {
-                            let out: BTreeSet<WorkerId> =
-                                reserved.union(&turn.barred).cloned().collect();
-                            let avoid = whole::Drain::avoiding(&op.avoid, &turn.barred);
-                            let name = servable.reserve(
-                                &self.workers,
-                                request,
-                                &out,
-                                &avoid,
-                                turn.kept.as_ref().map(|m| &m.worker),
-                                self.drain_order(&placed).as_deref(),
-                            )?;
-                            let max_wall = self.max_walls.get(&id).copied();
-                            let mark = self.drain.mark(id, &name, turn.kept, now, cfg, max_wall);
-                            marks.insert(id, mark);
-                            Some(name)
+                            match self.hold_whole(
+                                &mut servable,
+                                &whole,
+                                (id, position),
+                                &reserved,
+                                &placed,
+                                turn,
+                            ) {
+                                Ok(held) => held.map(|(name, mark)| {
+                                    whole.marks.insert(id, mark);
+                                    name
+                                }),
+                                Err(wait) => {
+                                    whole.waits.insert(id, wait);
+                                    None
+                                }
+                            }
                         })
                     }
                 };
@@ -716,7 +751,8 @@ impl Scheduler {
             self.undo_key_raise(id);
         }
         self.reservations = reservations;
-        self.drain.marks = marks;
+        self.drain.marks = whole.marks;
+        self.drain.waits = whole.waits;
         self.head_holds = head_holds;
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
@@ -814,178 +850,5 @@ impl Scheduler {
                 reason,
             })));
         }
-    }
-
-    /// A committed refusal: the operation is finished, and its waiters are answered.
-    /// A refusal of an operation that is no longer queued is stale and dropped.
-    fn refusal_committed(&mut self, record: &RefusalRecord) -> Vec<Effect> {
-        let id = record.operation;
-        let Some(op) = self.ops.get_mut(&id) else {
-            return Vec::new();
-        };
-        if op.state != OpState::Queued {
-            return Vec::new();
-        }
-        op.state = OpState::Refused {
-            reason: record.reason.clone(),
-        };
-        op.unservable = None;
-        self.queue.remove(&(Reverse(op.request.qos.clone()), id));
-        if self.in_flight.get(&op.request.key) == Some(&id) {
-            self.in_flight.remove(&op.request.key);
-        }
-        self.finished.push_back((self.now, id));
-        vec![Effect::Refuse(Refusal {
-            operation: id,
-            waiters: op.waiters.clone(),
-            reason: record.reason.clone(),
-        })]
-    }
-
-    fn lease_committed(&mut self, grant: &LeaseGrant, effects: &mut Vec<Effect>) {
-        let Some(op) = self.ops.get_mut(&grant.operation) else {
-            return;
-        };
-        if op.state.is_done() {
-            return;
-        }
-        op.committed_lease = op.committed_lease.max(Some(grant.lease));
-        if let OpState::Leased {
-            lease,
-            worker,
-            committed,
-        } = &mut op.state
-            && *lease == grant.lease
-            && !*committed
-        {
-            *committed = true;
-            let (session, process) = self
-                .workers
-                .get(&*worker)
-                .map_or((0, 0), |w| (w.session, w.process));
-            let sent = StartSent {
-                at: self.now,
-                session,
-                process,
-            };
-            // A leased operation's lease is always held: no branch on it.
-            let (booked, device) =
-                self.held
-                    .get_mut(&*lease)
-                    .map_or((op.request.resources, None), |held| {
-                        held.start_sent = Some(sent);
-                        (held.booked, held.device.clone())
-                    });
-            effects.push(Effect::Start(StartLease {
-                worker: worker.clone(),
-                lease: *lease,
-                operation: grant.operation,
-                key: op.request.key.clone(),
-                kind: op.request.kind,
-                resources: booked,
-                fence: op.request.fence(),
-                device,
-            }));
-        }
-    }
-
-    fn started(&mut self, id: OperationId, lease: LeaseId) {
-        let Some(op) = self.ops.get_mut(&id) else {
-            return;
-        };
-        if let OpState::Leased {
-            lease: held,
-            worker,
-            committed: true,
-        } = &op.state
-            && *held == lease
-        {
-            op.state = OpState::Running {
-                lease,
-                worker: worker.clone(),
-            };
-            // A leased operation's lease is always held: no branch on it.
-            let now = self.now;
-            let () = self
-                .held
-                .get_mut(&lease)
-                .map_or((), |held| held.started_at = Some(now));
-        }
-    }
-
-    fn report(&mut self, id: OperationId, lease: LeaseId, outcome: Outcome) -> Vec<Effect> {
-        let Some(op) = self.ops.get_mut(&id) else {
-            return Vec::new();
-        };
-        let current = match &op.state {
-            OpState::Leased {
-                lease, committed, ..
-            } => committed.then_some(*lease),
-            OpState::Running { lease, .. } => Some(*lease),
-            _ => None,
-        };
-        if current != Some(lease) || op.result_proposed {
-            return Vec::new();
-        }
-        op.result_proposed = true;
-        vec![Effect::Commit(ControlRecord::Result(ResultRecord {
-            lease,
-            operation: id,
-            outcome,
-        }))]
-    }
-
-    fn result_committed(&mut self, record: &ResultRecord) -> Vec<Effect> {
-        let id = record.operation;
-        let Some(op) = self.ops.get(&id) else {
-            return Vec::new();
-        };
-        if op.state.is_done() || op.committed_lease != Some(record.lease) {
-            return Vec::new();
-        }
-        if let Outcome::Failed(kill @ (Failure::OutOfMemory | Failure::NodeMemoryPressure)) =
-            record.outcome
-            && self.rerun_after_memory_kill(record, kill)
-        {
-            return Vec::new();
-        }
-        if let Outcome::Failed(Failure::Lost(why)) = record.outcome
-            && self.rerun_after_lost(record, why)
-        {
-            return Vec::new();
-        }
-        // The scheduler's own give-up for a lease that never started is not a run to charge.
-        if record.outcome == Outcome::Failed(Failure::Infra)
-            && !self.ops[&id].gave_up
-            && self.rerun_after_infra(record)
-        {
-            return Vec::new();
-        }
-        self.release(id, run_end_of(record.outcome));
-        let op = self.ops.get_mut(&id).expect("checked above");
-        op.state = match record.outcome {
-            Outcome::Completed { action_result } => OpState::Completed {
-                lease: record.lease,
-                action_result,
-            },
-            Outcome::Failed(failure) => OpState::Failed {
-                lease: record.lease,
-                failure,
-            },
-        };
-        // A queued operation (expired, not yet re-granted) leaves the queue too.
-        self.queue.remove(&(Reverse(op.request.qos.clone()), id));
-        if self.in_flight.get(&op.request.key) == Some(&id) {
-            self.in_flight.remove(&op.request.key);
-        }
-        self.finished.push_back((self.now, id));
-        vec![Effect::Answer(Answer {
-            operation: id,
-            lease: record.lease,
-            waiters: op.waiters.clone(),
-            outcome: record.outcome,
-            memory_runs: self.memory.runs(id).to_vec(),
-            farm_runs: op.farm_runs.clone(),
-        })]
     }
 }

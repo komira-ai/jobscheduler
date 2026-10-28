@@ -127,5 +127,5 @@ pub use scheduler::memory::{
 pub use scheduler::{
     Avoided, FINISHED_RETENTION, Fate, LeasePhase, LeaseView, MAX_AVOIDED, OpState,
     PLACEMENT_ROUND, QueueGroup, QueueView, Recovered, RecoveredLease, Scheduler, Snapshot,
-    UNSERVABLE_WAIT, WaitingGroup, WholeMark, platform_label,
+    UNSERVABLE_WAIT, WaitingGroup, WholeMark, WholeWait, platform_label,
 };

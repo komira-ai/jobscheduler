@@ -209,6 +209,16 @@ fairness, so a stream of newer ordinary requests that all need H cannot hold the
 (`allow_last_capable = true`), for instance when the operator accepts that a performance run is worth stalling one ordinary request. In a
 dedicated pool there is no ordinary work and neither rule applies.
 
+*Today's scheduler (`js-sched`) applies these caps to a whole-machine request that takes a quiet host at once and to a hold's mark, and
+counts one pool: every worker that serves whole-machine leases, of every platform (a Mac host counts toward the same ceiling and the same
+`max_draining` as a Linux one). A quiet take adds one whole host and drains none, so the ceiling and `keep_for_ordinary` apply to it and
+`max_draining` does not; a request that already holds a mark takes a quiet host whatever the caps, since its mark is already counted. The
+last-capable rule is applied to marks only: an ordinary request queued ahead that a quiet host could run is placed on it before the
+whole-node request is reached (narrow caveat: an older ordinary request that is capable by facts but blocked by admission, or left over by the round's placement limit, is not placed first, so a quiet take can take its last capable host). A request a cap stops stays queued and `whole_wait` names the cap. `js-sched` has no notion of a consumer,
+so `max_whole_node_per_consumer` is not enforced there; the setting is read and ignored. It is enforced where the caller's identity exists
+(K7): the lease server or the registry. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
+rule does not read it as taking a host from the request that holds it.*
+
 **Validation at load.** A mixed pool that sets `max_whole_node` needs `max_whole_node + keep_for_ordinary <= max_machines`, and every
 limit is at least 1 where it is a maximum; a file that breaks this is refused (D20). A dedicated pool may set `max_whole_node` below
 `max_machines`; the surplus hosts then serve nothing, which validation reports.
