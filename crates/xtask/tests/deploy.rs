@@ -41,9 +41,14 @@ enum Call<'a> {
     Post { service: &'a str, attempt: usize },
 }
 
-/// A canned HTTP/1.1 response.
+/// A canned HTTP/1.1 response. The body `"not json"` (a JSON string with that text) is sent
+/// as the bare text `not json`, which is not JSON.
 fn response(status: u16, body: &Value) -> Vec<u8> {
-    let body = body.to_string();
+    let body = if body == &json!("not json") {
+        "not json".to_owned()
+    } else {
+        body.to_string()
+    };
     format!(
         "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -1074,4 +1079,37 @@ fn the_plan_of_the_flags() {
     assert_eq!(plan.every, Duration::from_secs(30));
     args.audience = Some("coordinator".to_owned());
     assert_eq!(Plan::of(&args).audience, "coordinator");
+}
+
+/// Asserts that an answer that is not JSON fails the call and names it, and that the real
+/// clock waits between reads (the interval is made short so the test is quick): a farm that
+/// converges on its second read ends the deploy converged.
+#[test]
+fn an_answer_that_is_not_json_fails_and_the_real_clock_waits_between_reads() {
+    let farm = Farm::start(|_| (200, json!("not json")));
+    let (result, _, _) = farm.deploy(&farm.plan(&["js-server"]));
+    assert!(
+        matches!(&result, Err(Error::Call { what, why, .. })
+            if *what == "read the service before the deploy" && why.contains("expected")),
+        "{result:?}"
+    );
+
+    let farm = farm_with(|service, n| {
+        let role = role_of(service);
+        if n == 0 {
+            conv("in_progress", VERSION, (role, 0, 1, 0, 0))
+        } else {
+            conv("converged", VERSION, (role, 1, 0, 0, 0))
+        }
+    });
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    let mut plan = farm.plan(&["js-server"]);
+    plan.every = Duration::from_millis(1);
+    let mut out = Vec::new();
+    deploy::deploy(&plan, &farm.token_service(), &roots, &mut out).expect("deploy");
+    assert_eq!(farm.coordinator_calls().len(), 4);
 }
