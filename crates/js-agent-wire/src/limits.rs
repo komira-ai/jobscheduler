@@ -106,7 +106,7 @@ pub const MAX_GRACE_MS: u64 = 24 * 60 * 60 * 1000;
 pub const MAX_LOAD_LEASES: usize = 96;
 /// Most minute records in one load. A full node closes about 96 minutes a minute and
 /// beats 12 times a minute, so this is 12 times the need; a backlog drains over beats.
-pub const MAX_LOAD_MINUTES: usize = 64;
+pub const MAX_LOAD_MINUTES: usize = 65;
 /// The last minute index a load names. It means "this minute or later": the agent folds
 /// every later minute into it with the larger value of each field, and a receiver merges
 /// repeats of it the same way. It is one less than the 64 points of a curve.
