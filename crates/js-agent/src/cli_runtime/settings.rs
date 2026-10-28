@@ -267,6 +267,11 @@ impl Settings {
         &self.user
     }
 
+    /// The uid the containers run as (the first half of [`Settings::user`]).
+    pub fn uid(&self) -> u32 {
+        self.ids.0
+    }
+
     /// The engine host (`unix:///<path>`: a socket on this machine) the runtime is told to use,
     /// when one is given; otherwise the engine uses its own default.
     pub fn host(&self) -> Option<&str> {
