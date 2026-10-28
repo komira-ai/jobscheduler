@@ -14,6 +14,7 @@ mod recover;
 mod snapshot;
 mod state;
 mod view;
+mod worker;
 
 pub use recover::{Fate, Recovered, RecoveredLease};
 pub use snapshot::{
@@ -21,24 +22,26 @@ pub use snapshot::{
     platform_label,
 };
 pub use state::OpState;
+pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
-use js_caps::NodeCaps;
+use js_types::sched::usage::{CurveSource, LeaseCost};
 use js_types::sched::{
     Answer, ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind,
-    NodePhase, OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord,
-    StartLease, WaiterId, Waiting, WorkKey, WorkerId,
+    OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord, StartLease,
+    WaiterId, Waiting, WorkKey, WorkerId,
 };
 
+use crate::admission::{Admission, Blocked, LoadConfig};
 use crate::cordon::Cordons;
-use crate::fence::{HANDOVER_GRACE, LEASE_GRACE};
-use crate::input::{DaemonInstance, Request};
-use crate::load::Load;
+use crate::fence::HANDOVER_GRACE;
+use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
-use crate::servable::{Servable, Verdict};
+use crate::servable::{Attempt, Placed, Servable, Verdict};
 use memory::{MemoryLadder, MemoryState};
 
 /// At most this many leases are granted per [`Event::Tick`] (one log flush per round).
@@ -133,6 +136,8 @@ struct Held {
     operation: OperationId,
     /// What it booked on its worker.
     booked: Resources,
+    /// What admission charged it: fixed at its placement, kept until its result.
+    cost: LeaseCost,
     /// The iOS device it booked on its worker, by id.
     device: Option<String>,
     /// When and to which session its `Start` was emitted; `None` until its grant is
@@ -149,119 +154,6 @@ struct StartSent {
     at: FarmTime,
     session: u64,
     process: u64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct Worker {
-    pub(crate) capacity: Resources,
-    pub(crate) caps: NodeCaps,
-    pub(crate) booked: Resources,
-    /// How many leases it holds.
-    pub(crate) leases: usize,
-    /// A whole-machine lease holds it: nothing else is placed on it.
-    pub(crate) whole: bool,
-    /// The iOS devices its leases booked, by id. A booking lasts until its lease ends,
-    /// whatever the worker's reports say meanwhile ([`crate::devices`]).
-    pub(crate) devices: BTreeSet<String>,
-    last_heard: FarmTime,
-    /// Counts the worker's registrations: the session a `Start` emitted now goes to.
-    session: u64,
-    /// The daemon process of the current session.
-    instance: DaemonInstance,
-    /// Counts the registrations that changed the daemon process: the process a `Start`
-    /// emitted now goes to.
-    process: u64,
-    /// Until when leases whose `Start` went to an earlier process are kept: by then that
-    /// process has fenced ([`HANDOVER_GRACE`] after it was last heard).
-    handover_ends: FarmTime,
-    /// The earlier process the newest change of process was proven to replace: its
-    /// successor's drivers killed its runs before registering, so its leases the worker
-    /// leaves out go at once ([`Event::WorkerUp`]'s `predecessor_stopped`).
-    stopped_process: Option<u64>,
-    /// What its newest `Hello` says it is doing.
-    pub(crate) phase: NodePhase,
-    /// Until when the lease of a `Preparing` or `Restoring` phase is kept while the
-    /// worker is silent ([`crate::fence::SESSION_SWITCH_GRACE`] after that phase was
-    /// first reported).
-    switch_ends: FarmTime,
-}
-
-impl Worker {
-    pub(crate) fn free(&self) -> Resources {
-        self.capacity.saturating_sub(self.booked)
-    }
-
-    /// How loaded it is: what placement ranks the workers that have room by.
-    pub(crate) fn load(&self) -> Load {
-        Load::new(self.booked, self.capacity, self.leases)
-    }
-
-    pub(crate) fn alive(&self, now: FarmTime) -> bool {
-        now < self.last_heard.saturating_add(LEASE_GRACE)
-    }
-
-    /// Whether `lease`, which it holds, is kept at `now` although it is silent: it is
-    /// switching the GUI session for that lease, within the switch grace.
-    fn switching(&self, lease: LeaseId, now: FarmTime) -> bool {
-        self.phase.switching() == Some(lease) && now < self.switch_ends
-    }
-
-    /// Whether it holds fewer leases than its lease cap; a node that reports no cap
-    /// always does.
-    fn under_lease_cap(&self) -> bool {
-        self.capacity
-            .leases
-            .is_none_or(|cap| u64::try_from(self.leases).is_ok_and(|held| held < cap))
-    }
-
-    /// Whether `request`, an action or a VM, is at the whole host's memory (the last step
-    /// of the memory ladder, which the cap is): it runs with no other lease on the node,
-    /// and none is placed beside it, as a whole-machine lease does. A request for no
-    /// memory is not.
-    pub(crate) fn exclusive(&self, request: &Request) -> bool {
-        request.resources.memory_bytes > 0
-            && request.resources.memory_bytes >= self.capacity.memory_bytes
-    }
-
-    /// Whether `request` can be placed on it now, platform and kind aside: an action
-    /// if no whole-machine lease holds it, its free CPUs, GPUs and VM slots hold the
-    /// request, it holds fewer leases (of any kind) than its lease cap (if it reports
-    /// one), and its memory capacity is at least the request's memory; a VM if no
-    /// whole-machine lease holds it, it holds fewer leases than its cap, and its free CPUs,
-    /// memory, GPUs and VM slots hold the request; a whole-machine lease if it holds no
-    /// lease and its capacity holds the request. A
-    /// request for an iOS device also needs a free device that satisfies it
-    /// ([`Worker::free_device`]).
-    pub(crate) fn has_room(&self, request: &Request) -> bool {
-        let room = match request.kind {
-            LeaseKind::WholeMachine => self.leases == 0 && self.capacity.fits(&request.resources),
-            // An action's memory is the cgroup limit it first runs under, not a booking:
-            // what other leases hold of the node's memory never keeps it out. The node
-            // bounds how many run at once by CPUs (its lease count), and its memory
-            // pressure backstop pauses starts. The limit must still be one the node can
-            // give. The one limit that is not a share is the whole host ([`Worker::exclusive`]):
-            // that action runs alone.
-            LeaseKind::Action => {
-                !self.whole
-                    && self.free().fits(&request.resources.without_memory())
-                    && request.resources.memory_bytes <= self.capacity.memory_bytes
-                    && self.under_lease_cap()
-                    && (!self.exclusive(request) || self.leases == 0)
-            }
-            // A VM's memory is a booking: the guest holds it whole for as long as it runs,
-            // so what other leases hold of the node's memory keeps it out: a VM is placed
-            // only if its full request, memory included, fits the node's free capacity.
-            // Actions are not checked against memory, so a VM can wait behind a stream of
-            // them; nothing reserves a node for a queued VM.
-            LeaseKind::Vm => {
-                !self.whole
-                    && self.free().fits(&request.resources)
-                    && self.under_lease_cap()
-                    && (!self.exclusive(request) || self.leases == 0)
-            }
-        };
-        room && (!request.needs.wants_device() || self.free_device(&request.needs).is_some())
-    }
 }
 
 /// The scheduler core of one leader term.
@@ -346,6 +238,11 @@ pub struct Scheduler {
     grace_until: FarmTime,
     /// How many lost leases refuse an operation ([`Scheduler::with_loss_requeues`]).
     loss_cap: u32,
+    /// The load predicate's settings, counters and cost predictions ([`crate::admission`]).
+    admission: Admission,
+    /// The worker each blocked head of the queue holds (see [`Scheduler::place`]); the
+    /// last round's, kept so the hold does not wander.
+    head_holds: BTreeMap<OperationId, WorkerId>,
 }
 
 impl Scheduler {
@@ -377,6 +274,8 @@ impl Scheduler {
             store_down: false,
             grace_until: FarmTime::default(),
             loss_cap: u32::MAX,
+            admission: Admission::default(),
+            head_holds: BTreeMap::new(),
         }
     }
 
@@ -385,6 +284,24 @@ impl Scheduler {
     #[must_use]
     pub const fn with_finished_retention(mut self, retention: Duration) -> Self {
         self.finished_retention = retention;
+        self
+    }
+
+    /// This scheduler, admitting actions as `config` says. A scheduler built with
+    /// [`Scheduler::new`] places by the booked rule until this is called; the defaults of
+    /// [`LoadConfig`] are `On`, 5 s windows, `f` 0.75, `s_cpu` 0.10, `s_mem` 0.
+    #[must_use]
+    pub fn with_load_config(mut self, config: LoadConfig) -> Self {
+        self.admission.configure(config);
+        self
+    }
+
+    /// This scheduler, holding `curves` for the rule that charges a lease by a curve over
+    /// its lifetime. The flat rule does not read them: a key that has a curve is charged
+    /// flat and counted ([`LoadCounters::curve_flat`]).
+    #[must_use]
+    pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
+        self.admission.use_curves(curves);
         self
     }
 
@@ -433,6 +350,7 @@ impl Scheduler {
             self.ops.remove(&id);
             self.memory.forget(id);
             self.size_keys.remove(&id);
+            self.admission.forget(id);
         }
     }
 
@@ -500,6 +418,7 @@ impl Scheduler {
             let held = self.held.remove(&lease);
             if let Some((w, held)) = self.workers.get_mut(worker).zip(held) {
                 w.booked = w.booked.saturating_sub(held.booked);
+                w.load_state.remove(lease);
                 w.leases -= 1;
                 if let Some(device) = &held.device {
                     w.devices.remove(device);
@@ -556,6 +475,19 @@ impl Scheduler {
     /// A round places no more leases than the block of sequences the scheduler was given
     /// has left ([`Scheduler::use_seq_block`]); the rest wait for the next round.
     ///
+    /// Under admission by load ([`Scheduler::with_load_config`]) an action has room where
+    /// the load predicate admits it (see [`crate::LoadConfig`]), and workers are ranked by
+    /// what they are charged, measured and predicted, instead of by what is booked. An
+    /// action that has a worker with room but for the predicate is blocked; the first
+    /// such action of a pool in queue order (the head) holds the worker of the pool with
+    /// the smallest binding ratio, `max((L_cpu + p) / C_cpu, (L_mem + m) / C_mem)`, and
+    /// keeps it while its ratio is within a tenth of the best: no operation after it in
+    /// queue order is placed there, so the worker empties as its leases end. At most one
+    /// worker is held per pool, work before the head is never held back, and the head
+    /// of a pool blocked only by the cold cap holds nothing. A worker held for a
+    /// whole-machine operation or for a head, a draining, cordoned or whole-machine worker
+    /// is out before the predicate is read.
+    ///
     /// A whole-machine operation that fits nowhere holds one worker that could run it
     /// (the one it held last round while that still could, else the one with fewest
     /// leases): no operation after it in queue order (less urgent, or as urgent and
@@ -588,6 +520,8 @@ impl Scheduler {
         let mut stuck = Vec::new();
         let mut reserved = BTreeSet::new();
         let mut reservations = BTreeMap::new();
+        let mut head_holds = BTreeMap::new();
+        let mut held_pools = BTreeSet::new();
         for &(_, id) in &self.queue {
             let op = &self.ops[&id];
             let request = &op.request;
@@ -596,11 +530,29 @@ impl Scheduler {
             let key_raised = op
                 .key_applied
                 .is_some_and(|a| !a.undone && a.applied == request.resources.memory_bytes);
-            let fitted = placed.len() < round
-                && servable
-                    .fit(&mut self.workers, request, &reserved, &op.avoid, key_raised)
-                    .map(|(name, booked, device)| placed.push((id, name, booked, device)))
-                    .is_some();
+            // The lease it gets if it is placed now: leases are numbered in the order of
+            // `placed` below.
+            let lease = LeaseId::new(
+                self.term,
+                self.next_seq + u64::try_from(placed.len()).unwrap_or(u64::MAX),
+            );
+            let retried = !self.memory.runs(id).is_empty();
+            let cost = self.admission.cost_of(id, request, retried);
+            let attempt = Attempt {
+                request,
+                reserved: &reserved,
+                avoid: &op.avoid,
+                not_whole: key_raised,
+                cost,
+                lease,
+                fit_minutes: self.admission.fit_minutes(id),
+            };
+            let mut blocked = None;
+            let fitted = placed.len() < round && {
+                let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
+                blocked = fit.blocked;
+                fit.placed.map(|p| placed.push((id, p))).is_some()
+            };
             let verdict = if fitted {
                 Verdict::Servable
             } else {
@@ -620,6 +572,35 @@ impl Scheduler {
                 reserved.insert(name.clone());
                 reservations.insert(id, name);
             }
+            // A blocked head holds the worker with the most headroom, one per pool:
+            // requests after it in queue order are not placed there, so the worker
+            // empties as its leases end instead of being refilled by small work. The
+            // pool's slot is taken only by a request that holds a worker: one that
+            // cannot (an exclusive action, say) leaves it to the next blocked request.
+            let pool =
+                (blocked == Some(Blocked::Load)).then(|| servable.pool(&self.workers, request));
+            if let Some(pool) = pool
+                && !held_pools.contains(&pool)
+            {
+                let attempt = Attempt {
+                    request,
+                    reserved: &reserved,
+                    avoid: &op.avoid,
+                    not_whole: key_raised,
+                    cost,
+                    lease,
+                    fit_minutes: self.admission.fit_minutes(id),
+                };
+                let kept = self.head_holds.get(&id);
+                if let Some(name) =
+                    servable.hold_for_head(&self.workers, &self.admission, &attempt, kept)
+                {
+                    self.admission.counters.reservations += u64::from(kept != Some(&name));
+                    reserved.insert(name.clone());
+                    head_holds.insert(id, name);
+                    held_pools.insert(pool);
+                }
+            }
             if !fitted
                 && key_raised
                 && verdict == Verdict::Servable
@@ -637,6 +618,7 @@ impl Scheduler {
             self.undo_key_raise(id);
         }
         self.reservations = reservations;
+        self.head_holds = head_holds;
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
             // waited on: the next round judges the smaller request.
@@ -645,7 +627,13 @@ impl Scheduler {
             }
             self.note(id, verdict, effects);
         }
-        for (id, worker, booked, device) in placed {
+        for (id, placed) in placed {
+            let Placed {
+                worker,
+                booked,
+                device,
+                cost,
+            } = placed;
             let lease = LeaseId::new(self.term, self.next_seq);
             self.next_seq += 1;
             let op = self.ops.get_mut(&id).expect("queued operations exist");
@@ -660,6 +648,7 @@ impl Scheduler {
                 Held {
                     operation: id,
                     booked,
+                    cost,
                     device,
                     start_sent: None,
                     granted_at: self.now,
@@ -670,6 +659,7 @@ impl Scheduler {
                 lease,
                 operation: id,
                 worker,
+                cost,
             })));
         }
     }

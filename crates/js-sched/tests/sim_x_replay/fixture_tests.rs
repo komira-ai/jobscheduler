@@ -54,9 +54,9 @@ fn round_trip_of_hand_rows_and_every_outcome() {
     rows.push(row(
         1 << 40,
         1,
-        u64::MAX / 2,
-        u64::MAX / 3,
-        1 << 20,
+        coarse_ms(u64::MAX / 2),
+        coarse_ms(u64::MAX / 3),
+        1 << 16,
         Outcome::Evicted,
     ));
     let bytes = encode(&rows);
@@ -139,6 +139,63 @@ fn header_counts_that_disagree_with_the_records_are_refused() {
         Fixture::load(&b),
         Err(FixtureError::TooManyKeys { n_keys: 65_537 })
     );
+}
+
+#[test]
+fn byte_image_of_the_format_is_pinned() {
+    // The file as written by hand from the format description: magic, the two counts,
+    // then per record the start gap, the key (u16), wall, cpu and memory as LEB128 and
+    // the outcome byte; last, the FNV-1a of everything before it. A field order, width
+    // or varint form changed in the loader and the encoder together still fails here.
+    #[rustfmt::skip]
+    let body: [u8; 45] = [
+        b'J', b'S', b'X', b'1',
+        3, 0, 0, 0,                       // n_rows
+        2, 0, 0, 0,                       // n_keys
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,               // start 0, key 0, wall 1, cpu 0, mem 0, ok
+        0x00, 0x01, 0x00, 0xfa, 0x01, 0xb0, 0x09, 0x80, 0x04, 0x01, // +0, key 1, 250, 1200, 512, memory kill
+        0xb0, 0xea, 0x01, 0x00, 0x00, 0xf8, 0xc0, 0x07, 0xf0, 0xde, 0xe1, 0x04, 0x80, 0x80, 0x04, 0x02,
+    ];
+    let mut want = body.to_vec();
+    want.extend_from_slice(&0x0425_164a_2011_fc6c_u64.to_le_bytes());
+    assert_eq!(encode(&small()), want);
+    assert_eq!(Fixture::load(&want).expect("loads").rows, small());
+}
+
+#[test]
+fn outcome_codes_are_the_converters_order() {
+    // ok, memory kill, timeout, eviction: the bytes a converter writes. Two codes
+    // exchanged in the code and its inverse together would read a kill as a timeout.
+    assert_eq!(Outcome::Ok.code(), 0);
+    assert_eq!(Outcome::KilledMemory.code(), 1);
+    assert_eq!(Outcome::TimedOut.code(), 2);
+    assert_eq!(Outcome::Evicted.code(), 3);
+    assert_eq!(Outcome::from_code(1), Some(Outcome::KilledMemory));
+    assert_eq!(Outcome::from_code(2), Some(Outcome::TimedOut));
+}
+
+#[test]
+fn a_header_that_lies_about_its_rows_is_refused_without_reserving_for_them() {
+    // 4 billion rows promised over a body of three: the loader must run out of bytes,
+    // not try to reserve room for every promised row first.
+    let mut b = small_bytes();
+    b[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    seal(&mut b);
+    assert!(matches!(
+        Fixture::load(&b),
+        Err(FixtureError::Truncated { .. })
+    ));
+}
+
+#[test]
+fn the_key_limit_is_exactly_a_u16_index() {
+    // 65,536 keys (indices 0..=65,535) is the most a record can name: loaded, not refused.
+    let rows: Vec<Row> = (0..=u16::MAX)
+        .map(|k| row(u64::from(k), k, 1, 1, 1, Outcome::Ok))
+        .collect();
+    let f = Fixture::load(&encode(&rows)).expect("65,536 keys load");
+    assert_eq!(f.n_keys, 65_536);
+    assert_eq!(f.rows.len(), 65_536);
 }
 
 #[test]
@@ -233,14 +290,68 @@ fn refuses_a_zero_wall() {
 }
 
 #[test]
+fn refuses_an_uncoarsened_wall_cpu_or_memory() {
+    // 12_345 ms keeps four significant figures; 1_025 MiB is not a multiple of 4.
+    let mut rows = small();
+    rows[1].wall_ms = 12_345;
+    rows[1].cpu_ms = 12_000;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "wall",
+            value: 12_345,
+            coarse: 12_300
+        })
+    );
+    let mut rows = small();
+    rows[1].cpu_ms = 12_345;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "cpu",
+            value: 12_345,
+            coarse: 12_300
+        })
+    );
+    let mut rows = small();
+    rows[1].peak_mem_mib = 1_025;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "peak memory",
+            value: 1_025,
+            coarse: 1_028
+        })
+    );
+    // The same values, coarsened, load.
+    let mut rows = small();
+    rows[1].wall_ms = coarse_ms(12_345);
+    rows[1].cpu_ms = coarse_ms(12_345);
+    rows[1].peak_mem_mib = coarse_mem_mib(1_025);
+    assert!(Fixture::load(&encode(&rows)).is_ok());
+}
+
+#[test]
 fn refuses_every_truncation() {
-    // Cut at each byte of a small file and at a spread of points of the committed one:
-    // always a refusal, and always for running out of bytes.
+    // Cut at each byte of a small file, of the first records of the committed one, and at
+    // a spread of points of the rest: always a refusal, and always for running out of bytes.
     let small = small_bytes();
     for len in 0..small.len() {
         assert!(
             matches!(
                 Fixture::load(&small[..len]),
+                Err(FixtureError::Truncated { .. })
+            ),
+            "cut at {len}"
+        );
+    }
+    for len in 0..512 {
+        assert!(
+            matches!(
+                Fixture::load(&EMBEDDED[..len]),
                 Err(FixtureError::Truncated { .. })
             ),
             "cut at {len}"
@@ -343,6 +454,12 @@ fn errors_say_what_is_wrong() {
         FixtureError::StartOverflow { row: 5 },
         FixtureError::BadOutcome { row: 6, code: 7 },
         FixtureError::ZeroWall { row: 8 },
+        FixtureError::Uncoarsened {
+            row: 20,
+            field: "wall",
+            value: 21,
+            coarse: 22,
+        },
         FixtureError::KeyOutOfRange {
             row: 9,
             key: 10,
@@ -443,7 +560,7 @@ fn committed_values_respect_the_coarsening_bounds() {
 #[test]
 fn committed_outcomes_are_mostly_ok_and_all_known() {
     // Not a count of the trace: only that the non-ok outcomes are the minority they
-    // are in a real day, and that a replay has some of each kind to replay as given.
+    // are in a real day, and that each of the three has rows to replay as given.
     let loaded = embedded();
     let not_ok = loaded
         .rows
@@ -451,4 +568,10 @@ fn committed_outcomes_are_mostly_ok_and_all_known() {
         .filter(|r| r.outcome != Outcome::Ok)
         .count();
     assert!(not_ok > 0 && not_ok * 20 < loaded.rows.len());
+    for outcome in [Outcome::KilledMemory, Outcome::TimedOut, Outcome::Evicted] {
+        assert!(
+            loaded.rows.iter().any(|r| r.outcome == outcome),
+            "no {outcome:?} row"
+        );
+    }
 }

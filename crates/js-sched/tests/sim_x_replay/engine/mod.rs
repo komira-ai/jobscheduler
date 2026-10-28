@@ -1,9 +1,9 @@
-//! The replay engine of sims x and x2, shared by the `sim_x_replay` test and (later) the
-//! `sim_x2` example, which includes this file with `#[path]`.
+//! The replay engine behind the `sim_x_replay` test: it replays recorded per-action
+//! records against the placement scorer. Other test or example targets may include this
+//! file with `#[path]`.
 //!
-//! Modules, in dependency order. Each pull request of the series adds its own and its
-//! `mod` line here; a module imports only the ones above it in this list, and a pull
-//! request that adds a module never edits another's file.
+//! Modules, in dependency order. Each module has a file of its own and a `mod` line
+//! here; a module imports only the ones above it in this list.
 //!
 //! | module | holds | state |
 //! |---|---|---|

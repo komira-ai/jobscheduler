@@ -172,21 +172,25 @@ pub fn host_roots() -> Vec<CertificateDer<'static>> {
     rustls_native_certs::load_native_certs().certs
 }
 
-/// The body of `url`, over HTTPS only, trusting `roots`.
-pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>, Error> {
+/// The TLS settings that trust exactly `roots`, over rustls with ring.
+pub fn tls_config(roots: &[CertificateDer<'static>]) -> ureq::tls::TlsConfig {
     let roots = roots
         .iter()
         .map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned())
         .collect();
-    let tls = ureq::tls::TlsConfig::builder()
+    ureq::tls::TlsConfig::builder()
         .provider(ureq::tls::TlsProvider::Rustls)
         .root_certs(ureq::tls::RootCerts::Specific(Arc::new(roots)))
         .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .build();
+        .build()
+}
+
+/// The body of `url`, over HTTPS only, trusting `roots`.
+pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>, Error> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(true)
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
-        .tls_config(tls)
+        .tls_config(tls_config(roots))
         .build()
         .into();
     let failed = |e: ureq::Error| Error::Download {

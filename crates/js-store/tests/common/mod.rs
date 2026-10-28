@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use js_state::{
     Changes, Commit, CommitStats, Conflict, ManualClock, Revision, ScanPage, ScanRange, Store,
     StoreError, StoreTime, Txn, Versioned,
 };
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows, StateError};
 
 /// A store that applies a transaction of another frontend just before a write of this one
@@ -24,6 +24,9 @@ pub struct Racing {
     landings: Mutex<Vec<(String, Txn)>>,
     down: AtomicBool,
     unreadable: Mutex<Option<String>>,
+    ack_lost: AtomicBool,
+    asked: Mutex<Vec<Txn>>,
+    lease_scans: AtomicUsize,
 }
 
 impl Racing {
@@ -35,7 +38,28 @@ impl Racing {
             landings: Mutex::new(Vec::new()),
             down: AtomicBool::new(false),
             unreadable: Mutex::new(None),
+            ack_lost: AtomicBool::new(false),
+            asked: Mutex::new(Vec::new()),
+            lease_scans: AtomicUsize::new(0),
         })
+    }
+
+    /// How many times every `lease/` row has been scanned.
+    pub fn lease_scans(&self) -> usize {
+        self.lease_scans.load(Ordering::SeqCst)
+    }
+
+    /// Every transaction the store was asked to apply since the last call, in order, as it
+    /// was asked: whether it committed or not. The transactions of a landing are not among
+    /// them.
+    pub fn asked(&self) -> Vec<Txn> {
+        std::mem::take(&mut *self.asked.lock().expect("lock"))
+    }
+
+    /// The next write is applied and then reported as failed, as a connection lost after the
+    /// commit reports it: the rows are in, and nobody knows.
+    pub fn lose_next_ack(&self) {
+        self.ack_lost.store(true, Ordering::SeqCst);
     }
 
     /// The store's clock moves on by `by`.
@@ -65,6 +89,10 @@ impl Store for Racing {
         if self.down.load(Ordering::SeqCst) {
             return Err(StoreError::Failed("the store is down".to_owned()));
         }
+        self.asked
+            .lock()
+            .expect("lock")
+            .extend(batch.iter().cloned());
         let names = |key: &str| {
             let mut ops = batch.iter().flat_map(Txn::ops);
             ops.any(|op| op.key_cond().is_some_and(|(named, _)| named == key))
@@ -75,7 +103,11 @@ impl Store for Racing {
             self.inner.txn(landing)?.expect("the landing write");
         }
         drop(queued);
-        self.inner.apply_batch(batch)
+        let applied = self.inner.apply_batch(batch)?;
+        if self.ack_lost.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Failed("the connection closed".to_owned()));
+        }
+        Ok(applied)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
@@ -86,6 +118,8 @@ impl Store for Racing {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.lease_scans
+            .fetch_add(usize::from(prefix == "lease/"), Ordering::SeqCst);
         self.inner.scan_prefix(prefix)
     }
 
@@ -116,7 +150,13 @@ pub fn open(
     policy: EpochPolicy,
     first: u64,
 ) -> Result<(Rows, u64), StateError> {
-    Rows::open(store, policy, first, Arc::new(TestCodec::new()))
+    Rows::open(
+        store,
+        policy,
+        first,
+        Arc::new(TestCodec::new()),
+        Arc::new(TestExt),
+    )
 }
 
 /// A handle over `store` for the frontend numbered `id`, which kept the epoch it found or
@@ -124,7 +164,7 @@ pub fn open(
 pub fn frontend_with(store: &Arc<Racing>, id: u64, codec: &Arc<TestCodec>) -> Rows {
     let store: Arc<dyn Store> = store.clone();
     let codec = codec.clone();
-    Rows::open(store, EpochPolicy::Keep, id, codec)
+    Rows::open(store, EpochPolicy::Keep, id, codec, Arc::new(TestExt))
         .expect("open")
         .0
 }
