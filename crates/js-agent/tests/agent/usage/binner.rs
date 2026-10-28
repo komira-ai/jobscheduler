@@ -622,3 +622,18 @@ fn rates_saturate_at_u32_max() {
     assert_eq!(got[0].cpu_mean_millis, u32::MAX);
     assert!(got[0].cpu_mean_millis <= got[0].cpu_peak_window_millis);
 }
+
+/// Asserts that a window straddling a boundary leaves the old minute with the largest
+/// working set sampled inside it: samples at 57 s (100) and 62 s (900) give minute 0 a
+/// maximum of 100, and the 900 stays with the minute it was seen in. It catches the
+/// bracketing working set handed to the already-open first part of a window.
+#[test]
+fn a_straddle_keeps_each_minutes_own_working_set() {
+    let mut binner = Binner::new(30 * S);
+    for (t, ws) in [(0, 10), (30 * S, 40), (57 * S, 100), (62 * S, 900)] {
+        binner.observe(&sample(t, vec![lease("a", 0, 0, ws)]));
+    }
+    assert_eq!(binner.take(10, 62 * S), vec![minute("a", 0, 0, 0, 100)]);
+    binner.observe(&sample(120 * S, vec![lease("a", 0, 0, 900)]));
+    assert_eq!(binner.take(10, 120 * S), vec![minute("a", 1, 0, 0, 900)]);
+}
