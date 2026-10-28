@@ -651,3 +651,36 @@ fn a_restart_that_forgets_which_operations_hold_a_lease_fails_the_suite() {
         Scenario::RecoveredLeaseWaitsForItsWorker,
     );
 }
+
+/// Asserts that an operation that is queued when the process dies, for want of a worker or
+/// because the store refused its grant, runs once after the restart and is answered once. The
+/// suite's scenarios cannot say which operations are queued at a crash for a core that places
+/// work as it is submitted; this one does. Catches: a queued operation the restart forgets,
+/// or one it starts twice.
+#[test]
+fn an_operation_queued_when_the_process_dies_runs_once_after_it() {
+    for refused in [false, true] {
+        let mut harness = Harness::new();
+        if refused {
+            harness.worker_up("node-a");
+            harness.refuse_writes(u32::MAX);
+        }
+        let operation = harness.submit(1, 1);
+        assert!(
+            harness.observed().released.is_empty(),
+            "queued at the crash"
+        );
+
+        harness.crash_and_restart();
+        harness.worker_up("node-a");
+        harness.advance(Duration::from_secs(1));
+
+        let released = harness.observed().released;
+        assert_eq!(released.len(), 1, "refused: {refused}");
+        assert_eq!(released[0].operation, operation);
+        harness.report(operation, released[0].lease);
+        harness.advance(Duration::from_secs(1));
+        let answered = harness.observed().answered;
+        assert_eq!(answered.len(), 1, "refused: {refused}");
+    }
+}

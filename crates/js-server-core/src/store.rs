@@ -88,8 +88,11 @@ impl Writer for StoreWriter {
                 rows.refused(refusal.operation, ending)
             }
             // The effects of a committed record are a `Start`, an answer or a refusal; one
-            // the adapter cannot say how it ended is stale: there is no row to write.
-            _ => Err(StateError::Missing("what the effect settles".to_owned())),
+            // the adapter cannot say how it ended has no row to write, and no retry helps.
+            _ => {
+                tracing::error!("the adapter did not say how the effect ended: no row to write");
+                return Attempt::Dropped;
+            }
         };
         match written {
             Ok(()) => Attempt::Taken,
@@ -163,9 +166,11 @@ impl Engine {
     /// and is the epoch of a store that has none; the scheduler's term is the epoch.
     ///
     /// Every unfinished operation is taken up, one that holds a lease too: it waits for its
-    /// node to register for the lease grace, and is given up if the node does not. (A core
-    /// that shares its store with other frontends takes up only the queued ones, and the
-    /// leased ones of the nodes that register with it.) Each is held for a caller of its
+    /// node to register for the lease grace, and is given up if the node does not. This
+    /// start assumes no other frontend of the store is live: it would take up, and after
+    /// the grace give up, the leases of a frontend that is still running them (the farm
+    /// server takes up only the queued ones, and the leased ones of the nodes that register
+    /// with it; this core does not yet). Each is held for a caller of its
     /// own ([`Adapter::adopted`]). The first blocks of operation ids and lease sequences are
     /// reserved past everything any frontend of the store reserved, so a start never takes
     /// an id an earlier one took.

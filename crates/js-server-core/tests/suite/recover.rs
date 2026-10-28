@@ -230,3 +230,28 @@ fn a_request_joins_a_queued_operation_another_frontend_wrote() {
     up(&core, 6, "node-a", "d1");
     assert_eq!(started(&core), [lease(1, 0)]);
 }
+
+/// Pins a limit of this start: it takes up every unfinished operation, a lease another live
+/// frontend holds too, and gives that lease up once the lease grace has passed without its
+/// node registering here, so the operation would run twice. A start that shares a store with
+/// running frontends must change this on purpose, and this test with it.
+#[test]
+fn a_start_over_a_store_another_frontend_still_runs_takes_up_its_leases() {
+    let setup = Setup::new();
+    let running = setup.core(1);
+    up(&running, 0, "node-a", "d1");
+    let leased = submit(&running, 1, 1);
+
+    let second = setup.core_with(&Config::new(2), Rig::default(), 0);
+
+    let held = second.with(|view, _| view.sched().leases_on(&worker("node-a")).len());
+    assert_eq!(held, 1, "the other frontend's lease is taken up");
+    block_on(second.tick(at(60_001)));
+    assert!(
+        calls(&second).contains(&Call::Requeued(lease(1, 0))),
+        "and given up after the grace: {:?}",
+        calls(&second)
+    );
+    assert_eq!(setup.store.rows_of("loss/").len(), 1);
+    assert_eq!(leased.operation, OperationId(0));
+}

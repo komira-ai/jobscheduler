@@ -183,6 +183,11 @@ impl<A: Adapter> Core<A> {
     /// this frontend in the store, and is the epoch of a store that has none. `now` is the
     /// farm time of the start: the lease grace of a lease the store holds runs from it.
     ///
+    /// The start takes up every unfinished operation the store holds, leased ones too, and
+    /// assumes no other frontend of the store is live: a lease another running frontend
+    /// holds would be given up here once the grace has passed, and its operation run twice.
+    /// (The queued-only start of several frontends is not in this core yet.)
+    ///
     /// # Errors
     /// The store cannot be read or written, or holds a row that is not one the scheduler
     /// wrote.
