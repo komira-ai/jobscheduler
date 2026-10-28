@@ -41,7 +41,10 @@ fn a_result_stays_published_until_it_is_acknowledged() {
 
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().results.len(), 1, "no ack, no drop");
-    assert_eq!(worker.try_deliver(acks("r1", "ACCEPTED")), Delivery::Delivered);
+    assert_eq!(
+        worker.try_deliver(acks("r1", "ACCEPTED")),
+        Delivery::Delivered
+    );
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
     assert!(snapshot.held.is_empty() && snapshot.results.is_empty());
@@ -100,7 +103,11 @@ fn a_full_queue_refuses_the_next_reply_without_waiting() {
             "reply {n} has room"
         );
     }
-    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Full, "the queue is full");
+    assert_eq!(
+        worker.try_deliver(starts(&["r1"])),
+        Delivery::Full,
+        "the queue is full"
+    );
 
     machine.world.release();
     assert!(worker.handle().settle());
@@ -224,7 +231,10 @@ fn stop_all_stops_every_run() {
     let dir = Scratch::new("jobs-worker-stop-all");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert_eq!(worker.try_deliver(starts(&["r1", "r2"])), Delivery::Delivered);
+    assert_eq!(
+        worker.try_deliver(starts(&["r1", "r2"])),
+        Delivery::Delivered
+    );
     assert!(worker.handle().settle());
 
     worker.stop_all();
@@ -320,5 +330,9 @@ fn a_worker_that_panics_is_seen_to_have_ended() {
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(!handle.settle(), "the worker is gone");
     assert!(worker.ended() && handle.ended());
-    assert_eq!(worker.try_deliver(stops("r1")), Delivery::Gone, "nobody takes a reply");
+    assert_eq!(
+        worker.try_deliver(stops("r1")),
+        Delivery::Gone,
+        "nobody takes a reply"
+    );
 }

@@ -117,7 +117,9 @@ pub fn install() {
 fn limit_address_space() {
     use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
     let now = getrlimit(Resource::As);
-    let ceiling = now.maximum.map_or(ADDRESS_SPACE, |max| max.min(ADDRESS_SPACE));
+    let ceiling = now
+        .maximum
+        .map_or(ADDRESS_SPACE, |max| max.min(ADDRESS_SPACE));
     let current = now.current.map_or(ceiling, |cur| cur.min(ceiling));
     let _ = setrlimit(
         Resource::As,
