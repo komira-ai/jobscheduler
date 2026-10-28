@@ -9,6 +9,7 @@ mod admission;
 mod cell;
 mod common;
 mod feed;
+mod frontends;
 mod handover;
 mod intake;
 mod outage;
