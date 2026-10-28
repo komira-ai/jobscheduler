@@ -84,7 +84,7 @@ impl Collector {
     /// minutes were dropped since the last run, when any were.
     pub fn run(&mut self, running: &[RunningLease]) -> Vec<String> {
         let mut lines = self.sample(running);
-        lines.extend(self.drops());
+        let _ = self.drops();
         lines
     }
 
