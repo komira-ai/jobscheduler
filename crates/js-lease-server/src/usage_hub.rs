@@ -380,6 +380,7 @@ impl Usage {
         acks: &[ResultAck],
         holds: &dyn Fn(&LeaseId, &HostId) -> bool,
     ) {
+        info!("node minute");
         let Some(host) = host_of(&beat.host_id) else {
             self.hub().counts.records_dropped += 1;
             return;
