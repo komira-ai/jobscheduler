@@ -326,7 +326,7 @@ const STATE_REMOVAL_WAIT: Duration = Duration::from_secs(3);
 
 /// Whether `path` is gone, polling until `limit` has passed.
 fn wait_gone(path: &Path, limit: Duration) -> bool {
-    wait_gone_by(path, limit, Instant::now, nap)
+    wait_gone_by(path, limit, &Instant::now, &nap)
 }
 
 /// The pause between two looks at the path.
@@ -335,7 +335,7 @@ fn nap() {
 }
 
 /// [`wait_gone`] with the clock and the pause given, so a test drives each side of the loop.
-fn wait_gone_by(path: &Path, limit: Duration, now: impl Fn() -> Instant, pause: impl Fn()) -> bool {
+fn wait_gone_by(path: &Path, limit: Duration, now: &dyn Fn() -> Instant, pause: &dyn Fn()) -> bool {
     let deadline = now() + limit;
     loop {
         if !path.exists() {
@@ -524,7 +524,7 @@ mod tests {
         let path = dir.join("state");
         std::fs::create_dir(&path).expect("mkdir");
         let pauses = Cell::new(0);
-        let gone = wait_gone_by(&path, Duration::from_secs(60), Instant::now, || {
+        let gone = wait_gone_by(&path, Duration::from_secs(60), &Instant::now, &|| {
             pauses.set(pauses.get() + 1);
             std::fs::remove_dir(&path).expect("removed");
         });
@@ -548,7 +548,7 @@ mod tests {
             start + Duration::from_secs(u64::from(at))
         };
         let pauses = Cell::new(0);
-        let gone = wait_gone_by(&path, Duration::from_secs(3), clock, counting(&pauses));
+        let gone = wait_gone_by(&path, Duration::from_secs(3), &clock, &counting(&pauses));
         assert!(!gone);
         assert_eq!(pauses.get(), 2);
     }
@@ -561,8 +561,8 @@ mod tests {
         let gone = wait_gone_by(
             &dir.join("none"),
             Duration::from_secs(60),
-            Instant::now,
-            counting(&pauses),
+            &Instant::now,
+            &counting(&pauses),
         );
         assert!(gone);
         assert_eq!(pauses.get(), 0);
