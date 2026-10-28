@@ -362,7 +362,10 @@ fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
 
     let (_dir, machine, worker) = stuck("jobs-stall-held", Duration::from_secs(1), &["r1"], 1);
     machine.clock.advance(1_863_000);
-    assert!(!worker.stalled(), "a held run costs two calls, the start one");
+    assert!(
+        !worker.stalled(),
+        "a held run costs two calls, the start one"
+    );
     machine.clock.advance(1);
     assert!(worker.stalled());
     machine.world.release();
