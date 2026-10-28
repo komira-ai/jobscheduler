@@ -9,10 +9,12 @@ use std::time::Duration;
 
 use js_agent::usage::Outbox;
 use js_agent::{Delivery, Drain, HEARTBEAT_PATH, Session};
+use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
-use super::{start_answer, start_with_usage, starts};
+use super::{start_with_usage, starts};
+use crate::lifecycle::job;
 use crate::support::{Reply, Scratch, Script, Sent, beat_ok, hello, lowest, reply, welcome_with};
 
 const SLICE: &str = "/sys/fs/cgroup/jobs.slice";
@@ -42,6 +44,18 @@ fn counters(machine: &FakeMachine, k: u64) {
     machine
         .files
         .set(&format!("{SLICE}/cpu.max"), "max 100000\n");
+}
+
+/// The answer that starts `r1` with a wall-time limit of an hour, so that it is still
+/// running when the test is over.
+fn long_start() -> Value {
+    let mut spec = job("r1");
+    spec.limits.wall_ms = 3_600_000;
+    let reply = HeartbeatReply {
+        commands: vec![Command::Start(Box::new(spec))],
+        ..HeartbeatReply::default()
+    };
+    serde_json::to_value(reply).unwrap()
 }
 
 /// The load of each heartbeat sent so far, `Null` for a beat without one.
@@ -79,7 +93,7 @@ fn a_failed_send_requeues_and_the_next_beat_carries_the_minute_once() {
     let down: Reply = Err("the server is down".to_owned());
     let replies = vec![
         welcome_with(1, 30_000, 90_000),
-        reply(200, start_answer(&["r1"])),
+        reply(200, long_start()),
         beat_ok(),
         beat_ok(),
         down,
