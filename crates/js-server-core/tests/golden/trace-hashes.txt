@@ -1,0 +1,13 @@
+# Golden trace hashes: the SHA-256 of the full trace of each seeded simulation run.
+#
+# Do not edit by hand. A change to any hash means a simulation now makes a different
+# decision or writes its trace differently. Regenerate them only on purpose, with the
+# command the failing test prints, and justify each changed line in the pull request.
+# A change that only moves code must leave every hash as it is.
+format 1
+core-cell/base/seed-0 dac725a5c25a834c1c8572fa94f1f54e79ea71743721f995e3360cf2b60714cd
+core-cell/base/seed-1 77cb83f4f39d283e194045bf3b3af4ad1d72a76d10e6f2743b103566734c381b
+core-cell/base/seed-2 8fa490ad69047a49b8640aff5537a7c2b21feee74c24b558f78a1307ee250553
+core-cell/drop-first-start/seed-0 6aef72603cbe888633b5851689e4f21b06d0debbc1d8166c2b6cdcb556bed377
+core-cell/drop-first-start/seed-1 8d0453096aed18041f3519fc1830a4fe34c8bb5b6326826db02211a31caea418
+core-cell/drop-first-start/seed-2 21ebc4e354929f7eaf9af94532dbff2eb3222e1f3130b244941a316e4cb49da3

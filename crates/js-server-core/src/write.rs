@@ -11,9 +11,10 @@
 
 use std::collections::VecDeque;
 
-use js_types::sched::Effect;
+use js_types::sched::{Effect, OperationId};
 
-use crate::engine::Engine;
+use crate::adapter::Adapter;
+use crate::engine::{Engine, finish_of};
 
 /// How a write of the rows an effect settles ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,7 +53,7 @@ impl Engine {
     /// writer refuses because it cannot be reached: it and everything after it wait for
     /// the next call, so no later row is written ahead of an earlier one. A row refused
     /// for good drops its record's remaining effects.
-    pub(crate) fn release_unwritten(&mut self) -> Vec<Effect> {
+    pub(crate) fn release_unwritten(&mut self, a: &mut dyn Adapter) -> Vec<Effect> {
         let mut ready = Vec::new();
         loop {
             let Some(front) = self.unwritten.front() else {
@@ -75,9 +76,43 @@ impl Engine {
                 Attempt::Dropped => {
                     self.write_drops += 1;
                     tracing::error!("a committed record's remaining effects were dropped");
-                    self.unwritten.pop_front();
+                    let dropped = self.unwritten.pop_front().unwrap_or_default();
+                    self.forget_details(a, dropped);
                 }
             }
         }
+    }
+
+    /// Whether the finish of `operation` (its answer or refusal) is held back, unwritten.
+    /// Bounded by what is held, which is capped.
+    pub(crate) fn finish_held(&self, operation: OperationId) -> bool {
+        self.unwritten
+            .iter()
+            .flatten()
+            .any(|effect| finish_of(effect) == Some(operation))
+    }
+
+    /// Forgets what is parked for the answers among `dropped` effects, which will never be
+    /// written, and the acknowledgement owed for their results: the host keeps a result it
+    /// is not acknowledged for. What the writer has taken stays: it is settled after this
+    /// feed's writes, whatever a later record does.
+    fn forget_details(&mut self, a: &mut dyn Adapter, dropped: VecDeque<Effect>) {
+        for effect in dropped {
+            if let Effect::Answer(answer) = effect {
+                a.forget_parcel(answer.lease);
+                // Never written, so never acknowledged: the host resends the result.
+                self.owed.remove(&answer.lease);
+            }
+        }
+    }
+
+    /// Forgets what is parked for every report whose answer is no longer held.
+    pub(crate) fn forget_parked(&self, a: &mut dyn Adapter) {
+        let held = &self.unwritten;
+        a.retain_parcels(&|lease| {
+            let answers =
+                |effect: &Effect| matches!(effect, Effect::Answer(ans) if ans.lease == lease);
+            held.iter().flatten().any(answers)
+        });
     }
 }

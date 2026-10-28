@@ -6,11 +6,13 @@
 //! machine cannot see, is the loop that carries those effects out:
 //!
 //! - a record is committed, and fed back as committed, before anything that depends on it
-//!   happens; the `Start` of a lease and the answer of an operation are held until the rows
+//!   happens; the `Start` of a lease and the answer of a result are held until the rows
 //!   they settle are written ([`Writer`]), oldest first, and a lease the scheduler gives up
 //!   meanwhile loses its held `Start`;
 //! - only the newest stream of a worker is heard, and a `Start` goes to the stream whose
 //!   heartbeat it counts against ([`Stream`], [`Core::heartbeat`]);
+//! - a `Result` is taken from the node that holds its operation's current lease, and each
+//!   operation is answered once ([`Standing`], [`Taken`]);
 //! - a core that is handed over takes nothing more ([`Core::fence`]), and one that is
 //!   draining places nothing ([`Core::close_intake`]).
 //!
@@ -31,6 +33,7 @@ mod core;
 mod engine;
 mod host;
 mod observer;
+mod report;
 mod write;
 
 pub use self::core::{Admitted, Config, Core, Fenced, NodeAction, UnknownNode};
@@ -39,4 +42,5 @@ pub use admission::{Admission, AllowAll, Denied, SelfFencedOnly};
 pub use engine::HELD_CAP;
 pub use host::{Beat, Reported, Stream};
 pub use observer::Observer;
+pub use report::{Reason, Report, Standing, Taken};
 pub use write::{Attempt, Writer};

@@ -48,8 +48,10 @@ pub enum Call {
     Settle {
         operation: OperationId,
         lease: LeaseId,
+        ack: Option<WorkerId>,
     },
     Forgot(OperationId),
+    ForgotParcel(LeaseId),
 }
 
 /// An adapter that keeps what its hooks were told.
@@ -59,6 +61,8 @@ pub struct Rig {
     pub calls: Vec<Call>,
     /// The streams whose connection is open.
     pub open: BTreeSet<(WorkerId, Stream)>,
+    /// The leases a report was parked for.
+    pub parked: BTreeSet<LeaseId>,
     /// The callers each submit enrolled.
     pub callers: BTreeMap<WaiterId, Admitted>,
     /// The operations answered or refused whose callers the rig still keeps.
@@ -125,12 +129,14 @@ impl Adapter for Rig {
         self.calls.push(Call::Requeued(requeue.lease));
     }
 
-    fn settle(&mut self, _: &View<'_>, answer: &Answer) -> Delivery {
+    fn settle(&mut self, _: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery {
         self.note(format!("settle {}", answer.lease));
+        self.parked.remove(&answer.lease);
         self.kept.insert(answer.operation);
         self.calls.push(Call::Settle {
             operation: answer.operation,
             lease: answer.lease,
+            ack: ack.cloned(),
         });
         let (trace, delivered, operation) = (
             Arc::clone(&self.trace),
@@ -152,6 +158,15 @@ impl Adapter for Rig {
             self.kept.remove(&operation);
             self.calls.push(Call::Forgot(operation));
         }
+    }
+
+    fn forget_parcel(&mut self, lease: LeaseId) {
+        self.parked.remove(&lease);
+        self.calls.push(Call::ForgotParcel(lease));
+    }
+
+    fn retain_parcels(&mut self, waits: &dyn Fn(LeaseId) -> bool) {
+        self.parked.retain(|lease| waits(*lease));
     }
 }
 
