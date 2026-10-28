@@ -416,6 +416,7 @@ mod tests {
             memory_bytes: mem,
             limit_bytes: mem,
             cold: false,
+            key_hash: 0,
         }
     }
 

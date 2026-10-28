@@ -33,6 +33,34 @@ pub struct LeaseCost {
     /// The key had no usable estimate: the cold costs were charged, and the lease counted
     /// against the worker's cold cap.
     pub cold: bool,
+    /// [`key_hash`] of the action key the lease runs: the identity the scoring counts
+    /// same-key leases by. 0 when unknown (a cost built by hand).
+    pub key_hash: u64,
+}
+
+/// The 64-bit FNV-1a offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The 64-bit FNV-1a prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The byte between a key's class and its dedup text; it is not valid UTF-8, so no pair
+/// of keys feeds the same bytes.
+const KEY_SEPARATOR: u8 = 0xff;
+
+/// A fixed 64-bit hash of an action key: FNV-1a over the class, a separator byte and the
+/// dedup text. It is the same on every machine and in every release (it is stored in the
+/// lease's cost), unlike `std`'s hashers; two keys may share a value, so it counts
+/// same-key leases and never decides identity.
+#[must_use]
+pub fn key_hash(key: &WorkKey) -> u64 {
+    key.class
+        .bytes()
+        .chain(std::iter::once(KEY_SEPARATOR))
+        .chain(key.dedup.bytes())
+        .fold(FNV_OFFSET, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+        })
 }
 
 /// One reading of the node's action cgroup, taken by the agent.
@@ -509,6 +537,24 @@ mod tests {
         assert!(source.curve(&key("miss")).is_none());
     }
 
+    /// Catches: a hash that is not the stated FNV-1a (the value is stored with the lease and
+    /// must not change between releases), or one that cannot tell where the class ends.
+    #[test]
+    fn a_key_hash_is_fnv_1a_of_class_separator_dedup() {
+        let key = |class: &str, dedup: &str| WorkKey {
+            class: class.to_owned(),
+            dedup: dedup.to_owned(),
+        };
+        assert_eq!(
+            key_hash(&key("", "")),
+            0xaf64_724c_8602_eb6e,
+            "separator only"
+        );
+        assert_eq!(key_hash(&key("a", "")), 0x089b_c907_b544_c769);
+        assert_eq!(key_hash(&key("class", "dedup")), 0x1a07_e552_8c45_0fb8);
+        assert_ne!(key_hash(&key("ab", "c")), key_hash(&key("a", "bc")));
+    }
+
     #[test]
     fn a_lease_cost_compares_by_every_field() {
         let c = LeaseCost {
@@ -516,6 +562,7 @@ mod tests {
             memory_bytes: 2,
             limit_bytes: 3,
             cold: false,
+            key_hash: 4,
         };
         assert_eq!(c, LeaseCost { ..c });
         assert_ne!(c, LeaseCost { cpu_millis: 9, ..c });
@@ -534,6 +581,7 @@ mod tests {
             }
         );
         assert_ne!(c, LeaseCost { cold: true, ..c });
+        assert_ne!(c, LeaseCost { key_hash: 9, ..c });
         assert_eq!(LeaseCost::default().cpu_millis, 0);
     }
 

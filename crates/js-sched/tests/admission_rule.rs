@@ -8,14 +8,26 @@
 mod load_rig;
 
 use js_sched::{LoadConfig, LoadView};
-use js_types::sched::usage::LeaseCost;
-use js_types::sched::{Failure, LeaseId, Outcome, Resources};
+use js_types::sched::usage::{LeaseCost, key_hash};
+use js_types::sched::{Failure, LeaseId, Outcome, Resources, StartLease};
 
 use load_rig::{GIB, Rig, W_MS, cold, leases, w, warm};
 
 /// An 8-core worker with 32 GiB.
 fn node() -> Resources {
     Resources::new(8_000, 32 * GIB)
+}
+
+/// The cost `start`'s lease is charged, with its key hash checked against its request's
+/// key and then zeroed, so a test compares the other figures.
+fn cost_of(r: &Rig, start: &StartLease) -> Option<LeaseCost> {
+    let cost = r.s.lease_cost(start.lease)?;
+    let key = &r.s.request(start.operation).expect("held").key;
+    assert_eq!(cost.key_hash, key_hash(key));
+    Some(LeaseCost {
+        key_hash: 0,
+        ..cost
+    })
 }
 
 fn view(r: &Rig, name: &str) -> LoadView {
@@ -495,12 +507,13 @@ fn a_cost_above_the_node_is_clamped_to_it() {
     let starts = r.tick();
     assert_eq!(starts.len(), 1);
     assert_eq!(
-        r.s.lease_cost(starts[0].lease),
+        cost_of(&r, &starts[0]),
         Some(LeaseCost {
             cpu_millis: 8_000,
             memory_bytes: 32 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
+            key_hash: 0,
         })
     );
     r.action(250, 8 * GIB, Some(warm(250, GIB)));
@@ -517,24 +530,26 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
     r.action(1_000, 4 * GIB, Some(warm(1_000, 2 * GIB)));
     let first = r.tick().remove(0);
     assert_eq!(
-        r.s.lease_cost(first.lease),
+        cost_of(&r, &first),
         Some(LeaseCost {
             cpu_millis: 1_000,
             memory_bytes: 2 * GIB,
             limit_bytes: 4 * GIB,
             cold: false,
+            key_hash: 0,
         })
     );
     r.end(&first, Outcome::Failed(Failure::OutOfMemory));
     r.ms += 1_000;
     let second = r.tick().remove(0);
     assert_eq!(
-        r.s.lease_cost(second.lease),
+        cost_of(&r, &second),
         Some(LeaseCost {
             cpu_millis: 1_000,
             memory_bytes: 16 * GIB,
             limit_bytes: 16 * GIB,
             cold: false,
+            key_hash: 0,
         })
     );
     assert_eq!(r.s.lease_cost(first.lease), None, "the first lease is gone");
@@ -608,12 +623,13 @@ fn a_request_without_a_prediction_is_charged_its_cores_and_no_memory() {
     let starts = r.tick();
     assert_eq!(starts.len(), 4, "16 GiB limits four times over 32 GiB");
     assert_eq!(
-        r.s.lease_cost(starts[0].lease),
+        cost_of(&r, &starts[0]),
         Some(LeaseCost {
             cpu_millis: 2_000,
             memory_bytes: 0,
             limit_bytes: 16 * GIB,
             cold: false,
+            key_hash: 0,
         })
     );
     r.action(2_000, GIB, None);

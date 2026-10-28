@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_sizing::{COLD_CPU_MILLIS, Estimate};
-use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves};
+use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, key_hash};
 use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources, WorkKey};
 
 pub(crate) use head::{Ratio, binding, pick};
@@ -362,6 +362,7 @@ impl Admission {
             memory_bytes: if retried { memory.max(limit) } else { memory },
             limit_bytes: limit,
             cold,
+            key_hash: key_hash(&request.key),
         }
     }
 
@@ -376,12 +377,14 @@ impl Admission {
                 memory_bytes: r.memory_bytes,
                 limit_bytes: r.memory_bytes,
                 cold: false,
+                key_hash: key_hash(&request.key),
             },
             _ => LeaseCost {
                 cpu_millis: r.cpu_millis,
                 memory_bytes: 0,
                 limit_bytes: r.memory_bytes,
                 cold: false,
+                key_hash: key_hash(&request.key),
             },
         }
     }

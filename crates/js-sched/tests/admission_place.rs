@@ -12,7 +12,7 @@ use js_caps::NodeCaps;
 use js_sched::{
     DaemonInstance, Event, Input, LoadConfig, PlacementLoad, Recovered, RecoveredLease, Scheduler,
 };
-use js_types::sched::usage::{Curve, CurveSource, LeaseCost, MinutePoint};
+use js_types::sched::usage::{Curve, CurveSource, LeaseCost, MinutePoint, key_hash};
 use js_types::sched::{
     ControlRecord, Effect, FarmTime, LeaseId, LeaseKind, OperationId, Resources, StartLease,
     StateMachine, WaiterId, WorkKey,
@@ -465,18 +465,22 @@ fn placed_with_grants(n: u64) -> (Scheduler, Vec<js_types::sched::LeaseGrant>) {
 
 /// Catches: a grant record that does not carry the cost the lease was charged (a
 /// scheduler rebuilt from the log could not know it), and a cost that is not the
-/// prediction, the request's limit and the cold flag.
+/// prediction, the request's limit, the cold flag and the hash of the lease's key (the
+/// scoring counts same-key leases by it).
 #[test]
 fn the_grant_record_carries_the_cost() {
     let (s, grants) = placed_with_grants(3);
     assert_eq!(grants.len(), 3);
     for grant in &grants {
+        let key = s.request(grant.operation).expect("held").key.clone();
         let want = LeaseCost {
             cpu_millis: 500,
             memory_bytes: 2 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
+            key_hash: key_hash(&key),
         };
+        assert_ne!(want.key_hash, 0);
         assert_eq!(grant.cost, want);
         assert_eq!(s.lease_cost(grant.lease), Some(want));
     }
@@ -529,6 +533,12 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
     let mut b = restarted(&a, &grants, true);
     for g in &grants {
         assert_eq!(b.lease_cost(g.lease), a.lease_cost(g.lease));
+        let key = a.request(g.operation).expect("held").key.clone();
+        assert_eq!(
+            b.lease_cost(g.lease).map(|c| c.key_hash),
+            Some(key_hash(&key)),
+            "the key's hash is part of the cost a restart keeps"
+        );
     }
     let (before, after) = (a.load_view(&w("a")).unwrap(), b.load_view(&w("a")).unwrap());
     assert_eq!(before, after);
@@ -576,6 +586,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
     let view = b.load_view(&w("a")).unwrap();
     assert_eq!(view.predicted_cpu_millis, 2_000);
     assert_eq!(view.predicted_memory_bytes, 0);
+    let key = a.request(grants[0].operation).expect("held").key.clone();
     assert_eq!(
         b.lease_cost(grants[0].lease),
         Some(LeaseCost {
@@ -583,6 +594,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
             memory_bytes: 0,
             limit_bytes: 8 * GIB,
             cold: false,
+            key_hash: key_hash(&key),
         })
     );
 }
