@@ -53,10 +53,10 @@ pub struct LoadConfig {
     /// `g`, in thousandths: a curve charges a lease at least this share of its flat
     /// cores. Default 750; kept within 500 and `f`.
     pub profile_floor_permille: u32,
-    /// The node guard on flat memory (`d`, in thousandths): a lease charged by a memory
-    /// curve is admitted only if the flat memory costs of every lease on the worker,
-    /// its own included, stay within `(1 + d) * C_mem`. Never applies to a whole-host
-    /// lease. `None` turns it off. Default `Some(0)`: the sum of flat costs stays within
+    /// The node guard on flat memory (`d`, in thousandths): a lease that adds memory,
+    /// charged by a curve or flat, is admitted only if the flat memory costs of every
+    /// lease on the worker, its own included, stay within `(1 + d) * C_mem`. Never
+    /// applies to a whole-host, whole-machine or exclusive lease. `None` turns it off. Default `Some(0)`: the sum of flat costs stays within
     /// the worker's memory.
     pub flat_memory_slack_permille: Option<u32>,
     /// End a new lease's charge at its expected life: the P90 of its key's wall minutes

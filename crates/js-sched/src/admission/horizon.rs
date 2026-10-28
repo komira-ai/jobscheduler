@@ -20,10 +20,12 @@
 //! the flat rule's, and every later slot reads the same figures or less, so the result is
 //! the flat rule's.
 //!
-//! One further guard is off unless an operator turns it on: with memory charged by curve,
-//! the sum of the *flat* memory costs of every lease on the worker (cold and demoted
-//! ones included), with the new lease's, must stay within `(1 + d) * C_mem`. It bounds
-//! what a memory misfit shared by many keys can do, which the curves cannot see.
+//! One further guard, on by default (`d` = 0, see [`flat_memory_refusal`]): the sum of
+//! the *flat* memory costs of every lease on the worker (cold and demoted ones included),
+//! with the new lease's, must stay within `(1 + d) * C_mem`, whatever way the new lease
+//! is charged. It bounds what a memory misfit shared by many keys can do, which the
+//! curves cannot see, and what a lease charged flat (a retry up the memory ladder, a cold
+//! key) adds beside leases charged by curve.
 
 use js_types::sched::Resources;
 use js_types::sched::usage::LeaseCost;
@@ -76,7 +78,7 @@ pub(crate) fn new_charge(
 
 /// Why a lease of `cost`, charged over time as `profile` says (flat when `None`), does not
 /// fit a worker of `capacity` charged as `left`, or `None` if it fits at every slot.
-/// CPU is judged first, then memory, then the flat-memory guard.
+/// CPU is judged first, then memory. The flat-memory guard is [`flat_memory_refusal`].
 pub(crate) fn refusal(
     t: &Totals,
     cost: &LeaseCost,
@@ -103,17 +105,26 @@ pub(crate) fn refusal(
     if at.saturating_add(new_mem) > mem_limit {
         return Some(Refusal::Memory);
     }
-    if let (Some(d), Some(p)) = (cfg.flat_memory_slack_permille, profile)
-        && p.memory_profiled()
-    {
-        let flat = t
-            .mem_all()
-            .saturating_add(t.vm_mem)
-            .saturating_add(cost.memory_bytes);
-        let limit = super::scale(capacity.memory_bytes, 1000 + u64::from(d), 1000);
-        if flat > limit {
-            return Some(Refusal::Memory);
-        }
-    }
     None
+}
+
+/// Why the flat-memory guard refuses a lease of `cost` (already clamped to `capacity`):
+/// the flat memory costs of every lease on the worker, cold and demoted ones included,
+/// and the VMs' booked memory, with the new lease's, are above `(1 + d) * C_mem`. It
+/// holds for every lease that adds memory, charged by curve or flat, on a worker charged
+/// by measurement or by prediction alone; `None` when the guard is off. Whole-machine leases are never judged, and an action at the whole host's memory runs
+/// on a worker with no lease, so nothing is summed beside it.
+pub(crate) fn flat_memory_refusal(
+    t: &Totals,
+    cost: &LeaseCost,
+    capacity: &Resources,
+    cfg: &LoadConfig,
+) -> Option<Refusal> {
+    let d = cfg.flat_memory_slack_permille?;
+    let flat = t
+        .mem_all()
+        .saturating_add(t.vm_mem)
+        .saturating_add(cost.memory_bytes);
+    let limit = super::scale(capacity.memory_bytes, 1000 + u64::from(d), 1000);
+    (flat > limit).then_some(Refusal::Memory)
 }

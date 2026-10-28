@@ -588,7 +588,11 @@ impl WorkerLoad {
     /// On a worker charged by measurement, when the new lease or a lease on the worker is
     /// charged over time, the lease must fit at every slot of the horizon
     /// ([`horizon::refusal`]); otherwise at the one flat figure. `profile` is how the new
-    /// lease is charged over time, if it is.
+    /// lease is charged over time, if it is. Then the flat-memory guard
+    /// ([`horizon::flat_memory_refusal`]), which every lease that adds memory passes on
+    /// either path. Only actions come here: a whole-machine lease is not judged, and an
+    /// action at the whole host's memory is placed on a worker with no lease, whose flat
+    /// sum is empty, and its cost is clamped to the worker's memory.
     pub(crate) fn admits(
         &self,
         cost: &LeaseCost,
@@ -611,6 +615,9 @@ impl WorkerLoad {
             if left.mem.saturating_add(cost.memory_bytes) > cfg.mem_limit(capacity) {
                 return Err(Refusal::Memory);
             }
+        }
+        if let Some(refusal) = horizon::flat_memory_refusal(&self.totals, cost, capacity, cfg) {
+            return Err(refusal);
         }
         if cost.cold && self.cold_admitted(now, cfg) >= cfg.cold_cap(capacity) {
             return Err(Refusal::ColdCap);

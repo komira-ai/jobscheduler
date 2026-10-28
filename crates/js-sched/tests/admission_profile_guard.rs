@@ -334,24 +334,31 @@ fn a_lease_given_back_before_it_started_is_not_a_run() {
     assert_eq!(r.s.shape_demoted_runs(g), (8, 0));
 }
 
-/// Catches: the flat-memory guard held on a lease that is not charged by a memory curve:
-/// with the memory switch off and the guard's slack (25%) below the predicate's (50%), the
-/// flat rule alone decides, three leases of 30 GiB (90 of 96) are admitted and the fourth
-/// is not.
+/// Catches: the flat-memory guard not held on a lease that is not charged by a memory
+/// curve, or held to the predicate's slack: with the memory switch off and the guard's
+/// slack (25%) below the predicate's (50%), the guard alone decides, two leases of 30 GiB
+/// (60 of 80) are admitted and the third is not; with the guard off the predicate admits
+/// three (90 of 96) and not the fourth.
 #[test]
-fn the_flat_memory_guard_leaves_a_flat_charged_lease_to_the_flat_rule() {
-    let config = LoadConfig {
-        s_mem_permille: 500,
-        profile_memory: false,
-        flat_memory_slack_permille: Some(250),
-        ..LoadConfig::default()
+fn the_flat_memory_guard_holds_a_flat_charged_lease_too() {
+    let admitted = |slack: Option<u32>| {
+        let config = LoadConfig {
+            s_mem_permille: 500,
+            profile_memory: false,
+            flat_memory_slack_permille: slack,
+            ..LoadConfig::default()
+        };
+        let (mut r, curves) = cluster(config);
+        curves.set_all(&flat_ws(&[1_000], GIB), 5);
+        (0..4)
+            .map(|i| {
+                r.keyed(&format!("p{i}"), 1_000, 8 * GIB, warm(1_000, 30 * GIB));
+                r.tick().len()
+            })
+            .collect::<Vec<_>>()
     };
-    let (mut r, curves) = cluster(config);
-    curves.set_all(&flat_ws(&[1_000], GIB), 5);
-    for (i, want) in [1, 1, 1, 0].into_iter().enumerate() {
-        r.keyed(&format!("p{i}"), 1_000, 8 * GIB, warm(1_000, 30 * GIB));
-        assert_eq!(r.tick().len(), want, "lease {i}");
-    }
+    assert_eq!(admitted(Some(250)), [1, 1, 0, 0]);
+    assert_eq!(admitted(None), [1, 1, 1, 0]);
 }
 
 /// Catches: a kill at the lease's own limit not being a misfit of the memory curve, the
@@ -437,9 +444,8 @@ fn the_size_key_is_the_key_the_guard_judges_under() {
     assert_eq!(r.s.shape_demoted_runs(shape_key("s2")), (0, 0));
 }
 
-/// Catches: the flat-memory guard missing, applying to a lease that is not charged by a
-/// memory curve, leaving out the cold or demoted leases or the VMs on the worker, or
-/// applying with no setting: with `d` = 0.25 on 64 GiB the flat costs of the leases and
+/// Catches: the flat-memory guard missing, leaving out the cold or demoted leases or the
+/// VMs on the worker, or applying with no setting: with `d` = 0.25 on 64 GiB the flat costs of the leases and
 /// the new one stay within 80 GiB, though the curves ask for 1 GiB each.
 #[test]
 fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
@@ -471,14 +477,13 @@ fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
         ],
         [1; 3]
     );
-    // A cold lease of 30 is charged flat and is not held to the guard (60 + 30 > 80 is
-    // fine for it)...
+    // A cold lease of 30 is charged flat and passes the guard (30 + 30 <= 80)...
     let (mut r, curves) = cluster(on);
     curves.set_all(&flat_ws(&[1_000], GIB), 5);
     assert_eq!(flat_30(&mut r, "p1"), 1);
     r.keyed("c1", 1_000, 8 * GIB, cold(1_000, 30 * GIB));
     assert_eq!(r.tick().len(), 1);
-    // ...but it counts in the sum a lease charged by curve is held to: 30 + 30 + 30 > 80.
+    // ...and it counts in the sum: 30 + 30 + 30 > 80.
     assert_eq!(flat_30(&mut r, "p2"), 0);
     // The same for a VM that books 40 GiB: 40 + 30 fits, 40 + 30 + 30 does not.
     let curves = Curves::new("load");
