@@ -83,6 +83,7 @@ impl Fake {
             lease: LeaseFacts {
                 lease: LeaseId::new(1, 2),
                 cold: false,
+                retry: false,
             },
             hosts: hosts.into_iter().map(|(n, h)| (worker(n), h)).collect(),
         }
@@ -343,6 +344,23 @@ fn a_cold_key_must_fit_one_point_six_three_times() {
     // ceil(613 * 1.63) = 1000, ceil(614 * 1.63) = 1001.
     assert!(!memory_unsafe(true, 0, 613, 0));
     assert!(memory_unsafe(true, 0, 614, 0));
+}
+
+/// Catches: a retry of a warm key held to the warm factor (its last run missed, so it is
+/// held to the cold one): 614 bytes fit 1.3 times in 1,000 but not 1.63 times.
+#[test]
+fn a_retry_must_fit_one_point_six_three_times() {
+    let unsafe_as = |cold: bool, retry: bool, nm: u64| {
+        let host = Host::empty(100_000, 1_000).mem_new(at_slot(0, nm));
+        let mut fake = Fake::new(vec![("h", host)]);
+        fake.lease.cold = cold;
+        fake.lease.retry = retry;
+        key(&fake, "h").memory_unsafe
+    };
+    assert!(!unsafe_as(false, false, 614));
+    assert!(!unsafe_as(false, true, 613));
+    assert!(unsafe_as(false, true, 614));
+    assert!(unsafe_as(true, true, 614));
 }
 
 #[test]

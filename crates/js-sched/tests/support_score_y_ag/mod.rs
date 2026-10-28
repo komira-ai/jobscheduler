@@ -93,6 +93,7 @@ impl Fake {
             lease: LeaseFacts {
                 lease: LeaseId::new(1, 2),
                 cold,
+                retry: false,
             },
             hosts: hosts.into_iter().map(|(n, h)| (worker(n), h)).collect(),
         }

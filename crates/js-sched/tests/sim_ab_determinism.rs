@@ -147,7 +147,11 @@ struct Fake {
 impl Fake {
     fn new(lease: LeaseId, hosts: Vec<(&str, Host)>) -> Self {
         Self {
-            lease: LeaseFacts { lease, cold: false },
+            lease: LeaseFacts {
+                lease,
+                cold: false,
+                retry: false,
+            },
             hosts: hosts.into_iter().map(|(n, h)| (worker(n), h)).collect(),
         }
     }
