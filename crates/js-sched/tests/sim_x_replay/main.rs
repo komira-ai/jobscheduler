@@ -8,3 +8,4 @@
 
 mod engine;
 mod fixture_tests;
+mod truth_tests;
