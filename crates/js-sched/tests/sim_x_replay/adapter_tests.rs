@@ -191,6 +191,24 @@ fn measured_above_predicted_is_strictly_above_the_covered_sum() {
             "{measured}"
         );
     }
+    // Uncovered leases do not raise the bar: a measurement between the covered sum and
+    // covered plus uncovered is still above the predictions. Catches a comparison against
+    // the sum that includes the uncovered side.
+    for (measured, want) in [(4_000, false), (4_001, true), (4_500, true), (4_700, true)] {
+        let mut h = flat_host(CPU_CAP, 0);
+        h.slot0 = Slot0 {
+            measured_cpu_millis: measured,
+            covered_cpu_millis: 4_000,
+            uncovered_cpu_millis: 700,
+            ..Slot0::default()
+        };
+        let m = model(flat_lease(0, 1_000), &[("a", h)]);
+        assert_eq!(
+            m.host(&id("a")).measured_above_predicted,
+            want,
+            "uncovered, measured {measured}"
+        );
+    }
 }
 
 /// Shows: key 4 reads the lease's own `p_bar` through `new_key_millis`: a host whose
@@ -663,4 +681,22 @@ fn conformance_the_floor_binds_when_the_reading_is_low() {
     let mut ranker = ScoreRanker::new();
     assert!(ranker.place(&m, &names(&["a", "b"])).is_some());
     assert_eq!(ranker.tally().measurement_wins, 0);
+}
+
+/// Shows: a ranker built with a config runs that config: a fuller host holding 26% of its
+/// CPU in the lease's key loses to an empty one at the default 25% key share and wins when
+/// the share is the whole host. Catches `with_config` dropping its config.
+#[test]
+fn a_ranker_with_a_config_uses_it() {
+    let mut a = flat_host(10_000, 4_000);
+    a.same_key_millis = 2_000;
+    let b = flat_host(10_000, 0);
+    let m = model(flat_lease(0, 600), &[("a", a), ("b", b)]);
+    let cands = names(&["a", "b"]);
+    assert_eq!(ScoreRanker::new().place(&m, &cands), Some(&cands[1]));
+    let wide = ScoreConfig::new(1, 10_000, 1_000_000).expect("balance in range");
+    assert_eq!(
+        ScoreRanker::with_config(wide).place(&m, &cands),
+        Some(&cands[0])
+    );
 }
