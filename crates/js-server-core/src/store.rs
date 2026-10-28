@@ -393,15 +393,19 @@ impl Engine {
             // The floor change is taken before the adapter learns, as the lowering that
             // follows is judged against the floors the kill left.
             let unsettled = self.rows.is_some().then(|| self.unsettled_of(requeue));
+            // A raise makes a lowered row of its key that still waits for the store stale:
+            // the requeue writes the floor as it stands. What the adapter lowers below is
+            // lowered from the floors the kill left, so it is not stale.
+            let raised = unsettled
+                .as_ref()
+                .and_then(|u| u.floors.key_raised.as_ref());
+            if let Some(raised) = raised {
+                self.unwritten_floors.retain(|f| f.key != raised.key);
+            }
             a.learned_requeue(&self.view(), requeue);
             let lowered = a.lowered();
             self.lower_key_floors(a, lowered);
-            if let Some(unsettled) = unsettled {
-                if let Some(raised) = &unsettled.floors.key_raised {
-                    self.unwritten_floors.retain(|f| f.key != raised.key);
-                }
-                self.unsettled.push(unsettled);
-            }
+            self.unsettled.extend(unsettled);
         }
         let pending = std::mem::take(&mut self.unsettled);
         for unsettled in pending {
