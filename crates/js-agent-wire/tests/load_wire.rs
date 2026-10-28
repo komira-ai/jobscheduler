@@ -193,6 +193,25 @@ fn optional_scalars_of_the_wrong_type_take_their_default() {
     assert_eq!(got.minutes, load().minutes);
 }
 
+/// Asserts that decoding alone never vets: a record that breaks a rule (minute 64, a bad
+/// lease id) is still present after decode and nothing is counted invalid. It catches a
+/// decode that quietly drops rule-breaking records, which would leave the server's drop
+/// accounting (`vet`) unpinned.
+#[test]
+fn decode_leaves_rule_breaking_records_for_vet() {
+    let mut value = good_load();
+    value["minutes"][0]["minute"] = json!(64);
+    value["clocks"][0]["lease_id"] = json!("not-a-lease");
+    let got = decode(body_with(value)).load.unwrap();
+    assert_eq!(got.minutes[0].minute, 64);
+    assert_eq!(got.clocks[0].lease_id, "not-a-lease");
+    assert_eq!(got.dropped.invalid, 0);
+    let mut vetted = got;
+    assert_eq!(vetted.vet(), Ok(()));
+    assert_eq!(vetted.dropped.invalid, 2);
+    assert!(vetted.minutes.is_empty() && vetted.clocks.is_empty());
+}
+
 /// Asserts that, in each list, one record that does not decode is dropped and counted
 /// and its neighbours stay: wrong types, `null`, a missing key (each key in turn), a
 /// minute index too large for the wire type. It catches an all-or-nothing list decode and

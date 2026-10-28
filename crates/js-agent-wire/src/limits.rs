@@ -115,6 +115,8 @@ pub const TAIL_MINUTE: u16 = 63;
 /// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
 pub const MAX_LEASE_REF_LEN: usize = 41;
 /// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
-/// it. A load at every cap here, beside 96 held runs and 8 results at the longest ids,
-/// stays under three quarters of it; a test fixes the total.
+/// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
+/// the longest ids a beat stays under three quarters of it; a test fixes those totals.
+/// This is not a guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS` allow far
+/// more, and a beat over the server's limit is refused there.
 pub const HEARTBEAT_BODY_BUDGET: usize = 65_536;

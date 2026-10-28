@@ -321,9 +321,10 @@ fn worst_id(i: u64) -> String {
 /// `vet`), 96 held runs and 8 results at 128-byte ids. The load must stay within 28 KiB
 /// and the whole beat within 48 KiB, three quarters of `HEARTBEAT_BODY_BUDGET`. It
 /// catches a cap raised (96 to 512), a longer id grammar and a longer key name. Fix the
-/// caps, not this threshold.
+/// caps, not this threshold. It proves the load is bounded by its caps; it does not
+/// bound a beat with more held runs or results, which `validate` allows.
 #[test]
-fn a_maximal_heartbeat_stays_under_the_body_limit() {
+fn a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget() {
     let max = u32::MAX;
     let load = NodeLoad {
         seq: u64::MAX,
