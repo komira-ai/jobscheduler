@@ -21,6 +21,7 @@ use crate::error::StartupError;
 use crate::listener::{Slots, serve};
 use crate::ticker::Ticker;
 use crate::tls;
+use crate::usage_hub::UsageCounters;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -46,7 +47,7 @@ pub async fn start<T: Ticker>(
 ) -> Result<Running, StartupError> {
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
+    let (source, agents) = assemble(config.hosts, config.usage, &clock, &config.state_file)?;
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
     let bound = TcpListener::bind(config.listen)
@@ -158,6 +159,13 @@ impl Running {
         self.shared.agent_errors()
     }
 
+    /// What the usage side has counted since the server started: loads rejected, records
+    /// dropped, runs learned or not and why, and the failures of the usage store, with the
+    /// sink's own counts. All zero without agent registration or with `--usage-off`.
+    pub fn usage_counters(&self) -> UsageCounters {
+        self.shared.usage_counters()
+    }
+
     /// How many times the accept loop found every one of the `--max-connections` slots
     /// taken and waited for one to be given back, since the server started. A loop
     /// that waits is not accepting: this is how a test sees the cap hold, with a
@@ -179,6 +187,9 @@ impl Running {
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;
+        if let Some(usage) = self.shared.usage() {
+            usage.finish().await;
+        }
         let saved = report.save_error.map_or(Ok(()), |err| {
             let file = self.state_file.display();
             let reason = format!("the final tick could not write the lease file {file}: {err}");

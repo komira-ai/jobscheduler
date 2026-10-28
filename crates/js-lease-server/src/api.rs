@@ -23,6 +23,7 @@ use crate::agents::Agents;
 use crate::config::Token;
 use crate::hosts::HostList;
 use crate::run_api;
+use crate::usage_hub::{Usage, UsageCounters};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -68,6 +69,19 @@ impl Shared {
     /// A handle on the agent registry; `None` without agent flags.
     pub(crate) fn registry(&self) -> Option<Registry> {
         self.agents.as_ref().map(|agents| agents.registry.clone())
+    }
+
+    /// The usage side; `None` without agents or with `--usage-off`.
+    pub(crate) fn usage(&self) -> Option<&Arc<Usage>> {
+        self.agents
+            .as_ref()
+            .and_then(|agents| agents.usage.as_ref())
+    }
+
+    /// What the usage side has counted; all zero without one.
+    pub(crate) fn usage_counters(&self) -> UsageCounters {
+        self.usage()
+            .map_or_else(UsageCounters::default, |usage| usage.counters())
     }
 
     /// How many times the agent side could not read or write its files; 0 without agents.
