@@ -1,4 +1,4 @@
-# Extraction steps 23 to 58
+# Extraction steps 23 to 64
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
 data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
@@ -188,3 +188,30 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     other placement; a quiet host that appears first takes the request and the machine is released by the idle rule. *Proves:* on the fake
     aws, a whole-node request in a pool with an elastic entry acquires and no host is reserved; with the entry refused (quota, cooldown) it
     reserves; no other lease lands on the machine between registration and the commit.
+
+**Phase K. Hosts that run many jobs** ([hosts.md](hosts.md), D56 to D65). Step 59 needs share leases (step 29) and step 44; steps 61 to 63
+need the hierarchy (steps 30c and 31c).
+
+59. Packing and demand. Share and run bookings are placed by fit and `FirstFit` over the pool's hosts, and the scaler's demand is the
+    empty hosts the unplaced bookings need; ucdk Job classes are admitted `Book` at the declared size. *Proves:* invariants H1 and H2 over
+    seeded runs; 500 small jobs on two idle hosts launch nothing; nine hosts' worth launch nine; a ucdk class previously `BookAll` shares a
+    host; the previous pools and lease files load unchanged.
+60. Host facts for VMs. The core keys `virt` and `lifecycle`, launch options with declared facts, the agent's probe that lowers `vms`, the
+    scaler counting a VM request as demand only from an option that declares it. *Proves:* H3 and H4; a lying option serves containers only
+    and alerts; a `guest` constraint on the new keys is `constraint-bad-scope`.
+61. Launch options, price and capacity as data. `launch_options` and the optional `option` on `AcquireSpec`; the choice by price, capacity
+    signal, id; a refusal cools the option down. *Proves:* H7 (price never refuses); the dearer option is taken only when the cheaper is
+    refused; a provider without `launch_options` behaves as before.
+62. Spot hosts. The `Interruption` event from `events()`, the `reclaim` taint, `host_leaving` and `leaves_at` on the renewal answer, the
+    requeue of unstarted runs, the give-up at the deadline, the brake exclusion. *Proves:* H5 on the fake aws and the fake agent, including
+    a restart between the notice and the deadline, a reservation dropped without a give-up, and a storm of notices that does not trip the
+    taint brake.
+63. Tiers and further kinds. The nested `providers` entry, the price-unit check, per-tier fall-through, and the `gcp`, `azure` and on-prem
+    kinds behind the trait, each with a fake. *Proves:* H8; a flat file is unchanged; the layering test still finds no cloud name in the
+    core; two kinds of one tier choose by price and fall through on refusal and on outage.
+64. The cap-time swap and scale-down ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first
+    instance; the per-minute pool sample; the swap trigger and the pool keys `swap_window`, `scale_down_window`, `scale_down_util`,
+    `swap_drain_grace` and `max_evictions`; the victim choice (expected drain, then smallest) and its protected hosts; launch before drain;
+    drain, then terminate when empty or at the grace; the `evict` taint, the `evicted` attempt outcome that
+    charges no budget; the walk down the catalog on no capacity; the `retire` scale-down. *Proves:* H9 to H14 on the fake aws and the fake
+    agent, including a restart mid-window, a reclaim notice on the new host mid-window, and a swap with a whole-node request held and queued.

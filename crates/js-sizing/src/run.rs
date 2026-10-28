@@ -114,6 +114,29 @@ pub enum Discard {
 pub struct Observed {
     /// Whether the run entered the memory samples.
     pub memory: Result<(), Discard>,
-    /// Whether the run entered the CPU samples.
-    pub cpu: bool,
+    /// What became of the run's CPU measurement.
+    pub cpu: CpuSample,
+}
+
+/// What [`crate::Summaries::observe`] did with a run's CPU measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CpuSample {
+    /// Kept: the node's CPU pressure was known and below the threshold.
+    Kept,
+    /// Kept although the pressure was high or unknown, because it exceeded the key's
+    /// current estimate (a cold key's estimate is its cold cost).
+    Raised,
+    /// Dropped: the pressure was high or unknown and the sample did not exceed the
+    /// estimate.
+    Dropped,
+    /// Not a CPU measurement: not a success, a wall time under one second, or no CPU
+    /// time read.
+    Skipped,
+}
+
+impl CpuSample {
+    /// Whether the sample entered the key's CPU samples.
+    pub fn entered(self) -> bool {
+        matches!(self, Self::Kept | Self::Raised)
+    }
 }

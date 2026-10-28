@@ -13,7 +13,7 @@ use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig};
+use js_registry::{Credential, PoolConfig, WholeNodeConfig};
 
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
@@ -294,6 +294,7 @@ impl Config {
         let token = read_token(&cli.token_file)?;
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
+        let settings = with_pool_settings(settings, &hosts)?;
         Ok(Self {
             listen: cli.listen,
             state_file: cli.state_file,
@@ -330,6 +331,30 @@ impl Config {
     pub fn tick_period(&self) -> Duration {
         self.tick
     }
+}
+
+/// `settings` with what the registered pool's file decides about whole-node leases: the
+/// time a lease waits, pending, for its host to be ready is the pool's `prepare_timeout`
+/// (the lease table counts it; the registry counts the same figure per commit). A pool
+/// without whole-node settings, or no registered pool, leaves `settings` as the flags
+/// made them.
+fn with_pool_settings(settings: Settings, hosts: &Hosts) -> Result<Settings, StartupError> {
+    match hosts {
+        Hosts::Layered { agents, .. } => with_whole_node(settings, agents.pool.whole_node()),
+        Hosts::Static(_) => Ok(settings),
+    }
+}
+
+fn with_whole_node(
+    settings: Settings,
+    whole: Option<&WholeNodeConfig>,
+) -> Result<Settings, StartupError> {
+    let Some(whole) = whole else {
+        return Ok(settings);
+    };
+    settings
+        .with_prepare_timeout(Duration::from_millis(whole.prepare_timeout_ms))
+        .map_err(|err| StartupError::new("--agent-pool-config", err))
 }
 
 /// The sources of hosts the flags name. At least one is required; the two agent flags
@@ -543,5 +568,25 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(Limits::from(&cli), Limits::default());
+    }
+
+    /// Asserts how a pool's whole-node settings reach the lease table's settings: none
+    /// leaves the flags' settings untouched (every figure), a pool's `prepare_timeout`
+    /// replaces only the prepare timeout, and a zero one is a startup error naming the
+    /// pool flag. It catches a pool key that is dropped on the way, and one that also
+    /// disturbs the ttls.
+    #[test]
+    fn a_pools_prepare_timeout_replaces_only_the_prepare_timeout() {
+        let secs = Duration::from_secs;
+        let flags = Settings::new(secs(60), secs(3600)).unwrap();
+        assert_eq!(with_whole_node(flags, None).unwrap(), flags);
+        let mut whole = WholeNodeConfig::dedicated(2);
+        whole.prepare_timeout_ms = 1_200_000;
+        let set = with_whole_node(flags, Some(&whole)).unwrap();
+        assert_eq!(set.prepare_timeout(), secs(1200));
+        assert_eq!((set.default_ttl(), set.max_ttl()), (secs(60), secs(3600)));
+        whole.prepare_timeout_ms = 0;
+        let err = with_whole_node(flags, Some(&whole)).err().unwrap();
+        assert!(err.to_string().contains("--agent-pool-config"), "{err}");
     }
 }

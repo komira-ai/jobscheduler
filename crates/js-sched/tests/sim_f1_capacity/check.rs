@@ -487,7 +487,9 @@ impl Checker {
                     self.touched_workers.insert(worker.clone());
                 }
             }
-            Event::Heartbeat { worker, running } => {
+            Event::Heartbeat {
+                worker, running, ..
+            } => {
                 self.none(effects, "Heartbeat");
                 self.heartbeat(worker, running, sched);
             }
