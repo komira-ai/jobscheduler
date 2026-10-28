@@ -130,6 +130,10 @@ async fn heartbeat(
     // has accepted the beat, so a beat the registry refuses records nothing, and nothing
     // about the load can change the reply.
     let load = heartbeat.load.take();
+    if let Some(l) = &load {
+        let mut l = l.clone();
+        l.vet().map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    }
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be in the state file first: when it cannot be
