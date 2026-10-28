@@ -181,6 +181,54 @@ fn a_curve_shorter_than_its_life_still_reads_the_same_past_l() {
 }
 
 #[test]
+fn a_short_curve_whose_shuffle_ends_on_an_early_minute_still_reads_the_same_past_l() {
+    // Defect: rewriting the stored points to fewer than `L + 1`, so the held tail is the
+    // last shuffled minute instead of the curve's original last point. That differs only
+    // when the last minute of the shuffle comes from before the curve's last stored point,
+    // so the test looks for such draws and requires that there are some.
+    let (c, m) = distinct(3);
+    let before = warm(&c, &m, 6);
+    let mut hit = 0;
+    for seed in 1..=4 {
+        for key in 0..64 {
+            let perm = permutation(seed, KeyIx(key), 6);
+            if perm[5] >= 2 {
+                continue;
+            }
+            hit += 1;
+            let after = permute_belief(&before, seed, KeyIx(key));
+            assert_eq!(
+                reads(&after, 40)[6..],
+                reads(&before, 40)[6..],
+                "seed {seed} key {key}"
+            );
+        }
+    }
+    assert!(
+        hit > 0,
+        "some draw ends the shuffle before the last stored point"
+    );
+}
+
+#[test]
+fn with_curves_refuses_empty_and_mismatched_curves_and_keeps_the_rest() {
+    // Defect: a belief built over no curve, or over a cores curve and a memory curve of
+    // different lengths (a read of one would index past the other).
+    let (c, m) = distinct(4);
+    let b = warm(&c, &m, 4);
+    assert!(b.with_curves(Vec::new(), Vec::new()).is_none());
+    assert!(b.with_curves(vec![1, 2], vec![1, 2, 3]).is_none());
+    assert!(b.with_curves(vec![1, 2, 3], vec![1, 2]).is_none());
+    let same = b
+        .with_curves(vec![5, 6], vec![7, 8])
+        .expect("two of one length");
+    assert_eq!(same.curves(), (&[5u64, 6][..], &[7u64, 8][..]));
+    assert_eq!(same.life_minutes(), b.life_minutes());
+    assert_eq!(same.p_bar_cores_milli(), b.p_bar_cores_milli());
+    assert_eq!(same.is_cold(), b.is_cold());
+}
+
+#[test]
 fn the_area_is_preserved_per_key() {
     // Defect: a shuffle that duplicates a minute (the sum moves) or scales a value.
     let (c, m) = distinct(30);
@@ -407,6 +455,14 @@ fn the_measured_share_is_above_the_registered_floor() {
             "seed {seed}: {} ppm under the floor {DID_ANYTHING_FLOOR_PPM}",
             got.core_minute_ppm()
         );
+        // Pinned, so that the seed reaches both the world and the permutation: a seed that
+        // were dropped on the way would still clear the floor, and would repeat a number.
+        let pinned = [528_604, 524_896, 516_140, 540_010];
+        assert_eq!(
+            got.core_minute_ppm(),
+            pinned[seed as usize - 1],
+            "seed {seed}"
+        );
     }
     // A floor under half of 10% would mean the measure was under the 10% rule.
     const { assert!(DID_ANYTHING_FLOOR_PPM >= 50_000) };
@@ -431,5 +487,7 @@ fn the_ci_subsample_moves_as_much_as_the_floor_asks() {
         got.core_minute_ppm(),
         got.cores_only_ppm()
     );
-    assert!(got.warm > 0 && got.core_minute_ppm() >= DID_ANYTHING_FLOOR_PPM);
+    // The sampled pool itself, so that a widened filter shows.
+    assert_eq!((got.leases, got.warm), (21_434, 13_865));
+    assert!(got.core_minute_ppm() >= DID_ANYTHING_FLOOR_PPM);
 }
