@@ -320,3 +320,22 @@ async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
     );
     assert!(line.contains(&said), "{line} vs {said}");
 }
+
+/// Asserts that the tick alone gives up a reservation that reaches its drain deadline
+/// with the host still busy: no consumer polls after the deadline, yet after one tick the
+/// counts show no reservation and the host listing shows no mark. It catches a tick that
+/// does not bring the registry's marks up to the clock, which would leave the host listed
+/// as reserved, and counted so, until the next poll.
+#[tokio::test]
+async fn the_tick_alone_gives_up_a_reservation_at_its_deadline() {
+    let mut rig = Rig::new("tick_giveup").await;
+    rig.lease().await;
+    rig.ask("r1");
+    assert_eq!(rig.registry.whole_counts().reserved, 1);
+    rig.advance(31);
+    rig.shared.tick().await;
+    assert_eq!(rig.registry.whole_counts().reserved, 0);
+    let body = rig.hosts().await;
+    assert!(!body.contains("\"mark\""), "{body}");
+    assert!(!body.contains("reserved_for"), "{body}");
+}
