@@ -392,13 +392,19 @@ fn a_key_floor_row_keeps_the_larger_ask_and_its_name() {
             ask: 64 << 30,
             stamp: 2,
         },
-        None,
+        Some("est/y"),
     );
     store.land(&row, Txn::new().put(row.clone(), other, Cond::Any));
     let lost = rows.requeued(&killed(7, 0), None, None, &raise(48 << 30, 11), None);
     assert!(matches!(lost, Err(StateError::Conflict(_))), "{lost:?}");
     write(&rows, &raise(48 << 30, 11));
-    assert_eq!(stored().0.ask, 64 << 30, "a key floor was lowered");
+    let (held, names) = stored();
+    assert_eq!(held.ask, 64 << 30, "a key floor was lowered");
+    assert_eq!(
+        names,
+        [(9, "est/y".to_owned())],
+        "the other's name was lost"
+    );
 }
 
 /// Asserts that a give-up that raises a floor, and one that raises a key floor, write over a

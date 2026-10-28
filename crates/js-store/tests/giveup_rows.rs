@@ -243,11 +243,15 @@ fn the_rows_of_the_golden_file_load_and_a_version_1_fate_is_replaced_by_a_versio
 
     rows.granted(&grant_of(5, 1)).expect("grant");
     store.asked();
-    let kept = FloorChange::default();
-    rows.requeued(&silent(5, 1), None, Some(&fate()), &kept, None)
+    let none = FloorChange::default();
+    rows.requeued(&silent(5, 1), None, Some(&fate()), &none, None)
         .expect("a give-up over a version 1 fate");
     let replaced = store.get("fate/0000000000000005").expect("read");
-    assert_eq!(replaced.expect("a row").value[0], 2);
+    let version_2 = kept
+        .iter()
+        .find(|(key, _)| key == "fate/0000000000000004")
+        .map(|(_, value)| value.clone());
+    assert_eq!(Some(replaced.expect("a row").value), version_2);
     let asked = store.asked();
     assert!(
         shape(&asked[0]).contains(&"put fate/0000000000000005 cond=version ttl=-".to_owned()),
