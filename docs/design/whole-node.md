@@ -214,7 +214,7 @@ counts one pool: every worker that serves whole-machine leases, of every platfor
 `max_draining` as a Linux one). A quiet take adds one whole host and drains none, so the ceiling and `keep_for_ordinary` apply to it and
 `max_draining` does not; a request that already holds a mark takes a quiet host whatever the caps, since its mark is already counted. The
 last-capable rule is applied to marks only: an ordinary request queued ahead that a quiet host could run is placed on it before the
-whole-node request is reached. A request a cap stops stays queued and `whole_wait` names the cap. `js-sched` has no notion of a consumer,
+whole-node request is reached (narrow caveat: an older ordinary request that is capable by facts but blocked by admission, or left over by the round's placement limit, is not placed first, so a quiet take can take its last capable host). A request a cap stops stays queued and `whole_wait` names the cap. `js-sched` has no notion of a consumer,
 so `max_whole_node_per_consumer` is not enforced there; the setting is read and ignored. It is enforced where the caller's identity exists
 (K7): the lease server or the registry. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
 rule does not read it as taking a host from the request that holds it.*

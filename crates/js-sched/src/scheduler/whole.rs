@@ -445,7 +445,10 @@ impl Scheduler {
     /// counted), and `max_draining` does not apply. A request that already holds a mark
     /// is not checked: its mark is counted, and the take only turns it into a lease.
     /// The last-capable rule is not read here: an older ordinary request that a quiet
-    /// worker could run is placed on it before this request is reached.
+    /// worker could run is placed on it before this request is reached. Narrow caveat:
+    /// an older ordinary request that is capable by facts but blocked by admission, or
+    /// left over by the round's placement limit, is not placed first, so a quiet take
+    /// can take its last capable worker.
     pub(super) fn quiet_take(&self, round: &Round, id: OperationId) -> bool {
         self.whole_node.is_none()
             || self.drain.marks.contains_key(&id)

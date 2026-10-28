@@ -80,6 +80,23 @@ fn one_below_max_whole_node_a_quiet_worker_is_taken() {
     assert_eq!(ask(&mut f), None);
 }
 
+/// Catches: whole requests placed in one round not counted against each other: with one
+/// as the cap and two quiet workers, two requests queued before the same round yield one
+/// grant, and the other waits with the ceiling as its reason.
+#[test]
+fn two_requests_in_one_round_are_one_grant_at_cap_one() {
+    let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
+    let first = f.submit_whole(Some(secs(600)));
+    let second = f.submit_whole(Some(secs(600)));
+    let grants = f.grants();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].operation, first);
+    assert_eq!(
+        f.s.whole_wait(second),
+        Some(WholeWait::Cap(Blocked::Ceiling))
+    );
+}
+
 /// Catches: a request refused for the ceiling forgotten when room returns: it stays
 /// queued, and once the first lease is released it is granted the worker.
 #[test]
