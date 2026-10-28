@@ -5,6 +5,7 @@ use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
 use js_store::test_support::TestCodec;
 use js_store::{RowCodec, StateError, Value, WorkerUp};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -26,6 +27,13 @@ fn grant() -> LeaseGrant {
         lease: LeaseId::new(5, 4),
         operation: OperationId(8),
         worker: WorkerId::new("node-a"),
+        cost: LeaseCost {
+            cpu_millis: 500,
+            memory_bytes: 2 << 30,
+            limit_bytes: 4 << 30,
+            cold: true,
+            key_hash: 0x1234,
+        },
     }
 }
 

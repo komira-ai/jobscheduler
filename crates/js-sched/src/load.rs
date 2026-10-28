@@ -7,7 +7,9 @@ use js_types::sched::Resources;
 
 /// A worker's load; the smaller is the less loaded. The largest of its CPU share, its
 /// memory share and its lease share (its leases of its lease cap, if it reports one) of
-/// what is booked, then how many leases it holds.
+/// what is booked, then how many leases it holds. Under admission by load the figures are
+/// what the load predicate charges the worker before a new lease (measured plus predicted
+/// cost, [`crate::admission`]) instead of what is booked, as exact fractions all the same.
 ///
 /// Both shares count because the node's limits differ in what happens at the end: a node
 /// out of cores runs its actions slowly, a node out of memory kills them. A share is not
