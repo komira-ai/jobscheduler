@@ -250,7 +250,11 @@ fn the_public_least_loaded_rule_is_the_shadow_logs_previous_choice() {
     }
     let mut differs_from_first = false;
     for i in 0..9u64 {
-        r.action(500 + 250 * (i % 4), 2 * GIB, Some(warm(500 + 250 * (i % 4), GIB)));
+        r.action(
+            500 + 250 * (i % 4),
+            2 * GIB,
+            Some(warm(500 + 250 * (i % 4), GIB)),
+        );
         let loads: Vec<(js_types::sched::WorkerId, Load)> = ["a", "b", "c"]
             .iter()
             .map(|name| {

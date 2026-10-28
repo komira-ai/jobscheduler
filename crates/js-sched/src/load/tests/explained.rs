@@ -50,7 +50,10 @@ fn the_squared_and_the_linear_fit_choose_differently_on_a_fixed_case() {
 
 #[test]
 fn the_fit_shape_changes_only_key_5() {
-    let mut hosts = vec![("calm", Host::empty(100_000, BIG_MEMORY).cpu_load(|_| 20_000))];
+    let mut hosts = vec![(
+        "calm",
+        Host::empty(100_000, BIG_MEMORY).cpu_load(|_| 20_000),
+    )];
     let mut busy = Host::empty(100_000, BIG_MEMORY)
         .cpu_load(|s| if s < 12 { 70_000 } else { 30_000 })
         .cpu_new(|_| 20_000)
@@ -153,7 +156,11 @@ fn a_flat_charged_lease_fits_the_same_in_every_shape() {
         host.facts.fit_minutes = 1;
         let fake = Fake::new(vec![("h", host)]);
         let squared = with_fit(&fake, FitShape::Squared, "h").fit();
-        assert_eq!(with_fit(&fake, FitShape::Flat, "h").fit(), squared, "{round}");
+        assert_eq!(
+            with_fit(&fake, FitShape::Flat, "h").fit(),
+            squared,
+            "{round}"
+        );
     }
 }
 
@@ -230,7 +237,10 @@ fn choose_explained_names_the_tie_break_that_decided() {
 
     // Tie-break 3: the headroom over the next five minutes.
     let fake = Fake::new(vec![
-        ("a", twin().cpu_load(|s| if s == 3 { 30_000 } else { 20_000 })),
+        (
+            "a",
+            twin().cpu_load(|s| if s == 3 { 30_000 } else { 20_000 }),
+        ),
         ("b", twin()),
     ]);
     assert_eq!(

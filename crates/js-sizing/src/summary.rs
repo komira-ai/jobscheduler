@@ -298,8 +298,12 @@ impl Summary {
         let kept = usize::try_from(self.n_total).map_or(RING, |n| n.min(RING));
         let runs = &self.minute_ring[..kept];
         let reached = |t: u8| runs.iter().filter(|m| **m >= t).count() * 2 >= kept;
-        let life = (0..LIFE_HORIZON).take_while(|t| kept > 0 && reached(*t)).count();
-        u8::try_from(life).unwrap_or(LIFE_HORIZON).clamp(1, LIFE_HORIZON)
+        let life = (0..LIFE_HORIZON)
+            .take_while(|t| kept > 0 && reached(*t))
+            .count();
+        u8::try_from(life)
+            .unwrap_or(LIFE_HORIZON)
+            .clamp(1, LIFE_HORIZON)
     }
 
     /// Whether the key has at least one CPU sample.
@@ -314,7 +318,12 @@ impl Summary {
         let near_limit = memory_max(run.booked_memory_bytes)
             .is_some_and(|limit| u128::from(peak) * 100 >= u128::from(limit) * NEAR_LIMIT_PERCENT);
         if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near_limit {
-            self.record_memory(peak.min(run.booked_memory_bytes), true, now, minutes_reached(run));
+            self.record_memory(
+                peak.min(run.booked_memory_bytes),
+                true,
+                now,
+                minutes_reached(run),
+            );
         } else {
             self.record_memory(peak, false, now, minutes_reached(run));
         }

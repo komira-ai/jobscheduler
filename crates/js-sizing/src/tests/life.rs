@@ -75,7 +75,11 @@ fn life_follows_the_last_32_runs() {
     let mut walls = vec![reaching(10); 32];
     assert_eq!(life_after(&walls), 11);
     walls.extend(vec![reaching(0); 15]);
-    assert_eq!(life_after(&walls), 11, "17 of 32 runs still reach minute 10");
+    assert_eq!(
+        life_after(&walls),
+        11,
+        "17 of 32 runs still reach minute 10"
+    );
     walls.push(reaching(0));
     assert_eq!(life_after(&walls), 11, "16 of 32 is exactly half");
     walls.push(reaching(0));
