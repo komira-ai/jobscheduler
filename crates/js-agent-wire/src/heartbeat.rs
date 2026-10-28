@@ -217,7 +217,6 @@ pub struct Heartbeat {
     /// [`Heartbeat::validate`] never looks at it; see [`NodeLoad::vet`].
     #[serde(
         default,
-        skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::load::lenient_load"
     )]
     pub load: Option<NodeLoad>,
