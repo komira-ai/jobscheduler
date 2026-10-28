@@ -127,8 +127,11 @@
 //! the `exclusive` module for the sequence and [`lifecycle::Lifecycle::prepare`] for what
 //! quiet means. The agent started by [`run_with`] gives the
 //! session no [`Quiesce`]: the job [`Worker`] does not implement it, so with `--container-bin`
-//! too an `exclusive` lease is ignored (the heartbeat names no phase for it) and jobs go on
-//! as before; a later change implements [`Quiesce`] on the worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
+//! too the session does not follow an `exclusive` lease. Its heartbeats name no lease phase,
+//! `exclusive_ready` or `exclusive_refused`, and the worker's lifecycle refuses every start
+//! (`no-capacity`, reported as `failed_to_start`) while a reply names a lease, since nothing
+//! prepares the host for it; the runs it holds go on. A later change implements [`Quiesce`]
+//! on the worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
 //! until a flag sets it. The VM check of the design is a later change; the readiness hook
 //! (`--readiness-hook`, see `readiness`) wraps the host in [`Hooked`].
 //!

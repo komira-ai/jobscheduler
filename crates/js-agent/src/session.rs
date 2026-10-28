@@ -66,9 +66,12 @@
 //! - A worker that has ended ends the session with [`Step::Failed`].
 //!
 //! - The worker does not implement [`Quiesce`]: a session built for jobs is given no
-//!   [`Session::with_quiesce`] host, so the `exclusive` lease a reply names is ignored. The
-//!   heartbeat carries no `preparing`, `exclusive_ready` or `exclusive_refused`, and the
-//!   jobs go on as they would without the lease.
+//!   [`Session::with_quiesce`] host, so it does not follow the `exclusive` lease a reply
+//!   names. The heartbeat carries no `preparing`, `exclusive_ready` or `exclusive_refused`.
+//!   The worker's lifecycle still reads the lease from each reply, and while a reply names
+//!   one it refuses every start with `no-capacity` (reported as `failed_to_start`), because
+//!   nothing ever prepares the host for it; the runs it already holds go on, and starts are
+//!   accepted again from the first reply that names no lease.
 //!
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
@@ -614,7 +617,11 @@ impl<'a> Session<'a> {
                 self.lost_young = false;
                 // `None` when the lease id the reply names is not acceptable: the agent
                 // then changes nothing.
-                let lease = reply.validate().exclusive.is_ok().then(|| reply.exclusive.clone());
+                let lease = reply
+                    .validate()
+                    .exclusive
+                    .is_ok()
+                    .then(|| reply.exclusive.clone());
                 let followed = lease.and_then(|lease| {
                     let hold = self.hold.as_mut()?;
                     hold.follow(lease.as_deref())

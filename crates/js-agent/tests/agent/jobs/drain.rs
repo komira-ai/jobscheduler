@@ -283,7 +283,7 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
 }
 
 /// The flags that start an agent with containers over `dir`.
-fn container_flags(dir: &Scratch) -> Vec<String> {
+pub fn container_flags(dir: &Scratch) -> Vec<String> {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
     let (user, _, _) = user();
     vec![

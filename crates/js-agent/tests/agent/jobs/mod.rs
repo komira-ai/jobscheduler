@@ -6,6 +6,7 @@
 
 mod drain;
 mod e2e;
+mod exclusive;
 pub mod fake;
 mod session;
 mod system;
