@@ -1091,6 +1091,7 @@ dependencies = [
  "js-registry",
  "js-sched",
  "js-state",
+ "js-testkit",
  "js-types",
  "js-usage",
  "rcgen",

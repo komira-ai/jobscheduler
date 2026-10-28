@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::agents_support::{JOIN, Session, agent_args, join, post};
 use crate::runs_support::{beat, held, lease, queued, result, verdicts};
-use crate::support::{Harness, LogCapture, Scratch, args_with, base_args, config};
+use crate::support::{Harness, LogCapture, Scratch, args_with, base_args, config, logged_with};
 use crate::usage_support::{Fake, Seen, beat_load, load, start_over, start_usage};
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -174,14 +174,15 @@ async fn a_run_queued_without_a_work_key_is_counted_and_nothing_is_learned() {
 
 /// Asserts the log: one `node minute` line for each closed minute of each node (two nodes,
 /// three minutes, six lines), written when the minutes are flushed and not once for each
-/// of the twelve beats that made them. It catches a line per heartbeat, which at twelve
-/// beats a minute a node would drown the log, and a minute logged twice.
+/// of the twelve beats that made them. The beats are handled on the pool for blocking
+/// calls, so the lines are read from the process-wide subscriber, which sees that pool.
+/// It catches a line per heartbeat, which at twelve beats a minute a node would drown the
+/// log, and a minute logged twice.
 #[tokio::test]
 async fn each_closed_node_minute_is_logged_once_and_not_for_each_beat() {
-    let log = LogCapture::start();
     let fake = Arc::new(Fake::default());
     let h = start_usage("usage_log", &fake, &[]).await;
-    let (a, b) = (join(&h, "burst-1").await, join(&h, "burst-2").await);
+    let (a, b) = (join(&h, "logged-1").await, join(&h, "logged-2").await);
     for seq in 1..=3u64 {
         for twice in [0, 10] {
             beat_load(&h, &a, load(seq + twice, seq * 1_000_000, &[])).await;
@@ -189,16 +190,22 @@ async fn each_closed_node_minute_is_logged_once_and_not_for_each_beat() {
         }
         h.clock.advance(MINUTE);
     }
-    assert_eq!(log.text().matches("node minute").count(), 0);
+    let minute_lines = || {
+        let mut lines = logged_with("node minute");
+        lines.retain(|line| line.contains("host=logged-"));
+        lines
+    };
+    assert_eq!(minute_lines().len(), 0, "{:?}", minute_lines());
     let Harness {
         running, scratch, ..
     } = h;
     running.shutdown().await.unwrap();
-    let text = log.text();
-    assert_eq!(text.matches("node minute").count(), 6, "{text}");
+    let lines = minute_lines();
+    assert_eq!(lines.len(), 6, "{lines:?}");
+    let text = lines.join("\n");
     for needle in [
-        "host=burst-1",
-        "host=burst-2",
+        "host=logged-1",
+        "host=logged-2",
         "minute=16",
         "minute=18",
         "cpu_millis=3000",
@@ -352,6 +359,56 @@ async fn a_failing_sink_is_counted_and_the_ticks_go_on() {
     h.ticks.step().await;
     assert_eq!(h.running.usage_counters().faults, 2);
     assert_eq!(get(&h, "/healthz").await.status, 200);
+}
+
+/// Asserts that a reading handed to the sink is handled off the async thread: while the
+/// sink holds one beat's reading (it waits for the test to release it), `/healthz` is
+/// answered, another host's beat with its own reading is served, and the held beat is
+/// answered 200 once released. It catches a sink called on the server's async thread, where
+/// a slow store write would stop every other request, the ticks and the health check.
+#[tokio::test]
+async fn a_reading_held_in_the_sink_does_not_stop_other_requests() {
+    let fake = Arc::new(Fake::default());
+    let h = start_usage("usage_parked", &fake, &[]).await;
+    let (slow, quick) = (join(&h, "burst-1").await, join(&h, "burst-2").await);
+    let (mut arrived, release) = fake.park_next_reading();
+    let parked = beat_load(&h, &slow, load(1, 1000, &[]));
+    let meanwhile = async {
+        arrived.recv().await.unwrap();
+        assert_eq!(get(&h, "/healthz").await.status, 200);
+        let other = beat_load(&h, &quick, load(1, 1000, &[])).await;
+        assert_eq!(other.status, 200, "{}", other.body);
+        release.send(()).unwrap();
+    };
+    let (reply, ()) = tokio::join!(parked, meanwhile);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(!fake.read_inline());
+    assert_eq!(fake.seen().len(), 2);
+}
+
+/// Asserts that a sink that panics on a reading costs the beat nothing: the beat that
+/// carries both the load and a result is answered 200 with the result accepted, and the
+/// panic is counted as a fault. It catches a panic that fails the reply after the registry
+/// accepted the beat, which makes the agent send the result again to be told it is a
+/// duplicate.
+#[tokio::test]
+async fn a_sink_that_panics_on_a_reading_costs_the_beat_nothing() {
+    let fake = Arc::new(Fake::default());
+    let h = start_usage("usage_panic", &fake, &[]).await;
+    let me = join(&h, "burst-1").await;
+    beat(&h, &me, &[], &[]).await;
+    let lease = lease(&h).await;
+    let run = queued(&h, &lease, 1000).await;
+    beat(&h, &me, &[], &[]).await;
+    fake.panic_on_readings();
+    let mut body = me.beat();
+    body["held"] = json!([held(&run, "exited_unacked")]);
+    body["results"] = json!([result(&run, &lease)]);
+    body["load"] = load(1, 1000, &[0]);
+    let reply = post(&h, "/v1/agent/heartbeat", Some(JOIN), &body).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(verdicts(&reply.json()), [format!("{run} ACCEPTED")]);
+    assert_eq!(h.running.usage_counters().faults, 1);
 }
 
 /// Asserts that the server as started by its flags records into a file and offers admission
