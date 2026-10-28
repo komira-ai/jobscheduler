@@ -206,6 +206,7 @@ impl Engine {
     /// placement follows at once), and carries out the effects in order. Returns the
     /// answers, for the caller to deliver once the lock is released.
     fn carry_out(&mut self, a: &mut dyn Adapter, now: FarmTime, event: Event) -> Vec<Answer> {
+        a.clock(now);
         self.hold_placements(now);
         self.watch_store(now);
         self.claim_pending(a, now);

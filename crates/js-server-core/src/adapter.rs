@@ -21,10 +21,12 @@ use std::time::Duration;
 use js_sched::{DaemonInstance, NodePhase, Request, Requeue, Scheduler};
 use js_store::Ending;
 use js_types::sched::{
-    Answer, Effect, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId, WorkerId,
+    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId,
+    WorkerId,
 };
 
 use crate::host::Stream;
+use crate::report::{Report, Taken};
 
 /// Work to do once the core's lock is released: what settling an answer leaves, such as
 /// writing a result to a cache and then telling the callers.
@@ -101,6 +103,53 @@ impl<'a> View<'a> {
 
 /// Everything the core asks of the server around it. See the module documentation.
 pub trait Adapter: Send {
+    /// The farm time of the feed about to start, called at the top of every feed that is
+    /// carried out (a fenced core feeds nothing, so it is not called), before the scheduler
+    /// sees the input and before any other hook of the feed. An adapter that keeps a
+    /// clock for work it does later reads it here. Does nothing by default.
+    fn clock(&mut self, _now: FarmTime) {}
+
+    /// `worker`'s `report` is about to be fed, under the same hold of the lock as the feed
+    /// and its [`Adapter::after_report`], so no tick or heartbeat can finish the operation
+    /// between them. The `view` shows the operation as it stands before the feed: still
+    /// open, with its waiters, which a report that finishes it hands to the answer and
+    /// drops. `now` is the report's farm time; [`Adapter::clock`] is told it by the feed
+    /// that follows, so an adapter's own clock may still hold the previous feed's time
+    /// here. Called once for each [`Core::report`](crate::Core::report), whatever becomes
+    /// of the report: a stale or duplicate one (that a [`Core::standing`](crate::Core::standing)
+    /// check let through before a concurrent change) is seen here too, and is
+    /// [`Taken::Refused`] or [`Taken::Dropped`] in `after_report`. A report that `standing`
+    /// refused is not passed to `Core::report` by the host, and calls neither. A fenced core
+    /// ([`Core::fence`](crate::Core::fence)) is hooked too, with no [`Adapter::clock`] call
+    /// before it or between the hooks: it feeds nothing, so `after_report` gets no answers
+    /// and `Taken::Refused(Reason::Stale)`. Does nothing by default.
+    fn before_report(
+        &mut self,
+        _view: &View<'_>,
+        _now: FarmTime,
+        _worker: &WorkerId,
+        _report: &Report,
+    ) {
+    }
+
+    /// `worker`'s `report` was fed, and `taken` says how the scheduler took it; `answers`
+    /// are the operations it finished (this one, or others a held answer released), not
+    /// yet settled: [`Adapter::settle`] follows for each. `now` is the same farm time
+    /// `before_report` was given. On a fenced core nothing was fed, `answers` is empty and
+    /// `taken` is `Taken::Refused(Reason::Stale)`. Called once for each
+    /// [`Core::report`](crate::Core::report), after the matching
+    /// [`Adapter::before_report`]. Does nothing by default.
+    fn after_report(
+        &mut self,
+        _view: &View<'_>,
+        _now: FarmTime,
+        _worker: &WorkerId,
+        _report: &Report,
+        _answers: &[Answer],
+        _taken: Taken,
+    ) {
+    }
+
     /// Whether the connection of `worker`'s stream `stream` is still open. Asked when the
     /// worker registers again, to tell a daemon that restarted from one that is still
     /// connected.
