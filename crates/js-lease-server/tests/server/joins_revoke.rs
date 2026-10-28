@@ -5,9 +5,11 @@ use std::fs;
 
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, hosts, listed, post_raw, restarted, session, start_agents};
+use crate::agents_support::{JOIN, hosts, listed, restarted, session, start_agents};
 use crate::joins::{MINT, beat_with, code, hello, mint, minted};
 use crate::support::{Harness, LogCapture, Reply, TOKEN, request};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// `DELETE` of the revoke route with the client token.
 async fn revoke(h: &Harness, instance: &str) -> Reply {
@@ -157,10 +159,20 @@ async fn the_revoke_log_and_reply_never_hold_the_token() {
 async fn the_mint_answer_is_not_stored() {
     let h = start_agents("joins_mint_no_store", false).await;
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" }).to_string();
-    let raw = post_raw(&h, MINT, TOKEN, body.as_bytes(), None).await;
-    assert_eq!(raw.status, 201, "{}", raw.body);
-    assert!(raw.head.contains("cache-control: no-store"), "{}", raw.head);
-    let _: Value = serde_json::from_str(&raw.body).unwrap();
+    let head = format!(
+        "POST {MINT} HTTP/1.1\r\nHost: t\r\nConnection: close\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = TcpStream::connect(h.addr()).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut bytes = Vec::new();
+    let _ = stream.read_to_end(&mut bytes).await;
+    let text = String::from_utf8_lossy(&bytes).to_ascii_lowercase();
+    let (head, reply) = text.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("http/1.1 201"), "{head}");
+    assert!(head.contains("cache-control: no-store"), "{head}");
+    let raw_body = reply;
+    let _: Value = serde_json::from_str(raw_body).unwrap();
     let again = mint(&h, "i-2").await;
     assert_eq!(again.status, 201);
 }

@@ -78,7 +78,7 @@ async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered()
             .expect("the second hello is accepted");
     };
     let first = serve_hello(&agents, who.clone(), true, Ok(body("host-a")), &second).await;
-    let refused = first.err().expect("the registry refuses the first hello");
+    let refused = first.expect_err("the registry refuses the first hello");
     assert_eq!((refused.status.as_u16(), refused.error), (409, "host-live"));
     assert_eq!(agents.joins.serves(&who, "host-a"), Ok(()));
     let other = agents.joins.admit(&who, "host-b", Some(&instance()));
