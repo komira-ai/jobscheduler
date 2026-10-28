@@ -18,6 +18,8 @@ use js_usage::RunMinute;
 struct Flaky {
     inner: Fake,
     fail: Arc<AtomicBool>,
+    /// Whether the scan of a prefix (how the profile store opens) fails.
+    scan_fails: bool,
 }
 
 impl Store for Flaky {
@@ -33,6 +35,9 @@ impl Store for Flaky {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        if self.scan_fails {
+            return Err(StoreError::Failed("down".to_string()));
+        }
         self.inner.scan_prefix(prefix)
     }
 
@@ -64,6 +69,7 @@ fn sink() -> (NodeUsage, Arc<AtomicBool>) {
     let store = Flaky {
         inner,
         fail: fail.clone(),
+        scan_fails: false,
     };
     (NodeUsage::over(Arc::new(store), 1 << 20, 0).unwrap(), fail)
 }
@@ -248,4 +254,43 @@ fn the_sink_reads_back_rows_and_profiles() {
     sink.flush(102).unwrap();
     assert_eq!(sink.node_rows(&host(), 0, 200, 100).unwrap().len(), 2);
     assert_eq!(sink.node_rows(&host(), 0, 200, 0).unwrap().len(), 1);
+}
+
+/// Asserts that a usage file that cannot be opened (its directory does not exist) refuses
+/// the start and names `--usage-db`. It catches a server that starts without its store
+/// and silently records nothing.
+#[test]
+fn a_usage_file_that_will_not_open_refuses_the_start_naming_the_flag() {
+    let setup = StoreSetup {
+        db: PathBuf::from("/nonexistent-usage-directory/usage.db"),
+        profile_store_bytes: 1 << 20,
+    };
+    let refused = open(&setup, 0).err().unwrap();
+    assert_eq!(refused.flag(), "--usage-db");
+}
+
+/// Asserts that a start whose usage file cannot be opened is refused with the flag that
+/// names the file, and so is one whose stored profiles cannot be read. It catches a
+/// server that starts without usage after the operator asked for it, and a refusal
+/// that names another flag.
+#[test]
+fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
+    let setup = StoreSetup {
+        db: PathBuf::from("."),
+        profile_store_bytes: 1 << 20,
+    };
+    let err = open(&setup, 0)
+        .err()
+        .expect("a directory is not a usage file");
+    assert_eq!(err.flag(), "--usage-db");
+    let store = Flaky {
+        inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
+        fail: Arc::new(AtomicBool::new(false)),
+        scan_fails: true,
+    };
+    let err = sink_over(Arc::new(store), &setup, 0)
+        .err()
+        .expect("a store that cannot be scanned");
+    assert_eq!(err.flag(), "--usage-db");
+    assert!(err.reason().contains("down"), "{}", err.reason());
 }
