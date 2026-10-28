@@ -296,6 +296,8 @@ impl Binner {
     ///
     /// A minute that lies wholly inside the window has no sample of its own, so it takes
     /// the larger of the working sets the window is bracketed by: nothing is invented.
+    /// The first part belongs to the minute already open, which keeps its own samples, and
+    /// the last is filled by the sample that ends the window; neither takes the bracket.
     fn split(&mut self, id: &str, state: &mut LeaseState, at: (u64, u64), ws: u64) {
         let (now, cpu) = at;
         let delta = cpu - state.last_cpu;
@@ -304,7 +306,7 @@ impl Binner {
         let last = parts.len().saturating_sub(1);
         for (n, part) in parts.into_iter().enumerate() {
             self.roll(id, state, part.minute);
-            if n < last {
+            if 0 < n && n < last {
                 state.open.ws_max = state.open.ws_max.max(bracket);
             }
             state.open.cpu_usec += part.cpu_usec;
