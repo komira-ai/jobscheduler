@@ -29,9 +29,6 @@ fn refusal(result: Result<impl std::fmt::Debug, ClientError>) -> Refusal {
     }
 }
 
-/// Catches a skipped or partial token check (a prefix compare, a length-only check):
-/// a token that differs in its last byte is refused, the connection is closed, and the
-/// agent still serves the right token next.
 /// Asserts that two shares made under one name are two directories: the second one's
 /// set-up does not remove the first one's files. It catches a path named by the test
 /// alone, which two tests of one name, or two runs of one test binary at once, would
@@ -46,6 +43,9 @@ fn shares_of_one_name_are_separate() {
     assert_eq!(std::fs::read(first.inputs.join("f")).unwrap(), b"one");
 }
 
+/// Catches a skipped or partial token check (a prefix compare, a length-only check):
+/// a token that differs in its last byte is refused, the connection is closed, and the
+/// agent still serves the right token next.
 #[test]
 fn a_wrong_token_is_refused_and_the_right_one_still_works() {
     let shares = Shares::new("token");

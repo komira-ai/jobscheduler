@@ -8,10 +8,10 @@
 //!   user, since it refuses root) it reports `System`. The daemon is the control: an
 //!   agent that always said `Aqua` would pass the first check alone.
 //!
-//! Every test but the scratch-name check is `#[ignore]`: each needs root. CI runs them with `cargo xtask sudo-test
-//! -p kbf-guest --test as_root`, which builds this file as the runner's user and runs
-//! the binary through `sudo -n` with `--ignored` (GitHub's hosted runners allow
-//! passwordless sudo).
+//! Every test but the scratch-name check is `#[ignore]`: each needs root. CI runs them
+//! with `cargo xtask sudo-test -p kbf-guest --test as_root`, which builds this file as
+//! the runner's user and runs the binary through `sudo -n` with `--ignored` (GitHub's
+//! hosted runners allow passwordless sudo).
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -70,11 +70,6 @@ fn run_bounded(args: &[std::ffi::OsString]) -> Output {
     child.wait_with_output().expect("collected kbf-guest")
 }
 
-/// Catches the root refusal skipped, or reported with a status a supervisor reads as
-/// success or as a crash: as root, `session` and `serve` each exit 2 with the refusal,
-/// and `serve` does not create its socket first. The token file holds a valid token,
-/// so a `serve` that skipped the refusal would bind its socket: the socket check
-/// catches that on its own, before the exit status is read.
 /// Asserts that two scratch directories made under one name are two directories: the
 /// second one's set-up does not remove the first one's files and dropping the second does
 /// not remove the first. It needs no root, so it is not ignored.
@@ -93,6 +88,11 @@ fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
     assert_eq!(std::fs::read(kept).unwrap(), b"one");
 }
 
+/// Catches the root refusal skipped, or reported with a status a supervisor reads as
+/// success or as a crash: as root, `session` and `serve` each exit 2 with the refusal,
+/// and `serve` does not create its socket first. The token file holds a valid token,
+/// so a `serve` that skipped the refusal would bind its socket: the socket check
+/// catches that on its own, before the exit status is read.
 #[test]
 #[ignore = "needs root: run by `cargo xtask sudo-test -p kbf-guest --test as_root`"]
 fn as_root_every_subcommand_refuses_and_exits_2() {
