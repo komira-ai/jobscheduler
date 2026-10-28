@@ -20,15 +20,15 @@ whatever state the host is in, it is never drained for, and it has no cap. A who
 4. **Capped.** Pool limits (section 6) bound how many hosts are reserved or held whole, so whole-node requests cannot starve a pool.
 
 **Admission.** The class is admitted as `Admission::Whole` (6.2): the request needs a host with no lease and no run and books all of it.
-`BookAll` stays as it is (book every dimension of a host that is free, no overcommit) and is what ucdk Job classes use (D7); it has no
-reservation, no quiet gate, no drain and no cap. A `BookAll` start is never queued or marked, so it is unaffected unless a whole-node request waits in the same pool: then it is turned away from a host marked for that request, like any start that is not the request's own. `Whole` is `BookAll` plus those four, and nothing else about it differs.
+`BookAll` stays as it is (book every dimension of a host that is free, no overcommit); ucdk Job classes are to stop using it (step 59), booking their
+declared size and sharing a host (D7, D56); it has no reservation, no quiet gate, no drain and no cap. A `BookAll` start is never queued or marked, so it is unaffected unless a whole-node request waits in the same pool: then it is turned away from a host marked for that request, like any start that is not the request's own. `Whole` is `BookAll` plus those four, and nothing else about it differs.
 
 **How the old names relate (D46).**
 
 | Name | Meaning now |
 |---|---|
 | kbf `LeaseKind::WholeMachine`, class `whole_machine` | kbf's name for this class; the consumer's configuration maps it to class `whole-node` (9.4) |
-| `gpu-host`, admitted `BookAll` (the merged lease service, D32) | a **retained alias**: a whole-node class whose id stays `gpu-host` and whose `min_gpus` stays 1. It is still accepted, still reported under the id `gpu-host`, and still refuses a host without a GPU with the merged text (`class gpu-host needs at least 1 gpus`). Only its admission semantics unify with `whole-node`: it gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. Generic `whole-node` has `min_gpus` 0 (a pool of performance machines needs no GPU); GPU-ness of a request comes from its constraints (`gpus > 0`, `gpu_class`). No merged assertion changes: `classes()`, the error text and requests with class `gpu-host` are as merged. |
+| `gpu-host`, whole-node admission (merged as `BookAll`, which `Whole` extends; the merged lease service, D32) | a **retained alias**: a whole-node class whose id stays `gpu-host` and whose `min_gpus` stays 1. It is still accepted, still reported under the id `gpu-host`, and still refuses a host without a GPU with the merged text (`class gpu-host needs at least 1 gpus`). Only its admission semantics unify with `whole-node`: it gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. Generic `whole-node` has `min_gpus` 0 (a pool of performance machines needs no GPU); GPU-ness of a request comes from its constraints (`gpus > 0`, `gpu_class`). No merged assertion changes: `classes()`, the error text and requests with class `gpu-host` are as merged. |
 | a node lease of class `action` or `vm` that books the shape of a host | not whole-node. It is a share whose size equals the host; nothing else fits beside it, but it gets no quiet start, no reservation, no drain and no cap, and it counts nothing against the whole-node caps. kbf's standing node leases (step 34b) are these. |
 
 The GPU path is this class: a GPU request is served only as a whole-node lease on a pool whose shape has a GPU (the Mac Studio machines of
@@ -235,7 +235,16 @@ now, a reservation on a busy host. The acquire is recorded with the request id; 
 at once, before any other work can be placed on it (reserved at birth). A launch counts as a whole host against the ceiling from the
 acquire, and `max_machines` counts it as for any launch. If a busy host becomes quiet while the machine boots, the request takes the host
 and the booting machine is kept and released by the idle rule (D40). A machine that served a whole-node lease is checked at its end and
-is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released.
+is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released. A host that carries
+many bookings is drained like any other (section 3); a whole-node lease on a spot host can be lost to a reclaim, the loss case of
+section 9 ([hosts.md](hosts.md), sections 5 and 6).
+
+**An elastic pool at its machine cap (D62 to D65, [hosts.md](hosts.md) section 11).** When the pool is at `max_machines` and its queue keeps
+growing, the scheduler drains one elastic machine, lets its jobs finish for up to a grace, then terminates it and requeues the rest. It never picks a host that holds a
+whole-node lease or a reservation (the next smallest is taken), and it checks the ceiling of section 6 by host count: it does not remove a
+host if that would push the ceiling below the hosts reserved plus held. An eviction is not a reservation and counts toward neither
+`max_draining` nor `keep_for_ordinary`. A whole-node request that no live host is big enough for is demand like any other, and the biggest
+type launched may serve it (D50).
 
 ## 8. During and at the end
 

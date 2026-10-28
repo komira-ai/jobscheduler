@@ -37,7 +37,9 @@ sender that lists `16` and `16.0` is read as listing it once.
 | `xcode` | `set_version` | the versions of the Xcode applications installed |
 | `sim.ios`, `sim.tvos`, `sim.watchos`, `sim.visionos` | `set_version` | the simulator runtime versions installed, one key per platform |
 | `base_images` | `set_text` | the names of the primed VM base images the host holds (5.14) |
-| `vms` | `count` | the most VMs the host runs at once |
+| `vms` | `count` | the most VMs the host runs at once: the agent's flag, lowered to what its probe allows (hosts.md, section 4) |
+| `virt` | `text` | `none`, `nested` or `bare-metal`: how a VM would run on the host; the provider declares it per launch option and the agent's probe bounds it. Absent is unmet |
+| `lifecycle` | `text` | `on-demand`, `spot` or `registered`: the terms the host was obtained on; a consumer that cannot accept a reclaim constrains it (hosts.md, section 6) |
 | `gpu_class` | `text` | the GPU the host's shape declares (`apple-m` on the Mac Studio machines of the GPU pool); absent on a host with no GPU (GPUs, below) |
 
 An agent reports a key only when it can: a probe that fails reports the key absent and a warning (as the merged GPU probe does). An
