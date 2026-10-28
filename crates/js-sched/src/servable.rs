@@ -327,9 +327,12 @@ impl Servable {
     }
 
     /// The worker among `admitted`, the workers that passed everything including the
-    /// predicate, that the score chooses. Nothing is scored for none or one worker, nor for
-    /// a request that books a whole node (a worker it would own whole is among them): that
-    /// goes by the previous rule, the least loaded.
+    /// predicate, that the score chooses. A worker the request would own whole
+    /// ([`Worker::exclusive`], decided per worker) keeps the previous rule and is not
+    /// scored: the score ranks the workers that stay shared, so a mixed pool where the
+    /// request fills a small worker but not a large one scores the large ones. When every
+    /// admitted worker would be owned whole, or the request is not an action, the least
+    /// loaded is taken. Nothing is scored for a single candidate.
     fn scored<'a>(
         adm: &mut Admission,
         workers: &BTreeMap<WorkerId, Worker>,
@@ -337,15 +340,16 @@ impl Servable {
         attempt: &Attempt<'_>,
     ) -> Option<&'a WorkerId> {
         let request = attempt.request;
-        if let [only] = admitted {
-            return Some(only.name);
+        let shared: Vec<&Passed<'a>> = admitted
+            .iter()
+            .filter(|p| request.kind == LeaseKind::Action && !workers[p.name].exclusive(request))
+            .collect();
+        match shared.as_slice() {
+            [] => return least_loaded(&Self::loads(admitted)),
+            [only] => return Some(only.name),
+            _ => {}
         }
-        if request.kind != LeaseKind::Action
-            || admitted.iter().any(|p| workers[p.name].exclusive(request))
-        {
-            return least_loaded(&Self::loads(admitted));
-        }
-        let hosts = admitted
+        let hosts = shared
             .iter()
             .map(|p| {
                 let w = &workers[p.name];
@@ -376,7 +380,7 @@ impl Servable {
             },
             hosts,
         };
-        let names: Vec<&'a WorkerId> = admitted.iter().map(|p| p.name).collect();
+        let names: Vec<&'a WorkerId> = shared.iter().map(|p| p.name).collect();
         let mut scorer = adm.scorer();
         let choice = scorer.choose_among(&model, &names)?;
         adm.count_scored(scorer.evaluations(), &choice);

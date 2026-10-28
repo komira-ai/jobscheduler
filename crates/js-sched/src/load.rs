@@ -453,7 +453,9 @@ fn residual(t: u64, load: u64, new: u64) -> (u128, u128) {
 }
 
 /// The 64-bit FNV-1a hash of `len(lease) as u32 LE, lease, len(worker) as u32 LE,
-/// worker`, where `lease` is the lease's `term-seq` text.
+/// worker`, where `lease` is the lease's `term-seq` text (`1-2`). That is deliberately not
+/// `js_types::sched::LeaseId`'s `Display` (`1.2`): every implementation of the tie-break
+/// hashes this text, and the pinned vectors in the tests fix it.
 fn tie_hash(lease: LeaseId, worker: &WorkerId) -> u64 {
     let lease = format!("{}-{}", lease.term, lease.seq);
     fnv1a(&[lease.as_bytes(), worker.as_str().as_bytes()])

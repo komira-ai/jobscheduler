@@ -371,6 +371,35 @@ fn a_host_that_cannot_take_a_memory_miss_loses_to_a_looser_one_that_can() {
     assert_eq!(unsafe_vs_better_fit(200), "u");
 }
 
+/// `over` is 5% above its CPU capacity at minute 0 (CPU slack, memory safe); the other is
+/// inside 100% and holds `other_memory` of 1,000 bytes. The lease asks 10,000 millicores
+/// and 600 bytes, so a memory miss needs 780 bytes of room.
+fn slack_vs_memory(other_memory: u64) -> (String, bool, bool) {
+    let new = |h: Host| h.cpu_new(|_| 10_000).mem_new(|_| 600);
+    let over = new(Host::empty(100_000, 1_000).cpu_load(at_slot(0, 95_000)));
+    let inside = new(Host::empty(100_000, 1_000)
+        .cpu_load(|_| 50_000)
+        .mem_load(|_| other_memory));
+    let fake = Fake::new(vec![("over", over), ("inside", inside)]);
+    let (over_key, inside_key) = (key(&fake, "over"), key(&fake, "inside"));
+    assert!(over_key.slack > 0 && !over_key.memory_unsafe);
+    assert_eq!(inside_key.slack, 0);
+    (
+        pick(&fake, &["over", "inside"]),
+        inside_key.memory_unsafe,
+        pick(&fake, &["inside", "over"]) == pick(&fake, &["over", "inside"]),
+    )
+}
+
+#[test]
+fn cpu_slack_outranks_the_memory_miss() {
+    // The host inside 100% cannot take the miss (250 + 780 > 1,000) and the host with CPU
+    // slack can: slack is key 1 and the miss key 2, so the host inside 100% wins.
+    assert_eq!(slack_vs_memory(250), ("inside".to_owned(), true, true));
+    // Control: with room for the miss on both, slack alone decides the same way.
+    assert_eq!(slack_vs_memory(200), ("inside".to_owned(), false, true));
+}
+
 #[test]
 fn a_distrusted_host_loses_to_a_trusted_one_with_a_worse_fit() {
     let full = |f: fn(&mut HostFacts)| {

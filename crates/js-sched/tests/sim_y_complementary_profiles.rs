@@ -122,3 +122,76 @@ fn with_key_1_constant_the_flat_lease_goes_to_the_fuller_host_that_does_not_fit(
         "a"
     );
 }
+
+// ---- the shape alone: both hosts inside 100% at every slot, the same memory ----
+
+/// Two 100-core hosts with memory used to the last byte, so the memory leftover is 0 at
+/// every slot and the fit is the CPU leftover squared. The lease asks 10 cores at every
+/// slot and lives `life` minutes. `a` and `b` give the CPU left on each host after the
+/// lease at a slot, in cores.
+fn shapes(life: u8, a: impl Fn(usize) -> u64, b: impl Fn(usize) -> u64) -> Fake {
+    let host = |leftover: &dyn Fn(usize) -> u64| {
+        Host::empty(100_000, MEMORY)
+            .mem_load(|_| MEMORY)
+            .cpu_load(|slot| 90_000 - leftover(slot) * 1_000)
+            .cpu_new(|_| 10_000)
+            .life(life)
+    };
+    let fake = Fake::new(false, vec![("a", host(&a)), ("b", host(&b))]);
+    // Both pass the predicate and neither is over 100% anywhere: key 1 is 0 for both.
+    assert!(fake.admits("a") && fake.admits("b"));
+    let candidates = fake.admitted(&["a", "b"]);
+    let choice = Scorer::default()
+        .choose_among(&fake, &[&candidates[0], &candidates[1]])
+        .expect("a choice");
+    assert!(!choice.slack_used);
+    fake
+}
+
+fn both_orders(fake: &Fake) -> String {
+    let forward = pick(fake, &fake.admitted(&["a", "b"]));
+    assert_eq!(forward, pick(fake, &fake.admitted(&["b", "a"])));
+    forward
+}
+
+#[test]
+fn the_leftover_at_every_minute_of_the_life_counts_not_only_minute_0() {
+    // Leftovers over the three minutes of the life: A 10, 10, 40; B 2, 35, 35. Minute 0
+    // alone prefers B (2 against 10); over the life A is the tighter fit.
+    let fake = shapes(
+        3,
+        |s| [10, 10, 40].get(s).copied().unwrap_or(40),
+        |s| [2, 35, 35].get(s).copied().unwrap_or(40),
+    );
+    assert_eq!(both_orders(&fake), "a");
+}
+
+#[test]
+fn the_leftover_is_squared_so_one_large_gap_costs_more_than_two_small_ones() {
+    // Over two minutes A leaves 20 and 20, B leaves 0 and 40. Added up as they are, B has
+    // the smaller sum (30 * 40 = 1,200 against 61 * 20 = 1,220, weighted); squared, A's
+    // 24,400 is half of B's 48,000.
+    let fake = shapes(
+        2,
+        |s| if s < 2 { 20 } else { 40 },
+        |s| match s {
+            0 => 0,
+            _ => 40,
+        },
+    );
+    assert_eq!(both_orders(&fake), "a");
+}
+
+#[test]
+fn a_gap_in_the_near_minutes_outweighs_a_slightly_larger_gap_in_the_far_ones() {
+    // Thirty minutes of life. A leaves 30 in minutes 0 to 4 and nothing after; B leaves 31
+    // in minutes 25 to 29 and nothing before. Unweighted B's squares are the larger sum
+    // (961 against 900 each); weighted by the minutes' distance A's near gap is 145
+    // against B's 20.
+    let fake = shapes(
+        30,
+        |s| if s < 5 { 30 } else { 0 },
+        |s| if (25..30).contains(&s) { 31 } else { 0 },
+    );
+    assert_eq!(both_orders(&fake), "b");
+}

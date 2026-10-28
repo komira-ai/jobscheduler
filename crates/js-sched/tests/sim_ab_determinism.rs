@@ -5,9 +5,10 @@
 //! figures on a 16-thread and an 88-thread worker, at the tolerance edge, at truncated
 //! lives and at the extremes of `u64`.
 //!
-//! The row also asks for the same answers from the `kbf-sched` copy of the score. That half
-//! is outside this repository and is not asserted here; everything below is the `js-sched`
-//! half.
+//! The row also asks for the same answers from the `kbf-sched` copy of the score, from
+//! golden vectors both repositories load. That half is an open item, not covered: the copy
+//! is outside this repository, and the vectors below are inline Rust here, in no data file
+//! the copy can read. Everything below is the `js-sched` half.
 //!
 //! Exercises: the tie-breaks; the integer arithmetic.
 

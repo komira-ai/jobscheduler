@@ -12,7 +12,7 @@ mod load_rig;
 mod load_world;
 
 use js_sched::{EVALUATIONS_PER_WORKER, Event, LoadConfig, PlacementLoad, Prediction};
-use js_types::sched::{FarmTime, LeaseKind, Resources, StartLease};
+use js_types::sched::{FarmTime, LeaseKind, NodePhase, Resources, StartLease};
 
 use load_rig::{GIB, Rig, caps, w, warm};
 use load_world::{Spec, World};
@@ -32,6 +32,18 @@ enum Mark {
     Drain,
     /// Held for a whole-machine request queued ahead of the small actions.
     Reserved,
+    /// Not serving: it reports memory pressure, so it takes no new lease and keeps its own.
+    Pressure,
+    /// Not serving: its cleanup failed and it is quarantined.
+    Quarantine,
+}
+
+fn phase(mark: Mark) -> NodePhase {
+    match mark {
+        Mark::Pressure => NodePhase::MemoryPressure,
+        Mark::Quarantine => NodePhase::Quarantined("cleanup failed".to_owned()),
+        Mark::Drain | Mark::Reserved => NodePhase::Serving,
+    }
 }
 
 /// Three 8-core, 32 GiB workers. `a` holds two one-core leases predicted at 14 GiB each:
@@ -93,6 +105,13 @@ fn fixture(mark: Mark, others: (u64, u64)) -> Fixture {
             assert_eq!(r.s.reservation(head.unwrap()), Some(&w("a")));
             Vec::new()
         }
+        Mark::Pressure | Mark::Quarantine => {
+            r.feed(Event::Phase {
+                worker: w("a"),
+                phase: phase(mark),
+            });
+            Vec::new()
+        }
     };
     let submitted_at = r.ms / 1_000;
     Fixture {
@@ -144,6 +163,75 @@ fn a_draining_worker_takes_no_small_action_and_is_not_scored() {
     let evaluations = f.r.s.load_counters().score_evaluations - before;
     assert_eq!(evaluations, placed * 2 * EVALUATIONS_PER_WORKER, "b and c");
     assert_eq!(f.r.held("a").len(), 2, "a holds what it held");
+}
+
+/// Shows (worker not serving): `a`, the tightest fit with the lowest future load, reports
+/// memory pressure, and in a second run is quarantined. It is no cordon and no reservation:
+/// only its phase is not `Serving`. No small action goes to it, the score is evaluated for
+/// `b` and `c` alone, and once `a` reports `Serving` again the first action goes to it
+/// (so the phase is what keeps it off).
+#[test]
+fn a_worker_that_is_not_serving_takes_no_small_action_and_is_not_scored() {
+    for mark in [Mark::Pressure, Mark::Quarantine] {
+        let mut open = fixture(mark, FEW);
+        open.r.feed(Event::Phase {
+            worker: w("a"),
+            phase: NodePhase::Serving,
+        });
+        open.small(1);
+        assert_eq!(on(&open.r.round(1_000)), ["a"], "{mark:?}: serving again");
+
+        let mut f = fixture(mark, FEW);
+        let before = f.r.s.load_counters().score_evaluations;
+        let mut placed = 0;
+        for _ in 0..5 {
+            f.small(2);
+            let starts = f.r.round(1_000);
+            assert_eq!(starts.len(), 2, "{mark:?}");
+            assert!(
+                starts.iter().all(|s| s.worker.as_str() != "a"),
+                "{mark:?}: {:?}",
+                on(&starts)
+            );
+            placed += starts.len() as u64;
+        }
+        let evaluations = f.r.s.load_counters().score_evaluations - before;
+        assert_eq!(
+            evaluations,
+            placed * 2 * EVALUATIONS_PER_WORKER,
+            "{mark:?}: b and c"
+        );
+        assert_eq!(f.r.held("a").len(), 2, "{mark:?}: a holds what it held");
+    }
+}
+
+/// Shows (mixed pool): an action that books a small worker's whole memory owns that worker
+/// (`s`, 8 GiB) but only a quarter of each large one (`l1`, `l2`, 32 GiB), and all three
+/// pass the predicate. The score ranks the two workers it would share: the action goes to
+/// one of them, 64 evaluations for each of the two and none for `s`. A request of a large
+/// worker's whole memory is exclusive on all three, is not scored, and goes by the least
+/// loaded rule.
+#[test]
+fn an_action_exclusive_on_one_worker_is_still_scored_over_the_others() {
+    let mut r = Rig::on();
+    r.up("s", Resources::new(8_000, 8 * GIB));
+    r.up("l1", Resources::new(8_000, 32 * GIB));
+    r.up("l2", Resources::new(8_000, 32 * GIB));
+    let before = r.s.load_counters().score_evaluations;
+    r.action(500, 8 * GIB, Some(warm(500, GIB)));
+    let starts = r.round(1_000);
+    assert_eq!(starts.len(), 1);
+    assert_ne!(starts[0].worker.as_str(), "s", "{:?}", on(&starts));
+    assert_eq!(
+        r.s.load_counters().score_evaluations - before,
+        2 * EVALUATIONS_PER_WORKER,
+        "l1 and l2 alone"
+    );
+
+    let before = r.s.load_counters().score_evaluations;
+    r.action(500, 32 * GIB, Some(warm(500, GIB)));
+    assert_eq!(r.round(1_000).len(), 1);
+    assert_eq!(r.s.load_counters().score_evaluations, before, "not scored");
 }
 
 /// Shows (worker held for a whole-machine request): `a`, the tightest fit with the lowest
