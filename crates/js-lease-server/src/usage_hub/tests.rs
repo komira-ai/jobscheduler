@@ -93,13 +93,13 @@ impl UsageSink for Fake {
         _: &HostId,
         from: u64,
         _: u64,
-        _: usize,
+        _: NonZeroUsize,
     ) -> Result<Vec<NodeRow>, UsageFault> {
         self.down()?;
         Ok(vec![row(from)])
     }
 
-    fn key_profile(&self, _: &ProfileKey, _: u64) -> Result<Option<KeyView>, UsageFault> {
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         self.down()?;
         Ok(None)
     }
@@ -563,11 +563,14 @@ fn faults_on_learning_and_on_reads_are_counted() {
     usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)]);
     let host = HostId::new("h1").unwrap();
     let key = ProfileKey::parse("k").unwrap();
-    assert_eq!(usage.node_rows(&host, 5, 9, 10), Ok(vec![row(5)]));
+    assert_eq!(
+        usage.node_rows(&host, 5, 9, NonZeroUsize::MIN),
+        Ok(vec![row(5)])
+    );
     assert_eq!(usage.key_profile(&key), Ok(None));
     fake.fail.store(true, Ordering::SeqCst);
     quiet_beats(&usage, "h1", 2);
-    assert!(usage.node_rows(&host, 5, 9, 10).is_err());
+    assert!(usage.node_rows(&host, 5, 9, NonZeroUsize::MIN).is_err());
     assert!(usage.key_profile(&key).is_err());
     let counts = usage.counters();
     assert_eq!((counts.faults, counts.runs_learned), (3, 0));

@@ -28,6 +28,7 @@
 //! node and minute that had readings dropped.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
@@ -37,7 +38,7 @@ use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::usage::{
-    DropReason, HostLimits, KeySource, KeyView, MinuteIn, NodeRow, Observed, ProfileCurves,
+    DropReason, HostLimits, KeyProfile, KeySource, MinuteIn, NodeRow, Observed, ProfileCurves,
     ProfileKey, RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use crate::usage_map::{host_of, lease_of, load_in};
@@ -434,14 +435,14 @@ impl Usage {
         host: &HostId,
         from: u64,
         to: u64,
-        limit: usize,
+        limit: NonZeroUsize,
     ) -> Result<Vec<NodeRow>, UsageFault> {
         self.guard(self.sink.node_rows(host, from, to, limit))
     }
 
-    /// What is known of `key`. Blocks.
-    pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyView>, UsageFault> {
-        self.guard(self.sink.key_profile(key, self.now_minute()))
+    /// What is stored for `key`. Blocks.
+    pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.guard(self.sink.key_profile(key))
     }
 }
 

@@ -14,6 +14,7 @@
 //! [`NoKeys`] the key source that knows no run's key.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use js_types::{HostId, LeaseId};
@@ -24,8 +25,8 @@ pub use js_usage::Limits as HostLimits;
 /// One closed wall minute of one node.
 pub use js_usage::NodeMinute as NodeRow;
 pub use js_usage::{
-    BadKey, ClockIn, DropReason, LoadIn, MAX_KEY_LEN, MinuteIn, Observed, ProfileCurves,
-    ProfileKey, RunMinute, RunSeries,
+    BadKey, ClockIn, DropReason, Fit, KeyProfile, LoadIn, MAX_KEY_LEN, MinuteIn, Observed,
+    ProfileCurves, ProfileKey, RunMinute, RunSeries,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -60,30 +61,6 @@ pub struct RunEnd {
     pub lease: LeaseId,
     /// What it measured.
     pub series: RunSeries,
-}
-
-/// One point of a cost curve: what a run of this key uses at a minute of its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CurvePoint {
-    /// The minute since the run's start; the last point stands for later minutes.
-    pub minute: u16,
-    /// CPU, in thousandths of a core.
-    pub cores_milli: u32,
-    /// Working set, in bytes.
-    pub ws_bytes: u64,
-}
-
-/// What is known of one key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyView {
-    /// How many runs the profile holds.
-    pub runs: u16,
-    /// The fitted curve, once there are enough runs to fit one.
-    pub curve: Option<Vec<CurvePoint>>,
-    /// The last day (days since the Unix epoch) the key was used.
-    pub last_used_day: u64,
-    /// Whether the key has been idle so long that admission ignores its curve.
-    pub stale: bool,
 }
 
 /// What a sink counts, for [`crate::Running::usage_counters`].
@@ -136,12 +113,12 @@ pub trait UsageSink: Send + Sync {
         host: &HostId,
         from: u64,
         to: u64,
-        limit: usize,
+        limit: NonZeroUsize,
     ) -> Result<Vec<NodeRow>, UsageFault>;
 
-    /// What is known of `key`, or `None` for a key never seen.
-    fn key_profile(&self, key: &ProfileKey, now_minute: u64)
-    -> Result<Option<KeyView>, UsageFault>;
+    /// What is stored for `key` (its run count, its fit once there are enough runs, the
+    /// day it was last used), or `None` for a key never seen.
+    fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault>;
 
     /// The learned curves, for admission to read as its `CurveSource`; `None` for a sink
     /// that learns none.
@@ -178,11 +155,17 @@ impl UsageSink for NoUsage {
         Ok(())
     }
 
-    fn node_rows(&self, _: &HostId, _: u64, _: u64, _: usize) -> Result<Vec<NodeRow>, UsageFault> {
+    fn node_rows(
+        &self,
+        _: &HostId,
+        _: u64,
+        _: u64,
+        _: NonZeroUsize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
         Ok(Vec::new())
     }
 
-    fn key_profile(&self, _: &ProfileKey, _: u64) -> Result<Option<KeyView>, UsageFault> {
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         Ok(None)
     }
 
@@ -245,8 +228,11 @@ mod tests {
         assert_eq!(sink.run_ended(&end, 0), Ok(()));
         assert_eq!(sink.flush(0), Ok(Vec::new()));
         assert_eq!(sink.prune(0), Ok(()));
-        assert_eq!(sink.node_rows(&host, 0, 9, 5), Ok(Vec::new()));
-        assert_eq!(sink.key_profile(&end.key, 0), Ok(None));
+        assert_eq!(
+            sink.node_rows(&host, 0, 9, NonZeroUsize::MIN),
+            Ok(Vec::new())
+        );
+        assert_eq!(sink.key_profile(&end.key), Ok(None));
         assert!(sink.curves().is_none());
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);

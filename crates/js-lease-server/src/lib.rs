@@ -392,7 +392,7 @@ pub use layered::LayeredProvider;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
-    BadKey, ClockIn, CurvePoint, DropReason, HostLimits, KeySource, KeyView, LoadIn, MAX_KEY_LEN,
+    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
     MinuteIn, NoKeys, NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd,
     RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };

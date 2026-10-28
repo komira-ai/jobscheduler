@@ -220,40 +220,45 @@ fn the_prune_moves_the_curves_to_the_day() {
 impl NodeUsage {
     /// The stored rows of `host` from minute `from` to `to`.
     fn range(&self, host: &HostId, from: u64, to: u64) -> Vec<NodeRow> {
-        self.node_rows(host, from, to, 100).unwrap()
+        self.node_rows(host, from, to, NonZeroUsize::new(100).unwrap())
+            .unwrap()
     }
 }
 
 /// Asserts the reads of the sink: a key never seen is unknown; after two runs it has a
-/// count and no curve, after three a curve whose first point is the fit's; it is stale
-/// once idle past the limit; and a limit of zero still returns one row at most. It
-/// catches a curve offered early, a stale flag that is never set, and a zero limit that
-/// panics or returns everything.
+/// count and no fit, after three a fit whose first point is the runs' own; it is stale
+/// once idle past the limit; rows come oldest first inside the asked range and never
+/// more than the limit. It catches a fit offered early, a last-used day that is not the
+/// run's, and a limit or range that is not applied.
 #[test]
 fn the_sink_reads_back_rows_and_profiles() {
     let (sink, _) = sink();
     let key = key_map(&work()).unwrap();
-    assert_eq!(sink.key_profile(&key, 0), Ok(None));
+    assert_eq!(sink.key_profile(&key), Ok(None));
     finished(&sink, &key, 10);
     finished(&sink, &key, 11);
-    let two = sink.key_profile(&key, 12).unwrap().unwrap();
-    assert_eq!((two.runs, two.curve.is_none(), two.stale), (2, true, false));
+    let two = sink.key_profile(&key).unwrap().unwrap();
+    assert_eq!((two.runs, two.fit.is_none()), (2, true));
     finished(&sink, &key, 12);
-    let three = sink.key_profile(&key, 12).unwrap().unwrap();
-    let curve = three.curve.unwrap();
-    assert_eq!((three.runs, curve[0].minute), (3, 0));
-    assert_eq!(curve[0].cores_milli, 1500);
-    let idle = sink
-        .key_profile(&key, 1440 * (js_usage::STALE_DAYS + 5))
-        .unwrap();
-    assert!(idle.unwrap().stale);
+    let three = sink.key_profile(&key).unwrap().unwrap();
+    let fit = three.fit.clone().unwrap();
+    assert_eq!((three.runs, fit.runs), (3, 3));
+    assert_eq!(fit.points[0].cores_milli, 1500);
+    assert!(!three.is_stale(three.last_used_day));
+    assert!(three.is_stale(three.last_used_day + js_usage::STALE_DAYS + 1));
 
     sink.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
     sink.observe(&host(), 1, &reading(2, 20, 15), limits(), 100);
     sink.observe(&host(), 1, &reading(3, 30, 20), limits(), 101);
     sink.flush(102).unwrap();
-    assert_eq!(sink.node_rows(&host(), 0, 200, 100).unwrap().len(), 2);
-    assert_eq!(sink.node_rows(&host(), 0, 200, 0).unwrap().len(), 1);
+    let all = NonZeroUsize::new(100).unwrap();
+    assert_eq!(sink.node_rows(&host(), 0, 200, all).unwrap().len(), 2);
+    let one = sink.node_rows(&host(), 0, 200, NonZeroUsize::MIN).unwrap();
+    assert_eq!(one.len(), 1);
+    assert_eq!(one[0].minute, 100);
+    let late = sink.node_rows(&host(), 101, 200, all).unwrap();
+    assert_eq!(late.iter().map(|r| r.minute).collect::<Vec<_>>(), [101]);
+    assert!(sink.node_rows(&host(), 150, 200, all).unwrap().is_empty());
 }
 
 /// Asserts that a usage file that cannot be opened (its directory does not exist) refuses

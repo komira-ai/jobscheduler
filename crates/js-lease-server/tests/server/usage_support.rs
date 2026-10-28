@@ -2,13 +2,15 @@
 //! is asked, a key source over a map, and the messages an agent sends with a load.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use js_lease_server::{
-    CurvePoint, DropReason, HostLimits, KeySource, KeyView, LoadIn, NodeRow, Observation, Observed,
+    DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, NodeRow, Observation, Observed,
     ProfileKey, RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
+use js_types::sched::usage::MinutePoint;
 use js_types::{HostId, LeaseId};
 use serde_json::{Value, json};
 
@@ -206,7 +208,7 @@ impl UsageSink for Fake {
         host: &HostId,
         from: u64,
         to: u64,
-        limit: usize,
+        limit: NonZeroUsize,
     ) -> Result<Vec<NodeRow>, UsageFault> {
         let state = self.state();
         if state.fail {
@@ -218,14 +220,10 @@ impl UsageSink for Fake {
             .cloned()
             .unwrap_or_default();
         let inside = rows.into_iter().filter(|r| (from..=to).contains(&r.minute));
-        Ok(inside.take(limit).collect())
+        Ok(inside.take(limit.get()).collect())
     }
 
-    fn key_profile(
-        &self,
-        key: &ProfileKey,
-        now_minute: u64,
-    ) -> Result<Option<KeyView>, UsageFault> {
+    fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
         let state = self.state();
         if state.fail {
             return Err(down());
@@ -233,19 +231,22 @@ impl UsageSink for Fake {
         let Some(runs) = state.profiles.get(key.as_str()) else {
             return Ok(None);
         };
-        let curve = (runs.len() >= 3).then(|| {
-            let point = |m: &RunMinute| CurvePoint {
-                minute: u16::try_from(m.minute).unwrap(),
+        let fit = (runs.len() >= 3).then(|| {
+            let point = |m: &RunMinute| MinutePoint {
                 cores_milli: m.cores_milli,
-                ws_bytes: m.ws_bytes,
+                working_set_bytes: m.ws_bytes,
             };
-            runs[0].minutes.iter().map(point).collect()
+            Fit {
+                points: runs[0].minutes.iter().map(point).collect(),
+                runs: u16::try_from(runs.len()).unwrap(),
+                wall_minutes_p90: 1,
+            }
         });
-        Ok(Some(KeyView {
+        Ok(Some(KeyProfile {
             runs: u16::try_from(runs.len()).unwrap(),
-            curve,
-            last_used_day: now_minute / 1440,
-            stale: false,
+            fit,
+            last_used_day: 0,
+            bytes: 0,
         }))
     }
 

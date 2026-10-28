@@ -12,6 +12,7 @@
 //! The routes exist when agents register hosts and `--usage-off` is not given; without
 //! them the paths are unknown routes (404).
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use axum::Json;
@@ -22,11 +23,12 @@ use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use js_types::HostId;
+use js_types::sched::usage::MinutePoint;
 use serde::Serialize;
 use tracing::error;
 
 use crate::api::{Shared, authenticate};
-use crate::usage::{KeyView, NodeRow, ProfileKey, UsageFault};
+use crate::usage::{KeyProfile, NodeRow, ProfileKey, UsageFault};
 use crate::usage_hub::Usage;
 use crate::util::blocking;
 use crate::wire::ApiError;
@@ -39,6 +41,13 @@ const KEYS: &str = "/v1/usage/keys/";
 
 /// The most rows one answer holds; the answer's `next` says where the rest begins.
 pub(crate) const PAGE_ROWS: usize = 1440;
+
+/// How many rows are asked of the store: a page and one more, to tell whether a next page
+/// exists.
+const PAGE_PROBE: NonZeroUsize = NonZeroUsize::MIN.saturating_add(PAGE_ROWS);
+
+/// Minutes in a day, for the day a key was last used.
+const MINUTES_PER_DAY: u64 = 1440;
 
 /// The minutes an answer covers when the request names no range: the last hour.
 const DEFAULT_MINUTES: u64 = 60;
@@ -67,6 +76,15 @@ fn tail<'a>(uri: &'a Uri, prefix: &str) -> &'a str {
 fn host_id(text: &str) -> Option<HostId> {
     let dots = text.chars().all(|c| c == '.');
     HostId::new(text).ok().filter(|_| !dots)
+}
+
+/// The key a path segment names, if it is exactly a key in its canonical spelling and
+/// starts with a letter or a digit: the store admits more (a leading dot or dash), the
+/// route does not, so `.` and `..` never reach it.
+fn key_id(text: &str) -> Option<ProfileKey> {
+    let first = text.bytes().next()?;
+    let starts = first.is_ascii_lowercase() || first.is_ascii_digit();
+    ProfileKey::parse(text).ok().filter(|_| starts)
 }
 
 /// A decimal number of minutes: digits only, and no more than a `u64` holds.
@@ -161,7 +179,7 @@ async fn nodes(State(api): State<UsageApi>, uri: Uri) -> Result<Response, ApiErr
         host_id(tail(&uri, NODES)).ok_or_else(|| ApiError::bad_request("not a valid host id"))?;
     let range = window(parse_query(uri.query())?, api.usage.now_minute())?;
     let (usage, asked) = (api.usage.clone(), host.clone());
-    let rows = blocking(move || usage.node_rows(&asked, range.0, range.1, PAGE_ROWS + 1)).await;
+    let rows = blocking(move || usage.node_rows(&asked, range.0, range.1, PAGE_PROBE)).await;
     let rows = rows.map_err(unavailable)?;
     Ok((StatusCode::OK, Json(page(&host, range, rows))).into_response())
 }
@@ -185,29 +203,37 @@ struct KeyBody {
 }
 
 impl KeyBody {
-    fn of(key: &ProfileKey, view: KeyView) -> Self {
-        let point = |p: crate::usage::CurvePoint| PointView {
-            minute: p.minute,
+    /// The answer for `profile` on day `today`: the curve is the fit's points, point `i`
+    /// being minute `i` of a run's life.
+    fn of(key: &ProfileKey, profile: &KeyProfile, today: u64) -> Self {
+        let point = |(minute, p): (usize, &MinutePoint)| PointView {
+            minute: u16::try_from(minute).unwrap_or(u16::MAX),
             cores_milli: p.cores_milli,
-            ws_bytes: p.ws_bytes,
+            ws_bytes: p.working_set_bytes,
         };
         Self {
             key: key.to_string(),
-            runs: view.runs,
-            curve: view.curve.map(|c| c.into_iter().map(point).collect()),
-            last_used_day: view.last_used_day,
-            stale: view.stale,
+            runs: profile.runs,
+            curve: profile
+                .fit
+                .as_ref()
+                .map(|fit| fit.points.iter().enumerate().map(point).collect()),
+            last_used_day: profile.last_used_day,
+            stale: profile.is_stale(today),
         }
     }
 }
 
 async fn key(State(api): State<UsageApi>, uri: Uri) -> Result<Response, ApiError> {
-    let key = ProfileKey::parse(tail(&uri, KEYS))
-        .map_err(|_| ApiError::bad_request("not a valid key"))?;
+    let key = key_id(tail(&uri, KEYS)).ok_or_else(|| ApiError::bad_request("not a valid key"))?;
     let (usage, asked) = (api.usage.clone(), key.clone());
-    let view = blocking(move || usage.key_profile(&asked)).await;
-    match view.map_err(unavailable)? {
-        Some(view) => Ok((StatusCode::OK, Json(KeyBody::of(&key, view))).into_response()),
+    let profile = blocking(move || usage.key_profile(&asked)).await;
+    match profile.map_err(unavailable)? {
+        Some(profile) => {
+            let today = api.usage.now_minute() / MINUTES_PER_DAY;
+            let body = KeyBody::of(&key, &profile, today);
+            Ok((StatusCode::OK, Json(body)).into_response())
+        }
         None => Err(ApiError::coded(StatusCode::NOT_FOUND, "unknown-key")),
     }
 }
@@ -215,7 +241,7 @@ async fn key(State(api): State<UsageApi>, uri: Uri) -> Result<Response, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage::CurvePoint;
+    use crate::usage::Fit;
 
     /// The error as text: its status, its code and its reason.
     fn shown(err: ApiError) -> String {
@@ -354,38 +380,77 @@ mod tests {
         assert_eq!((more.host.as_str(), more.from, more.to), ("h1", 0, 9));
     }
 
-    /// Asserts the body of a key: the curve is `null` until the sink has one, and its
-    /// points carry the minute, the cores and the bytes under the documented names. It
-    /// catches a renamed field and a curve that is an empty list when it is absent.
+    /// Asserts the body of a key: the curve is `null` until the profile has a fit, its
+    /// points carry the minute (the point's place), the cores and the bytes under the
+    /// documented names, and the key is stale only once idle past the limit on the day
+    /// asked. It catches a renamed field, a curve that is an empty list when it is
+    /// absent, minutes that do not count from zero, and a stale flag read at the wrong
+    /// day.
     #[test]
     fn a_key_body_has_a_null_curve_until_there_is_one() {
         let key = ProfileKey::parse("act.build").unwrap();
-        let none = KeyView {
+        let none = KeyProfile {
             runs: 2,
-            curve: None,
+            fit: None,
             last_used_day: 9,
-            stale: false,
+            bytes: 100,
         };
-        let body = serde_json::to_value(KeyBody::of(&key, none)).unwrap();
+        let body = serde_json::to_value(KeyBody::of(&key, &none, 9)).unwrap();
         let wanted = serde_json::json!({
             "key": "act.build", "runs": 2, "curve": null, "last_used_day": 9, "stale": false
         });
         assert_eq!(body, wanted);
-        let curve = vec![CurvePoint {
-            minute: 0,
-            cores_milli: 1500,
-            ws_bytes: 4096,
-        }];
-        let some = KeyView {
-            runs: 3,
-            curve: Some(curve),
-            last_used_day: 9,
-            stale: true,
+        let point = |cores_milli, working_set_bytes| MinutePoint {
+            cores_milli,
+            working_set_bytes,
         };
-        let body = serde_json::to_value(KeyBody::of(&key, some)).unwrap();
-        let point = serde_json::json!({ "minute": 0, "cores_milli": 1500, "ws_bytes": 4096 });
-        assert_eq!(body["curve"], serde_json::json!([point]));
+        let some = KeyProfile {
+            runs: 3,
+            fit: Some(Fit {
+                points: vec![point(1500, 4096), point(2000, 8192)],
+                runs: 3,
+                wall_minutes_p90: 2,
+            }),
+            last_used_day: 9,
+            bytes: 100,
+        };
+        let body = serde_json::to_value(KeyBody::of(&key, &some, 9)).unwrap();
+        let first = serde_json::json!({ "minute": 0, "cores_milli": 1500, "ws_bytes": 4096 });
+        let second = serde_json::json!({ "minute": 1, "cores_milli": 2000, "ws_bytes": 8192 });
+        assert_eq!(body["curve"], serde_json::json!([first, second]));
+        assert_eq!(body["stale"], false);
+        let idle = 9 + js_usage::STALE_DAYS + 1;
+        let body = serde_json::to_value(KeyBody::of(&key, &some, idle)).unwrap();
         assert_eq!(body["stale"], true);
+    }
+
+    /// Asserts that a key segment is taken only in its canonical spelling and starts with
+    /// a letter or a digit, although the store's grammar admits more. It catches `.` and
+    /// `..` (and a leading dash) reaching a store key, and an escape or a capital naming
+    /// a key twice.
+    #[test]
+    fn a_key_segment_is_a_key_and_not_a_path_trick() {
+        let longest = "a".repeat(128);
+        let over = "a".repeat(129);
+        for good in ["a", "0", "act.build", "a..", "d1_0-9", longest.as_str()] {
+            assert!(key_id(good).is_some(), "{good}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            ".a",
+            "-a",
+            "_a",
+            "A",
+            "a/b",
+            "%2e",
+            "a%2e",
+            "é",
+            over.as_str(),
+        ] {
+            assert!(key_id(bad).is_none(), "{bad:?}");
+        }
     }
 
     /// Asserts that the part of a path after the prefix is the raw text, with escapes left

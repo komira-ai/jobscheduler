@@ -13,7 +13,9 @@ use serde_json::json;
 
 use crate::agents_support::{JOIN, JOIN_B, Session, agent_args, join, post};
 use crate::runs_support::{beat, held, lease, queued, result, verdicts};
-use crate::support::{Harness, LogCapture, Scratch, TOKEN, args_with, base_args, config, request};
+use crate::support::{
+    Harness, LogCapture, Reply, Scratch, TOKEN, args_with, base_args, config, request,
+};
 use crate::usage_support::{Fake, Seen, beat_load, load, start_over, start_usage};
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -365,7 +367,7 @@ async fn a_failing_sink_is_counted_and_the_ticks_go_on() {
 #[tokio::test]
 async fn the_minutes_of_beats_are_rows_after_a_flush() {
     let fake = Arc::new(Fake::default());
-    let h = start_usage("usage_rows", &fake, &[]).await;
+    let h = start_usage("usage_api_rows", &fake, &[]).await;
     let me = join(&h, "burst-1").await;
     beat_load(&h, &me, load(1, 5_000_000, &[])).await;
     h.clock.advance(MINUTE);
@@ -617,4 +619,54 @@ async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
     let fake = Arc::new(Fake::default());
     let other = start_usage("usage_no_curves", &fake, &[]).await;
     assert!(other.running.usage_curves().is_none());
+}
+
+/// Asserts the routes over the real store, with no sink supplied: two beats a minute
+/// apart are rows of their minutes after a flush, in the usage file the flags name, and
+/// are served from it in minute order, within the asked range; a key nothing was learned
+/// under is 404 `unknown-key`. It catches routes that read the wrong store (or a sink
+/// that records but cannot read back), a range not applied by the stored series, and a
+/// missing key answered as an empty profile.
+#[tokio::test]
+async fn the_started_server_serves_the_rows_it_flushed_to_its_file() {
+    let scratch = Scratch::new("usage_file_rows");
+    let args = agent_args(&scratch, false);
+    let h = Harness::over(scratch, config(args).unwrap()).await;
+    let me = join(&h, "burst-1").await;
+    beat_load(&h, &me, load(1, 5_000_000, &[])).await;
+    h.clock.advance(MINUTE);
+    beat_load(&h, &me, load(2, 8_000_000, &[])).await;
+    h.clock.advance(4 * MINUTE);
+    h.ticks.step().await;
+    let all = get(&h, "/v1/usage/nodes/burst-1?from=0&to=100").await;
+    assert_eq!(all.status, 200, "{}", all.body);
+    let minutes = |reply: &Reply| -> Vec<u64> {
+        let rows = reply.json()["rows"].clone();
+        let rows = rows.as_array().unwrap().clone();
+        rows.iter().map(|r| r["minute"].as_u64().unwrap()).collect()
+    };
+    let served = minutes(&all);
+    assert!(!served.is_empty(), "{}", all.body);
+    assert!(
+        served.windows(2).all(|pair| pair[0] < pair[1]),
+        "{served:?}"
+    );
+    let last = *served.last().unwrap();
+    let from_last = get(
+        &h,
+        &format!("/v1/usage/nodes/burst-1?from={last}&to={last}"),
+    )
+    .await;
+    assert_eq!(minutes(&from_last), vec![last]);
+    let after = get(
+        &h,
+        &format!("/v1/usage/nodes/burst-1?from={}&to=100", last + 1),
+    )
+    .await;
+    assert_eq!(minutes(&after), Vec::<u64>::new());
+    let other = get(&h, "/v1/usage/nodes/burst-2?from=16&to=17").await;
+    assert_eq!(other.json()["rows"], json!([]));
+    let key = get(&h, "/v1/usage/keys/act.build").await;
+    assert_eq!(key.status, 404);
+    assert_eq!(key.json(), json!({ "error": "unknown-key" }));
 }
