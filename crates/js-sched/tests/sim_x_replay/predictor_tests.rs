@@ -193,10 +193,10 @@ fn a_key_is_cold_below_three_runs_and_warm_at_three() {
 
 #[test]
 fn a_lease_sees_only_runs_that_ended_strictly_before_it_started() {
-    // Defect: a run visible at the instant it ends (look-ahead by one tick), or one
-    // that becomes visible a tick late. Runs of 1 s start every second, so the lease
-    // starting at 3,000 ms sees the runs that ended at 1,000 and 2,000 (cold) and not the
-    // one ending at 3,000; the one at 4,000 sees three.
+    // Runs of 1 s start every second. The lease starting at 3,000 ms sees the runs that
+    // ended at 1,000 and 2,000 (still cold) and not the one ending at 3,000; the lease at
+    // 4,000 sees three. A run is therefore visible from the tick after it ends, not at the
+    // tick it ends and not later.
     let rows: Vec<Row> = (0..5).map(|i| ok(i * 1_000, 0, 1_000, 1_000, 10)).collect();
     let p = flat(&rows);
     let cold: Vec<bool> = (0..5).map(|i| p.belief(i).is_cold()).collect();
@@ -770,4 +770,88 @@ fn the_learner_does_not_import_the_truth_model() {
     }
     assert!(!src.contains("HashMap") && !src.contains("HashSet"));
     assert!(!src.contains("f64") && !src.contains("f32"));
+}
+
+// ---- the stand-in agrees with the sizing crate's summary ---------------------------------
+
+/// The life the sizing crate's summary reports after one success per entry of `walls_ms`.
+fn sizing_life(walls_ms: &[u64]) -> u8 {
+    use js_sizing::{
+        Basis, Bounds, Cfg, Day, Instance, Key, Outcome as SizingOutcome, PlatformClass, Run,
+        Shape, Summaries,
+    };
+    let key = Key::new(
+        Instance::new("main"),
+        PlatformClass::new("linux-x86_64"),
+        Basis::Cgroup,
+        Shape(7),
+        Some(Cfg(1)),
+    );
+    let mut summaries = Summaries::default();
+    for wall_ms in walls_ms {
+        let run = Run {
+            outcome: SizingOutcome::Success,
+            wall_us: wall_ms * 1_000,
+            peak_memory_bytes: Some(1 << 30),
+            booked_memory_bytes: 4 << 30,
+            raised_memory_bytes: None,
+            limit_hits: 0,
+            swap_peak_bytes: 0,
+            cpu_usage_us: 0,
+            node_cpu_pressure_permille: None,
+        };
+        summaries.observe(&key, &run, Day(100), &Bounds::default());
+    }
+    summaries
+        .get(&key)
+        .map_or(1, js_sizing::Summary::life_minutes)
+}
+
+/// The stand-in over the same runs: the minutes of the last `RING` of them.
+fn standin_life(walls_ms: &[u64]) -> u8 {
+    let reached: Vec<u8> = walls_ms
+        .iter()
+        .map(|w| minutes_reached(&ok(0, 0, *w, 1, 1)))
+        .collect();
+    life_minutes_standin(&reached[reached.len().saturating_sub(RING)..])
+}
+
+#[test]
+fn the_stand_in_reports_the_life_the_sizing_summary_reports() {
+    // The vectors of the summary's own tests, as walls in milliseconds.
+    let reaching = |m: u64| m * MINUTE_MS + 5_000;
+    let vectors: Vec<Vec<u64>> = vec![
+        vec![reaching(0), reaching(3), reaching(3), reaching(5)],
+        vec![reaching(0), reaching(0), reaching(1), reaching(1)],
+        vec![reaching(0), reaching(0), reaching(0), reaching(1)],
+        vec![10_000, 59_999, 2_000],
+        vec![reaching(120); 6],
+        vec![reaching(29); 6],
+        vec![reaching(28); 6],
+    ];
+    for walls in &vectors {
+        assert_eq!(standin_life(walls), sizing_life(walls), "{walls:?}");
+    }
+    // Every length around the ring and walls spread over 0 to 40 minutes, from a fixed
+    // generator, with the minute boundaries and the 255-minute saturation among them.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        state >> 33
+    };
+    for n in 1..=40usize {
+        for spread in [2u64, 5, 41] {
+            let walls: Vec<u64> = (0..n)
+                .map(|_| match next() % 8 {
+                    0 => (next() % spread) * MINUTE_MS + 59_999,
+                    1 => (next() % spread) * MINUTE_MS + 1_000,
+                    2 => 300 * MINUTE_MS,
+                    _ => 1_000 + next() % (spread * MINUTE_MS),
+                })
+                .collect();
+            assert_eq!(standin_life(&walls), sizing_life(&walls), "{walls:?}");
+        }
+    }
 }
