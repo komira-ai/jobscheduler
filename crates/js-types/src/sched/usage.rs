@@ -5,7 +5,6 @@
 //! its cgroups and sends them in its heartbeat), and admission reads them; neither lives
 //! here.
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{LeaseId, WorkKey};
@@ -78,15 +77,7 @@ pub fn key_hash(key: &WorkKey) -> u64 {
 /// this function, so it is pinned by test vectors and never changes.
 #[must_use]
 pub fn profile_key(key: &WorkKey) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.class.as_bytes());
-    hasher.update([KEY_SEPARATOR]);
-    hasher.update(key.dedup.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::hex_hash::sha256_hex(&[key.class.as_bytes(), &[KEY_SEPARATOR], key.dedup.as_bytes()])
 }
 
 /// One reading of the node's action cgroup, taken by the agent.
