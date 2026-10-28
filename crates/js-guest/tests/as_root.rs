@@ -13,7 +13,7 @@
 //! the binary through `sudo -n` with `--ignored` (GitHub's hosted runners allow
 //! passwordless sudo).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
@@ -33,7 +33,7 @@ fn assert_root() {
 }
 
 /// A directory of one test's own (mode 0755), removed when the test ends.
-struct Scratch(PathBuf, TestDir);
+struct Scratch(TestDir);
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
@@ -44,7 +44,7 @@ impl Scratch {
             &format!("kbf-guest-as-root-{name}"),
         );
         set_mode(owner.path(), 0o755);
-        Scratch(owner.path().to_path_buf(), owner)
+        Scratch(owner)
     }
 }
 
@@ -83,7 +83,7 @@ fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
     let first = Scratch::new("same-name");
     std::fs::write(first.0.join("f"), "one").unwrap();
     let second = Scratch::new("same-name");
-    assert_ne!(first.0, second.0);
+    assert_ne!(first.0.path(), second.0.path());
     assert!(
         first.0.join("f").exists(),
         "a second scratch removed the first"
@@ -108,9 +108,9 @@ fn as_root_every_subcommand_refuses_and_exits_2() {
         "--token-file".into(),
         token.into_os_string(),
         "--inputs".into(),
-        s.0.clone().into_os_string(),
+        s.0.to_path_buf().into_os_string(),
         "--outputs".into(),
-        s.0.clone().into_os_string(),
+        s.0.to_path_buf().into_os_string(),
     ];
     for args in [vec!["session".into()], serve] {
         let out = run_bounded(&args);
@@ -224,7 +224,7 @@ mod launchd {
     /// as that user) can write its output there; its plist written by root, mode 0644.
     fn job_files(name: &str, uid: u32, gid: u32, user: Option<&str>) -> (Scratch, String) {
         let s = Scratch::new(name);
-        chown(&s.0, Some(uid), Some(gid)).expect("chown scratch");
+        chown(s.0.path(), Some(uid), Some(gid)).expect("chown scratch");
         let label = format!("kbf.ci.guest-session.{name}");
         let out = s.0.join(format!("{name}.out"));
         let file = s.0.join(format!("{name}.plist"));
