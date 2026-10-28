@@ -115,7 +115,7 @@ pub(crate) fn refusal(
 /// measurement or by prediction alone; `None` when the guard is off. A VM is judged by
 /// the same sum, with its booked memory as its cost, besides the booked-capacity rule
 /// it keeps. Whole-machine leases are never judged, and an action or a VM at the whole
-/// host's memory runs on a worker with no lease, so nothing is summed beside it.
+/// host's memory runs on a worker with no lease, so it passes on its own cost.
 pub(crate) fn flat_memory_refusal(
     t: &Totals,
     cost: &LeaseCost,

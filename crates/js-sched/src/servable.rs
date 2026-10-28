@@ -299,13 +299,12 @@ impl Servable {
 
     /// Whether a VM of `attempt` passes the flat-memory guard on `worker`: its booked
     /// memory is its flat cost, summed with the flat costs of the leases there and the
-    /// other VMs' bookings. A VM that owns the worker whole is not judged.
+    /// other VMs' bookings.
     fn vm_within_flat_memory(adm: &Admission, worker: &Worker, attempt: &Attempt<'_>) -> bool {
-        worker.exclusive(attempt.request)
-            || worker
-                .load_state
-                .flat_memory_refusal(&attempt.cost, &worker.capacity, &adm.cfg)
-                .is_none()
+        worker
+            .load_state
+            .flat_memory_refusal(&attempt.cost, &worker.capacity, &adm.cfg)
+            .is_none()
     }
 
     /// The candidates the predicate admits, each with its load and charge, and why none
