@@ -73,3 +73,67 @@ fn the_registered_provider_conforms() {
         .count();
     assert_eq!(passed, Check::ALL.len() - 2);
 }
+
+/// The registered provider of a `whole-node` pool over the standard hosts: its leases are
+/// committed and wait for the agents' ready reports.
+struct RegisteredWhole(Registered);
+
+fn registered_whole() -> RegisteredWhole {
+    let hosts = js_conformance::standard_hosts();
+    let (_, shape) = hosts[0].clone();
+    let name = ProviderId::new("pool").unwrap();
+    let config = PoolConfig::new(name, ResourceClass::whole_node(), shape, hosts.len());
+    let registry = Registry::new(config, ManualClock::new(Timestamp::from_millis(1)));
+    for (id, shape) in &hosts {
+        let admitted = registry.hello(&hello(id.as_str(), shape), &Credential::of_token("t"));
+        admitted.expect("the standard hosts meet the pool's shape");
+    }
+    RegisteredWhole(Registered {
+        provider: registry.provider(),
+    })
+}
+
+impl Subject for RegisteredWhole {
+    fn provider(&mut self) -> &mut dyn Provider {
+        self.0.provider()
+    }
+
+    fn booked(&self) -> BTreeMap<HostId, LeaseId> {
+        self.0.booked()
+    }
+
+    fn script_unknown(&mut self, call: Call, landed: bool) -> bool {
+        self.0.script_unknown(call, landed)
+    }
+
+    fn class(&self) -> ResourceClass {
+        ResourceClass::whole_node()
+    }
+
+    fn list_unleasable_class(&mut self, class: ResourceClass) -> bool {
+        let kept = self.0.provider.clone();
+        self.0.provider = kept.with_classes(vec![ResourceClass::whole_node(), class]);
+        true
+    }
+}
+
+/// Asserts that the whole-node registered provider passes every check but the two that
+/// need an Unknown answer and the two that expect a start to be answered `Started` and
+/// read Present at once, which a lease waiting for its agent's report cannot be. Those
+/// four are reported as not applicable. A booking made before the host is ready that
+/// breaks idempotence, a stop that leaves the host booked, or a late start that books a
+/// host fails here.
+#[test]
+fn the_whole_node_registered_provider_conforms() {
+    let report = run(registered_whole);
+    assert!(report.failed().is_empty(), "{report:?}");
+    assert_eq!(
+        report.not_applicable(),
+        vec![
+            Check::StartThenPresent,
+            Check::UnknownDoesNotFree,
+            Check::StartIsIdempotent,
+            Check::StartUnknownThenRetry
+        ]
+    );
+}

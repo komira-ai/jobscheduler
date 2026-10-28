@@ -5,8 +5,9 @@
 //!
 //! A pool file's values are loaded into this type and put on the registry's pool. The
 //! registry reads `prepare_timeout`, `reserve_backoff` and `max_replace` (for a failed
-//! prepare and for how long a request's record is kept); the other keys are not consumed
-//! yet, and the change that reserves hosts reads them.
+//! prepare and for how long a request's record is kept); the lease server also hands
+//! `prepare_timeout` to its lease table. The other keys are not consumed yet, and the
+//! change that reserves hosts reads them.
 
 /// How long a host stays excluded for a request after a give-up or a failed prepare:
 /// five minutes.
