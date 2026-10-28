@@ -29,6 +29,22 @@ impl LeaseId {
     }
 }
 
+/// The wire, the API and the logs use the crate root's `term-seq` form; the scheduler
+/// keeps this type internally. The conversions lose nothing; making them one type is a
+/// later change.
+impl From<LeaseId> for crate::LeaseId {
+    fn from(lease: LeaseId) -> Self {
+        Self::new(lease.term, lease.seq)
+    }
+}
+
+/// See the conversion in the other direction.
+impl From<crate::LeaseId> for LeaseId {
+    fn from(lease: crate::LeaseId) -> Self {
+        Self::new(lease.term(), lease.sequence())
+    }
+}
+
 impl fmt::Display for LeaseId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}", self.term, self.seq)
@@ -99,6 +115,28 @@ impl fmt::Display for LeaseKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches: a conversion that swaps or truncates a field, or one that loses an id
+    /// at an edge value; and the two display forms, which stay different.
+    #[test]
+    fn the_two_lease_ids_convert_both_ways_without_loss() {
+        for (term, seq) in [
+            (0, 0),
+            (3, 9),
+            (u64::MAX, u64::MAX),
+            (0, u64::MAX),
+            (u64::MAX, 0),
+        ] {
+            let sched = LeaseId::new(term, seq);
+            let root = crate::LeaseId::from(sched);
+            assert_eq!((root.term(), root.sequence()), (term, seq));
+            assert_eq!(LeaseId::from(root), sched);
+            assert_eq!(crate::LeaseId::new(term, seq), root);
+        }
+        let sched = LeaseId::new(3, 9);
+        assert_eq!(sched.to_string(), "3.9");
+        assert_eq!(crate::LeaseId::from(sched).to_string(), "3-9");
+    }
 
     /// Catches: an order on `seq` alone (or `seq` before `term`), under which a worker
     /// would accept a grant from a deposed leader over a newer leader's grant.

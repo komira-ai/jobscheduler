@@ -216,6 +216,62 @@ impl CurveSource for NoCurves {
     }
 }
 
+/// How a run ended, as far as the per-minute store cares: it decides which of the run's
+/// minutes are learned from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEnd {
+    /// The run ended on its own.
+    Clean,
+    /// The run was killed at its memory limit.
+    KilledAtLimit,
+    /// The run was cancelled.
+    Cancelled,
+    /// The run was requeued.
+    Requeued,
+    /// The run was killed by the node's pressure backstop.
+    BackstopKilled,
+}
+
+impl RunEnd {
+    /// Whether the run's CPU minutes enter the key's ring: only a run that ended on its
+    /// own, since any other end truncates it and would bias the curve low.
+    #[must_use]
+    pub const fn enters_cpu(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
+    /// Whether the run's memory minutes enter the key's memory column: a clean run and
+    /// one killed at its limit, whose peak is real.
+    #[must_use]
+    pub const fn enters_memory(&self) -> bool {
+        matches!(self, Self::Clean | Self::KilledAtLimit)
+    }
+}
+
+/// What the per-minute store asks the scheduler about a lease: which action key it ran
+/// and how its run ended.
+pub trait KeySource {
+    /// The key of `lease`, or `None` when the scheduler does not know the lease.
+    fn key_of(&self, lease: &LeaseId) -> Option<WorkKey>;
+
+    /// How the run of `lease` ended, or `None` while it runs or when it is unknown.
+    fn run_end(&self, lease: &LeaseId) -> Option<RunEnd>;
+}
+
+/// A [`KeySource`] that knows no lease.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoKeys;
+
+impl KeySource for NoKeys {
+    fn key_of(&self, _lease: &LeaseId) -> Option<WorkKey> {
+        None
+    }
+
+    fn run_end(&self, _lease: &LeaseId) -> Option<RunEnd> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +513,47 @@ mod tests {
                 ..c
             }
         );
+    }
+
+    #[test]
+    fn only_a_clean_run_enters_cpu_and_a_clean_or_limit_kill_enters_memory() {
+        let cases = [
+            (RunEnd::Clean, true, true),
+            (RunEnd::KilledAtLimit, false, true),
+            (RunEnd::Cancelled, false, false),
+            (RunEnd::Requeued, false, false),
+            (RunEnd::BackstopKilled, false, false),
+        ];
+        for (end, cpu, memory) in cases {
+            assert_eq!(end.enters_cpu(), cpu, "{end:?}");
+            assert_eq!(end.enters_memory(), memory, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn no_keys_knows_no_lease() {
+        let lease = LeaseId::new(1, 1);
+        assert_eq!(NoKeys.key_of(&lease), None);
+        assert_eq!(NoKeys.run_end(&lease), None);
+    }
+
+    #[test]
+    fn a_key_source_can_answer() {
+        struct One;
+        impl KeySource for One {
+            fn key_of(&self, lease: &LeaseId) -> Option<WorkKey> {
+                (lease.seq == 1).then(|| WorkKey {
+                    class: "c".to_owned(),
+                    dedup: "d".to_owned(),
+                })
+            }
+            fn run_end(&self, lease: &LeaseId) -> Option<RunEnd> {
+                (lease.seq == 1).then_some(RunEnd::Clean)
+            }
+        }
+        assert!(One.key_of(&LeaseId::new(1, 1)).is_some());
+        assert_eq!(One.run_end(&LeaseId::new(1, 1)), Some(RunEnd::Clean));
+        assert!(One.key_of(&LeaseId::new(1, 2)).is_none());
+        assert_eq!(One.run_end(&LeaseId::new(1, 2)), None);
     }
 }
