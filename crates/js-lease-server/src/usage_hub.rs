@@ -37,8 +37,8 @@ use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::usage::{
-    DropReason, HostLimits, KeySource, MinuteIn, NodeRow, Observed, ProfileKey, RunEnd, RunSeries,
-    SinkCounters, UsageFault, UsageSink,
+    DropReason, HostLimits, KeySource, KeyView, MinuteIn, NodeRow, Observed, ProfileKey, RunEnd,
+    RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use crate::usage_map::{host_of, lease_of, load_in};
 use crate::util::blocking;
@@ -418,6 +418,22 @@ impl Usage {
         if let Err(fault) = self.guard(pruned) {
             error!(error = %fault, "cannot prune the usage store");
         }
+    }
+
+    /// The rows of `host` from minute `from` to minute `to`, at most `limit`. Blocks.
+    pub(crate) fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        self.guard(self.sink.node_rows(host, from, to, limit))
+    }
+
+    /// What is known of `key`. Blocks.
+    pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyView>, UsageFault> {
+        self.guard(self.sink.key_profile(key, self.now_minute()))
     }
 }
 

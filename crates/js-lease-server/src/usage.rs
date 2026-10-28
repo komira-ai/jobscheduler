@@ -203,6 +203,30 @@ impl fmt::Display for ProfileKey {
     }
 }
 
+/// One point of a cost curve: what a run of this key uses at a minute of its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurvePoint {
+    /// The minute since the run's start; the last point stands for later minutes.
+    pub minute: u16,
+    /// CPU, in thousandths of a core.
+    pub cores_milli: u32,
+    /// Working set, in bytes.
+    pub ws_bytes: u64,
+}
+
+/// What is known of one key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyView {
+    /// How many runs the profile holds.
+    pub runs: u16,
+    /// The fitted curve, once there are enough runs to fit one.
+    pub curve: Option<Vec<CurvePoint>>,
+    /// The last day (days since the Unix epoch) the key was used.
+    pub last_used_day: u64,
+    /// Whether the key has been idle so long that admission ignores its curve.
+    pub stale: bool,
+}
+
 /// What a sink counts, for [`crate::Running::usage_counters`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SinkCounters {
@@ -246,11 +270,26 @@ pub trait UsageSink: Send + Sync {
     /// Removes what is past its retention at `now_minute`.
     fn prune(&self, now_minute: u64) -> Result<(), UsageFault>;
 
+    /// At most `limit` rows of `host` for the minutes `from` to `to` inclusive, oldest
+    /// first.
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<Vec<NodeRow>, UsageFault>;
+
+    /// What is known of `key`, or `None` for a key never seen.
+    fn key_profile(&self, key: &ProfileKey, now_minute: u64)
+    -> Result<Option<KeyView>, UsageFault>;
+
     /// What the sink has counted.
     fn counters(&self) -> SinkCounters;
 }
 
-/// The sink that records nothing: every reading is taken and forgotten.
+/// The sink that records nothing: every reading is taken and forgotten, every read is
+/// empty.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoUsage;
 
@@ -272,6 +311,14 @@ impl UsageSink for NoUsage {
 
     fn prune(&self, _: u64) -> Result<(), UsageFault> {
         Ok(())
+    }
+
+    fn node_rows(&self, _: &HostId, _: u64, _: u64, _: usize) -> Result<Vec<NodeRow>, UsageFault> {
+        Ok(Vec::new())
+    }
+
+    fn key_profile(&self, _: &ProfileKey, _: u64) -> Result<Option<KeyView>, UsageFault> {
+        Ok(None)
     }
 
     fn counters(&self) -> SinkCounters {
@@ -335,8 +382,8 @@ mod tests {
         assert_eq!(BadKey.to_string(), "not a valid key");
     }
 
-    /// Asserts that the sink that records nothing takes every reading, returns no closed
-    /// rows, and the key source that knows nothing names no key. It catches a
+    /// Asserts that the sink that records nothing takes every reading, returns no rows
+    /// and no profile, and the key source that knows nothing names no key. It catches a
     /// default sink that errors (and so counts a fault on every beat) or invents rows.
     #[test]
     fn the_empty_sink_and_the_empty_key_source_do_nothing() {
@@ -367,6 +414,8 @@ mod tests {
         assert_eq!(sink.run_ended(&end, 0), Ok(()));
         assert_eq!(sink.flush(0), Ok(Vec::new()));
         assert_eq!(sink.prune(0), Ok(()));
+        assert_eq!(sink.node_rows(&host, 0, 9, 5), Ok(Vec::new()));
+        assert_eq!(sink.key_profile(&end.key, 0), Ok(None));
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);
     }

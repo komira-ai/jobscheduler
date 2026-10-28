@@ -88,6 +88,22 @@ impl UsageSink for Fake {
         self.down()
     }
 
+    fn node_rows(
+        &self,
+        _: &HostId,
+        from: u64,
+        _: u64,
+        _: usize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        self.down()?;
+        Ok(vec![row(from)])
+    }
+
+    fn key_profile(&self, _: &ProfileKey, _: u64) -> Result<Option<KeyView>, UsageFault> {
+        self.down()?;
+        Ok(None)
+    }
+
     fn counters(&self) -> SinkCounters {
         SinkCounters {
             minutes_deduped: 7,
@@ -525,10 +541,11 @@ async fn a_failing_flush_or_prune_is_counted_and_survived() {
 }
 
 /// Asserts that a sink that cannot take a finished run costs a count and the run is not
-/// counted as learned, and that the sink's own counters are in the total. It catches a
-/// learned count that rises on failure.
+/// counted as learned, and that the reads pass the sink's answer and its failure on
+/// (counted too), with the sink's own counters in the total. It catches a learned count
+/// that rises on failure and a read failure that vanishes.
 #[test]
-fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
+fn faults_on_learning_and_on_reads_are_counted() {
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[("run-1", "k")]);
     usage.on_beat(
@@ -538,10 +555,16 @@ fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
     );
     let done = beat("h1", vec![result("run-1", "1-1", Outcome::Succeeded)]);
     usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)]);
+    let host = HostId::new("h1").unwrap();
+    let key = ProfileKey::parse("k").unwrap();
+    assert_eq!(usage.node_rows(&host, 5, 9, 10), Ok(vec![row(5)]));
+    assert_eq!(usage.key_profile(&key), Ok(None));
     fake.fail.store(true, Ordering::SeqCst);
     quiet_beats(&usage, "h1", 2);
+    assert!(usage.node_rows(&host, 5, 9, 10).is_err());
+    assert!(usage.key_profile(&key).is_err());
     let counts = usage.counters();
-    assert_eq!((counts.faults, counts.runs_learned), (1, 0));
+    assert_eq!((counts.faults, counts.runs_learned), (3, 0));
     assert_eq!(counts.sink.minutes_deduped, 7);
     assert_eq!(usage.now_minute(), 16);
 }

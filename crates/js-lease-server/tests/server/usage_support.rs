@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use js_lease_server::{
-    DropReason, HostLimits, KeySource, LoadIn, NodeRow, Observation, Observed, ProfileKey, RunEnd,
-    SinkCounters, UsageFault, UsageSink,
+    CurvePoint, DropReason, HostLimits, KeySource, KeyView, LoadIn, NodeRow, Observation, Observed,
+    ProfileKey, RunEnd, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use js_types::{HostId, LeaseId};
 use serde_json::{Value, json};
@@ -32,13 +32,14 @@ struct State {
     flushes: Vec<u64>,
     prunes: Vec<u64>,
     ended: Vec<RunEnd>,
+    profiles: BTreeMap<String, Vec<RunSeries>>,
     minutes: BTreeSet<(LeaseId, u16)>,
     drop_with: Option<DropReason>,
     fail: bool,
 }
 
 /// A sink over memory: a reading becomes a node row for the minute it was taken in, a
-/// flush closes the rows of the minutes that are over and writes them.
+/// flush closes the rows of the minutes that are over, and a key's profile is its runs.
 #[derive(Default)]
 pub struct Fake {
     state: Mutex<State>,
@@ -70,7 +71,7 @@ impl Fake {
         self.state().drop_with = Some(reason);
     }
 
-    /// Makes every flush, prune and run fail.
+    /// Makes every flush, prune, read and run fail.
     pub fn fail(&self) {
         self.state().fail = true;
     }
@@ -78,6 +79,31 @@ impl Fake {
     /// The rows written for `host`, oldest first.
     pub fn written(&self, host: &str) -> Vec<NodeRow> {
         self.state().written.get(host).cloned().unwrap_or_default()
+    }
+
+    /// Rows already written for `host` at these minutes.
+    pub fn seed_rows(&self, host: &str, minutes: std::ops::Range<u64>) {
+        let rows = minutes.map(|minute| NodeRow {
+            minute,
+            cpu_millis: 1000,
+            ws_max_bytes: 2048,
+            leases: 1,
+        });
+        self.state()
+            .written
+            .entry(host.to_string())
+            .or_default()
+            .extend(rows);
+    }
+
+    /// `runs` runs already learned under `key`.
+    pub fn learn(&self, key: &str, runs: usize) {
+        let series = RunSeries {
+            minutes: vec![(0, 1500, 4096)],
+        };
+        let mut state = self.state();
+        let kept = state.profiles.entry(key.to_string()).or_default();
+        kept.extend(std::iter::repeat_n(series, runs));
     }
 }
 
@@ -135,6 +161,8 @@ impl UsageSink for Fake {
             return Err(down());
         }
         state.ended.push(end.clone());
+        let kept = state.profiles.entry(end.key.to_string()).or_default();
+        kept.push(end.series.clone());
         Ok(())
     }
 
@@ -166,6 +194,54 @@ impl UsageSink for Fake {
             true => Err(down()),
             false => Ok(()),
         }
+    }
+
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        let state = self.state();
+        if state.fail {
+            return Err(down());
+        }
+        let rows = state
+            .written
+            .get(host.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let inside = rows.into_iter().filter(|r| (from..=to).contains(&r.minute));
+        Ok(inside.take(limit).collect())
+    }
+
+    fn key_profile(
+        &self,
+        key: &ProfileKey,
+        now_minute: u64,
+    ) -> Result<Option<KeyView>, UsageFault> {
+        let state = self.state();
+        if state.fail {
+            return Err(down());
+        }
+        let Some(runs) = state.profiles.get(key.as_str()) else {
+            return Ok(None);
+        };
+        let curve = (runs.len() >= 3).then(|| {
+            let point = |&(minute, cores_milli, ws_bytes): &(u16, u32, u64)| CurvePoint {
+                minute,
+                cores_milli,
+                ws_bytes,
+            };
+            runs[0].minutes.iter().map(point).collect()
+        });
+        Ok(Some(KeyView {
+            runs: u16::try_from(runs.len()).unwrap(),
+            curve,
+            last_used_day: now_minute / 1440,
+            stale: false,
+        }))
     }
 
     fn counters(&self) -> SinkCounters {
