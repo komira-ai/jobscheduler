@@ -613,6 +613,41 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
     assert_eq!(r.s.lease_cost(first.lease), None, "the first lease is gone");
 }
 
+/// Where a lease charged 16 GiB goes: `a` (64 GiB) already holds 40 GiB, `b` (128 GiB) is
+/// empty. With `retry` the lease is the rerun of one that ran out of memory; without, it
+/// is a first run predicted at 16 GiB.
+fn where_16_gib_goes(retry: bool) -> String {
+    let mut r = Rig::on();
+    r.up("a", Resources::new(8_000, 64 * GIB));
+    r.up("b", Resources::new(8_000, 128 * GIB));
+    r.feed(js_sched::Event::Cordon { worker: w("b") });
+    r.action(1_000, 40 * GIB, Some(warm(1_000, 40 * GIB)));
+    assert_eq!(r.tick().len(), 1);
+    r.feed(js_sched::Event::Uncordon { worker: w("b") });
+    let lease = if retry {
+        r.action(1_000, 4 * GIB, Some(warm(1_000, 2 * GIB)));
+        let first = r.tick().remove(0);
+        r.end(&first, Outcome::Failed(Failure::OutOfMemory));
+        r.ms += 1_000;
+        r.tick().remove(0)
+    } else {
+        r.action(1_000, 16 * GIB, Some(warm(1_000, 16 * GIB)));
+        r.tick().remove(0)
+    };
+    let cost = cost_of(&r, &lease).expect("charged");
+    assert_eq!((cost.memory_bytes, cost.retry), (16 * GIB, retry));
+    lease.worker.as_str().to_owned()
+}
+
+/// Catches: a rerun up the memory ladder scored with the warm miss factor: on `a`, 40 GiB
+/// plus 1.3 times 16 fits in 64 but 1.63 times does not, so the rerun goes to the empty
+/// `b`, while a first run of the same 16 GiB goes to `a`, the better fit.
+#[test]
+fn a_retry_is_scored_with_the_cold_miss_factor() {
+    assert_eq!(where_16_gib_goes(false), "a");
+    assert_eq!(where_16_gib_goes(true), "b");
+}
+
 /// Catches: a VM's booked cost left out of the sums (it runs outside the measured
 /// cgroup, so neither a reading nor a prediction would show it): beside a VM of 4 cores
 /// and 16 GiB, 16 actions of 1 GiB fit and the 17th does not, on memory.

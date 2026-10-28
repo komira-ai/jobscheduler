@@ -14,6 +14,7 @@ fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
@@ -22,14 +23,15 @@ fn cold(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: true,
+        life_minutes: 1,
     }
 }
 
 /// Sim f. Catches: sums not updated after each placement, so one round places more than
 /// the headroom (all sixty on the first worker, or more than the predicate allows on
-/// each), and a spread that ignores rank. Three 8-core workers take 8 leases of a core
-/// each (8800 of 1000), however the submissions come in, and a burst of twelve is spread
-/// four to a worker.
+/// each), and a placement that ignores the score. Three 8-core workers take 8 leases of a
+/// core each (8800 of 1000), however the submissions come in, and a burst of twelve is
+/// placed by best fit: eight on one worker, four on a second, none on the third.
 #[test]
 fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
     for (first, second) in [(60, 0), (30, 30), (12, 0)] {
@@ -44,9 +46,16 @@ fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
             w.submit_many(second, &spec);
             w.step();
         }
-        let per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
+        let mut per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
         if first == 12 {
-            assert_eq!(per, [4, 4, 4], "spread by rank");
+            // Best fit: the first worker fills to its 8 cores, the second takes the rest,
+            // whichever workers the score picks.
+            per.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(
+                per,
+                [8, 4, 0],
+                "placed by the score, not above the headroom"
+            );
         } else {
             assert_eq!(per, [8, 8, 8], "up to the headroom and no further: {per:?}");
         }
@@ -437,14 +446,13 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
     );
     // Leases that end one after the other, 12 to 26 ticks in: room appears piecemeal, which
     // is what a stream of small work fills up.
+    // The score packs the first eight leases onto one Linux worker and the next eight onto
+    // the other, so each worker's leases end in the same four steps.
     for i in 0..8 {
         let ticks = 12 + 2 * i;
-        let lease = Spec::flat("small", 1_000, ticks, warm(1_000, 0));
-        w.submit_many(2, &linux_only(lease.clone()));
-        w.submit(&on_mac(Spec {
-            class: "msmall",
-            ..lease
-        }));
+        let lease = Spec::flat("small", 1_000, 12 + 2 * (i % 4), warm(1_000, 0));
+        w.submit_many(2, &linux_only(lease));
+        w.submit(&on_mac(Spec::flat("msmall", 1_000, ticks, warm(1_000, 0))));
     }
     w.run(2);
     assert_eq!(w.running_on("n0") + w.running_on("n1"), 16);
@@ -481,10 +489,11 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
         w.step();
     }
     let bound = 24 + 2 * W + 1;
+    let linux_bound = 17 + 2 * W + 1;
     let head_at = first_start(&w, "head", submitted).expect("the head starts");
     let mac_at = first_start(&w, "mhead", submitted).expect("the Mac head starts");
     let second_at = first_start(&w, "head2", submitted).expect("the second head starts");
-    assert!(head_at <= submitted + bound, "head at {head_at}");
+    assert!(head_at <= submitted + linux_bound, "head at {head_at}");
     assert!(mac_at <= submitted + bound, "mac head at {mac_at}");
     assert!(second_at >= head_at, "queue order: {second_at} {head_at}");
     assert!(

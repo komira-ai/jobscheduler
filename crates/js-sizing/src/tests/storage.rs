@@ -55,7 +55,7 @@ fn a_corrupt_row_does_not_decode() {
         bytes[at..at + value.len()].copy_from_slice(value);
         reseal(bytes)
     };
-    assert_eq!(Summary::decode(&with(0, &[2])), None, "version");
+    assert_eq!(Summary::decode(&with(0, &[3])), None, "version");
     assert_eq!(Summary::decode(&with(1, &[3])), None, "basis");
     assert_eq!(Summary::decode(&with(1, &[0])), None, "basis 0");
     let n = u64::from_le_bytes(bytes[2..10].try_into().unwrap());
@@ -91,7 +91,7 @@ fn absurd_counters_and_days_do_not_decode() {
     assert!(Summary::decode(&with(18, &day)).is_none(), "last_seen");
     assert!(Summary::decode(&with(38, &day)).is_none(), "floor_day");
     assert!(Summary::decode(&with(50, &(MAX_DAY + RAISE_ONLY_DAYS + 1).to_le_bytes())).is_none());
-    let stamp_at = LEN - 8 - 4 * 32 - 8 * 8 - 4 * 8;
+    let stamp_at = LEN - 8 - 32 - 4 * 32 - 8 * 8 - 4 * 8;
     assert!(
         Summary::decode(&with(stamp_at, &day)).is_none(),
         "day_stamp"

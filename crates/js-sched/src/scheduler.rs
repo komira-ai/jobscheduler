@@ -545,6 +545,7 @@ impl Scheduler {
                 not_whole: key_raised,
                 cost,
                 lease,
+                fit_minutes: self.admission.fit_minutes(id),
             };
             let mut blocked = None;
             let fitted = placed.len() < round && {
@@ -588,6 +589,7 @@ impl Scheduler {
                     not_whole: key_raised,
                     cost,
                     lease,
+                    fit_minutes: self.admission.fit_minutes(id),
                 };
                 let kept = self.head_holds.get(&id);
                 if let Some(name) =
