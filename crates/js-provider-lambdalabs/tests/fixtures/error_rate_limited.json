@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/rate-limited",
+    "message": "Too many requests. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-rate_limited"
+  }
+}

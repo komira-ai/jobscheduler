@@ -1,0 +1,30 @@
+[package]
+name = "js-provider-lambdalabs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustix = { workspace = true, features = ["fs", "process"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+toml.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+# Test certificates for the https round trip.
+rcgen.workspace = true
+# `ureq` writes its own diagnostics through `log`; the test that keeps the API key out of
+# every log line installs a `log` sink to read them.
+log.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

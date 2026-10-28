@@ -1,0 +1,39 @@
+//! No source or test of this crate names the production API host: the address is the
+//! caller's to give, and a test that could reach it would be a test that spends.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files(&path, found);
+        } else {
+            found.push(path);
+        }
+    }
+}
+
+#[test]
+fn nothing_names_the_production_host() {
+    // Built from parts so that this file does not hold them either.
+    let needles = [["lambda", ".ai"].concat(), ["lambdalabs", ".com"].concat()];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found = Vec::new();
+    files(&root.join("src"), &mut found);
+    files(&root.join("tests"), &mut found);
+    assert!(found.len() > 10, "the scan found {} files", found.len());
+    for path in found {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for needle in &needles {
+            assert!(
+                !text.contains(needle.as_str()),
+                "{} names {needle}",
+                path.display()
+            );
+        }
+    }
+}

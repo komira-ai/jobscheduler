@@ -1157,6 +1157,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-provider-lambdalabs"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
 name = "js-registry"
 version = "0.1.0"
 dependencies = [
