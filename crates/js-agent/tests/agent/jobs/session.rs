@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use js_agent::{
-    Answer, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, STALL_STEPS, Session, Step,
+    Answer, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, Session, Snapshot, Step,
     Transport, Worker,
 };
 use serde_json::{Value, json};
@@ -276,7 +276,7 @@ fn a_worker_that_ended_ends_the_session() {
 #[test]
 fn a_reply_that_finds_the_worker_gone_ends_the_session_without_the_end_mark() {
     let machine = FakeMachine::new();
-    let worker = Worker::orphaned(machine.clock.clone());
+    let worker = Worker::orphaned(machine.clock.clone(), Snapshot::default());
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Gone);
     assert!(!worker.handle().settle(), "nobody reads the queue");
     assert!(!worker.ended(), "the thread never set the mark");
@@ -297,30 +297,44 @@ fn a_reply_that_finds_the_worker_gone_ends_the_session_without_the_end_mark() {
     assert_eq!(sent.borrow().len(), 2, "nothing is sent after the failure");
 }
 
-/// Asserts the progress watchdog: a worker that has been inside one call for exactly
-/// [`STALL_STEPS`] step intervals on the lifecycle's clock is not stalled and one more
-/// millisecond makes it stalled, which ends the session as `Failed`; a worker that waits
-/// for an order is never stalled, however far the clock has moved. It catches a session that
-/// heartbeats on over a worker that does not make progress, a bound that counts from the
-/// wrong moment, and a watchdog that fails an idle worker.
-#[test]
-fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
-    let dir = Scratch::new("jobs-session-stalled");
+/// A worker that holds the runs `held` and is stuck in the create of one more, with the stop
+/// grace `grace` and a clock at 0.
+fn stuck(name: &str, grace: Duration, held: &[&str]) -> (Scratch, FakeMachine, Worker) {
+    let dir = Scratch::new(name);
     let machine = FakeMachine::new();
-    let step = Duration::from_millis(10);
-    let worker = match Worker::start(plan(&dir, &machine, step)) {
+    let mut wanted = plan(&dir, &machine, Duration::from_millis(10));
+    wanted.config.stop_grace = grace;
+    let worker = match Worker::start(wanted) {
         Ok(worker) => worker,
         Err(why) => panic!("the worker did not start: {why}"),
     };
+    for &run in held {
+        assert_eq!(worker.try_deliver(starts(&[run])), Delivery::Delivered);
+        assert!(worker.handle().settle());
+    }
     machine.world.hold_creates();
-    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
-    machine.world.wait_entered(1);
+    assert_eq!(worker.try_deliver(starts(&["last"])), Delivery::Delivered);
+    machine
+        .world
+        .wait_entered(u32::try_from(held.len()).unwrap() + 1);
+    (dir, machine, worker)
+}
 
+/// Asserts the progress watchdog. A worker stuck in one create is not stalled at exactly
+/// the bound of its plan on the lifecycle's clock and is stalled one millisecond later:
+/// 661 s for a stop grace of one second (a call may take 600 s, a stop the grace on top, and
+/// 60 s are allowed besides), 4260 s for the longest grace (3600 s), and 1262 s when a run
+/// is already held (two calls to make). The session fails on the stall. A worker that waits
+/// for an order is never stalled, however far the clock has moved. It catches a bound that
+/// ends a healthy drain, one that is the same whatever the grace and the runs held, one that
+/// counts from the wrong moment, and a watchdog that fails an idle worker.
+#[test]
+fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
+    let (_dir, machine, worker) = stuck("jobs-stall-short", Duration::from_secs(1), &[]);
     let (mut script, _) = Script::new(vec![welcome(1), beat_ok(), beat_ok()]);
     let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
     assert!(matches!(session.tick(), Step::Wait { .. }));
-    let bound = u64::from(STALL_STEPS) * 10;
-    machine.clock.advance(bound);
+    machine.clock.advance(661_000);
     assert!(!worker.stalled());
     assert!(matches!(session.tick(), Step::Wait { .. }), "not yet");
     machine.clock.advance(1);
@@ -329,6 +343,20 @@ fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
         panic!("the worker has been inside one call for too long");
     };
     assert!(why.contains("job worker stopped"), "{why}");
+    machine.world.release();
+
+    let (_dir, machine, worker) = stuck("jobs-stall-long", Duration::from_secs(3600), &[]);
+    machine.clock.advance(4_260_000);
+    assert!(!worker.stalled(), "a long grace is a long bound");
+    machine.clock.advance(1);
+    assert!(worker.stalled());
+    machine.world.release();
+
+    let (_dir, machine, worker) = stuck("jobs-stall-held", Duration::from_secs(1), &["r1"]);
+    machine.clock.advance(1_262_000);
+    assert!(!worker.stalled(), "two calls take twice as long");
+    machine.clock.advance(1);
+    assert!(worker.stalled());
     machine.world.release();
 
     let dir = Scratch::new("jobs-session-idle");
