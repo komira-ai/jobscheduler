@@ -21,7 +21,8 @@ nothing in its first N ticks after start, and never releases an instance whose a
 adopted as a pool host from its tags and its hello, or alerts. Pool scaling (5.8) also runs only in `tick`, so `js-lease` stays the one place time acts and scaling is deterministic under an injected clock.
 
 ## 12.2 Usage record (always on)
-The scheduler's record is per machine lease: instance-hours (attribution, not a charge), wall phases, queue time, and the aggregate usage
+The scheduler's record is per machine lease: instance-hours (attribution, not a charge; a host shared by many leases is attributed to them
+in proportion to their bookings over time, hosts.md section 3), wall phases, queue time, and the aggregate usage
 the agent reports for the lease. Per-run usage (CPU-seconds, GB-seconds, GPU-seconds, peak memory with basis, and whether it ran, was
 cached or was joined) is the consumer's: it arrives from the agent on the work session, and kbf feeds its own sizing history (7, level
 2). The scheduler writes per-run records only for classes whose runs it places itself (ucdk). Stored in the state store and queryable,

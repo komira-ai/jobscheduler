@@ -1,4 +1,4 @@
-# Extraction steps 23 to 55
+# Extraction steps 23 to 64
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
 data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
@@ -61,7 +61,7 @@ numbers refer to design.md.
     the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
 34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a pool of kbf's own hosts, which register
     through `js-agent` into a `default` provider; a node lease at first), renews it, and places actions only inside its leases. Lease demand and release follow kbf's queue (a configured
-    floor of whole-node leases, more on queue depth, drained before release); each frontend leases only for the hosts it owns, as
+    floor of node leases, more on queue depth, drained before release; node leases are shares of a host's size, not the whole-node class of 46); each frontend leases only for the hosts it owns, as
     today. *Proves:* golden traces and corpus unchanged with the scheduler in the loop on fakes; a scheduler outage inside the TTL
     changes no placement; the cross-version matrix with a frontend pair.
 35. The first real aws pool, disabled by default; enabling it needs the go in R7.
@@ -106,10 +106,13 @@ step 36 made. The size fields of step 43 wait for D26.
 45. Several runs per lease: each run of a lease clones its own VM from its base image, and the lease's booking stays between runs.
     *Proves:* a lease with two runs sees two VM ids and none between them; the booking is the same before, between and after; no VM id
     serves two runs over seeded runs of the fake; a destroy that fails on the first run keeps the second from cloning and taints.
-46. The whole-node class: introduces the design's `Whole` mode (or shows that `BookAll` plus the selection rule suffices), the drain of a
-    host with its deadline and one-per-pool bound, the `exclusive` and `exclusive_ready` fields, the withheld lease token, the no-VM-running
-    check at `preparing`, `prepare_timeout` with the re-place cap, restore. *Proves:* the sequence of 5.15 on the fake agent; the token is not minted before the report; a timeout
-    gives the lease up; an older client that ignores readiness still waits.
+46. The whole-node class ([whole-node.md](whole-node.md)): the `Whole` admission and the class `whole-node` (the merged `gpu-host` is read
+    as it), the commit on a quiet host only (reservation and drain are step 56), the `exclusive` and `exclusive_ready` fields, the withheld
+    lease token with the clock starting at it, the no-VM-running check at `preparing`, `prepare_timeout` with the re-place cap, the typed
+    `exclusive_refused` report acted on at once, the agent's readiness hook, restore.
+    *Proves:* the sequence of 5.15 on the fake agent; no second lease or placement on a whole-node host; the token is not minted before the
+    report; a timeout gives the lease up and the retries stop at the cap; an older client that ignores readiness still waits; a lease file
+    and a pool written for `gpu-host` load and its tests pass unchanged.
 47. The first real VM driver, disabled by default, on an operator's host; it passes the VM conformance suite there. *Proves:* the same
     suite as the fake; it is not run on shared CI.
 
@@ -149,7 +152,7 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
 **Phase H. Closing the stepping stone.**
 
 54. The GPU machines register. `js-agent` runs on each GPU machine with the pool's join credential and registers with a `default` provider
-    in a pool of class `gpu-host`; the operator-listed pool behind `--pool-config` is retired and the file is no longer read. *Proves:*
+    in a pool of class `whole-node` (the merged name `gpu-host` is read as it, 46); the operator-listed pool behind `--pool-config` is retired and the file is no longer read. *Proves:*
     on fakes, the GPU-host service tests pass against registered hosts exactly as against listed ones; a GPU request is queued when the
     registered GPU hosts are busy and refused with `no-capable-host` when none is registered (D35); no production example declares the
     `static` kind. Installing the agent on the real machines and switching the service is an operational change that needs the owner's go
@@ -164,3 +167,51 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     server that lacks a feature does not send the request; a server that speaks majors 1 and 2 serves both at once; a cross-version
     matrix row runs the previous release of each of server, agent and client against the current of the others. The version-pair check
     between `js-agent` and `kbf-executor` is written only if they ever ship apart (D45); until then one package version covers both.
+
+**Phase J. The whole-node class completed** ([whole-node.md](whole-node.md)). Steps 56 and 57 need step 46; step 58 needs steps 30c and 31c
+(the hierarchy).
+
+56. Reservation and drain. A queued whole-node request takes a quiet host, else reserves exactly one (the cost order: latest end bound,
+    fewest leases, lowest host id); the `reserved` mark places nothing new; the `host_reserved` flag on a renewal answer; the drain deadline,
+    give-up and `reserve_backoff`; cancel drops the reservation; the reservation records in the lease file, bound again to a request
+    presented after a restart. *Proves:* a restart mid-drain keeps the host, the deadline and the counters; with a stream of share requests a queued whole-node request is
+    committed within its bound on the injected clock; a reserved host takes no new lease or placed run; nothing is stopped by a reservation
+    (the leases and runs on the host are the same set at the give-up); the cost order on a host table with three different hosts; a request
+    never holds two hosts and a host never two requests.
+57. Caps and the host-job rule. `max_whole_node`, `max_draining`, `max_whole_node_per_consumer`, `keep_for_ordinary`, `allow_last_capable`,
+    the effective ceiling, config validation, and `host_jobs` only in a whole-node lease. *Proves:* over seeded runs none of the caps is
+    exceeded at any step and a held lease is never revoked when the ceiling falls; a mixed pool keeps its floor of unmarked hosts while a
+    stream of whole-node requests runs; a second consumer is granted while the first is at its limit; a newer ordinary request does not hold
+    off an older whole-node request, and an older one does; a mixed pool without `max_whole_node` refuses with `no-matching-pool`; a
+    `host_jobs` lease that is not whole-node is refused.
+58. Elastic machines for whole-node requests. The acquire carries the request id and the registered machine is committed to it before any
+    other placement; a quiet host that appears first takes the request and the machine is released by the idle rule. *Proves:* on the fake
+    aws, a whole-node request in a pool with an elastic entry acquires and no host is reserved; with the entry refused (quota, cooldown) it
+    reserves; no other lease lands on the machine between registration and the commit.
+
+**Phase K. Hosts that run many jobs** ([hosts.md](hosts.md), D56 to D65). Step 59 needs share leases (step 29) and step 44; steps 61 to 63
+need the hierarchy (steps 30c and 31c).
+
+59. Packing and demand. Share and run bookings are placed by fit and `FirstFit` over the pool's hosts, and the scaler's demand is the
+    empty hosts the unplaced bookings need; ucdk Job classes are admitted `Book` at the declared size. *Proves:* invariants H1 and H2 over
+    seeded runs; 500 small jobs on two idle hosts launch nothing; nine hosts' worth launch nine; a ucdk class previously `BookAll` shares a
+    host; the previous pools and lease files load unchanged.
+60. Host facts for VMs. The core keys `virt` and `lifecycle`, launch options with declared facts, the agent's probe that lowers `vms`, the
+    scaler counting a VM request as demand only from an option that declares it. *Proves:* H3 and H4; a lying option serves containers only
+    and alerts; a `guest` constraint on the new keys is `constraint-bad-scope`.
+61. Launch options, price and capacity as data. `launch_options` and the optional `option` on `AcquireSpec`; the choice by price, capacity
+    signal, id; a refusal cools the option down. *Proves:* H7 (price never refuses); the dearer option is taken only when the cheaper is
+    refused; a provider without `launch_options` behaves as before.
+62. Spot hosts. The `Interruption` event from `events()`, the `reclaim` taint, `host_leaving` and `leaves_at` on the renewal answer, the
+    requeue of unstarted runs, the give-up at the deadline, the brake exclusion. *Proves:* H5 on the fake aws and the fake agent, including
+    a restart between the notice and the deadline, a reservation dropped without a give-up, and a storm of notices that does not trip the
+    taint brake.
+63. Tiers and further kinds. The nested `providers` entry, the price-unit check, per-tier fall-through, and the `gcp`, `azure` and on-prem
+    kinds behind the trait, each with a fake. *Proves:* H8; a flat file is unchanged; the layering test still finds no cloud name in the
+    core; two kinds of one tier choose by price and fall through on refusal and on outage.
+64. The cap-time swap and scale-down ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first
+    instance; the per-minute pool sample; the swap trigger and the pool keys `swap_window`, `scale_down_window`, `scale_down_util`,
+    `swap_drain_grace` and `max_evictions`; the victim choice (expected drain, then smallest) and its protected hosts; launch before drain;
+    drain, then terminate when empty or at the grace; the `evict` taint, the `evicted` attempt outcome that
+    charges no budget; the walk down the catalog on no capacity; the `retire` scale-down. *Proves:* H9 to H14 on the fake aws and the fake
+    agent, including a restart mid-window, a reclaim notice on the new host mid-window, and a swap with a whole-node request held and queued.

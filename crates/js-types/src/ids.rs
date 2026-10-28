@@ -78,6 +78,39 @@ impl ClassId {
     }
 }
 
+/// A request id was empty, too long, or held a character outside `[a-z0-9._-]`. The
+/// text that was refused is not kept, so the error can be logged or sent back as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a request id must be 1 to 63 characters of [a-z0-9._-]")]
+pub struct RequestIdError;
+
+/// The id a consumer gives a request and presents again on every poll, so the registry
+/// can tell a repeat of a request from a new one. The scheduler never branches on its
+/// text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(String);
+
+impl RequestId {
+    /// Builds the id, refusing an empty, long or out-of-alphabet value without keeping
+    /// it.
+    pub fn new(value: &str) -> Result<Self, RequestIdError> {
+        check("request", value)
+            .map(Self)
+            .map_err(|_| RequestIdError)
+    }
+
+    /// The id as text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RequestId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The scheduler's grant of resources to one attempt, identified by (term, sequence)
 /// as in the design's terms (section 3). Two grants never share a pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -130,6 +163,25 @@ mod tests {
         assert!(ClassId::new(&"a".repeat(63)).is_ok());
         let err = ProviderId::new("Pool").unwrap_err();
         assert!(err.to_string().starts_with("provider id \"Pool\""));
+    }
+
+    /// Asserts that a request id takes the id alphabet and length, and that the error
+    /// for a refused one does not carry the text it refused.
+    #[test]
+    fn request_ids_are_checked_and_the_error_keeps_no_input() {
+        let id = RequestId::new("req-1.a_b").unwrap();
+        assert_eq!(
+            (id.as_str(), id.to_string().as_str()),
+            ("req-1.a_b", "req-1.a_b")
+        );
+        assert!(RequestId::new(&"a".repeat(63)).is_ok());
+        assert_eq!(RequestId::new(""), Err(RequestIdError));
+        for bad in ["BAD ID", "x y z", "q/q", &"a".repeat(64)] {
+            let err = RequestId::new(bad).unwrap_err();
+            assert_eq!(err, RequestIdError);
+            let shown = format!("{err} {err:?}");
+            assert!(!shown.contains(bad), "{shown}");
+        }
     }
 
     /// Asserts that lease ids order by term and then sequence and print as

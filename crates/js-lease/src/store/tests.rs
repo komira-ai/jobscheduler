@@ -62,3 +62,25 @@ fn a_failed_first_rename_leaves_no_state_file() {
     replace_with(&path, b"new\n", refuse).unwrap_err();
     assert!(!path.exists());
 }
+
+/// Asserts that when the rename of a rewrite fails, a reader of the file still gets the
+/// old document whole, leases and reservations together: one replace carries both, so
+/// no record appears without the leases it was written with.
+#[test]
+fn a_failed_rename_keeps_old_leases_with_old_reservations() {
+    let dir = Dir::new("document");
+    let path = dir.file();
+    let text = |term: u32, give_ups: u32| {
+        format!(
+            "version = 1\nterm = {term}\nnext_sequence = 2\nlease_count = 1\nreservation_count = 1\n\n\
+             [[lease]]\nterm = {term}\nsequence = 1\nstate = \"held\"\nacquired_at_ms = 1\n\
+             expires_at_ms = 2\nends_at_ms = 3\n\n\
+             [[reservation]]\nrequest_id = \"r\"\ngive_ups = {give_ups}\n"
+        )
+    };
+    replace(&path, text(1, 1).as_bytes()).unwrap();
+    replace_with(&path, text(2, 2).as_bytes(), refuse).unwrap_err();
+    let document = super::read(&path).unwrap().unwrap();
+    assert_eq!((document.term, document.lease[0].term), (1, 1));
+    assert_eq!(document.reservation[0].give_ups, 1);
+}

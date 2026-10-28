@@ -10,7 +10,7 @@ an order.
 |---|---|---|
 | `default` | The base provider (`DefaultProvider`). Hosts register themselves: a machine runs `js-agent`, says hello with the pool's join credential, and is a host of the pool. | Never. |
 | `static` | **For testing only.** The operator lists hosts in the configuration; used by tests and by the single-host stepping stone (below). A production deployment declares none. | Never. |
-| `aws`, later `gcp`, `k8s`, `vsphere`, `proxmox` | Elastic providers: `acquire` boots a machine that runs `js-agent`, and that agent registers itself. | Yes: boots and terminates. |
+| `aws`, later `gcp`, `azure`, `k8s`, `vsphere`, `proxmox` | Elastic providers: `acquire` boots a host, a machine that runs `js-agent` and many jobs at once, and that agent registers itself. | Yes: boots and terminates. |
 
 A deployment always has a `default` provider. If the file declares none, one named `default` exists with no deny file. A pool admits
 registering hosts only when it has a `join_token_file` (registration.md); without one it has no registered hosts of its own, and only
@@ -30,13 +30,15 @@ machines an elastic provider launched can join it.
 - Identity and admission are those of registration.md (join credential, pool exists, tainted set, shape satisfied, `max_machines`).
 
 **Capable host.** A host of the pool is *capable* of a request when it could serve it once it is free: it is in the table and not tainted,
-not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` class needs the
+not denied, not draining and not `releasing`; its total shape (not its free room) holds the request's booking (a `BookAll` or `Whole` class needs the
 host to exist; a `Book` class needs the total to hold the booking); and its latest facts satisfy every constraint of the request (5.13).
 Busy hosts are capable. Lost hosts (silent past the grace, inside the retention window) are capable: the agent registers again with the
 same id and the work waits for it, which is the same stance as 5.6 (silence is Unknown, not Absent). Cordoned and quarantined-by-pressure
 hosts are capable: both end without anyone replacing the machine. **Tainted hosts are not capable**: a taint ends only when an operator
 reimages the machine and clears it (machines.md, 5.12), so waiting for it would be an unbounded wait for an unplanned human action; the
-caller should be told. Draining hosts are not capable for a new request, because they are leaving.
+caller should be told. Draining hosts are not capable for a new request, because they are leaving. A host *reserved* for a whole-node request (5.17) is not
+draining in this sense: it is not leaving, it stays capable, and it is simply not available to a second reservation or to new work until
+the reservation ends. For a whole-node request, "could ever serve" also needs the pool to offer the class (whole-node.md).
 
 **Admission against registered hosts (D35, settled).** Let the *hierarchy* of the request's pool be its ordered providers (below).
 
@@ -74,7 +76,8 @@ restarting is refused and the caller retries, which is the price of an answer th
 
 ## Elastic providers
 
-An elastic provider is a `CapacityProvider` that can launch (5.5). The scheduler's single interaction is:
+An elastic provider is a `CapacityProvider` that can launch (5.5). It launches **hosts**: a machine is sized to hold many jobs at once, and
+a launch answers the packed demand of the queue, never one job (hosts.md, section 3). The scheduler's single interaction is:
 
 1. **Acquire.** The scheduler records the intent (acquire id, pool, entry, shape) durably, then calls `acquire`. The provider boots a
    machine from the image its configuration names; the image carries `js-agent`, the scheduler's address and identity to pin, and the pool
@@ -140,3 +143,7 @@ boot-failure rule.
 **Tainted and lost hosts in the hierarchy.** A tainted host is replaced by an acquire in the hierarchy only if it was an elastic host
 (5.12); a tainted registered host is simply gone from the capable set, and the elastic entries (if any) serve the demand. Demand is
 computed over the whole pool, not per entry.
+
+**Several clouds, tiers, spot hosts.** `aws`, `gcp`, `azure` and on-prem sources are providers of this one hierarchy; an entry may be a
+tier of equal providers, among which price and capacity data choose; a spot host's reclaim notice taints, drains and reschedules through
+the paths above. Rules, configuration and tests: [hosts.md](hosts.md), sections 6 to 8 (D59 to D61).

@@ -8,7 +8,9 @@ Companion to [docs/design.md](../design.md), sections 5.4 and 5.8. Section numbe
 and is never reused, not even by the next run of the same lease (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
 "stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check.
 
-A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs in a row before it is given up.
+A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs, at once and in a row, before it is given up.
+Many VM runs and many containers are on one host at the same time, each booked against the host's capacity (5.15, 5.18); each VM run is
+still a fresh VM.
 
 **After every job, in this order, `js-agent`:**
 
@@ -76,7 +78,9 @@ message) or `host` (the job may change the machine: install packages, load a mod
 value is `contained`. A new value an old agent does not know is refused by it, never run (R3: the field is additive; an old agent
 refuses a `host` it cannot parse and the lease is given up as never started).
 
-**Who may request a host job.** Three consents are needed, and any one missing refuses the `Start` before a container exists:
+**Who may request a host job.** Three consents are needed, and any one missing refuses the `Start` before a container exists. A fourth
+condition is on the lease: it must be a whole-node lease (5.17, D51), so that no other consumer's work is on the host the job may change; a
+`host_jobs` request for any other class is refused at submit.
 
 - the consumer's own configuration allows it (kbf: `allow_host_jobs`, default false) and its lease request states `host_jobs = true`;
 - the pool allows it (`allow_host_jobs`, default false; configuration.md), checked when the lease is granted; the lease token minted for
