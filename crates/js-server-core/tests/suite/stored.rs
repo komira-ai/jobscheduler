@@ -57,12 +57,18 @@ impl Racing {
     /// A read of the rows under `prefix` fails from now on, or (`None`) reads again. `""`
     /// is every row.
     pub fn fail_reads(&self, prefix: Option<&str>) {
-        *self.unreadable.lock().unwrap_or_else(PoisonError::into_inner) = prefix.map(str::to_owned);
+        *self
+            .unreadable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = prefix.map(str::to_owned);
     }
 
     /// A write of a row under `prefix` fails from now on, or (`None`) writes again.
     pub fn fail_writes(&self, prefix: Option<&str>) {
-        *self.unwritable.lock().unwrap_or_else(PoisonError::into_inner) = prefix.map(str::to_owned);
+        *self
+            .unwritable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = prefix.map(str::to_owned);
     }
 
     /// The store's clock moves on by `by`.
@@ -77,16 +83,27 @@ impl Racing {
 
     /// Applies `txn` to the store as a writer of its own.
     pub fn write(&self, txn: Txn) {
-        self.inner.txn(txn).expect("the fake writes").expect("no conflict");
+        self.inner
+            .txn(txn)
+            .expect("the fake writes")
+            .expect("no conflict");
     }
 
     fn reads_fail(&self, key: &str) -> bool {
-        let unreadable = self.unreadable.lock().unwrap_or_else(PoisonError::into_inner);
-        unreadable.as_deref().is_some_and(|prefix| key.starts_with(prefix))
+        let unreadable = self
+            .unreadable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        unreadable
+            .as_deref()
+            .is_some_and(|prefix| key.starts_with(prefix))
     }
 
     fn writes_fail(&self, batch: &[Txn]) -> bool {
-        let unwritable = self.unwritable.lock().unwrap_or_else(PoisonError::into_inner);
+        let unwritable = self
+            .unwritable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(prefix) = unwritable.as_deref() else {
             return false;
         };

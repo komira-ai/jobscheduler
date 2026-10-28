@@ -67,7 +67,11 @@ fn a_start_takes_up_the_operations_the_store_holds_and_numbers_past_them() {
         ]
     );
     assert_eq!(second.epoch(), Some(1));
-    assert_eq!(second.queued_operations(), 1, "the leased one is not queued");
+    assert_eq!(
+        second.queued_operations(),
+        1,
+        "the leased one is not queued"
+    );
     let held = second.with(|view, _| view.sched().leases_on(&worker("node-a")).len());
     assert_eq!(held, 1);
     // A new operation and a new lease are numbered in blocks past the first start's.
@@ -218,7 +222,11 @@ fn a_request_joins_a_queued_operation_another_frontend_wrote() {
     assert_eq!(admitted.operation, queued.operation);
     let adopted = Call::Adopted(queued.operation, WaiterId(1), parcel(1));
     assert!(calls(&core).contains(&adopted), "{:?}", calls(&core));
-    assert_eq!(setup.store.rows_of("op/").len(), 1, "one operation of the work");
+    assert_eq!(
+        setup.store.rows_of("op/").len(),
+        1,
+        "one operation of the work"
+    );
     up(&core, 6, "node-a", "d1");
     assert_eq!(started(&core), [lease(1, 0)]);
 }

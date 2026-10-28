@@ -151,9 +151,8 @@ fn cordon_event(worker: WorkerId, cordon: StoredCordon, now: FarmTime, at: u64) 
         StoredCordon::Cordoned => Event::Cordon { worker },
         StoredCordon::Draining { deadline_unix_ms } => Event::Drain {
             worker,
-            deadline: now.saturating_add(Duration::from_millis(
-                deadline_unix_ms.saturating_sub(at),
-            )),
+            deadline: now
+                .saturating_add(Duration::from_millis(deadline_unix_ms.saturating_sub(at))),
         },
     }
 }

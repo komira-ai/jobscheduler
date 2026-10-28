@@ -40,8 +40,8 @@ use js_state::{
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{Ending, RowCodec, Value, keys};
 use js_types::sched::{
-    Answer, Effect, FarmTime, LeaseGrant, LeaseId, LeaseKind, NodePhase, OperationId, Outcome,
-    Qos, Refusal, Resources, ResultRef, StartLease, WaiterId, WorkKey, WorkerId,
+    Answer, Effect, FarmTime, LeaseGrant, LeaseId, LeaseKind, NodePhase, OperationId, Outcome, Qos,
+    Refusal, Resources, ResultRef, StartLease, WaiterId, WorkKey, WorkerId,
 };
 
 const TERM: u64 = 1;
@@ -395,11 +395,7 @@ impl Harness {
             streams: BTreeMap::new(),
             callers: BTreeMap::new(),
         };
-        let storage = Storage::new(
-            self.store.clone(),
-            self.codec.clone(),
-            Arc::new(TestExt),
-        );
+        let storage = Storage::new(self.store.clone(), self.codec.clone(), Arc::new(TestExt));
         let core = Core::open(&Config::new(TERM), probe, storage, self.at()).expect("opened");
         self.core = Some(match self.broken {
             Break::TakesGrantsUnwritten => core.with_writer(takes_grants_unwritten),
@@ -442,9 +438,11 @@ fn leaves_operations(
             attempt_of(rows.refused(refusal.operation, ending))
         }
         (Effect::Answer(answer), _) => {
-            let undone = Txn::new()
-                .delete(keys::lease(answer.lease), Cond::Any)
-                .put(keys::queue(answer.operation), Vec::new(), Cond::Any);
+            let undone = Txn::new().delete(keys::lease(answer.lease), Cond::Any).put(
+                keys::queue(answer.operation),
+                Vec::new(),
+                Cond::Any,
+            );
             attempt_of(store.txn(undone).map(|_| ()).map_err(Into::into))
         }
         _ => Attempt::Taken,

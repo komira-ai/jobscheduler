@@ -14,8 +14,8 @@ use std::time::Duration;
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, NodePhase, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Reported,
-    Settles, Stage, Stream, View, Writer,
+    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Reported, Settles,
+    Stage, Stream, View, Writer,
 };
 use js_store::Ending;
 use js_types::sched::{

@@ -187,9 +187,7 @@ impl Engine {
         a.retain_parcels(&|lease| {
             let answers =
                 |effect: &Effect| matches!(effect, Effect::Answer(ans) if ans.lease == lease);
-            held.iter()
-                .flat_map(|batch| &batch.effects)
-                .any(answers)
+            held.iter().flat_map(|batch| &batch.effects).any(answers)
         });
     }
 

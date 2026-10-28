@@ -508,7 +508,12 @@ impl<A: Adapter> Core<A> {
     #[must_use]
     pub fn write_behind(&self) -> usize {
         let locked = self.lock();
-        locked.engine.unwritten.iter().map(|b| b.effects.len()).sum()
+        locked
+            .engine
+            .unwritten
+            .iter()
+            .map(|b| b.effects.len())
+            .sum()
     }
 
     /// Whether the scheduler has been told the state store is unavailable: nothing is

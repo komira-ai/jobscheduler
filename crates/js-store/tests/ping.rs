@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Racing, open, only};
+use common::{Racing, only, open};
 use js_state::Store;
 use js_store::{EpochPolicy, StateError};
 

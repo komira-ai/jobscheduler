@@ -46,7 +46,11 @@ fn a_store_that_is_gone_holds_the_placement_until_a_write_takes_again() {
     block_on(core.tick(at(3)));
     assert!(!core.store_down());
     assert_eq!(started(&core), [lease(1, 0)]);
-    assert_eq!(setup.store.rows_of("owner/").len(), 1, "the node is claimed");
+    assert_eq!(
+        setup.store.rows_of("owner/").len(),
+        1,
+        "the node is claimed"
+    );
     assert_eq!(setup.store.rows_of("lease/").len(), 1);
     // The session row the registration could not write is put by the next heartbeat.
     assert!(setup.store.rows_of("session/").is_empty());
@@ -105,7 +109,11 @@ fn the_next_block_of_lease_sequences_is_reserved_before_the_last_is_used() {
     submit(&core, 3, 515);
 
     let all = started(&core);
-    assert_eq!(all.last(), Some(&lease(1, 1024)), "numbered from the new block");
+    assert_eq!(
+        all.last(),
+        Some(&lease(1, 1024)),
+        "numbered from the new block"
+    );
     let mut sorted = all.clone();
     sorted.sort();
     sorted.dedup();
@@ -164,7 +172,10 @@ fn a_kill_for_memory_writes_its_floor_and_fate_and_a_restart_keeps_the_booking()
             .request(admitted.operation)
             .map(|request| request.resources.memory_bytes)
     });
-    assert!(booked.is_some_and(|bytes| bytes > GIB), "{booked:?}: the raised booking");
+    assert!(
+        booked.is_some_and(|bytes| bytes > GIB),
+        "{booked:?}: the raised booking"
+    );
 }
 
 /// Asserts that a give-up the store cannot take stays in line and is written, in order, before
@@ -185,7 +196,11 @@ fn a_give_up_the_store_missed_is_written_before_the_grant_that_follows_it() {
 
     // The give-up is refused; the re-grant meets no queue row, is stale, and is undone.
     assert_eq!(core.dropped_writes(), 1);
-    assert_eq!(core.queued_operations(), 1, "kept: its give-up is not written");
+    assert_eq!(
+        core.queued_operations(),
+        1,
+        "kept: its give-up is not written"
+    );
     assert_eq!(started(&core), [lease(1, 0)]);
     assert!(
         !calls(&core)
@@ -252,9 +267,9 @@ fn a_result_the_store_refuses_for_good_is_dropped() {
     let admitted = submit(&core, 1, 1);
     let rows = setup.store.rows_of("lease/");
     let key = rows[0].0.clone();
-    setup.store.write(
-        js_state::Txn::new().put(key, b"not a lease".to_vec(), js_state::Cond::Any),
-    );
+    setup
+        .store
+        .write(js_state::Txn::new().put(key, b"not a lease".to_vec(), js_state::Cond::Any));
 
     let taken = finish(&core, 2, "node-a", admitted.operation, lease(1, 0));
 

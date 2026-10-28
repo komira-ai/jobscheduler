@@ -22,8 +22,7 @@ use std::time::Duration;
 use crate::common::{begin, block_on};
 use js_sched::{DaemonInstance, Request, SelfFence};
 use js_server_core::{
-    Adapter, Attempt, Beat, Config, Core, Delivery, Reported, Settles, Stage, Standing, Taken,
-    View,
+    Adapter, Attempt, Beat, Config, Core, Delivery, Reported, Settles, Stage, Standing, Taken, View,
 };
 use js_sim::golden::GoldenFile;
 use js_sim::{
@@ -224,14 +223,16 @@ impl Leader {
     fn new(flaky: bool) -> Self {
         begin();
         let mut writes = 0_u64;
-        let core = Core::new(&Config::new(1), Wire::default()).with_writer(move |_: &Effect, _: &Settles<'_>| {
-            writes += 1;
-            if flaky && writes.is_multiple_of(5) {
-                Attempt::Transient
-            } else {
-                Attempt::Taken
-            }
-        });
+        let core = Core::new(&Config::new(1), Wire::default()).with_writer(
+            move |_: &Effect, _: &Settles<'_>| {
+                writes += 1;
+                if flaky && writes.is_multiple_of(5) {
+                    Attempt::Transient
+                } else {
+                    Attempt::Taken
+                }
+            },
+        );
         Self {
             core,
             sessions: BTreeMap::new(),
