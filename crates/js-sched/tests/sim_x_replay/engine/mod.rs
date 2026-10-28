@@ -10,7 +10,7 @@
 //! | `fixture` | the trace row, the key and outcome types every other module shares, the loader and the encoder | present |
 //! | `tables` | integer quantile tables | planned |
 //! | `truth` | what really happens to a run, from a row and keyed draws | planned |
-//! | `predictor` | what the scheduler believes about a key | planned |
+//! | `predictor` | what the scheduler believes about a key | present |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
 //! | `rankers`, `report`, `control` | the compared placement rules, the report and the control | planned |

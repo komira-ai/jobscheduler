@@ -129,6 +129,33 @@ fn the_ring_of_the_predictor_slides_the_same_way() {
     assert_eq!(life_after(32, 17), 1);
 }
 
+#[test]
+fn a_ring_of_33_would_answer_differently_from_a_ring_of_32() {
+    // Defect: a ring that keeps 33 runs. The vectors above give the same answer for 32
+    // and 33. Here the oldest of 33 runs is the only one that is 10 minutes long: a ring
+    // of 32 has dropped it (a curve of one point), a ring of 33 still shows its minutes.
+    // Then one short run first, 16 long, 16 short: a ring of 32 drops the short one and
+    // holds 16 long of 32 (half, L = 11); a ring of 33 holds 16 of 33 (under half, L = 1).
+    let probe_at = 40_000_000;
+    let mut rows = vec![ok(0, 0, 10 * MINUTE_MS + 5_000, 1_000_000, 100)];
+    rows.extend((1..33).map(|i| ok(i * 1_000_000, 0, 5_000, 1_000, 100)));
+    rows.push(ok(probe_at, 0, 1_000, 1, 1));
+    let p = flat(&rows);
+    assert_eq!(p.belief(33).curve_len(), 1, "the oldest of 33 is dropped");
+    assert_eq!(
+        p.belief(32).curve_len(),
+        11,
+        "32 runs still hold the long one"
+    );
+
+    let mut rows = vec![ok(0, 0, 5_000, 1_000, 100)];
+    rows.extend((1..17).map(|i| ok(i * 1_000_000, 0, 10 * MINUTE_MS + 5_000, 1_000_000, 100)));
+    rows.extend((17..33).map(|i| ok(i * 1_000_000, 0, 5_000, 1_000, 100)));
+    rows.push(ok(probe_at, 0, 1_000, 1, 1));
+    let p = flat(&rows);
+    assert_eq!(p.belief(33).life_minutes(), 11, "16 of 32 is half");
+}
+
 // ---- cold and warm ---------------------------------------------------------------------
 
 #[test]
@@ -174,6 +201,30 @@ fn a_lease_sees_only_runs_that_ended_strictly_before_it_started() {
     let p = flat(&rows);
     let cold: Vec<bool> = (0..5).map(|i| p.belief(i).is_cold()).collect();
     assert_eq!(cold, [true, true, true, true, false]);
+}
+
+#[test]
+fn the_visibility_boundary_is_exact_to_the_millisecond() {
+    // Defect: the boundary off by a millisecond either way (a run that ended 1 ms before
+    // the lease hidden, or one ending at the lease's start visible). Two runs end at 1,000
+    // and 2,000 and a third at 11,000. The lease at 11,000 sees two (cold); the lease at
+    // 11,001 sees three (warm). Both are 1 ms long, so neither sees the other.
+    let rows = vec![
+        ok(0, 0, 1_000, 100, 10),
+        ok(1_000, 0, 1_000, 100, 10),
+        ok(10_000, 0, 1_000, 100, 10),
+        ok(11_000, 0, 1, 100, 10),
+        ok(11_001, 0, 1, 100, 10),
+    ];
+    let p = flat(&rows);
+    assert!(
+        p.belief(3).is_cold(),
+        "a run ending at 11,000 is hidden from 11,000"
+    );
+    assert!(
+        !p.belief(4).is_cold(),
+        "a run ending at 11,000 is seen from 11,001"
+    );
 }
 
 #[test]
@@ -256,6 +307,35 @@ fn p_bar_is_the_p90_of_mean_cores_and_of_peak_memory_separately() {
     let p = flat(&ring_of(&[300, 100, 200], &[5, 7, 6]));
     assert_eq!(p.belief(3).p_bar_cores_milli(), 300);
     assert_eq!(p.belief(3).p_bar_mem_mib(), 7);
+}
+
+#[test]
+fn p_bar_reads_the_peak_of_a_series_and_the_mean_of_the_row() {
+    // Defect: peak memory taken as the minimum, the first or the last point of a series;
+    // p_bar cores taken from the series (its maximum) and not from the row's mean. Three
+    // runs of 90 s, each with a peak in its middle minute; the rows' means are 1, 2 and
+    // 3 cores, the series reach 9, 8 and 7 cores. P90 of three is the largest.
+    let rows: Vec<Row> = (0..4)
+        .map(|k| ok(k * 1_000_000, 0, 90_000, 90_000 * (k + 1).min(3), 1))
+        .collect();
+    let p = Predictor::build(&rows, |i, _| {
+        let k = i as u64;
+        Observed::new(
+            vec![100, 9_000 - 1_000 * k, 100],
+            vec![5 + k, 50 + 10 * k, 7 - k],
+        )
+        .expect("a series")
+    });
+    let b = p.belief(3);
+    assert_eq!(b.p_bar_cores_milli(), 3_000);
+    assert_eq!(b.p_bar_mem_mib(), 70);
+    // The same on the series of `shaped()`: the peaks are 110, 100, 90, 80, 70, 60, 50,
+    // 40, 45, 50 and 999; the P90 is 110 (first points give 100, last points 110 only
+    // by accident, the minimum 40). Every row there has a mean of 1 millicore.
+    let (rows, p) = shaped();
+    let b = p.belief(rows.len() - 1);
+    assert_eq!(b.p_bar_mem_mib(), 110);
+    assert_eq!(b.p_bar_cores_milli(), 1, "the series reach 10,000");
 }
 
 #[test]
@@ -349,11 +429,55 @@ fn eol_drops_a_warm_belief_to_zero_from_l_and_held_does_not() {
 }
 
 #[test]
+fn a_belief_encodes_to_the_documented_bytes() {
+    // Defect: a field dropped from, or reordered in, the canonical form. The identity
+    // tests compare the predictor with itself, so only exact bytes pin the fields. A cold
+    // belief, then a warm one of two minutes (three runs of 90 s; P90 of three is the
+    // largest: curve 300, 3,000 and working sets 30, 21; p_bar 3,000 and 30; L = 2).
+    let le = |v: u64| v.to_le_bytes().to_vec();
+    let cat = |parts: &[Vec<u8>]| parts.concat();
+    let cold = flat(&[ok(0, 0, 1_000, 1, 1)]);
+    assert_eq!(
+        bytes_of(&cold, 0),
+        cat(&[
+            vec![1, 1],
+            le(2_000),
+            le(4_096),
+            1u32.to_le_bytes().to_vec(),
+            le(2_000),
+            le(4_096),
+        ])
+    );
+    let mut rows: Vec<Row> = (0..3)
+        .map(|k| ok(k * 1_000_000, 0, 90_000, 90_000 * (k + 1), 1))
+        .collect();
+    rows.push(ok(5_000_000, 0, 1_000, 1, 1));
+    let p = Predictor::build(&rows, |i, _| {
+        let k = i as u64 + 1;
+        Observed::new(vec![100 * k, 1_000 * k], vec![10 * k, 7 * k]).expect("a series")
+    });
+    let want = cat(&[
+        vec![0, 2],
+        le(3_000),
+        le(30),
+        2u32.to_le_bytes().to_vec(),
+        le(300),
+        le(3_000),
+        le(30),
+        le(21),
+    ]);
+    assert_eq!(bytes_of(&p, 3), want);
+    assert_eq!(p.to_bytes().len(), 3 * bytes_of(&p, 0).len() + want.len());
+    assert_eq!(p.digest(), fnv1a(&p.to_bytes()));
+}
+
+#[test]
 fn observed_series_are_checked() {
     // Defect: an empty series (which would make a ring run reach no minute at all) or
     // cores and memory of different lengths.
     assert!(Observed::new(vec![], vec![]).is_none());
     assert!(Observed::new(vec![1, 2], vec![1]).is_none());
+    assert!(Observed::new(vec![1], vec![1, 2]).is_none());
     let o = Observed::new(vec![1, 2], vec![3, 4]).expect("two points");
     assert_eq!(o.minutes(), 2);
     let f = Observed::flat(&ok(0, 0, 130_000, 260_000, 7));
@@ -532,6 +656,9 @@ fn beliefs_are_a_function_of_the_fixture_and_the_seed_only() {
     // trace-clock brute force. The same toy engines with an engine-clock learner (ring
     // filled at placement + wall) would differ, which the last assertion shows, so the
     // equality above is a property and not an accident of the trace.
+    // The equality of the three readings to `reference` holds by construction (`build`
+    // has no placement input); the content is the brute-force oracle and the check that
+    // waits would change it.
     let rows = prefix(2_000);
     let p = Predictor::build(&rows, seeded(7));
     let reference = p.to_bytes();

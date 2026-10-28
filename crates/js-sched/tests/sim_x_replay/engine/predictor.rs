@@ -284,7 +284,8 @@ impl Predictor {
     /// The beliefs for `rows` (row `i` is lease `i`), on the trace clock.
     ///
     /// `observed(i, row)` gives what the learner saw of run `i` once it ended; it is
-    /// called once for each `Ok` run that some later lease can see, in no promised order,
+    /// called once for each `Ok` run that ends before some later lease of its key starts
+    /// (including a run the ring evicts before any lease reads it), in no promised order,
     /// and must be a function of its arguments (and the caller's seed) alone.
     pub fn build(rows: &[Row], mut observed: impl FnMut(usize, &Row) -> Observed) -> Predictor {
         let mut by_key: BTreeMap<KeyIx, Vec<usize>> = BTreeMap::new();
