@@ -1,57 +1,21 @@
 //! Rows a later binary wrote, read back as a start reads them: a row that holds a command
-//! this binary does not know is skipped, and the rows it can read load.
+//! this binary does not know is skipped, and the rows it can read load. What the log says
+//! about such rows is tested in `skip_log.rs`, alone in its binary.
 
 mod common;
 
-use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use js_sched::Request;
 use js_state::{Cond, Store, Txn};
 use js_store::test_support::TestCodec;
-use js_store::{RowCodec, Rows, StateError, Submitted, keys};
+use js_store::{RowCodec, Rows, StateError};
 use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
 
 use common::{Racing, frontend_with};
-
-/// Log lines written by the test's subscriber on this thread.
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
-
-impl Lines {
-    /// The log of this thread, until the guard drops. Other tests reach the same callsites
-    /// with no subscriber and can leave their interest cached as never, so the cache is
-    /// rebuilt once ours is installed.
-    fn subscribe(&self) -> tracing::subscriber::DefaultGuard {
-        let writer = self.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        tracing::callsite::rebuild_interest_cache();
-        guard
-    }
-
-    fn text(&self) -> String {
-        let bytes = self.0.lock().expect("lock").clone();
-        String::from_utf8(bytes).expect("UTF-8 logs")
-    }
-}
-
-impl io::Write for Lines {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().expect("lock").extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
 
 const OP_KNOWN: &str = "op/0000000000000001";
 const OP_UNKNOWN: &str = "op/0000000000000002";
@@ -128,37 +92,4 @@ fn an_unknown_row_a_write_depends_on_is_refused_naming_it() {
     };
     assert_eq!(key, OP_UNKNOWN);
     assert_eq!(why, "a command this binary does not know");
-}
-
-/// Asserts that a request for work another submit queued joins that operation, and carries
-/// its lease, when the store also holds a `lease/` row that holds a command this binary does
-/// not know: the row is passed over, not refused, and not logged.
-#[test]
-fn a_request_joins_an_operation_past_an_unknown_lease_row() {
-    let (store, codec, rows) = opened();
-    let queued = rows.submit(OperationId(1), &request(1), &[], None);
-    assert!(
-        matches!(queued, Ok(Submitted::Queued(OperationId(1)))),
-        "{queued:?}"
-    );
-    // A granted operation has left the queue: the lease is looked up only then.
-    let granted = Txn::new().delete(keys::queue(OperationId(1)), Cond::Any);
-    store
-        .txn(granted)
-        .expect("the store answers")
-        .expect("the queue row goes");
-    put(&store, LEASE_KNOWN, codec.lease(&grant()).expect("encode"));
-    put(&store, LEASE_UNKNOWN, unknown());
-    let lines = Lines::default();
-    let _guard = lines.subscribe();
-
-    let joined = rows.submit(OperationId(2), &request(1), &[], None);
-
-    let Ok(Submitted::Joined(op)) = joined else {
-        panic!("the request did not join");
-    };
-    assert_eq!(op.operation, OperationId(1));
-    assert_eq!(op.lease, Some(grant()));
-    let text = lines.text();
-    assert!(!text.contains(LEASE_UNKNOWN), "{text}");
 }
