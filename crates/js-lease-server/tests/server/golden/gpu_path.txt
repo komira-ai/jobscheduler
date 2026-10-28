@@ -26,204 +26,482 @@
 
 == routes ==
 GET /healthz
-  no token: 200 ok
-  wrong token: 200 ok
-  valid token: 200 ok
+  no token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  wrong token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  valid token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  valid token, again: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 409 {"error":"no-capacity"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 409 {"error":"no-capacity"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/hosts
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/renew
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/9-9/renew
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-lease"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/renew
-  no token: 401
-  wrong token: 401
-  valid token: 405
+  no token: 401 [type -; headers allow,connection,content-length,date]
+  wrong token: 401 [type -; headers allow,connection,content-length,date]
+  valid token: 405 [type -; headers allow,connection,content-length,date]
+  valid token, again: 405 [type -; headers allow,connection,content-length,date]
 POST /v1/leases/1-1/runs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs/r1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1/runs/r1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/agent/hello
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/agent/heartbeat
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/sched/jobs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/sched/jobs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/sched/jobs/1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/sched/jobs/1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/nothing
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"state":"freed"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"state":"freed"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-lease"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
 PUT /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 405
+  no token: 401 [type -; headers allow,connection,content-length,date]
+  wrong token: 401 [type -; headers allow,connection,content-length,date]
+  valid token: 405 [type -; headers allow,connection,content-length,date]
+GET /
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /metrics
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /metrics
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/jobs
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/jobs
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/operations
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/operations
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/placements
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/placements
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/sched
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/sched
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/sched/hosts
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/sched/hosts
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/workers
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/workers
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/hosts/gpu-01
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/hosts/gpu-01
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/agent
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/agent
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/agent/session
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/agent/session
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/state
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/state
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/leases/1-1/hold
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/leases/1-1/hold
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 
 == routes-with-agents ==
 GET /healthz
-  no token: 200 ok
-  wrong token: 200 ok
-  valid token: 200 ok
+  no token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  wrong token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  valid token: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
+  valid token, again: 200 ok [type text/plain; charset=utf-8; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 201 {"id":"1-1","host":"gpu-01","expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 201 {"id":"1-2","host":"gpu-02","expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 409 {"error":"no-capacity"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 409 {"error":"no-capacity"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"leases":[{"id":"1-1","state":"held","host":"gpu-01","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}},{"id":"1-2","state":"held","host":"gpu-02","acquired_at_ms":1000000,"expires_at_ms":1600000,"ends_at_ms":8200000,"labels":{"team":"infra"}}]} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/hosts
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"hosts":[{"id":"gpu-01","source":"static","lease":"1-1","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","lease":"1-2","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/1-1/renew
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"expires_at_ms":1600000}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"expires_at_ms":1600000} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/leases/9-9/renew
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-lease"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/renew
-  no token: 401
-  wrong token: 401
-  valid token: 405
+  no token: 401 [type -; headers allow,connection,content-length,date]
+  wrong token: 401 [type -; headers allow,connection,content-length,date]
+  valid token: 405 [type -; headers allow,connection,content-length,date]
+  valid token, again: 405 [type -; headers allow,connection,content-length,date]
 POST /v1/leases/1-1/runs
-  no token: 401
-  wrong token: 401
-  valid token: 400 {"error":"bad-request","reason":"the body is JSON, but not what this route takes (line 1, column 2)"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 400 {"error":"bad-request","reason":"the body is JSON, but not what this route takes (line 1, column 2)"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"runs":[]}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"runs":[]} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 200 {"runs":[]} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/leases/1-1/runs/r1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-run"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1/runs/r1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-run"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-run"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/agent/hello
-  no token: 401
-  wrong token: 401
-  valid token: 401
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 POST /v1/agent/heartbeat
-  no token: 401
-  wrong token: 401
-  valid token: 401
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 401 [type -; headers connection,content-length,date]
 GET /v1/sched/jobs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 POST /v1/sched/jobs
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/sched/jobs/1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/sched/jobs/1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 GET /v1/nothing
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"not-found"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1
-  no token: 401
-  wrong token: 401
-  valid token: 200 {"state":"freed"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 200 {"state":"freed"} [type application/json; headers connection,content-length,content-type,date]
 DELETE /v1/leases/1-1
-  no token: 401
-  wrong token: 401
-  valid token: 404 {"error":"unknown-lease"}
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"unknown-lease"} [type application/json; headers connection,content-length,content-type,date]
 PUT /v1/leases
-  no token: 401
-  wrong token: 401
-  valid token: 405
+  no token: 401 [type -; headers allow,connection,content-length,date]
+  wrong token: 401 [type -; headers allow,connection,content-length,date]
+  valid token: 405 [type -; headers allow,connection,content-length,date]
+GET /
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /metrics
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /metrics
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/jobs
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/jobs
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/operations
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/operations
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/placements
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/placements
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/sched
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/sched
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/sched/hosts
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/sched/hosts
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/workers
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/workers
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/hosts/gpu-01
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/hosts/gpu-01
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/agent
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/agent
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/agent/session
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/agent/session
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/state
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/state
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+GET /v1/leases/1-1/hold
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+  valid token, again: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+POST /v1/leases/1-1/hold
+  no token: 401 [type -; headers connection,content-length,date]
+  wrong token: 401 [type -; headers connection,content-length,date]
+  valid token: 404 {"error":"not-found"} [type application/json; headers connection,content-length,content-type,date]
+
+== keep-alive ==
+GET /healthz (token none, close asked false): 200 ok [type text/plain; charset=utf-8; headers content-length,content-type,date] [connection -]
+GET /v1/leases (token valid, close asked false): 200 {"leases":[]} [type application/json; headers content-length,content-type,date] [connection -]
+GET /v1/leases (token wrong, close asked false): 401 [type -; headers content-length,date] [connection -]
+GET /v1/hosts (token valid, close asked false): 200 {"hosts":[{"id":"gpu-01","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}},{"id":"gpu-02","source":"static","shape":{"cpu_millis":64000,"memory_bytes":549755813888,"gpus":8,"gpu_class":"nvidia-a100"},"capabilities":{"driver":"550","isa":"x86-64-v3"},"labels":{}}]} [type application/json; headers content-length,content-type,date] [connection -]
+GET /v1/leases (token valid, close asked true): 200 {"leases":[]} [type application/json; headers connection,content-length,content-type,date] [connection close]
+bytes after the last reply: 0
 
 == state-files ==
 without agent flags
-  before start: (empty)
-  after start: leases.toml leases.toml.lock
-  after acquire: leases.toml leases.toml.lock
-  after shutdown: leases.toml leases.toml.lock
+  before start: pool.toml state/ token
+  after start: pool.toml state/ state/leases.toml state/leases.toml.lock token
+  after acquire: pool.toml state/ state/leases.toml state/leases.toml.lock token
+  after shutdown: pool.toml state/ state/leases.toml state/leases.toml.lock token
 with agent flags
-  before start: (empty)
-  after start: leases.toml leases.toml.lock
-  after acquire: leases.toml leases.toml.lock
-  after an agent joins: leases.toml leases.toml.agents leases.toml.lock
-  after shutdown: leases.toml leases.toml.agents leases.toml.lock
+  before start: agent-pool.toml agent-tokens pool.toml state/ token
+  after start: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock token
+  after acquire: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock token
+  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock token
+  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock token
 
 == lease-file ==
 after start
@@ -294,9 +572,34 @@ next_sequence = 2
 lease_count = 0
 lease = []
 
+after second acquire
+version = 1
+term = 1
+next_sequence = 3
+lease_count = 1
+
+[[lease]]
+term = 1
+sequence = 2
+state = "held"
+host = "gpu-01"
+acquired_at_ms = 1110000
+expires_at_ms = 1710000
+ends_at_ms = 8310000
+
+[lease.labels]
+team = "infra"
+
+after a tick after the ttl
+version = 1
+term = 1
+next_sequence = 3
+lease_count = 0
+lease = []
+
 after shutdown
 version = 1
 term = 1
-next_sequence = 2
+next_sequence = 3
 lease_count = 0
 lease = []
