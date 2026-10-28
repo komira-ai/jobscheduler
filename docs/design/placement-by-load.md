@@ -22,7 +22,7 @@ separately. Per-node measurements come from cgroups each heartbeat; per-action-k
 | `--lease-placement=numa-node` (`numa.rs`, cpuset on lease cgroups) | Removed. Containers may use any core. |
 | `--reserve-cpus` as the `cpu.max` quota | Kept as a **capacity reduction only**: `C_cpu = hardware threads - reserve`. Chosen over measuring the non-action usage because the daemon and storage processes live outside the actions cgroup, in a layout only the operator knows; a static number cannot be made wrong by a failed read. The non-action usage (root `cpu.stat` minus actions) is exported so the reserve can be tuned. The memory side is unchanged: `C_mem` is the Hello memory after protected floors. |
 | per-lease `cpu.weight` from the booking | Unchanged (a proportional share under contention, not a limit or a tier). |
-| protection of the daemon and storage processes, which `cpu.max` gave indirectly (the actions cgroup could never take the whole node) | Replaced by weight. The actions cgroup keeps `cpu.weight` 100 (the default); the daemon and storage services run with `CPUWeight=1000` in their systemd units (the packaged units; where a unit is not used, the delegated cgroup that holds them gets `cpu.weight` 1000). Under contention CFS then gives those processes up to ten times the share of the whole actions cgroup, so a heartbeat is not starved however much the actions demand, and the lease self-fence does not trip from CPU starvation. Idle, they use almost nothing, so the weight costs the actions nothing. The daemon's own runnable time is exported (`cpu.pressure` of its cgroup) as telemetry. |
+| protection of the daemon and storage processes, which `cpu.max` gave indirectly (the actions cgroup could never take the whole node) | Replaced by weight, set where the siblings actually are. kbf-driver-container moves the daemon into a `supervisor/` cgroup with `actions/` beside it, both under the unit's delegated cgroup; a unit `CPUWeight` is relative to other units and weighting the parent that holds both changes nothing between them. So the daemon writes `supervisor/cpu.weight` = 1000 next to its existing `supervisor/memory.min` write, and `actions/` stays at 100: under contention the supervisor gets up to ten times the share of the whole actions cgroup, so a heartbeat is not starved and the lease self-fence does not trip from CPU starvation. The storage service is a separate unit, a sibling of the node unit, so its unit `CPUWeight=1000` does work. Idle, both use almost nothing, so the weight costs the actions nothing. The value is not chosen but measured: the daemon's `cpu.pressure` and self-fence trips are canary criteria. |
 
 ## Signals
 Additive and optional; an old agent omits them, an old server ignores them.
@@ -93,15 +93,15 @@ its leases, no decay. It never falls back to booked-only. Such a worker is as sa
 
 ## The overshoot bound
 Let `M` be the CPU of covered leases at the last reading, `P_c = sum(p_i, covered)`, `U_w` and `U_c` the predicted cost of uncovered warm and cold
-leases, so `max(M, f P_c) + U_w + U_c <= (1+s_cpu) C`. Let `k` be actual over predicted CPU of a warm lease over a window (the mean is learned,
-within-run peaks are not, so `k` includes phase changes), `r` how much a covered lease's CPU can rise over its measured use in one window, `A` the CPU a
+leases, so `max(M, f P_c) + U_w + U_c <= (1+s_cpu) C`. Let `k` be the **whole-run mean** cores over predicted cores of a warm lease (`mean cores / p_i`, the figure the histogram below records; the mean is learned,
+so `k` includes the lease's own variation between runs), `r` the factor by which a lease's peak window exceeds its whole-run mean (`peak window / mean`, also histogrammed), so a lease's demand in one window is at most `r k p_i`; `A` the CPU a
 cold lease can use, and `n_c` the cold leases uncovered at once. The covered leases demand at most `r M` when the measurement is the larger term, and at
-most `k P_c` when the floor is (any covered lease, idle now, can wake up to its `k` times its prediction); with `f P_c <= (1+s_cpu) C` the second is at most
-`k (1+s_cpu) C / f`. Then the demand in any window after admission is
+most `r k P_c` when the floor is (any covered lease, idle now, can wake to its peak window); with `f P_c <= (1+s_cpu) C` the second is at most
+`r k (1+s_cpu) C / f`. Then the demand in any window after admission is
 
-    P_cpu  <=  max(r, k/f) * (1 + s_cpu) * C  +  n_c * A
+    P_cpu  <=  (r k / f) * (1 + s_cpu) * C  +  n_c * A
 
-(the uncovered warm term `k U_w` is inside the first, since `f P_c + U_w <= (1+s_cpu) C` and `f <= 1`). The floor is what makes this a bound: stated
+(the uncovered warm term `r k U_w` is inside it, since `f P_c + U_w <= (1+s_cpu) C` and `f <= 1`; `r M` is inside it too, since `r k / f >= r` once `k >= f`, and below that the floor is the larger term). The floor is what makes this a bound: stated
 without it, the covered term `r M` is about 0 when covered leases are idle and the covered leases are bounded by nothing but the admission history.
 
 Cold cap: at most `cold_per_window` leases with a cold CPU cost are admitted per worker per window, default `ceil(C_cpu / 32)` (setting
@@ -114,11 +114,10 @@ proportionally less on a pool, and only for actions shorter than the ramp (longe
 run it has a figure. To drain a mass-cold event faster an operator raises `--placement-cold-per-window` for the pool and restarts the scheduler with it;
 the bound moves with it by `n_c * A` (at 12 per window: `n_c = 24`, plus 96 cores, 354 cores = 4.0 C on 88 threads) and sim o asserts exactly that.
 
-Defaults (`f = 0.75`, `s_cpu = 0.10`), with the shadow exit criteria below (`k <= 2`, `r <= 2` at p99, `A <= 4` cores at p99), so `max(r, k/f) = 2.67`:
-on 88 threads `n_c = 6`, so `P_cpu <= 2.67 * 1.1 * 88 + 6 * 4 = 258 + 24 = 282 cores = 3.2 C`; on 16 threads `n_c = 2`,
-`P_cpu <= 2.67 * 1.1 * 16 + 8 = 47 + 8 = 55 = 3.4 C`. (With `f = 0.5` the figures are 411 cores, 4.7 C, and 78 cores, 4.9 C; with `f = 1`, 218 and 43,
-2.5 C and 2.7 C.) Not 10 times. It is a worst case at the p99 criteria, not the expected overshoot; CPU is compressible, so it slows work and does
-not fail it. The bound lasts until the leases admitted at `k` times their cost finish, which can be minutes to hours: the next heartbeat shows the rise
+Defaults (`f = 0.75`, `s_cpu = 0.10`), with the shadow exit criteria below (`k <= 2`, `r <= 2` at p99, `A <= 4` cores at p99), so `r k / f = 5.33`:
+on 88 threads `n_c = 6`, so `P_cpu <= 5.33 * 1.1 * 88 + 6 * 4 = 516 + 24 = 540 cores = 6.1 C`; on 16 threads `n_c = 2`,
+`P_cpu <= 5.33 * 1.1 * 16 + 8 = 94 + 8 = 102 cores = 6.4 C`. (With `f = 0.5`: `r k / f = 8`, 798 cores = 9.1 C and 149 cores = 9.3 C, which is why the range stops at 0.5 and the default is higher; with `f = 1`: 411 cores = 4.7 C and 78 cores = 4.9 C.) About 6 C, not 10 times. It is a worst case at the p99 criteria, not the expected overshoot; CPU is compressible, so it slows work and does
+not fail it. The bound lasts until the leases admitted at `r k` times their cost finish, which can be minutes to hours: the next heartbeat shows the rise
 and stops further admission, and a key with understated cost relearns by the rule above, but that protects later leases only. A lease is uncovered for
 `2W` plus the heartbeat delivery delay.
 Memory: a lease cannot exceed its cgroup limit `1.5 x booking + 512 MiB`, so a cold lease (4 GiB) has `k_m <= 1.63` and
@@ -160,7 +159,8 @@ round. Work ahead of the head is never held back.
 | js scheduler | `js_sched::Event::Heartbeat` gains `load: Option<NodeLoad>`; the predicate and shares live in one pure module (`load.rs`) with shared test vectors, because kbf-sched is a copy |
 | Cost | `js-sizing`: floor 250 m, scaled samples, the learning rule, `Observed` says why a sample was dropped |
 | Flags | `--placement-load off\|shadow\|on` and `--placement-load-pools` (pools that are `on`; the rest stay at their mode) on kbf-server and as a `Scheduler` setter plus `js-lease-server::Config` field; `--placement-cold-per-window`, `--placement-cpu-floor` (`f`, default 0.75, range 0.5 to 1), `--placement-s-cpu`, `--placement-s-mem`. On kbf-node: `--actions-cpu-max=on\|off` (default `on`, today's behaviour); `off` makes `limit_cpus` write `max` and skip the limit, and the operator sets it on the nodes of a pool when that pool goes `on` (the node starts first, then the pool mode flips). The server does not trust the pairing: `actions_cpu_limited` in the heartbeat puts a worker of an `on` pool that still has a limit in the fallback and raises a counter, and a node with `off` in a pool that is not `on` is merely under-limited, reported the same way. |
-| Daemon protection | the packaged systemd units of the daemon and storage services set `CPUWeight=1000` (the actions cgroup stays 100); in a layout without those units the delegated cgroup that holds them takes `cpu.weight` 1000 from the installer. Not a kbf-server flag: it is a property of the node's units. | `shadow` or `on` with `--learned-sizes=off` is refused at start-up, since the CPU estimate exists only with learned sizes. |
+| Daemon protection | the daemon writes `supervisor/cpu.weight` = 1000 (flag `--supervisor-cpu-weight`, default 1000) beside its existing `supervisor/memory.min` write in kbf-driver-container `delegate.rs`; `actions/` stays 100. The storage unit gets `CPUWeight=1000` in its packaged systemd unit (a sibling unit, so the unit weight applies). Not a kbf-server flag. |
+| Learned sizes | `shadow` or `on` with `--learned-sizes=off` is refused at start-up, since the CPU estimate exists only with learned sizes. |
 
 ## Ranking
 `load.rs` ranks by the largest of CPU share, memory share and lease share, now `L_cpu / C_cpu` and `D_mem / C_mem` from the predicate's own left sides
@@ -168,7 +168,7 @@ round. Work ahead of the head is never held back.
 
 ## Telemetry
 Per worker each heartbeat: measured CPU and memory over capacity, uncovered cost, sum of predicted cost, throttled time, run-queue proxy
-(`cpu.pressure`), non-action CPU, plausibility state. Per finished lease, **in `shadow` and `on`**: histograms of `k` for CPU (`mean cores / p_i`),
+(`cpu.pressure`), non-action CPU, plausibility state. Per finished lease, **in `shadow` and `on`**: histograms of `k` for CPU (`mean cores / p_i`, the same `k` as the bound), the share of node-windows where the floor binds (`f * P_c > M`),
 of `r` (`peak window / mean`, from the daemon's per-heartbeat read of the lease cgroup) and of `k_m` (`memory.peak / m_i`). Per key: cost, sample count;
 farm-wide: cold and unsampled keys, cold leases admitted. The summary reports the distribution of measured CPU over capacity, the share of windows
 above `1 + s_cpu`, and the run queue.
@@ -180,8 +180,8 @@ verdict differences.
 
 | Step | Numeric exit criteria |
 |---|---|
-| shadow to canary pool | signal fresh on at least 99% of heartbeats of container workers; p99 `k <= 2`, p99 `r <= 2`, p99 cold-run mean cores `<= 4`, p99 warm `k_m <= 1.3`; median `k >= f` (otherwise the floor binds in normal phases and `f` or the costs are wrong); keys without a CPU sample at most 5% of started leases |
-| canary to wide | over a canary period of at least 7 days of traffic: p99 measured CPU / `C` at most 1.25 and never above the bound; ladder retries and node-pressure kills not above the control pools; queue wait p95 not more than 10% above control; mean measured CPU / `C` above control |
+| shadow to canary pool | signal fresh on at least 99% of heartbeats of container workers; p99 `k <= 2`, p99 `r <= 2`, p99 cold-run mean cores `<= 4`, p99 warm `k_m <= 1.3`; the core-second-weighted mean of `k` per node at least `f` (the floor acts on the sum, so the weighted mean is the figure that matters), and the share of node-windows where `f * P_c > M` (the floor binds) reported and not above 10%, otherwise the floor binds in normal phases and `f` or the costs are wrong; keys without a CPU sample at most 5% of started leases |
+| canary to wide | over a canary period of at least 7 days of traffic: the daemon's `cpu.pressure` and lease self-fence trips not above the control pools' (this is what measures the supervisor weight); p99 measured CPU / `C` at most 1.25 and never above the bound; ladder retries and node-pressure kills not above the control pools; queue wait p95 not more than 10% above control; mean measured CPU / `C` above control |
 
 ## Simulation tests
 Logical ticks only (js-sim, js-sched sims), `W` expressed in ticks; no wall-clock assertion. Bounds are checked against the model's ground-truth
@@ -196,7 +196,7 @@ demand, not the scheduler's own figures. The last column names the mechanism the
 | e | Throughput and p99 wait against booked-only with the contention model: not worse by more than 5% on (a), at least 10% higher on the light population | contention model absent (claim cannot fail); floor |
 | f | A burst of equal submissions in one round, then across two rounds, over several workers, before any heartbeat: admitted `<=` headroom, spread by rank | per-placement update of the sums |
 | g | Cold burst: 40 unlearned keys at once: uncovered cold leases per worker `<= 2 * cold_per_window`, demand within `P_cpu` | the cold cap |
-| h | Phase change (idle for 4 windows, then 16 cores): demand within the bound, and no placement after the heartbeat that shows the rise. Idle prelude: batches of leases are admitted window after window while every earlier lease is idle (measures about 0), the node is filled to the predicate, and all leases then wake at their `k = 2`: demand `<= max(r, k/f) (1 + s_cpu) C + n_c A`, and the covered charge never falls below `f * sum p_i` while they idle | believing a rise at once; the covered-CPU floor |
+| h | Phase change (idle for 4 windows, then 16 cores): demand within the bound, and no placement after the heartbeat that shows the rise. Idle prelude: batches of leases are admitted window after window while every earlier lease is idle (measures about 0), the node is filled to the predicate, and all leases then wake at their peak (`r = 2`, `k = 2`): demand `<= (r k / f) (1 + s_cpu) C + n_c A`, and the covered charge never falls below `f * sum p_i` while they idle | believing a rise at once; the covered-CPU floor |
 | i | A key understated 4x: demand `<= 4.4 C` at first; after the learned samples (taken under pressure) the cost is within 1.25 x true and demand `<= 1.1 C` | the learning-under-load rule |
 | j | Scheduler restart with leases in flight: no placement beyond the bound across the restart; recovered leases are counted | counting recovered leases |
 | k | Stuck-low signal (reports 0 with leases running): flagged within the stated number of windows, then predicted-sum, demand within the bound. Long leases (40 windows) beside short ones on a healthy signal: never flagged; a node with only long leases is unchecked and reported, not flagged | the plausibility check; counting only leases that ended in the span |
