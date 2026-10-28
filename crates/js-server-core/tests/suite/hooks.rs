@@ -19,8 +19,9 @@ fn since(core: &js_server_core::Core<crate::common::Rig>, seen: usize) -> Vec<Ho
 }
 
 /// Catches: a feed that reaches the scheduler before the adapter is told the time, for
-/// each kind of input that feeds it: a tick, a heartbeat, a report. The first hook of
-/// each call is the clock at that call's time.
+/// each kind of input that feeds it: a tick, a heartbeat, a report. The first hook of a
+/// registration, tick and heartbeat is the clock at that call's time, and a report's feed
+/// tells it exactly once.
 #[test]
 fn the_clock_is_told_at_the_top_of_every_feed() {
     let core = core();
@@ -47,14 +48,11 @@ fn the_clock_is_told_at_the_top_of_every_feed() {
         outcome: done(),
     };
     block_on(core.report(at(20), &worker("node-a"), report, |_| {}));
-    let after = since(&core, seen);
-    assert_eq!(after.first(), Some(&Hook::Clock(at(20))));
-    assert!(
-        after
-            .iter()
-            .all(|hook| !matches!(hook, Hook::Clock(time) if *time != at(20))),
-        "a report's feed tells its own time only: {after:?}"
-    );
+    let clocks = since(&core, seen)
+        .into_iter()
+        .filter(|hook| matches!(hook, Hook::Clock(_)))
+        .count();
+    assert_eq!(clocks, 1, "one clock call for the one feed of a report");
 }
 
 /// Catches: a hook order the adapter cannot work with: the open operation and its waiters
@@ -76,20 +74,21 @@ fn a_report_is_hooked_before_the_feed_and_after_it_and_before_the_settle() {
         block_on(core.report(at(20), &node, report, |_| {})),
         Taken::Accepted
     );
-    let ours: Vec<Hook> = since(&core, seen)
-        .into_iter()
-        .filter(|hook| !matches!(hook, Hook::Clock(_)))
-        .collect();
+    // The feed's one clock call falls between the hooks: `before_report` carries the time
+    // itself.
     assert_eq!(
-        ours,
+        since(&core, seen),
         [
             Hook::Before {
+                now: at(20),
                 worker: node.clone(),
                 report,
                 open: true,
                 waiters: vec![admitted.waiter],
             },
+            Hook::Clock(at(20)),
             Hook::After {
+                now: at(20),
                 worker: node,
                 report,
                 answers: vec![(admitted.operation, vec![admitted.waiter])],

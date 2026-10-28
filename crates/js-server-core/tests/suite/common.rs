@@ -70,6 +70,7 @@ pub enum Hook {
     Clock(FarmTime),
     /// `before_report`: what the view showed of the report's operation.
     Before {
+        now: FarmTime,
         worker: WorkerId,
         report: Report,
         open: bool,
@@ -77,6 +78,7 @@ pub enum Hook {
     },
     /// `after_report`.
     After {
+        now: FarmTime,
         worker: WorkerId,
         report: Report,
         answers: Vec<(OperationId, Vec<WaiterId>)>,
@@ -129,9 +131,16 @@ impl Adapter for Rig {
         self.hooks.push(Hook::Clock(now));
     }
 
-    fn before_report(&mut self, view: &View<'_>, worker: &WorkerId, report: &Report) {
+    fn before_report(
+        &mut self,
+        view: &View<'_>,
+        now: FarmTime,
+        worker: &WorkerId,
+        report: &Report,
+    ) {
         let sched = view.sched();
         self.hooks.push(Hook::Before {
+            now,
             worker: worker.clone(),
             report: *report,
             open: sched.state(report.operation).is_some_and(open),
@@ -144,12 +153,14 @@ impl Adapter for Rig {
     fn after_report(
         &mut self,
         view: &View<'_>,
+        now: FarmTime,
         worker: &WorkerId,
         report: &Report,
         answers: &[Answer],
         taken: Taken,
     ) {
         self.hooks.push(Hook::After {
+            now,
             worker: worker.clone(),
             report: *report,
             answers: answers
