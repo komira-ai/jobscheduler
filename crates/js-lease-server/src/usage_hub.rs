@@ -404,17 +404,16 @@ impl Usage {
             hub.results(&host, beat, acks, &*self.keys, now);
             finished
         };
+        let mut learned = 0;
         for (lease, ending) in finished {
             let end = RunEnd {
                 key: ending.key,
                 lease,
                 series: series_of(&ending.minutes),
             };
-            let learned = self.guard(self.sink.run_ended(&end, now));
-            if learned.is_ok() {
-                self.hub().counts.runs_learned += 1;
-            }
+            learned += u64::from(self.guard(self.sink.run_ended(&end, now)).is_ok());
         }
+        self.hub().counts.runs_learned += learned;
     }
 
     /// Checks one load and gives it to the sink; returns the lease minutes that are new.
