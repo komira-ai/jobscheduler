@@ -281,7 +281,15 @@ impl Adapter for Probe {
         Some(Ending::new(done.to_vec(), retention))
     }
 
-    fn adopted(&mut self, _: OperationId, waiter: WaiterId, parcel: Option<&[u8]>) {
+    fn adopted(
+        &mut self,
+        _: OperationId,
+        waiter: WaiterId,
+        parcel: Option<&[u8]>,
+        _: &js_sched::Request,
+        _: Option<&js_types::sched::LeaseGrant>,
+        _: Option<u64>,
+    ) {
         let caller = parcel
             .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
             .map(u64::from_be_bytes);
