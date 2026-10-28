@@ -95,6 +95,19 @@ fn nth(released: &[Released], index: usize) -> (OperationId, LeaseId) {
     released.get(index).map_or(none, |s| (s.operation, s.lease))
 }
 
+/// The operations of `released`, in order.
+fn operations(released: &[Released]) -> Vec<OperationId> {
+    released.iter().map(|s| s.operation).collect()
+}
+
+/// The operation and worker of each start in `released`, in order.
+fn placements(released: &[Released]) -> Vec<(OperationId, &str)> {
+    released
+        .iter()
+        .map(|s| (s.operation, s.worker.as_str()))
+        .collect()
+}
+
 /// The starts released since `seen` of them were.
 fn since<H: CoreHarness>(harness: &H, seen: usize) -> Vec<Released> {
     harness.observed().released.split_off(seen)
@@ -153,7 +166,7 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     harness.advance(SECOND);
 
     notes.expect(
-        again.len() == 1 && again[0].operation == queued,
+        operations(&again) == [queued],
         "after the restart only the operation that was still queued is started",
     );
     notes.expect(
@@ -211,7 +224,7 @@ fn stale_heartbeat_is_not_fed<H: CoreHarness>(harness: &mut H, notes: &mut Notes
 
     let all = harness.observed().released;
     notes.expect(
-        all.len() == 2 && all[0].stream == old && all[1].stream == new,
+        all.iter().map(|s| s.stream).collect::<Vec<_>>() == [old, new],
         "each Start went to the worker's newest stream when it left",
     );
 }
@@ -227,9 +240,8 @@ fn refused_write_is_retried<H: CoreHarness>(harness: &mut H, notes: &mut Notes) 
     }
 
     let seen = harness.observed();
-    let started: Vec<OperationId> = seen.released.iter().map(|s| s.operation).collect();
     notes.expect(
-        started == [first, second],
+        operations(&seen.released) == [first, second],
         "each operation is started once, in the order the scheduler placed them",
     );
     let leases: Vec<LeaseId> = seen.released.iter().map(|s| s.lease).collect();
@@ -250,14 +262,8 @@ fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
     let kept_lease = nth(&before, 0).1;
     let lost_lease = nth(&before, 1).1;
     notes.expect(
-        before.len() == 2 && before[0].operation == kept && before[1].operation == lost,
-        "both operations were started before the restart",
-    );
-    notes.expect(
-        before
-            .iter()
-            .any(|s| s.operation == lost && s.worker == NODE_B),
-        "the second operation was placed on the second worker",
+        placements(&before) == [(kept, NODE_A), (lost, NODE_B)],
+        "the operations were started before the restart, one on each worker",
     );
 
     harness.crash_and_restart();
@@ -281,8 +287,12 @@ fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
     wait(harness, STEP * 3);
     let after = since(harness, before.len());
     notes.expect(
-        after.len() == 1 && after[0].operation == lost && after[0].lease != lost_lease,
+        operations(&after) == [lost],
         "after the grace the unclaimed lease is given up and its operation runs again",
+    );
+    notes.expect(
+        after.iter().all(|s| s.lease != lost_lease),
+        "the operation runs again under a new lease",
     );
     harness.report(kept, kept_lease);
     notes.expect(
