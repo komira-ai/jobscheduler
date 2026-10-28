@@ -14,7 +14,7 @@ use js_caps::NodeCaps;
 use js_sched::DaemonInstance;
 use js_state::fake::{Fake, Flaw};
 use js_state::{ManualClock, Store, share};
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows, StoredCordon, WorkerUp};
 use js_types::sched::{FarmTime, OperationId, Resources, WorkerId};
 
@@ -56,7 +56,8 @@ fn the_owner_session_and_cordon_rows_are_the_rows_of_the_golden_file() {
     ));
     share(&*store).expect("the shared marker");
     let codec = Arc::new(TestCodec::new());
-    let (rows, _) = Rows::open(store.clone(), EpochPolicy::Keep, TERM, codec).expect("open");
+    let ext = Arc::new(TestExt);
+    let (rows, _) = Rows::open(store.clone(), EpochPolicy::Keep, TERM, codec, ext).expect("open");
     rows.reserve_operation(OperationId(4))
         .expect("operation ids");
     rows.reserve_seqs(0).expect("lease sequences");

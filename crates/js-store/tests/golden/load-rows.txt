@@ -1,0 +1,9 @@
+# The `loss/` and `fate/` rows a start reads, copied unchanged from the farm server's golden
+# file of scheduler rows: the loss count of operation 4 (two), and its fate (the version 2 row:
+# a raised booking, two runs killed for memory, four runs the farm lost or could not run, the
+# workers placement avoids and the leases given up as not started). The test seeds a store with
+# them and checks that a start reads them back as the values the farm server wrote them from.
+# A change to this file needs a reason: a store written by an earlier release holds these rows
+# as they are, and the release after this one must read them.
+fate/0000000000000004 expires_ns=- value=0200000004000000000000000200066e6f64652d61000000010000000001000000100000000000066e6f64652d620000000400000000000000000400066e6f64652d610000066e6f64652d62010000066e6f64652d63010100066e6f64652d63020000000200066e6f64652d6100066e6f64652d6200000003
+loss/0000000000000004 expires_ns=- value=0000000000000002

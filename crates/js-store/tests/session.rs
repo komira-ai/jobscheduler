@@ -9,7 +9,7 @@ use std::time::Duration;
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
 use js_state::{Cond, Store, Txn};
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, RowCodec, Rows, SESSION_RENEWAL, StateError, Value, WorkerUp, keys};
 use js_types::sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseGrant, Resources, WorkerId};
@@ -167,7 +167,14 @@ fn a_renewal_that_loses_a_race_is_a_conflict() {
 fn a_registration_that_cannot_be_encoded_writes_nothing() {
     let store = Racing::new();
     let handle: Arc<dyn Store> = store.clone();
-    let (rows, _) = Rows::open(handle, EpochPolicy::Keep, 1, Arc::new(Failing)).expect("open");
+    let (rows, _) = Rows::open(
+        handle,
+        EpochPolicy::Keep,
+        1,
+        Arc::new(Failing),
+        Arc::new(TestExt),
+    )
+    .expect("open");
 
     let refused = rows.session(&up("daemon-1"));
 

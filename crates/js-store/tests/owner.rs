@@ -16,11 +16,11 @@ use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
 use js_state::{Cond, Store, Txn};
 use js_store::keys;
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{
     CAS_TRIES, EpochPolicy, OWNER_CACHE_TTL, Owner, RowCodec, Rows, StateError, WorkerUp,
 };
-use js_types::sched::{FarmTime, LeaseId, OperationId, Resources, WorkKey, WorkerId};
+use js_types::sched::{FarmTime, LeaseGrant, LeaseId, OperationId, Resources, WorkKey, WorkerId};
 
 use common::{Racing, frontend_with, open};
 
@@ -88,7 +88,10 @@ fn queue(store: &Racing, operation: u64) {
 
 /// A stand-in for the grant of `operation` under the lease `(5, seq)` on `worker`: the
 /// queue row goes, the lease row and its index row are put, and the transaction is
-/// conditional on the version of the queue row it read.
+/// conditional on the version of the queue row it read. The lease row holds a value the
+/// test codec reads as one a later binary wrote, which a look at the node's leases skips:
+/// these tests are about who may write the row, and the reading of real ones is tested in
+/// `tests/load.rs`.
 fn grant(
     rows: &Rows,
     store: &Racing,
@@ -103,7 +106,7 @@ fn grant(
         .delete(keys::queue(operation), Cond::Version(version))
         .put(
             keys::lease(LeaseId::new(5, seq)),
-            b"lease".to_vec(),
+            b"later lease".to_vec(),
             Cond::Absent,
         )
         .put(keys::lease_by_op(operation), owner_row(5, seq), Cond::Any);
@@ -170,8 +173,13 @@ fn up(daemon: &str) -> WorkerUp {
 }
 
 fn request() -> Request {
+    request_of(1)
+}
+
+/// A request for the work `tag`: no two tags are the same work.
+fn request_of(tag: u64) -> Request {
     Request {
-        key: WorkKey::new("main", "ab/1"),
+        key: WorkKey::new("main", format!("ab/{tag}")),
         qos: js_types::sched::Qos::Ci,
         kind: js_types::sched::LeaseKind::Action,
         resources: Resources::new(1_000, 1 << 30),
@@ -384,14 +392,38 @@ fn a_node_another_frontend_claimed_is_not_owned() {
     assert!(is_stale(&refused), "{refused:?}");
 }
 
-/// Asserts that a `Hello` reads the daemon process the node's session row names (none when
-/// the row is missing, is not a registration, or holds a value of a later binary), and the
-/// owner before.
+/// Asserts that a `Hello` reads what it takes over: the owner before, the unfinished
+/// operations whose lease rows name the node (not another node's, and not a lease whose
+/// operation has no row), and the daemon process the node's session row names (none when
+/// the row is missing, is not a registration, or holds a value of a later binary).
 #[test]
-fn a_hello_reads_the_session_of_the_node_it_takes_over() {
+fn a_hello_reads_the_leases_and_the_session_of_the_node_it_takes_over() {
     let (store, codec, [left, taker]) = frontends([1, 2]);
     let first = left.arrive(&node(), at(0)).expect("a Hello");
     assert_eq!(first.session, None);
+    assert!(first.leases.is_empty());
+    for tag in [4, 5] {
+        let submitted = left.submit(OperationId(tag), &request_of(tag), &[], None);
+        submitted.expect("submit");
+        remove(&store, &keys::queue(OperationId(tag)));
+    }
+    let leased = |operation: u64, seq: u64, worker: &str| LeaseGrant {
+        lease: LeaseId::new(5, seq),
+        operation: OperationId(operation),
+        worker: WorkerId::new(worker),
+    };
+    // Operation 9 has no row: its lease is left out.
+    for grant in [
+        leased(4, 0, "node-a"),
+        leased(5, 1, "node-b"),
+        leased(9, 9, "node-a"),
+    ] {
+        overwrite(
+            &store,
+            &keys::lease(grant.lease),
+            codec.lease(&grant).expect("row"),
+        );
+    }
     let daemon = DaemonInstance::new("daemon-1");
     left.session(&up("daemon-1")).expect("a session");
 
@@ -399,6 +431,10 @@ fn a_hello_reads_the_session_of_the_node_it_takes_over() {
 
     assert_eq!(arrival.previous, Some(named(1, 1)));
     assert_eq!(arrival.session, Some(daemon));
+    let held: Vec<OperationId> = arrival.leases.iter().map(|op| op.operation).collect();
+    assert_eq!(held, [OperationId(4)]);
+    let lease = arrival.leases[0].lease.as_ref().map(|grant| grant.lease);
+    assert_eq!(lease, Some(LeaseId::new(5, 0)));
 
     overwrite(&store, SESSION_ROW, vec![0xff]);
     let unreadable = taker.arrive(&node(), at(2)).expect("a Hello");
@@ -525,9 +561,10 @@ fn a_claim_made_again_over_another_frontends_row_reports_that_frontend() {
 
 /// Asserts that two writers on one store, each of them the owner by its own belief, cannot
 /// both write the node's lease: the frontend the daemon said `Hello` to last writes it, and
-/// the other, whose write was ready first, is refused as stale and leaves the store as the
-/// owner has it. The store is a plain fake with no landing writes: the loser lost to the
-/// rows alone.
+/// the other, which reads the owner row after that arrival, is refused as stale and leaves
+/// the store as the owner has it. The two handles run one after the other on a plain fake;
+/// a change of hands between one writer's read and its commit is the job of
+/// `a_node_that_changes_hands_between_the_read_and_the_commit_is_stale`.
 #[test]
 fn two_writers_on_one_fake_the_loser_gets_stale_owner() {
     let store = Arc::new(js_state::fake::Fake::with_flaw(
@@ -538,7 +575,7 @@ fn two_writers_on_one_fake_the_loser_gets_stale_owner() {
     let handle = |id: u64| {
         let store: Arc<dyn Store> = store.clone();
         let codec: Arc<dyn RowCodec> = codec.clone();
-        Rows::open(store, EpochPolicy::Keep, id, codec)
+        Rows::open(store, EpochPolicy::Keep, id, codec, Arc::new(TestExt))
             .expect("open")
             .0
     };
