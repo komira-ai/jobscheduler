@@ -289,8 +289,9 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   attempt); they are never reported failed. The attempt ends `evicted` and counts against no budget: not the platform-fault budget, not
   the loss count that refuses a poison operation, not a task failure. Options: (a) terminate at once (rejected by the owner: builds must
   not just fail); (b) charge it as a platform fault or a loss (rejected: it is the scheduler's choice); (c) drain, then requeue the rest,
-  charging nothing (adopted), with `max_evictions` (**decided: 3**) per request, after which its host is passed over as a victim, so one
-  request cannot be hit for ever. A terminate that reads back Unknown frees nothing (5.6).
+  charging nothing (adopted), with `max_evictions` (**decided: 3**) per request, counting only jobs still running at the end of the grace (those requeued as `evicted`), kept as an eviction
+  record per request id written in the same atomic write as the lease change and deleted when the request ends or no replacement is asked
+  for within `regain_grace`; after the cap its host is passed over as a victim, so one request cannot be hit for ever. A terminate that reads back Unknown frees nothing (5.6).
 - **D64. The victim, what is never the victim, and the catalog.** The victim is the smallest host whose running jobs are expected to finish
   soonest: hosts whose expected drain (the end bound of whole-node.md section 3, or a better predicted remaining time where a consumer has
   one) is within the grace tie and the smallest of them wins; others rank after, by expected drain; a job with no prediction counts as its

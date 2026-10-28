@@ -392,11 +392,15 @@ at the end of the grace are put back in the queue to be retried elsewhere; they 
   outcome `evicted` and **charged to no budget**: not the platform-fault budget, not the loss count that refuses a poison operation after
   three losses (absence.md), not a task failure (8.1). The consumer is told the reason, so kbf, whose budgets are its own, can also not
   charge it. A request evicted `max_evictions` times has its host passed over as a victim, which bounds how often one request can be hit.
-  The count is kept per request id, as an additive field of the run record for a scheduler-placed run (an attempt ends `evicted`), and as
-  an additive counter in the lease file for a lease a consumer holds (kbf): when the host of a lease is evicted, the counter of the
-  lease's request id goes up, and a consumer that presents the same request id when it asks for a replacement lease (as it does for a
-  whole-node request, whole-node.md section 3) carries the count with it; the record is dropped when the request ends. A consumer that
-  presents no stable request id has no count across leases, and then only the structural bound above applies.
+  The count is of jobs still running at the end of the grace, the ones requeued as `evicted`; a job that finished inside the grace is not
+  counted. It is kept per request id as its own *eviction record*, written in the same atomic write as the lease change (the lease table
+  holds leases, not requests; the reservation record of whole-node.md section 3 is the model). For a scheduler-placed run it is also
+  visible as the run's `evicted` attempts. For a lease a consumer holds (kbf), the record's counter goes up when the lease is lost at the
+  end of the grace, and a consumer that presents the same request id when it asks for a replacement lease (as it does for a whole-node
+  request) carries the count with it. A record is deleted when its request is granted a lease that then ends normally, is refused or
+  cancelled, or, for an ordinary lease with no such event, when no replacement lease is asked for under that id within `regain_grace` of
+  the lease's end; so a request id that never returns does not keep a counter for ever. A consumer that presents no stable request id has
+  no count across leases, and then only the structural bound above applies.
 - *The cap.* An evicted host leaves the count when its terminate reads back Absent (5.11); until then, draining included, it counts, and
   the swap's launch is the one extra of item 3.
 
