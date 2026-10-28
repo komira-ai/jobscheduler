@@ -10,7 +10,6 @@
 //! prints: it replays nothing and asserts nothing about results. A malformed line stops
 //! it with the file and line number.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 // The same engine as the `sim_x_replay` test, included by path.
@@ -19,25 +18,8 @@ mod engine;
 
 const USAGE: &str = "usage: sim_x2 --export <dir>";
 
-/// Reads the flags: `--export <dir>` and nothing else.
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
-    let mut dir = None;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--export" => {
-                let value = args.next().ok_or("--export needs a directory")?;
-                if dir.replace(PathBuf::from(value)).is_some() {
-                    return Err("--export given twice".to_string());
-                }
-            }
-            other => return Err(format!("unknown argument {other:?}")),
-        }
-    }
-    dir.ok_or_else(|| "--export is required".to_string())
-}
-
 fn main() -> ExitCode {
-    let dir = match parse_args(std::env::args().skip(1)) {
+    let dir = match engine::export::parse_args(std::env::args().skip(1)) {
         Ok(dir) => dir,
         Err(message) => {
             eprintln!("sim_x2: {message}\n{USAGE}");

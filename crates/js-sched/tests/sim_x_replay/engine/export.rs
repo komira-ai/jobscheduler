@@ -37,12 +37,20 @@
 //! replay's types: [`Export::rows`] (one [`Row`] per run, in start order), and
 //! [`Export::beliefs`], the [`Predictor`] built from each key's earlier runs only.
 //!
+//! # Long runs
+//!
+//! A run may have any number of minutes. The predictor counts the minutes a run reached
+//! in a `u8`, saturating at 255, and a belief's life is at most
+//! [`LIFE_HORIZON`](super::predictor::LIFE_HORIZON) minutes, so the minutes past 255 of a
+//! run change no belief; the rows still carry the whole series' CPU time and peak.
+//!
 //! # Arrivals
 //!
 //! With `start_ms` the starts are the recorded ones ([`Arrivals::Recorded`]). Without,
 //! the runs are laid out one after another in file order, a gap longer than the longest
 //! wall apart ([`Arrivals::Invented`]), so each run's earlier runs are the runs above it
-//! in the file. [`Export::header`] says which, and which other inputs are real.
+//! in the file. An export with no runs has no arrivals ([`Arrivals::Absent`]).
+//! [`Export::header`] says which, and which other inputs are real.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -240,6 +248,8 @@ pub enum Arrivals {
     Recorded,
     /// The export has no starts; runs are laid out serially in file order.
     Invented,
+    /// The export has no runs, so there is nothing to arrive.
+    Absent,
 }
 
 fn fields<'a>(line: &'a str, tag: &str, want: usize) -> Result<Vec<&'a str>, LineError> {
@@ -514,6 +524,23 @@ pub fn read_dir(dir: &Path) -> Result<Export, ReadError> {
     Ok(Export { profile, nodes })
 }
 
+/// Reads the runner's flags: `--export <dir>`, given once, and nothing else.
+pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    let mut dir = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--export" => {
+                let value = args.next().ok_or("--export needs a directory")?;
+                if dir.replace(PathBuf::from(value)).is_some() {
+                    return Err("--export given twice".to_string());
+                }
+            }
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+    }
+    dir.ok_or_else(|| "--export is required".to_string())
+}
+
 /// A run's mean cores times its time in each minute, in ms of CPU.
 fn cpu_ms(run: &Run) -> u64 {
     let mut total: u128 = 0;
@@ -528,7 +555,9 @@ fn cpu_ms(run: &Run) -> u64 {
 impl Export {
     /// Whether the starts are the export's or invented.
     pub fn arrivals(&self) -> Arrivals {
-        if self.profile.runs.iter().all(|r| r.start_ms.is_some()) {
+        if self.profile.runs.is_empty() {
+            Arrivals::Absent
+        } else if self.profile.runs.iter().all(|r| r.start_ms.is_some()) {
             Arrivals::Recorded
         } else {
             Arrivals::Invented
@@ -632,6 +661,7 @@ impl Export {
         }
         match self.arrivals() {
             Arrivals::Recorded => out.push_str("real: arrivals (recorded starts)\n"),
+            Arrivals::Absent => out.push_str("absent: arrivals (no runs)\n"),
             Arrivals::Invented => out.push_str(
                 "invented: arrivals (the export carries no starts; runs follow one another in file order)\n",
             ),

@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 
 use crate::engine::export::{
     Arrivals, Export, ExportError, KEY_PROFILE_FILE, KeyProfile, LineError, NODE_MINUTE_FILE,
-    NodeMinute, ReadError, parse_key_profile, parse_node_minutes, read_dir, render_key_profile,
-    render_node_minutes,
+    NodeMinute, ReadError, Run, parse_args, parse_key_profile, parse_node_minutes, read_dir,
+    render_key_profile, render_node_minutes,
 };
-use crate::engine::predictor::{COLD_CORES_MILLI, COLD_MEM_MIB, MIN_RING, Tail};
+use crate::engine::fixture::KeyIx;
+use crate::engine::predictor::{COLD_CORES_MILLI, COLD_MEM_MIB, LIFE_HORIZON, MIN_RING, Tail};
 
 const KEY_A: u64 = 0xa1;
 const KEY_B: u64 = 0xb2;
@@ -510,4 +511,127 @@ fn an_empty_profile_is_an_empty_export() {
     assert!(e.rows().is_empty());
     assert!(e.beliefs().is_empty());
     assert!(e.header(&e.beliefs()).contains("0 runs, 0 keys"));
+}
+
+/// One single-minute run of key 0 on the platform `p`, in memory.
+fn lone_run(start_ms: u64, cores_milli: u32, ws_bytes: u64) -> Run {
+    Run {
+        key: KeyIx(0),
+        platform: "p".to_string(),
+        start_ms: Some(start_ms),
+        wall_ms: 1_000,
+        cores_milli: vec![cores_milli],
+        ws_bytes: vec![ws_bytes],
+    }
+}
+
+fn export_of(runs: Vec<Run>) -> Export {
+    Export {
+        profile: KeyProfile {
+            keys: vec![KEY_A],
+            runs,
+        },
+        nodes: Vec::new(),
+    }
+}
+
+#[test]
+fn a_working_set_past_a_whole_mib_rounds_up_in_rows_and_beliefs() {
+    // A floor in place of the round-up, in the row's peak or in the belief's series: the
+    // fixture's working sets are whole MiB, so only an odd byte tells them apart.
+    const MIB: u64 = 1 << 20;
+    let runs = (0..4)
+        .map(|i| lone_run(i * 10_000, 1_000, 5 * MIB + 1))
+        .collect();
+    let e = export_of(runs);
+    assert!(e.rows().iter().all(|r| r.peak_mem_mib == 6));
+    let b = e.beliefs();
+    assert!(!b.belief(3).is_cold());
+    assert_eq!(b.belief(3).mem_mib_at(0, Tail::Held), 6);
+    // One byte under the next MiB still rounds to it, and an exact MiB does not move.
+    let e = export_of(vec![
+        lone_run(0, 1_000, 6 * MIB - 1),
+        lone_run(10_000, 1_000, 6 * MIB),
+    ]);
+    assert_eq!(
+        e.rows().iter().map(|r| r.peak_mem_mib).collect::<Vec<_>>(),
+        vec![6, 6]
+    );
+}
+
+#[test]
+fn runs_with_one_start_keep_file_order_in_rows_and_beliefs() {
+    // A tie broken against file order: the later line would come first. Four runs start
+    // together; their cores differ, so the belief of the lease after them shows the
+    // order only through which runs are in its ring (all of them) and the row order
+    // shows it directly.
+    let mut runs: Vec<Run> = (0..4)
+        .map(|i| lone_run(5_000, 1_000 + 100 * i, 1 << 20))
+        .collect();
+    runs.push(lone_run(50_000, 9_000, 1 << 20));
+    let e = export_of(runs);
+    assert_eq!(e.order(), vec![0, 1, 2, 3, 4]);
+    assert_eq!(e.run(2).cores_milli, vec![1_200]);
+    let cpu: Vec<u64> = e.rows().iter().map(|r| r.cpu_ms).collect();
+    assert_eq!(cpu, vec![1_000, 1_100, 1_200, 1_300, 9_000]);
+    // The ring of the last lease holds the four earlier runs, P90 of their cores.
+    let b = e.beliefs();
+    assert!(!b.belief(4).is_cold());
+    assert_eq!(b.belief(4).cores_milli_at(0, Tail::Held), 1_300);
+    assert!(b.belief(3).is_cold());
+}
+
+#[test]
+fn an_export_with_no_runs_names_no_arrivals() {
+    // An empty profile read as "recorded starts" (all() over nothing is true).
+    let e = export_of(Vec::new());
+    assert_eq!(e.arrivals(), Arrivals::Absent);
+    let header = e.header(&e.beliefs());
+    assert!(header.contains("absent: arrivals (no runs)\n"), "{header}");
+    assert!(!header.contains("real: arrivals"));
+    assert!(!header.contains("invented: arrivals"));
+}
+
+#[test]
+fn runs_past_the_curve_horizon_are_read_without_panic() {
+    // Minutes past 255 saturate in the predictor's reach count; the export accepts runs
+    // of any length, and a belief's life is the horizon whatever the length.
+    let minutes = 301usize;
+    let long = |start_ms: u64| Run {
+        key: KeyIx(0),
+        platform: "p".to_string(),
+        start_ms: Some(start_ms),
+        wall_ms: 300 * 60_000,
+        cores_milli: vec![1_000; minutes],
+        ws_bytes: vec![1 << 20; minutes],
+    };
+    let e = export_of((0..4).map(|i| long(i * 20_000_000)).collect());
+    let b = e.beliefs();
+    assert!(!b.belief(3).is_cold());
+    assert_eq!(b.belief(3).life_minutes(), LIFE_HORIZON);
+    assert_eq!(e.rows()[3].cpu_ms, 300 * 60_000);
+}
+
+#[test]
+fn the_runner_flags_are_export_once_and_nothing_else() {
+    // The example's argument handling: each refusal and the one accepted shape.
+    let args = |v: &[&str]| parse_args(v.iter().map(|s| s.to_string()));
+    assert_eq!(args(&["--export", "d"]), Ok(PathBuf::from("d")));
+    assert_eq!(args(&[]), Err("--export is required".to_string()));
+    assert_eq!(
+        args(&["--export"]),
+        Err("--export needs a directory".to_string())
+    );
+    assert_eq!(
+        args(&["--export", "a", "--export", "b"]),
+        Err("--export given twice".to_string())
+    );
+    assert_eq!(
+        args(&["--bogus"]),
+        Err("unknown argument \"--bogus\"".to_string())
+    );
+    assert_eq!(
+        args(&["--export", "d", "extra"]),
+        Err("unknown argument \"extra\"".to_string())
+    );
 }
