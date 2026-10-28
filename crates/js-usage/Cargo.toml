@@ -1,0 +1,23 @@
+[package]
+name = "js-usage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The ids a series is keyed by (`HostId`, `LeaseId`).
+js-types = { path = "../js-types" }
+# The durable store the series are written through.
+js-state = { path = "../js-state" }
+thiserror.workspace = true
+
+[dev-dependencies]
+# The in-memory fake store, with its deliberately broken variants: the tests run the
+# series over it.
+js-state = { path = "../js-state", features = ["test-support"] }
+
+[lints]
+workspace = true
