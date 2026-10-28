@@ -67,6 +67,46 @@ fn a_grant_that_loses_to_another_frontend_is_undone_and_its_callers_followed() {
     assert!(calls(&a).contains(&followed), "{:?}", calls(&a));
 }
 
+/// Asserts that a grant lost to another frontend is judged by the queue row read after the
+/// loss: another frontend took the operation and queued it again meanwhile, so the operation
+/// stays queued here with its caller, and is not handed off as if it were gone. Catches: a
+/// caller moved to the store's follower while this core still holds the operation.
+#[test]
+fn a_lost_grant_whose_operation_is_queued_again_keeps_its_caller() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    let queued = submit(&core, 1, 1);
+    let key = js_store::keys::queue(queued.operation);
+    let other = setup.rows(7);
+    let store = setup.store.clone();
+    let taken = LeaseGrant {
+        lease: lease(5, 0),
+        operation: queued.operation,
+        worker: worker("node-b"),
+        cost: LeaseCost::default(),
+    };
+    // The other frontend takes the operation before this core's grant reads its queue row,
+    // and queues it again before the look that follows the loss.
+    setup.store.before_read("queue/", move || {
+        other.granted(&taken).expect("granted by another frontend");
+        let again = store.clone();
+        store.before_read("queue/", move || again.put(&key, Vec::new()));
+    });
+
+    up(&core, 2, "node-a", "d1");
+
+    assert_eq!(core.dropped_writes(), 1, "the grant was not refused");
+    assert_eq!(core.queued_operations(), 1);
+    let waiters = core.with(|view, _| view.sched().waiters(queued.operation).map(<[_]>::to_vec));
+    assert_eq!(waiters, Some(vec![queued.waiter]));
+    assert!(
+        !calls(&core)
+            .iter()
+            .any(|call| matches!(call, Call::KeptFinished(..) | Call::Followed(..))),
+        "handed off"
+    );
+}
+
 /// Asserts that a grant for a node the daemon has left for another frontend is dropped, and
 /// that the lease stays as the scheduler made it (nothing in the store says it lost). Catches:
 /// a frontend that grants work to a daemon it no longer owns.
