@@ -23,6 +23,7 @@ pub use snapshot::{
     platform_label,
 };
 pub use state::OpState;
+pub use whole::WholeMark;
 pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
@@ -267,6 +268,9 @@ pub struct Scheduler {
     /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
     /// the log or the `Eq` memory state.
     max_walls: BTreeMap<OperationId, Duration>,
+    /// The marks, give-up counts and back-offs of whole-machine requests
+    /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
+    drain: whole::Drain,
 }
 
 impl Scheduler {
@@ -302,6 +306,7 @@ impl Scheduler {
             head_holds: BTreeMap::new(),
             whole_node: None,
             max_walls: BTreeMap::new(),
+            drain: whole::Drain::default(),
         }
     }
 
@@ -337,6 +342,16 @@ impl Scheduler {
     /// fewest leases and the least booked. An end bound is a lease's start plus the longest
     /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
     /// and booking alone.
+    ///
+    /// A worker that fits (one with no lease) is taken at once. A request that fits
+    /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
+    /// and marks it ([`Scheduler::whole_mark`]) with a deadline from
+    /// [`js_whole::cost::reserve_deadline`] (the longest it may run is the one given with
+    /// [`Scheduler::set_max_wall`]; with none, no deadline but `drain_deadline`). At the
+    /// deadline, if the worker is still busy, the hold is given up: counted, dropped, the
+    /// worker barred to the request for `reserve_backoff`, and another held if there is
+    /// one. Nothing running is stopped. The marks, counts and back-offs are in memory
+    /// only; a recovered scheduler has none, so every count restarts at zero.
     #[must_use]
     pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
         self.whole_node = Some(config);
@@ -389,6 +404,7 @@ impl Scheduler {
             self.memory.forget(id);
             self.size_keys.remove(&id);
             self.max_walls.remove(&id);
+            self.drain.forget(id);
             self.admission.forget(id);
         }
     }
@@ -574,6 +590,7 @@ impl Scheduler {
         let mut stuck = Vec::new();
         let mut reserved = BTreeSet::new();
         let mut reservations = BTreeMap::new();
+        let mut marks = BTreeMap::new();
         let mut head_holds = BTreeMap::new();
         let mut held_pools = BTreeSet::new();
         for &(_, id) in &self.queue {
@@ -592,10 +609,13 @@ impl Scheduler {
             );
             let (cost, profile) = self.charging(id, request);
             let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
+            // A whole-machine request avoids the workers it gave up for the back-off.
+            let barred = self.drain.barred(id, now);
+            let avoid = whole::Drain::avoiding(&op.avoid, &barred);
             let attempt = Attempt {
                 request,
                 reserved: &reserved,
-                avoid: &op.avoid,
+                avoid: &avoid,
                 not_whole: key_raised,
                 cost,
                 profile: profile.clone(),
@@ -613,20 +633,41 @@ impl Scheduler {
             } else {
                 servable.verdict(&self.workers, request)
             };
-            if !fitted
-                && request.kind == LeaseKind::WholeMachine
-                && verdict == Verdict::Servable
-                && let Some(name) = servable.reserve(
-                    &self.workers,
-                    request,
-                    &reserved,
-                    &op.avoid,
-                    self.reservations.get(&id),
-                    self.drain_order(&placed).as_deref(),
-                )
-            {
-                reserved.insert(name.clone());
-                reservations.insert(id, name);
+            if !fitted && request.kind == LeaseKind::WholeMachine && verdict == Verdict::Servable {
+                let held = match &self.whole_node {
+                    None => servable.reserve(
+                        &self.workers,
+                        request,
+                        &reserved,
+                        &op.avoid,
+                        self.reservations.get(&id),
+                        None,
+                    ),
+                    Some(cfg) => {
+                        let turn = self.drain.turn(id, op.queued_at, now, cfg);
+                        turn.and_then(|turn| {
+                            let out: BTreeSet<WorkerId> =
+                                reserved.union(&turn.barred).cloned().collect();
+                            let avoid = whole::Drain::avoiding(&op.avoid, &turn.barred);
+                            let name = servable.reserve(
+                                &self.workers,
+                                request,
+                                &out,
+                                &avoid,
+                                turn.kept.as_ref().map(|m| &m.worker),
+                                self.drain_order(&placed).as_deref(),
+                            )?;
+                            let max_wall = self.max_walls.get(&id).copied();
+                            let mark = self.drain.mark(id, &name, turn.kept, now, cfg, max_wall);
+                            marks.insert(id, mark);
+                            Some(name)
+                        })
+                    }
+                };
+                if let Some(name) = held {
+                    reserved.insert(name.clone());
+                    reservations.insert(id, name);
+                }
             }
             // A blocked head holds the worker with the most headroom, one per pool:
             // requests after it in queue order are not placed there, so the worker
@@ -675,6 +716,7 @@ impl Scheduler {
             self.undo_key_raise(id);
         }
         self.reservations = reservations;
+        self.drain.marks = marks;
         self.head_holds = head_holds;
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
