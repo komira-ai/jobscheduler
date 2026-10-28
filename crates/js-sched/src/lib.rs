@@ -41,7 +41,8 @@
 //! - whole-machine leases: one goes only to a worker that holds no lease, and books
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
-//!   until it has emptied. An action at the whole memory of a worker (the last step of
+//!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An action at the whole memory of a worker (the last step of
 //!   the memory ladder) holds none: it waits until some worker's free memory meets its
 //!   request, which under sustained spread load can be long, and nothing reserves a
 //!   worker for it;

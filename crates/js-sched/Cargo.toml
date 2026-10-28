@@ -11,6 +11,7 @@ publish.workspace = true
 js-caps = { path = "../js-caps" }
 js-sizing = { path = "../js-sizing" }
 js-types = { path = "../js-types" }
+js-whole = { path = "../js-whole" }
 
 [dev-dependencies]
 js-sim = { path = "../js-sim" }
