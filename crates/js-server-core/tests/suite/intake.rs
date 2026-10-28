@@ -472,7 +472,15 @@ fn a_poll_requeues_the_lease_of_a_node_no_frontend_hears() {
 
     core.intake(at(1));
     assert_eq!((lease_rows(&setup), queue_rows(&setup)), (1, 0));
-    setup.store.advance(wait);
+    let short = wait - Duration::from_millis(1);
+    setup.store.advance(short);
+    core.intake(at(2));
+    assert_eq!(
+        (lease_rows(&setup), queue_rows(&setup)),
+        (1, 0),
+        "swept before the wait"
+    );
+    setup.store.advance(wait - short);
     core.intake(at(2));
 
     assert_eq!((lease_rows(&setup), queue_rows(&setup)), (0, 1));
@@ -484,6 +492,31 @@ fn a_poll_requeues_the_lease_of_a_node_no_frontend_hears() {
         1,
         "the requeued operation did not run"
     );
+}
+
+/// Asserts that the wait before an unheard node's lease is requeued is, with no configuration,
+/// the store's orphan wait: a poll one millisecond short of it leaves the lease, the next
+/// requeues it. Catches: a default of no wait, which requeues the lease of a daemon that
+/// reconnects to another frontend within a renewal interval.
+#[test]
+fn the_default_orphan_wait_is_the_stores() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    let other = setup.rows(7);
+    queue_on(&other, 5000);
+    other
+        .granted(&grant_of(5000, 0, "node-z"))
+        .expect("granted to a node of another frontend");
+    core.intake(at(1));
+    let short = js_store::ORPHAN_WAIT - Duration::from_millis(1);
+    setup.store.advance(short);
+    core.intake(at(2));
+    assert_eq!((lease_rows(&setup), queue_rows(&setup)), (1, 0));
+
+    setup.store.advance(Duration::from_millis(1));
+    core.intake(at(3));
+
+    assert_eq!((lease_rows(&setup), queue_rows(&setup)), (0, 1));
 }
 
 /// Asserts that a core with a daemon connected does not requeue the lease of that daemon
