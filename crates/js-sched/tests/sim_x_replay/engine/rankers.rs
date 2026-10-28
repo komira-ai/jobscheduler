@@ -250,7 +250,8 @@ impl Ranker {
 }
 
 /// FNV-1a over the placements in order: each lease index as eight little-endian bytes, then
-/// the host's name preceded by its length as a `u32`. Two runs with the same placements in
+/// the host's name preceded by its length as a `u32` (the fixed-width index already marks
+/// where a name ends; the length keeps the encoding self-delimiting on its own). Two runs with the same placements in
 /// the same order have the same hash in every process.
 #[must_use]
 pub fn sequence_hash(placements: &[(u64, WorkerId)]) -> u64 {

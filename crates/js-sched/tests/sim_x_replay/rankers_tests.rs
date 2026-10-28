@@ -680,12 +680,12 @@ fn shares_sum_to_placements_and_evaluations_are_64_per_scored_candidate() {
 fn gd_counters_and_guard() {
     let hosts = [("p", host([30_000; SLOTS])), ("q", host([40_000; SLOTS]))];
     let mut r = Ranker::new(RankerKind::Score, base());
-    for (ix, l, n) in [(1, 1, 2), (2, 3, 2), (3, 3, 1)] {
+    for (ix, l, n) in [(1, 1, 2), (2, 3, 2), (3, 3, 1), (4, 2, 2)] {
         let m = model(lease(ix, l, [NEW; SLOTS]), &hosts[..n]);
         let c: Vec<WorkerId> = hosts[..n].iter().map(|(n, _)| id(n)).collect();
         r.place(&m, &c);
     }
-    assert_eq!((r.attempts(), r.scored(), r.scored_long()), (3, 2, 1));
+    assert_eq!((r.attempts(), r.scored(), r.scored_long()), (4, 3, 2));
 
     let ok = Gd {
         placements: 10_000,
@@ -694,6 +694,14 @@ fn gd_counters_and_guard() {
         differ: 200,
     };
     assert_eq!(ok.check(10_000), Ok(()));
+    // Each floor is inclusive: a run exactly at it passes.
+    let at_floors = Gd {
+        placements: 10_000,
+        scored: 2_000,
+        scored_long: 500,
+        differ: 100,
+    };
+    assert_eq!(at_floors.check(10_000), Ok(()));
     let fails = [
         (
             Gd {
