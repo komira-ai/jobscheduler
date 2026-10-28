@@ -314,7 +314,9 @@ fn stuck(name: &str, grace: Duration, held: &[&str]) -> (Scratch, FakeMachine, W
     }
     machine.world.hold_creates();
     assert_eq!(worker.try_deliver(starts(&["last"])), Delivery::Delivered);
-    machine.world.wait_entered(u32::try_from(held.len()).unwrap() + 1);
+    machine
+        .world
+        .wait_entered(u32::try_from(held.len()).unwrap() + 1);
     (dir, machine, worker)
 }
 
