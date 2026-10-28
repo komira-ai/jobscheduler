@@ -80,6 +80,27 @@ impl Drop for Scratch {
     }
 }
 
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's files and dropping the second does
+/// not remove the first. It catches a path named by the test alone, which two tests of
+/// one name, or two runs of one test binary at once, would share and delete under each
+/// other.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read(kept).unwrap(), b"one");
+}
+
 /// What a run of the CLI printed and returned.
 #[derive(Debug)]
 pub struct Outcome {
