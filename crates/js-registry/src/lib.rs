@@ -121,7 +121,7 @@ pub use config::{
 pub use credential::{Binding, Credential};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
-pub use registry::{HostState, HostView, Registry};
+pub use registry::{HostMark, HostState, HostView, Registry, WholeCounts};
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
 pub use whole::queue::MAX_WAITING_REQUESTS;

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_agent_wire::Taint;
 use js_provider::HostCapacity;
-use js_registry::{HostState, HostView};
+use js_registry::{HostMark, HostState, HostView};
 use js_types::{HostId, LeaseId, Shape};
 use serde::Serialize;
 
@@ -52,6 +52,16 @@ struct HostEntry {
     /// is sent no start and takes no new run.
     #[serde(skip_serializing_if = "Option::is_none")]
     taint: Option<Taint>,
+    /// Set for a registered host set aside for whole-node use: `reserved` for a waiting
+    /// request, `held` while a whole-node lease is committed on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mark: Option<&'static str>,
+    /// The request a reserved host is set aside for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reserved_for: Option<String>,
+    /// When a reservation that is draining a busy host is given up, in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drain_deadline_ms: Option<u64>,
 }
 
 fn shape_view(shape: &Shape) -> ShapeView {
@@ -83,6 +93,9 @@ impl HostEntry {
             agent_version: None,
             releasing: None,
             taint: None,
+            mark: None,
+            reserved_for: None,
+            drain_deadline_ms: None,
         }
     }
 
@@ -105,6 +118,12 @@ impl HostEntry {
             agent_version: host.agent_version,
             releasing: Some(host.releasing),
             taint: host.taint,
+            mark: host.mark.map(|mark| match mark {
+                HostMark::Reserved => "reserved",
+                HostMark::Held => "held",
+            }),
+            reserved_for: host.reserved_for.map(|id| id.to_string()),
+            drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
         }
     }
 }
