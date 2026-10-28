@@ -331,6 +331,7 @@ impl Usage {
             return;
         };
         let now = self.now_minute();
+        info!(host = %host, "node minute");
         let fresh = match load {
             Some(load) => self.observe(&host, beat.epoch, load, now),
             None => Vec::new(),
