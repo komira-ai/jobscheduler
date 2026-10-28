@@ -53,6 +53,27 @@ pub(crate) fn mem_left(t: &Totals, slot: usize, working_set: u64) -> u64 {
         .saturating_add(t.vm_mem)
 }
 
+/// What a new lease of `cost` (already clamped to `capacity`), charged over time as
+/// `profile` says, is charged `slot` minutes ahead on a worker charged as `left`, as
+/// `(millicores, bytes)`: its curve's figure at the slot, clamped to the worker; the flat
+/// charge at every slot where the lease is charged flat, and on a worker charged by
+/// prediction alone, where the least cores a lease is charged there apply.
+pub(crate) fn new_charge(
+    cost: &LeaseCost,
+    profile: Option<&Profile>,
+    left: &Left,
+    capacity: &Resources,
+    slot: usize,
+) -> (u64, u64) {
+    match profile.filter(|_| !left.fallback) {
+        Some(p) => (
+            p.new_cpu(slot).min(capacity.cpu_millis),
+            p.new_mem(slot).min(capacity.memory_bytes),
+        ),
+        None => (left.charged_cpu(cost), cost.memory_bytes),
+    }
+}
+
 /// Why a lease of `cost`, charged over time as `profile` says (flat when `None`), does not
 /// fit a worker of `capacity` charged as `left`, or `None` if it fits at every slot.
 /// CPU is judged first, then memory, then the flat-memory guard.
@@ -66,14 +87,8 @@ pub(crate) fn refusal(
 ) -> Option<Refusal> {
     let cpu_limit = cfg.cpu_limit(capacity);
     let mem_limit = cfg.mem_limit(capacity);
-    let new_cpu = |slot: usize| {
-        profile
-            .map_or(cost.cpu_millis, |p| p.new_cpu(slot))
-            .min(capacity.cpu_millis)
-    };
-    let new_mem = profile
-        .map_or(cost.memory_bytes, |p| p.new_mem(0))
-        .min(capacity.memory_bytes);
+    let new_cpu = |slot: usize| new_charge(cost, profile, left, capacity, slot).0;
+    let new_mem = new_charge(cost, profile, left, capacity, 0).1;
     for slot in 0..SLOTS {
         let at = cpu_left(t, slot, left.measured, cfg);
         if at.saturating_add(new_cpu(slot)) > cpu_limit {

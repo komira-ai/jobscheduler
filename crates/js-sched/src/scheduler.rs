@@ -36,7 +36,7 @@ use js_types::sched::{
     WaiterId, Waiting, WorkKey, WorkerId,
 };
 
-use crate::admission::{Admission, Blocked, LoadConfig};
+use crate::admission::{Admission, Blocked, LoadConfig, Profile};
 use crate::cordon::Cordons;
 use crate::fence::HANDOVER_GRACE;
 use crate::input::Request;
@@ -520,6 +520,18 @@ impl Scheduler {
     /// does, waits with a reason ([`Effect::Waiting`] when the reason changes), and is
     /// refused once it has waited so for the unservable wait. Its refusal is committed
     /// first and leaves the queue at once, so nothing places it meanwhile.
+    /// What operation `id`, asking `request`, is charged if placed now: its cost and how
+    /// that is charged over time (`None`: flat).
+    fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
+        let retried = !self.memory.runs(id).is_empty();
+        let cost = self.admission.cost_of(id, request, retried);
+        // The shape guard judges a key's runs together: the caller's size key, which the
+        // curves are learned under, else the request's own key.
+        let guard_key = self.size_keys.get(&id).copied().unwrap_or(cost.key_hash);
+        let profile = self.admission.profile_of(id, request, &cost, guard_key);
+        (cost, profile)
+    }
+
     fn place(&mut self, effects: &mut Vec<Effect>) {
         // A grant the store cannot take is useless, and a refusal as much.
         if self.store_down {
@@ -553,12 +565,7 @@ impl Scheduler {
                 self.term,
                 self.next_seq + u64::try_from(placed.len()).unwrap_or(u64::MAX),
             );
-            let retried = !self.memory.runs(id).is_empty();
-            let cost = self.admission.cost_of(id, request, retried);
-            // The shape guard judges a key's runs together: the caller's size key, which
-            // the curves are learned under, else the request's own key.
-            let guard_key = self.size_keys.get(&id).copied().unwrap_or(cost.key_hash);
-            let profile = self.admission.profile_of(id, request, &cost, guard_key);
+            let (cost, profile) = self.charging(id, request);
             let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
             let attempt = Attempt {
                 request,

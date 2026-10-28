@@ -9,7 +9,7 @@ use js_types::sched::{
 };
 
 use super::{OpState, Scheduler};
-use crate::admission::{LoadCounters, LoadView, Prediction};
+use crate::admission::{LoadCounters, LoadView, Prediction, clamped, new_charge};
 use crate::cordon::Cordon;
 use crate::input::Request;
 
@@ -232,16 +232,65 @@ impl Scheduler {
     /// horizon on. A worker charged by prediction alone is charged the same at every minute.
     #[must_use]
     pub fn charged_ahead(&self, worker: &WorkerId, minutes: u32) -> Option<(u64, u64)> {
-        let w = self.workers.get(worker)?;
         let slot = if minutes > crate::HORIZON_MINUTES {
             crate::admission::H_PLUS_SLOT
         } else {
             usize::try_from(minutes).unwrap_or(0)
         };
-        Some(
+        self.load_at(worker, slot)
+    }
+
+    /// The predicate's left side at `slot` for `worker`, without a new lease: the CPU in
+    /// millicores and the memory in bytes it charges the worker's leases and measurement
+    /// then. A slot is `0..=`[`crate::HORIZON`] for that many minutes from now, or
+    /// [`crate::H_PLUS`] for what each lease asks for from the horizon on; `None` for a
+    /// worker that is not registered or a slot past [`crate::H_PLUS`]. A worker charged by
+    /// prediction alone is charged the same at every slot.
+    #[must_use]
+    pub fn load_at(&self, worker: &WorkerId, slot: usize) -> Option<(u64, u64)> {
+        let w = self.workers.get(worker)?;
+        (slot <= crate::admission::H_PLUS_SLOT).then(|| {
             w.load_state
-                .left_at(slot, self.now, &w.capacity, &self.admission.cfg),
-        )
+                .left_at(slot, self.now, &w.capacity, &self.admission.cfg)
+        })
+    }
+
+    /// What the new lease of `operation` is charged at `slot` if placed on `worker`, as
+    /// the predicate counts it: the CPU in millicores and the memory in bytes. By its
+    /// key's curve at the slot where the lease is charged by one; the same flat figures at
+    /// every slot for a lease charged flat, on a worker charged by prediction alone (its
+    /// cores are then at least what a lease is charged there) and for an action that would
+    /// own the worker whole. Both are clamped to the worker's capacity. Slots are those of
+    /// [`Scheduler::load_at`]. `None` for an operation the scheduler does not hold, a worker
+    /// that is not registered or a slot past [`crate::H_PLUS`].
+    ///
+    /// The predicate checks memory at slot 0 only (the memory it charges never rises with
+    /// the minute); the figure at a later slot is the lease's charge then.
+    #[must_use]
+    pub fn charge_at(
+        &self,
+        operation: OperationId,
+        worker: &WorkerId,
+        slot: usize,
+    ) -> Option<(u64, u64)> {
+        let request = &self.ops.get(&operation)?.request;
+        let w = self.workers.get(worker)?;
+        if slot > crate::admission::H_PLUS_SLOT {
+            return None;
+        }
+        let (cost, profile) = self.charging(operation, request);
+        let cost = clamped(cost, &w.capacity);
+        let profile = profile.filter(|_| !w.exclusive(request));
+        let left = w
+            .load_state
+            .left(self.now, &w.capacity, &self.admission.cfg);
+        Some(new_charge(
+            &cost,
+            profile.as_deref(),
+            &left,
+            &w.capacity,
+            slot,
+        ))
     }
 
     /// The runs left that the shape guard charges a key's CPU and memory flat, as

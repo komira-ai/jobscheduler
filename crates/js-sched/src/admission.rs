@@ -71,6 +71,7 @@ use js_types::sched::{FarmTime, LeaseId, LeaseKind, OperationId, Resources, Work
 pub use config::{FlagError, LoadConfig, PlacementLoad};
 pub(crate) use config::{scale, scale_up};
 pub(crate) use head::{Ratio, binding, pick};
+pub(crate) use horizon::new_charge;
 pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
 pub use profile::HORIZON_MINUTES;
 pub(crate) use profile::{H_PLUS as H_PLUS_SLOT, Profile};

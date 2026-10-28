@@ -9,8 +9,8 @@
 #[path = "profile_rig/mod.rs"]
 mod profile_rig;
 
-use js_sched::{HORIZON_MINUTES, LoadConfig};
-use js_types::sched::{Failure, LeaseId, Outcome, Resources, WorkKey};
+use js_sched::{H_PLUS, HORIZON_MINUTES, LoadConfig};
+use js_types::sched::{Failure, LeaseId, OperationId, Outcome, Resources, WorkKey};
 
 use profile_rig::load_curves::Curves;
 use profile_rig::load_rig::{self, GIB, Rig, cold, minute, w, warm};
@@ -603,6 +603,76 @@ fn a_recovered_lease_is_charged_flat() {
             again.s.charged_ahead(&w("a"), m),
             Some((15_000, 2 * GIB)),
             "minute {m}"
+        );
+    }
+}
+
+/// Catches: the figures the score reads not being the predicate's: `load_at` is what
+/// `charged_ahead` gives (the left side without the new lease, by slot), `charge_at` is the
+/// new lease's own charge by slot (a curved lease differs by minute, a flat one is the same
+/// at every slot, a worker charged by prediction alone is flat with at least a core), and a
+/// worker, operation or slot that does not exist gives nothing.
+#[test]
+fn the_score_reads_the_load_and_the_charge_by_slot() {
+    let (mut r, curves) = cluster(LoadConfig::default());
+    curves.set("held", &busy_at(5, 14), 5);
+    let first = place(&mut r, "held", warm(20_000, GIB));
+    r.window_clocked("a", 5_000, GIB, &[first.lease], &[(first.lease, 0)], &[]);
+    let a = w("a");
+    let slots = || (0..=HORIZON_MINUTES as usize).chain([H_PLUS]);
+    for slot in slots() {
+        let minutes = u32::try_from(slot).expect("small");
+        assert_eq!(
+            r.s.load_at(&a, slot),
+            Some(ahead(&r, minutes)),
+            "slot {slot}"
+        );
+    }
+    assert_eq!(r.s.load_at(&a, 4).map(|l| l.0), Some(15_000));
+    assert_eq!(
+        r.s.load_at(&a, 5).map(|l| l.0),
+        Some(90_000),
+        "the busy minute"
+    );
+
+    // A curve of 10, 60 and 10 cores and 1, 4 and 1 GiB; predicted at 20 cores (a floor
+    // of 15). Not yet running, so its first two minutes are the larger of minutes 0 and 1.
+    let points = [(10_000, GIB), (60_000, 4 * GIB), (10_000, GIB)];
+    curves.set("curved", &points, 5);
+    let curved = r.keyed("curved", 1_000, GIB, warm(20_000, 4 * GIB));
+    let flat = r.keyed("flat", 1_000, GIB, warm(20_000, 2 * GIB));
+    // A worker with no measurement charges every lease flat, at least a core.
+    r.up("n", node());
+    curves.set("small", &points, 5);
+    let small = r.keyed("small", 1_000, GIB, warm(500, GIB));
+    // An action asking for the whole host's memory runs alone and is charged flat.
+    curves.set("whole", &points, 5);
+    let whole = r.keyed("whole", 1_000, 64 * GIB, warm(20_000, 4 * GIB));
+    let charge = |op, slot| r.s.charge_at(op, &a, slot);
+    assert_eq!(charge(whole, 0), Some((20_000, 4 * GIB)));
+    assert_eq!(charge(curved, 0), Some((60_000, 4 * GIB)));
+    assert_eq!(charge(curved, 1), Some((60_000, 4 * GIB)));
+    assert_eq!(charge(curved, 2), Some((15_000, GIB)));
+    assert_eq!(
+        charge(curved, HORIZON_MINUTES as usize),
+        Some((15_000, GIB))
+    );
+    assert_eq!(charge(curved, H_PLUS), Some((15_000, GIB)));
+
+    for slot in slots() {
+        assert_eq!(charge(flat, slot), Some((20_000, 2 * GIB)), "slot {slot}");
+    }
+    assert_eq!(charge(flat, H_PLUS + 1), None);
+    assert_eq!(r.s.load_at(&a, H_PLUS + 1), None);
+    assert_eq!(charge(OperationId(999), 0), None);
+    assert_eq!(r.s.charge_at(flat, &w("nobody"), 0), None);
+    assert_eq!(r.s.load_at(&w("nobody"), 0), None);
+
+    for slot in slots() {
+        assert_eq!(
+            r.s.charge_at(small, &w("n"), slot),
+            Some((1_000, GIB)),
+            "slot {slot}"
         );
     }
 }
