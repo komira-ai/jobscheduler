@@ -132,6 +132,7 @@ impl Harness {
         let effects = self.feed(Event::Heartbeat {
             worker: w(name),
             running: running.to_vec(),
+            load: None,
         });
         assert!(effects.is_empty(), "{effects:?}");
     }

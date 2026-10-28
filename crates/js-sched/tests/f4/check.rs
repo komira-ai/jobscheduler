@@ -342,7 +342,9 @@ impl Checker {
                 }
                 Vec::new()
             }
-            Event::Heartbeat { worker, running } => self.heartbeat(&worker, &running),
+            Event::Heartbeat {
+                worker, running, ..
+            } => self.heartbeat(&worker, &running),
             // The world switches no node's session.
             Event::Phase { .. } => unreachable!("F4 feeds no node phase"),
             Event::Submit { waiter, request } => self.submit(waiter, request),

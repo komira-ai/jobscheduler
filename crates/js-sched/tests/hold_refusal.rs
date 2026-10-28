@@ -131,6 +131,7 @@ fn a_refusal_is_taken_back_when_a_worker_elsewhere_could_run_the_operation() {
     let beat = Event::Heartbeat {
         worker: WorkerId::new("linux"),
         running: Vec::new(),
+        load: None,
     };
     drop(feed(&mut s, before, beat));
     assert!(feed(&mut s, before, Event::Tick).is_empty());

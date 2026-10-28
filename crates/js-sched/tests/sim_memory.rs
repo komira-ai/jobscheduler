@@ -295,7 +295,11 @@ impl World {
         for (name, _) in NODES {
             let worker = WorkerId::new(name);
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if active && self.rng.chance(Chance::percent(10)) {
             self.submit();

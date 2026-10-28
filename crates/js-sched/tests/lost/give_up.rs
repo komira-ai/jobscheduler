@@ -256,6 +256,7 @@ fn a_node_that_drops_every_start_ends_the_operation_bounded() {
     let beat = Event::Heartbeat {
         worker: w("a"),
         running: Vec::new(),
+        load: None,
     };
     let proposed = f.s.apply(Input::new(f.now, beat));
     let record = ResultRecord {

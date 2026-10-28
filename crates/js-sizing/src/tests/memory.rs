@@ -103,7 +103,7 @@ fn a_failed_non_oom_run_is_not_a_sample() {
             seen,
             Observed {
                 memory: Err(Discard::NotASample),
-                cpu: false
+                cpu: CpuSample::Skipped
             }
         );
         assert_eq!(s.get(&k).unwrap().samples(), 0);
@@ -188,7 +188,10 @@ fn a_zero_field_never_changes_the_estimate() {
             ];
             for zero in zeros {
                 let seen = noisy.observe(&k, &zero, DAY, &b);
-                assert!(seen.memory.is_err() && !seen.cpu, "{zero:?}");
+                assert!(
+                    seen.memory.is_err() && seen.cpu == CpuSample::Skipped,
+                    "{zero:?}"
+                );
             }
             assert_eq!(plain.get(&k), noisy.get(&k));
             assert_eq!(
@@ -204,7 +207,7 @@ fn a_zero_field_never_changes_the_estimate() {
         ..success(GIB)
     };
     let seen = s.observe(&linux(1), &idle, DAY, &b);
-    assert!(seen.memory.is_ok() && !seen.cpu);
+    assert!(seen.memory.is_ok() && seen.cpu == CpuSample::Skipped);
 }
 
 // ---- M2: a run that hit its limit is censored ----------------------------------------
@@ -632,7 +635,9 @@ fn a_hint_is_never_lowered() {
     let est = ask(Some(12 * GIB), Some(4000));
     assert_eq!((est.memory_bytes, est.cpu_millis), (12 * GIB, 4000));
     let est = ask(Some(512 * MIB), Some(500));
-    assert_eq!((est.memory_bytes, est.cpu_millis), (GIB, 1000));
+    // The key has no CPU sample, so it is counted at the cold cost; the hint of 500 m
+    // is below it.
+    assert_eq!((est.memory_bytes, est.cpu_millis), (GIB, COLD_CPU_MILLIS));
     assert_eq!(ask(None, None).memory_bytes, GIB);
 }
 
@@ -651,34 +656,162 @@ fn cpu_of(runs: &[(u64, Option<u16>, usize)], bounds: &Bounds) -> u32 {
         .cpu_millis
 }
 
-/// Rule 3.3: samples taken under node CPU pressure (or with no pressure reading) are
-/// dropped; the threshold is exclusive.
+/// Rule: a sample taken at or above the pressure threshold, or with no reading, below the
+/// key's estimate is dropped, and the threshold is exclusive: one permille under it the
+/// sample is always kept. A key with samples compares against its own estimate.
 #[test]
-fn cpu_samples_under_node_pressure_are_dropped() {
+fn a_pressured_sample_below_the_estimate_is_dropped() {
     let b = Bounds::default();
-    assert_eq!(cpu_of(&[(4000, Some(500), 32)], &b), 1000);
-    assert_eq!(cpu_of(&[(4000, None, 32)], &b), 1000);
+    // The key learned 4 cores on quiet nodes; 1-core samples under pressure do not lower it.
+    for pressure in [Some(500), None, Some(CPU_PRESSURE_MAX_PERMILLE)] {
+        assert_eq!(
+            cpu_of(&[(4000, Some(0), 32), (1000, pressure, 32)], &b),
+            4000,
+            "{pressure:?}"
+        );
+    }
+    // The same samples on a quiet node do lower it.
     assert_eq!(
-        cpu_of(&[(4000, Some(CPU_PRESSURE_MAX_PERMILLE), 32)], &b),
+        cpu_of(
+            &[
+                (4000, Some(0), 32),
+                (1000, Some(CPU_PRESSURE_MAX_PERMILLE - 1), 32)
+            ],
+            &b
+        ),
         1000
     );
+    let mut s = Summaries::default();
+    let k = linux(1);
+    feed_on(&mut s, &k, &busy(4000, Some(0)), 3, DAY);
+    let seen = s.observe(&k, &busy(1000, Some(500)), DAY, &b);
+    assert_eq!((seen.cpu, seen.memory), (CpuSample::Dropped, Ok(())));
+    // Equal to the estimate is not above it.
+    let seen = s.observe(&k, &busy(4000, None), DAY, &b);
+    assert_eq!(seen.cpu, CpuSample::Dropped);
+    assert!(!seen.cpu.entered());
+}
+
+/// Rule: a pressured sample above the estimate is kept and raises it.
+#[test]
+fn a_pressured_sample_above_the_estimate_raises_it() {
+    let b = Bounds::default();
     assert_eq!(
-        cpu_of(&[(4000, Some(CPU_PRESSURE_MAX_PERMILLE - 1), 32)], &b),
-        4000
+        cpu_of(&[(1000, Some(0), 32), (3000, Some(500), 32)], &b),
+        3000
     );
     let mut s = Summaries::default();
-    let seen = s.observe(&linux(1), &busy(4000, Some(500)), DAY, &b);
-    assert!(!seen.cpu && seen.memory.is_ok());
+    let k = linux(1);
+    feed_on(&mut s, &k, &busy(1000, Some(0)), 3, DAY);
+    let seen = s.observe(&k, &busy(1250, Some(900)), DAY, &b);
+    assert_eq!(seen.cpu, CpuSample::Raised);
+    assert!(seen.cpu.entered());
+    // A quiet sample is Kept, not Raised, even when it is larger.
+    let seen = s.observe(&k, &busy(2000, Some(0)), DAY, &b);
+    assert_eq!(seen.cpu, CpuSample::Kept);
+}
+
+/// Rule: an unknown pressure follows the rule of a high one, in both directions.
+#[test]
+fn an_unknown_pressure_sample_is_kept_only_above_the_estimate() {
+    let b = Bounds::default();
+    assert_eq!(
+        cpu_of(&[(2000, Some(0), 32), (3000, None, 32)], &b),
+        3000,
+        "above the estimate: kept"
+    );
+    assert_eq!(
+        cpu_of(&[(2000, Some(0), 32), (1000, None, 32)], &b),
+        2000,
+        "below the estimate: dropped"
+    );
+    let mut s = Summaries::default();
+    let k = linux(1);
+    feed_on(&mut s, &k, &busy(2000, Some(0)), 3, DAY);
+    assert_eq!(
+        s.observe(&k, &busy(3000, None), DAY, &b).cpu,
+        CpuSample::Raised
+    );
+    assert_eq!(
+        s.observe(&k, &busy(500, None), DAY, &b).cpu,
+        CpuSample::Dropped
+    );
+}
+
+/// Rule: a key with no CPU sample compares a pressured sample with the cold cost (two
+/// cores): above it is learned, at or below it is not, and the key stays at the cold cost.
+#[test]
+fn a_key_with_no_estimate_compares_with_the_cold_cost() {
+    let b = Bounds::default();
+    assert_eq!(COLD_CPU_MILLIS, 2000);
+    let k = linux(1);
+    let mut s = Summaries::default();
+    let at = s.observe(&k, &busy(COLD_CPU_MILLIS.into(), Some(900)), DAY, &b);
+    assert_eq!(at.cpu, CpuSample::Dropped);
+    let below = s.observe(&k, &busy(300, None), DAY, &b);
+    assert_eq!(below.cpu, CpuSample::Dropped);
+    assert!(!s.get(&k).unwrap().has_cpu_sample());
+    assert_eq!(estimate(&s, &k).unwrap().cpu_millis, COLD_CPU_MILLIS);
+    let above = s.observe(&k, &busy(2001, Some(900)), DAY, &b);
+    assert_eq!(above.cpu, CpuSample::Raised);
+    assert!(s.get(&k).unwrap().has_cpu_sample());
+    // The cold cost is within the node: on a node of 1 core, 1500 m exceeds it.
+    let small = Bounds {
+        node_cpu_millis: 1000,
+        ..b
+    };
+    let k2 = linux(2);
+    assert_eq!(
+        s.observe(&k2, &busy(1001, None), DAY, &small).cpu,
+        CpuSample::Raised
+    );
+    assert_eq!(
+        s.observe(&linux(3), &busy(1000, None), DAY, &small).cpu,
+        CpuSample::Dropped
+    );
+}
+
+/// Rule: the counters count each case once per run, and a key counts as unsampled
+/// until a CPU sample enters it.
+#[test]
+fn cpu_counters_count_each_case() {
+    let b = Bounds::default();
+    let mut s = Summaries::default();
+    assert_eq!(s.cpu_counts(), CpuCounts::default());
+    let k = linux(1);
+    s.observe(&k, &busy(300, Some(900)), DAY, &b); // dropped (cold 2000)
+    assert_eq!(s.unsampled_keys(), 2, "the key and its L2");
+    s.observe(&k, &busy(1000, Some(0)), DAY, &b); // kept
+    s.observe(&k, &busy(1000, Some(0)), DAY, &b); // kept
+    s.observe(&k, &busy(3000, None), DAY, &b); // kept under pressure
+    s.observe(&k, &busy(100, None), DAY, &b); // dropped
+    s.observe(&k, &success(GIB), DAY, &b); // no CPU time: not counted
+    assert_eq!(
+        s.cpu_counts(),
+        CpuCounts {
+            kept: 2,
+            kept_under_pressure: 1,
+            dropped: 2
+        }
+    );
+    assert_eq!(s.unsampled_keys(), 0);
+    s.observe(&linux(2), &success(GIB), DAY, &b);
+    assert_eq!(
+        s.unsampled_keys(),
+        1,
+        "the new key; its L2 is already sampled"
+    );
     let failed = Run {
         outcome: Outcome::Failed,
         ..busy(4000, Some(0))
     };
-    assert!(!s.observe(&linux(1), &failed, DAY, &b).cpu);
+    assert_eq!(s.observe(&k, &failed, DAY, &b).cpu, CpuSample::Skipped);
     let short = Run {
         wall_us: 10,
         ..busy(4000, Some(0))
     };
-    assert!(!s.observe(&linux(1), &short, DAY, &b).cpu);
+    assert_eq!(s.observe(&k, &short, DAY, &b).cpu, CpuSample::Skipped);
+    assert_eq!(s.cpu_counts().kept, 2);
 }
 
 /// Rule 3.3: the estimate is the nearest-rank P90 of the last 32 samples.
@@ -694,13 +827,24 @@ fn cpu_is_the_p90_of_the_recent_samples() {
     );
 }
 
-/// Rule 3.3: rounded up to 250 m, never below 1000 m, never above the node.
+/// Rule: a 0.3-core action costs 500 m (rounded up to the next 250 m), not a whole core.
+#[test]
+fn a_light_key_costs_half_a_core() {
+    let b = Bounds::default();
+    assert_eq!(cpu_of(&[(300, Some(0), 10)], &b), 500);
+    assert_eq!(cpu_of(&[(250, Some(0), 10)], &b), 250);
+    assert_eq!(cpu_of(&[(251, Some(0), 10)], &b), 500);
+}
+
+/// Rule 3.3: rounded up to 250 m, never below 250 m, never above the node.
 #[test]
 fn cpu_is_rounded_up_and_clamped() {
     let b = Bounds::default();
     assert_eq!(cpu_of(&[(1501, Some(0), 10)], &b), 1750);
     assert_eq!(cpu_of(&[(1750, Some(0), 10)], &b), 1750);
     assert_eq!(cpu_of(&[(200, Some(0), 10)], &b), CPU_MIN_MILLIS);
+    assert_eq!(CPU_MIN_MILLIS, 250);
+    assert_eq!(cpu_of(&[(1, Some(0), 10)], &b), 250);
     let small = Bounds {
         node_cpu_millis: 16_000,
         ..b

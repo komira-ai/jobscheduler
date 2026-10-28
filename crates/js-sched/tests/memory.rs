@@ -113,6 +113,7 @@ impl Farm {
         let event = Event::Heartbeat {
             worker: w(name),
             running,
+            load: None,
         };
         assert!(self.feed(event).is_empty());
     }
