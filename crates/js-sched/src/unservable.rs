@@ -17,6 +17,7 @@ use js_types::sched::{LeaseKind, NodePhase, Resources, WorkerId};
 /// lasts [`UNSERVABLE_WAIT`](crate::UNSERVABLE_WAIT). [`Self::Cordoned`] is temporary by
 /// intent: the work waits for the cordon to end and is never refused for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Unservable {
     /// No worker is connected.
     NoWorker,
