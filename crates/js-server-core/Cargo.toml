@@ -1,0 +1,24 @@
+[package]
+name = "js-server-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The node report a host registers with, and the scheduler the core drives.
+js-caps = { path = "../js-caps" }
+js-sched = { path = "../js-sched" }
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+# The lines the farm's operators read: a lease granted or given up, a refused operation.
+tracing.workspace = true
+
+[dev-dependencies]
+# The tests install one subscriber, so the fields of every logged line are evaluated.
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

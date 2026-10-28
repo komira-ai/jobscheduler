@@ -1183,6 +1183,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-server-core"
+version = "0.1.0"
+dependencies = [
+ "js-caps",
+ "js-sched",
+ "js-types",
+ "thiserror",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "js-sim"
 version = "0.1.0"
 dependencies = [
