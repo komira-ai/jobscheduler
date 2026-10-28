@@ -188,8 +188,13 @@ impl Record {
         if self.state == LeaseState::Releasing {
             return Step::Retry;
         }
-        let awaiting_verdict = self.whole && self.state == LeaseState::Pending;
-        if self.expires_at <= now && !(awaiting_verdict && !self.deadline_observed) {
+        let unasked = [
+            self.whole,
+            self.state == LeaseState::Pending,
+            !self.deadline_observed,
+        ];
+        let unasked = unasked.into_iter().all(|yes| yes);
+        if self.expires_at <= now && !unasked {
             return Step::Expire;
         }
         if self.state == LeaseState::Pending {
