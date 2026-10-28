@@ -130,6 +130,11 @@ async fn heartbeat(
     // has accepted the beat, so a beat the registry refuses records nothing, and nothing
     // about the load can change the reply.
     let load = heartbeat.load.take();
+    if let Some(usage) = &agents.usage {
+        let usage = Arc::clone(usage);
+        let (early, seen) = (heartbeat.clone(), load.clone());
+        blocking(move || usage.on_beat(&early, seen, &[])).await;
+    }
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be in the state file first: when it cannot be
