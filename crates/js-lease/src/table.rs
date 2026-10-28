@@ -8,7 +8,9 @@ use crate::book::{self, Book, Seen, Step};
 use crate::clock::{Clock, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
-use crate::types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+use crate::types::{
+    Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, ReservationRecord, Settings, TickReport,
+};
 
 /// The lease table over one provider. See the crate docs for the rules.
 ///
@@ -39,7 +41,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         path: impl Into<PathBuf>,
         boot: Boot,
     ) -> Result<Self, OpenError> {
-        let book = Book::load(settings, path.into(), boot)?;
+        let book = Book::load(settings, path.into(), boot, clock.now())?;
         let mut table = Self {
             provider,
             clock,
@@ -160,6 +162,19 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// Every lease of the table with its state, in id order.
     pub fn list(&self) -> Vec<LeaseInfo> {
         self.book.list()
+    }
+
+    /// Replaces the reservation ledger with `records`; the next [`Self::tick`] writes
+    /// the file. Two records of one request keep the later. The table stores them and
+    /// decides nothing about them.
+    pub fn set_reservations(&mut self, records: Vec<ReservationRecord>) {
+        self.book.set_reservations(records);
+    }
+
+    /// The reservation ledger, in request id order: as set, or as the open restored it
+    /// (held deadlines extended by the boot grace, `claim_by` stamped).
+    pub fn reservations(&self) -> Vec<ReservationRecord> {
+        self.book.reservations()
     }
 
     /// The term of this boot: the first boot of a file takes 1 and every later boot the

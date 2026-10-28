@@ -181,6 +181,34 @@ fn a_start_of_the_request_restarts_the_idle_time() {
     assert!(!recorded(&fx, 600));
 }
 
+/// With a back-off short enough that `reserve_backoff` for each try is under the prepare
+/// timeout, a record is still kept until the prepare timeout and dropped at it.
+#[test]
+fn an_idle_record_is_kept_for_at_least_the_prepare_timeout() {
+    let name = ProviderId::new("builders").unwrap();
+    let settings = WholeNodeConfig {
+        prepare_timeout_ms: TIMEOUT,
+        reserve_backoff_ms: 10_000,
+        max_replace: 2,
+        ..WholeNodeConfig::dedicated(4)
+    };
+    let short = PoolConfig::new(name, whole(), pool_shape(), 4)
+        .with_whole_node(settings)
+        .unwrap();
+    let fx = fixture_of(short);
+    let hosts = vec![("a", fx.join("a", "t"))];
+    let mut provider = fx.provider.clone();
+    assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
+    refuse(&fx, hosts[0], lease(1).to_string(), RefusalReason::NotQuiet);
+    assert!(recorded(&fx, 600));
+    wait(&fx, &hosts, TIMEOUT - 5_000);
+    assert!(recorded(&fx, 600));
+    fx.clock.advance(Duration::from_millis(4_999));
+    assert!(recorded(&fx, 600));
+    fx.clock.advance(Duration::from_millis(1));
+    assert!(!recorded(&fx, 600));
+}
+
 /// The record of a request with a lease committed is kept while the lease waits for its
 /// agent, even when the wait is as long as the horizon (a short back-off leaves the
 /// prepare timeout as the horizon): the timeout then counts as the second failure.
