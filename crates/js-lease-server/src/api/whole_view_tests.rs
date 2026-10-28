@@ -51,7 +51,8 @@ fn request(class: &str, wall_s: u64) -> Request {
 }
 
 /// A server over one registered host, `a`, in a pool that gives up a reserved host after
-/// thirty seconds.
+/// thirty seconds and keeps a request that is not presented again on its wait list for ten
+/// minutes, so only the drain deadline ends a reservation here.
 struct Rig {
     shared: Arc<Shared>,
     clock: ManualClock,
@@ -79,6 +80,7 @@ impl Rig {
         let pool = pool.with_timing(1_000, 7_200_000).unwrap();
         let whole = WholeNodeConfig {
             drain_deadline_ms: Some(30_000),
+            regain_grace_ms: 600_000,
             ..WholeNodeConfig::dedicated(1)
         };
         let pool = pool.with_whole_node(whole).unwrap();
@@ -328,6 +330,12 @@ async fn the_tick_logs_the_counts_of_reserved_held_and_queued() {
 /// as reserved, and counted so, until the next poll.
 #[tokio::test]
 async fn the_tick_alone_gives_up_a_reservation_at_its_deadline() {
+    // The tick logs; its own subscriber keeps that line out of the other test's.
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(Lines::default())
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
     let mut rig = Rig::new("tick_giveup").await;
     rig.lease().await;
     rig.ask("r1");
