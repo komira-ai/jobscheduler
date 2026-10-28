@@ -31,6 +31,7 @@ use crate::cordon::Cordons;
 use crate::input::Request;
 use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
 use crate::scheduler::Worker;
+use crate::unservable::Unservable;
 
 /// Whether some live worker could run a request, ignoring what is booked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,10 +39,10 @@ pub(crate) enum Verdict {
     /// A live worker satisfies the platform and is large enough.
     Servable,
     /// None is; why, for the request's callers.
-    Unservable(String),
+    Unservable(Unservable),
     /// None that placement may use is, but a cordoned one is; why, naming them. The
     /// work waits: a cordon is temporary by intent, so it is not refused for it.
-    Cordoned(String),
+    Cordoned(Unservable),
 }
 
 /// One request to place: what it is, which workers are out, and what it will be charged.
@@ -645,22 +646,11 @@ impl Servable {
         if could.is_empty() {
             return verdict;
         }
-        let held = if could.iter().all(|(_, phase)| **phase == NodePhase::Serving) {
-            "cordoned"
-        } else {
-            "cordoned or not serving"
-        };
-        let named: Vec<String> = could
-            .iter()
-            .map(|(name, phase)| match phase {
-                NodePhase::Serving => name.as_str().to_owned(),
-                phase => format!("{name} ({})", phase.name()),
-            })
+        let workers = could
+            .into_iter()
+            .map(|(name, phase)| (name.clone(), phase.clone()))
             .collect();
-        Verdict::Cordoned(format!(
-            "every live worker that can run it is {held}: {}",
-            named.join(", ")
-        ))
+        Verdict::Cordoned(Unservable::Cordoned { workers })
     }
 
     /// The cordoned or not serving live workers that could run `request` (serve its kind,
@@ -692,17 +682,17 @@ impl Servable {
     ) -> Verdict {
         if self.live.is_empty() {
             let why = if self.cordoned.is_empty() {
-                "no worker is connected"
+                Unservable::NoWorker
             } else if self
                 .cordoned
                 .iter()
                 .all(|name| workers[name].phase == NodePhase::Serving)
             {
-                "every connected worker is cordoned"
+                Unservable::EveryWorkerCordoned
             } else {
-                "every connected worker is cordoned or not serving"
+                Unservable::EveryWorkerHeldBack
             };
-            return Verdict::Unservable(why.to_owned());
+            return Verdict::Unservable(why);
         }
         let kind = request.kind;
         let serving = self
@@ -711,21 +701,14 @@ impl Servable {
             .filter(|name| serves(&workers[*name].caps, kind))
             .count();
         if serving == 0 {
-            return Verdict::Unservable(format!(
-                "none of the {} live worker(s) serves lease kind {kind}: that needs a \
-                 driver among {}",
-                self.live.len(),
-                kind.drivers().join(", ")
-            ));
+            return Verdict::Unservable(Unservable::NoDriver {
+                live: self.live.len(),
+                kind,
+            });
         }
         let at = self.matching(workers, request);
         let matching = &self.memo[at].1;
         if matching.is_empty() {
-            let workers_named = if serving == self.live.len() {
-                format!("{serving} live worker(s)")
-            } else {
-                format!("{serving} live worker(s) serving lease kind {kind}")
-            };
             let (closest, unmet) = self
                 .live
                 .iter()
@@ -734,11 +717,13 @@ impl Servable {
                 .min_by_key(|(_, unmet)| unmet.len())
                 .expect("there is a live worker");
             let unmet: Vec<String> = unmet.iter().map(ToString::to_string).collect();
-            return Verdict::Unservable(format!(
-                "none of the {workers_named} satisfies the action's platform; the closest, \
-                 {closest}, lacks {}",
-                unmet.join(", ")
-            ));
+            return Verdict::Unservable(Unservable::PlatformMismatch {
+                serving,
+                some_cannot_serve: serving != self.live.len(),
+                kind,
+                closest: closest.clone(),
+                lacks: unmet,
+            });
         }
         let large_enough = matching
             .iter()
@@ -746,15 +731,9 @@ impl Servable {
         if large_enough {
             return Verdict::Servable;
         }
-        let r = request.resources;
-        Verdict::Unservable(format!(
-            "the {} live worker(s) that satisfy the action's platform are all smaller than \
-             its request ({} millicores, {} bytes of memory, {} GPU(s), {} VM slot(s))",
-            matching.len(),
-            r.cpu_millis,
-            r.memory_bytes,
-            r.gpus,
-            r.vms
-        ))
+        Verdict::Unservable(Unservable::TooLarge {
+            matching: matching.len(),
+            asked: request.resources,
+        })
     }
 }

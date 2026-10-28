@@ -15,6 +15,7 @@ use std::time::Duration;
 use js_types::sched::{FarmTime, LeaseId, OperationId, Qos, WorkKey, WorkerId};
 
 use super::{OpState, Scheduler};
+use crate::unservable::Unservable;
 
 /// The most operations [`QueueView::avoided`] lists; [`QueueView::avoided_total`] is
 /// the count before the cap.
@@ -86,8 +87,10 @@ pub struct QueueGroup {
 /// Queued operations that no live worker can run, grouped by the reason they wait.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WaitingGroup {
-    /// Why, as their callers are told.
+    /// Why, as their callers are told ([`Unservable`]'s `Display`).
     pub reason: String,
+    /// Why, as a value to match on or count by.
+    pub cause: Unservable,
     /// How many wait for it.
     pub count: usize,
     /// The first of them in queue order, as one to look at.
@@ -224,10 +227,11 @@ impl Scheduler {
             group.1 = group.1.min(op.queued_at);
             if let Some(u) = &op.unservable {
                 waiting
-                    .entry(u.reason.as_str())
+                    .entry(u.text.as_str())
                     .and_modify(|w| w.count += 1)
                     .or_insert_with(|| WaitingGroup {
-                        reason: u.reason.clone(),
+                        reason: u.text.clone(),
+                        cause: u.reason.clone(),
                         count: 1,
                         example: id,
                         example_key: op.request.key.clone(),
