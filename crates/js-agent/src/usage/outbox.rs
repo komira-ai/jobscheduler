@@ -18,6 +18,13 @@
 //!   counted: resending the same bytes would be refused again for ever, and the session
 //!   ends on such an answer anyway.
 //!
+//! # At least once
+//!
+//! A beat that went out but whose answer never came back (a transport error after the
+//! server processed it) is failed like any other, so its minutes ride on a later beat and
+//! the server may see a minute twice. Delivery is at least once; the server dedupes by
+//! (lease, minute). Only a 2xx answer settles a minute for good.
+//!
 //! The scalar part of a load (the counters and gauges) is never resent: the next sample
 //! has newer ones.
 
@@ -156,6 +163,14 @@ impl Outbox {
         let mut slot = self.lock();
         let lost = slot.in_flight.take().map_or(0, |held| held.minutes.len());
         slot.dropped += lost as u64;
+    }
+
+    /// Panics while holding the lock, so that the lock is poisoned: for the tests that the
+    /// session and the worker go on after a thread died holding it.
+    #[doc(hidden)]
+    pub fn panic_while_locked(&self) {
+        let _slot = self.lock();
+        panic!("the thread holding the outbox died");
     }
 
     /// How many minutes were dropped for being too old or for a refused beat.

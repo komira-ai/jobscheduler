@@ -341,8 +341,12 @@ fn minutes_kept_through_a_long_outage_are_dropped() {
     let later = 60 + MAX_UNSENT_AGE_USEC / SECOND + 1;
     rig.node(9 * 30 * SECOND, 100);
     rig.lease("a", 9 * 30 * SECOND, 100);
-    rig.run_at(later, &[running("a", 0)]);
+    let lines = rig.run_at(later, &[running("a", 0)]);
     assert_eq!(rig.outbox.dropped(), 1);
+    assert_eq!(
+        lines,
+        ["usage: dropped 1 minute(s) too old to send or refused by the server (1 since start)"]
+    );
     assert!(
         !rig.load().unwrap().minutes.iter().any(|m| m.minute == 0),
         "the minute that rode with the sample of t=60 is too old"
@@ -415,4 +419,89 @@ fn a_boxed_reader_reads_like_the_reader_inside() {
     assert!(boxed.read("/b").is_err());
     assert_eq!(boxed.link("/l"), Ok("target".to_owned()));
     assert_eq!(boxed.device(Path::new("/a")), inner.device(Path::new("/a")));
+}
+
+/// Asserts that dropped minutes are reported to the operator, since the wire has no field
+/// for them: the run after a refused beat says how many minutes were dropped and how many
+/// in all, a run with nothing new says nothing, and a second refusal is a second line with
+/// the new count. It catches minutes lost without a trace, and the same loss told in every
+/// window.
+#[test]
+fn dropped_minutes_are_told_once_with_their_count() {
+    let mut rig = Rig::windowed();
+    let at = |rig: &mut Rig, seconds: u64| {
+        let k = seconds / 30;
+        rig.node(k * 30 * SECOND, 100);
+        rig.lease("a", k * 30 * SECOND, 100);
+        rig.run_at(seconds, &[running("a", 0)])
+    };
+    for seconds in [0, 30] {
+        assert!(at(&mut rig, seconds).is_empty());
+        rig.load();
+        rig.outbox.delivered();
+    }
+    assert!(at(&mut rig, 60).is_empty());
+    assert_eq!(names(&rig.load().unwrap().minutes), [("a", 0, 1000)]);
+    rig.outbox.refused();
+    let told = at(&mut rig, 90);
+    assert_eq!(
+        told,
+        ["usage: dropped 1 minute(s) too old to send or refused by the server (1 since start)"]
+    );
+    rig.load();
+    rig.outbox.delivered();
+    assert!(at(&mut rig, 120).is_empty(), "nothing new, nothing said");
+    rig.load();
+    rig.outbox.refused();
+    let again = at(&mut rig, 150);
+    assert_eq!(
+        again,
+        ["usage: dropped 1 minute(s) too old to send or refused by the server (2 since start)"]
+    );
+}
+
+/// Asserts that the collector goes on when a thread died holding the outbox's lock: the
+/// run still publishes its reading and the next window still reclaims. It catches a lock
+/// that panics on poison, which would end the worker thread, and with it every job.
+#[test]
+fn a_poisoned_outbox_does_not_stop_the_collector() {
+    let mut rig = Rig::windowed();
+    let poisoner = rig.outbox.clone();
+    assert!(
+        std::thread::spawn(move || poisoner.panic_while_locked())
+            .join()
+            .is_err()
+    );
+    rig.node(0, 100);
+    assert!(rig.collector.due());
+    assert!(rig.run_at(0, &[]).is_empty());
+    assert_eq!(rig.load().unwrap().seq, 1);
+    rig.node(30 * SECOND, 100);
+    assert!(rig.run_at(30, &[]).is_empty());
+    assert_eq!(rig.load().unwrap().seq, 2);
+}
+
+/// Asserts that a later session's heartbeat interval is the window the collector samples
+/// and bins at: after the interval went from 30 to 5 seconds, a lease sampled 20 seconds
+/// after its last sample is a gap (more than three windows) and is not covered, where with
+/// the first interval it would have been. It catches a binner that keeps the interval of the
+/// first session for the life of the process.
+#[test]
+fn the_window_follows_the_session_that_is_welcomed_last() {
+    let mut rig = Rig::windowed();
+    let at = |rig: &mut Rig, seconds: u64| {
+        rig.node(seconds * SECOND, 100);
+        rig.lease("a", seconds * SECOND, 100);
+        rig.run_at(seconds, &[running("a", 0)]);
+        rig.load().unwrap().covered
+    };
+    at(&mut rig, 0);
+    assert_eq!(at(&mut rig, 30), ["a"], "30 seconds is one window");
+
+    rig.outbox.set_window(Duration::from_secs(5));
+    assert!(
+        at(&mut rig, 50).is_empty(),
+        "20 seconds is four windows of 5: a gap"
+    );
+    assert_eq!(at(&mut rig, 55), ["a"], "one window of 5 again");
 }

@@ -166,6 +166,13 @@ impl Binner {
         }
     }
 
+    /// Sets the time between samples again, for a session whose heartbeat interval is not
+    /// the one the binner was made with (0 is read as 1). The gap rule follows from the next
+    /// sample on; what is held is untouched.
+    pub fn set_window(&mut self, window_usec: u64) {
+        self.window_usec = window_usec.max(1);
+    }
+
     /// Takes one sample in. Time is `sample.mono_usec` only.
     pub fn observe(&mut self, sample: &Sample) -> Observation {
         self.latest = self.latest.max(sample.mono_usec);

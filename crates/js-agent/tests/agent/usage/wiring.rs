@@ -125,9 +125,67 @@ fn each_answer_settles_the_minutes_it_carried() {
         session.tick();
         outbox.publish(reading(1, 100, vec![minute("1-1", 0, 5)]));
         session.tick();
-        assert_eq!(outbox.reclaim(100).len(), kept, "{name}");
-        assert_eq!(outbox.dropped(), dropped, "{name}");
+        // The next beat takes the outbox again: what the answer settled must not come back.
+        outbox.publish(reading(2, 200, Vec::new()));
+        session.tick();
+        assert_eq!(
+            outbox.reclaim(200).len(),
+            kept,
+            "{name}: after the next beat"
+        );
+        assert_eq!(outbox.dropped(), dropped, "{name}: after the next beat");
     }
+}
+
+/// Asserts that a minute the server took (2xx) is on no later beat: the beat after it, with
+/// a reading of its own and then with none, carries no minute and the worker is given none
+/// back. It catches a session that does not say `delivered` on a 2xx, whose minute is then
+/// requeued by the next take and sent again on every beat after.
+#[test]
+fn a_delivered_minute_is_on_no_later_beat() {
+    let outbox = Arc::new(Outbox::new());
+    let (mut script, sent) = Script::new(vec![welcome(1), beat_ok(), beat_ok(), beat_ok()]);
+    let mut session = session_over(&mut script, &outbox);
+    session.tick();
+    outbox.publish(reading(1, 100, vec![minute("1-1", 0, 5)]));
+    session.tick();
+    outbox.publish(reading(2, 200, Vec::new()));
+    session.tick();
+    session.tick();
+    let beats = beats(&sent);
+    assert_eq!(beats.len(), 3);
+    assert_eq!(beats[0]["load"]["minutes"][0]["minute"], 0);
+    assert!(beats[1]["load"].get("minutes").is_none(), "{:?}", beats[1]);
+    assert!(beats[2].get("load").is_none());
+    assert!(outbox.reclaim(200).is_empty());
+    assert_eq!(outbox.dropped(), 0);
+}
+
+/// Asserts that a session carries on when a thread died holding the outbox's lock: the
+/// beat still carries the load that was published, the answer still settles it, and the
+/// window is still set. It catches a lock that panics on poison, which would end the
+/// session's thread over a fault of the worker's.
+#[test]
+fn a_poisoned_outbox_does_not_stop_the_session() {
+    let outbox = Arc::new(Outbox::new());
+    let poisoner = outbox.clone();
+    assert!(
+        std::thread::spawn(move || poisoner.panic_while_locked())
+            .join()
+            .is_err()
+    );
+    let (mut script, sent) = Script::new(vec![welcome(1), beat_ok(), refused(503, "unavailable")]);
+    let mut session = session_over(&mut script, &outbox);
+    session.tick();
+    assert_eq!(outbox.window_usec(), 5_000_000);
+    outbox.publish(reading(1, 100, vec![minute("1-1", 0, 5)]));
+    session.tick();
+    outbox.publish(reading(2, 200, vec![minute("1-1", 1, 5)]));
+    session.tick();
+    let beats = beats(&sent);
+    assert_eq!(beats[0]["load"]["minutes"][0]["minute"], 0);
+    assert_eq!(beats[1]["load"]["minutes"][0]["minute"], 1);
+    assert_eq!(outbox.reclaim(200).len(), 1, "the 503 kept its minute");
 }
 
 /// Asserts that the draining beat carries the load too, and that it is settled like any

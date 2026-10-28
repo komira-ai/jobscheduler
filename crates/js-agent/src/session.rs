@@ -87,7 +87,9 @@
 //! 2xx is delivered; a transport error, a conflict, 408, 429, 5xx and a message that was
 //! never sent are failed (the minutes ride on a later beat, once); any other 4xx, which the
 //! session also ends on, is refused (the minutes are dropped: the same bytes would be refused
-//! again for ever). The draining beat of [`Session::drain`] carries the load too, so the last
+//! again for ever). A transport error is also what a beat the server processed but whose
+//! reply was lost looks like, so delivery is at least once: the minutes are sent again and
+//! the server dedupes by (lease, minute). The draining beat of [`Session::drain`] carries the load too, so the last
 //! minutes of leases that just ended are not left behind.
 
 use std::fmt;

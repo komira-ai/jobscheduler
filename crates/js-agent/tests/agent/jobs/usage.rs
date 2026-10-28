@@ -49,13 +49,17 @@ fn counters(machine: &FakeMachine, k: u64) {
 /// The answer that starts `r1` with a wall-time limit of an hour, so that it is still
 /// running when the test is over.
 fn long_start() -> Value {
+    serde_json::to_value(long_reply()).unwrap()
+}
+
+/// The same answer as a value of the wire type.
+fn long_reply() -> HeartbeatReply {
     let mut spec = job("r1");
     spec.limits.wall_ms = 3_600_000;
-    let reply = HeartbeatReply {
+    HeartbeatReply {
         commands: vec![Command::Start(Box::new(spec))],
         ..HeartbeatReply::default()
-    };
-    serde_json::to_value(reply).unwrap()
+    }
 }
 
 /// The load of each heartbeat sent so far, `Null` for a beat without one.
@@ -217,4 +221,49 @@ fn without_an_actions_cgroup_nothing_is_sampled_and_the_worker_says_why() {
         1,
         "{lines:?}"
     );
+}
+
+/// Asserts that a lease whose control group the runtime could not give at its start is
+/// looked up again at the following windows: the worker says once that it is not known,
+/// does not say it again, and once the runtime can say, the lease is sampled (its baseline
+/// at that window, covered at the next). It catches a lease that stays unsampled for its
+/// whole life after one failed lookup, and a line in every window while it is missing.
+#[test]
+fn a_missing_control_group_is_looked_up_again_at_the_next_windows() {
+    let dir = Scratch::new("jobs-usage-late-cgroup");
+    let machine = FakeMachine::new();
+    counters(&machine, 0);
+    let outbox = Arc::new(Outbox::new());
+    outbox.set_window(Duration::from_secs(30));
+    let worker = start_with_usage(&dir, &machine, &outbox, Some(SLICE));
+    let said = |worker: &js_agent::Worker| {
+        let lines = worker.take_lines();
+        lines
+            .iter()
+            .filter(|line| line.contains("control group"))
+            .count()
+    };
+
+    assert_eq!(worker.try_deliver(long_reply()), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    assert_eq!(said(&worker), 1, "told once that it is not known");
+    let first = outbox.take().unwrap();
+    assert_eq!(first.seq, 1);
+    assert_eq!(first.clocks.len(), 1, "the lease is named, not sampled");
+
+    machine.clock.advance(30_000);
+    assert!(worker.handle().settle());
+    assert_eq!(said(&worker), 0, "not told again while it is still missing");
+    assert!(outbox.take().is_some());
+
+    machine.world.set_cgroup_base(SLICE);
+    for k in 1..=2 {
+        machine.clock.advance(30_000);
+        counters(&machine, k);
+        assert!(worker.handle().settle());
+        let load = outbox.take().unwrap();
+        let covered = load.covered.len();
+        assert_eq!(covered, usize::from(k == 2), "window {k}");
+    }
+    assert_eq!(said(&worker), 0, "nothing more once it is found");
 }

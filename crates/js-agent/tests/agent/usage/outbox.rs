@@ -1,5 +1,7 @@
 //! The hand-over between the worker and the session, and the wire form of a reading.
 
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use js_agent::usage::{ClosedMinute, MAX_UNSENT_AGE_USEC, Outbox, Reading, Sample};
@@ -195,4 +197,62 @@ fn a_refused_load_is_dropped_and_counted() {
     assert_eq!(outbox.dropped(), 2);
     outbox.publish(reading(2, 200, Vec::new()));
     assert!(outbox.take().unwrap().minutes.is_empty());
+}
+
+/// Asserts that a delivered load is settled for good, whatever the session does next: the
+/// next take, with no new reading and with one, gives back nothing of it, the worker
+/// reclaims nothing and nothing is counted as dropped. The settling shows only at the take
+/// after the 2xx (an unsettled load is then counted as unanswered and given back), so a
+/// check right after `delivered` cannot see it. It catches a session that forgets to say
+/// `delivered` on a 2xx and an outbox whose `delivered` clears nothing: both resend the
+/// same minutes on a later beat.
+#[test]
+fn a_delivered_load_is_not_given_back_by_a_later_take() {
+    let delivered = || {
+        let outbox = Outbox::new();
+        outbox.publish(reading(1, 100, vec![minute("1-1", 0, 5)]));
+        assert_eq!(outbox.take().unwrap().minutes.len(), 1);
+        outbox.delivered();
+        outbox
+    };
+
+    let outbox = delivered();
+    assert!(outbox.take().is_none(), "no new reading");
+    assert!(outbox.reclaim(100).is_empty());
+    assert_eq!(outbox.dropped(), 0);
+
+    let outbox = delivered();
+    outbox.publish(reading(2, 150, vec![minute("1-1", 1, 6)]));
+    let next = outbox.take().unwrap();
+    let carried: Vec<_> = next
+        .minutes
+        .iter()
+        .map(|m| (m.lease_id.as_str(), m.minute))
+        .collect();
+    assert_eq!(carried, [("1-1", 1)], "only the new minute");
+    assert!(
+        outbox.reclaim(150).is_empty(),
+        "minute 0 does not come back"
+    );
+    assert_eq!(outbox.dropped(), 0);
+}
+
+/// Asserts that a thread that died holding the outbox's lock does not take the hand-over
+/// down with it: a reading is published and taken, a failed beat gives its minutes back
+/// and the counts are read. It catches a lock that panics on poison, which would kill the
+/// session's heartbeat (or the worker) over a fault of the other thread.
+#[test]
+fn a_poisoned_lock_does_not_stop_the_hand_over() {
+    let outbox = Arc::new(Outbox::new());
+    let poisoner = outbox.clone();
+    let died = thread::spawn(move || poisoner.panic_while_locked()).join();
+    assert!(died.is_err(), "the thread panicked");
+
+    outbox.publish(reading(1, 100, vec![minute("1-1", 0, 5)]));
+    assert_eq!(outbox.take().unwrap().minutes.len(), 1);
+    outbox.failed();
+    assert_eq!(names(&outbox.reclaim(100)), [("1-1".to_owned(), 0)]);
+    outbox.refused();
+    outbox.delivered();
+    assert_eq!(outbox.dropped(), 0);
 }

@@ -11,8 +11,16 @@
 //! heartbeat interval and publishes a [`Reading`] in an [`Outbox`]. The session takes the
 //! reading into its next heartbeat ([`to_wire`]) and tells the outbox whether the beat went
 //! through ([`Outbox::delivered`], [`Outbox::failed`], [`Outbox::refused`]), so a minute is
-//! sent once and a failed send is not lost. Without `--actions-cgroup` there is no
+//! not sent again after a 2xx and a failed send is not lost.
+//!
+//! Delivery is at least once. When the server processed a beat but the reply was lost (a
+//! transport error), the agent cannot know, keeps the minutes and sends them again; the
+//! server dedupes by (lease, minute). Dropped minutes (too old, or refused) are logged by
+//! the worker with their count, not sent. Without `--actions-cgroup` there is no
 //! collector and the heartbeat carries no load.
+//!
+//! The window is the heartbeat interval of the current session: when a later session is
+//! welcomed with another interval, the sampling and the binner's gap rule follow it.
 //!
 //! # Time bases
 //!

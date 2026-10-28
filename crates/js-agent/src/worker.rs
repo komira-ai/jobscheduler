@@ -482,7 +482,11 @@ fn work(
         let sampled = usage
             .as_mut()
             .filter(|collector| collector.due())
-            .map(|collector| collector.run(&life.running()));
+            .map(|collector| {
+                let mut said = life.find_cgroups();
+                said.extend(collector.run(&life.running()));
+                said
+            });
         lines.extend(sampled.into_iter().flatten());
         shared.publish(Snapshot::of(&life), lines);
         shared.busy_until.store(0, Ordering::SeqCst);
