@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+use js_testkit::dir::TestDir;
+
 const BIN: &str = env!("CARGO_BIN_EXE_kbf-guest");
 
 /// Stops a test run as the runner's user, where every check below would fail for the
@@ -31,22 +33,18 @@ fn assert_root() {
 }
 
 /// A directory of one test's own (mode 0755), removed when the test ends.
-struct Scratch(PathBuf);
+struct Scratch(PathBuf, TestDir);
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("kbf-guest-as-root-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        set_mode(&dir, 0o755);
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Root made it: leave no root-owned files in the runner's target directory.
-        let _ = std::fs::remove_dir_all(&self.0);
+        // Root makes it and root's `TestDir` removes it on drop: no root-owned files are
+        // left in the runner's target directory.
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &format!("kbf-guest-as-root-{name}"),
+        );
+        set_mode(owner.path(), 0o755);
+        Scratch(owner.path().to_path_buf(), owner)
     }
 }
 

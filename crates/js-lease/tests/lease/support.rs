@@ -9,6 +9,7 @@ use std::time::Duration;
 use js_lease::{Boot, LeaseState, LeaseTable, ManualClock, OpenError, Settings, Timestamp};
 use js_provider::Provider;
 use js_provider_fake::FakeProvider;
+use js_testkit::dir::TestDir;
 use js_types::{
     Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
 };
@@ -19,17 +20,19 @@ pub const T0: u64 = 1_000_000;
 /// emptied when the test ends.
 pub struct Scratch {
     pub dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-lease")
-            .join(name);
-        fs::create_dir_all(&dir).unwrap();
-        let scratch = Self { dir };
-        scratch.clear();
-        scratch
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn file(&self) -> PathBuf {
@@ -41,13 +44,6 @@ impl Scratch {
         for name in ["leases.toml", "leases.toml.tmp", "leases.toml.lock"] {
             let _ = fs::remove_file(self.dir.join(name));
         }
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        self.clear();
-        let _ = fs::remove_dir(&self.dir);
     }
 }
 

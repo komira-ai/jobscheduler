@@ -25,8 +25,8 @@ js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-provider-fake = { path = "../js-provider-fake" }
-js-types = { path = "../js-types" }
 js-testkit = { path = "../js-testkit" }
+js-types = { path = "../js-types" }
 rcgen.workspace = true
 rustix = { workspace = true, features = ["event"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
