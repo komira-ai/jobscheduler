@@ -8,6 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use js_agent::{
@@ -26,16 +27,27 @@ pub const POOL: &str = "macs";
 pub const SECRET: &str = "sess-secret-0001-abcdefghijklmnop";
 
 /// A directory under the target directory that holds one test's files and is removed when
-/// the test ends.
+/// the test ends. Its path is the name, the process id and a count of the directories this
+/// process has made, so no other test (of any name) and no other run shares it: the
+/// directory is deleted at the start and the end, and a shared one is deleted under a
+/// running test.
 pub struct Scratch {
     dir: PathBuf,
 }
 
+/// The directories made by this process so far.
+static MADE: AtomicUsize = AtomicUsize::new(0);
+
 impl Scratch {
     pub fn new(name: &str) -> Self {
+        let unique = format!(
+            "{name}-{}-{}",
+            std::process::id(),
+            MADE.fetch_add(1, Ordering::Relaxed)
+        );
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("js-agent")
-            .join(name);
+            .join(unique);
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
