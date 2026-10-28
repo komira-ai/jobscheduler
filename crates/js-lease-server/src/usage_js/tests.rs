@@ -280,8 +280,13 @@ fn a_usage_file_that_will_not_open_refuses_the_start_naming_the_flag() {
 /// that names another flag.
 #[test]
 fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
+    // A directory is not a usage file. It is made in the temporary directory, because
+    // the lock file of a state file sits beside it under its name, and one beside the
+    // crate's directory would stray into the workspace.
+    let dir = std::env::temp_dir().join("js-lease-server-usage-not-a-file");
+    std::fs::create_dir_all(&dir).unwrap();
     let setup = StoreSetup {
-        db: PathBuf::from("."),
+        db: dir,
         profile_store_bytes: 1 << 20,
     };
     let err = open(&setup, 0)
