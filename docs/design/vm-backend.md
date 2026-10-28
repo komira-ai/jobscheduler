@@ -109,6 +109,8 @@ A VM's only path to the host is one stream per VM that the hypervisor ties to th
 guest a small program, `js-guest`, part of every base image, listens on it from boot. The frame codec is a crate shared by agent and
 guest, `js-guest-wire`, small and dependency-light, versioned like the agent wire (major 1; fields only added).
 
+**What the crates carry today.** `js-guest` and `js-guest-wire` are the guest program and codec lifted from kbf with their bytes unchanged, and they speak kbf's run protocol (`Hello`, `Run`, `Kill`; `Ready`, `Refused`, `Started`, `Exited`; version 1), with inputs and outputs as shared directories and not as frames. The `Put`, `Exec`, `Log` and `Signal` frames in the table below are the earlier design of this channel, and no crate here speaks them.
+
 | Direction | Frame | Meaning |
 |---|---|---|
 | guest to host | `Ready{guest_version, protocol}` | the guest is up and idle; sent once |

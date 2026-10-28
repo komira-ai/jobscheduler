@@ -867,13 +867,27 @@ version = "0.1.0"
 dependencies = [
  "js-agent",
  "js-agent-wire",
+ "js-caps",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
  "js-registry",
+ "js-sched",
+ "js-state",
  "js-types",
+]
+
+[[package]]
+name = "js-contain"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "rustix",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -881,6 +895,31 @@ name = "js-coverage"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "thiserror",
+]
+
+[[package]]
+name = "js-guest"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "hex",
+ "js-guest-wire",
+ "libc",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+]
+
+[[package]]
+name = "js-guest-wire"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -906,11 +945,13 @@ dependencies = [
  "hyper",
  "hyper-util",
  "js-agent-wire",
+ "js-caps",
  "js-lease",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
  "js-registry",
+ "js-sched",
  "js-types",
  "rcgen",
  "rustix",
@@ -1036,7 +1077,10 @@ dependencies = [
 name = "js-store"
 version = "0.1.0"
 dependencies = [
+ "js-caps",
+ "js-sched",
  "js-state",
+ "js-store",
  "js-types",
  "thiserror",
 ]
