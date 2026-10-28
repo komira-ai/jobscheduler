@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
-use js_sched::{Fate, Recovered, RecoveredLease, Request};
+use js_sched::{Fate, Floor, KeyFloor, Recovered, RecoveredLease, Request};
 use js_state::{Version, Versioned};
 use js_types::sched::{LeaseGrant, OperationId, WaiterId, WorkerId};
 
@@ -33,6 +33,15 @@ pub struct Stored {
     pub next_seq: u64,
     /// Every unfinished operation, in id order.
     pub operations: Vec<StoredOperation>,
+    /// Every memory floor, oldest stamp first (two floors with one stamp in key order, the
+    /// later with the next stamp).
+    pub floors: Vec<Floor>,
+    /// Every key floor, in the same order. Empty when size keys are not read
+    /// ([`Rows::set_read_size_keys`]).
+    pub key_floors: Vec<KeyFloor>,
+    /// The size summary each key floor decays with, for those whose row names one: the size
+    /// key and the name, as the writer gave it ([`Rows::requeued`]).
+    pub key_names: Vec<(u64, String)>,
     /// Every node an operator placed, in node-name order.
     pub cordons: Vec<(WorkerId, StoredCordon)>,
 }
@@ -147,6 +156,12 @@ impl Rows {
                 size_keys.insert(operation, size_key_row(&key, &row)?);
             }
         }
+        let floors = self.stored_floors()?;
+        let (key_floors, key_names) = if self.size_keys.load(Ordering::SeqCst) {
+            self.stored_key_floors()?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut operations = Vec::new();
         for (key, row) in self.scan_known_logged(keys::OPERATION)? {
             let request = self.request_row(&key, &row)?;
@@ -167,6 +182,9 @@ impl Rows {
             next_operation: self.counter(keys::NEXT_OP)?,
             next_seq: self.counter(keys::NEXT_SEQ)?,
             operations,
+            floors,
+            key_floors,
+            key_names,
             cordons: self.cordons()?,
         })
     }

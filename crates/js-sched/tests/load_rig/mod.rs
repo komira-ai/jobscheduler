@@ -256,6 +256,7 @@ pub fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
@@ -265,6 +266,7 @@ pub fn cold(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: true,
+        life_minutes: 1,
     }
 }
 
