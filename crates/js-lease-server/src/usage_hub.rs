@@ -159,7 +159,7 @@ impl Hub {
             }
             let full = self.running.len() >= MAX_TRACKS;
             match self.running.entry(m.lease) {
-                Entry::Occupied(mut on_file) if on_file.get().host == *host => {
+                Entry::Occupied(mut on_file) => {
                     let track = on_file.get_mut();
                     track.touched = now;
                     merge(&mut track.minutes, m);
