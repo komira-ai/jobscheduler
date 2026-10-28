@@ -20,12 +20,16 @@ js-sched = { path = "../js-sched" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 thiserror.workspace = true
+# The key of each row a start skips (it holds a command this binary does not know) is logged.
+tracing.workspace = true
 
 [dev-dependencies]
 # The in-memory fake store: the tests run the rows over it.
 js-state = { path = "../js-state", features = ["test-support"] }
 # This crate's own tests see the test codec.
 js-store = { path = ".", features = ["test-support"] }
+# The tests read the log a start writes.
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

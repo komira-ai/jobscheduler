@@ -371,6 +371,11 @@ pub struct LeaseGrant {
     pub operation: OperationId,
     /// Where.
     pub worker: WorkerId,
+    /// What admission charged the lease, fixed at the grant and held until its result.
+    /// Not part of the trace text. A lease row built from the grant keeps it, and a
+    /// scheduler recovered from the rows charges the lease the same
+    /// ([`super::usage::LeaseCost`]).
+    pub cost: super::usage::LeaseCost,
 }
 
 /// A result the scheduler accepted from the holder of `lease`.

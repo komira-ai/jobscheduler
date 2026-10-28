@@ -556,6 +556,7 @@ fn a_recovered_lease_books_what_the_store_holds_and_its_kill_is_no_new_event() {
         lease: lease.then(|| RecoveredLease {
             lease: op.lease,
             worker: w("big"),
+            cost: None,
         }),
         losses: 0,
         fate: None,

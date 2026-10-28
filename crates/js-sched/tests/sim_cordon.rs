@@ -129,6 +129,7 @@ impl World {
                     lease: start.lease,
                     operation: start.operation,
                     worker: start.worker,
+                    cost: Default::default(),
                 };
                 let ends = self.now + self.rng.between(5, 60);
                 self.running.entry(ends).or_default().push(grant);
