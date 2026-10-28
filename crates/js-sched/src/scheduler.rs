@@ -16,6 +16,7 @@ mod snapshot;
 mod state;
 mod view;
 mod whole;
+mod whole_view;
 mod worker;
 
 pub use recover::{Fate, Recovered, RecoveredLease};
@@ -25,6 +26,7 @@ pub use snapshot::{
 };
 pub use state::OpState;
 pub use whole::{WholeMark, WholeWait};
+pub use whole_view::{WholeReason, WholeState, WholeSummary};
 pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
