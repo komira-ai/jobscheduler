@@ -3,14 +3,21 @@
 //! and how a floor the adapter's estimator lowers is applied and written. A core with size
 //! keys off (the default) must behave as it did before any of it existed.
 
-use js_sched::OpState;
-use js_server_core::{Admitted, Config, Core, Lowered, Report};
-use js_store::{StateError, keys};
-use js_types::sched::{Failure, LeaseId, OperationId, Outcome};
+use std::time::Duration;
+
+use js_sched::{DaemonInstance, NodePhase, OpState, Request, Requeue};
+use js_server_core::{
+    Adapter, Admitted, Config, Core, Delivery, Lowered, Report, Stage, Stream, View,
+};
+use js_store::{Ending, StateError, keys};
+use js_types::sched::{
+    Answer, Effect, Failure, LeaseGrant, LeaseId, OperationId, Outcome, Refusal, StartLease,
+    WaiterId, WorkerId,
+};
 
 use crate::common::{
-    Call, GIB, Rig, at, block_on, calls, core_by, enrol, request, submit, submit_request, up,
-    worker,
+    Call, GIB, Rig, at, block_on, calls, core_by, enrol, reported, request, submit, submit_request,
+    up, worker,
 };
 use crate::recover::finish;
 use crate::stored::Setup;
@@ -546,4 +553,102 @@ fn size_keys_off_core_is_byte_identical() {
             .iter()
             .all(|(name, _)| !name.starts_with("opkey/") && !name.starts_with("keyfloor/"))
     );
+}
+
+/// An adapter that does nothing and takes the default of every hook that has one.
+struct Bare;
+
+impl Adapter for Bare {
+    fn stream_open(&self, _: &WorkerId, _: Stream) -> bool {
+        true
+    }
+
+    fn name(&self, _: &View<'_>, operation: OperationId) -> String {
+        operation.0.to_string()
+    }
+
+    fn phased(&mut self, _: &WorkerId, _: &NodePhase, _: &NodePhase) {}
+
+    fn offer(&mut self, _: &View<'_>, _: &LeaseGrant) {}
+
+    fn start(&mut self, _: &View<'_>, _: &StartLease) {}
+
+    fn cancel(&mut self, _: &View<'_>, _: &WorkerId, _: LeaseId) {}
+
+    fn show(&mut self, _: &View<'_>, _: OperationId, _: &Stage) {}
+
+    fn refuse(&mut self, _: &View<'_>, _: &Refusal) {}
+
+    fn requeued(&mut self, _: &Requeue) {}
+
+    fn settle(&mut self, _: &View<'_>, _: &Answer, _: Option<&WorkerId>) -> Delivery {
+        Box::pin(std::future::ready(()))
+    }
+
+    fn forget_dropped(&mut self, _: &dyn Fn(OperationId) -> bool) {}
+
+    fn forget_parcel(&mut self, _: LeaseId) {}
+
+    fn retain_parcels(&mut self, _: &dyn Fn(LeaseId) -> bool) {}
+
+    fn ending(&self, _: &Effect, _: Duration) -> Option<Ending> {
+        None
+    }
+
+    fn adopted(
+        &mut self,
+        _: OperationId,
+        _: WaiterId,
+        _: Option<&[u8]>,
+        _: &Request,
+        _: Option<&LeaseGrant>,
+        _: Option<u64>,
+    ) {
+    }
+
+    fn waiting_among(&self, _: &[WaiterId]) -> Vec<WaiterId> {
+        Vec::new()
+    }
+
+    fn show_callers(&mut self, _: &[WaiterId], _: &Stage) {}
+
+    fn keep_finished(&mut self, _: OperationId, _: Vec<WaiterId>) {}
+
+    fn followed(&mut self, _: OperationId, _: &[u8]) {}
+
+    fn watched(&mut self) -> Vec<OperationId> {
+        Vec::new()
+    }
+
+    fn show_watched(&mut self, _: OperationId, _: &Stage) {}
+}
+
+/// Asserts that an adapter that names no summary and lowers nothing (the defaults) still has
+/// its floors raised and written: the row is there and names no summary. Catches: a default
+/// hook that blocks the floor's write, and a core that needs the adapter to implement the
+/// size-key hooks.
+#[test]
+fn an_adapter_with_the_default_hooks_has_its_floors_written_without_a_name() {
+    let setup = Setup::new();
+    let core = Core::open(&on(), Bare, setup.storage(), at(0)).expect("opened");
+    let node = worker("node-a");
+    let (instance, predecessor) = (DaemonInstance::new("d1"), DaemonInstance::new(""));
+    core.register(at(0), &node, instance, predecessor, reported(8), |_, _| {})
+        .expect("registered");
+    let admitted = core
+        .submit_keyed(at(1), request(1), &[1], Some(K), |_, _| {})
+        .expect("submitted");
+    let report = Report {
+        operation: admitted.operation,
+        lease: LeaseId::new(1, 0),
+        outcome: Outcome::Failed(Failure::OutOfMemory),
+    };
+
+    block_on(core.report(at(5), &node, report, |_| {}));
+
+    let raised = core
+        .with(|view, _| view.sched().key_floor(K))
+        .expect("raised");
+    assert_eq!(floor_rows(&setup), [(K, raised)]);
+    assert!(setup.rows(9).load().expect("loaded").key_names.is_empty());
 }
