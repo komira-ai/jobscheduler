@@ -45,7 +45,7 @@ impl LambdaApi for Lagging {
     }
 }
 
-fn rig(max: usize) -> (Arc<Lagging>, Arc<ManualClock>, LambdaProvider) {
+fn rig(max_machines: usize) -> (Arc<Lagging>, Arc<ManualClock>, LambdaProvider) {
     let fake = Arc::new(FakeLambda::new());
     fake.set_offers(vec![offer(
         "gpu_1x_sample",
@@ -64,7 +64,7 @@ fn rig(max: usize) -> (Arc<Lagging>, Arc<ManualClock>, LambdaProvider) {
         api.clone(),
         clock.clone(),
         OptionTable::parse(TABLE).unwrap(),
-        live(max),
+        live(max_machines),
     );
     (api, clock, provider)
 }
@@ -98,7 +98,7 @@ fn a_retry_after_a_lost_launch_answer_does_not_launch_again_while_the_list_lags(
 }
 
 #[test]
-fn an_unresolved_launch_of_another_acquire_still_counts_toward_the_cap() {
+fn an_unresolved_launch_of_another_acquire_still_counts_toward_max_machines() {
     let (api, clock, provider) = rig(1);
     api.hide.store(true, Ordering::SeqCst);
     api.fake

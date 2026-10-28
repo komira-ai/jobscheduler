@@ -37,7 +37,7 @@ pub struct Sweep {
     pub orphans: Vec<Held>,
     /// Ours, and terminating or preempted.
     pub ending: Vec<Held>,
-    /// Some of our marks, not all. Never touched; they count toward the cap.
+    /// Some of our marks, not all. Never touched; they count toward `max_machines`.
     pub suspects: Vec<Held>,
 }
 
@@ -229,7 +229,7 @@ impl LambdaProvider {
         if let Some(sent) = gate.unknown.get(wanted) {
             // An earlier launch of this acquire got no answer and no list shows it yet:
             // it may have landed. A second launch would be a second instance under the
-            // same acquire id, and one the cap does not count.
+            // same acquire id, and one `max_machines` does not count.
             let wait = (*sent + self.config.unknown_hold).saturating_sub(now);
             tracing::warn!(
                 ?wait,
@@ -249,10 +249,13 @@ impl LambdaProvider {
             return Self::refuse(RefusalCode::Denied, Reason::HalfMarked { count: half });
         }
         let held = live.len() + gate.unknown.len();
-        let max = self.config.max_instances.get();
-        if held >= max {
-            tracing::warn!(held, max, "no launch: the cap is reached");
-            return Self::refuse(RefusalCode::Denied, Reason::AtCap { held, max });
+        let max_machines = self.config.max_machines.get();
+        if held >= max_machines {
+            tracing::warn!(held, max_machines, "no launch: max_machines is reached");
+            return Self::refuse(
+                RefusalCode::Denied,
+                Reason::AtMaxMachines { held, max_machines },
+            );
         }
         if let Some(last) = gate.last_launch {
             let due = last + self.config.launch_interval;

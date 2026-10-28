@@ -28,7 +28,7 @@ pub enum ConfigError {
 pub struct ElasticConfig {
     pub(crate) scheduler: SchedulerId,
     pub(crate) ssh_key: String,
-    pub(crate) max_instances: NonZeroUsize,
+    pub(crate) max_machines: NonZeroUsize,
     pub(crate) enabled: bool,
     pub(crate) mode: Mode,
     pub(crate) launch_interval: Duration,
@@ -37,9 +37,9 @@ pub struct ElasticConfig {
 
 impl ElasticConfig {
     /// A configuration for the scheduler `scheduler`, which puts the account's ssh key
-    /// `ssh_key` on what it launches and never holds more than `max_instances`
-    /// instances, counting the ones it cannot place and the launches it has no answer
-    /// for. There is no default cap.
+    /// `ssh_key` on what it launches and never holds more than `max_machines`
+    /// machines, counting the ones it cannot place and the launches it has no answer
+    /// for. There is no default.
     ///
     /// # Errors
     ///
@@ -47,7 +47,7 @@ impl ElasticConfig {
     pub fn new(
         scheduler: SchedulerId,
         ssh_key: &str,
-        max_instances: NonZeroUsize,
+        max_machines: NonZeroUsize,
     ) -> Result<Self, ConfigError> {
         let named =
             (1..=64).contains(&ssh_key.len()) && ssh_key.bytes().all(|b| b.is_ascii_graphic());
@@ -56,7 +56,7 @@ impl ElasticConfig {
             true => Ok(Self {
                 scheduler,
                 ssh_key: ssh_key.to_owned(),
-                max_instances,
+                max_machines,
                 enabled: false,
                 mode: Mode::DryRun,
                 // The API allows one launch per 12 seconds.
@@ -88,7 +88,7 @@ impl ElasticConfig {
         self
     }
 
-    /// Sets how long a launch that got no answer counts toward the cap while no list
+    /// Sets how long a launch that got no answer counts toward `max_machines` while no list
     /// shows it (ten minutes by default). After that a list is trusted to show it.
     #[must_use]
     pub fn unknown_hold(mut self, hold: Duration) -> Self {

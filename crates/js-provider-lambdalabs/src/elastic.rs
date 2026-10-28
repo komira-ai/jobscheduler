@@ -115,17 +115,17 @@ pub enum Reason {
     /// A label or the pool name cannot become a tag.
     Label(LabelError),
     /// Instances with some of this scheduler's marks, not all, exist: launching more
-    /// could exceed the cap unseen. An operator clears them.
+    /// could exceed `max_machines` unseen. An operator clears them.
     HalfMarked {
         /// How many there are.
         count: usize,
     },
-    /// The instances held, and launches not yet resolved, reach `max_instances`.
-    AtCap {
+    /// The instances held, and launches not yet resolved, reach `max_machines`.
+    AtMaxMachines {
         /// The count.
         held: usize,
         /// The limit.
-        max: usize,
+        max_machines: usize,
     },
     /// The API refused with this code.
     Api(ErrorCode),

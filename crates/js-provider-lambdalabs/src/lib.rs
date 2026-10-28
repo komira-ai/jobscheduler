@@ -10,8 +10,8 @@
 //! - [`Elastic`], the provider-side contract of a scheduler (acquire, list, release), and
 //!   [`LambdaProvider`], which implements it over a [`LambdaApi`]: ownership marks on
 //!   everything it launches (tags and a name prefix; both are needed to terminate, either
-//!   counts toward the cap), an acquire that launches once per acquire id, a release that
-//!   reads back, and the cost guard (disabled and dry-run by default, `max_instances`
+//!   counts toward `max_machines`), an acquire that launches once per acquire id, a release that
+//!   reads back, and the cost guard (disabled and dry-run by default, `max_machines`
 //!   checked against a fresh list before each launch, a launch rate limit on an injected
 //!   [`Clock`], a report-only [`Sweep`]);
 //! - the typed answers ([`InstanceTypeOffer`], [`Instance`], [`Status`]) and the errors

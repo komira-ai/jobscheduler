@@ -135,8 +135,12 @@ fn a_launch_error_keeps_its_code_and_request_id_and_drops_the_text() {
     assert!(!format!("{err:?}").contains("CANARY"));
 }
 
-/// A provider on the real client against `server`, live, with room for `max` instances.
-fn provider(server: &Server, max: usize, limit: Duration) -> (LambdaProvider, Arc<ManualClock>) {
+/// A provider on the real client against `server`, live, with room for `max_machines` machines.
+fn provider(
+    server: &Server,
+    max_machines: usize,
+    limit: Duration,
+) -> (LambdaProvider, Arc<ManualClock>) {
     let scratch = Scratch::new("launch");
     let key = ApiKey::from_file(&scratch.key_file("key-one")).unwrap();
     let api = HttpApi::connect(&server.url("http"), &key, None, limit).unwrap();
@@ -148,7 +152,7 @@ fn provider(server: &Server, max: usize, limit: Duration) -> (LambdaProvider, Ar
     let config = ElasticConfig::new(
         SchedulerId::new("sched-one").unwrap(),
         "fixture-key",
-        std::num::NonZeroUsize::new(max).unwrap(),
+        std::num::NonZeroUsize::new(max_machines).unwrap(),
     )
     .unwrap()
     .enable()

@@ -126,7 +126,7 @@ pub enum Claim {
     /// tag, and the name prefix.
     Ours,
     /// Some mark of this scheduler's, not all: it may be ours, renamed or retagged. It
-    /// counts toward the cap, blocks launches and is never terminated.
+    /// counts toward `max_machines`, blocks launches and is never terminated.
     Suspect,
     /// No mark of this scheduler's.
     Foreign,

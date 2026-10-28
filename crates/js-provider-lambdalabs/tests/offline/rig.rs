@@ -61,17 +61,20 @@ pub struct Rig {
     pub provider: LambdaProvider,
 }
 
-/// The config of a live, enabled provider with room for `max` instances.
-pub fn live(max: usize) -> ElasticConfig {
-    config(max).enable().live().launch_interval(INTERVAL)
+/// The config of a live, enabled provider with room for `max_machines` machines.
+pub fn live(max_machines: usize) -> ElasticConfig {
+    config(max_machines)
+        .enable()
+        .live()
+        .launch_interval(INTERVAL)
 }
 
 /// The config a provider starts from: disabled and in dry-run mode.
-pub fn config(max: usize) -> ElasticConfig {
+pub fn config(max_machines: usize) -> ElasticConfig {
     ElasticConfig::new(
         SchedulerId::new(SCHEDULER).unwrap(),
         KEY,
-        NonZeroUsize::new(max).unwrap(),
+        NonZeroUsize::new(max_machines).unwrap(),
     )
     .unwrap()
 }

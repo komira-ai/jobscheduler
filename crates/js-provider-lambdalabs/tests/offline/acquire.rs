@@ -236,7 +236,13 @@ fn a_launch_with_no_answer_holds_its_slot_until_a_list_shows_it_or_the_hold_ends
     rig.clock.advance(INTERVAL);
     assert_eq!(
         rig.provider.acquire(&ask("b")),
-        refused(RefusalCode::Denied, Reason::AtCap { held: 1, max: 1 })
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 1,
+                max_machines: 1
+            }
+        )
     );
     assert_eq!(rig.fake.count(Call::Launch), 1);
     // Ten minutes later the hold is over and a list is trusted.
@@ -254,7 +260,13 @@ fn a_launch_that_landed_unseen_is_counted_once_not_twice() {
     // The instance is listed and the pending launch is settled by it: one, not two.
     assert_eq!(
         rig.provider.acquire(&ask("b")),
-        refused(RefusalCode::Denied, Reason::AtCap { held: 1, max: 1 })
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 1,
+                max_machines: 1
+            }
+        )
     );
 }
 
@@ -277,7 +289,7 @@ fn the_hold_length_is_configurable() {
 }
 
 #[test]
-fn max_instances_is_checked_against_a_fresh_list_before_each_launch() {
+fn max_machines_is_checked_against_a_fresh_list_before_each_launch() {
     let rig = rig(live(2));
     for name in ["a", "b"] {
         held_id(&rig.provider.acquire(&ask(name)));
@@ -285,7 +297,13 @@ fn max_instances_is_checked_against_a_fresh_list_before_each_launch() {
     }
     assert_eq!(
         rig.provider.acquire(&ask("c")),
-        refused(RefusalCode::Denied, Reason::AtCap { held: 2, max: 2 })
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 2,
+                max_machines: 2
+            }
+        )
     );
     assert_eq!(rig.fake.count(Call::Launch), 2);
     // The list is read again for each acquire, not remembered from the last one.
@@ -319,7 +337,13 @@ fn instances_of_other_owners_do_not_count_but_our_terminating_ones_do() {
     rig.clock.advance(INTERVAL);
     assert_eq!(
         rig.provider.acquire(&ask("c")),
-        refused(RefusalCode::Denied, Reason::AtCap { held: 2, max: 2 })
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 2,
+                max_machines: 2
+            }
+        )
     );
     // A terminated one does not.
     rig.fake.set_status(&id("fake0001"), Status::Terminated);
@@ -327,7 +351,7 @@ fn instances_of_other_owners_do_not_count_but_our_terminating_ones_do() {
 }
 
 #[test]
-fn a_renamed_instance_blocks_launches_instead_of_slipping_past_the_cap() {
+fn a_renamed_instance_blocks_launches_instead_of_slipping_past_max_machines() {
     let rig = rig(live(2));
     held_id(&rig.provider.acquire(&ask("a")));
     rig.clock.advance(INTERVAL);
@@ -464,6 +488,12 @@ fn an_answer_naming_no_instance_is_unknown_and_holds_its_slot() {
     rig.clock.advance(INTERVAL);
     assert_eq!(
         rig.provider.acquire(&ask("b")),
-        refused(RefusalCode::Denied, Reason::AtCap { held: 1, max: 1 })
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 1,
+                max_machines: 1
+            }
+        )
     );
 }
