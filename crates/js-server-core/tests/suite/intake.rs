@@ -766,6 +766,82 @@ fn a_cordon_another_frontend_wrote_is_applied_and_lifted_by_the_poll() {
     assert_eq!(placement(&core, "node-a"), None);
 }
 
+/// Asserts that a drain another frontend wrote is applied by a poll with its deadline as far
+/// from the poll's farm time as it is from the store's clock then, not from the clock's start
+/// or the farm time alone. Catches: frontends with clocks of their own that disagree on when a
+/// drain ends.
+#[test]
+fn a_drain_another_frontend_wrote_ends_by_the_stores_clock_at_the_poll() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    up(&core, 0, "node-a", "d1");
+    submit(&core, 1, 1);
+    let drain = StoredCordon::Draining {
+        deadline_unix_ms: 600_000,
+    };
+    setup
+        .rows(7)
+        .cordoned(&worker("node-a"), Some(drain))
+        .expect("written");
+    setup.store.advance(Duration::from_secs(100));
+
+    core.intake(at(1_000));
+
+    let left = 600_000 - setup.rows(7).store_ms();
+    assert!(left < 600_000 - 99_000, "the clock moved: {left}");
+    let deadline = at(1_000 + left);
+    assert_eq!(
+        placement(&core, "node-a"),
+        Some(Cordon::Draining { deadline })
+    );
+}
+
+/// Asserts that a drain put back in force when its node claims its leases ends by the store's
+/// clock at the claim, as far from the claim's farm time as the stored deadline is from the
+/// store's clock then. Catches: a drain resumed with its whole length again, or with none left.
+#[test]
+fn a_resumed_drain_ends_by_the_stores_clock_at_the_claim() {
+    let setup = Setup::new();
+    let first = setup.core(1);
+    up_after(&first, 0, "node-a", ("d1", ""), reported(1));
+    submit(&first, 1, 1);
+    first
+        .place(
+            at(2),
+            &worker("node-a"),
+            NodeAction::Drain(Duration::from_secs(600)),
+        )
+        .expect("placed");
+    drop(first);
+    let second = setup.core_with(&Config::new(1), Rig::default(), 5_000);
+    setup.store.advance(Duration::from_secs(100));
+    let rows = setup.rows(7);
+    let [(_, StoredCordon::Draining { deadline_unix_ms })] = rows.cordons().expect("read")[..]
+    else {
+        panic!("one drain row");
+    };
+    // The store's clock moves a little with every write the claim makes, so the claim's
+    // reading lies between the one before it and the one after.
+    let before = rows.store_ms();
+
+    up_after(&second, 5_001, "node-a", ("d1", ""), reported(1));
+
+    let after = rows.store_ms();
+    assert!(before > 99_000, "the clock moved: {before}");
+    let Some(Cordon::Draining { deadline }) = placement(&second, "node-a") else {
+        panic!("the drain was not resumed");
+    };
+    let ms = deadline.as_millis();
+    let (soonest, latest) = (
+        5_001 + deadline_unix_ms - after,
+        5_001 + deadline_unix_ms - before,
+    );
+    assert!(
+        (soonest..=latest).contains(&ms),
+        "{ms} not in {soonest}..={latest}"
+    );
+}
+
 /// Asserts that a read of the cordons applies what another frontend wrote at once, returns the
 /// rows, and returns nothing, with the nodes as they were, when the core has no store or the
 /// store cannot be read. Catches: an operator's view that shows a node as placed after another
