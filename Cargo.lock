@@ -772,6 +772,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-guest"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "hex",
+ "js-guest-wire",
+ "libc",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+]
+
+[[package]]
+name = "js-guest-wire"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-lease"
 version = "0.1.0"
 dependencies = [
