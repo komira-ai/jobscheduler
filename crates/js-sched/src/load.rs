@@ -177,7 +177,8 @@ pub struct HostFacts {
     /// `C_mem`: the worker's memory capacity in bytes.
     pub memory_capacity_bytes: u64,
     /// `L`: the leading minutes at least half of the key's runs reached (`life_minutes`
-    /// of `js-sizing`) when the lease is charged by a curve, else 1. Clamped to
+    /// of `js-sizing`) when the lease is charged by a curve, else 1. It is the attempt's
+    /// value, the same on every candidate, including fallback hosts. Clamped to
     /// `1..=HORIZON` here.
     pub fit_minutes: u8,
     /// The worker is in fallback: no measurement, or a stale signal, or a kind of node
