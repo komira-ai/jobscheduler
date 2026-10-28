@@ -200,7 +200,7 @@ impl Binner {
         self.counters.aged_out += (before - all.len()) as u64;
         // Stable: ties keep the map's order, lease id then minute.
         all.sort_by_key(|(_, entry)| entry.closed_at);
-        let rest = all.split_off(max.min(all.len()));
+        let rest = all.split_off((max + 1).min(all.len()));
         self.pending = rest.into_iter().collect();
         self.in_flight = all
             .iter()
