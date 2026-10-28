@@ -149,7 +149,7 @@ pub struct Binner {
 /// `cpu` microseconds over `span` microseconds, in thousandths of a core, saturating.
 fn millis(cpu: u64, span: u64) -> u32 {
     let value = u128::from(cpu) * 1000 / u128::from(span);
-    u32::try_from(value).unwrap_or(u32::MAX)
+    value as u32
 }
 
 impl Binner {
