@@ -2,6 +2,7 @@
 //! the doc comment of a test names the rule and the defect it catches.
 
 mod calibration;
+mod life;
 mod memory;
 mod reference;
 mod safety;

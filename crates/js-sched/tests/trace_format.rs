@@ -88,6 +88,7 @@ fn every_event_has_its_fixed_spelling() {
         lease: lease(),
         operation: OperationId(7),
         worker: worker(),
+        cost: Default::default(),
     });
     let resources = "res(cpu=4000 mem=8 gpus=0 vms=0 leases=-)";
     let cases: Vec<(Event, String)> = vec![

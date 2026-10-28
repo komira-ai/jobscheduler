@@ -28,10 +28,12 @@
 //!
 //! # What the loader checks
 //!
-//! Only that the file is consistent with itself: magic, record framing, outcome codes,
+//! That the file is consistent with itself: magic, record framing, outcome codes,
 //! wall at least 1 ms, a first start of 0, keys in range and first appearing in order,
-//! the header's key count equal to the keys seen, the hash, and no bytes after it. The
-//! row and key counts of any particular file are data, never constants of the code.
+//! the header's key count equal to the keys seen, the hash, and no bytes after it. It also
+//! refuses a wall, cpu or peak memory that is not its own coarsening, so a file written
+//! without coarsening does not load. The row and key counts of any particular file are
+//! data, never constants of the code.
 
 use std::fmt;
 
@@ -171,6 +173,20 @@ impl Fixture {
             let outcome = Outcome::from_code(code).ok_or(FixtureError::BadOutcome { row, code })?;
             if wall_ms == 0 {
                 return Err(FixtureError::ZeroWall { row });
+            }
+            for (field, value, coarse) in [
+                ("wall", wall_ms, coarse_ms(wall_ms)),
+                ("cpu", cpu_ms, coarse_ms(cpu_ms)),
+                ("peak memory", peak_mem_mib, coarse_mem_mib(peak_mem_mib)),
+            ] {
+                if value != coarse {
+                    return Err(FixtureError::Uncoarsened {
+                        row,
+                        field,
+                        value,
+                        coarse,
+                    });
+                }
             }
             if u32::from(key) >= n_keys {
                 return Err(FixtureError::KeyOutOfRange { row, key, n_keys });
@@ -394,6 +410,17 @@ pub enum FixtureError {
         /// The record.
         row: u32,
     },
+    /// A wall, cpu or peak memory that is not a fixed point of its coarsening.
+    Uncoarsened {
+        /// The record.
+        row: u32,
+        /// Which field: "wall", "cpu" or "peak memory".
+        field: &'static str,
+        /// The value in the file.
+        value: u64,
+        /// What the coarsening makes of it.
+        coarse: u64,
+    },
     /// A key at or past the header's count.
     KeyOutOfRange {
         /// The record.
@@ -446,6 +473,15 @@ impl fmt::Display for FixtureError {
             FixtureError::StartOverflow { row } => write!(f, "start overflows at row {row}"),
             FixtureError::BadOutcome { row, code } => write!(f, "row {row}: outcome code {code}"),
             FixtureError::ZeroWall { row } => write!(f, "row {row}: zero wall"),
+            FixtureError::Uncoarsened {
+                row,
+                field,
+                value,
+                coarse,
+            } => write!(
+                f,
+                "row {row}: {field} {value} is not coarse (would be {coarse})"
+            ),
             FixtureError::KeyOutOfRange { row, key, n_keys } => {
                 write!(f, "row {row}: key {key} but the header has {n_keys} keys")
             }

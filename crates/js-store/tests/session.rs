@@ -9,7 +9,7 @@ use std::time::Duration;
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
 use js_state::{Cond, Store, Txn};
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, RowCodec, Rows, SESSION_RENEWAL, StateError, Value, WorkerUp, keys};
 use js_types::sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseGrant, Resources, WorkerId};
@@ -167,7 +167,14 @@ fn a_renewal_that_loses_a_race_is_a_conflict() {
 fn a_registration_that_cannot_be_encoded_writes_nothing() {
     let store = Racing::new();
     let handle: Arc<dyn Store> = store.clone();
-    let (rows, _) = Rows::open(handle, EpochPolicy::Keep, 1, Arc::new(Failing)).expect("open");
+    let (rows, _) = Rows::open(
+        handle,
+        EpochPolicy::Keep,
+        1,
+        Arc::new(Failing),
+        Arc::new(TestExt),
+    )
+    .expect("open");
 
     let refused = rows.session(&up("daemon-1"));
 
@@ -178,4 +185,122 @@ fn a_registration_that_cannot_be_encoded_writes_nothing() {
     rows.renew(&node()).expect("nothing to renew");
     assert!(!held(&store));
     assert!(store.get(&keys::session(&node())).expect("read").is_none());
+}
+
+/// The registration of `worker` by a daemon: a Linux node with the container driver and
+/// four cores and 8 GiB.
+fn registered(worker: &str) -> WorkerUp {
+    let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])
+        .expect("caps")
+        .with_drivers(["container"]);
+    WorkerUp {
+        worker: WorkerId::new(worker),
+        instance: DaemonInstance::new("daemon"),
+        predecessor_stopped: false,
+        capacity: Resources::new(4_000, 8 << 30),
+        caps,
+    }
+}
+
+/// A request for an action that takes one core and 1 GiB.
+fn asking() -> Request {
+    Request {
+        key: js_types::sched::WorkKey::new("main", "01/1"),
+        qos: js_types::sched::Qos::Ci,
+        kind: js_types::sched::LeaseKind::Action,
+        resources: Resources::new(1_000, 1 << 30),
+        needs: js_caps::Request::default(),
+        hermetic: true,
+        do_not_cache: false,
+    }
+}
+
+/// Asserts that an operation could run if any daemon session in the store could run it,
+/// whichever frontend wrote the session; and that none could when the store holds no
+/// session, or only sessions too small for it or of another platform.
+#[test]
+fn a_request_could_run_if_any_daemon_session_of_the_store_could_run_it() {
+    let store = Racing::new();
+    let codec = Arc::new(TestCodec::new());
+    let (mine, other) = (
+        frontend_with(&store, 1, &codec),
+        frontend_with(&store, 2, &codec),
+    );
+    assert!(!mine.session_could_run(&asking()).expect("no sessions"));
+    other
+        .session(&registered("node-b"))
+        .expect("a session of the other frontend");
+
+    assert!(mine.session_could_run(&asking()).expect("a session"));
+    let mut big = asking();
+    big.resources = Resources::new(1_000, 16 << 30);
+    assert!(!mine.session_could_run(&big).expect("a session"));
+    let mut mac = asking();
+    let needs = js_caps::Request::from_platform([("OSFamily", "macos")]);
+    mac.needs = needs.expect("a platform");
+    assert!(!mine.session_could_run(&mac).expect("a session"));
+}
+
+/// Asserts that a session row that is not a daemon's registration is refused naming the
+/// row, whether its bytes are not a value of the codec at all or are another kind of value.
+#[test]
+fn a_session_row_that_is_not_a_registration_is_refused_naming_it() {
+    let store = Racing::new();
+    let codec = Arc::new(TestCodec::new());
+    let rows = frontend_with(&store, 1, &codec);
+    let submit = codec.submit(&asking()).expect("encodes");
+    for (key, value) in [("session/a", vec![0xff]), ("session/b", submit)] {
+        store
+            .txn(Txn::new().put(key, value, Cond::Any))
+            .expect("store")
+            .expect("put");
+
+        let read = rows.session_could_run(&asking());
+
+        let error = read.expect_err("a corrupt row");
+        assert!(error.to_string().contains(key), "{error}");
+        store
+            .txn(Txn::new().delete(key, Cond::Any))
+            .expect("store")
+            .expect("delete");
+    }
+}
+
+/// Asserts that the daemons of the other frontends are the session rows of the nodes this
+/// frontend does not hold: a node in `connected` is left out, the others are listed with
+/// their capacity, and a row that is not a registration is refused naming it.
+#[test]
+fn the_remote_sessions_are_the_rows_of_nodes_this_frontend_does_not_hold() {
+    let store = Racing::new();
+    let codec = Arc::new(TestCodec::new());
+    let (mine, other) = (
+        frontend_with(&store, 1, &codec),
+        frontend_with(&store, 2, &codec),
+    );
+    let none = std::collections::BTreeSet::new();
+    assert!(mine.remote_sessions(&none).expect("no sessions").is_empty());
+    for node in ["node-a", "node-b"] {
+        other.session(&registered(node)).expect("a session");
+    }
+
+    let held = [WorkerId::new("node-a")].into();
+    let remote = mine.remote_sessions(&held).expect("sessions");
+    assert_eq!(remote.len(), 1);
+    assert_eq!(remote[0].1, Resources::new(4_000, 8 << 30));
+    assert_eq!(mine.remote_sessions(&none).expect("sessions").len(), 2);
+
+    store
+        .txn(Txn::new().put("session/c", vec![0xff], Cond::Any))
+        .expect("store")
+        .expect("put");
+    let error = mine.remote_sessions(&none).expect_err("a corrupt row");
+    assert!(error.to_string().contains("session/c"), "{error}");
+    // A row that decodes to another kind of value is refused as well.
+    let submit = codec.submit(&asking()).expect("encodes");
+    store
+        .txn(Txn::new().put("session/c", submit, Cond::Any))
+        .expect("store")
+        .expect("put");
+    let error = mine.remote_sessions(&none).expect_err("another value");
+    assert!(error.to_string().contains("session/c"), "{error}");
 }

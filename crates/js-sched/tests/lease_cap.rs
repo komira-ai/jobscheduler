@@ -69,6 +69,7 @@ impl Farm {
                         lease: start.lease,
                         operation: start.operation,
                         worker: start.worker,
+                        cost: Default::default(),
                     }),
                     _ => {}
                 }

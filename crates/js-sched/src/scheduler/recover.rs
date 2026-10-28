@@ -5,11 +5,13 @@ use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     FarmRun, FarmTime, LeaseId, LeaseKind, MemoryRun, OperationId, Resources, WaiterId, WorkerId,
 };
 
 use super::{Held, OpState, Operation, Scheduler, StartSent, Worker};
+use crate::admission::Admission;
 use crate::fence::LEASE_GRACE;
 use crate::input::Request;
 
@@ -77,6 +79,11 @@ pub struct RecoveredLease {
     pub lease: LeaseId,
     /// The worker it was granted to.
     pub worker: WorkerId,
+    /// What admission charged it when it was granted, as its grant record
+    /// ([`js_types::sched::LeaseGrant::cost`]) held it: the scheduler charges the lease
+    /// that and never asks the estimator again. `None` for a row written before costs were
+    /// kept: it is charged its request's cores and no memory.
+    pub cost: Option<LeaseCost>,
 }
 
 impl Scheduler {
@@ -179,7 +186,11 @@ impl Scheduler {
         }
         let committed_lease = lease.as_ref().map(|l| l.lease);
         let state = match lease {
-            Some(RecoveredLease { lease, worker }) => {
+            Some(RecoveredLease {
+                lease,
+                worker,
+                cost,
+            }) => {
                 // A session no worker has: the heartbeat reconcile takes the lease
                 // for one that went to an earlier session of the process.
                 let process = self.workers.get(&worker).map_or(0, |w| w.process);
@@ -191,6 +202,10 @@ impl Scheduler {
                 let mut held = Held {
                     operation: id,
                     booked: request.resources,
+                    cost: Admission::with_key_hash(
+                        cost.unwrap_or_else(|| Admission::booked_cost(&request)),
+                        &request,
+                    ),
                     device: None,
                     start_sent: Some(sent),
                     granted_at: self.now,
@@ -199,7 +214,7 @@ impl Scheduler {
                 // A worker that registered already is not adopted again: the lease is
                 // booked on it now, or its end would release a booking it never made.
                 if let Some(registered) = self.workers.get_mut(&worker) {
-                    held.booked = book(registered, &request);
+                    held.booked = book(registered, &request, lease, held.cost);
                 } else {
                     self.awaited.entry(worker.clone()).or_insert(until);
                 }
@@ -276,7 +291,7 @@ impl Scheduler {
         // onto it: the store does not say what the lease was granted at, and a floor set
         // after the grant (by a sibling's kill) would book more than the lease runs under,
         // so its own kill would step the ladder past a rung and count as a new event.
-        for held in self.held.values_mut() {
+        for (lease, held) in &mut self.held {
             let op = &self.ops[&held.operation];
             if op.state.holding().is_none_or(|(_, holder)| holder != id) {
                 continue;
@@ -287,14 +302,14 @@ impl Scheduler {
                     ..sent
                 });
             }
-            held.booked = book(worker, &op.request);
+            held.booked = book(worker, &op.request, *lease, held.cost);
         }
     }
 }
 
 /// Books the lease of `request`, which the state store holds, on `worker`: returns what it
 /// books.
-fn book(worker: &mut Worker, request: &Request) -> Resources {
+fn book(worker: &mut Worker, request: &Request, lease: LeaseId, cost: LeaseCost) -> Resources {
     let booked = match request.kind {
         LeaseKind::WholeMachine => {
             worker.whole = true;
@@ -302,6 +317,9 @@ fn book(worker: &mut Worker, request: &Request) -> Resources {
         }
         LeaseKind::Action | LeaseKind::Vm => {
             worker.whole |= worker.exclusive(request);
+            worker
+                .load_state
+                .insert(lease, cost, request.kind == LeaseKind::Vm);
             request.resources
         }
     };

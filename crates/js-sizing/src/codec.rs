@@ -1,18 +1,23 @@
 //! The stored form of a [`Summary`]: one version byte, fixed little-endian fields and
-//! an FNV-1a checksum. The same summary always encodes to the same bytes; anything that
+//! an FNV-1a checksum. Version 2 adds the 32 bytes of `minute_ring` before the checksum;
+//! a version 1 record (without it) still decodes, with every run taken as under a minute. The same summary always encodes to the same bytes; anything that
 //! is not exactly such a record decodes to `None` and the key starts cold.
 
 use crate::key::{Basis, Day};
 use crate::summary::{MAX_DAY, MAX_SAMPLES, RAISE_ONLY_DAYS, Summary};
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
+const VERSION_1: u8 = 1;
 const SLOTS: usize = 9;
 const RING: usize = 32;
 const DAYS: usize = 8;
 /// version, basis, n_total, cpu_n, last_seen, oom_floor, floor_anchor, floor_day,
 /// last_kill_n, raise_only_until, chunk_max, chunk_held, ring, day_stamp, day_max,
-/// cpu_ring, checksum.
-pub(crate) const LEN: usize = 1
+/// cpu_ring, minute_ring, checksum.
+pub(crate) const LEN: usize = LEN_V1 + RING;
+
+/// The length of a version 1 record: `LEN` without `minute_ring`.
+const LEN_V1: usize = 1
     + 1
     + 8
     + 8
@@ -37,7 +42,7 @@ pub(crate) fn checksum(bytes: &[u8]) -> u64 {
 }
 
 struct Reader<'a> {
-    bytes: &'a [u8; LEN],
+    bytes: &'a [u8],
     at: usize,
 }
 
@@ -96,6 +101,7 @@ impl Summary {
         for cpu in self.cpu_ring {
             out.extend_from_slice(&cpu.to_le_bytes());
         }
+        out.extend_from_slice(&self.minute_ring);
         out.extend_from_slice(&checksum(&out).to_le_bytes());
         out
     }
@@ -104,7 +110,10 @@ impl Summary {
     /// record: wrong length, unknown version or basis, bad checksum, or counters that
     /// contradict each other.
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        let bytes: &[u8; LEN] = bytes.try_into().ok()?;
+        let current = bytes.len() == LEN;
+        if !current && bytes.len() != LEN_V1 {
+            return None;
+        }
         let mut reader = Reader { bytes, at: 0 };
         let version = reader.u8();
         let basis = match reader.u8() {
@@ -141,15 +150,19 @@ impl Summary {
         for cpu in &mut cpu_ring {
             *cpu = reader.u32();
         }
+        let mut minute_ring = [0; RING];
+        if current {
+            minute_ring = reader.array();
+        }
         let stored = reader.u64();
         let days = [last_seen, floor_day].iter().all(|day| day.0 <= MAX_DAY)
             && raise_only_until.0 <= MAX_DAY + RAISE_ONLY_DAYS
             && day_stamp.iter().all(|stamp| *stamp <= MAX_DAY);
-        let sound = version == VERSION
+        let sound = version == if current { VERSION } else { VERSION_1 }
             && days
             && n_total <= MAX_SAMPLES
             && cpu_n <= MAX_SAMPLES
-            && stored == checksum(&bytes[..LEN - 8])
+            && stored == checksum(&bytes[..bytes.len() - 8])
             && floor_anchor <= n_total
             && last_kill <= n_total;
         sound.then_some(Self {
@@ -162,6 +175,7 @@ impl Summary {
             day_max,
             cpu_n,
             cpu_ring,
+            minute_ring,
             oom_floor,
             floor_anchor,
             floor_day,
