@@ -4,6 +4,8 @@ use std::fmt;
 
 use time::OffsetDateTime;
 
+use crate::bootstrap::UserData;
+
 /// The id of an instance: 1 to 64 ASCII letters, digits, `-` or `_`. It becomes a path
 /// segment of a request, so nothing else is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -191,4 +193,8 @@ pub struct LaunchRequest {
     pub name: String,
     /// The tags to put on the instance.
     pub tags: Vec<Tag>,
+    /// The cloud-init user data to run on first boot; the launch carries a `user_data`
+    /// field only when this is set. The API shows user data to Lambda, so it holds no
+    /// secret.
+    pub user_data: Option<UserData>,
 }

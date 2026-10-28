@@ -137,6 +137,9 @@ impl LambdaProvider {
             ssh_key: self.config.ssh_key.clone(),
             name: self.owner.name(&request.acquire),
             tags,
+            // The bootstrap is rendered by `Bootstrap::render`; handing it to a launch
+            // waits for the decision on the lease-server endpoint and token delivery.
+            user_data: None,
         })
     }
 

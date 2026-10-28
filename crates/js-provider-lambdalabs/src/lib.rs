@@ -18,6 +18,9 @@
 //! - the typed answers ([`InstanceTypeOffer`], [`Instance`], [`Status`]) and the errors
 //!   ([`ApiError`], [`ErrorCode`]), which are matched on Lambda's `code`, never on its
 //!   message text;
+//! - [`Bootstrap`], the pure rendering of the cloud-init [`UserData`] that installs
+//!   `js-agent` on a launched instance (checked download, a service gated on the token
+//!   file, no secret), and the optional `user_data` of a [`LaunchRequest`];
 //! - [`ApiKey`], the key read from an owner-only file and never printed;
 //! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked.
 //!
@@ -29,6 +32,7 @@
 //! delivered whole-host `Provider` trait, which is called under the lease table's lock.
 
 mod api;
+mod bootstrap;
 mod clock;
 mod config;
 mod elastic;
@@ -45,6 +49,7 @@ mod select;
 mod wire;
 
 pub use api::LambdaApi;
+pub use bootstrap::{Bootstrap, BootstrapError, Fault, UserData};
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{ConfigError, ElasticConfig, Mode};
 pub use elastic::{

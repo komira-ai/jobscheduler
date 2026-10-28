@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::bootstrap::UserData;
 use crate::error::{ApiError, ErrorCode, cut, plain};
 use crate::model::{
     Architecture, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Region, Status, Tag,
@@ -212,6 +213,8 @@ struct LaunchBody<'a> {
     ssh_key_names: [&'a str; 1],
     name: &'a str,
     tags: Vec<WireTagOut<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_data: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -250,6 +253,7 @@ pub(crate) fn launch_body(request: &LaunchRequest) -> Vec<u8> {
                 value: &tag.value,
             })
             .collect(),
+        user_data: request.user_data.as_ref().map(UserData::as_str),
     };
     // A struct of strings always serializes.
     serde_json::to_vec(&body).unwrap_or_default()

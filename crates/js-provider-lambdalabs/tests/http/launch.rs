@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use js_provider_lambdalabs::{
-    AcquireId, AcquireRequest, Acquired, ApiError, ApiKey, Candidate, Elastic, ElasticConfig,
+    AcquireId, AcquireRequest, Acquired, ApiError, ApiKey, Bootstrap, Candidate, Elastic, ElasticConfig,
     ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider, LaunchRequest, ManualClock,
     OptionTable, Reason, Refusal, RefusalCode, Released, SchedulerId, Tag,
 };
@@ -31,6 +31,7 @@ fn request() -> LaunchRequest {
             key: "jobscheduler:pool".to_owned(),
             value: "fixture".to_owned(),
         }],
+        user_data: None,
     }
 }
 
@@ -57,6 +58,60 @@ fn a_launch_posts_the_documented_body_with_one_ssh_key_and_no_quantity() {
             "tags": [{"key": "jobscheduler:pool", "value": "fixture"}],
         })
     );
+}
+
+fn bootstrap() -> js_provider_lambdalabs::UserData {
+    Bootstrap {
+        agent_url: "https://github.com/example-org/jobscheduler/releases/download/v0.1.0/js-agent",
+        agent_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        server_url: "https://lease.example.org:8443",
+        pool: "lambda-gpu",
+        ca_cert: "/etc/js-agent/ca.pem",
+        token_file: "/etc/js-agent/token",
+        state_root: "/var/lib/js-agent/state",
+        scratch_root: "/mnt/scratch/js-agent",
+        container_bin: "/usr/bin/docker",
+    }
+    .render()
+    .unwrap()
+}
+
+#[test]
+fn a_launch_carries_user_data_only_when_it_is_given() {
+    let server = Server::plain();
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    let api = client(&server, "key-one");
+    api.launch(&request()).unwrap();
+    let data = bootstrap();
+    let with = LaunchRequest {
+        user_data: Some(data.clone()),
+        ..request()
+    };
+    api.launch(&with).unwrap();
+
+    let without = body(&server, 0);
+    assert!(without.as_object().unwrap().get("user_data").is_none());
+    let given = body(&server, 1);
+    assert_eq!(given["user_data"], json!(data.as_str()));
+    // Nothing else of the body moved.
+    let mut rest = given.as_object().unwrap().clone();
+    rest.remove("user_data");
+    assert_eq!(Value::Object(rest), without);
+    // The document sent holds no secret: the token file is named, never filled.
+    assert!(given["user_data"].as_str().unwrap().contains("ConditionPathExists=$TOKEN_FILE"));
+}
+
+#[test]
+fn a_launch_request_never_shows_its_user_data_text() {
+    let with = LaunchRequest {
+        user_data: Some(bootstrap()),
+        ..request()
+    };
+    let shown = format!("{with:?}");
+    assert!(shown.contains("UserData("), "{shown}");
+    assert!(!shown.contains("nvidia"), "{shown}");
+    assert!(!shown.contains("systemctl"), "{shown}");
 }
 
 #[test]

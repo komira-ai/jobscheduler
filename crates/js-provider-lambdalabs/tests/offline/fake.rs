@@ -143,6 +143,7 @@ fn launch_request(name: &str, region: &str) -> js_provider_lambdalabs::LaunchReq
         ssh_key: "key".to_owned(),
         name: name.to_owned(),
         tags: Vec::new(),
+        user_data: None,
     }
 }
 

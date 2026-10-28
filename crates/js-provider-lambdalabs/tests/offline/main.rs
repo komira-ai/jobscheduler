@@ -2,6 +2,7 @@
 //! the small value types, and the provider over the fake account.
 
 mod acquire;
+mod bootstrap;
 mod config;
 mod fake;
 mod key;
