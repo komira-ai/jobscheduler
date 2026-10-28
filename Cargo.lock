@@ -740,12 +740,15 @@ version = "0.1.0"
 dependencies = [
  "js-agent",
  "js-agent-wire",
+ "js-caps",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
  "js-registry",
+ "js-sched",
+ "js-state",
  "js-types",
 ]
 
