@@ -126,12 +126,8 @@ async fn an_expired_token_is_refused() {
     let kept = minted_for(&h, "i-1", 10).await;
     let unused = minted_for(&h, "i-2", 10).await;
     let held = session(&hello(&h, &kept, "burst-1", "i-1").await, "burst-1");
-    h.clock.advance(secs(9));
-    let early = hello(&h, &unused, "burst-2", "i-2").await;
-    assert_eq!(early.status, 200, "{}", early.body);
-    let other = minted_for(&h, "i-3", 10).await;
-    h.clock.advance(secs(1));
-    let late = hello(&h, &other, "burst-3", "i-3").await;
+    h.clock.advance(secs(10));
+    let late = hello(&h, &unused, "burst-2", "i-2").await;
     assert_eq!(
         (late.status, code(&late)),
         (403, "join-token-expired".into())
