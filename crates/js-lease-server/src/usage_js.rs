@@ -50,7 +50,16 @@ pub(crate) fn open(setup: &StoreSetup, today: u64) -> Result<Arc<dyn UsageSink>,
     let clock = Arc::new(SystemClock::default());
     let store = SqliteStore::open(&setup.db, clock, Options::default())
         .map_err(StartupError::because("--usage-db"))?;
-    let store: Arc<dyn Store> = Arc::new(store);
+    sink_over(Arc::new(store), setup, today)
+}
+
+/// The sink over an opened `store`; a store whose profiles cannot be read is a refused
+/// start naming `--usage-db`.
+fn sink_over(
+    store: Arc<dyn Store>,
+    setup: &StoreSetup,
+    today: u64,
+) -> Result<Arc<dyn UsageSink>, StartupError> {
     let usage = NodeUsage::over(store, setup.profile_store_bytes, today)
         .map_err(StartupError::because("--usage-db"))?;
     info!(
