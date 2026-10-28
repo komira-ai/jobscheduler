@@ -124,11 +124,19 @@ pub trait Adapter: Send {
     fn requeued(&mut self, requeue: &Requeue);
 
     /// Settles the answer of a finished operation: works out what its callers are told,
-    /// and keeps them until the scheduler drops the operation. Returns what remains to do
-    /// once the lock is released.
-    fn settle(&mut self, view: &View<'_>, answer: &Answer) -> Delivery;
+    /// and keeps them until the scheduler drops the operation. `ack` is the worker owed the
+    /// acknowledgement of the result that finished it, if the finish had to wait. Returns
+    /// what remains to do once the lock is released.
+    fn settle(&mut self, view: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery;
 
     /// Forgets the callers, and their channels, of every finished operation `held` no
     /// longer says the scheduler holds.
     fn forget_dropped(&mut self, held: &dyn Fn(OperationId) -> bool);
+
+    /// Drops what is kept for the report of `lease`, whose answer will never be written.
+    fn forget_parcel(&mut self, lease: LeaseId);
+
+    /// Keeps what is kept for the reports whose lease `waits` says still wait for their
+    /// answer to be written.
+    fn retain_parcels(&mut self, waits: &dyn Fn(LeaseId) -> bool);
 }

@@ -16,11 +16,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use js_sched::{Cordon, Event, FARM_RERUNS, Input, LOSS_REQUEUES, Request, Requeue, Scheduler};
 use js_types::sched::{
-    Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Refusal, StartLease,
+    Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Outcome, Refusal, StartLease,
     StateMachine, WaiterId, Waiting, WorkerId,
 };
 
-use crate::adapter::{Adapter, Delivery, Link, Stage, View};
+use crate::adapter::{Adapter, Link, Stage, View};
 use crate::core::{Admitted, Config, Fenced, NodeAction, UnknownNode};
 use crate::write::{Attempt, Writer};
 
@@ -47,6 +47,16 @@ pub(crate) struct Engine {
     /// to an operator's cordon: an operation that waits only for these is queued, not
     /// stuck, since the other frontends take it.
     drain_held: BTreeSet<WorkerId>,
+    /// The operation of each lease whose `Start` was sent, until its operation is answered
+    /// or refused: a `Result` names a lease it was sent.
+    pub(crate) sent: BTreeMap<LeaseId, OperationId>,
+    /// The operation of each lease whose answer was settled, while the scheduler keeps the
+    /// operation: a copy of its `Result` is a duplicate, not an unknown lease.
+    pub(crate) answered: BTreeMap<LeaseId, OperationId>,
+    /// The `Result`s taken but not acknowledged, by lease, with the worker that sent each:
+    /// their finish waits in `unwritten`. The acknowledgement goes out when that finish is
+    /// settled, and never if it is dropped instead.
+    pub(crate) owed: BTreeMap<LeaseId, WorkerId>,
     /// The effects of committed records whose rows the writer has not taken, one batch per
     /// record, oldest first. Nothing is carried out (no `Start`, no answer) before its row
     /// is written, so a writer that refuses holds the later effects behind the earliest
@@ -82,6 +92,9 @@ impl Engine {
             paused: BTreeSet::new(),
             ever_started: BTreeSet::new(),
             drain_held: BTreeSet::new(),
+            sent: BTreeMap::new(),
+            answered: BTreeMap::new(),
+            owed: BTreeMap::new(),
             unwritten: VecDeque::new(),
             write_drops: 0,
             held_cap: HELD_CAP,
@@ -133,7 +146,7 @@ impl Engine {
         self.log_requeues(a);
         if answering {
             // Before this input's own effects: they follow what was held back.
-            for effect in self.release_unwritten().into_iter().rev() {
+            for effect in self.release_unwritten(a).into_iter().rev() {
                 effects.push_front(effect);
             }
         }
@@ -158,14 +171,17 @@ impl Engine {
                     // Written at once when this input can deliver an answer, or when
                     // nothing older waits; else behind the records already held.
                     let released = if answering || self.unwritten.len() == 1 {
-                        self.release_unwritten()
+                        self.release_unwritten(a)
                     } else {
                         Vec::new()
                     };
                     effects.extend(released);
                 }
                 Effect::Start(start) => self.start(a, &start),
-                Effect::Answer(answer) => answers.push(answer),
+                Effect::Answer(answer) => {
+                    self.failed(a, &answer);
+                    answers.push(answer);
+                }
                 Effect::Waiting(waiting) => self.waiting(a, &waiting),
                 Effect::Refuse(refusal) => self.refuse(a, &refusal),
             }
@@ -209,6 +225,8 @@ impl Engine {
     pub(crate) fn forget_dropped(&mut self, a: &mut dyn Adapter) {
         let sched = &self.sched;
         a.forget_dropped(&|operation| sched.state(operation).is_some());
+        self.answered
+            .retain(|_, operation| sched.state(*operation).is_some());
         self.ever_started
             .retain(|operation| sched.state(*operation).is_some());
     }
@@ -219,15 +237,19 @@ impl Engine {
         // Marked before the `Start` leaves: a stream that reads the stage later never
         // sees an operation that has a `Start` in flight as one that cannot start.
         self.ever_started.insert(start.operation);
+        self.sent.insert(start.lease, start.operation);
         a.start(&self.view(), start);
     }
 
-    /// Settles the answer of a finished operation: has the adapter work out what its callers
-    /// get, then forgets the callers of whatever the scheduler has dropped since.
-    pub(crate) fn settle(&mut self, a: &mut dyn Adapter, answer: &Answer) -> Delivery {
-        let delivery = a.settle(&self.view(), answer);
-        self.forget_dropped(a);
-        delivery
+    /// Logs an operation the scheduler finishes failed: the failure kind, and how much of
+    /// the farm-fault budget and the memory ladder its runs used (`farm_runs` at
+    /// `farm_budget` is the budget spent, so no rerun is left). Operations that complete
+    /// are logged where their lease's result is taken.
+    fn failed(&self, a: &dyn Adapter, answer: &Answer) {
+        if let Outcome::Failed(failure) = answer.outcome {
+            let operation = a.name(&self.view(), answer.operation);
+            tracing::warn!(%operation, lease = %answer.lease, ?failure, farm_runs = answer.farm_runs.len(), farm_budget = FARM_RERUNS, memory_runs = answer.memory_runs.len(), "operation finished failed");
+        }
     }
 
     /// Tells an operation's callers why it waits, or that it no longer waits for a
@@ -274,6 +296,9 @@ impl Engine {
     /// keeps them for the finished retention. Nothing is cached, so nothing is awaited.
     pub(crate) fn refuse(&mut self, a: &mut dyn Adapter, refusal: &Refusal) {
         tracing::warn!(operation = %refusal.operation, reason = %refusal.reason, "operation refused");
+        // A lease given up before the operation was refused may still be listed.
+        self.sent
+            .retain(|_, operation| *operation != refusal.operation);
         a.refuse(&self.view(), refusal);
         self.forget_dropped(a);
     }
@@ -383,5 +408,14 @@ fn started(effect: &Effect) -> Option<LeaseId> {
     match effect {
         Effect::Start(start) => Some(start.lease),
         _ => None,
+    }
+}
+
+/// The operation of an `Answer` or `Refuse` effect that is a finish, if it is one.
+pub(crate) fn finish_of(effect: &Effect) -> Option<OperationId> {
+    match effect {
+        Effect::Answer(answer) => Some(answer.operation),
+        Effect::Refuse(refusal) => Some(refusal.operation),
+        Effect::Start(_) | Effect::Commit(_) | Effect::Waiting(_) => None,
     }
 }

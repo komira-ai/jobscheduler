@@ -9,9 +9,9 @@ use crate::common::{
 };
 use js_sched::{FINISHED_RETENTION, UNSERVABLE_WAIT};
 use js_server_core::{Admission, Beat, Config, Core, Denied, NodeAction, Observer, Reported};
-use js_types::sched::WorkerId;
+use js_types::sched::{LeaseId, WorkerId};
 
-/// Refuses the registrations and heartbeats of one worker.
+/// Refuses the registrations, heartbeats and results of one worker.
 pub(crate) struct Deny(pub(crate) &'static str);
 
 impl Admission for Deny {
@@ -26,6 +26,14 @@ impl Admission for Deny {
     fn allow_beat(&self, worker: &WorkerId, _: &Beat) -> Result<(), Denied> {
         if worker.as_str() == self.0 {
             Err(Denied::new("denied beat"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn allow_result(&self, worker: &WorkerId, _: LeaseId) -> Result<(), Denied> {
+        if worker.as_str() == self.0 {
+            Err(Denied::new("denied result"))
         } else {
             Ok(())
         }

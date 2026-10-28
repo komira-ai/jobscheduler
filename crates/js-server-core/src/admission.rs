@@ -1,11 +1,11 @@
 //! Which hosts the core hears from.
 //!
-//! An [`Admission`] is asked before the core takes a host's registration or heartbeat; a
-//! host it refuses never reaches the scheduler. The core asks outside its lock, so a policy
-//! that reads a list that changes (a deny list, a certificate store) does not stall the
-//! farm.
+//! An [`Admission`] is asked before the core takes a host's registration, heartbeat or
+//! result; a host it refuses never reaches the scheduler. The core asks outside its lock,
+//! so a policy that reads a list that changes (a deny list, a certificate store) does not
+//! stall the farm.
 
-use js_types::sched::WorkerId;
+use js_types::sched::{LeaseId, WorkerId};
 
 use crate::host::{Beat, Reported};
 
@@ -40,6 +40,12 @@ pub trait Admission: Send + Sync {
     /// # Errors
     /// Why not.
     fn allow_beat(&self, worker: &WorkerId, beat: &Beat) -> Result<(), Denied>;
+
+    /// Whether `worker` may report the result of `lease`.
+    ///
+    /// # Errors
+    /// Why not.
+    fn allow_result(&self, worker: &WorkerId, lease: LeaseId) -> Result<(), Denied>;
 }
 
 /// Hears every host.
@@ -52,6 +58,10 @@ impl Admission for AllowAll {
     }
 
     fn allow_beat(&self, _: &WorkerId, _: &Beat) -> Result<(), Denied> {
+        Ok(())
+    }
+
+    fn allow_result(&self, _: &WorkerId, _: LeaseId) -> Result<(), Denied> {
         Ok(())
     }
 }

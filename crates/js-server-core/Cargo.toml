@@ -17,6 +17,8 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The simulated cell in tests/cell.rs.
+js-sim = { path = "../js-sim" }
 # The tests install one subscriber, so the fields of every logged line are evaluated.
 tracing-subscriber.workspace = true
 

@@ -4,13 +4,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, Request, UNSERVABLE_WAIT};
-use js_types::sched::{FarmTime, OperationId, WaiterId, WorkerId};
+use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
 
 use crate::adapter::{Adapter, Delivery, View};
 use crate::admission::{Admission, AllowAll, Denied};
 use crate::engine::Engine;
 use crate::host::{Beat, Reported, Stream};
 use crate::observer::Observer;
+use crate::report::{Report, Standing, Taken, log_refusal};
 use crate::write::Writer;
 
 /// How a core is built.
@@ -282,6 +283,56 @@ impl<A: Adapter> Core<A> {
         };
         deliver(settled).await;
         Ok(true)
+    }
+
+    /// What `lease` stands for as `worker`'s `Result` names it: the operation, if `worker`
+    /// holds its current lease; else why the `Result` is not taken. A copy of a result the
+    /// scheduler took, whose finish waits to be written, is acknowledged with the first.
+    ///
+    /// # Errors
+    /// The admission refuses the host.
+    pub fn standing(&self, worker: &WorkerId, lease: LeaseId) -> Result<Standing, Denied> {
+        self.admission.allow_result(worker, lease)?;
+        let mut locked = self.lock();
+        let standing = locked.engine.standing(lease, worker);
+        if standing == Standing::Held {
+            locked.engine.owed.entry(lease).or_insert(worker.clone());
+        }
+        if let Standing::Refused(reason) = standing {
+            log_refusal(worker, lease, reason);
+        }
+        Ok(standing)
+    }
+
+    /// Feeds `worker`'s `report`, and answers the callers of the operation it finishes. The
+    /// report is checked first ([`Core::standing`]); `park` runs under the lock before the
+    /// feed, so the adapter keeps what the answer needs of the report (the result it
+    /// carries), and what no answer used is dropped again after. Returns whether the
+    /// scheduler took it, and so what to acknowledge it with.
+    pub async fn report(
+        &self,
+        now: FarmTime,
+        worker: &WorkerId,
+        report: Report,
+        park: impl FnOnce(&mut A),
+    ) -> Taken {
+        let (settled, taken) = {
+            let mut locked = self.lock();
+            let Locked { engine, adapter } = &mut *locked;
+            // Parked before the feed: the answer it decides is settled with it. An answer
+            // held back earlier, released by this input, is settled with its own.
+            park(adapter);
+            let (answers, taken) = engine.take_report(adapter, now, worker, report);
+            let settled: Vec<Delivery> = answers
+                .iter()
+                .map(|answer| engine.settle(adapter, answer))
+                .collect();
+            // What no answer used waits only if its answer does.
+            engine.forget_parked(adapter);
+            (settled, taken)
+        };
+        deliver(settled).await;
+        taken
     }
 
     /// Expires leases of silent workers and places queued work. A silent lease lost past
