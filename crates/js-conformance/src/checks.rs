@@ -5,7 +5,7 @@ use std::time::Duration;
 use js_provider::{Call, Observed, RefusalCode, StartAck, StartSpec, StopAck};
 use js_types::{Admission, HostId, LeaseId, ResourceClass, Resources};
 
-use crate::{Subject, Verdict, standard_hosts, standard_request};
+use crate::{Subject, Verdict, request_of, standard_hosts, standard_request};
 
 /// One rule of the delegated contract, with a name in the suite's output.
 ///
@@ -91,20 +91,39 @@ impl Check {
 
     /// Runs this check on a fresh subject.
     pub(crate) fn run<S: Subject>(&self, subject: S) -> Verdict {
+        let class = subject.class();
+        // No `if` here: a branch inside a function generic over the subject is counted once
+        // per subject type, and no one subject takes both sides.
+        Some(&class)
+            .filter(|class| self.applies_to(class))
+            .map_or(Verdict::NotApplicable, |class| self.check(subject, class))
+    }
+
+    /// Whether this check can be asked of a subject that serves `class`. A whole-node
+    /// lease is committed and then waits for the host's report, so its start answers
+    /// Unknown and it reads Unknown (not Present) until then: the two checks that expect
+    /// an immediate `Started` and Present do not apply to it.
+    fn applies_to(&self, class: &ResourceClass) -> bool {
+        let immediate = matches!(self, Self::StartThenPresent | Self::StartIsIdempotent);
+        !(immediate && matches!(class.admission(), Admission::Whole))
+    }
+
+    /// Runs this check, which `applies_to` has accepted for `class`.
+    fn check<S: Subject>(&self, subject: S, class: &ResourceClass) -> Verdict {
         match self {
-            Self::StartThenPresent => start_then_present(subject),
-            Self::StopThenAbsent => stop_then_absent(subject),
-            Self::UnknownDoesNotFree => unknown_does_not_free(subject),
-            Self::RefusesNonPositiveWallTime => refuses_wall_time(subject),
-            Self::RefusesReservedLabel => refuses_reserved_label(subject),
-            Self::RefusesInvalidLabel => refuses_invalid_label(subject),
-            Self::RefusesUnknownClass => refuses_unknown_class(subject),
-            Self::StartIsIdempotent => start_is_idempotent(subject),
-            Self::NeverDoubleBooks => never_double_books(subject),
-            Self::StartUnknownThenRetry => start_unknown_then_retry(subject),
-            Self::StartAfterStopIsRefused => start_after_stop_is_refused(subject),
-            Self::NoFitIsRefused => no_fit_is_refused(subject),
-            Self::UnsupportedClassIsRefused => unsupported_class_is_refused(subject),
+            Self::StartThenPresent => start_then_present(subject, class),
+            Self::StopThenAbsent => stop_then_absent(subject, class),
+            Self::UnknownDoesNotFree => unknown_does_not_free(subject, class),
+            Self::RefusesNonPositiveWallTime => refuses_wall_time(subject, class),
+            Self::RefusesReservedLabel => refuses_reserved_label(subject, class),
+            Self::RefusesInvalidLabel => refuses_invalid_label(subject, class),
+            Self::RefusesUnknownClass => refuses_unknown_class(subject, class),
+            Self::StartIsIdempotent => start_is_idempotent(subject, class),
+            Self::NeverDoubleBooks => never_double_books(subject, class),
+            Self::StartUnknownThenRetry => start_unknown_then_retry(subject, class),
+            Self::StartAfterStopIsRefused => start_after_stop_is_refused(subject, class),
+            Self::NoFitIsRefused => no_fit_is_refused(subject, class),
+            Self::UnsupportedClassIsRefused => unsupported_class_is_refused(subject, class),
         }
     }
 }
@@ -171,9 +190,9 @@ fn seen_on(host: &Option<HostId>) -> Observed {
 }
 
 /// The standard request for lease `sequence`, checked against the shipped class.
-fn spec(sequence: u64) -> StartSpec {
-    let known = [ResourceClass::gpu_host()];
-    StartSpec::new(lease(sequence), standard_request(), &known)
+fn spec(class: &ResourceClass, sequence: u64) -> StartSpec {
+    let known = [class.clone()];
+    StartSpec::new(lease(sequence), request_of(class), &known)
         .expect("the standard request meets the start contract")
 }
 
@@ -187,8 +206,8 @@ fn unleasable_class() -> ResourceClass {
 
 /// One start answered `Started`, observed Present on the host the table shows, and
 /// that host is one the request fits on. Which host is the provider's rank.
-fn start_then_present<S: Subject>(mut s: S) -> Verdict {
-    let ack = s.provider().start(spec(1));
+fn start_then_present<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let ack = s.provider().start(spec(class, 1));
     let seen = s.provider().observe(&lease(1));
     let table = s.booked();
     let placed = home(&table, 1);
@@ -202,8 +221,8 @@ fn start_then_present<S: Subject>(mut s: S) -> Verdict {
     judge(observed, expected)
 }
 
-fn stop_then_absent<S: Subject>(mut s: S) -> Verdict {
-    s.provider().start(spec(1));
+fn stop_then_absent<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    s.provider().start(spec(class, 1));
     let ack = s.provider().stop(&lease(1));
     let seen = s.provider().observe(&lease(1));
     let observed = (ack, seen, s.booked());
@@ -217,8 +236,8 @@ fn stop_then_absent<S: Subject>(mut s: S) -> Verdict {
     judge(observed, expected)
 }
 
-fn unknown_does_not_free<S: Subject>(mut s: S) -> Verdict {
-    s.provider().start(spec(1));
+fn unknown_does_not_free<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    s.provider().start(spec(class, 1));
     let can_observe = s.script_unknown(Call::Observe, false);
     let can_stop = s.script_unknown(Call::Stop, false);
     if ![can_observe, can_stop].into_iter().all(|ok| ok) {
@@ -240,30 +259,30 @@ fn unknown_does_not_free<S: Subject>(mut s: S) -> Verdict {
     judge(observed, expected)
 }
 
-fn refuses_wall_time<S: Subject>(mut s: S) -> Verdict {
-    let mut request = standard_request();
+fn refuses_wall_time<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let mut request = request_of(class);
     request.max_wall = Duration::ZERO;
     refusal(&mut s, request, RefusalCode::WallTimeNotPositive)
 }
 
-fn refuses_reserved_label<S: Subject>(mut s: S) -> Verdict {
-    let mut request = standard_request();
+fn refuses_reserved_label<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let mut request = request_of(class);
     request
         .labels
         .insert("jobscheduler.dev/tenant".to_string(), "someone".to_string());
     refusal(&mut s, request, RefusalCode::ReservedLabel)
 }
 
-fn refuses_invalid_label<S: Subject>(mut s: S) -> Verdict {
-    let mut request = standard_request();
+fn refuses_invalid_label<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let mut request = request_of(class);
     request
         .labels
         .insert("tenant".to_string(), "NOT VALID".to_string());
     refusal(&mut s, request, RefusalCode::InvalidLabel)
 }
 
-fn refuses_unknown_class<S: Subject>(mut s: S) -> Verdict {
-    let mut request = standard_request();
+fn refuses_unknown_class<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let mut request = request_of(class);
     request.class = js_types::ClassId::new("no-such-class").expect("constant id is valid");
     refusal(&mut s, request, RefusalCode::UnknownClass)
 }
@@ -278,9 +297,9 @@ fn refusal<S: Subject>(s: &mut S, request: js_types::Request, code: RefusalCode)
     judge((made, s.booked()), (Err(code), none_held()))
 }
 
-fn start_is_idempotent<S: Subject>(mut s: S) -> Verdict {
-    let first = s.provider().start(spec(1));
-    let second = s.provider().start(spec(1));
+fn start_is_idempotent<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let first = s.provider().start(spec(class, 1));
+    let second = s.provider().start(spec(class, 1));
     let table = s.booked();
     let placed = home(&table, 1);
     let observed = (
@@ -301,10 +320,10 @@ fn start_is_idempotent<S: Subject>(mut s: S) -> Verdict {
 /// Two leases start and a third is refused. The table must show one lease per host, the
 /// two leases on distinct hosts the request fits on, and the provider's own capacity
 /// listing must agree; which hosts they are is the provider's rank.
-fn never_double_books<S: Subject>(mut s: S) -> Verdict {
-    s.provider().start(spec(1));
-    s.provider().start(spec(2));
-    let third = s.provider().start(spec(3));
+fn never_double_books<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    s.provider().start(spec(class, 1));
+    s.provider().start(spec(class, 2));
+    let third = s.provider().start(spec(class, 3));
     let third_refused = matches!(third, StartAck::Refused(_));
     let table = s.booked();
     let first = home(&table, 1);
@@ -333,13 +352,13 @@ fn never_double_books<S: Subject>(mut s: S) -> Verdict {
 /// not land. In both legs, observing the lease id must tell the two apart, and the
 /// retry must end with exactly one host booked for the lease. The hosts are read from
 /// the table: lease 2 must end on a host other than lease 1's, and both must fit.
-fn start_unknown_then_retry<S: Subject>(mut s: S) -> Verdict {
+fn start_unknown_then_retry<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
     if !s.script_unknown(Call::Start, true) {
         return Verdict::NotApplicable;
     }
-    let landed = unknown_start_leg(&mut s, 1);
+    let landed = unknown_start_leg(&mut s, class, 1);
     s.script_unknown(Call::Start, false);
-    let lost = unknown_start_leg(&mut s, 2);
+    let lost = unknown_start_leg(&mut s, class, 2);
     let first_home = home(&landed.after_lookup, 1);
     let second_home = home(&lost.after_retry, 2);
     let observed = (
@@ -394,11 +413,11 @@ struct Leg {
     after_retry: Table,
 }
 
-fn unknown_start_leg<S: Subject>(s: &mut S, sequence: u64) -> Leg {
-    let first = s.provider().start(spec(sequence));
+fn unknown_start_leg<S: Subject>(s: &mut S, class: &ResourceClass, sequence: u64) -> Leg {
+    let first = s.provider().start(spec(class, sequence));
     let seen = s.provider().observe(&lease(sequence));
     let after_lookup = s.booked();
-    let retry = s.provider().start(spec(sequence));
+    let retry = s.provider().start(spec(class, sequence));
     Leg {
         first,
         seen,
@@ -412,12 +431,12 @@ fn unknown_start_leg<S: Subject>(s: &mut S, sequence: u64) -> Leg {
 /// any start of it and then a start of it arrives. Both late starts must be refused
 /// with `LeaseEnded`, both leases must read Absent, and the provider's table must hold
 /// nothing: neither the duplicate nor the reordered start may book a host.
-fn start_after_stop_is_refused<S: Subject>(mut s: S) -> Verdict {
-    s.provider().start(spec(1));
+fn start_after_stop_is_refused<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    s.provider().start(spec(class, 1));
     s.provider().stop(&lease(1));
-    let after_stop = s.provider().start(spec(1));
+    let after_stop = s.provider().start(spec(class, 1));
     s.provider().stop(&lease(2));
-    let before_start = s.provider().start(spec(2));
+    let before_start = s.provider().start(spec(class, 2));
     let seen = (
         s.provider().observe(&lease(1)),
         s.provider().observe(&lease(2)),
@@ -436,11 +455,11 @@ fn start_after_stop_is_refused<S: Subject>(mut s: S) -> Verdict {
 /// A request that asks for more CPU than any standard host offers. Every provider that
 /// lists hosts must refuse it with `NoFit`, which is not `NoCapacity`: no wait will
 /// ever make it fit (design 6.1). Nothing may be booked.
-fn no_fit_is_refused<S: Subject>(mut s: S) -> Verdict {
-    let mut request = standard_request();
+fn no_fit_is_refused<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let mut request = request_of(class);
     let too_big = Resources::new(1_000_000, 1, 1, Some("conformance-gpu".to_string()));
     request.resources = too_big.expect("constant resources are valid");
-    let known = [ResourceClass::gpu_host()];
+    let known = [class.clone()];
     let made = StartSpec::new(lease(1), request, &known).map(|spec| s.provider().start(spec));
     let expected = (Ok(StartAck::Refused(RefusalCode::NoFit)), none_held());
     judge((made, s.booked()), expected)
@@ -451,13 +470,13 @@ fn no_fit_is_refused<S: Subject>(mut s: S) -> Verdict {
 /// under other rules. A provider that does not list the class when asked fails: the
 /// request is then refused by `StartSpec::new` as an unknown class, not by the
 /// provider.
-fn unsupported_class_is_refused<S: Subject>(mut s: S) -> Verdict {
-    let class = unleasable_class();
-    if !s.list_unleasable_class(class.clone()) {
+fn unsupported_class_is_refused<S: Subject>(mut s: S, class: &ResourceClass) -> Verdict {
+    let unleasable = unleasable_class();
+    if !s.list_unleasable_class(unleasable.clone()) {
         return Verdict::NotApplicable;
     }
-    let mut request = standard_request();
-    request.class = class.id().clone();
+    let mut request = request_of(class);
+    request.class = unleasable.id().clone();
     let known = s.provider().classes();
     let made = StartSpec::new(lease(1), request, &known).map(|spec| s.provider().start(spec));
     let expected = (

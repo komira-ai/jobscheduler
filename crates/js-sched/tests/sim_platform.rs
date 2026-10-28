@@ -289,7 +289,14 @@ impl World {
                     .collect();
                 self.last_heard.insert(name.clone(), t);
                 let worker = WorkerId::new(name.as_str());
-                self.feed(t, Event::Heartbeat { worker, running });
+                self.feed(
+                    t,
+                    Event::Heartbeat {
+                        worker,
+                        running,
+                        load: None,
+                    },
+                );
             }
         }
         let due: Vec<(LeaseId, OperationId)> = self
