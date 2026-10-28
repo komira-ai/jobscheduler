@@ -13,7 +13,7 @@ use std::time::Duration;
 use js_caps::NodeCaps;
 use js_sched::Request;
 use js_state::{Cond, Txn};
-use js_types::sched::fence::LEASE_GRACE;
+use js_types::sched::fence::{LEADER_LEASE_MARGIN, LEASE_GRACE, SELF_FENCE};
 use js_types::sched::{Resources, WorkerId};
 
 use crate::{Rows, StateError, WorkerUp, keys};
@@ -22,6 +22,27 @@ use crate::{Rows, StateError, WorkerUp, keys};
 /// a third of the lease grace, so the row outlives two missed renewals. One write per
 /// session per interval, whatever the number of leases it holds.
 pub const SESSION_RENEWAL: Duration = Duration::from_secs(LEASE_GRACE.as_secs() / 3);
+
+/// How old a frontend's last write of a daemon's `session/` row may be for it still to
+/// acknowledge the daemon's heartbeats.
+///
+/// A daemon's work ends `T` ([`SELF_FENCE`]) after the last heartbeat that was acknowledged,
+/// and the fence keeps a margin ([`LEADER_LEASE_MARGIN`]) beyond that. The row is there for
+/// [`LEASE_GRACE`] after its last write, and a reader that takes a missing row to mean the
+/// daemon is gone would wait one renewal interval ([`SESSION_RENEWAL`]) beyond that. The
+/// window is what is left of the two after the work and twice the margin: a derived constant,
+/// which the orphan sweep relies on ([`crate::ORPHAN_WAIT`]). The embedding server checks it
+/// against its longest heartbeat interval: a frontend that renews its rows on schedule must
+/// never withhold an acknowledgement.
+pub const ACK_WINDOW: Duration = ROW_LIFE.saturating_sub(RUN_LIFE);
+
+/// How long after its last write a daemon's session row, written on schedule, is certain to
+/// be there to be read, with the wait beyond its expiry.
+const ROW_LIFE: Duration = LEASE_GRACE.saturating_add(SESSION_RENEWAL);
+
+/// How long after its last acknowledged heartbeat a daemon may run, with twice the margin of
+/// the fence.
+const RUN_LIFE: Duration = SELF_FENCE.saturating_add(LEADER_LEASE_MARGIN.saturating_mul(2));
 
 impl Rows {
     /// A daemon registered: its session row, as of the registration, expiring a lease

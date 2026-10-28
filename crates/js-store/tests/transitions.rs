@@ -6,17 +6,13 @@
 //!
 //! The tests of the precondition of each write name the row the write is conditional on, put
 //! the second writer's change to exactly that row, and assert that the first writer loses.
-//!
-//! A lease given up belongs to a later row of this crate, so the tests that need one make a
-//! stand-in that touches the same rows: the lease rows go, and the operation is queued again
-//! (with a loss count, if the test says one).
 
 mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_sched::Request;
+use js_sched::{FloorChange, Request, Requeue, RequeueReason};
 use js_state::{Cond, Store, Txn};
 use js_store::keys;
 use js_store::test_support::TestCodec;
@@ -108,18 +104,21 @@ fn value_of(store: &Racing, key: &str) -> Vec<u8> {
     row.expect("a row").value
 }
 
-/// A stand-in for the lease `(5, seq)` of `operation` given up: the lease rows go and the
-/// operation is queued again, with `losses` in its `loss/` row if there are any.
-fn give_up(store: &Racing, operation: u64, seq: u64, losses: Option<u64>) {
-    let operation = OperationId(operation);
-    let mut txn = Txn::new()
-        .delete(keys::lease(LeaseId::new(5, seq)), Cond::Any)
-        .delete(keys::lease_by_op(operation), Cond::Any)
-        .put(keys::queue(operation), Vec::new(), Cond::Absent);
-    if let Some(losses) = losses {
-        txn = txn.put(keys::loss(operation), losses.to_be_bytes(), Cond::Any);
+/// The give-up of the lease `(5, seq)` of `operation` on node-a.
+fn requeue(operation: u64, seq: u64) -> Requeue {
+    Requeue {
+        operation: OperationId(operation),
+        lease: LeaseId::new(5, seq),
+        worker: WorkerId::new("node-a"),
+        reason: RequeueReason::Silent,
     }
-    store.txn(txn).expect("store").expect("given up");
+}
+
+/// `rows` gives the lease `(5, seq)` of `operation` up: the lease rows go and the operation is
+/// queued again, with `losses` in its `loss/` row if there are any.
+fn give_up(rows: &Rows, operation: u64, seq: u64, losses: Option<u32>) -> Result<(), StateError> {
+    let kept = FloorChange::default();
+    rows.requeued(&requeue(operation, seq), losses, None, &kept, None)
 }
 
 /// What another frontend writes to grant lease `seq` of `operation` to `node-b` over
@@ -184,6 +183,67 @@ fn a_grant_written_before_is_taken_as_written_unless_the_lease_is_another() {
     assert!(is_missing(&second), "{second:?}");
 }
 
+/// Asserts that a lease given up after another frontend finished the operation puts
+/// nothing back in the queue and writes no loss count: the operation is not run again.
+#[test]
+fn a_lease_given_up_after_another_frontend_finished_the_operation_queues_nothing() {
+    let (store, _, [first, second]) = frontends([1, 2]);
+    submit(&first, 4);
+    grant(&first, 4, 0, "node-a").expect("grant");
+    finish(&second, 4, 0, "finished").expect("finished");
+    let txns = store.commit_stats().txns;
+
+    give_up(&first, 4, 0, Some(1)).expect("nothing to give up");
+
+    assert_eq!(store.commit_stats().txns, txns, "a give-up wrote");
+    assert_eq!((count(&store, "queue/"), count(&store, "loss/")), (0, 0));
+    assert_eq!((count(&store, "op/"), count(&store, "done/")), (0, 1));
+}
+
+/// Asserts that a lease given up a second time, by a frontend that did not know another had
+/// given it up and granted the operation again, queues nothing and leaves the new lease and
+/// the loss count of the first give-up as they are; and that the new lease, given up in its
+/// turn, queues the operation and counts as the second loss.
+#[test]
+fn a_lease_given_up_twice_does_not_queue_an_operation_that_runs_under_a_new_lease() {
+    let (store, _, [first, second]) = frontends([1, 2]);
+    submit(&first, 4);
+    grant(&first, 4, 0, "node-a").expect("grant");
+    give_up(&first, 4, 0, Some(1)).expect("given up");
+    grant(&second, 4, 1, "node-b").expect("granted again");
+
+    give_up(&second, 4, 0, Some(2)).expect("a second give-up of the first lease");
+
+    assert_eq!((count(&store, "queue/"), count(&store, "lease/")), (0, 1));
+    let loss = value_of(&store, &keys::loss(OperationId(4)));
+    assert_eq!(loss, 1_u64.to_be_bytes());
+
+    // The new lease, given up in its turn, is queued again and counts as the second loss.
+    give_up(&second, 4, 1, Some(2)).expect("the new lease given up");
+    assert_eq!((count(&store, "queue/"), count(&store, "lease/")), (1, 0));
+    let loss = value_of(&store, &keys::loss(OperationId(4)));
+    assert_eq!(loss, 2_u64.to_be_bytes());
+}
+
+/// Asserts that a give-up that loses the lease row to another frontend's finish between its
+/// read and its write is refused whole, and that tried again it finds the lease row gone
+/// and writes nothing: the finished operation is not queued.
+#[test]
+fn a_give_up_that_loses_to_a_finish_after_it_read_the_rows_writes_nothing() {
+    let (store, _, [first]) = frontends([1]);
+    submit(&first, 4);
+    grant(&first, 4, 0, "node-a").expect("grant");
+    let lease = Txn::new().delete(keys::lease(LeaseId::new(5, 0)), Cond::Any);
+    store.land(&keys::queue(OperationId(4)), settled(lease, 4, "finished"));
+
+    let lost = give_up(&first, 4, 0, Some(1));
+
+    assert!(matches!(lost, Err(StateError::Conflict(_))), "{lost:?}");
+    give_up(&first, 4, 0, Some(1)).expect("tried again, nothing to give up");
+    assert_eq!((count(&store, "queue/"), count(&store, "loss/")), (0, 0));
+    assert_eq!((count(&store, "op/"), count(&store, "done/")), (0, 1));
+}
+
 /// Asserts that a result for a lease the farm gave up in the same feed finishes the queued
 /// operation: its rows go, its loss count with them, and its result is the one row left.
 #[test]
@@ -191,7 +251,7 @@ fn a_result_for_a_lease_the_farm_gave_up_finishes_the_queued_operation() {
     let (store, _, [rows]) = frontends([1]);
     submit(&rows, 4);
     grant(&rows, 4, 0, "node-a").expect("grant");
-    give_up(&store, 4, 0, Some(1));
+    give_up(&rows, 4, 0, Some(1)).expect("given up");
 
     finish(&rows, 4, 0, "ran").expect("finished");
 
@@ -208,7 +268,7 @@ fn a_result_that_loses_to_a_grant_of_another_frontend_after_it_read_the_rows_is_
     let (store, codec, [first]) = frontends([1]);
     submit(&first, 4);
     grant(&first, 4, 0, "node-a").expect("grant");
-    give_up(&store, 4, 0, None);
+    give_up(&first, 4, 0, None).expect("given up");
     store.land(&keys::queue(OperationId(4)), another_grant(&codec, 4, 1));
 
     let late = finish(&first, 4, 0, "late");
@@ -287,7 +347,7 @@ fn a_finish_that_loses_the_rows_to_another_frontends_finish_is_a_duplicate() {
     let (store, _, [first]) = frontends([1]);
     submit(&first, 4);
     grant(&first, 4, 0, "node-a").expect("grant");
-    give_up(&store, 4, 0, None);
+    give_up(&first, 4, 0, None).expect("given up");
     store.land(
         &keys::queue(OperationId(4)),
         settled(Txn::new(), 4, "other"),
