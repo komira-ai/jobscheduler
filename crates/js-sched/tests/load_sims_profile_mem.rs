@@ -354,8 +354,8 @@ fn retry_beside_a_big_booking(config: LoadConfig, o_curve: bool) -> World {
 /// at the 16 GiB rung, that is refused with no end, or that is not refused while the flat
 /// charges say it does not fit. `o` books 20 GiB on a 32 GiB node. Without a curve for
 /// `o` the flat sum is 36: the retry waits for `o` to end, then runs and finishes. With a
-/// curve for `o` (charged 1 GiB) the retry fits at once: the guard applies to a lease
-/// charged by a curve, not to the flat-charged retry, and the sim documents that.
+/// curve for `o` (charged 1 GiB) the flat-memory guard must hold the same: memory is never
+/// planned over the worker's RAM (see the ignored sim below).
 #[test]
 fn x_a_retry_waits_for_the_flat_booking_that_blocks_it_and_then_runs() {
     let mut w = retry_beside_a_big_booking(LoadConfig::default(), false);
@@ -374,16 +374,22 @@ fn x_a_retry_waits_for_the_flat_booking_that_blocks_it_and_then_runs() {
     );
 }
 
-/// Sim x (the retry beside a lease charged by a curve). See the sim above.
+/// Sim x (the retry beside a lease charged by a curve). Catches: a flat-charged retry
+/// (16 GiB) admitted beside a 20 GiB lease that a curve charges 1 GiB, on a 32 GiB worker:
+/// the flat costs sum to 36, so the retry waits until that lease ends, then runs.
 #[test]
-fn x_a_retry_runs_beside_a_lease_charged_by_its_curve() {
+#[ignore = "#127: the flat-memory guard applies to uncurved admissions"]
+fn x_a_retry_waits_for_a_curve_charged_booking_that_blocks_it_by_flat_cost() {
     let mut w = retry_beside_a_big_booking(LoadConfig::default(), true);
-    assert_eq!(
-        w.running_of("k"),
-        1,
-        "20 GiB booked, charged 1 by its curve"
-    );
+    assert_eq!(w.running_of("k"), 0, "refused beside o by the flat sum");
+    assert_eq!(w.running_of("o"), 1);
     drain(&mut w, 2_000);
     assert_eq!(w.stats["k"].finished, 1);
-    assert_eq!(w.stats["k"].started, 2);
+    assert_eq!(w.stats["k"].started, 2, "one kill, one retry");
+    let o_started = w.starts.iter().find(|s| s.1 == "o").map(|s| s.0).unwrap();
+    let retry = w.starts.iter().filter(|s| s.1 == "k").nth(1).map(|s| s.0);
+    assert!(
+        retry.unwrap() >= o_started + 600,
+        "the retry started at {retry:?} while o (from {o_started}) still ran"
+    );
 }
