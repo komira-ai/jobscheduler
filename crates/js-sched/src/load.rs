@@ -9,9 +9,9 @@
 //! clock.
 //!
 //! Everything the score needs about costs and load comes through one seam,
-//! [`PredictedLoad`]. The flat rule of the predicate charges a lease the same at every
-//! slot, so [`FlatLoad`] answers every slot with the same figures; a rule that charges by
-//! a curve answers by slot and the scorer does not change.
+//! [`PredictedLoad`]. Placement provides it as a [`SlotLoad`]: the figures the predicate
+//! charges at each slot. Under the flat rule they are the same at every slot; a worker or
+//! a lease charged by a curve answers by slot and the scorer does not change.
 //!
 //! The previous ranking ([`Load`], [`least_loaded`]) is kept as a pure function for
 //! leases that bypass scoring.
@@ -32,7 +32,6 @@
 use std::cmp::{Ordering, Reverse};
 use std::collections::BTreeMap;
 
-use js_types::sched::usage::LeaseCost;
 use js_types::sched::{LeaseId, Resources, WorkerId};
 
 /// A worker's load; the smaller is the less loaded. This is the previous ranking: placement
@@ -178,7 +177,8 @@ pub struct HostFacts {
     /// `C_mem`: the worker's memory capacity in bytes.
     pub memory_capacity_bytes: u64,
     /// `L`: the leading minutes at least half of the key's runs reached (`life_minutes`
-    /// of `js-sizing`). 1 when the lease is charged flat on this worker. Clamped to
+    /// of `js-sizing`) when the lease is charged by a curve, else 1. It is the attempt's
+    /// value, the same on every candidate, including fallback hosts. Clamped to
     /// `1..=HORIZON` here.
     pub fit_minutes: u8,
     /// The worker is in fallback: no measurement, or a stale signal, or a kind of node
@@ -694,62 +694,60 @@ pub fn least_loaded<'a>(admitted: &[(&'a WorkerId, Load)]) -> Option<&'a WorkerI
         .map(|(name, _)| *name)
 }
 
-/// The figures of one candidate in a [`FlatLoad`].
+/// The figures of one candidate in a [`SlotLoad`].
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct FlatHost {
-    /// The predicate's left side, without the new lease.
-    pub(crate) left: Charge,
-    /// The new lease's charge on this worker, as the predicate charges it (clamped).
-    pub(crate) new: Charge,
+pub(crate) struct SlotHost {
+    /// The predicate's left side at each slot, without the new lease.
+    pub(crate) left: [Charge; SLOTS],
+    /// The new lease's charge on this worker at each slot, as the predicate charges it.
+    pub(crate) new: [Charge; SLOTS],
     pub(crate) facts: HostFacts,
 }
 
-/// The predicted load of the candidates under the flat rule: the predicate charges every
-/// lease the same at every slot, so the left side and the new lease's charge are constants
-/// and `L` is 1.
-#[derive(Clone, Debug)]
-pub(crate) struct FlatLoad {
-    pub(crate) lease: LeaseFacts,
-    pub(crate) hosts: BTreeMap<WorkerId, FlatHost>,
-}
-
-impl FlatLoad {
+impl SlotHost {
     /// The figures of a candidate: what the predicate computed for it. `facts` has the
-    /// scalars the ledger gave; the capacity, `L` and the new lease's `p_bar` are set here.
-    pub(crate) fn host(
+    /// scalars the ledger gave; the capacity and the new lease's `p_bar` (`new_key_millis`,
+    /// its flat CPU cost on this worker) are set here.
+    pub(crate) fn new(
         capacity: &Resources,
-        left: Charge,
-        cost: &LeaseCost,
+        left: [Charge; SLOTS],
+        new: [Charge; SLOTS],
+        new_key_millis: u64,
         facts: HostFacts,
-    ) -> FlatHost {
-        FlatHost {
+    ) -> Self {
+        Self {
             left,
-            new: Charge {
-                cpu_millis: cost.cpu_millis,
-                memory_bytes: cost.memory_bytes,
-            },
+            new,
             facts: HostFacts {
                 cpu_capacity_millis: capacity.cpu_millis,
                 memory_capacity_bytes: capacity.memory_bytes,
-                fit_minutes: 1,
-                new_key_millis: cost.cpu_millis,
+                new_key_millis,
                 ..facts
             },
         }
     }
 }
 
-impl PredictedLoad for FlatLoad {
+/// The predicted load of the candidates, slot by slot: the left side of the predicate and
+/// the new lease's charge as it charges them at each of the [`SLOTS`]. Under the flat rule
+/// every slot of a host holds the same figures.
+#[derive(Clone, Debug)]
+pub(crate) struct SlotLoad {
+    pub(crate) lease: LeaseFacts,
+    pub(crate) hosts: BTreeMap<WorkerId, SlotHost>,
+}
+
+impl PredictedLoad for SlotLoad {
     fn lease(&self) -> LeaseFacts {
         self.lease
     }
 
-    fn load(&self, worker: &WorkerId, _slot: usize) -> Charge {
-        self.hosts[worker].left
+    fn load(&self, worker: &WorkerId, slot: usize) -> Charge {
+        self.hosts[worker].left[slot]
     }
 
-    fn charge(&self, worker: &WorkerId, _slot: usize) -> Charge {
-        self.hosts[worker].new
+    fn charge(&self, worker: &WorkerId, slot: usize) -> Charge {
+        self.hosts[worker].new[slot]
     }
 
     fn host(&self, worker: &WorkerId) -> HostFacts {
