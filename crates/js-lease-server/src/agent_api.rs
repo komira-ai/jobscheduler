@@ -153,13 +153,13 @@ async fn heartbeat(
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
         let registry = agents.registry.clone();
-        blocking(move || {
+        (move || {
             let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
                 registry.host_of(lease).as_ref() == Some(host)
             };
             usage.on_beat(&heartbeat, load, &acks, &holds);
         })
-        .await;
+        ();
     }
     Ok(Json(reply))
 }
