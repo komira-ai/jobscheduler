@@ -406,7 +406,7 @@ impl Usage {
             let total: u32 = reasons.values().sum();
             let why: Vec<String> = reasons
                 .iter()
-                .map(|(reason, count)| format!("{}={count}", reason.as_str()))
+                .map(|(reason, count)| format!("{}={count}", crate::usage::drop_name(*reason)))
                 .collect();
             warn!(host = %host, minute, dropped = total, reasons = %why.join(","), "node readings dropped");
         }

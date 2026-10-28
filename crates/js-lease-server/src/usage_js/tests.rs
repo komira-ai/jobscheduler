@@ -1,0 +1,154 @@
+//! The adapter over the in-memory store, with a wrapper that fails on cue.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use js_state::fake::{Fake, Flaw};
+use js_state::{
+    Changes, Commit, CommitStats, Conflict, ManualClock, Revision, ScanPage, ScanRange, StoreError,
+    StoreTime, Txn, Versioned,
+};
+use js_types::LeaseId;
+
+use super::*;
+use crate::usage::{DropReason, Observed};
+
+/// A store that forwards to the fake and fails every write while `fail` is set.
+struct Flaky {
+    inner: Fake,
+    fail: Arc<AtomicBool>,
+}
+
+impl Store for Flaky {
+    fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
+        match self.fail.load(Ordering::SeqCst) {
+            true => Err(StoreError::Failed("down".to_string())),
+            false => self.inner.apply_batch(batch),
+        }
+    }
+
+    fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        self.inner.get(key)
+    }
+
+    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.inner.scan_prefix(prefix)
+    }
+
+    fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
+        self.inner.scan_range(scan)
+    }
+
+    fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError> {
+        self.inner.changes(after, limit)
+    }
+
+    fn reap_expired(&self) -> Result<usize, StoreError> {
+        self.inner.reap_expired()
+    }
+
+    fn commit_stats(&self) -> CommitStats {
+        self.inner.commit_stats()
+    }
+
+    fn now(&self) -> StoreTime {
+        self.inner.now()
+    }
+}
+
+fn sink() -> (NodeUsage, Arc<AtomicBool>) {
+    let clock = Arc::new(ManualClock::default());
+    let fail = Arc::new(AtomicBool::new(false));
+    let inner = Fake::with_flaw(clock, Flaw::None);
+    let store = Flaky {
+        inner,
+        fail: fail.clone(),
+    };
+    (NodeUsage::over(Box::new(store)), fail)
+}
+
+fn limits() -> HostLimits {
+    HostLimits {
+        threads: 8,
+        memory_bytes: 1 << 34,
+    }
+}
+
+fn reading(seq: u64, mono_sec: u64, cpu_sec: u64) -> LoadIn {
+    LoadIn {
+        seq,
+        mono_usec: mono_sec * 1_000_000,
+        cpu_usage_usec: cpu_sec * 1_000_000,
+        working_set_bytes: 4096,
+        actions_cpu_limited: false,
+        covered: vec![LeaseId::new(1, 1)],
+        minutes: Vec::new(),
+        clocks: Vec::new(),
+    }
+}
+
+fn host() -> HostId {
+    HostId::new("h1").unwrap()
+}
+
+/// Asserts the path of a reading to a stored row: the first reading only sets a baseline
+/// (dropped, counted), the second is accepted, and the flush at a later minute returns the
+/// closed minute and writes it, where it reads back with the node's CPU. It catches a
+/// flush that returns rows it did not write, and one that writes nothing.
+#[test]
+fn readings_become_a_stored_node_minute_at_a_flush() {
+    let (sink, _) = sink();
+    let first = sink.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
+    assert_eq!(first.observed, Observed::Dropped(DropReason::NoBaseline));
+    let second = sink.observe(&host(), 1, &reading(2, 20, 15), limits(), 100);
+    assert_eq!(second.observed, Observed::Accepted);
+    assert!(sink.flush(100).unwrap().is_empty());
+    let closed = sink.flush(101).unwrap();
+    assert_eq!(closed.len(), 1);
+    assert_eq!(closed[0].0, host());
+    assert_eq!(closed[0].1.minute, 100);
+    assert_eq!(closed[0].1.cpu_millis, 500);
+    assert_eq!(sink.range(&host(), 0, 200), vec![closed[0].1]);
+    assert_eq!(sink.counters().dropped[&DropReason::NoBaseline], 1);
+    assert!(sink.flush(102).unwrap().is_empty());
+}
+
+/// Asserts that a write that fails keeps the minute: the flush returns the fault, and the
+/// next flush, with the store back, writes the minute once. It catches a minute lost to a
+/// failed write and one written twice.
+#[test]
+fn a_failed_write_keeps_the_minute_for_the_next_flush() {
+    let (sink, fail) = sink();
+    sink.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
+    sink.observe(&host(), 1, &reading(2, 20, 15), limits(), 100);
+    fail.store(true, Ordering::SeqCst);
+    let err = sink.flush(101).unwrap_err();
+    assert!(err.0.contains("down"), "{err}");
+    assert!(sink.range(&host(), 0, 200).is_empty());
+    fail.store(false, Ordering::SeqCst);
+    assert!(sink.flush(102).unwrap().is_empty());
+    assert_eq!(sink.range(&host(), 0, 200).len(), 1);
+}
+
+/// Asserts that prune succeeds on an empty store, fails with the store's fault when the
+/// store does, and that a run handed over is taken and kept for the profile side. It
+/// catches a prune that swallows a failure.
+#[test]
+fn prune_reports_a_failed_store_and_a_run_is_taken() {
+    let (sink, fail) = sink();
+    sink.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
+    sink.observe(&host(), 1, &reading(2, 20, 15), limits(), 100);
+    sink.flush(101).unwrap();
+    assert_eq!(sink.prune(101), Ok(()));
+    assert_eq!(sink.range(&host(), 0, 200).len(), 1);
+    sink.prune(100 + js_usage::NODE_RETENTION_MINUTES + 120)
+        .unwrap();
+    assert!(sink.range(&host(), 0, 200).is_empty());
+    fail.store(true, Ordering::SeqCst);
+    assert!(sink.prune(5).is_err());
+    let end = RunEnd {
+        key: crate::usage::ProfileKey::parse("k").unwrap(),
+        lease: LeaseId::new(1, 1),
+        series: Default::default(),
+    };
+    assert_eq!(sink.run_ended(&end, 0), Ok(()));
+}

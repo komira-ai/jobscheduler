@@ -298,17 +298,24 @@ pub(crate) struct UsageSetup {
 
 impl UsageSetup {
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    pub(crate) fn build(self, clock: &SharedClock, limits: HostLimits) -> Option<Arc<Usage>> {
-        let db = self.db?;
-        let bytes = self.profile_store_bytes;
-        let open = move || {
-            usage_js::open(&StoreSetup {
-                db,
-                profile_store_bytes: bytes,
-            })
+    /// A usage file that will not open is a refused start naming `--usage-db`.
+    pub(crate) fn build(
+        self,
+        clock: &SharedClock,
+        limits: HostLimits,
+    ) -> Result<Option<Arc<Usage>>, StartupError> {
+        let Some(db) = self.db else {
+            return Ok(None);
         };
-        let sink = self.sink.unwrap_or_else(open);
-        Some(Arc::new(Usage::new(sink, self.keys, clock.clone(), limits)))
+        let sink = match self.sink {
+            Some(sink) => sink,
+            None => usage_js::open(&StoreSetup {
+                db,
+                profile_store_bytes: self.profile_store_bytes,
+            })?,
+        };
+        let usage = Usage::new(sink, self.keys, clock.clone(), limits);
+        Ok(Some(Arc::new(usage)))
     }
 }
 
