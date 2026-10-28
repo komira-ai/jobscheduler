@@ -723,7 +723,7 @@ mod tests {
         assert_eq!(fit_minutes_of(9, true), 9);
         assert_eq!(fit_minutes_of(0, true), 1);
         assert_eq!(fit_minutes_of(200, true), 30);
-        assert!(!CHARGED_BY_CURVE, "production charges every lease flat");
+        const { assert!(!CHARGED_BY_CURVE, "production charges every lease flat") };
         assert_eq!(usize::from(js_sizing::LIFE_HORIZON), crate::load::HORIZON);
     }
 
