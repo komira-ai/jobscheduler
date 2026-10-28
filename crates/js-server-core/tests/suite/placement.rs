@@ -48,6 +48,21 @@ fn work_that_started_and_lost_its_worker_waits_kept() {
     assert!(matches!(shown(&core)[..], [Stage::WaitingKept(_)]));
 }
 
+/// Catches: work held by the drain's cordon on one node and an operator's on another shown
+/// as queued for the other frontends: the operator's cordon keeps it waiting, whichever
+/// node it is on.
+#[test]
+fn work_held_by_a_drain_and_an_operators_cordon_together_is_waiting() {
+    let core = core();
+    up(&core, 0, "node-a", "d1");
+    up(&core, 0, "node-b", "d2");
+    core.place(at(1), &worker("node-a"), NodeAction::Cordon)
+        .expect("placed");
+    core.close_intake();
+    submit(&core, 2, 1);
+    assert!(waiting(&shown(&core)[0]), "{:?}", shown(&core));
+}
+
 /// Catches: work held only by the cordon an operator placed shown as queued (it waits for
 /// the operator), and work held only by the drain's own cordon shown as waiting (the other
 /// frontends take it).

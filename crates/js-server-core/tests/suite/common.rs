@@ -71,6 +71,8 @@ pub struct Rig {
     pub delivered: Arc<Mutex<Vec<OperationId>>>,
     /// The resent reports that reached the rig.
     pub resized: u32,
+    /// The names the core asked for, in order.
+    pub named: Mutex<Vec<String>>,
 }
 
 impl Rig {
@@ -84,8 +86,16 @@ impl Adapter for Rig {
         self.open.contains(&(worker.clone(), stream))
     }
 
-    fn name(&self, _: &View<'_>, operation: OperationId) -> String {
-        format!("operations/{}", operation.0)
+    /// Names the operations the scheduler still holds, as an adapter that looks the name up
+    /// from the operation's callers does; one it dropped has none.
+    fn name(&self, view: &View<'_>, operation: OperationId) -> String {
+        let name = if view.sched().state(operation).is_some() {
+            format!("operations/{}", operation.0)
+        } else {
+            String::new()
+        };
+        self.named.lock().expect("named").push(name.clone());
+        name
     }
 
     fn phased(&mut self, worker: &WorkerId, before: &NodePhase, after: &NodePhase) {

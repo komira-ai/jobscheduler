@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use crate::common::{begin, block_on};
 use js_sched::{DaemonInstance, Request, SelfFence};
-use js_server_core::{Adapter, Beat, Config, Core, Delivery, Reported, Stage, Standing, View};
+use js_server_core::{
+    Adapter, Attempt, Beat, Config, Core, Delivery, Reported, Stage, Standing, Taken, View,
+};
 use js_sim::golden::GoldenFile;
 use js_sim::{
     Chance, Event, Faults, Node, NodeId, NodeInput, Output, Partition, Sim, TraceHash, text,
@@ -153,8 +155,18 @@ impl Adapter for Wire {
 
     fn requeued(&mut self, _: &js_sched::Requeue) {}
 
-    fn settle(&mut self, _: &View<'_>, answer: &Answer, _: Option<&WorkerId>) -> Delivery {
+    /// A result whose finish had to wait is acknowledged to its sender now.
+    fn settle(&mut self, _: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery {
         self.answers.push(answer.clone());
+        if let Some(worker) = ack {
+            let msg = Msg::ReportAck {
+                lease: answer.lease,
+            };
+            self.outbox.push(Output::Send {
+                to: NodeId::new(worker.as_str()),
+                msg,
+            });
+        }
         Box::pin(std::future::ready(()))
     }
 
@@ -197,10 +209,20 @@ struct Leader {
 }
 
 impl Leader {
-    fn new() -> Self {
+    /// A leader whose writer, if `flaky`, refuses every fifth write for the moment.
+    fn new(flaky: bool) -> Self {
         begin();
+        let mut writes = 0_u64;
+        let core = Core::new(&Config::new(1), Wire::default()).with_writer(move |_: &Effect| {
+            writes += 1;
+            if flaky && writes.is_multiple_of(5) {
+                Attempt::Transient
+            } else {
+                Attempt::Taken
+            }
+        });
         Self {
-            core: Core::new(&Config::new(1), Wire::default()),
+            core,
             sessions: BTreeMap::new(),
             out: Vec::new(),
         }
@@ -302,15 +324,24 @@ impl Leader {
                 lease,
                 outcome,
             } => {
-                self.send(from, Msg::ReportAck { lease });
-                let held = self.core.standing(&worker, lease).expect("heard");
-                if held == Standing::Current(operation) {
-                    let report = js_server_core::Report {
-                        operation,
-                        lease,
-                        outcome,
-                    };
-                    block_on(self.core.report(now, &worker, report, |_| {}));
+                // Acknowledged as the core says: a result taken or refused at once; one
+                // whose finish waits when the finish is written (`Wire::settle`); one
+                // dropped never, so the worker sends it again.
+                let acknowledged = match self.core.standing(&worker, lease).expect("heard") {
+                    Standing::Current(held) if held == operation => {
+                        let report = js_server_core::Report {
+                            operation,
+                            lease,
+                            outcome,
+                        };
+                        let taken = block_on(self.core.report(now, &worker, report, |_| {}));
+                        !matches!(taken, Taken::Held | Taken::Dropped)
+                    }
+                    Standing::Current(_) | Standing::Refused(_) => true,
+                    Standing::Held => false,
+                };
+                if acknowledged {
+                    self.send(from, Msg::ReportAck { lease });
                 }
             }
             other => panic!("leader got {other:?}"),
@@ -548,15 +579,24 @@ impl Node for Cell {
 struct Scenario {
     cut: bool,
     worker_1: Fault,
+    /// The leader's writer refuses every fifth write for the moment.
+    flaky: bool,
 }
 
 const BASE: Scenario = Scenario {
     cut: true,
     worker_1: Fault::None,
+    flaky: false,
 };
 const DROP_FIRST_START: Scenario = Scenario {
     cut: false,
     worker_1: Fault::DropFirstStart,
+    flaky: false,
+};
+const FLAKY_WRITER: Scenario = Scenario {
+    cut: false,
+    worker_1: Fault::None,
+    flaky: true,
 };
 
 fn run(seed: u64, scenario: Scenario) -> Sim<Cell> {
@@ -568,7 +608,7 @@ fn run(seed: u64, scenario: Scenario) -> Sim<Cell> {
         ..Faults::default()
     };
     let mut sim = Sim::new(seed, faults);
-    sim.add_node("leader", Cell::Leader(Leader::new()));
+    sim.add_node("leader", Cell::Leader(Leader::new(scenario.flaky)));
     // Placement spreads the twelve operations over the cores: four land on worker-1
     // (6 cores) and are cut off, eight on worker-2 (12 cores).
     let worker_1 = Worker::new(Resources::new(6_000, 64 * GIB), scenario.worker_1);
@@ -697,6 +737,24 @@ fn a_start_lost_on_a_live_session_is_granted_again() {
     }
 }
 
+/// Catches: a writer that refuses some writes for the moment losing, answering twice or
+/// leaking the work behind them: every held effect is written later, in order, every operation
+/// is answered once, and the results whose finish waited are acknowledged when it is written
+/// (a worker that was not acknowledged sends its result again).
+#[test]
+fn a_writer_that_refuses_some_writes_delays_the_work_and_loses_none() {
+    for seed in 0..SEEDS {
+        let sim = run(seed, FLAKY_WRITER);
+        assert_answered_once(&sim, seed);
+        assert_bookings_released(&sim, seed);
+        assert_never_twice_at_once(&sim, seed);
+        assert!(
+            workers(&sim).all(|(_, worker)| worker.unacked.is_empty()),
+            "seed {seed}: a result was never acknowledged"
+        );
+    }
+}
+
 /// Catches: anything in the core or this cell that depends on more than the seed (a hashed
 /// collection, a clock): two runs of one seed must trace identically.
 #[test]
@@ -716,7 +774,11 @@ fn golden() -> GoldenFile {
 
 /// The trace hash of the cell under each scenario and three seeds.
 fn golden_runs() -> Vec<(String, TraceHash)> {
-    let scenarios = [("base", BASE), ("drop-first-start", DROP_FIRST_START)];
+    let scenarios = [
+        ("base", BASE),
+        ("drop-first-start", DROP_FIRST_START),
+        ("flaky-writer", FLAKY_WRITER),
+    ];
     let mut runs = Vec::new();
     for (name, scenario) in scenarios {
         for seed in 0..3 {

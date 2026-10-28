@@ -1,16 +1,16 @@
 //! A host's `Result`: what its lease stands for, how the scheduler takes it, and when it
-//! is acknowledged (moved from the farm core's tests of the same rules).
+//! is acknowledged. The tests are new, written against the rules that moved from kbf's farm.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::admission::Deny;
 use crate::common::{
-    Call, GIB, Gate, Trace, at, beat, block_on, calls, core, gated, gated_by, lease, lines,
-    request, started, submit, submit_request, up, worker,
+    Call, GIB, Gate, Trace, at, beat, block_on, calls, core, core_by, gated, gated_by, lease,
+    lines, request, started, submit, submit_request, up, worker,
 };
 use js_sched::fence::{LEASE_GRACE, START_GRACE};
-use js_server_core::{Attempt, Config, Denied, Reason, Report, SelfFencedOnly, Standing, Taken};
+use js_server_core::{Attempt, Config, Denied, Reason, Report, Standing, Taken};
 use js_types::sched::{Failure, OperationId, Outcome, Resources, ResultRef};
 
 fn done() -> Outcome {
@@ -401,15 +401,22 @@ fn a_result_is_heard_only_from_a_host_the_admission_allows() {
     );
 }
 
-/// Catches: a host that fences itself, which the policy hears, judged on anything but its
-/// lease when it reports.
+/// Catches: the "lease finished" line naming the operation after the report has finished it
+/// (with no finished retention the scheduler has dropped it by then, and its callers with it):
+/// the name is asked for before the report is fed.
 #[test]
-fn a_result_of_a_host_that_fences_itself_is_judged_on_its_lease() {
-    let core = core().with_admission(SelfFencedOnly);
+fn the_line_of_a_finishing_report_names_the_operation_it_finished() {
+    let config = Config::new(1).with_finished_retention(Duration::ZERO);
+    let core = core_by(&config);
     up(&core, 0, "node-a", "d1");
     let admitted = submit(&core, 1, 1);
-    assert_eq!(
-        core.standing(&worker("node-a"), lease(1, 0)),
-        Ok(Standing::Current(admitted.operation))
-    );
+    let report = Report {
+        operation: admitted.operation,
+        lease: lease(1, 0),
+        outcome: done(),
+    };
+    let taken = block_on(core.report(at(2), &worker("node-a"), report, |_| {}));
+    assert_eq!(taken, Taken::Accepted);
+    let named = core.with(|_, rig| rig.named.lock().expect("named").clone());
+    assert_eq!(named, ["operations/0"]);
 }

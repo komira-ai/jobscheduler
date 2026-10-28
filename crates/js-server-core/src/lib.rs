@@ -38,7 +38,7 @@ mod write;
 
 pub use self::core::{Admitted, Config, Core, Fenced, NodeAction, UnknownNode};
 pub use adapter::{Adapter, Delivery, Link, Stage, View};
-pub use admission::{Admission, AllowAll, Denied, SelfFencedOnly};
+pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
 pub use host::{Beat, Reported, Stream};
 pub use observer::Observer;

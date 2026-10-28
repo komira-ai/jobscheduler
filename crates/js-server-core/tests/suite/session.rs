@@ -1,5 +1,6 @@
 //! A host's session: the stream a worker registers on, the heartbeats it sends on it, the
-//! report it resends, and its phase (moved from the farm core's tests of the same rules).
+//! report it resends, and its phase. The tests are new, written against the rules that
+//! moved from kbf's farm.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -9,7 +10,7 @@ use crate::common::{
 };
 use js_sched::NodePhase;
 use js_sched::fence::LEASE_GRACE;
-use js_server_core::{Beat, Core, Stream};
+use js_server_core::{Beat, Core, NodeAction, Stream};
 use js_types::sched::usage::NodeLoad;
 
 fn requeued(core: &Core<Rig>) -> bool {
@@ -177,19 +178,73 @@ fn a_heartbeat_listing_a_lease_the_scheduler_does_not_hold_cancels_it() {
 }
 
 /// Catches: a heartbeat that carries the node's load being refused or its load dropped
-/// before the scheduler.
+/// before the scheduler: the scheduler reads the working set back.
 #[test]
-fn a_heartbeat_with_a_load_is_taken() {
+fn a_heartbeat_with_a_load_reaches_the_scheduler() {
     let core = core();
     let stream = up(&core, 0, "node-a", "d1");
     let load = NodeLoad {
         seq: 1,
+        memory_working_set_bytes: 12_345,
         ..NodeLoad::default()
     };
     let beat = Beat::new(1, vec![]).with_load(load.clone());
     assert_eq!(beat.load, Some(load));
     let taken = block_on(core.heartbeat(at(1), &worker("node-a"), stream, beat));
     assert_eq!(taken, Ok(true));
+    let seen = core.with(|view, _| view.sched().load_view(&worker("node-a")));
+    assert_eq!(seen.and_then(|v| v.working_set_bytes), Some(12_345));
+}
+
+/// Catches: a host that says it takes no lease (memory pressure, draining, quarantined, or
+/// switching its session) being offered one, and one that serves again not being offered
+/// the work that waited.
+#[test]
+fn a_host_not_serving_is_offered_nothing_until_it_serves() {
+    let phases = [
+        NodePhase::MemoryPressure,
+        NodePhase::Draining,
+        NodePhase::Quarantined("cleanup failed".to_owned()),
+        NodePhase::Preparing(lease(1, 9)),
+        NodePhase::Restoring(lease(1, 9)),
+    ];
+    for phase in phases {
+        let core = core();
+        let stream = up_after(
+            &core,
+            0,
+            "node-a",
+            ("d1", ""),
+            reported(8).in_phase(phase.clone()),
+        );
+        submit(&core, 1, 1);
+        assert_eq!(started(&core), [], "{phase:?}");
+        resend(&core, 2, ("node-a", stream), reported(8)).expect("admitted");
+        assert_eq!(started(&core), [lease(1, 0)], "{phase:?}");
+    }
+}
+
+/// Catches: a fenced core feeding the scheduler an operator's cordon or a host's phase (it
+/// feeds the scheduler nothing through its feed); a registration is still recorded.
+#[test]
+fn a_fenced_core_registers_a_host_but_places_and_phases_nothing() {
+    let core = core();
+    let stream = up(&core, 0, "node-a", "d1");
+    core.fence();
+    up(&core, 1, "node-b", "d2");
+    assert_eq!(core.sessions(), 2);
+    core.place(at(2), &worker("node-a"), NodeAction::Cordon)
+        .expect("placed");
+    let quarantined = reported(8).in_phase(NodePhase::Quarantined("cleanup failed".to_owned()));
+    resend(&core, 3, ("node-a", stream), quarantined).expect("admitted");
+    let (cordon, phase) = core.with(|view, _| {
+        let sched = view.sched();
+        (
+            sched.cordon(&worker("node-a")).cloned(),
+            sched.phase(&worker("node-a")).cloned().unwrap_or_default(),
+        )
+    });
+    assert_eq!((cordon, phase), (None, NodePhase::Serving));
 }
 
 /// Catches: a core that stays locked for ever once code run under the lock panicked.

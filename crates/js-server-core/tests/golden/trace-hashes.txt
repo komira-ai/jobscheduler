@@ -11,3 +11,6 @@ core-cell/base/seed-2 8fa490ad69047a49b8640aff5537a7c2b21feee74c24b558f78a1307ee
 core-cell/drop-first-start/seed-0 6aef72603cbe888633b5851689e4f21b06d0debbc1d8166c2b6cdcb556bed377
 core-cell/drop-first-start/seed-1 8d0453096aed18041f3519fc1830a4fe34c8bb5b6326826db02211a31caea418
 core-cell/drop-first-start/seed-2 21ebc4e354929f7eaf9af94532dbff2eb3222e1f3130b244941a316e4cb49da3
+core-cell/flaky-writer/seed-0 5fbec63ec603f2559b1de9777ee5e05e8d51d23c8cf0a6c167e3a6c0b9283286
+core-cell/flaky-writer/seed-1 adecc07a6a31d67ab1e4dd3f5b82ca1f6bbe78d5c473d78b60b91f59b58a1c50
+core-cell/flaky-writer/seed-2 f7ada82e7c940e048d0e8bdfc75591728f9b670ec9360e82183a72abd5f98041
