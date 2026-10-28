@@ -640,4 +640,118 @@ mod tests {
         load.remove(lease(1));
         assert_eq!(*load.totals(), Totals::default());
     }
+
+    fn curve(points: &[(u32, u64)]) -> js_types::sched::usage::Curve {
+        let points = points
+            .iter()
+            .map(
+                |&(cores_milli, working_set_bytes)| js_types::sched::usage::MinutePoint {
+                    cores_milli,
+                    working_set_bytes,
+                },
+            )
+            .collect();
+        js_types::sched::usage::Curve::new(points, 5).expect("a short curve")
+    }
+
+    /// A profile of a lease of `cost(20_000, 2 GiB)`: the curve of cores 10 then 60 and
+    /// working set 4 GiB then 1 GiB, by curve in CPU and in memory as asked, or none and
+    /// a life of three minutes.
+    fn profile(by_curve: bool, cpu: bool, mem: bool, life: Option<u32>) -> Arc<Profile> {
+        use super::super::profile::Choice;
+        Arc::new(Profile::new(
+            Choice {
+                curve: by_curve.then(|| curve(&[(10_000, 4 * GIB), (60_000, GIB)])),
+                cpu,
+                mem,
+                demoted_cpu: false,
+                demoted_mem: false,
+                life,
+                floor_permille: 750,
+                guard_key: 1,
+            },
+            &cost(20_000, 2 * GIB),
+        ))
+    }
+
+    /// Catches: the per-slot lanes missing a kind of lease, or counting a lease in the
+    /// wrong lane or twice, or not giving it back: six leases (charged by curve in both
+    /// resources, covered and not; flat to a life; by curve in CPU only; by curve in
+    /// memory only; covered with no clock, which is flat) are summed slot by slot and taken
+    /// off to nothing.
+    #[test]
+    fn the_lanes_sum_each_kind_of_lease_by_slot_and_empty_when_they_are_removed() {
+        use js_types::sched::usage::LeaseClock;
+        let mut load = WorkerLoad::default();
+        let kinds = [
+            (profile(true, true, true, None), false),
+            (profile(true, true, true, None), true),
+            (profile(false, true, true, Some(3)), true),
+            (profile(true, true, false, None), false),
+            (profile(true, true, true, None), true),
+            (profile(true, false, true, None), false),
+        ];
+        for (i, (p, _)) in kinds.iter().enumerate() {
+            load.insert(
+                lease(i as u64),
+                cost(20_000, 2 * GIB),
+                false,
+                Some(p.clone()),
+            );
+        }
+        let cfg = LoadConfig::default();
+        let capacity = Resources::new(100_000, 64 * GIB);
+        let mut counters = LoadCounters::default();
+        let read = |seq: u64, covered: Vec<LeaseId>, clocks: Vec<LeaseClock>| NodeLoad {
+            seq,
+            mono_usec: 3_600_000_000 + seq * 5_000_000,
+            covered,
+            lease_clocks: clocks,
+            ..NodeLoad::default()
+        };
+        let now = FarmTime::from_millis(0);
+        load.accept(
+            read(1, Vec::new(), Vec::new()),
+            now,
+            &capacity,
+            &cfg,
+            &mut counters,
+        );
+        // Leases 1, 2 and 4 are covered; 1 is a minute old, 2 is new, 4 has no clock.
+        let second = read(2, vec![lease(1), lease(2), lease(4)], Vec::new());
+        let clock = |l: u64, age_minutes: u64| LeaseClock {
+            lease: lease(l),
+            started_mono_usec: second.mono_usec - age_minutes * 60_000_000,
+        };
+        let second = NodeLoad {
+            lease_clocks: vec![clock(1, 1), clock(2, 0)],
+            ..second
+        };
+        load.accept(second, now, &capacity, &cfg, &mut counters);
+        let t = load.totals();
+        assert!(t.has_timed());
+        // Covered by curve (lease 1: 60 cores from its minute 1); covered flat to a life
+        // (lease 2: 20 cores for three minutes, a floor of 0.75 on the sum); the flat
+        // lease 4 stays in the scalar sum (20 cores).
+        assert_eq!(
+            t.cpu_covered_at(0, &cfg),
+            60_000 + (20_000 + 20_000) * 3 / 4
+        );
+        assert_eq!(t.cpu_covered_at(5, &cfg), 60_000 + 20_000 * 3 / 4);
+        // Uncovered: leases 0 and 3 by curve (60 cores, the larger of minutes 0 and 1 and
+        // then the tail), lease 5 flat in CPU (20).
+        assert_eq!(t.cpu_uncovered_at(0), 60_000 + 60_000 + 20_000);
+        assert_eq!(t.cpu_uncovered_at(31), 60_000 + 60_000 + 20_000);
+        // Memory: lease 0 and 5 hold 4 GiB then 1; lease 1 holds 1 (from its minute 1);
+        // lease 2 holds 2 for three minutes; leases 3 and 4 flat (2 each).
+        assert_eq!(t.mem_all_at(0), (4 + 1 + 2 + 2 + 2 + 4) * GIB);
+        assert_eq!(t.mem_all_at(1), (1 + 1 + 2 + 2 + 2 + 1) * GIB);
+        assert_eq!(t.mem_all_at(3), (1 + 1 + 0 + 2 + 2 + 1) * GIB);
+        assert_eq!(t.mem_uncovered_at(0), (4 + 2 + 4) * GIB);
+        assert_eq!(t.mem_uncovered_at(1), (1 + 2 + 1) * GIB);
+        for i in 0..6 {
+            load.remove(lease(i));
+        }
+        assert_eq!(*load.totals(), Totals::default());
+    }
 }

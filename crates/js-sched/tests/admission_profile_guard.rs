@@ -208,6 +208,57 @@ fn runs_that_did_not_end_are_left_out_of_the_window() {
     assert_eq!(mem_run(3 * GIB, None), (0, 8), "memory");
 }
 
+/// Catches: a run that was charged by curve before the key was demoted, and ends after it,
+/// being judged (and so keeping the key's history for after its eight flat runs): three
+/// leases of one size key run together, the first two end with a misfit and demote the key,
+/// the third ends with a misfit too and counts for nothing; after eight flat runs one
+/// misfit does not demote the key again.
+#[test]
+fn a_run_that_ends_after_the_demotion_is_not_judged() {
+    let (mut r, curves) = cluster(LoadConfig::default());
+    for key in ["s1", "s2", "s3"] {
+        curves.set(key, &flat_ws(&[10_000, 10_000], GIB), 5);
+    }
+    let mut starts = Vec::new();
+    for key in ["s1", "s2", "s3"] {
+        let operation = r.s.next_operation();
+        r.s.set_size_key(operation, 99);
+        starts.push(place(&mut r, key, warm(20_000, 2 * GIB)));
+    }
+    let leases: Vec<LeaseId> = starts.iter().map(|s| s.lease).collect();
+    let ages: Vec<(LeaseId, u32)> = leases.iter().map(|&l| (l, 1)).collect();
+    let seen: Vec<_> = leases.iter().map(|&l| minute(l, 0, 40_000, GIB)).collect();
+    r.window_clocked("a", 5_000, GIB, &leases, &ages, &seen);
+    r.finish(&starts[0]);
+    assert_eq!(r.s.shape_demoted_runs(99), (0, 0));
+    r.finish(&starts[1]);
+    assert_eq!(r.s.shape_demoted_runs(99), (8, 0));
+    r.finish(&starts[2]);
+    assert_eq!(
+        r.s.shape_demoted_runs(99),
+        (8, 0),
+        "charged by curve before, says nothing"
+    );
+    for i in 0..8 {
+        let operation = r.s.next_operation();
+        r.s.set_size_key(operation, 99);
+        let flat = place(&mut r, "s1", warm(20_000, 2 * GIB));
+        r.finish(&flat);
+        assert_eq!(r.s.shape_demoted_runs(99).0, 7 - i, "flat run {i}");
+    }
+    let operation = r.s.next_operation();
+    r.s.set_size_key(operation, 99);
+    let one = place(&mut r, "s1", warm(20_000, 2 * GIB));
+    let seen = [minute(one.lease, 0, 40_000, GIB)];
+    r.window_clocked("a", 5_000, GIB, &[one.lease], &[(one.lease, 1)], &seen);
+    r.finish(&one);
+    assert_eq!(
+        r.s.shape_demoted_runs(99),
+        (0, 0),
+        "one misfit with a clean history"
+    );
+}
+
 /// Catches: a run that was lost for good (the farm's reruns used up) judged as a run of the
 /// curve: after one misfit that counted, three lost runs of one operation with misfit
 /// minutes do not demote the key, and the next one that ends on its own does.
