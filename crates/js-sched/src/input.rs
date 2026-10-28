@@ -211,7 +211,9 @@ pub enum Event {
         /// reboot there are none), or ended with a result not yet acknowledged.
         running: Vec<LeaseId>,
         /// The node's load as the agent measured it, when it sent one. The scheduler
-        /// does not read it yet, and the trace does not show it.
+        /// keeps the last readings of each worker and charges the worker by them
+        /// ([`crate::LoadConfig`]); a scheduler built without a load configuration
+        /// keeps them and places by the booked rule. The trace does not show it.
         load: Option<NodeLoad>,
     },
     /// The worker's phase, from each `Hello` it sends (the registration's included,

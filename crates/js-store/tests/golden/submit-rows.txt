@@ -1,0 +1,17 @@
+# The `op/`, `queue/`, `inflight/` and `opkey/` rows of a store one frontend queued two
+# operations in (ids 4 and 8, each with the size key 7), and the grant of the second took out of
+# the queue, as js-store writes them: the key, when the store's clock expires it (nanoseconds,
+# `-` for a row that does not expire) and the value as hex.
+#
+# The `inflight/`, `opkey/` and `queue/` lines are the lines of the farm server's golden file of
+# scheduler rows for the same calls, copied unchanged. The `op/` lines have that file's keys and
+# expiry; their values are the test codec's, because the bytes of an `op/` row belong to the
+# codec the embedding server supplies. A change to this file needs a reason: a store written by
+# an earlier release holds these rows as they are, and the release after this one must read them.
+inflight/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1 expires_ns=- value=0000000000000004
+inflight/6d61696e/0909090909090909090909090909090909090909090909090909090909090909/9 expires_ns=- value=0000000000000008
+op/0000000000000004 expires_ns=- value=7375626d69742030
+op/0000000000000008 expires_ns=- value=7375626d69742031
+opkey/0000000000000004 expires_ns=- value=010000000000000007
+opkey/0000000000000008 expires_ns=- value=010000000000000007
+queue/0000000000000004 expires_ns=- value=

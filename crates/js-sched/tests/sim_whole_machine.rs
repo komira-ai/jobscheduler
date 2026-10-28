@@ -146,6 +146,7 @@ impl World {
                     lease: start.lease,
                     operation: start.operation,
                     worker: start.worker,
+                    cost: Default::default(),
                 };
                 self.running.entry(self.now + runs).or_default().push(grant);
                 Vec::new()

@@ -36,6 +36,7 @@ use js_types::sched::{FarmTime, WorkerId};
 
 use crate::blocks::contended;
 use crate::codec::Value;
+use crate::load::StoredOperation;
 use crate::{Rows, StateError, keys};
 
 /// How long a frontend trusts its last look at an `owner/` row before it reads the row
@@ -100,6 +101,8 @@ pub struct Arrival {
     pub frontend: u64,
     /// The owner the row named before, if it named one.
     pub previous: Option<Owner>,
+    /// The unfinished operations whose lease rows name the node.
+    pub leases: Vec<StoredOperation>,
     /// The daemon process the node's `session/` row names: the one that said `Hello` to the
     /// frontend that owned the node, as far as the row has not expired.
     pub session: Option<DaemonInstance>,
@@ -139,10 +142,12 @@ impl Rows {
         worker: &WorkerId,
         previous: Option<Owner>,
     ) -> Result<Arrival, StateError> {
+        let leases = self.held_by(worker)?;
         let session = self.session_instance(worker)?;
         Ok(Arrival {
             frontend: self.frontend,
             previous,
+            leases,
             session,
         })
     }
