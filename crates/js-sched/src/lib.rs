@@ -31,7 +31,8 @@
 //!   stays within its CPU and its memory, each charged at a cost the lease keeps from its
 //!   grant to its result; a worker with no usable reading is charged by predicted cost
 //!   alone. A scheduler built with [`Scheduler::new`] places this way, by the defaults of
-//!   [`LoadConfig`]: planned to 1.1x of the worker's CPU (`--placement-cpu-slack`) and 1.0x of its memory.
+//!   [`LoadConfig`]: planned to 1.1x of the worker's CPU (`--placement-cpu-slack`) and
+//!   1.0x of its memory.
 //!   [`PlacementLoad::Off`], set through [`Scheduler::with_load_config`], is the rollback
 //!   switch to the booked rule; it is not a supported mode.
 //!   The rule, its settings and its counters are described in the `admission` module's

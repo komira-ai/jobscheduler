@@ -145,9 +145,11 @@ impl LoadConfig {
     }
 
     /// Sets the placement flag `name` (`--placement-score-balance`,
-    /// `--placement-score-slack-tol-ppm`, `--placement-key-share` or `--placement-cpu-slack`, with or without the leading dashes) to `value`. Nothing
+    /// `--placement-score-slack-tol-ppm`, `--placement-key-share` or
+    /// `--placement-cpu-slack`, with or without the leading dashes) to `value`. Nothing
     /// changes on an error. The balance is 0 to 4, the key share 0 to 100 (a trailing `%`
-    /// is allowed) and the CPU slack 0 to 1000 thousandths (0 is 1.0x of the cores); a value outside is refused rather than clamped, so a typo is not run.
+    /// is allowed) and the CPU slack 0 to 1000 thousandths (0 is 1.0x of the cores); a
+    /// value outside is refused rather than clamped, so a typo is not run.
     ///
     /// # Errors
     /// [`FlagError`] for another flag or a value out of range.
