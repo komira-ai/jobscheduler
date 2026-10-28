@@ -282,6 +282,30 @@ fn an_operation_the_store_has_no_trace_of_keeps_its_callers_waiting() {
     assert_eq!(shown_to(&core, queued.waiter), Some(done));
 }
 
+/// Asserts that the intake poll counts the looks that found no trace of a followed operation in
+/// a row, and starts the count over when a look finds the operation queued: the warning is
+/// logged at the second look in a row, not at the second look in all. Catches: a warning for
+/// an operation that was traced in between.
+#[test]
+fn a_look_that_finds_a_followed_operation_starts_the_untraced_count_over() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    let queued = submit(&core, 1, 1);
+    let (op, queue) = ("op/0000000000000000", "queue/0000000000000000");
+    setup.store.remove(op);
+    setup.store.remove(queue);
+    let warning = "no trace in the state store: callers keep waiting";
+    let polled = |now: u64| logged(|| core.intake(at(now))).matches(warning).count();
+
+    assert_eq!(polled(2), 0, "the first look without a trace");
+    setup.store.put(op, Vec::new());
+    assert_eq!(polled(3), 0, "found running");
+    assert_eq!(shown_to(&core, queued.waiter), Some(Stage::Executing));
+    setup.store.remove(op);
+    assert_eq!(polled(4), 0, "the first look without a trace again");
+    assert_eq!(polled(5), 1, "the second in a row");
+}
+
 /// Asserts that the operations clients ask for by name, which the core does not hold, are
 /// shown what the store says of them at a follow and at an intake poll: nothing while queued,
 /// executing while leased, the result once it is there, and not looked at again after. Catches:
