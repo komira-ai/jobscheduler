@@ -54,7 +54,7 @@ Each admitted lease carries, in `Worker`'s per-lease map, a `LeaseCost { p_milli
 separate fields (the request's `Resources.memory_bytes` stays the cgroup limit, as `has_room` already treats it, so nothing that reads it changes), the profile curves used at admission (at most 64 buckets of two
 `u32`, 512 bytes; empty for a flat lease), the agent-reported start that defines `covered`, and `key_hash: u64` (for the same-key share in the score): FNV-1a 64 over the class bytes, a `0xff` separator byte, then the dedup bytes (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`). The covered and uncovered sets are derived from `NodeLoad.covered` and `started_mono` and are not stored. `Event::Heartbeat` gains
 `load: Option<NodeLoad>`. **The cost is persisted with the lease** (in the lease record that replay reads) and is the value used after a restart: a recovered lease is never re-estimated from the current estimator, so the sums
-before and after a restart agree. This is data in the pure crate; the estimator is never read inside the scheduler's decision, only at admission by the caller that produces the cost.
+before and after a restart agree. This is data in the pure crate; the estimator is never read inside the scheduler's decision, only at admission by the caller that produces the cost. The store does not yet persist the cost, so until it does a lease recovered through the store is charged its request (tracked as a jobscheduler issue).
 
 ## What goes away in kbf
 | Today | Under this design |
@@ -211,7 +211,7 @@ by the memory ladder or the pressure backstop, cancelled or requeued is truncate
   a key whose runs last a minute or two. The whole table is bounded by `--profile-store-bytes` (default 256 MiB), evicting the least recently used key (an evicted key is charged flat until it is relearned), and ages
   with the same staleness rule as the cost estimate. A row is written when a run ends, not per minute.
 - `node_minute`, per node: minute, mean cores, working-set maximum, lease count; kept 14 days (14 x 1440 rows of 32 bytes, about 0.65 MB per node), pruned daily. It is telemetry, never an admission input: the server buffers a node's rows and writes them in one batch every 5 minutes, so a scheduler crash loses at most 5 minutes of it.
-Per-lease raw minutes are not kept outside the ring. Nothing else is stored: no argument vector, path, environment, user or output, only the `key_hash`, the node
+Per-lease raw minutes are not kept outside the ring. Apart from that 32-byte minute ring in the summary, nothing else is stored: no argument vector, path, environment, user or output, only the `key_hash`, the node
 identifier the scheduler already holds, and counts. The telemetry tables are public-safe by construction.
 
 **Profile shape: absolute minutes since start, not normalised to run length.** Admission aligns a running lease by its elapsed time and does not know when it
@@ -325,7 +325,7 @@ The predicate decides whether a host may take the lease. The score decides which
 
 **Scored minutes.**
 - *Safety keys (1 and 2) look at every slot the predicate charges*: `tau` in `0..H` and the `H+` slot. A flat lease is charged flat across all 31 minutes, so a cold lease cannot be placed on a host that is at 108% at minute 10 by looking only at minute 0.
-- *The fit (key 5) looks at the lease's own life*: `tau` in `0..L-1`. `L` is the number of leading minutes `t` (0-indexed) that at least half of the key's ring runs reached, clamped to `1..H`; a flat-charged lease and a key whose runs are under a minute have `L = 1`. The minutes after `L` and the `H+` slot are not in the fit: the curve holds its tail to the lease's result, so thirty tail slots would outweigh two busy ones and the fit would become "mean level". `js-sizing` exports one `u8`, `life_minutes` (= `L`), per key from the ring it already holds.
+- *The fit (key 5) looks at the lease's own life*: `tau` in `0..L-1`. `L` is the number of leading minutes `t` (0-indexed) that at least half of the key's ring runs reached, clamped to `1..H`; a flat-charged lease and a key whose runs are under a minute have `L = 1`. The minutes after `L` and the `H+` slot are not in the fit: the curve holds its tail to the lease's result, so thirty tail slots would outweigh two busy ones and the fit would become "mean level". `js-sizing` exports one `u8`, `life_minutes` (= `L`), per key. The existing ring holds no wall time, so the per-key summary keeps a 32-byte per-run minute ring for `L` (stored format version 2; version-1 records decode with `L = 1`).
 
 **Residuals**, in parts per million of the host's own capacity, so a 16-thread and an 88-thread host compare directly. Products in `u128`, results `u64`, floor division; the signed `dc` and `dm` are `i128` (a load can exceed `Tc` by a large factor) and `xc`, `oc`, `xm`, `om` are at most `10^6` times the overload factor in `u64`. Key 1 and key 5 sums are `u64`: key 5 is at most `max(2, b) x 10^12` per slot times the sum of the weights (`2 + ... + 31 = 495`), about `2.0 x 10^15` at `b = 4` (`3.7 x 10^15` even with every weight at 31), far below `1.8 x 10^19`; key 1 is smaller.
 - `dc = Tc - Lc - Nc` (signed). `xc = max(0, dc) * 10^6 / Tc`. `oc = max(0, -dc) * 10^6 / Tc` is the load in the 10% slack zone.
