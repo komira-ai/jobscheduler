@@ -4,6 +4,7 @@ mod support;
 
 use std::time::Duration;
 
+use js_agent_wire::DEFAULT_GRACE_MS;
 use js_provider::{Observed, Provider, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{ProviderId, Request, ResourceClass};
@@ -80,6 +81,29 @@ fn a_hello_gives_the_agent_a_whole_prepare_timeout() {
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
     assert!(!recorded(&fx, 600));
     fx.clock.advance(Duration::from_millis(TIMEOUT - 1));
+    fx.registry.advance();
+    assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
+    assert!(!recorded(&fx, 600));
+    fx.clock.advance(Duration::from_millis(1));
+    fx.registry.advance();
+    assert_eq!(provider.observe(&lease(1)), Observed::Absent);
+    let kept = fx.registry.request_record(&request_of(600)).unwrap();
+    assert_eq!(kept.prepare_failures, 1);
+}
+
+/// A hello from a host whose lease is committed but not yet ready leaves the commit time
+/// alone, so an agent that keeps restarting cannot postpone the prepare deadline.
+#[test]
+fn a_hello_on_a_committed_host_keeps_the_commit_time() {
+    let (fx, _) = pool(&["a"]);
+    let mut provider = fx.provider.clone();
+    assert_eq!(provider.start(spec_of(1, 600)), StartAck::Unknown);
+    // The agent goes silent past the grace period and comes back.
+    fx.pass_grace();
+    let epoch = fx.join("a", "t");
+    assert_eq!(fx.registry.hosts()[0].lease, Some(lease(1)));
+    let gone = DEFAULT_GRACE_MS + 1;
+    wait(&fx, &[("a", epoch)], TIMEOUT - gone - 1);
     fx.registry.advance();
     assert_eq!(provider.observe(&lease(1)), Observed::Unknown);
     assert!(!recorded(&fx, 600));
