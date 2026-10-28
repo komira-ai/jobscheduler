@@ -5,6 +5,10 @@
 //!
 //! * `engine` - the replay engine (`engine/mod.rs` lists its modules).
 //! * `fixture_tests` - the committed trace and the loader that reads it.
+//! * `adapter_tests` - the scorer adapter and ranker 5.
 
+mod adapter_tests;
 mod engine;
 mod fixture_tests;
+#[path = "../load_rig/mod.rs"]
+mod load_rig;
