@@ -31,8 +31,9 @@ const OWNER_HANDOVER_WAIT: Duration = HANDOVER_GRACE.saturating_add(OWNER_CACHE_
 impl Engine {
     /// A daemon said `Hello` here as `worker`, whose newest stream is `instance`'s: this
     /// core becomes its owner, takes up the leases the store holds for it that the
-    /// scheduler does not hold, and reads what the node's session row said before the
-    /// registration replaces it. Call it before the registration is written and the worker
+    /// scheduler does not hold (a drain of the node that ended at the start, for want of a
+    /// lease, is put back in force: [`Engine::resume_drain`]), and reads what the node's
+    /// session row said before the registration replaces it. Call it before the registration is written and the worker
     /// is fed to the scheduler.
     ///
     /// The leases of a node whose owner was another frontend are kept for
@@ -61,6 +62,7 @@ impl Engine {
                 self.take_in_stored(a, op);
             }
         }
+        self.resume_drain(now, worker);
         let moved = arrival
             .previous
             .is_some_and(|owner| owner.frontend != arrival.frontend);

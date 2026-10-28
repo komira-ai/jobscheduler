@@ -55,7 +55,13 @@ pub enum Call {
     Forgot(OperationId),
     ForgotParcel(LeaseId),
     Adopted(OperationId, WaiterId, Option<Vec<u8>>),
-    Followed(OperationId, Vec<WaiterId>),
+    /// The callers shown a stage of an operation another frontend runs.
+    ShowCallers(Vec<WaiterId>, Stage),
+    /// The callers of a finished operation another frontend ran, kept.
+    KeptFinished(OperationId, Vec<WaiterId>),
+    /// An operation another frontend ran ended, with its `done/` value.
+    Followed(OperationId, Vec<u8>),
+    ShowWatched(OperationId, Stage),
 }
 
 /// An adapter that keeps what its hooks were told.
@@ -79,6 +85,12 @@ pub struct Rig {
     pub no_ending: bool,
     /// The names the core asked for, in order.
     pub named: Mutex<Vec<String>>,
+    /// The callers that gave up: no longer listening.
+    pub gone: BTreeSet<WaiterId>,
+    /// What each caller of an operation another frontend runs was last shown.
+    pub shown: BTreeMap<WaiterId, Stage>,
+    /// The operations clients ask for by name, and what each was last shown.
+    pub watching: BTreeMap<OperationId, Option<Stage>>,
 }
 
 impl Rig {
@@ -200,8 +212,45 @@ impl Adapter for Rig {
         self.calls.push(Call::Adopted(operation, waiter, parcel));
     }
 
-    fn followed(&mut self, operation: OperationId, waiters: &[WaiterId]) {
-        self.calls.push(Call::Followed(operation, waiters.to_vec()));
+    fn waiting_among(&self, callers: &[WaiterId]) -> Vec<WaiterId> {
+        let waiting = |caller: &WaiterId| {
+            let done = matches!(self.shown.get(caller), Some(Stage::Done(_)));
+            !self.gone.contains(caller) && !done
+        };
+        callers.iter().copied().filter(waiting).collect()
+    }
+
+    fn show_callers(&mut self, callers: &[WaiterId], stage: &Stage) {
+        for caller in callers {
+            self.shown.insert(*caller, stage.clone());
+        }
+        self.calls
+            .push(Call::ShowCallers(callers.to_vec(), stage.clone()));
+    }
+
+    fn keep_finished(&mut self, operation: OperationId, callers: Vec<WaiterId>) {
+        self.kept.insert(operation);
+        self.calls.push(Call::KeptFinished(operation, callers));
+    }
+
+    fn followed(&mut self, operation: OperationId, ended: &[u8]) {
+        self.calls.push(Call::Followed(operation, ended.to_vec()));
+    }
+
+    fn watched(&mut self) -> Vec<OperationId> {
+        let open = |stage: &Option<Stage>| !matches!(stage, Some(Stage::Done(_)));
+        let open: Vec<OperationId> = self
+            .watching
+            .iter()
+            .filter(|(_, stage)| open(stage))
+            .map(|(operation, _)| *operation)
+            .collect();
+        open
+    }
+
+    fn show_watched(&mut self, operation: OperationId, stage: &Stage) {
+        self.watching.insert(operation, Some(stage.clone()));
+        self.calls.push(Call::ShowWatched(operation, stage.clone()));
     }
 }
 
@@ -448,4 +497,52 @@ pub fn lines(trace: &Trace) -> Vec<String> {
 
 pub fn lease(term: u64, seq: u64) -> LeaseId {
     LeaseId::new(term, seq)
+}
+
+/// What `waiter`, a caller of an operation another frontend runs, was last shown.
+pub fn shown_to(core: &Core<Rig>, waiter: WaiterId) -> Option<Stage> {
+    core.with(|_, rig| rig.shown.get(&waiter).cloned())
+}
+
+/// A log sink a test can read back.
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+/// Runs `run` under a subscriber of its own on this thread, and returns what it logged.
+pub fn logged(run: impl FnOnce()) -> String {
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let kept = sink
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    String::from_utf8_lossy(&kept).into_owned()
 }
