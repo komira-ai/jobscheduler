@@ -78,7 +78,9 @@ fn lifetime(asked: Option<u64>) -> Result<Duration, ApiError> {
 /// when too many tokens wait to be used, 500 when the file could not be written.
 fn refusal(err: MintError) -> ApiError {
     match err {
-        MintError::NoRandom => ApiError::coded(StatusCode::SERVICE_UNAVAILABLE, "token-unavailable"),
+        MintError::NoRandom => {
+            ApiError::coded(StatusCode::SERVICE_UNAVAILABLE, "token-unavailable")
+        }
         MintError::Full => ApiError::coded(StatusCode::TOO_MANY_REQUESTS, "too-many-join-tokens"),
         MintError::Unsaved => {
             ApiError::coded(StatusCode::INTERNAL_SERVER_ERROR, "state-write-failed")

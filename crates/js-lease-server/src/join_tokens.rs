@@ -202,7 +202,10 @@ impl JoinTokens {
             entry.used_by.is_some()
                 || (entry.expires_at_ms > now.millis() && entry.instance != instance)
         });
-        let waiting = next.values().filter(|entry| entry.used_by.is_none()).count();
+        let waiting = next
+            .values()
+            .filter(|entry| entry.used_by.is_none())
+            .count();
         if waiting >= MAX_WAITING {
             return Err(MintError::Full);
         }
@@ -561,26 +564,35 @@ mod tests {
         assert!(joins.identify(&second.token).is_some());
 
         let who = credential(&second);
-        joins
-            .admit(&who, "host-a", Some(&instance("i-1")))
-            .unwrap();
+        joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
         let third = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
-        assert!(joins.identify(&second.token).is_some(), "a used token stays");
+        assert!(
+            joins.identify(&second.token).is_some(),
+            "a used token stays"
+        );
         assert!(joins.identify(&third.token).is_some());
 
         clock.set(Timestamp::from_millis(T0 + 31 * 60 * 1000));
         let fourth = joins.mint(instance("i-9"), DEFAULT_TTL).unwrap();
-        assert!(joins.identify(&third.token).is_none(), "an expired token goes");
+        assert!(
+            joins.identify(&third.token).is_none(),
+            "an expired token goes"
+        );
         assert!(joins.identify(&fourth.token).is_some());
 
         for n in 0..MAX_WAITING - 1 {
-            joins.mint(instance(&format!("w-{n}")), DEFAULT_TTL).unwrap();
+            joins
+                .mint(instance(&format!("w-{n}")), DEFAULT_TTL)
+                .unwrap();
         }
         assert_eq!(
             joins.mint(instance("one-more"), DEFAULT_TTL).err(),
             Some(MintError::Full)
         );
-        assert!(joins.identify(&fourth.token).is_some(), "a refusal drops nothing");
+        assert!(
+            joins.identify(&fourth.token).is_some(),
+            "a refusal drops nothing"
+        );
         let again = joins.mint(instance("w-0"), DEFAULT_TTL);
         assert!(again.is_ok(), "a replacement needs no room");
     }
@@ -654,7 +666,10 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load(&path).is_err(), "a file others can read is refused");
         let under_a_file = path.join("below");
-        assert!(load(&under_a_file).is_err(), "a path that cannot be looked at");
+        assert!(
+            load(&under_a_file).is_err(),
+            "a path that cannot be looked at"
+        );
         let missing = path.with_file_name("missing.joins");
         assert_eq!(load(&missing).unwrap(), Entries::new());
     }

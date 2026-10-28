@@ -4,6 +4,7 @@
 use std::fs;
 use std::time::Duration;
 
+use js_lease::Clock;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
@@ -32,10 +33,11 @@ async fn minted(h: &Harness, instance: &str) -> String {
 
 /// A token minted for `instance` that lasts `ttl_seconds`; its expiry is checked.
 async fn minted_for(h: &Harness, instance: &str, ttl_seconds: u64) -> String {
-    let body = json!({ "provider": "lambdalabs", "instance_id": instance, "ttl_seconds": ttl_seconds });
+    let body =
+        json!({ "provider": "lambdalabs", "instance_id": instance, "ttl_seconds": ttl_seconds });
     let reply = h.call("POST", MINT, Some(&body)).await;
     assert_eq!(reply.status, 201, "{}", reply.body);
-    let expiry = crate::support::T0 + ttl_seconds * 1000;
+    let expiry = h.clock.now().millis() + ttl_seconds * 1000;
     assert_eq!(reply.json()["expires_at_ms"].as_u64(), Some(expiry));
     reply.json()["token"].as_str().unwrap().to_string()
 }
@@ -96,13 +98,19 @@ async fn a_second_use_by_another_host_is_refused() {
     let token = minted(&h, "i-1").await;
     let first = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     let second = hello(&h, &token, "burst-2", "i-1").await;
-    assert_eq!((second.status, code(&second)), (403, "join-token-used".into()));
+    assert_eq!(
+        (second.status, code(&second)),
+        (403, "join-token-used".into())
+    );
     let stolen = Session {
         host: "burst-2".into(),
         ..first.clone()
     };
     let beat = beat_with(&h, &token, &stolen).await;
-    assert_eq!((beat.status, code(&beat)), (403, "join-token-not-admitted".into()));
+    assert_eq!(
+        (beat.status, code(&beat)),
+        (403, "join-token-not-admitted".into())
+    );
     assert_eq!(beat_with(&h, &token, &first).await.status, 200);
     h.clock.advance(secs(60));
     let again = hello(&h, &token, "burst-1", "i-1").await;
@@ -124,7 +132,10 @@ async fn an_expired_token_is_refused() {
     let other = minted_for(&h, "i-3", 10).await;
     h.clock.advance(secs(1));
     let late = hello(&h, &other, "burst-3", "i-3").await;
-    assert_eq!((late.status, code(&late)), (403, "join-token-expired".into()));
+    assert_eq!(
+        (late.status, code(&late)),
+        (403, "join-token-expired".into())
+    );
     assert_eq!(beat_with(&h, &kept, &held).await.status, 200);
 }
 
@@ -137,9 +148,15 @@ async fn a_wrong_instance_is_refused_and_the_token_stays_good() {
     let h = start_agents("joins_instance", false).await;
     let token = minted(&h, "i-1").await;
     let other = hello(&h, &token, "burst-1", "i-2").await;
-    assert_eq!((other.status, code(&other)), (403, "join-token-instance".into()));
+    assert_eq!(
+        (other.status, code(&other)),
+        (403, "join-token-instance".into())
+    );
     let plain = post(&h, "/v1/agent/hello", Some(&token), &hello_body("burst-1")).await;
-    assert_eq!((plain.status, code(&plain)), (403, "join-token-instance".into()));
+    assert_eq!(
+        (plain.status, code(&plain)),
+        (403, "join-token-instance".into())
+    );
     assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 200);
 }
 
@@ -156,7 +173,10 @@ async fn an_unused_token_cannot_heartbeat() {
         secret: "x".into(),
     };
     let reply = beat_with(&h, &token, &beat).await;
-    assert_eq!((reply.status, code(&reply)), (403, "join-token-not-admitted".into()));
+    assert_eq!(
+        (reply.status, code(&reply)),
+        (403, "join-token-not-admitted".into())
+    );
 }
 
 /// Asserts that the token shows only in the answer to the mint: no other answer, no log
@@ -204,7 +224,11 @@ async fn minting_needs_the_client_token() {
     let body = json!({ "provider": "lambdalabs", "instance_id": "i-1" })
         .to_string()
         .into_bytes();
-    for token in [None, Some("wrong-token-0123456789-abcdefghijklmnop"), Some(JOIN)] {
+    for token in [
+        None,
+        Some("wrong-token-0123456789-abcdefghijklmnop"),
+        Some(JOIN),
+    ] {
         let reply = request(h.addr(), "POST", MINT, token, Some(&body)).await;
         assert_eq!(reply.status, 401, "{token:?}");
         assert!(reply.body.is_empty(), "{}", reply.body);
@@ -221,7 +245,13 @@ async fn minting_needs_the_client_token() {
         let reply = h.call("POST", MINT, Some(&body)).await;
         assert_eq!(reply.status, 400, "{body}: {}", reply.body);
     }
-    let unused = hello(&h, "no-such-token-0123456789-abcdefghijkl", "burst-1", "i-1").await;
+    let unused = hello(
+        &h,
+        "no-such-token-0123456789-abcdefghijkl",
+        "burst-1",
+        "i-1",
+    )
+    .await;
     assert_eq!(unused.status, 401);
 }
 
@@ -277,7 +307,10 @@ async fn a_restart_keeps_an_unused_token_and_a_used_one() {
 
     let h = restarted(first, false).await;
     let stolen = hello(&h, &used, "burst-2", "i-1").await;
-    assert_eq!((stolen.status, code(&stolen)), (403, "join-token-used".into()));
+    assert_eq!(
+        (stolen.status, code(&stolen)),
+        (403, "join-token-used".into())
+    );
     let own = hello(&h, &used, "burst-1", "i-1").await;
     assert_eq!(own.status, 200, "{}", own.body);
     let late = hello(&h, &unused, "burst-2", "i-2").await;
