@@ -68,8 +68,7 @@ impl Settings {
     /// `now + boot_grace` while the loop lasts and never grows it beyond that.
     ///
     /// This grace applies to reservation records only. Lease records have no restart
-    /// grace in this crate; the lease-side grace is wired by the server step that
-    /// persists reservation marks and adds the boot-grace flag, and
+    /// grace in this crate; the lease-side grace is the server's boot-grace flag, and
     /// that setting is separate from this one.
     pub fn with_restart_grace(mut self, boot_grace: Duration, regain_grace: Duration) -> Self {
         self.boot_grace = boot_grace;

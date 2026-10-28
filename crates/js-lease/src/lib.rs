@@ -18,6 +18,9 @@
 //!   retries both.
 //! - **Time acts in one place.** Only [`LeaseTable::tick`] expires a lease. Between
 //!   ticks a lapsed lease is still listed, and a renew of it is refused as expired.
+//!   The server's tick (`js-lease-server`) ticks the table first and then advances the
+//!   agent registry, so a registry that reaches its own deadline (a reservation's drain
+//!   deadline, a prepare deadline) acts on the same tick and not at the next poll.
 //! - **Wall time bounds a lease's life, as the clock reads it.** A lease is never
 //!   renewed past its acquisition plus the request's maximum wall time. The bound is a
 //!   wall-clock instant, so a system clock stepped back (a time sync, a resumed VM)

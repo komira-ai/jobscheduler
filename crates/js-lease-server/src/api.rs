@@ -90,8 +90,9 @@ impl Shared {
         self.save_errors.load(Ordering::SeqCst)
     }
 
-    /// Ticks the table, logs what changed and counts a failed write. The lock is held
-    /// for the table call alone.
+    /// Ticks the table, then advances the agent registry (when the server has one) so its
+    /// reservations and prepare deadlines act on this tick, logs what changed and counts
+    /// a failed write. The lock is held for the table call alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = self.table.lock().await.tick();
         let counts = match &self.agents {

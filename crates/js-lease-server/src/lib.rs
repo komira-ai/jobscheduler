@@ -29,7 +29,7 @@
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
-//! | `--tick` | how often the table is ticked, `5s` unless given |
+//! | `--tick` | how often the table is ticked and, with agent registration on, the agent registry is advanced (reservation drain and prepare deadlines), `5s` unless given |
 //! | `--tls-cert`, `--tls-key` | PEM files; both or neither. The key file must be owner-only like the token file. Both are read at start only: renew a certificate by restarting the server |
 //! | `--max-connections` | connections open at once, `256` unless given; at the cap the server stops accepting |
 //! | `--handshake-timeout` | a TLS client's time to finish its handshake, `10s` |
@@ -296,7 +296,7 @@
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
-//! ticks the table at every tick of its [`Ticker`] (a timer of `--tick` in production),
+//! ticks the table (then advances the agent registry, when agent registration is on) at every tick of its [`Ticker`] (a timer of `--tick` in production),
 //! logs what a tick changed, and counts the ticks that could not write the lease file
 //! ([`Running::save_errors`]); `/healthz` answers 503 once the loop has stopped. On
 //! SIGTERM or ctrl-c the server stops accepting, gives the requests
