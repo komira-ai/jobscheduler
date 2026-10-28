@@ -6,12 +6,15 @@
 //! unservable is judged from these rows, which hold every frontend's daemons, and not from
 //! the daemons of one frontend.
 
+use std::collections::BTreeSet;
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use js_caps::NodeCaps;
+use js_sched::Request;
 use js_state::{Cond, Txn};
-use js_types::sched::WorkerId;
 use js_types::sched::fence::LEASE_GRACE;
+use js_types::sched::{Resources, WorkerId};
 
 use crate::{Rows, StateError, WorkerUp, keys};
 
@@ -56,5 +59,43 @@ impl Rows {
         };
         let renewed = Txn::new().put_ttl(key, row.value, LEASE_GRACE, Cond::Version(row.version));
         self.commit(renewed)
+    }
+
+    /// The capabilities and capacity of every daemon the session rows list that is not in
+    /// `connected` (the nodes of this frontend): the daemons of the other frontends of the
+    /// state store, each renewed by the frontend it is connected to.
+    ///
+    /// # Errors
+    /// The store cannot be read, or a session row is not a daemon's registration.
+    pub fn remote_sessions(
+        &self,
+        connected: &BTreeSet<WorkerId>,
+    ) -> Result<Vec<(NodeCaps, Resources)>, StateError> {
+        let mut remote = Vec::new();
+        for (key, row) in self.store.scan_prefix(keys::SESSION)? {
+            if keys::worker_of(keys::SESSION, &key).is_some_and(|node| connected.contains(&node)) {
+                continue;
+            }
+            let up = self.session_row(&key, &row)?;
+            remote.push((up.caps, up.capacity));
+        }
+        Ok(remote)
+    }
+
+    /// Whether a daemon session in the store, of any frontend, could run `request`: the
+    /// session rows hold each connected daemon's capabilities and capacity, written by the
+    /// frontend it is connected to, and expire unless that frontend renews them. An
+    /// operation is unservable only if none could.
+    ///
+    /// # Errors
+    /// The store cannot be read, or a session row is not a daemon's registration.
+    pub fn session_could_run(&self, request: &Request) -> Result<bool, StateError> {
+        for (key, row) in self.store.scan_prefix(keys::SESSION)? {
+            let up = self.session_row(&key, &row)?;
+            if request.runnable_on(&up.caps, &up.capacity) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

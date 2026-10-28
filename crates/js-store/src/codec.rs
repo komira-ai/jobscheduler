@@ -104,6 +104,14 @@ impl Rows {
         }
     }
 
+    /// The registration a `session/` row holds.
+    pub(crate) fn session_row(&self, key: &str, row: &Versioned) -> Result<WorkerUp, StateError> {
+        match self.codec.read(key, &row.value)? {
+            Value::Session(up) => Ok(up),
+            other => Err(wrong(key, &other, "not a daemon registration")),
+        }
+    }
+
     /// The request an `op/` row holds.
     pub(crate) fn request_row(&self, key: &str, row: &Versioned) -> Result<Request, StateError> {
         match self.codec.read(key, &row.value)? {
