@@ -9,6 +9,9 @@
 //!   ([`release`]): whether a commit of main is released and as which version, and setting
 //!   that version in the CI checkout before the build (docs/release.md).
 //!
+//! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
+//!   test rather than a verb: `cargo test -p xtask --test layering`.
+//!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
 
@@ -19,6 +22,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 pub mod fetch;
+pub mod layering;
 pub mod release;
 
 /// Why a verb failed.
