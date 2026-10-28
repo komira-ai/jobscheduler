@@ -525,9 +525,10 @@ fn a_claim_made_again_over_another_frontends_row_reports_that_frontend() {
 
 /// Asserts that two writers on one store, each of them the owner by its own belief, cannot
 /// both write the node's lease: the frontend the daemon said `Hello` to last writes it, and
-/// the other, whose write was ready first, is refused as stale and leaves the store as the
-/// owner has it. The store is a plain fake with no landing writes: the loser lost to the
-/// rows alone.
+/// the other, which reads the owner row after that arrival, is refused as stale and leaves
+/// the store as the owner has it. The two handles run one after the other on a plain fake;
+/// a change of hands between one writer's read and its commit is the job of
+/// `a_node_that_changes_hands_between_the_read_and_the_commit_is_stale`.
 #[test]
 fn two_writers_on_one_fake_the_loser_gets_stale_owner() {
     let store = Arc::new(js_state::fake::Fake::with_flaw(
