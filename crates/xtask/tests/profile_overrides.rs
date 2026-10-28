@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 /// The packages whose simulations run in CI test builds.
 const OPTIMISED: [&str; 4] = ["js-sched", "js-sim", "js-sizing", "js-types"];
 
-/// The profiles that build test code.
-const PROFILES: [&str; 2] = ["dev", "test"];
 
 /// The repository root.
 fn repo() -> PathBuf {
@@ -92,16 +90,34 @@ fn every_override_names_a_workspace_package() {
 }
 
 #[test]
-fn the_simulation_packages_are_optimised_on_both_profiles() {
+fn the_simulation_packages_are_optimised_on_the_test_profile_only() {
     let manifest = root();
-    for profile in PROFILES {
-        for package in OPTIMISED {
-            assert!(
-                optimised(&manifest, profile, package),
-                "profile.{profile}.package.{package} lacks opt-level = 2"
-            );
-        }
+    for package in OPTIMISED {
+        assert!(
+            optimised(&manifest, "test", package),
+            "profile.test.package.{package} lacks opt-level = 2"
+        );
     }
+    let others: Vec<_> = overrides(&manifest)
+        .into_iter()
+        .filter(|(profile, _)| profile != "test")
+        .collect();
+    assert_eq!(others, Vec::new(), "only `test` carries package overrides");
+}
+
+#[test]
+fn the_coverage_profile_is_dev_and_the_coverage_job_builds_with_it() {
+    let manifest = root();
+    let coverage = &manifest["profile"]["coverage"];
+    assert_eq!(coverage["inherits"].as_str(), Some("dev"));
+    assert!(coverage.get("opt-level").is_none());
+    let ci = std::fs::read_to_string(repo().join(".github/workflows/ci.yml")).expect("ci.yml");
+    let run = ci
+        .lines()
+        .find(|l| l.contains("llvm-cov --workspace"))
+        .expect("the coverage run line");
+    assert!(run.contains("--profile coverage"), "{run}");
+    assert!(ci.contains("root=target/llvm-cov-target/coverage"));
 }
 
 #[test]
