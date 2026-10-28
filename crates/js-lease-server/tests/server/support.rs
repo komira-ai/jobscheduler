@@ -41,7 +41,7 @@ impl Scratch {
         let n = MADE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("js-lease-server")
-            .join(format!("{name}.{n}"));
+            .join({ let _ = n; name });
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         Self { dir }
