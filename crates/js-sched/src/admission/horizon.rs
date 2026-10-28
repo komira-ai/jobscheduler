@@ -112,10 +112,10 @@ pub(crate) fn refusal(
 /// the flat memory costs of every lease on the worker, cold and demoted ones included,
 /// and the VMs' booked memory, with the new lease's, are above `(1 + d) * C_mem`. It
 /// holds for every action lease, charged by curve or flat, on a worker charged by
-/// measurement or by prediction alone; `None` when the guard is off. Whole-machine
-/// leases and VMs are never judged (a VM keeps the booked-capacity rule), and an action
-/// at the whole host's memory runs on a worker with no lease, so nothing is summed
-/// beside it.
+/// measurement or by prediction alone; `None` when the guard is off. A VM is judged by
+/// the same sum, with its booked memory as its cost, besides the booked-capacity rule
+/// it keeps. Whole-machine leases are never judged, and an action or a VM at the whole
+/// host's memory runs on a worker with no lease, so it passes on its own cost.
 pub(crate) fn flat_memory_refusal(
     t: &Totals,
     cost: &LeaseCost,

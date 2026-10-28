@@ -216,6 +216,9 @@ impl Servable {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, attempt.avoid);
         let by_load = adm.by_load() && request.kind == LeaseKind::Action;
+        // A VM is placed by its booking, and under load admission also held to the
+        // flat-memory guard.
+        let vm_by_load = adm.by_load() && request.kind == LeaseKind::Vm;
         let now = self.now;
         // The workers that pass everything but the load predicate.
         let candidates: Vec<&WorkerId> = self.memo[at]
@@ -227,6 +230,7 @@ impl Servable {
                     && !skip.contains(*name)
                     && workers[*name].has_room(request, by_load)
                     && (!attempt.not_whole || !workers[*name].exclusive(request))
+                    && (!vm_by_load || Self::vm_within_flat_memory(adm, &workers[*name], attempt))
             })
             .collect();
         let mut blocked = None;
@@ -291,6 +295,16 @@ impl Servable {
             }),
             blocked: None,
         }
+    }
+
+    /// Whether a VM of `attempt` passes the flat-memory guard on `worker`: its booked
+    /// memory is its flat cost, summed with the flat costs of the leases there and the
+    /// other VMs' bookings.
+    fn vm_within_flat_memory(adm: &Admission, worker: &Worker, attempt: &Attempt<'_>) -> bool {
+        worker
+            .load_state
+            .flat_memory_refusal(&attempt.cost, &worker.capacity, &adm.cfg)
+            .is_none()
     }
 
     /// The candidates the predicate admits, each with its load and charge, and why none
