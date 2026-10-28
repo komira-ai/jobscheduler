@@ -50,10 +50,13 @@
 //!   label, and stops the ones that are running (at most [`RESCUE_MAX`], each call bounded
 //!   by the runner's [`CALL_LIMIT`] and the stop grace, the whole by the [`Rescue`] bound,
 //!   [`RESCUE_BOUND`] unless the stop grace is longer, on a thread that is left behind
-//!   when the bound passes). Each one that could not be stopped is reported as a line. What
-//!   is left is the supervisor's: it restarts the agent, whose next process adopts the
-//!   containers that still exist and enforces their limits. So the agent's own time to
-//!   leave is the wind-down wait plus the rescue bound, minutes and not hours.
+//!   when the bound passes). A container that cannot be read is still stopped, and each one
+//!   that could not be read or stopped is reported as a line. What is left is the
+//!   supervisor's: it restarts the agent, whose next process adopts the containers that
+//!   still exist and enforces their limits. The supervisor must restart the agent after
+//!   every exit, status 0 and 2 included (systemd: `Restart=always`, no
+//!   `RestartPreventExitStatus=2`). So the agent's own time to leave is the wind-down wait
+//!   plus the rescue bound, minutes and not hours.
 //!
 //! A start the worker is already inside when it is closed is not undone: its container may
 //! be made after the rescue listed, and then it is the next process's to adopt.
@@ -202,26 +205,38 @@ impl Rescue {
             Ok((runtime, _)) => runtime,
             Err(why) => return vec![format!("rescue: no runtime: {why}")],
         };
-        let found = match runtime.list_labelled() {
-            Ok(found) => found,
+        let ids = match runtime.list_ids() {
+            Ok(ids) => ids,
             Err(why) => return vec![format!("rescue: cannot list the containers: {why}")],
         };
-        // Exited containers (the listing holds them too) must not use up the limit.
-        let found: Vec<_> = found
-            .into_iter()
-            .filter(|one| !matches!(runtime.poll(&one.id), Ok(Status::Exited(_))))
-            .collect();
-        let stopped = found.iter().take(self.max).filter_map(|one| {
-            let done = runtime.stop(&one.id, self.stop_grace);
+        // Exited containers (the listing holds them too) must not use up the limit. One
+        // that cannot be read is still tried: it may be running.
+        let mut unread = Vec::new();
+        let mut found = Vec::new();
+        for id in ids {
+            match runtime.poll(&id) {
+                Ok(Status::Exited(_)) => {}
+                Ok(_) => found.push(id),
+                Err(why) => {
+                    unread.push(format!(
+                        "rescue: cannot read {}: {why}; stopping it anyway",
+                        id.0
+                    ));
+                    found.push(id);
+                }
+            }
+        }
+        let stopped = found.iter().take(self.max).filter_map(|id| {
+            let done = runtime.stop(id, self.stop_grace);
             done.err()
-                .map(|why| format!("rescue: cannot stop {}: {why}", one.id.0))
+                .map(|why| format!("rescue: cannot stop {}: {why}", id.0))
         });
         let stopped: Vec<String> = stopped.collect();
         let skipped = found
             .iter()
             .skip(self.max)
-            .map(|one| format!("rescue: {} not tried: too many containers", one.id.0));
-        stopped.into_iter().chain(skipped).collect()
+            .map(|id| format!("rescue: {} not tried: too many containers", id.0));
+        unread.into_iter().chain(stopped).chain(skipped).collect()
     }
 
     /// [`Rescue::stop_all`] on a thread of its own, waited for at most the bound. A thread

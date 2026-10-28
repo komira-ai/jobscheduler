@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
-    Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status,
+    Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
 };
 use js_agent::{Machine, RuntimeBuild, SharedClock};
 
@@ -40,7 +40,7 @@ impl Clock for TestClock {
 
 struct Container {
     run_id: String,
-    spec: ContainerSpec,
+    labels: BTreeMap<String, String>,
     exit: Option<Exit>,
 }
 
@@ -154,9 +154,26 @@ impl World {
         );
     }
 
-    /// The runtime of this world.
-    pub fn runtime(&self) -> Runtime {
-        Runtime(self.clone())
+    /// The runtime of the agent `host_id` on this world: it labels what it makes with the
+    /// host id and lists only what carries the run label and its own host id.
+    pub fn runtime(&self, host_id: &str) -> Runtime {
+        Runtime(self.clone(), host_id.to_owned())
+    }
+
+    /// A running container of the run `run_id` that the agent `host_id` made, which no
+    /// runtime of another agent may list or stop.
+    pub fn leak(&self, run_id: &str, host_id: &str) {
+        let mut state = self.lock();
+        state.next += 1;
+        let id = format!("c{}", state.next);
+        let labels = [(label::RUN, run_id), (label::AGENT, host_id)];
+        let labels = labels.map(|(key, value)| (key.to_owned(), value.to_owned()));
+        let container = Container {
+            run_id: run_id.to_owned(),
+            labels: labels.into(),
+            exit: None,
+        };
+        state.containers.insert(id, container);
     }
 }
 
@@ -181,7 +198,7 @@ fn failed(call: &str) -> RuntimeError {
 }
 
 /// The container runtime the worker thread makes.
-pub struct Runtime(World);
+pub struct Runtime(World, String);
 
 impl ContainerRuntime for Runtime {
     fn create_and_start(&mut self, spec: &ContainerSpec) -> Result<ContainerId, RuntimeError> {
@@ -206,9 +223,11 @@ impl ContainerRuntime for Runtime {
         }
         state.next += 1;
         let id = format!("c{}", state.next);
+        let mut labels = spec.labels.clone();
+        labels.insert(label::AGENT.to_owned(), self.1.clone());
         let container = Container {
             run_id: spec.run_id.clone(),
-            spec: spec.clone(),
+            labels,
             exit: None,
         };
         state.containers.insert(id.clone(), container);
@@ -273,12 +292,17 @@ impl ContainerRuntime for Runtime {
         if state.fails("list") {
             return Err(failed("list"));
         }
+        let mine = |container: &&Container| {
+            let agent = container.labels.get(label::AGENT);
+            container.labels.contains_key(label::RUN) && agent == Some(&self.1)
+        };
         Ok(state
             .containers
             .iter()
+            .filter(|(_, container)| mine(container))
             .map(|(id, container)| Found {
                 id: ContainerId(id.clone()),
-                labels: container.spec.labels.clone(),
+                labels: container.labels.clone(),
                 running_ms: 0,
                 never_started: false,
             })
@@ -337,13 +361,13 @@ impl Machine for FakeMachine {
 
     fn runtime(
         &self,
-        _build: &RuntimeBuild<'_>,
+        build: &RuntimeBuild<'_>,
     ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String> {
         match self.build {
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
             Build::Panics => panic!("the runtime panics while it is made"),
             Build::Fine | Build::HostNotSeen => Ok((
-                Box::new(self.world.runtime()),
+                Box::new(self.world.runtime(build.host_id)),
                 vec!["the fake engine is ready".to_owned()],
             )),
         }
