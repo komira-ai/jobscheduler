@@ -115,3 +115,34 @@ impl Store for TestStore {
         self.fake.now()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use js_state::{Cond, Revision};
+
+    use super::*;
+
+    /// Catches: the wrapper dropping a call it forwards, so a test over it reads a
+    /// different store than the one written.
+    #[test]
+    fn the_wrapper_forwards_what_it_does_not_change() {
+        let store = TestStore::new();
+        store
+            .txn(Txn::new().put("p/a", b"1".to_vec(), Cond::Any))
+            .unwrap()
+            .unwrap();
+        let page = store
+            .scan_range(ScanRange::new("p/", NonZeroUsize::MIN))
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(
+            store.changes(Revision::default(), 10).unwrap().rows.len(),
+            1
+        );
+        assert_eq!(store.reap_expired().unwrap(), 0);
+        assert_eq!(store.commit_stats(), store.fake.commit_stats());
+        assert_eq!(store.now(), store.fake.now());
+    }
+}

@@ -554,6 +554,32 @@ mod tests {
         assert_eq!(ps.run_ended(&pk(key), &run(), day).unwrap(), Admitted::Yes);
     }
 
+    /// Catches: eviction that deletes the key being written when it is the least recently
+    /// used one (its own row would go with the write that replaces it), or that stops at
+    /// it and leaves the budget exceeded.
+    #[test]
+    fn the_key_being_written_is_never_its_own_victim() {
+        let size_after = |runs: usize| {
+            let mut probe = open(&TestStore::new(), 1 << 20, 10);
+            for _ in 0..runs {
+                learn_one(&mut probe, "x", 10);
+            }
+            probe.total_bytes()
+        };
+        let (one, two) = (size_after(1), size_after(2));
+        assert!(two > one);
+        let store = TestStore::new();
+        let mut ps = open(&store, one + two - 1, 10);
+        learn_one(&mut ps, "a", 10);
+        learn_one(&mut ps, "b", 10);
+        assert_eq!(stored(&store), ["a", "b"], "both fit while a has one run");
+        // `a` is the least recently used, and its second run no longer fits beside `b`.
+        learn_one(&mut ps, "a", 10);
+        assert_eq!(stored(&store), ["a"]);
+        assert_eq!(ps.profile(&pk("a")).unwrap().unwrap().runs, 2);
+        assert_eq!(ps.total_bytes(), two);
+    }
+
     /// Catches: a budget one byte short being treated as met.
     #[test]
     fn one_byte_over_the_budget_evicts_one_key() {
@@ -676,11 +702,10 @@ mod tests {
             let _ = fake.txn(Txn::new().put(name.clone(), empty.clone(), Cond::Any));
         });
         let err = ps.run_ended(&pk("a"), &run(), 10).unwrap_err();
-        assert!(
-            matches!(err, ProfileError::Conflict(ref k) if k == "a"),
-            "{err}"
+        assert_eq!(
+            err.to_string(),
+            "profile row a was changed by another writer"
         );
-        assert!(err.to_string().contains("another writer"));
     }
 
     /// Catches: a read writing (the use of a key must cost no write), a write per touch, a
