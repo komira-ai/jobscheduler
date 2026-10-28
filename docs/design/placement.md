@@ -26,5 +26,4 @@ is capped per pool and per consumer). Large non-whole requests have no
 reservation today (`docs/design/simulation.md`, scenario F1.5, documents this); R1 forbids adding reservation admission, so the design
 adds none and the scenario is kept as a known behaviour.
 
-
 The rule that replaces the CPU and memory part of 6.3 for actions, from measured and predicted load, is in [placement-by-load.md](placement-by-load.md).
