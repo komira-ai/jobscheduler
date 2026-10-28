@@ -10,7 +10,7 @@
 //! does no I/O but through the store, so the crate is pure in the sense of `clippy.toml`.
 //!
 //! The bytes of the values of the `op/`, `lease/` and `session/` rows are not this crate's:
-//! the embedding server supplies a [`RowCodec`], and an [`Ext`] for the rows only it has.
+//! the embedding server supplies a [`RowCodec`].
 //!
 //! Several frontends may share one store. Each reserves a block of [`ID_BLOCK`] operation
 //! ids or lease sequences with one compare-and-set write of `max(stored, its own next) +
@@ -36,7 +36,6 @@ mod codec;
 mod cordon;
 mod epoch;
 mod error;
-mod ext;
 pub mod keys;
 mod owner;
 mod session;
@@ -48,7 +47,6 @@ pub use codec::{RowCodec, Value, WorkerUp};
 pub use cordon::StoredCordon;
 pub use epoch::{EpochBump, EpochPolicy};
 pub use error::StateError;
-pub use ext::Ext;
 pub use owner::{Arrival, OWNER_CACHE_TTL, Owner};
 pub use session::SESSION_RENEWAL;
 
