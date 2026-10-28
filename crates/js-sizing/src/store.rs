@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::key::{Day, Instance, Key, Level};
-use crate::run::{Bounds, Hint, Observed, Run};
+use crate::run::{Bounds, CpuSample, Hint, Observed, Run};
 use crate::summary::{MAX_DAY, N_MIN, Summary};
 
 /// A key idle for more than this many days is stale: no estimate, dropped by
@@ -41,6 +41,18 @@ pub struct Estimate {
     pub cpu_millis: u32,
     /// The level of the summary the sizes came from.
     pub level: Level,
+}
+
+/// How the CPU measurements of finished runs were treated, since the store was made.
+/// Pure data: the caller exports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CpuCounts {
+    /// Kept because the node was quiet.
+    pub kept: u64,
+    /// Kept under pressure (or with no reading) because they exceeded the estimate.
+    pub kept_under_pressure: u64,
+    /// Dropped under pressure (or with no reading) for not exceeding the estimate.
+    pub dropped: u64,
 }
 
 /// Summaries keyed by `Key`, with per-instance counts.
@@ -124,6 +136,7 @@ pub struct Summaries {
     per_instance: usize,
     max_pinned: usize,
     unpinned: u64,
+    cpu_counts: CpuCounts,
 }
 
 impl Default for Summaries {
@@ -143,6 +156,7 @@ impl Summaries {
             per_instance: per_instance.max(2),
             max_pinned: max_pinned.max(2),
             unpinned: 0,
+            cpu_counts: CpuCounts::default(),
         }
     }
 
@@ -169,6 +183,12 @@ impl Summaries {
             self.apply(&l2, run, now, bounds);
         }
         let observed = self.apply(key, run, now, bounds);
+        match observed.cpu {
+            CpuSample::Kept => self.cpu_counts.kept += 1,
+            CpuSample::Raised => self.cpu_counts.kept_under_pressure += 1,
+            CpuSample::Dropped => self.cpu_counts.dropped += 1,
+            CpuSample::Skipped => {}
+        }
         self.evict(key, &l2);
         observed
     }
@@ -198,6 +218,20 @@ impl Summaries {
             self.unpinned += u64::from(summary.holds_safety_state());
             self.lru.put(key, summary);
         }
+    }
+
+    /// What happened to the CPU measurements of the runs fed in so far.
+    pub fn cpu_counts(&self) -> CpuCounts {
+        self.cpu_counts
+    }
+
+    /// Keys held (both levels) that have no CPU sample, so their CPU is not learned.
+    pub fn unsampled_keys(&self) -> usize {
+        [&self.lru, &self.pinned]
+            .iter()
+            .flat_map(|table| table.map.values())
+            .filter(|summary| !summary.has_cpu_sample())
+            .count()
     }
 
     /// How many times a key with safety state could not be given a place in the safety
