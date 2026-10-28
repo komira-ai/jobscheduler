@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use js_sched::fence::LEASE_GRACE;
-use js_types::sched::{LeaseId, OperationId};
+use js_types::sched::{LeaseId, OperationId, WaiterId};
 
 use super::write_path;
 use super::{CoreHarness, Released, Stream};
@@ -35,7 +35,7 @@ pub enum Scenario {
     /// lease the newest stream is about to list; and a `Start` goes to the stream that is
     /// the worker's newest when it leaves.
     StaleHeartbeatIsNotFed,
-    /// A write the store refused is not lost, however many times it is refused: the held
+    /// A write the store refused is not lost, refused up to six times in a row: the held
     /// records are written again, in the order the scheduler asked, and each `Start` is
     /// released once.
     RefusedWriteIsRetriedInOrder,
@@ -190,6 +190,20 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
         operations(&harness.observed().released) == [first, second, third],
         "each operation is started once across both restarts, a joined one once",
     );
+    let answered = harness.observed().answered;
+    let waiters: Vec<WaiterId> = answered
+        .iter()
+        .filter(|a| a.operation == second)
+        .flat_map(|a| a.waiters.clone())
+        .collect();
+    notes.expect(
+        waiters == [WaiterId(2)],
+        "a joined operation is recovered for its first caller, not the joiner",
+    );
+    notes.expect(
+        third.0 == second.0 + 1,
+        "a join does not use up an operation id: the next operation is numbered next",
+    );
     for operation in [first, second, third] {
         notes.expect(
             answers_of(harness, operation) == 1,
@@ -251,13 +265,26 @@ fn stale_heartbeat_is_not_fed<H: CoreHarness>(harness: &mut H, notes: &mut Notes
         harness.observed().released.len() == 1,
         "a heartbeat from a replaced stream did not requeue the lease",
     );
-    harness.heartbeat(NODE_A, new, &[nth(&first, 0).1]);
+    let lease = nth(&first, 0).1;
+    harness.heartbeat(NODE_A, new, &[lease]);
+
+    // A second replacement: heartbeats of both earlier streams, one and two generations
+    // old, arrive late and list nothing.
+    let newest = harness.worker_up(NODE_A);
+    harness.heartbeat(NODE_A, old, &[]);
+    harness.heartbeat(NODE_A, new, &[]);
+    harness.advance(SECOND);
+    notes.expect(
+        harness.observed().released.len() == 1,
+        "heartbeats from streams replaced twice over did not requeue the lease",
+    );
+    harness.heartbeat(NODE_A, newest, &[lease]);
     harness.submit(2, 2);
     harness.advance(SECOND);
 
     let all = harness.observed().released;
     notes.expect(
-        all.iter().map(|s| s.stream).collect::<Vec<_>>() == [old, new],
+        all.iter().map(|s| s.stream).collect::<Vec<_>>() == [old, newest],
         "each Start went to the worker's newest stream when it left",
     );
 }

@@ -65,9 +65,9 @@ pub(super) fn start_waits_for_commit<H: CoreHarness>(harness: &mut H, notes: &mu
 
 pub(super) fn refused_write_is_retried<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
     harness.worker_up(NODE_A);
-    // Refused once, twice, three and four times: a record held behind a refusal keeps its
+    // Refused once up to six times: a record held behind a refusal keeps its
     // place and is not given up however often the store says no.
-    for depth in 1..=4u8 {
+    for depth in 1..=6u8 {
         let started = harness.observed().released.len();
         let first = harness.submit(u64::from(2 * depth - 1), 2 * depth - 1);
         let second = harness.submit(u64::from(2 * depth), 2 * depth);
