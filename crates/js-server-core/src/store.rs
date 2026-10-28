@@ -544,10 +544,9 @@ impl Engine {
             leases = Some(granted.map(|grant| grant.lease).collect::<Vec<_>>());
             Ok(())
         });
-        leases.map_or(NodeHeld::Unread, |mut leases| {
-            leases.sort();
-            NodeHeld::Elsewhere { leases }
-        })
+        // The lease rows are keyed by zero-padded hexadecimal term and sequence, so the
+        // store lists them in lease order.
+        leases.map_or(NodeHeld::Unread, |leases| NodeHeld::Elsewhere { leases })
     }
 
     /// Cordons, drains or uncordons `worker` (see `js_sched::Cordon`), after the store has

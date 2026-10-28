@@ -142,13 +142,16 @@ pub struct NodeUnread(pub String);
 /// ([`Core::node_held`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NodeHeld {
-    /// This frontend owns the node, or the node is connected here and no frontend has
-    /// claimed it yet; a core with no state store holds every node connected to it.
+    /// This frontend owns the node, or the node has a link here (it registered with this
+    /// core) and the store has never had an owner for it, as when its first claim was
+    /// refused; a core with no state store holds every node linked to it. A link here
+    /// whose claim was refused while the store names another owner reads `Elsewhere`: the
+    /// store's answer decides.
     Here,
-    /// Another frontend owns the node.
+    /// The store knows the node and this frontend does not own it.
     Elsewhere {
-        /// The leases the store holds on the node, ascending (none if it holds no
-        /// unfinished work).
+        /// The leases the store holds on the node, in lease order (none if it holds no
+        /// unfinished work); the leases of other nodes are not listed.
         leases: Vec<LeaseId>,
     },
     /// No frontend has held the node and it is not connected here.
@@ -522,8 +525,12 @@ impl<A: Adapter> Core<A> {
     }
 
     /// Which frontend holds `worker` at `now`, for a view of a node that may be connected
-    /// to another frontend of the state store: the look [`Core::place`] makes before it
-    /// accepts a node. Writes nothing.
+    /// to another frontend of the state store. Writes nothing. It reads, in order: whether
+    /// this core owns the node (the node's `owner/` row, when the core's last look is old);
+    /// whether the store has an `owner/` row for the node at all (the only look
+    /// [`Core::place`] makes); and, for a node the core does not own, the stored lease rows
+    /// that name the node. "Connected here" means the core holds a link for the node, not
+    /// that its stream is open, so a link with no owner row reads `Here`.
     #[must_use]
     pub fn node_held(&self, now: FarmTime, worker: &WorkerId) -> NodeHeld {
         self.lock().engine.node_held(now, worker)
