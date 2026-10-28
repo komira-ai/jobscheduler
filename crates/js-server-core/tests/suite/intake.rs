@@ -248,6 +248,40 @@ fn an_operation_whose_requeue_the_store_has_not_taken_is_not_handed_off() {
     assert_eq!(core.queued_operations(), 1);
 }
 
+/// Asserts that an operation this core queued, granted, and then gave the lease up of (which
+/// writes its queue row again) is not mistaken by the next poll for one another frontend
+/// queued again: its caller stays the scheduler's, and nothing is handed off. Catches: a
+/// core that hands its own work to the store follower and takes it back under a new caller.
+#[test]
+fn an_operation_whose_lease_this_core_gave_up_is_not_handed_off_by_the_next_poll() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    let queued = submit(&core, 1, 1);
+    assert_eq!((lease_rows(&setup), queue_rows(&setup)), (0, 1));
+    core.intake(at(2));
+    up(&core, 3, "node-a", "d1");
+    block_on(core.tick(at(4)));
+    assert_eq!((lease_rows(&setup), queue_rows(&setup)), (1, 0));
+    let past = js_sched::fence::LEASE_GRACE.as_millis() as u64 + 5;
+    block_on(core.tick(at(past)));
+    assert_eq!(queue_rows(&setup), 1, "the give-up wrote the queue row");
+
+    core.intake(at(past + 1));
+
+    let waiters = core.with(|view, _| view.sched().waiters(queued.operation).map(<[_]>::to_vec));
+    assert_eq!(
+        waiters,
+        Some(vec![queued.waiter]),
+        "the caller was detached"
+    );
+    assert!(
+        !calls(&core)
+            .iter()
+            .any(|c| matches!(c, Call::KeptFinished(..) | Call::Followed(..))),
+        "handed off"
+    );
+}
+
 /// Asserts that an operation held queued whose queue row is a newer write than the one read
 /// (another frontend granted it and queued it again, with a loss counted) is taken in again
 /// with the rows of now. Catches: stale rows kept for an operation another frontend rewrote.

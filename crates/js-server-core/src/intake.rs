@@ -131,6 +131,12 @@ impl Intake {
     pub(crate) fn keeps(&self, operation: OperationId) -> bool {
         self.kept.contains_key(&operation)
     }
+
+    /// Forgets the version read of `operation`'s `queue/` row: this core wrote the row again
+    /// (a lease it gave up), so a newer version is no other frontend's doing.
+    pub(crate) fn rewrote(&mut self, operation: OperationId) {
+        self.queue_seen.remove(&operation);
+    }
 }
 
 impl<A: Adapter> Core<A> {

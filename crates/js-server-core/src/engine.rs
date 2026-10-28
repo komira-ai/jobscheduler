@@ -280,6 +280,11 @@ impl Engine {
     pub(crate) fn log_requeues(&mut self, a: &mut dyn Adapter) {
         let given_up = self.sched.take_requeues();
         self.settle_requeues(&given_up);
+        // The queue row a give-up writes is this core's own: the intake poll finds the
+        // operation queued as it left it, not queued again by another frontend.
+        for requeue in &given_up {
+            self.intake.rewrote(requeue.operation);
+        }
         for requeue in given_up {
             a.requeued(&requeue);
             let Requeue {
