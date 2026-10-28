@@ -199,6 +199,7 @@ fn a_light_short_actions_run_at_more_than_one_a_core() {
     let peak = |config| {
         let mut w = World::new(config);
         w.linux("n", 88, 512);
+        w.baseline("n");
         w.submit_many(400, light);
         w.run(3);
         w.nodes["n"].peak_running

@@ -33,10 +33,34 @@ pub struct LeaseCost {
     /// The key had no usable estimate: the cold costs were charged, and the lease counted
     /// against the worker's cold cap.
     pub cold: bool,
-    /// A 64-bit digest of the lease's action key, for the placement score's same-key
-    /// share; 0 when no key is known (a record written before it was kept, a VM), which
-    /// matches no key.
-    pub key_digest: u64,
+    /// [`key_hash`] of the action key the lease runs: the identity the scoring counts
+    /// same-key leases by. 0 when unknown (a cost built by hand).
+    pub key_hash: u64,
+}
+
+/// The 64-bit FNV-1a offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The 64-bit FNV-1a prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The byte between a key's class and its dedup text; it is not valid UTF-8, so no pair
+/// of keys feeds the same bytes.
+const KEY_SEPARATOR: u8 = 0xff;
+
+/// A fixed 64-bit hash of an action key: FNV-1a over the class, a separator byte and the
+/// dedup text. It is the same on every machine and in every release (it is stored in the
+/// lease's cost), unlike `std`'s hashers; two keys may share a value, so it counts
+/// same-key leases and never decides identity.
+#[must_use]
+pub fn key_hash(key: &WorkKey) -> u64 {
+    key.class
+        .bytes()
+        .chain(std::iter::once(KEY_SEPARATOR))
+        .chain(key.dedup.bytes())
+        .fold(FNV_OFFSET, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(FNV_PRIME)
+        })
 }
 
 /// One reading of the node's action cgroup, taken by the agent.
@@ -236,6 +260,62 @@ pub struct NoCurves;
 
 impl CurveSource for NoCurves {
     fn curve(&self, _key: &WorkKey) -> Option<Curve> {
+        None
+    }
+}
+
+/// How a run ended, as far as the per-minute store cares: it decides which of the run's
+/// minutes are learned from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunEnd {
+    /// The run ended on its own.
+    Clean,
+    /// The run was killed at its memory limit.
+    KilledAtLimit,
+    /// The run was cancelled.
+    Cancelled,
+    /// The run was requeued.
+    Requeued,
+    /// The run was killed by the node's pressure backstop.
+    BackstopKilled,
+}
+
+impl RunEnd {
+    /// Whether the run's CPU minutes enter the key's ring: only a run that ended on its
+    /// own, since any other end truncates it and would bias the curve low.
+    #[must_use]
+    pub const fn enters_cpu(&self) -> bool {
+        matches!(self, Self::Clean)
+    }
+
+    /// Whether the run's memory minutes enter the key's memory column: a clean run and
+    /// one killed at its limit, whose peak is real.
+    #[must_use]
+    pub const fn enters_memory(&self) -> bool {
+        matches!(self, Self::Clean | Self::KilledAtLimit)
+    }
+}
+
+/// What the per-minute store asks the scheduler about a lease: which action key it ran
+/// and how its run ended.
+pub trait KeySource {
+    /// The key of `lease`, or `None` when the scheduler does not know the lease.
+    fn key_of(&self, lease: &LeaseId) -> Option<WorkKey>;
+
+    /// How the run of `lease` ended, or `None` while it runs or when it is unknown.
+    fn run_end(&self, lease: &LeaseId) -> Option<RunEnd>;
+}
+
+/// A [`KeySource`] that knows no lease.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoKeys;
+
+impl KeySource for NoKeys {
+    fn key_of(&self, _lease: &LeaseId) -> Option<WorkKey> {
+        None
+    }
+
+    fn run_end(&self, _lease: &LeaseId) -> Option<RunEnd> {
         None
     }
 }
@@ -457,6 +537,24 @@ mod tests {
         assert!(source.curve(&key("miss")).is_none());
     }
 
+    /// Catches: a hash that is not the stated FNV-1a (the value is stored with the lease and
+    /// must not change between releases), or one that cannot tell where the class ends.
+    #[test]
+    fn a_key_hash_is_fnv_1a_of_class_separator_dedup() {
+        let key = |class: &str, dedup: &str| WorkKey {
+            class: class.to_owned(),
+            dedup: dedup.to_owned(),
+        };
+        assert_eq!(
+            key_hash(&key("", "")),
+            0xaf64_724c_8602_eb6e,
+            "separator only"
+        );
+        assert_eq!(key_hash(&key("a", "")), 0x089b_c907_b544_c769);
+        assert_eq!(key_hash(&key("class", "dedup")), 0x1a07_e552_8c45_0fb8);
+        assert_ne!(key_hash(&key("ab", "c")), key_hash(&key("a", "bc")));
+    }
+
     #[test]
     fn a_lease_cost_compares_by_every_field() {
         let c = LeaseCost {
@@ -464,7 +562,7 @@ mod tests {
             memory_bytes: 2,
             limit_bytes: 3,
             cold: false,
-            key_digest: 0,
+            key_hash: 4,
         };
         assert_eq!(c, LeaseCost { ..c });
         assert_ne!(c, LeaseCost { cpu_millis: 9, ..c });
@@ -483,6 +581,7 @@ mod tests {
             }
         );
         assert_ne!(c, LeaseCost { cold: true, ..c });
+        assert_ne!(c, LeaseCost { key_hash: 9, ..c });
         assert_eq!(LeaseCost::default().cpu_millis, 0);
     }
 
@@ -510,5 +609,47 @@ mod tests {
                 ..c
             }
         );
+    }
+
+    #[test]
+    fn only_a_clean_run_enters_cpu_and_a_clean_or_limit_kill_enters_memory() {
+        let cases = [
+            (RunEnd::Clean, true, true),
+            (RunEnd::KilledAtLimit, false, true),
+            (RunEnd::Cancelled, false, false),
+            (RunEnd::Requeued, false, false),
+            (RunEnd::BackstopKilled, false, false),
+        ];
+        for (end, cpu, memory) in cases {
+            assert_eq!(end.enters_cpu(), cpu, "{end:?}");
+            assert_eq!(end.enters_memory(), memory, "{end:?}");
+        }
+    }
+
+    #[test]
+    fn no_keys_knows_no_lease() {
+        let lease = LeaseId::new(1, 1);
+        assert_eq!(NoKeys.key_of(&lease), None);
+        assert_eq!(NoKeys.run_end(&lease), None);
+    }
+
+    #[test]
+    fn a_key_source_can_answer() {
+        struct One;
+        impl KeySource for One {
+            fn key_of(&self, lease: &LeaseId) -> Option<WorkKey> {
+                (lease.seq == 1).then(|| WorkKey {
+                    class: "c".to_owned(),
+                    dedup: "d".to_owned(),
+                })
+            }
+            fn run_end(&self, lease: &LeaseId) -> Option<RunEnd> {
+                (lease.seq == 1).then_some(RunEnd::Clean)
+            }
+        }
+        assert!(One.key_of(&LeaseId::new(1, 1)).is_some());
+        assert_eq!(One.run_end(&LeaseId::new(1, 1)), Some(RunEnd::Clean));
+        assert!(One.key_of(&LeaseId::new(1, 2)).is_none());
+        assert_eq!(One.run_end(&LeaseId::new(1, 2)), None);
     }
 }

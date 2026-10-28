@@ -15,6 +15,12 @@ use super::{LoadConfig, LoadCounters, charge};
 /// capacity, or more memory than this many times its capacity.
 const IMPLAUSIBLE_FACTOR: u64 = 4;
 
+/// The least a lease is charged on a worker that has never sent an accepted reading (a
+/// Mac, a native or VM node): nothing there measures a light population, so only the
+/// predictions protect it. A worker that has measured keeps the sub-core charge of the
+/// estimate (250 m at least) even when its signal has gone stale.
+pub(crate) const UNMEASURED_CPU_FLOOR_MILLIS: u64 = 1000;
+
 /// One lease on the ledger.
 #[derive(Clone, Copy, Debug)]
 struct Entry {
@@ -103,6 +109,18 @@ pub(crate) struct Left {
     pub(crate) mem: u64,
     /// No usable measurement: every lease is charged its full predicted cost.
     pub(crate) fallback: bool,
+    /// The least CPU any lease is charged on this worker: [`UNMEASURED_CPU_FLOOR_MILLIS`]
+    /// (within the worker's cores) on a worker that never sent an accepted reading, else 0.
+    /// The sum in `cpu` already holds it for the leases on the ledger; the new lease takes
+    /// it through [`Left::charged_cpu`].
+    pub(crate) floor_cpu: u64,
+}
+
+impl Left {
+    /// The cores a new lease of `cost` is charged on this worker.
+    pub(crate) fn charged_cpu(&self, cost: &LeaseCost) -> u64 {
+        cost.cpu_millis.max(self.floor_cpu)
+    }
 }
 
 /// Why the predicate refused a lease.
@@ -121,6 +139,9 @@ pub(crate) struct WorkerLoad {
     ledger: BTreeMap<LeaseId, Entry>,
     totals: Totals,
     cold: ColdWindow,
+    /// An accepted reading has arrived at some time: the worker measures, even if its
+    /// signal is gone for now.
+    measured_once: bool,
 }
 
 impl WorkerLoad {
@@ -218,6 +239,7 @@ impl WorkerLoad {
             return self.drop_readings(counters);
         }
         counters.readings_accepted += 1;
+        self.measured_once = true;
         let older = self.readings.as_ref().and_then(|r| r.windows[0]);
         let covered: BTreeSet<LeaseId> = load.covered.iter().copied().collect();
         self.readings = Some(Readings {
@@ -261,7 +283,7 @@ impl WorkerLoad {
         }
         self.ledger
             .values()
-            .filter(|e| !e.vm && e.cost.key_digest == digest)
+            .filter(|e| !e.vm && e.cost.key_hash == digest)
             .fold(0, |sum, e| sum.saturating_add(charge(&e.cost).cpu_millis))
     }
 
@@ -333,7 +355,9 @@ impl WorkerLoad {
     /// ```
     ///
     /// Without one, the fallback charges every lease its full predicted cost once, and
-    /// the working set is not read.
+    /// the working set is not read. On a worker that never sent an accepted reading each
+    /// action lease is charged at least [`UNMEASURED_CPU_FLOOR_MILLIS`]; a worker that has
+    /// measured and gone stale is charged the estimates as they are.
     pub(crate) fn left(&self, now: FarmTime, capacity: &Resources, cfg: &LoadConfig) -> Left {
         let t = &self.totals;
         if let Some(reading) = self.fresh_reading(now, cfg) {
@@ -347,12 +371,28 @@ impl WorkerLoad {
                     .max(ws.saturating_add(t.mem_uncovered))
                     .saturating_add(t.vm_mem),
                 fallback: false,
+                floor_cpu: 0,
             }
-        } else {
+        } else if self.measured_once {
             Left {
                 cpu: t.cpu_all().saturating_add(t.vm_cpu),
                 mem: t.mem_all().saturating_add(t.vm_mem),
                 fallback: true,
+                floor_cpu: 0,
+            }
+        } else {
+            let floor = UNMEASURED_CPU_FLOOR_MILLIS.min(capacity.cpu_millis);
+            let floored = self
+                .ledger
+                .values()
+                .filter(|e| !e.vm)
+                .map(|e| charge(&e.cost).cpu_millis.max(floor))
+                .fold(0, u64::saturating_add);
+            Left {
+                cpu: floored.saturating_add(t.vm_cpu),
+                mem: t.mem_all().saturating_add(t.vm_mem),
+                fallback: true,
+                floor_cpu: floor,
             }
         }
     }
@@ -366,7 +406,7 @@ impl WorkerLoad {
         now: FarmTime,
         cfg: &LoadConfig,
     ) -> Result<(), Refusal> {
-        if left.cpu.saturating_add(cost.cpu_millis) > cfg.cpu_limit(capacity) {
+        if left.cpu.saturating_add(left.charged_cpu(cost)) > cfg.cpu_limit(capacity) {
             return Err(Refusal::Cpu);
         }
         if left.mem.saturating_add(cost.memory_bytes) > cfg.mem_limit(capacity) {
@@ -401,7 +441,7 @@ mod tests {
             memory_bytes: mem,
             limit_bytes: mem,
             cold: false,
-            key_digest: 0,
+            key_hash: 0,
         }
     }
 
@@ -428,7 +468,7 @@ mod tests {
 
     fn keyed(cpu: u64, digest: u64) -> LeaseCost {
         LeaseCost {
-            key_digest: digest,
+            key_hash: digest,
             ..cost(cpu, 0)
         }
     }

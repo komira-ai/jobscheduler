@@ -359,7 +359,7 @@ impl Servable {
                     fit_minutes: 1,
                     fallback: p.left.fallback,
                     measured_above_predicted: w.load_state.measured_above_covered(),
-                    same_key_millis: w.load_state.same_key_millis(attempt.cost.key_digest),
+                    same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),
                     new_key_millis: 0,
                     uncovered_leases: w.load_state.uncovered_leases(),
                 };
@@ -436,7 +436,7 @@ impl Servable {
                 let left = w.load_state.left(now, &w.capacity, &adm.cfg);
                 let ratio = binding(
                     (
-                        left.cpu.saturating_add(cost.cpu_millis),
+                        left.cpu.saturating_add(left.charged_cpu(&cost)),
                         w.capacity.cpu_millis,
                     ),
                     (

@@ -12,7 +12,7 @@ use js_caps::NodeCaps;
 use js_sched::{
     DaemonInstance, Event, Input, LoadConfig, PlacementLoad, Recovered, RecoveredLease, Scheduler,
 };
-use js_types::sched::usage::{Curve, CurveSource, LeaseCost, MinutePoint};
+use js_types::sched::usage::{Curve, CurveSource, LeaseCost, MinutePoint, key_hash};
 use js_types::sched::{
     ControlRecord, Effect, FarmTime, LeaseId, LeaseKind, OperationId, Resources, StartLease,
     StateMachine, WaiterId, WorkKey,
@@ -382,6 +382,7 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     let mut r = Rig::on();
     let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
     r.up_with("b", node(), whole.clone());
+    r.baseline("b");
     for _ in 0..4 {
         r.action(1_000, 4 * GIB, Some(warm(250, 0)));
     }
@@ -431,14 +432,6 @@ fn a_draining_worker_takes_no_small_work() {
     assert_eq!(on(&r.round(1_000)), ["b"; 5]);
 }
 
-/// The key of the action `grant` is for: `placed_with_grants` names them by operation.
-fn grant_key(
-    _grants: &[js_types::sched::LeaseGrant],
-    grant: &js_types::sched::LeaseGrant,
-) -> WorkKey {
-    WorkKey::new("load", format!("{}", grant.operation.0))
-}
-
 /// A scheduler with `n` actions placed on worker `a` and the grants it committed.
 fn placed_with_grants(n: u64) -> (Scheduler, Vec<js_types::sched::LeaseGrant>) {
     let mut s = Scheduler::new(1).with_load_config(LoadConfig::default());
@@ -485,20 +478,22 @@ fn placed_with_grants(n: u64) -> (Scheduler, Vec<js_types::sched::LeaseGrant>) {
 
 /// Catches: a grant record that does not carry the cost the lease was charged (a
 /// scheduler rebuilt from the log could not know it), and a cost that is not the
-/// prediction, the request's limit and the cold flag.
+/// prediction, the request's limit, the cold flag and the hash of the lease's key (the
+/// scoring counts same-key leases by it).
 #[test]
 fn the_grant_record_carries_the_cost() {
     let (s, grants) = placed_with_grants(3);
     assert_eq!(grants.len(), 3);
     for grant in &grants {
+        let key = s.request(grant.operation).expect("held").key.clone();
         let want = LeaseCost {
             cpu_millis: 500,
             memory_bytes: 2 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&grant_key(&grants, grant)),
+            key_hash: key_hash(&key),
         };
-        assert_ne!(want.key_digest, 0);
+        assert_ne!(want.key_hash, 0);
         assert_eq!(grant.cost, want);
         assert_eq!(s.lease_cost(grant.lease), Some(want));
     }
@@ -551,13 +546,20 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
     let mut b = restarted(&a, &grants, true);
     for g in &grants {
         assert_eq!(b.lease_cost(g.lease), a.lease_cost(g.lease));
+        let key = a.request(g.operation).expect("held").key.clone();
+        assert_eq!(
+            b.lease_cost(g.lease).map(|c| c.key_hash),
+            Some(key_hash(&key)),
+            "the key's hash is part of the cost a restart keeps"
+        );
     }
     let (before, after) = (a.load_view(&w("a")).unwrap(), b.load_view(&w("a")).unwrap());
     assert_eq!(before, after);
     assert_eq!(after.predicted_cpu_millis, 2_500);
     assert_eq!(after.predicted_memory_bytes, 10 * GIB);
     assert!(after.fallback);
-    // The same room: 32 GiB of 2 GiB leases is sixteen, eleven more beside five.
+    // The same room. Neither worker has sent a reading, so each lease is charged at least
+    // 1000 m: five leases and three more fill 8800 m.
     let more = |s: &mut Scheduler, seq: u64| {
         let t = FarmTime::from_millis(2_000);
         for i in 0..20 {
@@ -584,8 +586,8 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
             .filter(|e| matches!(e, Effect::Start(_)))
             .count()
     };
-    assert_eq!(more(&mut a, 5), 11);
-    assert_eq!(more(&mut b, 5), 11);
+    assert_eq!(more(&mut a, 5), 3);
+    assert_eq!(more(&mut b, 5), 3);
 }
 
 /// Catches: a row written before costs were kept charged nothing (it would not count) or
@@ -597,6 +599,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
     let view = b.load_view(&w("a")).unwrap();
     assert_eq!(view.predicted_cpu_millis, 2_000);
     assert_eq!(view.predicted_memory_bytes, 0);
+    let key = a.request(grants[0].operation).expect("held").key.clone();
     assert_eq!(
         b.lease_cost(grants[0].lease),
         Some(LeaseCost {
@@ -604,7 +607,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
             memory_bytes: 0,
             limit_bytes: 8 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&WorkKey::new("load", "0")),
+            key_hash: key_hash(&key),
         })
     );
 }

@@ -194,6 +194,14 @@ impl Rig {
         })
     }
 
+    /// The first reading of `name`'s session, with nothing busy and nothing covered: it
+    /// gives no window, so the worker is still charged by prediction, but it has now
+    /// measured. The farm time does not move.
+    pub fn baseline(&mut self, name: &str) {
+        let load = self.reading(name, 0, 0, Vec::new());
+        self.beat(name, Some(load));
+    }
+
     /// One window passes on `name`: the farm time moves by `W`, and it sends a reading
     /// of `busy_milli` cores, `working_set` bytes, `covered` leases.
     pub fn window(&mut self, name: &str, busy_milli: u64, working_set: u64, covered: &[LeaseId]) {

@@ -21,7 +21,9 @@
 //! - `V` is the booked cost of the worker's VM leases, which run outside the measured
 //!   cgroup.
 //! - A worker with no usable measurement is admitted by the same predicate on the sum of
-//!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule.
+//!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule. Each lease
+//!   on a worker that never sent an accepted reading (a Mac, a native or VM node) is
+//!   charged at least 1000 m there; a worker that measured and went stale is not.
 //! - At most [`LoadConfig::cold_cap`] cold leases are admitted per worker per window.
 //! - A blocked head of the queue holds the worker with the most headroom, so a stream
 //!   of small work cannot keep a large action out for good (`head.rs`).
@@ -47,14 +49,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_sizing::{COLD_CPU_MILLIS, Estimate};
-use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves};
+use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, key_hash};
 use js_types::sched::{FarmTime, LeaseId, LeaseKind, OperationId, Resources, WorkKey, WorkerId};
 
 pub(crate) use head::{Ratio, binding, pick};
 pub(crate) use ledger::{Left, Refusal, WorkerLoad, clamped};
 
 use crate::input::Request;
-use crate::load::{Charge, ScoreConfig, Scorer, key_digest};
+use crate::load::{Charge, ScoreConfig, Scorer};
 
 /// Whether placement reads the load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -472,7 +474,7 @@ impl Admission {
             memory_bytes: if retried { memory.max(limit) } else { memory },
             limit_bytes: limit,
             cold,
-            key_digest: key_digest(&request.key),
+            key_hash: key_hash(&request.key),
         }
     }
 
@@ -487,14 +489,14 @@ impl Admission {
                 memory_bytes: r.memory_bytes,
                 limit_bytes: r.memory_bytes,
                 cold: false,
-                key_digest: 0,
+                key_hash: key_hash(&request.key),
             },
             _ => LeaseCost {
                 cpu_millis: r.cpu_millis,
                 memory_bytes: 0,
                 limit_bytes: r.memory_bytes,
                 cold: false,
-                key_digest: key_digest(&request.key),
+                key_hash: key_hash(&request.key),
             },
         }
     }
@@ -502,9 +504,9 @@ impl Admission {
     /// `cost` with the digest of `request`'s key if it has none and the request is an
     /// action: a cost record written before the digest was kept is rebuilt with it.
     pub(crate) fn with_digest(cost: LeaseCost, request: &Request) -> LeaseCost {
-        if cost.key_digest == 0 && request.kind == LeaseKind::Action {
+        if cost.key_hash == 0 && request.kind == LeaseKind::Action {
             LeaseCost {
-                key_digest: key_digest(&request.key),
+                key_hash: key_hash(&request.key),
                 ..cost
             }
         } else {

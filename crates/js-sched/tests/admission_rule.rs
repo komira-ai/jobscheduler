@@ -8,14 +8,26 @@
 mod load_rig;
 
 use js_sched::{LoadConfig, LoadView};
-use js_types::sched::usage::LeaseCost;
-use js_types::sched::{Failure, LeaseId, Outcome, Resources};
+use js_types::sched::usage::{LeaseCost, key_hash};
+use js_types::sched::{Failure, LeaseId, Outcome, Resources, StartLease};
 
 use load_rig::{GIB, Rig, W_MS, cold, leases, w, warm};
 
 /// An 8-core worker with 32 GiB.
 fn node() -> Resources {
     Resources::new(8_000, 32 * GIB)
+}
+
+/// The cost `start`'s lease is charged, with its key hash checked against its request's
+/// key and then zeroed, so a test compares the other figures.
+fn cost_of(r: &Rig, start: &StartLease) -> Option<LeaseCost> {
+    let cost = r.s.lease_cost(start.lease)?;
+    let key = &r.s.request(start.operation).expect("held").key;
+    assert_eq!(cost.key_hash, key_hash(key));
+    Some(LeaseCost {
+        key_hash: 0,
+        ..cost
+    })
 }
 
 fn view(r: &Rig, name: &str) -> LoadView {
@@ -42,15 +54,17 @@ fn measured(busy: u64, working_set: u64) -> (Rig, Vec<LeaseId>) {
     (r, held)
 }
 
-/// Catches: a worker with no reading admitted by the booked rule (8 one-core leases) or by
+/// Catches: a worker with no window admitted by the booked rule (8 one-core leases) or by
 /// no rule at all: it is admitted by the sum of its leases' predicted costs against
 /// capacity plus the CPU slack, 17 leases of 500 m on 8 cores (8500 of 8800), and the
 /// 18th waits (and holds the worker for the head of the queue, so the two behind it are
-/// not counted as blocked).
+/// not counted as blocked). Its one reading, the baseline, makes it a worker that
+/// measures: no floor on its leases.
 #[test]
-fn a_worker_without_a_reading_is_admitted_by_the_sum_of_predicted_costs() {
+fn a_worker_without_a_window_is_admitted_by_the_sum_of_predicted_costs() {
     let mut r = Rig::on();
     r.up("a", node());
+    r.baseline("a");
     let placed = fill(&mut r, 20, warm(500, 0));
     assert_eq!(placed.len(), 17);
     let v = view(&r, "a");
@@ -69,6 +83,88 @@ fn a_worker_without_a_reading_is_admitted_by_the_sum_of_predicted_costs() {
         "the 18th is blocked and holds the worker: the two behind it are not tried there"
     );
     assert_eq!(c.cold_deferred, 0);
+}
+
+/// Catches: a worker nothing has measured (no reading ever: a Mac, a native or VM node)
+/// charged the estimates of a light population as they are: it charges every lease at
+/// least 1000 m, so 0.3-core keys (estimated at 500 m) fill it at 8 leases, 8000 of 8800,
+/// where a worker that has measured takes 17. The lease is recorded at its estimate; the
+/// floor is the worker's.
+#[test]
+fn a_worker_never_measured_charges_each_lease_at_least_a_core() {
+    let mut r = Rig::on();
+    r.up("a", node());
+    let placed = fill(&mut r, 20, warm(500, 0));
+    assert_eq!(placed.len(), 8);
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_cpu_millis, 8_000);
+    assert_eq!(v.predicted_cpu_millis, 4_000, "the sums hold the estimates");
+    assert_eq!(r.s.lease_cost(placed[0]).unwrap().cpu_millis, 500);
+    // A lease above the floor is charged what it is.
+    let mut big = Rig::on();
+    big.up("a", node());
+    big.action(2_500, 8 * GIB, Some(warm(2_500, 0)));
+    assert_eq!(leases(&big.tick()).len(), 1);
+    assert_eq!(view(&big, "a").left_cpu_millis, 2_500);
+}
+
+/// Catches: the floor kept after the worker has measured, or applied to the sub-core
+/// charge of a measured worker. A worker whose signal went stale was measured once, so
+/// its leases keep their estimates (500 m: 9 more fit beside 4000); and at the least
+/// estimate, 250 m, 35 leases fill 8750 of 8800.
+#[test]
+fn a_worker_that_has_measured_keeps_the_sub_core_charge_when_stale() {
+    let (mut r, _) = measured(1_000, GIB);
+    r.ms += 3 * W_MS + 1;
+    r.tick();
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_cpu_millis, 4_000);
+    assert_eq!(
+        fill(&mut r, 20, warm(500, 0)).len(),
+        9,
+        "4000 + 9 * 500 of 8800"
+    );
+
+    let mut light = Rig::on();
+    light.up("a", node());
+    light.baseline("a");
+    assert_eq!(fill(&mut light, 40, warm(250, 0)).len(), 35);
+    assert_eq!(view(&light, "a").left_cpu_millis, 8_750);
+}
+
+/// Catches: the CPU limit read as exclusive (`>=`): a lease landing exactly on
+/// `C * (1 + s_cpu)` (8800 on 8 cores) is admitted, and one milli over waits.
+#[test]
+fn a_lease_landing_exactly_on_the_cpu_limit_is_admitted_and_one_milli_over_is_not() {
+    for (last, admitted) in [(300, true), (301, false)] {
+        let mut r = Rig::on();
+        r.up("a", node());
+        r.baseline("a");
+        assert_eq!(fill(&mut r, 17, warm(500, 0)).len(), 17);
+        r.action(1_000, GIB, Some(warm(last, 0)));
+        assert_eq!(leases(&r.tick()).len(), usize::from(admitted), "{last} m");
+    }
+}
+
+/// Catches: the working set added to the fallback's memory sum. A worker whose signal
+/// went stale is charged the predicted memory of its leases alone: beside a stale
+/// reading of 30 GiB in use and leases predicted at no memory, 4 GiB still fits 32 GiB.
+#[test]
+fn the_fallback_memory_sum_leaves_the_working_set_out() {
+    let (mut r, _) = measured(1_000, 30 * GIB);
+    assert!(
+        view(&r, "a").left_memory_bytes >= 30 * GIB,
+        "fresh, the working set counts"
+    );
+    r.ms += 3 * W_MS + 1;
+    r.tick();
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_memory_bytes, 0);
+    r.action(500, 4 * GIB, Some(warm(500, 4 * GIB)));
+    assert_eq!(leases(&r.tick()).len(), 1);
 }
 
 /// Catches: the measurement ignored, or believed below the floor. Eight leases predicted at
@@ -252,6 +348,7 @@ fn the_memory_slack_is_the_configured_one() {
         ..LoadConfig::default()
     });
     r.up("a", node());
+    r.baseline("a");
     assert_eq!(fill(&mut r, 12, warm(250, 4 * GIB)).len(), 10);
 }
 
@@ -410,13 +507,13 @@ fn a_cost_above_the_node_is_clamped_to_it() {
     let starts = r.tick();
     assert_eq!(starts.len(), 1);
     assert_eq!(
-        r.s.lease_cost(starts[0].lease),
+        cost_of(&r, &starts[0]),
         Some(LeaseCost {
             cpu_millis: 8_000,
             memory_bytes: 32 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&js_types::sched::WorkKey::new("load", "k0")),
+            key_hash: 0,
         })
     );
     r.action(250, 8 * GIB, Some(warm(250, GIB)));
@@ -433,26 +530,26 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
     r.action(1_000, 4 * GIB, Some(warm(1_000, 2 * GIB)));
     let first = r.tick().remove(0);
     assert_eq!(
-        r.s.lease_cost(first.lease),
+        cost_of(&r, &first),
         Some(LeaseCost {
             cpu_millis: 1_000,
             memory_bytes: 2 * GIB,
             limit_bytes: 4 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&js_types::sched::WorkKey::new("load", "k0")),
+            key_hash: 0,
         })
     );
     r.end(&first, Outcome::Failed(Failure::OutOfMemory));
     r.ms += 1_000;
     let second = r.tick().remove(0);
     assert_eq!(
-        r.s.lease_cost(second.lease),
+        cost_of(&r, &second),
         Some(LeaseCost {
             cpu_millis: 1_000,
             memory_bytes: 16 * GIB,
             limit_bytes: 16 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&js_types::sched::WorkKey::new("load", "k0")),
+            key_hash: 0,
         })
     );
     assert_eq!(r.s.lease_cost(first.lease), None, "the first lease is gone");
@@ -470,6 +567,7 @@ fn a_vm_is_added_to_every_sum() {
         node().with_vms(2),
         load_rig::caps("container").with_drivers(["container", "vm"]),
     );
+    r.baseline("a");
     let mut vm = r.request(LeaseKind::Vm, 4_000, 16 * GIB);
     vm.resources = vm.resources.with_vms(1);
     r.submit(vm);
@@ -525,13 +623,13 @@ fn a_request_without_a_prediction_is_charged_its_cores_and_no_memory() {
     let starts = r.tick();
     assert_eq!(starts.len(), 4, "16 GiB limits four times over 32 GiB");
     assert_eq!(
-        r.s.lease_cost(starts[0].lease),
+        cost_of(&r, &starts[0]),
         Some(LeaseCost {
             cpu_millis: 2_000,
             memory_bytes: 0,
             limit_bytes: 16 * GIB,
             cold: false,
-            key_digest: js_sched::key_digest(&js_types::sched::WorkKey::new("load", "k0")),
+            key_hash: 0,
         })
     );
     r.action(2_000, GIB, None);

@@ -700,7 +700,7 @@ fn a_restart_rebuilt_from_the_cost_records_chooses_the_same_worker() {
         let mut rebuilt = restarted(&original, &placed, order);
         for g in &placed {
             assert_eq!(rebuilt.lease_cost(g.lease), Some(g.cost));
-            assert_ne!(g.cost.key_digest, 0);
+            assert_ne!(g.cost.key_hash, 0);
         }
         let got = one_more(&mut rebuilt, next);
         assert_eq!(got.worker, expected.worker, "order {order:?}");
