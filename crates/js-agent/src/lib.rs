@@ -177,6 +177,7 @@ use std::fmt::Display;
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -201,8 +202,8 @@ pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_MAX, Rescue, STALL_CALLS_MAX, STALL_MARGIN,
-    STEP_EVERY, Snapshot, Worker, stall_bound,
+    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue, STALL_CALLS_MAX,
+    STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, stall_bound,
 };
 
 /// The exit statuses of `js-agent`.
@@ -247,6 +248,8 @@ pub struct Services<'a> {
     pub machine: Arc<dyn Machine>,
     /// Told of the job worker once it has started (a test's way to wait for it).
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
+    /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
+    pub rescue_bound: Option<Duration>,
 }
 
 /// Why the program ends without a stop request.
@@ -292,6 +295,7 @@ pub fn main_with(
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
                 worker_hook: None,
+                rescue_bound: None,
             };
             run_with(args, out, err, services)
         }
@@ -378,7 +382,8 @@ fn execute(
         );
     }
     let (machine, hook) = (&services.machine, services.worker_hook);
-    let started = jobs::start(local, &offer.hello, platform, machine, hook, err);
+    let bound = services.rescue_bound;
+    let started = jobs::start(local, &offer.hello, platform, (machine, hook, bound), err);
     let jobs = started.map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain)) = &jobs {

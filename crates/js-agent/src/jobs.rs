@@ -21,7 +21,8 @@ pub const DRAIN_SETTLE: Duration = Duration::from_secs(30);
 /// without it registers and heartbeats and runs no job. The worker has built the
 /// lifecycle and adopted the containers an earlier process left when this returns, and
 /// the lines it has to say (the engine's warnings, what it adopted) are written to `err`.
-/// `hook` is handed a [`Handle`] to the worker.
+/// `hook` is handed a [`Handle`] to the worker. `rescue_bound` replaces the bound of the
+/// rescue (see [`crate::Rescue`]); it is `None` outside a test.
 ///
 /// # Errors
 ///
@@ -32,8 +33,7 @@ pub fn start(
     local: Local,
     hello: &Hello,
     platform: &Platform,
-    machine: &Arc<dyn Machine>,
-    hook: Option<&dyn Fn(Handle)>,
+    (machine, hook, rescue_bound): (&Arc<dyn Machine>, Option<&dyn Fn(Handle)>, Option<Duration>),
     err: &mut dyn Write,
 ) -> Result<Option<(Worker, Drain)>, String> {
     let Local {
@@ -64,6 +64,7 @@ pub fn start(
         watch,
         machine: machine.clone(),
         step_every: STEP_EVERY,
+        rescue_bound,
     })
     .map_err(|why| format!("--container-bin: {why}"))?;
     worker.take_lines().iter().for_each(|line| {

@@ -83,6 +83,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         watch: Vec::new(),
         machine: Arc::new(machine.clone()),
         step_every,
+        rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
     }
 }
 

@@ -24,14 +24,16 @@
 //!
 //! - **The server refuses the host for good** ([`Exit::Fatal`], for example a revoked
 //!   token): no heartbeat can be sent, so there is no drain. The worker is closed, asked to
-//!   stop every run, and waited for until none runs, for a bounded time; what it did not
-//!   stop is stopped through the runtime directly, as below. The exit status is the
+//!   stop every run, and waited for until none runs or the worker has ended, for the stop
+//!   grace and a minute; what it did not stop is stopped through the runtime directly, as
+//!   below. The exit status is the
 //!   refusal's. The results of the stopped runs are not sent and the server would not take
 //!   them, so they may be lost.
 //! - **The job worker is gone or stalled** ([`Exit::Failed`]): the worker cannot be asked,
 //!   so the agent makes a runtime of its own, lists its containers by their label and stops
-//!   them, each call bounded by the runner's limit and the stop grace, the whole bounded in
-//!   time. A container that could not be stopped is named in the log. The agent then relies
+//!   them, each call bounded by the runner's limit and the stop grace, the whole bounded to
+//!   ten minutes (or the stop grace and a minute, when that is longer); the worker is
+//!   closed first, so a worker that wakes from a stall starts nothing more. A container that could not be stopped is named in the log. The agent then relies
 //!   on its supervisor (for example systemd `Restart=`) to start a new process, which
 //!   adopts what still exists.
 //! - Without `--container-bin` there is no worker and both ends are as they were.

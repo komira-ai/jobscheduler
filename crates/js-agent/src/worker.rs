@@ -40,17 +40,23 @@
 //! container with nobody to enforce its wall limit:
 //!
 //! - After a refusal for good the worker is alive: [`Worker::wind_down`] closes it, asks it
-//!   to stop every run and waits for the runs to leave the running state, for at most the
-//!   [`Rescue`] bound. What it cannot stop that way is stopped by the [`Rescue`] below.
-//!   The results of the stopped runs are not sent: the server no longer takes them, and
-//!   they may be lost.
-//! - After the worker's end the worker cannot be asked. [`Worker::rescue`] makes a runtime
-//!   of its own from the machine, lists the containers by the agent's label, and stops
-//!   them (at most [`RESCUE_MAX`], each call bounded by the runner's [`CALL_LIMIT`] and the
-//!   stop grace, the whole by the [`Rescue`] bound, on a thread that is left behind when
-//!   the bound passes). Each one that could not be stopped is reported as a line. What is
-//!   left is the supervisor's: it restarts the agent, whose next process adopts the
-//!   containers that still exist and enforces their limits.
+//!   to stop every run and waits until none is running or the worker has ended, for at
+//!   most the stop grace plus [`WIND_DOWN_MARGIN`] (and never past the [`Rescue`] bound).
+//!   What is still running then is stopped by the [`Rescue`] below. The results of the
+//!   stopped runs are not sent: the server no longer takes them, and they may be lost.
+//! - After the worker's end the worker cannot be asked. [`Worker::rescue`] closes the
+//!   worker first (a worker that wakes from a stall must not start the runs still queued),
+//!   makes a runtime of its own from the machine, lists the containers by the agent's
+//!   label, and stops the ones that are running (at most [`RESCUE_MAX`], each call bounded
+//!   by the runner's [`CALL_LIMIT`] and the stop grace, the whole by the [`Rescue`] bound,
+//!   [`RESCUE_BOUND`] unless the stop grace is longer, on a thread that is left behind
+//!   when the bound passes). Each one that could not be stopped is reported as a line. What
+//!   is left is the supervisor's: it restarts the agent, whose next process adopts the
+//!   containers that still exist and enforces their limits. So the agent's own time to
+//!   leave is the wind-down wait plus the rescue bound, minutes and not hours.
+//!
+//! A start the worker is already inside when it is closed is not undone: its container may
+//! be made after the rescue listed, and then it is the next process's to adopt.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -65,7 +71,7 @@ use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Tain
 use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{Config, Event, Lifecycle};
+use crate::lifecycle::{Config, Event, Lifecycle, Status};
 use crate::system::{Machine, RuntimeBuild, SharedClock};
 
 /// How many orders wait for the worker. Replies beyond it are dropped, see the module.
@@ -111,10 +117,24 @@ pub struct Plan {
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
     pub step_every: Duration,
+    /// The bound of the [`Rescue`] in place of [`RESCUE_BOUND`]: for a test.
+    pub rescue_bound: Option<Duration>,
 }
 
-/// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried.
-pub const RESCUE_MAX: usize = 16;
+/// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
+/// is far above what a host runs at once, so every container the agent started is stopped,
+/// and it keeps the number of calls bounded.
+pub const RESCUE_MAX: usize = 256;
+
+/// How long a [`Rescue`] may take, unless the stop grace is longer (then the grace plus
+/// [`WIND_DOWN_MARGIN`]). The stops are made one after the other, so with many containers
+/// the bound can pass first; what is left is adopted by the next process, which the
+/// supervisor starts.
+pub const RESCUE_BOUND: Duration = Duration::from_secs(600);
+
+/// What [`Worker::wind_down`] allows on top of the stop grace for the worker to stop the
+/// runs itself.
+pub const WIND_DOWN_MARGIN: Duration = Duration::from_secs(60);
 
 /// How the agent stops its containers without the worker: a runtime of its own, made by
 /// the machine the worker was made from.
@@ -127,11 +147,14 @@ pub struct Rescue {
     stop_grace: Duration,
     max: usize,
     bound: Duration,
+    wind: Duration,
 }
 
 impl Rescue {
-    /// A rescue over `machine` for the agent `host_id`, bounded by
-    /// [`stall_bound`] for [`RESCUE_MAX`] stops and a listing.
+    /// A rescue over `machine` for the agent `host_id`, bounded by [`RESCUE_BOUND`] (or the
+    /// stop grace and [`WIND_DOWN_MARGIN`], when that is longer) and stopping at most
+    /// [`RESCUE_MAX`] containers. [`Worker::wind_down`] waits for the worker for the stop
+    /// grace and [`WIND_DOWN_MARGIN`].
     pub fn new(
         machine: Arc<dyn Machine>,
         settings: Settings,
@@ -146,7 +169,8 @@ impl Rescue {
             platform,
             stop_grace,
             max: RESCUE_MAX,
-            bound: stall_bound(stop_grace, RESCUE_MAX.saturating_add(1)),
+            bound: RESCUE_BOUND.max(stop_grace.saturating_add(WIND_DOWN_MARGIN)),
+            wind: stop_grace.saturating_add(WIND_DOWN_MARGIN),
         }
     }
 
@@ -155,6 +179,13 @@ impl Rescue {
     pub fn limited(mut self, max: usize, bound: Duration) -> Self {
         self.max = max;
         self.bound = bound;
+        self
+    }
+
+    /// The same, with the time [`Worker::wind_down`] waits for the worker given: for a test.
+    #[must_use]
+    pub fn winding(mut self, wait: Duration) -> Self {
+        self.wind = wait;
         self
     }
 
@@ -175,6 +206,11 @@ impl Rescue {
             Ok(found) => found,
             Err(why) => return vec![format!("rescue: cannot list the containers: {why}")],
         };
+        // Exited containers (the listing holds them too) must not use up the limit.
+        let found: Vec<_> = found
+            .into_iter()
+            .filter(|one| !matches!(runtime.poll(&one.id), Ok(Status::Exited(_))))
+            .collect();
         let stopped = found.iter().take(self.max).filter_map(|one| {
             let done = runtime.stop(&one.id, self.stop_grace);
             done.err()
@@ -279,6 +315,9 @@ struct Ending<'a>(&'a Shared);
 impl Drop for Ending<'_> {
     fn drop(&mut self) {
         self.0.ended.store(true, Ordering::SeqCst);
+        // Taking the lock between the mark and the wake-up keeps a waiter that has just
+        // read the mark as unset from missing the wake-up.
+        drop(self.0.lock());
         self.0.changed.notify_all();
     }
 }
@@ -385,6 +424,10 @@ impl Worker {
             plan.platform.clone(),
             stop_grace,
         );
+        let rescue = plan
+            .rescue_bound
+            .into_iter()
+            .fold(rescue, |rescue, bound| rescue.limited(RESCUE_MAX, bound));
         // The thread is not joined, so a stuck worker cannot keep the process from ending;
         // the agent stops the containers it still holds itself (see the module) and a
         // container that is still there is adopted by the next process.
@@ -477,27 +520,36 @@ impl Worker {
     }
 
     /// The end after a refusal for good: closes the worker, asks it to stop every run and
-    /// waits until none is running, for at most the [`Rescue`] bound; what still runs then
-    /// is stopped by [`Worker::rescue`]. The lines say what could not be stopped.
+    /// waits until none is running or the worker has ended, for at most the stop grace and
+    /// [`WIND_DOWN_MARGIN`] (and the [`Rescue`] bound, when that is shorter); a worker that
+    /// ended, or runs that still run then, are stopped by [`Worker::rescue`]. The lines say
+    /// what could not be stopped.
     pub fn wind_down(&self) -> Vec<String> {
         self.close();
         self.stop_all();
         let shared = &self.handle.shared;
         let published = shared.lock();
-        let running = |published: &mut Published| published.snapshot.running();
+        let waiting = |published: &mut Published| {
+            published.snapshot.running() && !shared.ended.load(Ordering::SeqCst)
+        };
+        let wait = self.rescue.wind.min(self.rescue.bound);
         let _ = shared
             .changed
-            .wait_timeout_while(published, self.rescue.bound, running)
+            .wait_timeout_while(published, wait, waiting)
             .unwrap_or_else(PoisonError::into_inner);
-        match self.snapshot().running() {
+        // A worker that ended may have been inside a start: what it made is not in the
+        // snapshot.
+        match self.snapshot().running() || self.ended() {
             true => self.rescue(),
             false => Vec::new(),
         }
     }
 
-    /// Stops every container of the agent without the worker, which is gone or stuck, see
-    /// the module. One line for each container that could not be stopped.
+    /// Closes the worker, so one that wakes from a stall takes no start that still waits in
+    /// its queue, and stops every container of the agent without it, see the module. One
+    /// line for each container that could not be stopped.
     pub fn rescue(&self) -> Vec<String> {
+        self.close();
         self.rescue.run()
     }
 

@@ -549,6 +549,10 @@ pub fn run(
 /// The machine the jobs run on and the hook that is told of their worker.
 pub type Jobs<'a> = (Arc<dyn Machine>, Option<&'a dyn Fn(Handle)>);
 
+/// The bound of the rescue in the tests that run the whole agent: a regression that hangs
+/// in the rescue ends the test in seconds, not at the bound of a host.
+pub const RESCUE_TEST_BOUND: Duration = Duration::from_secs(30);
+
 /// Runs the program on `args` against `host`, with the machine and the worker hook given.
 pub fn run_on(
     args: &[&str],
@@ -568,6 +572,7 @@ pub fn run_on(
         sleeper,
         machine: jobs.0,
         worker_hook: jobs.1,
+        rescue_bound: Some(RESCUE_TEST_BOUND),
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

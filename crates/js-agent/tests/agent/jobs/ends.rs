@@ -7,14 +7,17 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::mpsc::sync_channel;
+use std::thread;
 use std::time::Duration;
 
+use js_agent::lifecycle::Capacity;
 use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Snapshot, Wake, Worker, drive};
 use js_agent_wire::{HeldRun, HeldState};
 
 use super::drain::container_flags;
-use super::fake::{Build, FakeMachine, World};
-use super::{rescue, start, start_answer, starts};
+use super::fake::{Build, FakeMachine, HANG_GUARD, World};
+use super::{STEP_NEVER, plan, rescue, start, start_answer, starts};
 use crate::bounds::{Capped, WakeBudget};
 use crate::support::{
     CountingSleeper, Lowest, Ran, Scratch, Script, ScriptConnector, beat_ok, code, flags, hello,
@@ -290,4 +293,201 @@ fn a_refusal_logs_what_it_could_not_stop() {
     assert!(matches!(exit, Exit::Fatal(_)), "{exit:?}");
     let text = log.text();
     assert!(text.contains("rescue: cannot list"), "{text}");
+}
+
+/// Runs `work` on a thread of its own and waits for its answer for at most the hang guard.
+/// A call that waits for a time no test expects ends the test with a message; the thread
+/// is left behind (the process ends anyway).
+fn promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (done, answer) = sync_channel(1);
+    thread::spawn(move || {
+        let _ = done.send(work());
+    });
+    answer
+        .recv_timeout(HANG_GUARD)
+        .expect("the call waited for a time it should not wait for")
+}
+
+/// A worker over `machine` whose stop grace (and so its wind-down wait and rescue bound)
+/// is an hour: a wait that is not cut short outlasts the hang guard.
+fn slow_to_give_up(dir: &Scratch, machine: &FakeMachine) -> Worker {
+    let mut plan = plan(dir, machine, STEP_NEVER);
+    plan.config.stop_grace = Duration::from_secs(3600);
+    plan.rescue_bound = None;
+    Worker::start(plan).unwrap_or_else(|why| panic!("the worker did not start: {why}"))
+}
+
+/// Asserts that a worker that dies while it is being wound down is rescued at once: the
+/// worker holds a running run, its runtime panics in the stop it is asked for, and
+/// `wind_down` returns without waiting out the hour it would otherwise wait, with the run
+/// stopped through a runtime of the agent's own after a second listing. It catches a wait
+/// that does not look at the worker's end and so holds the agent for hours.
+#[test]
+fn a_worker_that_ends_while_winding_down_is_rescued_at_once() {
+    let dir = Scratch::new("jobs-ends-w5");
+    let machine = FakeMachine::new();
+    let worker = slow_to_give_up(&dir, &machine);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    machine.world.panic_at("stop");
+    let lines = promptly(move || worker.wind_down());
+    assert!(lines.is_empty(), "{lines:?}");
+    let log = machine.world.log();
+    let lists = log.iter().filter(|call| *call == "list").count();
+    assert_eq!(lists, 2, "the adoption and the rescue each list: {log:?}");
+    assert_eq!(
+        stops_in(&machine.world),
+        2,
+        "the worker's, then the rescue's"
+    );
+}
+
+/// Asserts that a worker that ended while it was inside a start, so that no snapshot ever
+/// showed the run, is still rescued by `wind_down`: the rescue lists the containers again.
+/// It catches a wind-down that rescues only what the last snapshot shows running.
+#[test]
+fn a_worker_that_ended_inside_a_start_is_rescued() {
+    let dir = Scratch::new("jobs-ends-w6");
+    let machine = FakeMachine::new();
+    let worker = slow_to_give_up(&dir, &machine);
+    machine.world.panic_at("create");
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(!worker.handle().settle(), "the worker ended");
+    assert!(!worker.snapshot().running());
+    let lines = promptly(move || worker.wind_down());
+    assert!(lines.is_empty(), "{lines:?}");
+    let log = machine.world.log();
+    let lists = log.iter().filter(|call| *call == "list").count();
+    assert_eq!(lists, 2, "the adoption and the rescue each list: {log:?}");
+}
+
+/// Asserts that a worker that is alive but never answers is waited for only for the time
+/// the rescue gives it, not for the whole bound of the rescue: with a wait of 50 ms and a
+/// bound of an hour, `wind_down` returns and the run is stopped by the rescue. It catches
+/// a wind-down that waits out the bound of the rescue for a stalled worker.
+#[test]
+fn a_stalled_worker_is_waited_for_only_the_wind_down_wait() {
+    let (world, _held, dir) = world_with_r1("jobs-ends-w7");
+    let machine = FakeMachine::of(&world);
+    let hour = Duration::from_secs(3600);
+    let quick = rescue(&dir, &machine)
+        .limited(4, hour)
+        .winding(Duration::from_millis(50));
+    let stuck = Worker::orphaned(machine.clock.clone(), running("r1"), quick);
+    let lines = promptly(move || stuck.wind_down());
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(world.log().contains(&"stop r1".to_owned()));
+}
+
+/// Asserts that rescuing closes the worker: a worker that is inside a start when the
+/// rescue runs, with a second start waiting in its queue, makes the first container when
+/// it wakes and never the second. It catches a rescue that leaves a stalled worker free to
+/// start the runs it has queued, after the rescue listed the containers.
+#[test]
+fn a_rescue_closes_the_worker_so_a_queued_start_is_not_taken() {
+    let dir = Scratch::new("jobs-ends-w8");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    machine.world.wait_entered(1);
+    assert_eq!(worker.try_deliver(starts(&["r2"])), Delivery::Delivered);
+    let lines = worker.rescue();
+    assert!(lines.is_empty(), "{lines:?}");
+    machine.world.release();
+    assert!(worker.handle().settle());
+    assert_eq!(
+        machine.world.created(),
+        ["r1"],
+        "r2 was queued behind a stall"
+    );
+}
+
+/// Asserts that `wind_down` closes the worker itself: with one start in progress and
+/// another queued, and nothing yet shown as running (so no rescue follows), the queued
+/// start is not taken once the worker goes on. It catches a wind-down that only asks for
+/// the stops and lets the worker take the starts that wait.
+#[test]
+fn a_wind_down_closes_the_worker() {
+    let dir = Scratch::new("jobs-ends-w9");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    machine.world.hold_creates();
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    machine.world.wait_entered(1);
+    assert_eq!(worker.try_deliver(starts(&["r2"])), Delivery::Delivered);
+    assert!(worker.wind_down().is_empty());
+    machine.world.release();
+    assert!(worker.handle().settle());
+    assert_eq!(
+        machine.world.created(),
+        ["r1"],
+        "r2 was queued behind a stall"
+    );
+}
+
+/// Asserts that exited containers, which the listing holds too, do not use up the limit of
+/// the rescue: of three containers, two have exited, and a limit of one still stops the
+/// one that runs and no other. It catches a rescue that spends its limit on containers
+/// that are already stopped and leaves a running one.
+#[test]
+fn exited_containers_do_not_use_up_the_rescue_limit() {
+    let dir = Scratch::new("jobs-ends-w10");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    assert_eq!(
+        worker.try_deliver(starts(&["r1", "r2", "r3"])),
+        Delivery::Delivered
+    );
+    assert!(worker.handle().settle());
+    machine.world.exit("r1", 0);
+    machine.world.exit("r2", 0);
+    let limited = rescue(&dir, &machine).limited(1, Duration::from_secs(60));
+    let gone = Worker::orphaned(machine.clock.clone(), running("r3"), limited);
+    let lines = gone.rescue();
+    assert!(lines.is_empty(), "{lines:?}");
+    let log = machine.world.log();
+    assert_eq!(stops_in(&machine.world), 1, "{log:?}");
+    assert!(log.contains(&"stop r3".to_owned()), "{log:?}");
+}
+
+/// Asserts that a container the rescue cannot read the state of is still stopped: the
+/// first poll fails and the run is stopped all the same. It catches a rescue that skips
+/// what it cannot tell is running.
+#[test]
+fn a_container_whose_state_is_unknown_is_stopped() {
+    let (world, _held, dir) = world_with_r1("jobs-ends-w11");
+    let machine = FakeMachine::of(&world);
+    let rescuing = rescue(&dir, &machine);
+    let gone = Worker::orphaned(machine.clock.clone(), running("r1"), rescuing);
+    world.fail("poll", 1);
+    let lines = gone.rescue();
+    assert!(lines.is_empty(), "{lines:?}");
+    assert!(world.log().contains(&"stop r1".to_owned()));
+}
+
+/// Asserts that a host that runs more containers than the old limit of 16 has every one
+/// of them stopped by the rescue with its default limit. It catches a limit that leaves
+/// running containers behind on a host with many cores.
+#[test]
+fn every_running_container_is_stopped_beyond_sixteen() {
+    let dir = Scratch::new("jobs-ends-w12");
+    let machine = FakeMachine::new();
+    let mut big = plan(&dir, &machine, STEP_NEVER);
+    big.config.capacity = Capacity {
+        cpu_millis: 64_000,
+        memory_bytes: 1 << 40,
+        gpus: Default::default(),
+    };
+    let worker = Worker::start(big).unwrap_or_else(|why| panic!("no worker: {why}"));
+    let names: Vec<String> = (0..20).map(|n| format!("r{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(worker.try_deliver(starts(&names)), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    assert_eq!(machine.world.created().len(), 20, "all were started");
+    let rescuing = rescue(&dir, &machine);
+    let gone = Worker::orphaned(machine.clock.clone(), running("r0"), rescuing);
+    let lines = gone.rescue();
+    assert!(lines.is_empty(), "{lines:?}");
+    assert_eq!(stops_in(&machine.world), 20);
 }
