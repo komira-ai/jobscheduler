@@ -220,6 +220,33 @@ impl Scheduler {
         ))
     }
 
+    /// What `worker` is charged `minutes` minutes ahead, as `(millicores, bytes)`, before a
+    /// new lease: the predicted load curve admission checks, summed over its leases. Past
+    /// the horizon ([`crate::HORIZON_MINUTES`]) it is what each lease asks for from the
+    /// horizon on. A worker charged by prediction alone is charged the same at every minute.
+    #[must_use]
+    pub fn charged_ahead(&self, worker: &WorkerId, minutes: u32) -> Option<(u64, u64)> {
+        let w = self.workers.get(worker)?;
+        let slot = if minutes > crate::HORIZON_MINUTES {
+            crate::admission::H_PLUS_SLOT
+        } else {
+            usize::try_from(minutes).unwrap_or(0)
+        };
+        Some(
+            w.load_state
+                .left_at(slot, self.now, &w.capacity, &self.admission.cfg),
+        )
+    }
+
+    /// The runs left that the shape guard charges a key's CPU and memory flat, as
+    /// `(cpu, memory)`: 0 for a resource that is charged by its curve. The key is the size
+    /// key the caller named for the operation ([`Scheduler::set_size_key`]), else the
+    /// [`js_types::sched::usage::key_hash`] of its request's key.
+    #[must_use]
+    pub fn shape_demoted_runs(&self, guard_key: u64) -> (u32, u32) {
+        self.admission.shape_runs_left(guard_key)
+    }
+
     /// The worker a blocked head of the queue, `operation`, holds for headroom, if any.
     #[must_use]
     pub fn head_hold(&self, operation: OperationId) -> Option<&WorkerId> {

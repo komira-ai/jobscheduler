@@ -5,15 +5,21 @@
 //! [`FarmTime`], never a clock.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
-use js_types::sched::usage::{LeaseCost, NodeLoad};
+use js_types::sched::usage::{LeaseCost, LeaseMinute, NodeLoad};
 use js_types::sched::{FarmTime, LeaseId, Resources};
 
+use super::horizon;
+use super::profile::{Lanes, Profile};
 use super::{LoadConfig, LoadCounters, charge};
 
 /// A reading is dropped when it implies more cores than this many times the worker's
 /// capacity, or more memory than this many times its capacity.
 const IMPLAUSIBLE_FACTOR: u64 = 4;
+
+/// A minute of the agent's clock, in microseconds.
+const MINUTE_USEC: u64 = 60_000_000;
 
 /// The least a lease is charged on a worker that has never sent an accepted reading (a
 /// Mac, a native or VM node): nothing there measures a light population, so only the
@@ -22,14 +28,80 @@ const IMPLAUSIBLE_FACTOR: u64 = 4;
 pub(crate) const UNMEASURED_CPU_FLOOR_MILLIS: u64 = 1000;
 
 /// One lease on the ledger.
-#[derive(Clone, Copy, Debug)]
-struct Entry {
-    cost: LeaseCost,
+#[derive(Clone, Debug)]
+pub(super) struct Entry {
+    pub(super) cost: LeaseCost,
     /// A VM lease: it runs outside the actions cgroup, so its booked cost is added to
     /// every sum and no reading covers it.
-    vm: bool,
+    pub(super) vm: bool,
     /// The newest accepted reading lists it as running for the whole window.
-    covered: bool,
+    pub(super) covered: bool,
+    /// How it is charged over time, when it is charged by curve or to an expected life.
+    pub(super) profile: Option<Arc<Profile>>,
+    /// Its age in whole minutes as of the newest accepted reading (its own clock); 0 for
+    /// a lease no reading has given a clock.
+    pub(super) age: u32,
+    /// The newest accepted reading gives it a clock.
+    pub(super) clocked: bool,
+    /// Its age is known: a lease no reading covers is as old as it was placed (0), a
+    /// covered one needs the clock. A covered lease without one is charged flat.
+    pub(super) aged: bool,
+    /// The working set of its newest closed minute when that was above what its curve asks
+    /// for from that minute on, else 0: the lease is charged what it uses until a minute
+    /// says it uses less. Only a lease charged by a memory curve can have one.
+    pub(super) ws_over: u64,
+    /// The newest minute record taken in.
+    seen_minute: Option<u32>,
+    /// Some minute of it misfit its CPU curve / memory curve.
+    cpu_misfit: bool,
+    mem_misfit: bool,
+}
+
+impl Entry {
+    fn new(cost: LeaseCost, vm: bool, profile: Option<Arc<Profile>>) -> Self {
+        Self {
+            cost,
+            vm,
+            covered: false,
+            profile,
+            age: 0,
+            clocked: false,
+            aged: true,
+            ws_over: 0,
+            seen_minute: None,
+            cpu_misfit: false,
+            mem_misfit: false,
+        }
+    }
+
+    /// Takes in a closed minute of the lease; counts the minutes that misfit.
+    fn observe(&mut self, minute: &LeaseMinute, counters: &mut LoadCounters) {
+        if self.seen_minute.is_some_and(|seen| minute.minute <= seen) {
+            return;
+        }
+        self.seen_minute = Some(minute.minute);
+        self.ws_over = 0;
+        let Some(p) = self.profile.as_deref() else {
+            return;
+        };
+        if p.cpu_misfit(minute.minute, minute.cpu_mean_millis) {
+            self.cpu_misfit = true;
+            counters.misfit_cpu_minutes += 1;
+        }
+        if p.mem_misfit(minute.minute, minute.ws_max_bytes) {
+            self.mem_misfit = true;
+            self.ws_over = minute.ws_max_bytes;
+            counters.misfit_memory_minutes += 1;
+        }
+    }
+}
+
+/// A lease taken off the ledger: what the shape guard needs to judge its run.
+#[derive(Clone, Debug)]
+pub(crate) struct Ended {
+    pub(crate) profile: Option<Arc<Profile>>,
+    pub(crate) cpu_misfit: bool,
+    pub(crate) mem_misfit: bool,
 }
 
 /// The sums of the predicted charges on a worker.
@@ -43,10 +115,13 @@ pub(crate) struct Totals {
     pub(crate) vm_mem: u64,
     /// How many action leases the ledger holds.
     pub(crate) actions: usize,
+    /// The per-slot charges of the leases charged over time.
+    pub(super) lanes: Lanes,
 }
 
 impl Totals {
     fn shift(&mut self, entry: &Entry, up: bool) {
+        self.lanes.shift(entry, up);
         let c = charge(&entry.cost);
         let (cpu, mem) = if entry.vm {
             (&mut self.vm_cpu, &mut self.vm_mem)
@@ -79,6 +154,48 @@ impl Totals {
     /// Predicted cores of every action lease, covered or not.
     pub(crate) const fn cpu_all(&self) -> u64 {
         self.cpu_covered.saturating_add(self.cpu_uncovered)
+    }
+
+    /// What the covered leases are charged `slot` minutes ahead (the `H+` slot included):
+    /// the floor `f` on the cores of those charged flat, plus the charge of those charged
+    /// by curve. At slot 0 with no lease charged over time this is `f * sum p(covered)`.
+    pub(crate) fn cpu_covered_at(&self, slot: usize, cfg: &LoadConfig) -> u64 {
+        let l = &self.lanes;
+        let flat = self
+            .cpu_covered
+            .saturating_sub(l.timed_cpu_cov_p)
+            .saturating_add(l.cpu_cov_p.at(slot));
+        cfg.floor_of(flat).saturating_add(l.cpu_cov_c.at(slot))
+    }
+
+    /// What the uncovered leases are charged `slot` minutes ahead.
+    pub(crate) fn cpu_uncovered_at(&self, slot: usize) -> u64 {
+        let l = &self.lanes;
+        self.cpu_uncovered
+            .saturating_sub(l.timed_cpu_unc_p)
+            .saturating_add(l.cpu_unc.at(slot))
+    }
+
+    /// Memory the action leases are charged `slot` minutes ahead, covered or not.
+    pub(crate) fn mem_all_at(&self, slot: usize) -> u64 {
+        let l = &self.lanes;
+        self.mem_all()
+            .saturating_sub(l.timed_mem_cov)
+            .saturating_sub(l.timed_mem_unc)
+            .saturating_add(l.mem_all.at(slot))
+    }
+
+    /// Memory the uncovered leases are charged `slot` minutes ahead.
+    pub(crate) fn mem_uncovered_at(&self, slot: usize) -> u64 {
+        let l = &self.lanes;
+        self.mem_uncovered
+            .saturating_sub(l.timed_mem_unc)
+            .saturating_add(l.mem_unc.at(slot))
+    }
+
+    /// Whether some lease is charged over time.
+    pub(crate) const fn has_timed(&self) -> bool {
+        self.lanes.timed > 0
     }
 }
 
@@ -114,6 +231,11 @@ pub(crate) struct Left {
     /// The sum in `cpu` already holds it for the leases on the ledger; the new lease takes
     /// it through [`Left::charged_cpu`].
     pub(crate) floor_cpu: u64,
+    /// The measured cores, in millicores, the left side holds (0 when it is charged by
+    /// prediction alone).
+    pub(crate) measured: u64,
+    /// The working set that counts against memory (0 when charged by prediction alone).
+    pub(crate) working_set: u64,
 }
 
 impl Left {
@@ -145,26 +267,32 @@ pub(crate) struct WorkerLoad {
 }
 
 impl WorkerLoad {
-    /// Charges `lease` at `cost` from now until [`WorkerLoad::remove`]. It is uncovered:
-    /// no reading has listed it.
-    pub(crate) fn insert(&mut self, lease: LeaseId, cost: LeaseCost, vm: bool) {
-        let entry = Entry {
-            cost,
-            vm,
-            covered: false,
-        };
+    /// Charges `lease` at `cost` from now until [`WorkerLoad::remove`], over time as
+    /// `profile` says if it has one. It is uncovered: no reading has listed it.
+    pub(crate) fn insert(
+        &mut self,
+        lease: LeaseId,
+        cost: LeaseCost,
+        vm: bool,
+        profile: Option<Arc<Profile>>,
+    ) {
+        let entry = Entry::new(cost, vm, profile);
+        self.totals.shift(&entry, true);
         // A lease booked twice is charged once.
         if let Some(old) = self.ledger.insert(lease, entry) {
             self.totals.shift(&old, false);
         }
-        self.totals.shift(&entry, true);
     }
 
     /// Takes `lease`'s charge off, whatever its outcome. A lease not charged is ignored.
-    pub(crate) fn remove(&mut self, lease: LeaseId) {
-        if let Some(entry) = self.ledger.remove(&lease) {
-            self.totals.shift(&entry, false);
-        }
+    pub(crate) fn remove(&mut self, lease: LeaseId) -> Option<Ended> {
+        let entry = self.ledger.remove(&lease)?;
+        self.totals.shift(&entry, false);
+        Some(Ended {
+            profile: entry.profile,
+            cpu_misfit: entry.cpu_misfit,
+            mem_misfit: entry.mem_misfit,
+        })
     }
 
     pub(crate) const fn totals(&self) -> &Totals {
@@ -172,9 +300,13 @@ impl WorkerLoad {
     }
 
     /// A new session: readings of the old one say nothing about the new. The leases
-    /// stay charged.
+    /// stay charged, uncovered, and what the old session said of their working sets is
+    /// forgotten.
     pub(crate) fn new_session(&mut self) {
         self.readings = None;
+        for entry in self.ledger.values_mut() {
+            entry.ws_over = 0;
+        }
         self.cover(&BTreeSet::new());
     }
 
@@ -200,7 +332,30 @@ impl WorkerLoad {
         self.totals = Totals::default();
         for (lease, entry) in &mut self.ledger {
             entry.covered = !entry.vm && covered.contains(lease);
+            entry.aged = !entry.covered || entry.clocked;
             self.totals.shift(entry, true);
+        }
+    }
+
+    /// Takes the clocks and closed minutes of an accepted reading in: each lease's age,
+    /// its newest working set, and the minutes that misfit its curves.
+    fn take_clocks(&mut self, load: &NodeLoad, counters: &mut LoadCounters) {
+        let clocks: BTreeMap<LeaseId, u64> = load
+            .lease_clocks
+            .iter()
+            .map(|c| (c.lease, c.started_mono_usec))
+            .collect();
+        for (lease, entry) in &mut self.ledger {
+            let started = clocks.get(lease);
+            entry.clocked = started.is_some();
+            entry.age = started.map_or(0, |s| {
+                u32::try_from(load.mono_usec.saturating_sub(*s) / MINUTE_USEC).unwrap_or(u32::MAX)
+            });
+        }
+        for minute in &load.minutes {
+            if let Some(entry) = self.ledger.get_mut(&minute.lease) {
+                entry.observe(minute, counters);
+            }
         }
     }
 
@@ -242,6 +397,7 @@ impl WorkerLoad {
         self.measured_once = true;
         let older = self.readings.as_ref().and_then(|r| r.windows[0]);
         let covered: BTreeSet<LeaseId> = load.covered.iter().copied().collect();
+        self.take_clocks(&load, counters);
         self.readings = Some(Readings {
             last: load,
             arrived: now,
@@ -250,7 +406,7 @@ impl WorkerLoad {
         self.cover(&covered);
         if let Some(measured) = self.measured() {
             counters.floor_windows += 1;
-            if cfg.floor_of(self.totals.cpu_covered) > u64::from(measured) {
+            if self.totals.cpu_covered_at(0, cfg) > u64::from(measured) {
                 counters.floor_binds += 1;
             }
         }
@@ -344,16 +500,14 @@ impl WorkerLoad {
         let t = &self.totals;
         if let Some(reading) = self.fresh_reading(now, cfg) {
             let measured = u64::from(self.measured().unwrap_or(0));
-            let cpu = measured.max(cfg.floor_of(t.cpu_covered));
             let ws = self.working_set_counted(reading, capacity, cfg);
             Left {
-                cpu: cpu.saturating_add(t.cpu_uncovered).saturating_add(t.vm_cpu),
-                mem: t
-                    .mem_all()
-                    .max(ws.saturating_add(t.mem_uncovered))
-                    .saturating_add(t.vm_mem),
+                cpu: horizon::cpu_left(t, 0, measured, cfg),
+                mem: horizon::mem_left(t, 0, ws),
                 fallback: false,
                 floor_cpu: 0,
+                measured,
+                working_set: ws,
             }
         } else if self.measured_once {
             Left {
@@ -361,6 +515,8 @@ impl WorkerLoad {
                 mem: t.mem_all().saturating_add(t.vm_mem),
                 fallback: true,
                 floor_cpu: 0,
+                measured: 0,
+                working_set: 0,
             }
         } else {
             let floor = UNMEASURED_CPU_FLOOR_MILLIS.min(capacity.cpu_millis);
@@ -375,24 +531,61 @@ impl WorkerLoad {
                 mem: t.mem_all().saturating_add(t.vm_mem),
                 fallback: true,
                 floor_cpu: floor,
+                measured: 0,
+                working_set: 0,
             }
         }
     }
 
+    /// What the worker is charged `slot` minutes ahead (slot [`super::profile::H_PLUS`]: from
+    /// the horizon on), as `(cores in millicores, memory in bytes)`, before a new lease.
+    /// A worker charged by prediction alone is charged the same at every slot.
+    pub(crate) fn left_at(
+        &self,
+        slot: usize,
+        now: FarmTime,
+        capacity: &Resources,
+        cfg: &LoadConfig,
+    ) -> (u64, u64) {
+        let left = self.left(now, capacity, cfg);
+        if left.fallback {
+            return (left.cpu, left.mem);
+        }
+        let t = &self.totals;
+        (
+            horizon::cpu_left(t, slot, left.measured, cfg),
+            horizon::mem_left(t, slot, left.working_set),
+        )
+    }
+
     /// Whether a lease of `cost` (already clamped to the capacity) fits beside `left`.
+    ///
+    /// On a worker charged by measurement, when the new lease or a lease on the worker is
+    /// charged over time, the lease must fit at every slot of the horizon
+    /// ([`horizon::refusal`]); otherwise at the one flat figure. `profile` is how the new
+    /// lease is charged over time, if it is.
     pub(crate) fn admits(
         &self,
         cost: &LeaseCost,
+        profile: Option<&Profile>,
         left: &Left,
         capacity: &Resources,
         now: FarmTime,
         cfg: &LoadConfig,
     ) -> Result<(), Refusal> {
-        if left.cpu.saturating_add(left.charged_cpu(cost)) > cfg.cpu_limit(capacity) {
-            return Err(Refusal::Cpu);
-        }
-        if left.mem.saturating_add(cost.memory_bytes) > cfg.mem_limit(capacity) {
-            return Err(Refusal::Memory);
+        if !left.fallback && (self.totals.has_timed() || profile.is_some_and(Profile::timed)) {
+            if let Some(refusal) =
+                horizon::refusal(&self.totals, cost, profile, left, capacity, cfg)
+            {
+                return Err(refusal);
+            }
+        } else {
+            if left.cpu.saturating_add(left.charged_cpu(cost)) > cfg.cpu_limit(capacity) {
+                return Err(Refusal::Cpu);
+            }
+            if left.mem.saturating_add(cost.memory_bytes) > cfg.mem_limit(capacity) {
+                return Err(Refusal::Memory);
+            }
         }
         if cost.cold && self.cold_admitted(now, cfg) >= cfg.cold_cap(capacity) {
             return Err(Refusal::ColdCap);
@@ -437,8 +630,8 @@ mod tests {
     #[test]
     fn a_lease_is_charged_once_and_removing_a_stranger_changes_nothing() {
         let mut load = WorkerLoad::default();
-        load.insert(lease(1), cost(500, GIB), false);
-        load.insert(lease(1), cost(700, 2 * GIB), false);
+        load.insert(lease(1), cost(500, GIB), false, None);
+        load.insert(lease(1), cost(700, 2 * GIB), false, None);
         assert_eq!(load.totals().cpu_uncovered, 700);
         assert_eq!(load.totals().mem_uncovered, 2 * GIB);
         assert_eq!(load.totals().actions, 1);

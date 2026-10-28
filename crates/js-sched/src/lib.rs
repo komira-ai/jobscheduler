@@ -103,7 +103,9 @@ mod requeue;
 mod scheduler;
 mod servable;
 
-pub use admission::{LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction};
+pub use admission::{
+    HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction,
+};
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;

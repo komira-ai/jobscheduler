@@ -645,11 +645,11 @@ impl CurveSource for EveryKey {
     }
 }
 
-/// Catches: a curve changing what the flat rule charges (the seam is for the rule that
-/// reads it), and the keys that have one going uncounted: three leases are charged
-/// exactly as without a source and counted.
+/// Catches: a curve changing what a worker charged by prediction alone charges (a worker
+/// with no window has no clock to read a curve by), and the keys that have one going
+/// uncounted: three leases are charged exactly as without a source and counted.
 #[test]
-fn the_flat_rule_charges_a_key_with_a_curve_flat_and_counts_it() {
+fn a_worker_charged_by_prediction_alone_charges_a_key_with_a_curve_flat_and_counts_it() {
     let mut s = Scheduler::new(1)
         .with_load_config(LoadConfig::default())
         .with_curves(Arc::new(EveryKey));

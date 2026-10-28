@@ -7,7 +7,7 @@ mod load_world;
 
 use js_sched::{LoadConfig, Prediction};
 
-use load_world::{GIB, Spec, W, World};
+use load_world::{Curves, GIB, Spec, W, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
     Prediction {
@@ -243,15 +243,36 @@ fn phased(awake: u64, hint: Prediction) -> Spec {
     }
 }
 
+/// A world for sim h's actions, which run under two minutes: with `profiles` every key
+/// has the curve of one bucket, at the 4 cores they use when awake, over the 2 they are
+/// predicted at; otherwise none has a curve.
+fn phase_world(profiles: bool) -> World {
+    if !profiles {
+        return World::new(LoadConfig::default());
+    }
+    let curves = Curves::new("sim");
+    curves.set_all(&[(2_000, 0)], 5);
+    World::with_curves(LoadConfig::default(), &curves)
+}
+
 /// Sim h (rise). Catches: a rise in load not believed at once (smoothed with the idle
 /// windows before it, or believed only after two): five leases predicted at 2 cores wake
 /// to 4 each on a 16-core node, two more are admitted while the readings are idle (the
 /// floor bounds that), and once the first reading that shows the rise is in, the
 /// measurement (a saturated node) with the two uncovered leases leaves no room, where the
 /// floor and the uncovered leases alone would leave room for three.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_a_rise_is_believed_at_once_and_stops_placement() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_a_rise_is_believed_at_once_and_stops_placement_with(profiles);
+    }
+}
+
+fn h_a_rise_is_believed_at_once_and_stops_placement_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let phase = phased(4_000, warm(2_000, 0));
     w.submit_many(5, &phase);
@@ -285,9 +306,18 @@ fn h_a_rise_is_believed_at_once_and_stops_placement() {
 /// prediction (`r` 2, `k` 2). The demand stays within `(r k / f) (1 + s) C + n_c A`
 /// (93.9 + 8 cores on 16), and the covered charge never falls below `f` of the covered
 /// predictions while they idle.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_the_idle_prelude_cannot_stack_beyond_the_floor() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles);
+    }
+}
+
+fn h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let node = js_types::sched::WorkerId::new("n");
     let sleeper = Spec {

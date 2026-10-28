@@ -6,15 +6,20 @@
 #![allow(dead_code, reason = "each test binary uses some of the rig")]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use js_caps::NodeCaps;
 use js_sched::harness::feed;
 use js_sched::{DaemonInstance, Event, LoadConfig, Prediction, Request, Scheduler};
-use js_types::sched::usage::NodeLoad;
+use js_types::sched::usage::{LeaseClock, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, FarmTime, LeaseId, LeaseKind, OperationId, Outcome, Qos, Resources, ResultRef,
     StartLease, WaiterId, WorkKey, WorkerId,
 };
+
+#[path = "../load_curves/mod.rs"]
+mod curves;
+pub use curves::Curves;
 
 pub const GIB: u64 = 1 << 30;
 pub const MIB: u64 = 1 << 20;
@@ -55,6 +60,24 @@ impl Rig {
             next: 0,
             gauges: BTreeMap::new(),
         }
+    }
+
+    /// A scheduler configured with `config` and given `curves`, at time 0.
+    pub fn with_curves(config: LoadConfig, curves: &Arc<Curves>) -> Self {
+        let mut rig = Self::new(config);
+        rig.s = Scheduler::new(1)
+            .with_load_config(config)
+            .with_curves(curves.clone());
+        rig
+    }
+
+    /// Sets `name`'s monotonic clock to `mono_usec`, so that a lease can be given an age
+    /// before the first reading. Call it before the baseline.
+    pub fn set_clock(&mut self, name: &str, mono_usec: u64) {
+        self.gauges
+            .get_mut(name)
+            .expect("registered worker")
+            .mono_usec = mono_usec;
     }
 
     /// A scheduler with the default configuration (the predicate on).
@@ -105,7 +128,7 @@ impl Rig {
 
     /// Submits `request`; the operation's id is the count of operations before it.
     pub fn submit(&mut self, request: Request) -> OperationId {
-        let op = OperationId(self.s.operations() as u64);
+        let op = self.s.next_operation();
         let waiter = WaiterId(op.0);
         self.feed(Event::Submit { waiter, request });
         op
@@ -118,6 +141,22 @@ impl Rig {
         if let Some(hint) = hint {
             self.s.set_cost(op, hint);
         }
+        op
+    }
+
+    /// Submits an action of the key `key` (shared by whoever names the same) with the
+    /// prediction `hint` fed for it.
+    pub fn keyed(
+        &mut self,
+        key: &str,
+        cpu_millis: u64,
+        limit: u64,
+        hint: Prediction,
+    ) -> OperationId {
+        let mut request = self.request(LeaseKind::Action, cpu_millis, limit);
+        request.key = WorkKey::new("load", key);
+        let op = self.submit(request);
+        self.s.set_cost(op, hint);
         op
     }
 
@@ -223,6 +262,34 @@ impl Rig {
         self.beat(name, Some(load));
     }
 
+    /// One window passes on `name` as in [`Rig::window`], and the reading carries the
+    /// start of each lease in `ages` (that many whole minutes ago on the agent's clock) and
+    /// the closed `minutes`.
+    pub fn window_clocked(
+        &mut self,
+        name: &str,
+        busy_milli: u64,
+        working_set: u64,
+        covered: &[LeaseId],
+        ages: &[(LeaseId, u32)],
+        minutes: &[LeaseMinute],
+    ) {
+        self.ms += W_MS;
+        let mut load = self.reading(name, busy_milli, working_set, covered.to_vec());
+        load.lease_clocks = ages
+            .iter()
+            .map(|&(lease, age)| LeaseClock {
+                lease,
+                started_mono_usec: load
+                    .mono_usec
+                    .checked_sub(u64::from(age) * 60_000_000)
+                    .expect("set the clock before the baseline"),
+            })
+            .collect();
+        load.minutes = minutes.to_vec();
+        self.beat(name, Some(load));
+    }
+
     /// The worker reports that `start` ended with a result.
     pub fn finish(&mut self, start: &StartLease) {
         let outcome = Outcome::Completed {
@@ -247,6 +314,17 @@ impl Rig {
     /// The leases held on `name`.
     pub fn held(&self, name: &str) -> Vec<LeaseId> {
         self.s.leases_on(&w(name))
+    }
+}
+
+/// A closed minute of `lease`.
+pub fn minute(lease: LeaseId, minute: u32, cpu_mean_millis: u32, ws_max_bytes: u64) -> LeaseMinute {
+    LeaseMinute {
+        lease,
+        minute,
+        cpu_mean_millis,
+        cpu_peak_window_millis: cpu_mean_millis,
+        ws_max_bytes,
     }
 }
 

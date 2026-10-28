@@ -18,11 +18,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_caps::NodeCaps;
 use js_types::sched::{FarmTime, LeaseKind, NodePhase, Resources, WorkerId};
 
+use std::sync::Arc;
+
 use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
-    Admission, Blocked, Left, PlacementLoad, Ratio, Refusal, binding, clamped, pick,
+    Admission, Blocked, Left, PlacementLoad, Profile, Ratio, Refusal, binding, clamped, pick,
 };
 use crate::cordon::Cordons;
 use crate::input::Request;
@@ -52,6 +54,8 @@ pub(crate) struct Attempt<'a> {
     pub(crate) not_whole: bool,
     /// What it is charged if placed now (before the clamp to a worker's capacity).
     pub(crate) cost: LeaseCost,
+    /// How it is charged over time, if it is (see [`Admission::profile_of`]).
+    pub(crate) profile: Option<Arc<Profile>>,
     /// The lease it gets if placed now.
     pub(crate) lease: LeaseId,
 }
@@ -217,13 +221,19 @@ impl Servable {
         };
         let worker = workers.get_mut(&name).expect("live workers are registered");
         let (cost, left) = Self::charged(adm, worker, attempt, now);
+        let profile = Self::profile_on(worker, attempt).cloned();
         if request.kind == LeaseKind::Action {
             if by_load {
-                adm.count_admitted(&request.key, &cost, left.fallback);
+                adm.count_admitted(&request.key, &cost, left.fallback, profile.as_deref());
             } else if adm.cfg.mode == PlacementLoad::Shadow {
-                let ok = worker
-                    .load_state
-                    .admits(&cost, &left, &worker.capacity, now, &adm.cfg);
+                let ok = worker.load_state.admits(
+                    &cost,
+                    profile.as_deref(),
+                    &left,
+                    &worker.capacity,
+                    now,
+                    &adm.cfg,
+                );
                 adm.count_shadow(ok.is_ok());
             }
             if cost.cold {
@@ -243,8 +253,10 @@ impl Servable {
         worker.booked = worker.booked.saturating_add(booked);
         worker.leases += 1;
         match request.kind {
-            LeaseKind::Action => worker.load_state.insert(attempt.lease, cost, false),
-            LeaseKind::Vm => worker.load_state.insert(attempt.lease, cost, true),
+            LeaseKind::Action => worker
+                .load_state
+                .insert(attempt.lease, cost, false, profile),
+            LeaseKind::Vm => worker.load_state.insert(attempt.lease, cost, true, None),
             LeaseKind::WholeMachine => {}
         }
         let device = worker.free_device(&request.needs).map(str::to_owned);
@@ -276,10 +288,14 @@ impl Servable {
             let w = &workers[name];
             let cost = clamped(attempt.cost, &w.capacity);
             let left = w.load_state.left(now, &w.capacity, &adm.cfg);
-            match w
-                .load_state
-                .admits(&cost, &left, &w.capacity, now, &adm.cfg)
-            {
+            match w.load_state.admits(
+                &cost,
+                Self::profile_on(w, attempt).map(|p| &**p),
+                &left,
+                &w.capacity,
+                now,
+                &adm.cfg,
+            ) {
                 Ok(()) => admitted.push((name, w.load_charged(&left))),
                 Err(Refusal::ColdCap) => cold = true,
                 Err(_) => load = true,
@@ -295,6 +311,15 @@ impl Servable {
             None
         };
         (admitted, why)
+    }
+
+    /// How `attempt` is charged over time on `worker`: as its profile says, except that an
+    /// action at the whole host's memory runs alone and is charged flat.
+    fn profile_on<'a>(worker: &Worker, attempt: &'a Attempt<'_>) -> Option<&'a Arc<Profile>> {
+        attempt
+            .profile
+            .as_ref()
+            .filter(|_| !worker.exclusive(attempt.request))
     }
 
     /// The cost `attempt` is charged on `worker`, and what the worker is charged before it.
@@ -344,15 +369,20 @@ impl Servable {
                 let w = &workers[name];
                 let cost = clamped(attempt.cost, &w.capacity);
                 let left = w.load_state.left(now, &w.capacity, &adm.cfg);
+                // The charge of the new lease at the present minute.
+                let profile = Self::profile_on(w, attempt);
+                let (new_cpu, new_mem) = profile.map_or_else(
+                    || (left.charged_cpu(&cost), cost.memory_bytes),
+                    |p| {
+                        (
+                            p.new_cpu(0).min(w.capacity.cpu_millis),
+                            p.new_mem(0).min(w.capacity.memory_bytes),
+                        )
+                    },
+                );
                 let ratio = binding(
-                    (
-                        left.cpu.saturating_add(left.charged_cpu(&cost)),
-                        w.capacity.cpu_millis,
-                    ),
-                    (
-                        left.mem.saturating_add(cost.memory_bytes),
-                        w.capacity.memory_bytes,
-                    ),
+                    (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
+                    (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
                 );
                 (name, ratio)
             })

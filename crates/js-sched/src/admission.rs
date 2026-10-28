@@ -28,6 +28,16 @@
 //! - A blocked head of the queue holds the worker with the most headroom, so a stream
 //!   of small work cannot keep a large action out for good (`head.rs`).
 //!
+//! - Time profiles (`profile.rs`, `horizon.rs`): a key with a learned curve (3 runs or
+//!   more, not demoted) is charged per minute of the lease's life instead of one number, and
+//!   the predicate is checked at every minute of the next 30 and once for what each lease
+//!   asks for from then on. The measurement enters at the first minute only. Cold keys,
+//!   demoted keys, retries and workers charged by prediction alone are charged flat, as
+//!   before. Both switches ([`LoadConfig::profile`], [`LoadConfig::profile_memory`]) off
+//!   give the flat rule exactly.
+//! - The shape guard (`guard.rs`) charges a resource of a key flat for 8 runs when its
+//!   curve misfit in 2 of the last 3 runs or 3 of the last 10.
+//!
 //! The cost of a lease ([`LeaseCost`]) is fixed when it is placed, written into its
 //! grant record, and kept by the scheduler and by any scheduler recovered from the
 //! record until the lease's result; it is never computed again from the estimator.
@@ -37,11 +47,16 @@
 //! request's `resources.memory_bytes` (the limit it first runs under) are different
 //! figures and are kept apart.
 //!
-//! Where a lease's charge is computed there is one function, [`charge`]; the rule that
-//! charges a lease by a curve over its lifetime replaces it.
+//! Where a lease's flat charge is computed there is one function, [`charge`]; the charge by
+//! a curve over the lease's minutes is [`profile::Profile`], and the two are summed in the
+//! ledger by one rule ([`horizon`]). The curve of a lease is not part of its cost record:
+//! a lease recovered from the store is charged flat until it ends.
 
+mod guard;
 mod head;
+mod horizon;
 mod ledger;
+mod profile;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -49,13 +64,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_sizing::{COLD_CPU_MILLIS, Estimate};
-use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, key_hash};
+use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, RunEnd, key_hash};
 use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources, WorkKey};
 
 pub(crate) use head::{Ratio, binding, pick};
-pub(crate) use ledger::{Left, Refusal, WorkerLoad, clamped};
+pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
+pub use profile::HORIZON_MINUTES;
+pub(crate) use profile::{H_PLUS as H_PLUS_SLOT, Profile};
 
 use crate::input::Request;
+
+use guard::{Resource, ShapeGuard};
+use profile::{Choice, MIN_RUNS};
 
 /// Whether placement reads the load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,6 +113,27 @@ pub struct LoadConfig {
     /// in the working set (see `WorkerLoad::working_set_counted`). Default 250; at most
     /// 1000.
     pub file_share_permille: u32,
+    /// Profile admission: a key with a learned curve is charged per minute and the
+    /// predicate is checked over the next 30 minutes. The operator's off switch for CPU
+    /// (memory has its own, [`LoadConfig::profile_memory`]); with both off the flat rule
+    /// applies. Default on.
+    pub profile: bool,
+    /// Memory is charged by the curve's remaining maximum. Needs [`LoadConfig::profile`].
+    /// Default on.
+    pub profile_memory: bool,
+    /// `g`, in thousandths: a curve charges a lease at least this share of its flat
+    /// cores. Default 750; kept within 500 and `f`.
+    pub profile_floor_permille: u32,
+    /// The node guard on flat memory (`d`, in thousandths): a lease charged by a memory
+    /// curve is admitted only if the flat memory costs of every lease on the worker,
+    /// its own included, stay within `(1 + d) * C_mem`. Never applies to a whole-host
+    /// lease. `None` (the default) turns it off; the suggested value is 250.
+    pub flat_memory_slack_permille: Option<u32>,
+    /// End a new lease's charge at its expected life: the P90 of its key's wall minutes
+    /// (read through [`CurveSource::wall_minutes_p90`]) plus this many minutes, instead
+    /// of charging it for the whole horizon. The lease's own present minute is always
+    /// charged. `None` (the default) turns it off; the suggested value is 2.
+    pub expected_life_delta_minutes: Option<u32>,
 }
 
 impl Default for LoadConfig {
@@ -105,6 +146,11 @@ impl Default for LoadConfig {
             s_mem_permille: 0,
             cold_per_window: None,
             file_share_permille: 250,
+            profile: true,
+            profile_memory: true,
+            profile_floor_permille: 750,
+            flat_memory_slack_permille: None,
+            expected_life_delta_minutes: None,
         }
     }
 }
@@ -113,11 +159,13 @@ impl LoadConfig {
     /// These settings with each value brought into its range.
     #[must_use]
     pub fn normalised(self) -> Self {
+        let floor = self.cpu_floor_permille.clamp(500, 1000);
         Self {
             window: self.window.max(Duration::from_millis(1)),
-            cpu_floor_permille: self.cpu_floor_permille.clamp(500, 1000),
+            cpu_floor_permille: floor,
             cold_per_window: self.cold_per_window.map(|n| n.max(1)),
             file_share_permille: self.file_share_permille.min(1000),
+            profile_floor_permille: self.profile_floor_permille.clamp(500, floor),
             ..self
         }
     }
@@ -192,8 +240,21 @@ pub struct LoadCounters {
     pub admitted_fallback: u64,
     /// Of those, cold ones.
     pub admitted_cold: u64,
-    /// Of those, whose key has a curve that the flat rule did not use.
+    /// Of those, whose key has a curve that was not used: charged flat in both CPU and
+    /// memory (the switches are off, the key is demoted, or it is a retry).
     pub curve_flat: u64,
+    /// Of those, charged by curve in CPU.
+    pub profile_cpu: u64,
+    /// Of those, charged by curve in memory.
+    pub profile_memory: u64,
+    /// Lease-minutes whose mean cores were over twice the charge (and 250 m over it).
+    pub misfit_cpu_minutes: u64,
+    /// Lease-minutes whose working set was above the curve's remaining maximum.
+    pub misfit_memory_minutes: u64,
+    /// Times the shape guard charged a key's CPU flat for the next runs.
+    pub demotions_cpu: u64,
+    /// Times the shape guard charged a key's memory flat for the next runs.
+    pub demotions_memory: u64,
     /// Queued requests, one count per request per round, that had a worker with room
     /// apart from the predicate and found none it admitted.
     pub blocked: u64,
@@ -303,6 +364,7 @@ pub(crate) struct Admission {
     pub(crate) counters: LoadCounters,
     hints: BTreeMap<OperationId, Prediction>,
     curves: Curves,
+    guard: ShapeGuard,
 }
 
 impl Default for Admission {
@@ -319,6 +381,7 @@ impl Default for Admission {
             counters: LoadCounters::default(),
             hints: BTreeMap::new(),
             curves: Curves(Arc::new(NoCurves)),
+            guard: ShapeGuard::default(),
         }
     }
 }
@@ -395,14 +458,122 @@ impl Admission {
         }
     }
 
+    /// How the lease of `operation`, `request`, charged `cost` if placed now, is charged
+    /// over time: by its key's curve (in CPU, in memory, or both), up to an expected life,
+    /// or flat, which is `None`.
+    ///
+    /// A key is charged by curve when the setting is on, it has a prediction that is not
+    /// cold, its curve was fitted from [`MIN_RUNS`] runs or more, the lease is not a
+    /// retry up the memory ladder (charged flat at its rung), and the shape guard has not
+    /// demoted the resource.
+    pub(crate) fn profile_of(
+        &self,
+        operation: OperationId,
+        request: &Request,
+        cost: &LeaseCost,
+        retried: bool,
+        guard_key: u64,
+    ) -> Option<Arc<Profile>> {
+        // A scheduler that places by the booked rule reads no curve; shadow counts what
+        // the predicate would have said, curves included.
+        if request.kind != LeaseKind::Action || retried || self.cfg.mode == PlacementLoad::Off {
+            return None;
+        }
+        let cfg = &self.cfg;
+        self.hints.get(&operation).filter(|p| !p.cold)?;
+        let curve = cfg
+            .profile
+            .then(|| self.curves.0.curve(&request.key))
+            .flatten()
+            .filter(|c| c.runs() >= MIN_RUNS && !c.points().is_empty());
+        let life = cfg.expected_life_delta_minutes.and_then(|delta| {
+            self.curves
+                .0
+                .wall_minutes_p90(&request.key)
+                .map(|minutes| minutes.saturating_add(delta))
+        });
+        if curve.is_none() && life.is_none() {
+            return None;
+        }
+        let (cpu_left, mem_left) = self.guard.runs_left(guard_key);
+        let charged = curve.is_some();
+        let choice = Choice {
+            curve,
+            cpu: cpu_left == 0,
+            mem: cfg.profile_memory && mem_left == 0,
+            demoted_cpu: charged && cpu_left > 0,
+            demoted_mem: charged && cfg.profile_memory && mem_left > 0,
+            life,
+            floor_permille: cfg.profile_floor_permille,
+            guard_key,
+        };
+        Some(Arc::new(Profile::new(choice, cost)))
+    }
+
+    /// The runs left that the shape guard charges `guard_key`'s CPU and memory flat.
+    pub(crate) fn shape_runs_left(&self, guard_key: u64) -> (u32, u32) {
+        self.guard.runs_left(guard_key)
+    }
+
+    /// A lease taken off its worker's ledger ended as `end`: its run is judged by the shape
+    /// guard if it was charged by curve (a run that did not run to its end, or was killed
+    /// by the node, says nothing about the curve), or counted off the flat runs of a
+    /// demoted key.
+    pub(crate) fn run_ended(&mut self, ended: &Ended, end: RunEnd) {
+        let Some(p) = ended.profile.as_deref() else {
+            return;
+        };
+        let key = p.guard_key;
+        let ran = matches!(end, RunEnd::Clean | RunEnd::KilledAtLimit);
+        if p.demoted_cpu {
+            if ran {
+                self.guard.flat_run(key, Resource::Cpu);
+            }
+        } else if p.cpu_by_curve()
+            && end == RunEnd::Clean
+            && self.guard.record(key, Resource::Cpu, ended.cpu_misfit)
+        {
+            self.counters.demotions_cpu += 1;
+        }
+        if p.demoted_mem {
+            if ran {
+                self.guard.flat_run(key, Resource::Memory);
+            }
+        } else if p.mem_by_curve() {
+            let misfit = match end {
+                RunEnd::Clean => Some(ended.mem_misfit),
+                // A kill at the lease's own limit is a misfit by itself.
+                RunEnd::KilledAtLimit => Some(true),
+                _ => None,
+            };
+            if let Some(misfit) = misfit
+                && self.guard.record(key, Resource::Memory, misfit)
+            {
+                self.counters.demotions_memory += 1;
+            }
+        }
+    }
+
     /// Counts a lease the predicate admitted.
-    pub(crate) fn count_admitted(&mut self, key: &WorkKey, cost: &LeaseCost, fallback: bool) {
+    pub(crate) fn count_admitted(
+        &mut self,
+        key: &WorkKey,
+        cost: &LeaseCost,
+        fallback: bool,
+        profile: Option<&Profile>,
+    ) {
         let c = &mut self.counters;
         c.admitted += 1;
         c.admitted_fallback += u64::from(fallback);
         c.admitted_cold += u64::from(cost.cold);
-        // The flat rule charges a key that has a curve flat: say how often.
-        c.curve_flat += u64::from(self.curves.0.curve(key).is_some());
+        // On a worker charged by prediction alone, a curve is not used either.
+        let by_curve = profile.filter(|_| !fallback);
+        let cpu = by_curve.is_some_and(Profile::cpu_by_curve);
+        let memory = by_curve.is_some_and(Profile::mem_by_curve);
+        c.profile_cpu += u64::from(cpu);
+        c.profile_memory += u64::from(memory);
+        // A key with a curve that was charged flat: say how often.
+        c.curve_flat += u64::from(!cpu && !memory && self.curves.0.curve(key).is_some());
     }
 
     /// Counts what the predicate said about the worker `Shadow` placed on.
@@ -504,6 +675,40 @@ mod tests {
         .normalised();
         assert_eq!(high.cpu_floor_permille, 1000);
         assert_eq!(LoadConfig::default().normalised(), LoadConfig::default());
+    }
+
+    /// Catches: the profile floor `g` outside 0.5 to `f` (a curve charged below half of
+    /// the flat cost, or above the floor the covered flat leases get), the switches not
+    /// on and the two owner-decision settings not off by default.
+    #[test]
+    fn the_profile_floor_stays_between_a_half_and_the_flat_floor() {
+        let with = |f, g| {
+            LoadConfig {
+                cpu_floor_permille: f,
+                profile_floor_permille: g,
+                ..LoadConfig::default()
+            }
+            .normalised()
+        };
+        assert_eq!(with(750, 100).profile_floor_permille, 500);
+        assert_eq!(with(750, 600).profile_floor_permille, 600);
+        assert_eq!(with(750, 900).profile_floor_permille, 750, "not above f");
+        assert_eq!(
+            with(600, 750).profile_floor_permille,
+            600,
+            "f moved: g follows"
+        );
+        assert_eq!(
+            with(100, 100).profile_floor_permille,
+            500,
+            "f is clamped first"
+        );
+        let d = LoadConfig::default();
+        assert!(d.profile);
+        assert!(d.profile_memory);
+        assert_eq!(d.profile_floor_permille, d.cpu_floor_permille);
+        assert_eq!(d.flat_memory_slack_permille, None);
+        assert_eq!(d.expected_life_delta_minutes, None);
     }
 
     /// Catches: the default cold cap not being one per 32 cores rounded up (3 on 88
