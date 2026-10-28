@@ -72,20 +72,17 @@ pub const DOMAIN_BURST: u64 = 4;
 pub const DOMAIN_MEM_SPIKE: u64 = 5;
 /// Domain of a hand-made world's run mean (subject: lease).
 pub const DOMAIN_RUN_MEAN: u64 = 6;
-/// Domain of the random ranker's choice (subject: lease; the ranker picks the index).
-pub const DOMAIN_RANDOM: u64 = 7;
 /// Domain of the control's permutation of a key's belief minutes (subject: key digest).
 pub const DOMAIN_PERM: u64 = 8;
 
 /// Every domain, to check they are distinct.
-pub const DOMAINS: [u64; 8] = [
+pub const DOMAINS: [u64; 7] = [
     DOMAIN_CLASS,
     DOMAIN_SHIFT,
     DOMAIN_NOISE,
     DOMAIN_BURST,
     DOMAIN_MEM_SPIKE,
     DOMAIN_RUN_MEAN,
-    DOMAIN_RANDOM,
     DOMAIN_PERM,
 ];
 

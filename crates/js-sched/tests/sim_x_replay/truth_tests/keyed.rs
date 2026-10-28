@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use crate::engine::tables::{LN15, LN32, LN2245, draw};
 use crate::engine::truth::{
-    DOMAIN_BURST, DOMAIN_CLASS, DOMAIN_MEM_SPIKE, DOMAIN_NOISE, DOMAIN_PERM, DOMAIN_RANDOM,
-    DOMAIN_RUN_MEAN, DOMAIN_SHIFT, DOMAINS, mix, splitmix64,
+    DOMAIN_BURST, DOMAIN_CLASS, DOMAIN_MEM_SPIKE, DOMAIN_NOISE, DOMAIN_PERM, DOMAIN_RUN_MEAN,
+    DOMAIN_SHIFT, DOMAINS, mix, splitmix64,
 };
 
 const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -69,12 +69,11 @@ fn domains_are_distinct_and_named() {
             DOMAIN_BURST,
             DOMAIN_MEM_SPIKE,
             DOMAIN_RUN_MEAN,
-            DOMAIN_RANDOM,
             DOMAIN_PERM
         ]
     );
     // And their values are part of the pinned numbers.
-    assert_eq!(DOMAINS, [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(DOMAINS, [1, 2, 3, 4, 5, 6, 8]);
 }
 
 #[test]
