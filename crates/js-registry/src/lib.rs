@@ -73,6 +73,30 @@
 //!   is sent no start, takes no new run and no new lease (a lease already on it is left
 //!   alone until it ends), and is never forgotten for being silent; its
 //!   live runs finish and are acknowledged. The registry never clears a taint.
+//! - **Whole-node commit.** A lease of a `Whole` class is committed, not granted
+//!   (design `whole-node.md` sections 5 and 8): the registry books it only on a
+//!   host that is live, serving, clean, quiet and clear of another whole-node lease or a
+//!   restore, and answers `Unknown`, so the lease stays pending. The host's heartbeat
+//!   replies name the lease in `exclusive`; the lease reads `Unknown` until the agent
+//!   reports `exclusive_ready` for exactly that lease, then `Present`, which is when a
+//!   consumer is given its token. Until then no run is queued
+//!   ([`RunRefusal::NotReady`]) or started. A new session (hello) voids the
+//!   preparation. When the lease ends the host stays unbookable until two heartbeats
+//!   have followed the stop and the last shows it serving with nothing held. A `BookAll`
+//!   lease is granted at once and none of this applies; neither does it to a static
+//!   pool, which has no agent to wait for and holds a `Whole` lease at once. The state
+//!   is in memory only.
+//! - **Reservation and drain.** A whole-node request that carries an id and finds no
+//!   host to commit waits ([`Registry::queue_position`]) and, on each tick
+//!   ([`Registry::advance`], run by every observe), is given a host in queue order
+//!   (design `whole-node.md` sections 3, 4 and 6): a quiet host at once, else after
+//!   `drain_after` the host that costs least to drain, which then takes no other
+//!   request's start and no new lease. The request's own next start commits the lease on
+//!   it ([`Registry::reservations`]). Nothing is stopped for a reservation; one that
+//!   reaches its deadline with the host still busy is given up, the host is left out for
+//!   the request for `reserve_backoff`, and after `max_reserve_attempts` give-ups the
+//!   next deadline is the wall time and the reservation commits. Cancelling the request
+//!   or letting it expire drops the reservation at once. Reservations are in memory only.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
 //!   that the agent's next hello completes. The seat takes the binding the caller
@@ -87,6 +111,8 @@ mod refusal;
 mod registry;
 mod runs;
 mod session;
+mod whole;
+mod whole_config;
 
 pub use config::{
     ConfigError, DEFAULT_LOST_RETENTION_MS, MAX_LOST_RETENTION_MS, MIN_LOST_RETENTION_MS,
@@ -95,6 +121,13 @@ pub use config::{
 pub use credential::{Binding, Credential};
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
-pub use registry::{HostState, HostView, Registry};
+pub use registry::{HostMark, HostState, HostView, Registry, WholeCounts};
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
+pub use whole::queue::MAX_WAITING_REQUESTS;
+pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord};
+pub use whole::reserve::Reservation;
+pub use whole_config::{
+    DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
+    WholeNodeConfig,
+};

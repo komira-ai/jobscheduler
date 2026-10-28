@@ -1,0 +1,20 @@
+[package]
+name = "js-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+js-state = { path = "../js-state" }
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+
+[dev-dependencies]
+# The in-memory fake store: the tests run the rows over it.
+js-state = { path = "../js-state", features = ["test-support"] }
+
+[lints]
+workspace = true

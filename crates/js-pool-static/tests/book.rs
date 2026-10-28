@@ -127,3 +127,36 @@ fn remove_free_unlists_only_a_free_host() {
     assert!(!book.contains(&host("b")));
     assert!(!book.remove_free(&host("b")));
 }
+
+/// Asserts the class gate: a listed `Whole` class is leasable, a listed `Book` class is
+/// still `UnsupportedClass`, and an unlisted class is refused. A gate that only knew
+/// `BookAll` would refuse the whole-node class.
+#[test]
+fn class_gate_leases_whole_classes_only() {
+    let make = |admission| ResourceClass::new(ClassId::new("w").unwrap(), admission, 0);
+    let spec_of = |class: &ResourceClass| {
+        let request = Request {
+            class: class.id().clone(),
+            resources: Resources::new(1000, 1, 0, None).unwrap(),
+            capabilities: BTreeMap::new(),
+            max_wall: Duration::from_secs(60),
+            labels: BTreeMap::new(),
+            validation_run: None,
+        };
+        StartSpec::new(LeaseId::new(1, 1), request, std::slice::from_ref(class)).unwrap()
+    };
+    let whole = make(Admission::Whole);
+    assert_eq!(
+        HostBook::class_gate(std::slice::from_ref(&whole), &spec_of(&whole)),
+        None
+    );
+    let booked = make(Admission::Book(Default::default()));
+    assert_eq!(
+        HostBook::class_gate(std::slice::from_ref(&booked), &spec_of(&booked)),
+        Some(RefusalCode::UnsupportedClass)
+    );
+    assert_eq!(
+        HostBook::class_gate(&[], &spec_of(&whole)),
+        Some(RefusalCode::UnsupportedClass)
+    );
+}

@@ -17,6 +17,7 @@
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
+//! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
@@ -64,6 +65,8 @@ pub const MAX_VERSION_LEN: usize = 64;
 pub const MAX_TAINT_TEXT_LEN: usize = 256;
 /// Longest result `detail` text, in bytes.
 pub const MAX_DETAIL_LEN: usize = 1024;
+/// Longest `detail` of an exclusive refusal, in bytes; the scheduler never parses it.
+pub const MAX_REFUSAL_DETAIL: usize = 256;
 /// Longest refusal code, in bytes.
 pub const MAX_CODE_LEN: usize = 64;
 /// Most GPUs one host may report, and most device indices one job may name.

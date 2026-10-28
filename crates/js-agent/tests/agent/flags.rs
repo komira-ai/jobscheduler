@@ -305,3 +305,53 @@ fn an_unreachable_server_is_retried_not_fatal() {
     assert_eq!(ran.err.matches(&said).count(), 2, "{}", ran.err);
     assert!(!ran.err.contains(secret));
 }
+
+/// Asserts the readiness-hook flags: with none the agent starts as before; a hook that is
+/// an absolute path to an executable file (with arguments, hyphens included) is accepted;
+/// and an empty program, a relative one, a file that is not executable, one that is not
+/// there, and an argument without a hook each end the program with status 2 naming the
+/// flag, before anything is sent. It catches a hook that is looked up on the `PATH`, one
+/// that is checked only when a lease asks for it, and arguments that are silently dropped.
+#[test]
+fn the_readiness_hook_flags_are_checked_when_the_agent_starts() {
+    let host = linux_host();
+    let (ran, _, _) = run_scripted(&[], &host, vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    let ok = ["--readiness-hook", "/bin/sh", "--readiness-hook-arg", "-c"];
+    let (ran, _, _) = run_scripted(&ok, &host, vec![welcome(1)], 1);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+
+    let dir = Scratch::new("readiness-flags");
+    let plain = dir.write("plain", "x", 0o600);
+    let plain = plain.to_str().unwrap();
+    let cases: [(&[&str], &str); 6] = [
+        (
+            &["--readiness-hook", ""],
+            "--readiness-hook: not an absolute path",
+        ),
+        (
+            &["--readiness-hook", "hook.sh"],
+            "--readiness-hook: not an absolute path",
+        ),
+        (
+            &["--readiness-hook", plain],
+            "--readiness-hook: not an executable file",
+        ),
+        (
+            &["--readiness-hook", "/"],
+            "--readiness-hook: not an executable file",
+        ),
+        (
+            &["--readiness-hook", "/nonexistent/hook"],
+            "--readiness-hook: not an executable file",
+        ),
+        (
+            &["--readiness-hook-arg", "x"],
+            "--readiness-hook-arg: needs --readiness-hook",
+        ),
+    ];
+    for (extra, said) in cases {
+        let err = refused(extra, &host);
+        assert!(err.contains(said), "{extra:?}: {err}");
+    }
+}

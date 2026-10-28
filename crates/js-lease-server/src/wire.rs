@@ -113,6 +113,10 @@ pub(crate) struct Pending {
 #[derive(Debug, Serialize)]
 pub(crate) struct Renewed {
     pub(crate) expires_at_ms: u64,
+    /// Whether the host the lease holds is set aside for a waiting whole-node request.
+    /// Left out when false, so a body from a host that is not reserved reads as before.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) host_reserved: bool,
 }
 
 /// The body of a release: `freed` or `releasing`.
@@ -211,6 +215,8 @@ pub(crate) fn refusal_status(code: RefusalCode) -> StatusCode {
             | RefusalCode::NoFit
             | RefusalCode::UnsupportedClass
             | RefusalCode::LeaseEnded
+            | RefusalCode::NoCapableHost
+            | RefusalCode::ExclusiveNotReady
     );
     match conflict {
         true => StatusCode::CONFLICT,
@@ -277,6 +283,35 @@ pub(crate) fn parse_id(text: &str) -> Option<LeaseId> {
 mod tests {
     use super::*;
 
+    /// Asserts the renewal body: without a reservation it is the old body byte for byte,
+    /// with one it adds `host_reserved`, and a client that reads only `expires_at_ms`
+    /// parses both. It catches a field that is sent when false, and one renamed.
+    #[test]
+    fn the_renewal_body_adds_host_reserved_only_when_true() {
+        let plain = Renewed {
+            expires_at_ms: 5,
+            host_reserved: false,
+        };
+        let marked = Renewed {
+            expires_at_ms: 5,
+            host_reserved: true,
+        };
+        let (plain, marked) = (
+            serde_json::to_string(&plain).unwrap(),
+            serde_json::to_string(&marked).unwrap(),
+        );
+        assert_eq!(plain, r#"{"expires_at_ms":5}"#);
+        assert_eq!(marked, r#"{"expires_at_ms":5,"host_reserved":true}"#);
+        #[derive(serde::Deserialize)]
+        struct OldClient {
+            expires_at_ms: u64,
+        }
+        for body in [plain, marked] {
+            let read: OldClient = serde_json::from_str(&body).unwrap();
+            assert_eq!(read.expires_at_ms, 5);
+        }
+    }
+
     /// Asserts that a lease id in a path is read only in the exact form the table
     /// prints, so no two paths name one lease.
     #[test]
@@ -301,6 +336,8 @@ mod tests {
             RefusalCode::NoFit,
             RefusalCode::UnsupportedClass,
             RefusalCode::LeaseEnded,
+            RefusalCode::NoCapableHost,
+            RefusalCode::ExclusiveNotReady,
         ];
         let unprocessable = [
             RefusalCode::WallTimeNotPositive,

@@ -5,8 +5,8 @@ mod common;
 
 use common::{heartbeat, hello, job, round_trip, welcome, with_unknown};
 use js_agent_wire::{
-    Ack, Command, Heartbeat, HeartbeatReply, HeldState, Hello, HelloReply, Isolation, JobSpec,
-    Outcome, Phase, ProtocolRange, ResultAck, Welcome,
+    Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldState, Hello, HelloReply,
+    Isolation, JobSpec, Outcome, Phase, ProtocolRange, RefusalReason, ResultAck, Welcome,
 };
 use serde_json::{Value, json};
 
@@ -178,6 +178,7 @@ fn unknown_fields_ignored_everywhere() {
             ack: Ack::Accepted,
         }],
         taint_ack: true,
+        exclusive: None,
     };
     let mut body = with_unknown(&reply, &[]);
     body["commands"][0]["field_from_the_future"] = json!(true);
@@ -238,4 +239,64 @@ fn unknown_enum_values_leave_known_entries_intact() {
 fn hello_reply_of_unknown_type_is_an_error() {
     assert!(serde_json::from_value::<HelloReply>(json!({"type": "maybe"})).is_err());
     assert!(serde_json::from_value::<HelloReply>(json!({"epoch": 1})).is_err());
+}
+
+/// Every known refusal code round-trips through its wire string, and an unknown or empty
+/// string reads as `setup-failed` with the rest of the heartbeat intact. It catches a
+/// renamed code and an unknown code failing the decode or reading as a success.
+#[test]
+fn refusal_codes_round_trip_and_unknown_reads_setup_failed() {
+    let known = [
+        (RefusalReason::NotQuiet, "not-quiet"),
+        (RefusalReason::NoiseOverBound, "noise-over-bound"),
+        (RefusalReason::SetupFailed, "setup-failed"),
+        (RefusalReason::HostUnsafe, "host-unsafe"),
+        (RefusalReason::Unsupported, "unsupported"),
+    ];
+    for (code, text) in known {
+        assert_eq!(serde_json::to_value(code).unwrap(), json!(text));
+        assert_eq!(
+            serde_json::from_value::<RefusalReason>(json!(text)).unwrap(),
+            code
+        );
+        let beat = json!({
+            "host_id": "a", "epoch": 1, "phase": "preparing",
+            "exclusive_refused": {"lease_id": "1-1", "code": text, "detail": "d"}
+        });
+        let beat: Heartbeat = serde_json::from_value(beat).unwrap();
+        let refusal = ExclusiveRefusal {
+            lease_id: "1-1".into(),
+            code,
+            detail: "d".into(),
+        };
+        assert_eq!(beat.exclusive_refused, Some(refusal));
+        assert_eq!(beat.exclusive_ready, None);
+    }
+    for text in ["", "NOT-QUIET", "disk-full"] {
+        let code: RefusalReason = serde_json::from_value(json!(text)).unwrap();
+        assert_eq!(code, RefusalReason::SetupFailed, "{text}");
+    }
+    let beat: Heartbeat = serde_json::from_value(json!({
+        "host_id": "a", "epoch": 1, "phase": "preparing",
+        "exclusive_refused": {"lease_id": "1-1", "code": "from-the-future"}
+    }))
+    .unwrap();
+    let refused = beat.exclusive_refused.unwrap();
+    assert_eq!(
+        (refused.code, refused.detail.as_str()),
+        (RefusalReason::SetupFailed, "")
+    );
+}
+
+/// A ready report and a reply naming an exclusive lease decode. It catches a misspelt
+/// field name that would leave the field None.
+#[test]
+fn exclusive_ready_and_reply_exclusive_decode() {
+    let beat: Heartbeat = serde_json::from_value(
+        json!({"host_id": "a", "epoch": 1, "phase": "serving", "exclusive_ready": "9-2"}),
+    )
+    .unwrap();
+    assert_eq!(beat.exclusive_ready.as_deref(), Some("9-2"));
+    let reply: HeartbeatReply = serde_json::from_value(json!({"exclusive": "9-2"})).unwrap();
+    assert_eq!(reply.exclusive.as_deref(), Some("9-2"));
 }
