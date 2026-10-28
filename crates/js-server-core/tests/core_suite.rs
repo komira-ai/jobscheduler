@@ -565,7 +565,7 @@ fn failures(report: &core::CoreReport) -> Vec<(Scenario, Verdict)> {
     report.results.iter().filter(failed).cloned().collect()
 }
 
-/// Asserts that the durable core passes the seven scenarios of the core-driver suite, over
+/// Asserts that the durable core passes the eight scenarios of the core-driver suite, over
 /// the in-memory store behind the wrapper that refuses lease and result writes. Catches: a
 /// `Start` before its grant is in the store, an operation answered twice across a restart,
 /// a lease id handed out twice, a replaced stream's heartbeat fed, a refused write that is

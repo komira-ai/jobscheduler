@@ -7,7 +7,7 @@
 //! effects out: when an effect is released relative to the store write it depends on, what
 //! survives a crash, which ids may be handed out twice, which heartbeats are fed. The
 //! scheduler's own simulations have no store, so none of this is checked there. This
-//! module states it as seven scenarios against [`CoreHarness`], a narrow set of operations
+//! module states it as eight scenarios against [`CoreHarness`], a narrow set of operations
 //! (submit a job, register a worker's stream, send a heartbeat, report a result, advance
 //! an injected clock, refuse the store's next writes, crash and restart, read what left the
 //! core). The scenarios do not name a transport.
@@ -73,6 +73,7 @@
 //!   replaces the worker's earlier one; `heartbeat` names the stream it arrived on.
 
 mod model;
+mod queued;
 mod scenarios;
 mod write_path;
 

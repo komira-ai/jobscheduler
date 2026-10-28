@@ -4,6 +4,7 @@ use std::time::Duration;
 use js_sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseId, OperationId, WaiterId};
 
+use super::queued;
 use super::write_path;
 use super::{CoreHarness, Released, Stream};
 use crate::Verdict;
@@ -46,11 +47,15 @@ pub enum Scenario {
     /// While the store is down nothing is given up for silence, and for the grace after it
     /// returns a silent worker's lease is kept; once the grace has passed it is given up.
     StoreOutageIsWaitedOut,
+    /// An operation still queued when the process dies, for want of any worker to place it
+    /// on, is started once after the restart, answered once, and
+    /// its id is not handed out again.
+    QueuedAtCrashRunsOnce,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 8] = [
         Scenario::StartWaitsForCommit,
         Scenario::AnsweredOnceAcrossRestart,
         Scenario::LeaseIdsNeverRepeat,
@@ -58,6 +63,7 @@ impl Scenario {
         Scenario::RefusedWriteIsRetriedInOrder,
         Scenario::RecoveredLeaseWaitsForItsWorker,
         Scenario::StoreOutageIsWaitedOut,
+        Scenario::QueuedAtCrashRunsOnce,
     ];
 
     /// Runs this scenario on a fresh harness.
@@ -77,6 +83,7 @@ impl Scenario {
             Self::StoreOutageIsWaitedOut => {
                 write_path::store_outage_is_waited_out(harness, &mut notes);
             }
+            Self::QueuedAtCrashRunsOnce => queued::queued_at_crash_runs_once(harness, &mut notes),
         }
         notes.verdict()
     }

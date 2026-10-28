@@ -60,6 +60,14 @@ fn recovering_without_the_leases_fails_recovered_lease_waits_for_its_worker() {
 }
 
 #[test]
+fn forgetting_the_queue_when_no_worker_had_registered_fails_queued_at_crash_runs_once() {
+    only_fails(
+        Defect::ForgetsQueueWithoutWorkers,
+        Scenario::QueuedAtCrashRunsOnce,
+    );
+}
+
+#[test]
 fn the_failure_text_names_what_was_wrong() {
     let report = core::run(|| ReferenceCore::broken(Defect::StartBeforeCommit));
     let text = report.results.iter().find_map(|(_, v)| match v {
