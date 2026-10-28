@@ -329,7 +329,7 @@ fn settle(outbox: &Outbox, sent: &Result<Answer, Reason>) {
     };
     match verdict(answer.status, &code_of(&answer.body)) {
         Verdict::Done => outbox.delivered(),
-        Verdict::Fatal => outbox.refused(),
+        Verdict::Fatal => outbox.failed(),
         Verdict::Conflict | Verdict::Retry => outbox.failed(),
     }
 }
