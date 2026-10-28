@@ -5,6 +5,7 @@ use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
 use js_store::test_support::TestCodec;
 use js_store::{RowCodec, StateError, Value, WorkerUp};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -26,6 +27,14 @@ fn grant() -> LeaseGrant {
         lease: LeaseId::new(5, 4),
         operation: OperationId(8),
         worker: WorkerId::new("node-a"),
+        cost: LeaseCost {
+            cpu_millis: 500,
+            memory_bytes: 2 << 30,
+            limit_bytes: 4 << 30,
+            cold: true,
+            retry: true,
+            key_hash: 0x1234,
+        },
     }
 }
 
@@ -62,6 +71,31 @@ fn each_value_reads_back_as_it_was_encoded() {
         Value::Session(up())
     );
     assert_eq!(session, b"session 2");
+}
+
+/// Asserts that the codec keeps the cost of a lease grant, every figure of it, and that a
+/// lease written as a binary without costs wrote it reads back as such, with the default
+/// cost as a placeholder.
+#[test]
+fn a_lease_keeps_its_cost_and_a_legacy_lease_does_not() {
+    let codec = TestCodec::new();
+
+    let kept = codec.lease(&grant()).expect("a grant");
+    let legacy = codec.legacy_lease(&grant());
+
+    let Value::Lease(read) = codec.read("lease/1", &kept).expect("read") else {
+        panic!("not a lease");
+    };
+    assert_eq!(read.cost, grant().cost);
+    assert_ne!(read.cost, LeaseCost::default());
+    let want = LeaseGrant {
+        cost: LeaseCost::default(),
+        ..grant()
+    };
+    assert_eq!(
+        codec.read("lease/1", &legacy).expect("read"),
+        Value::LegacyLease(want)
+    );
 }
 
 /// Asserts that a value that starts with `later` reads as one a later binary wrote, whatever

@@ -92,6 +92,7 @@ fn leased(operation: u64, request: Request, seq: u64, worker: &str) -> Recovered
         lease: Some(RecoveredLease {
             lease: LeaseId::new(TERM, seq),
             worker: node(worker),
+            cost: None,
         }),
         ..queued(operation, request)
     }

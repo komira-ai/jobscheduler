@@ -22,9 +22,18 @@
 //! - placement of a CPU, memory and GPU request onto worker capacity, GPUs whole and
 //!   held by one lease each until it ends, on workers whose node report lists a driver
 //!   serving the lease kind and satisfies the action's platform (`js-caps` matching),
-//!   spread over the workers that have room: to the one with the least booked, as a
-//!   share of its capacity (the larger of its CPU and memory shares), then the fewest
-//!   leases, then the first by name;
+//!   spread over the workers that have room: to the one with the least booked (or, under
+//!   admission by load, charged), as a share of its capacity (the larger of its CPU and
+//!   memory shares), then the fewest leases, then the first by name;
+//! - admission by measured and predicted load ([`LoadConfig`], [`PlacementLoad`]): an
+//!   action is admitted to a worker when what the worker's readings measure, plus the
+//!   predicted cost of the leases no reading covers yet, plus the cost of the new lease,
+//!   stays within its CPU and its memory, each charged at a cost the lease keeps from its
+//!   grant to its result; a worker with no usable reading is charged by predicted cost
+//!   alone. A scheduler built with [`Scheduler::new`] still places by the booked rule
+//!   until [`Scheduler::with_load_config`] turns this on (the default of [`LoadConfig`]).
+//!   The rule, its settings and its counters are described in the `admission` module's
+//!   source;
 //! - iOS device leases ([`DEVICE_LEASES_PER_WORKER`]): a request with `ios.device=1`
 //!   goes only to a worker whose report lists a device satisfying every device
 //!   attribute of the request, books that one device by id until the lease ends, and
@@ -83,16 +92,25 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
+mod admission;
 mod cordon;
 mod devices;
 pub mod fence;
 pub mod harness;
 mod input;
 mod load;
+pub use load::{
+    Charge, Choice, DecidedBy, EVALUATIONS_PER_WORKER, FitShape, H_PLUS, HORIZON, HostFacts,
+    LeaseFacts, Load, MAX_BALANCE, PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
+    least_loaded,
+};
 mod requeue;
 mod scheduler;
 mod servable;
 
+pub use admission::{
+    FlagError, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction, ShadowChoice,
+};
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;
