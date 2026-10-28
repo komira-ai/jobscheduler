@@ -761,7 +761,7 @@ dependencies = [
 name = "js-guest"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "clap",
  "hex",
  "js-guest-wire",
