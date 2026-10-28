@@ -72,6 +72,7 @@ fn built() -> Vec<String> {
         ("floor", keys::floor(&odd("a/b"))),
         ("floor", keys::floor(&odd("\u{e9}"))),
         ("floor", keys::floor(&odd(""))),
+        ("floor", keys::floor(&odd("\u{1}\u{f}"))),
         ("inflight", keys::inflight(&odd("a/b"))),
     ]
     .map(|(name, key)| format!("{name} {key}"));
