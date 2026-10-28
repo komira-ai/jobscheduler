@@ -26,6 +26,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::join_tokens::JoinRefusal;
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -39,26 +40,39 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
         .with_state(agents)
 }
 
-/// Refuses a request that does not carry one of the join tokens, with a 401 that says
-/// nothing else, and passes the credential of the token on. The client token of the
-/// lease routes is not a join token and gets the same 401.
+/// Marks a request that was authenticated with a one-time token (see
+/// [`crate::join_tokens`]) and not with one of the pool's join tokens: the routes then
+/// hold it to the host the token registered.
+#[derive(Clone)]
+struct OneTime;
+
+/// Refuses a request that does not carry one of the join tokens or a one-time token, with
+/// a 401 that says nothing else, and passes the credential of the token on (and the mark
+/// [`OneTime`] when it is a one-time token). The client token of the lease routes is
+/// neither and gets the same 401.
 async fn authenticate(
     State(agents): State<Arc<Agents>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let credential = request
+    let given = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(bearer)
-        .and_then(|given| agents.tokens.identify(given));
-    match credential {
-        Some(credential) => {
+        .and_then(bearer);
+    let pooled = given.and_then(|given| agents.tokens.identify(given));
+    let single = || given.and_then(|given| agents.joins.identify(given));
+    match (pooled, single()) {
+        (Some(credential), _) => {
             request.extensions_mut().insert(credential);
             next.run(request).await
         }
-        None => StatusCode::UNAUTHORIZED.into_response(),
+        (None, Some(credential)) => {
+            request.extensions_mut().insert(credential);
+            request.extensions_mut().insert(OneTime);
+            next.run(request).await
+        }
+        (None, None) => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 
@@ -98,12 +112,27 @@ fn retry_after(wait: Duration) -> u64 {
 async fn hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
+    one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Welcome>, Refused> {
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    // A one-time token registers the host that names its instance, and only that host
+    // thereafter. The token is consumed before the registry is asked: a hello the registry
+    // then refuses (the pool is full) leaves the token tied to this host, which says hello
+    // again with the same token.
+    if one_time.is_some() {
+        let instance = hello.instance.clone();
+        let admitted = agents
+            .admit_join(who.clone(), hello.host_id.clone(), instance)
+            .await;
+        admitted.map_err(|refusal| {
+            warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
+            Refused::join(refusal)
+        })?;
+    }
     let welcome = agents.registry.hello(&hello, &who).map_err(|refusal| {
         warn!(code = refusal.code(), "agent hello refused");
         Refused::of(&refusal)
@@ -116,6 +145,7 @@ async fn hello(
 async fn heartbeat(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
+    one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
     let heartbeat: Heartbeat = decode(
@@ -125,6 +155,12 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    if one_time.is_some() {
+        agents
+            .joins
+            .serves(&who, &heartbeat.host_id)
+            .map_err(Refused::join)?;
+    }
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be in the state file first: when it cannot be
@@ -182,6 +218,16 @@ impl Refused {
             error,
             supported: None,
         }
+    }
+
+    /// The answer to a refused one-time token: 503 when the use could not be written down,
+    /// 403 otherwise. The code names the fault and nothing of the token.
+    fn join(refusal: JoinRefusal) -> Self {
+        let status = match refusal {
+            JoinRefusal::Unsaved => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::FORBIDDEN,
+        };
+        Self::new(status, refusal.code())
     }
 
     /// The answer to a registry refusal: 400 for a message that breaks the wire's rules,
@@ -290,6 +336,25 @@ mod tests {
             assert_eq!(answer.error, code);
             let says_majors = code == "unsupported-protocol";
             assert_eq!(answer.supported.is_some(), says_majors, "{code}");
+        }
+    }
+
+    /// Every refusal of a one-time token has its status and code: 503 for the use that
+    /// could not be written down (the agent may try again), 403 for the rest.
+    #[test]
+    fn every_join_refusal_has_its_status_and_code() {
+        let cases = [
+            (JoinRefusal::Expired, 403, "join-token-expired"),
+            (JoinRefusal::Used, 403, "join-token-used"),
+            (JoinRefusal::WrongInstance, 403, "join-token-instance"),
+            (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
+            (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
+        ];
+        for (refusal, status, code) in cases {
+            let answer = Refused::join(refusal);
+            assert_eq!(answer.status.as_u16(), status, "{code}");
+            assert_eq!(answer.error, code);
+            assert!(answer.supported.is_none());
         }
     }
 

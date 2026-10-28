@@ -117,15 +117,8 @@ impl Entry {
 /// cannot be read as written is a refusal rather than a start with no bindings, which
 /// would reopen the gap it exists to close.
 pub(crate) fn load(path: &Path) -> Result<BTreeMap<HostId, Binding>, StartupError> {
-    let bytes = match fs::metadata(path) {
-        Ok(_) => read_private(path, FLAG)?,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
-        Err(err) => {
-            return Err(StartupError::new(
-                FLAG,
-                format!("{}: {err}", path.display()),
-            ));
-        }
+    let Some(bytes) = read_if_present(path)? else {
+        return Ok(BTreeMap::new());
     };
     let text = String::from_utf8(bytes).map_err(|_| "it is not text".to_string());
     let parsed = text.and_then(|text| parse(&text));
@@ -136,6 +129,19 @@ pub(crate) fn load(path: &Path) -> Result<BTreeMap<HostId, Binding>, StartupErro
         );
         StartupError::new(FLAG, named)
     })
+}
+
+/// The bytes of the owner-only file at `path`; none when there is no file. Any other
+/// failure to look at it is a refusal to start.
+pub(crate) fn read_if_present(path: &Path) -> Result<Option<Vec<u8>>, StartupError> {
+    match fs::metadata(path) {
+        Ok(_) => read_private(path, FLAG).map(Some),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(StartupError::new(
+            FLAG,
+            format!("{}: {err}", path.display()),
+        )),
+    }
 }
 
 /// The bindings a file's text holds, or what is wrong with it.
@@ -202,7 +208,7 @@ fn render(bindings: &BTreeMap<HostId, Binding>) -> io::Result<String> {
 /// Replaces the file at `path` with `bytes`, readable by its owner only: written and
 /// fsynced beside it, renamed over it, and the directory fsynced, so a reader sees the
 /// old file or the new one.
-fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     let temp = path.with_file_name(name);

@@ -25,6 +25,17 @@ hello in message metadata, never in a log line.
   identity document in place of the token; the provider's `verify_instance` checks signature, account, region and instance id, matches it
   to an acquire record of this pool still `registering`, and accepts it once. Another elastic kind supplies its own proof of the same
   shape, or it cannot be elastic. A second hello for that instance needs the live-stream rule.
+- *One-time join token (an elastic kind with no signed identity).* A provider that cannot sign an instance identity (a GPU cloud that
+  gives the instance nothing signed) proves it another way: the operator's tooling mints a token for the instance it launched
+  (`POST /v1/agent/join-tokens`, behind the client token, with the provider and instance id and a short lifetime, 30 minutes unless asked,
+  at most a day) and delivers it to that instance after boot, never in user data, an argument or a commit. The server keeps only its digest, in
+  `<state file>.joins`, so a restart keeps an unused token valid and a used one used. The first hello that presents the token, names that
+  instance in `instance`, and arrives before the expiry registers the host and consumes the token: it is then tied to that host id. It
+  carries that host's later hellos and heartbeats and nothing else; a hello for another host id is refused `join-token-used`, an unused token
+  past its time `join-token-expired`, a hello that names another instance or none `join-token-instance`, and a heartbeat for a host the
+  token did not register `join-token-not-admitted`. A second token for an instance replaces its unused one. The agent reads the token with
+  `--token-file` (owner-only, as always) and names its instance with `--instance-file`. A token is also the host's credential, so the
+  agent keeps the file; the host is revoked by `deny_hosts_file` or the operator's removal, as any host is.
 - *Lifecycle.* A host that stops heartbeating is Unknown, its leases stay and the agent self-fences. Past the grace its self-fence
   leases are given up, since the agent has fenced itself (5.4); a run-on lease is given up only when the host is proven stopped
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention
