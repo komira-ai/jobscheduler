@@ -123,7 +123,8 @@ async fn hello(
     // thereafter. The token is consumed before the registry is asked, so that two hellos
     // cannot both pass; a hello the registry then refuses (the pool is full, the host id
     // is bound to another credential) gives the use back, and the token stays unused for
-    // its instance.
+    // its instance. Not when a later hello of the same host was admitted meanwhile: the
+    // registry may have accepted that one, and the token then stays the host's.
     let mut fresh = false;
     if one_time.is_some() {
         let instance = hello.instance.clone();

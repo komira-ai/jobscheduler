@@ -337,6 +337,7 @@ fn a_damaged_file_is_refused() {
 
 const CREDENTIAL_MS: u64 = 24 * 60 * 60 * 1000;
 const STEP_MS: u64 = 60 * 60 * 1000;
+const SPREAD_MS: u64 = 30 * 60 * 1000;
 
 /// The `credential_expires_at_ms` the file at `path` holds for its one used token.
 fn held_expiry(path: &Path) -> u64 {
@@ -415,12 +416,13 @@ fn a_renewal_is_written_only_when_it_gains_a_step() {
     let (joins, clock) = tokens(&path);
     let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
-    clock.set(Timestamp::from_millis(T0 + STEP_MS - 1));
+    let step = refresh_step_ms(&who.to_hex());
+    clock.set(Timestamp::from_millis(T0 + step - 1));
     joins.serves(&who, "host-a").unwrap();
     assert_eq!(held_expiry(&path), T0 + CREDENTIAL_MS);
-    clock.set(Timestamp::from_millis(T0 + STEP_MS));
+    clock.set(Timestamp::from_millis(T0 + step));
     joins.serves(&who, "host-a").unwrap();
-    assert_eq!(held_expiry(&path), T0 + STEP_MS + CREDENTIAL_MS);
+    assert_eq!(held_expiry(&path), T0 + step + CREDENTIAL_MS);
 }
 
 /// A renewal the file does not take is not kept in memory either: the heartbeat is
@@ -434,7 +436,7 @@ fn a_renewal_the_file_refuses_is_not_kept() {
     joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    clock.set(Timestamp::from_millis(T0 + STEP_MS));
+    clock.set(Timestamp::from_millis(T0 + STEP_MS + SPREAD_MS));
     assert_eq!(joins.serves(&who, "host-a"), Ok(()));
     clock.set(Timestamp::from_millis(T0 + CREDENTIAL_MS));
     assert_eq!(joins.serves(&who, "host-a"), Err(JoinRefusal::Expired));
@@ -465,6 +467,79 @@ fn a_released_use_leaves_the_token_unused() {
         joins.admit(&who, "host-b", Some(&instance("i-1"))),
         Ok(Admission::Fresh)
     );
+}
+
+/// The credential time of the used token `who`, as the server holds it.
+fn held_in_memory(joins: &JoinTokens, who: &Credential) -> u64 {
+    let entries = joins.lock();
+    entries[&who.to_hex()]
+        .used
+        .as_ref()
+        .unwrap()
+        .credential_expires_at_ms
+}
+
+/// A release of a use that a later hello of the same host followed does nothing: hello
+/// A is admitted fresh, hello B of the same host is admitted again (the registry may have
+/// accepted B and refused A), and A's release then leaves the token used by the host, so
+/// that another host id holding a copy is refused as used and the host still heartbeats.
+/// It catches a release that frees a token a registered host holds.
+#[test]
+fn a_release_after_a_hello_served_again_keeps_the_use() {
+    let path = scratch("release_after_again");
+    let (joins, _) = tokens(&path);
+    let who = credential(&joins.mint(instance("i-1"), DEFAULT_TTL).unwrap());
+    let here = instance("i-1");
+    assert_eq!(
+        joins.admit(&who, "host-a", Some(&here)),
+        Ok(Admission::Fresh)
+    );
+    assert_eq!(
+        joins.admit(&who, "host-a", Some(&here)),
+        Ok(Admission::Again)
+    );
+    joins.release(&who, "host-a");
+    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
+    assert_eq!(
+        joins.admit(&who, "host-b", Some(&here)),
+        Err(JoinRefusal::Used)
+    );
+    assert!(fs::read_to_string(&path).unwrap().contains("used_by"));
+}
+
+/// Tokens first used at the same moment come due for a write at different times: every
+/// step lies in [step, step + spread), the steps are not all one value, and of the tokens
+/// with the least and the greatest step, a heartbeat at the least step moves the first
+/// and not the second, and one at the greatest moves both. It catches a step that is the
+/// same for every token (a stampede of whole-file writes) and one outside its bounds.
+#[test]
+fn renewals_of_tokens_used_together_come_due_apart() {
+    let path = scratch("spread");
+    let (joins, clock) = tokens(&path);
+    let mut all = Vec::new();
+    for n in 0..8 {
+        let id = format!("i-{n}");
+        let who = credential(&joins.mint(instance(&id), DEFAULT_TTL).unwrap());
+        let host = format!("host-{n}");
+        joins.admit(&who, &host, Some(&instance(&id))).unwrap();
+        all.push((refresh_step_ms(&who.to_hex()), who, host));
+    }
+    assert!(
+        all.iter()
+            .all(|(step, _, _)| (STEP_MS..STEP_MS + SPREAD_MS).contains(step))
+    );
+    all.sort_by_key(|(step, _, _)| *step);
+    let (least, first, first_host) = &all[0];
+    let (greatest, last, last_host) = &all[all.len() - 1];
+    assert!(least < greatest, "every token has the step {least}");
+    clock.set(Timestamp::from_millis(T0 + least));
+    joins.serves(first, first_host).unwrap();
+    joins.serves(last, last_host).unwrap();
+    assert_eq!(held_in_memory(&joins, first), T0 + least + CREDENTIAL_MS);
+    assert_eq!(held_in_memory(&joins, last), T0 + CREDENTIAL_MS);
+    clock.set(Timestamp::from_millis(T0 + greatest));
+    joins.serves(last, last_host).unwrap();
+    assert_eq!(held_in_memory(&joins, last), T0 + greatest + CREDENTIAL_MS);
 }
 
 /// A release the file refuses leaves the token tied to the host, in memory as in the

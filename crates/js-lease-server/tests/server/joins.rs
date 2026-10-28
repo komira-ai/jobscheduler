@@ -392,10 +392,10 @@ async fn a_heartbeat_renews_the_credential() {
     let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
     h.clock.advance(secs(86_399));
     let first = beat_with(&h, &token, &held).await;
-    assert!(!first.body.contains("join-token"), "{}", first.body);
+    assert_eq!(first.status, 200, "{}", first.body);
     h.clock.advance(secs(86_399));
     let second = beat_with(&h, &token, &held).await;
-    assert!(!second.body.contains("join-token"), "{}", second.body);
+    assert_eq!(second.status, 200, "{}", second.body);
 }
 
 /// Asserts that a second server over the state file of a running one is refused at start,

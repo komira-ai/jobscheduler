@@ -24,9 +24,12 @@
 //! register that host id once the host has been silent for the bound. The server does
 //! not learn when the registry forgets a host (the registry keeps no hook for it), so the
 //! bound is what ends a token whose host is gone. A host silent for longer than the bound
-//! needs a new token. A moved time is written only when it gains an hour
-//! ([`REFRESH_STEP`]) over the one in the file, so a heartbeat does not write the file
-//! every time; a restart can therefore lose at most that hour of the time.
+//! needs a new token. A moved time is written only when it gains a step over the one in
+//! the file, so a heartbeat does not write the file every time; a restart can therefore
+//! lose at most that step of the time. The step is [`REFRESH_STEP`] (an hour) plus a part
+//! of up to [`REFRESH_SPREAD`] that each token has of its own, taken from its digest: hosts
+//! first used in the same minute do not all come due, and rewrite the whole file under the
+//! lock, at the same heartbeat.
 //!
 //! The instance a hello names is the hello's own claim: the binding guards against
 //! mix-ups (a token delivered to the wrong machine, a host id reused by another
@@ -34,7 +37,10 @@
 //! client token can mint for any instance id.
 //!
 //! A hello that the registry then refuses gives the use back ([`JoinTokens::release`]):
-//! the token stays unused for the instance. When that write fails the token stays tied to
+//! the token stays unused for the instance, unless a hello of the same host was served
+//! with it in between (the host is then registered with it, and the token stays its).
+//! That mark is kept in memory only: a restart in between leaves the use standing, which
+//! errs on the side of one token, one host. When that write fails the token stays tied to
 //! the host, which says hello again with it; if that host cannot register, mint another.
 //!
 //! Only the SHA-256 digest of a token is kept, in memory and in `<state file>.joins`, which
@@ -94,6 +100,10 @@ pub(crate) const CREDENTIAL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// How much later than the time in the file a moved credential time must be to be written.
 pub(crate) const REFRESH_STEP: Duration = Duration::from_secs(60 * 60);
 
+/// The most that is added to [`REFRESH_STEP`] for one token. The part a token has is
+/// taken from its digest, so it is the same on every call and after a restart.
+pub(crate) const REFRESH_SPREAD: Duration = Duration::from_secs(30 * 60);
+
 /// The most tokens that may wait to be used at once.
 pub(crate) const MAX_WAITING: usize = 256;
 
@@ -110,6 +120,10 @@ struct Entry {
 struct Used {
     host: String,
     credential_expires_at_ms: u64,
+    /// Whether a hello of `host` was served with the token after the hello that used it.
+    /// Kept in memory only (a loaded token has it unset): it stops [`JoinTokens::release`]
+    /// from freeing a token whose host the registry accepted by that later hello.
+    again_served: bool,
 }
 
 /// What a granted [`JoinTokens::admit`] did to the token.
@@ -298,6 +312,8 @@ impl JoinTokens {
             if used.host != host {
                 return Err(JoinRefusal::Used);
             }
+            let held = entries.get_mut(&key).and_then(|entry| entry.used.as_mut());
+            held.into_iter().for_each(|used| used.again_served = true);
             self.renew(&mut entries, &key, now);
             return Ok(Admission::Again);
         }
@@ -311,6 +327,7 @@ impl JoinTokens {
             used: Some(Used {
                 host: host.to_owned(),
                 credential_expires_at_ms: credential_expiry(now),
+                again_served: false,
             }),
             ..entry.clone()
         };
@@ -326,15 +343,18 @@ impl JoinTokens {
 
     /// Gives back the use that [`JoinTokens::admit`] just made for `host` with the token
     /// whose credential is `credential`: the registry refused the hello, and the token
-    /// stays good for the instance it was minted for. Written like the use; when the write
+    /// stays good for the instance it was minted for. It does nothing when a hello of
+    /// `host` was admitted [`Admission::Again`] since the use: that hello may have been
+    /// the one the registry accepted, and the token is then the host's. Written like the use; when the write
     /// fails the token stays tied to `host` (a restart agrees with the memory), and the
     /// operator mints again if that host cannot register.
     pub(crate) fn release(&self, credential: &Credential, host: &str) {
         let key = credential.to_hex();
         let mut entries = self.lock();
-        let tied = entries
-            .get(&key)
-            .filter(|entry| entry.used.as_ref().is_some_and(|used| used.host == host));
+        let tied = entries.get(&key).filter(|entry| {
+            let held = entry.used.as_ref();
+            held.is_some_and(|used| used.host == host && !used.again_served)
+        });
         let Some(entry) = tied else {
             return;
         };
@@ -373,7 +393,7 @@ impl JoinTokens {
     /// that gains [`REFRESH_STEP`] over the time held, and only when the file took it: a
     /// failed write leaves the time as it was and the next call tries again.
     fn renew(&self, entries: &mut Entries, key: &str, now: u64) {
-        let renewed = entries.get(key).and_then(|entry| entry.renewed(now));
+        let renewed = entries.get(key).and_then(|entry| entry.renewed(key, now));
         let Some(renewed) = renewed else {
             return;
         };
@@ -388,20 +408,32 @@ impl JoinTokens {
 
 impl Entry {
     /// This entry with the time of its credential moved to [`CREDENTIAL_TTL`] after
-    /// `now`, when that gains [`REFRESH_STEP`] over the time it holds.
-    fn renewed(&self, now: u64) -> Option<Entry> {
+    /// `now`, when that gains the step of the token at `key` over the time it holds.
+    fn renewed(&self, key: &str, now: u64) -> Option<Entry> {
         let renewed = credential_expiry(now);
-        let step = duration_ms(REFRESH_STEP);
+        let step = refresh_step_ms(key);
         let used = self.used.as_ref();
         let due = used.filter(|used| renewed >= used.credential_expires_at_ms.saturating_add(step));
         due.map(|used| Entry {
             used: Some(Used {
                 host: used.host.clone(),
                 credential_expires_at_ms: renewed,
+                again_served: used.again_served,
             }),
             ..self.clone()
         })
     }
+}
+
+/// The gain over the file that makes a renewal of the token at `key` worth a write:
+/// [`REFRESH_STEP`] and a part below [`REFRESH_SPREAD`] taken from the digest, with no
+/// random source, so tokens first used together come due at different heartbeats.
+fn refresh_step_ms(key: &str) -> u64 {
+    let seed = key
+        .bytes()
+        .take(6)
+        .fold(0u64, |seed, byte| seed * 257 + u64::from(byte));
+    duration_ms(REFRESH_STEP) + seed % duration_ms(REFRESH_SPREAD)
 }
 
 /// The time a credential used at `now` lasts to.
@@ -454,6 +486,7 @@ fn parse(text: &str) -> Result<Entries, String> {
             (Some(host), Some(credential_expires_at_ms)) => Some(Used {
                 host,
                 credential_expires_at_ms,
+                again_served: false,
             }),
             _ => {
                 let both = "a token has only one of used_by and credential_expires_at_ms";

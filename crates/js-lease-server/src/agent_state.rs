@@ -206,8 +206,9 @@ fn render(bindings: &BTreeMap<HostId, Binding>) -> io::Result<String> {
 }
 
 /// Replaces the file at `path` with `bytes`, readable by its owner only: written and
-/// fsynced beside it (in a file made new, whatever an earlier crash left under that name), renamed over it, and the directory fsynced, so a reader sees the
-/// old file or the new one.
+/// fsynced beside it (in a file made new, whatever an earlier crash left under that
+/// name), renamed over it, and the directory fsynced, so a reader sees the old file or
+/// the new one.
 pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
