@@ -21,7 +21,7 @@ whatever state the host is in, it is never drained for, and it has no cap. A who
 
 **Admission.** The class is admitted as `Admission::Whole` (6.2): the request needs a host with no lease and no run and books all of it.
 `BookAll` stays as it is (book every dimension of a host that is free, no overcommit) and is what ucdk Job classes use (D7); it has no
-reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those four, and nothing else about it differs.
+reservation, no quiet gate, no drain and no cap. A `BookAll` start is never queued or marked, so it is unaffected unless a whole-node request waits in the same pool: then it is turned away from a host marked for that request, like any start that is not the request's own. `Whole` is `BookAll` plus those four, and nothing else about it differs.
 
 **How the old names relate (D46).**
 
@@ -87,14 +87,14 @@ the host it has and does not switch to a cheaper one later (no thrash). Two requ
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`.
 
-**Reservations survive a restart (D55).** A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *Today's registry keeps its marks, wait list and give-up counts in memory only, so a restart loses them: a waiting request presents again, waits again and is set a host again, and no lease or run is touched. Persisting them beside the reservation records of the lease file is a later change.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
 *reservation record* holds: the request id, the host, the time reserved, the deadline, the request's two counters (`max_reserve_attempts`
 give-ups and `max_replace` prepare failures) and its host exclusions with their end times. The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
 cancelled or unclaimed. The queue itself is not persisted (the table holds leases, not requests); a consumer presents the same request id
 again after a restart, as it re-presents any request, and the scheduler binds it to its record, so the drain in progress continues with its
-original deadline (raised to at least boot plus the boot grace, never the stored deadline plus the grace; the lease-side grace is a separate setting wired by M3-n) and the counters keep the bounds of sections 4 and 5 across any number of
+original deadline (raised to at least boot plus the boot grace, never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
 defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
