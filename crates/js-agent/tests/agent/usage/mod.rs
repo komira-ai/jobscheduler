@@ -4,7 +4,10 @@
 
 mod binner;
 mod cgroup;
+mod collect;
+mod outbox;
 mod sampler;
+mod wiring;
 
 use std::cell::Cell;
 

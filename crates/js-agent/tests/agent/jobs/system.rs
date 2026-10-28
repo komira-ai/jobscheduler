@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use js_agent::{Machine, Platform, RuntimeBuild, System};
+use js_agent::usage::UsageClock;
+use js_agent::{FileReader, Machine, Platform, RuntimeBuild, System};
 
 use crate::support::Scratch;
 
@@ -20,6 +21,22 @@ fn the_system_clock_is_monotonic() {
     assert!(second >= first);
     assert!(first < 60_000, "it starts when the machine does: {first}");
     assert!(System::default().clock().now_ms() < 60_000);
+}
+
+/// Asserts that the system's usage clock counts microseconds on the same zero as its clock
+/// of the jobs (a reading of the clock in milliseconds, then one of the usage clock, is at
+/// least as many thousand microseconds) and does not go back, and that its cgroup files are
+/// this machine's. It catches a lease start stamped on one clock and sampled on another,
+/// which would put every minute boundary in the wrong place.
+#[test]
+fn the_system_usage_clock_shares_the_jobs_zero() {
+    let machine = System::new();
+    let ms = machine.clock().now_ms();
+    let usage = machine.usage_clock();
+    let first = usage.now_usec();
+    assert!(first >= ms * 1000);
+    assert!(usage.now_usec() >= first);
+    assert!(machine.cgroup_files().read("/proc/self/cgroup").is_ok());
 }
 
 /// Asserts that the system's view of the host is this machine's `/proc`: the process table

@@ -1,10 +1,18 @@
 //! What each lease costs the machine: CPU and memory sampled from the cgroup tree and cut
 //! into per-lease minutes, ready to be sent to the server.
 //!
-//! The module is pure. [`Sampler`] reads cgroup files through a [`FileReader`](crate::FileReader)
-//! and takes the time from a [`UsageClock`]; [`Binner`] takes [`Sample`]s as values and reads
-//! nothing. No wall time enters anywhere, so a step of the machine's clock cannot move a
-//! minute.
+//! [`Sampler`] reads cgroup files through a [`FileReader`](crate::FileReader) and takes the
+//! time from a [`UsageClock`]; [`Binner`] takes [`Sample`]s as values and reads nothing. No
+//! wall time enters anywhere, so a step of the machine's clock cannot move a minute.
+//!
+//! # To the heartbeat
+//!
+//! The job worker owns a [`Collector`], which samples on the worker's thread once per
+//! heartbeat interval and publishes a [`Reading`] in an [`Outbox`]. The session takes the
+//! reading into its next heartbeat ([`to_wire`]) and tells the outbox whether the beat went
+//! through ([`Outbox::delivered`], [`Outbox::failed`], [`Outbox::refused`]), so a minute is
+//! sent once and a failed send is not lost. Without `--actions-cgroup` there is no
+//! collector and the heartbeat carries no load.
 //!
 //! # Time bases
 //!
@@ -33,7 +41,10 @@
 mod binner;
 mod cgroup;
 mod clock;
+mod collect;
+mod outbox;
 mod sampler;
+mod wire;
 
 pub use binner::{
     Binner, ClosedMinute, Counters, MAX_UNSENT_AGE_USEC, MIN_SPAN_USEC, Observation, TAIL_MINUTE,
@@ -44,4 +55,7 @@ pub use cgroup::{
     parse_usage_usec, working_set,
 };
 pub use clock::{MINUTE_USEC, MonotonicClock, UsageClock};
+pub use collect::Collector;
+pub use outbox::{Outbox, Reading};
 pub use sampler::{LeaseCgroup, LeaseSample, Sample, SampleError, Sampler};
+pub use wire::to_wire;

@@ -376,8 +376,8 @@ fn execute(
     let started = jobs::start(local, &offer.hello, platform, machine, hook, err);
     let jobs = started.map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
-    if let Some((worker, drain)) = &jobs {
-        session = session.with_jobs(worker, *drain);
+    if let Some((worker, drain, outbox)) = &jobs {
+        session = session.with_jobs(worker, *drain).with_usage(outbox.clone());
     }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

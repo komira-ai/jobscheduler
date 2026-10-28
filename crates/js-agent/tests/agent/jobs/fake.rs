@@ -8,16 +8,17 @@
 //! guard that fails the test with a message; none is a time the test expects.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
     Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status,
 };
-use js_agent::{Machine, RuntimeBuild, SharedClock};
+use js_agent::{FileReader, Machine, RuntimeBuild, SharedClock};
 
 /// How long a test waits for the other thread before it fails.
 pub const HANG_GUARD: Duration = Duration::from_secs(120);
@@ -58,6 +59,11 @@ struct State {
     log: Vec<String>,
     /// The call that panics, once.
     panic_at: Option<&'static str>,
+    /// The control group directory of the container of each run.
+    cgroups: BTreeMap<String, PathBuf>,
+    /// The directory a container with no control group of its own is in, as
+    /// `<dir>/docker-<run>.scope`.
+    cgroup_base: Option<PathBuf>,
 }
 
 struct Inner {
@@ -89,6 +95,17 @@ impl World {
             code,
             oom_killed: false,
         });
+    }
+
+    /// The runtime reports `dir` as the control group of the container of `run_id`.
+    pub fn set_cgroup(&self, run_id: &str, dir: &str) {
+        self.lock().cgroups.insert(run_id.to_owned(), dir.into());
+    }
+
+    /// Every container is in `<dir>/docker-<run>.scope`, unless its run has a control group
+    /// of its own.
+    pub fn set_cgroup_base(&self, dir: &str) {
+        self.lock().cgroup_base = Some(dir.into());
     }
 
     /// The calls so far, in order.
@@ -245,6 +262,20 @@ impl ContainerRuntime for Runtime {
         Ok(())
     }
 
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        let state = self.0.lock();
+        let run = &state.containers.get(&id.0)?.run_id;
+        let own = state.cgroups.get(run).cloned();
+        own.or_else(|| {
+            Some(
+                state
+                    .cgroup_base
+                    .as_ref()?
+                    .join(format!("docker-{run}.scope")),
+            )
+        })
+    }
+
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         let mut state = self.0.lock();
         state.log.push("list".to_owned());
@@ -284,6 +315,45 @@ pub struct FakeMachine {
     pub world: World,
     pub clock: Arc<TestClock>,
     pub build: Build,
+    pub files: SharedFiles,
+}
+
+/// Cgroup files the test writes and the worker thread reads, and the threads that read.
+#[derive(Clone, Default)]
+pub struct SharedFiles(Arc<Mutex<(BTreeMap<String, String>, Vec<ThreadId>)>>);
+
+impl SharedFiles {
+    /// The file at `path` holds `text` from now on.
+    pub fn set(&self, path: &str, text: &str) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.0.insert(path.to_owned(), text.to_owned());
+    }
+
+    /// The threads that read a file, one entry for each read.
+    pub fn readers(&self) -> Vec<ThreadId> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .clone()
+    }
+}
+
+impl FileReader for SharedFiles {
+    fn read(&self, path: &str) -> Result<String, String> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.1.push(std::thread::current().id());
+        let found = state.0.get(path).cloned();
+        found.ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn link(&self, _path: &str) -> Result<String, String> {
+        Err("no links here".to_owned())
+    }
+
+    fn device(&self, _path: &Path) -> Result<u64, String> {
+        Err("no devices here".to_owned())
+    }
 }
 
 impl FakeMachine {
@@ -297,6 +367,7 @@ impl FakeMachine {
             world: world.clone(),
             clock: Arc::default(),
             build: Build::Fine,
+            files: SharedFiles::default(),
         }
     }
 
@@ -325,6 +396,10 @@ impl Machine for FakeMachine {
                 vec!["the fake engine is ready".to_owned()],
             )),
         }
+    }
+
+    fn cgroup_files(&self) -> Box<dyn FileReader> {
+        Box::new(self.files.clone())
     }
 
     fn view(&self) -> Box<dyn HostView> {

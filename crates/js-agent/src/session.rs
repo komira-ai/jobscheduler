@@ -78,13 +78,25 @@
 //!
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
+//!
+//! # Usage
+//!
+//! A session given an [`Outbox`] ([`Session::with_usage`]) tells it the heartbeat interval
+//! when it registers (the window the worker samples at) and puts what it holds in the next
+//! heartbeat as `load`. It never reads a cgroup file. The outbox is told how the beat went:
+//! 2xx is delivered; a transport error, a conflict, 408, 429, 5xx and a message that was
+//! never sent are failed (the minutes ride on a later beat, once); any other 4xx, which the
+//! session also ends on, is refused (the minutes are dropped: the same bytes would be refused
+//! again for ever). The draining beat of [`Session::drain`] carries the load too, so the last
+//! minutes of leases that just ended are not left behind.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, RefusalReason, Refused,
+    Heartbeat, HeartbeatReply, Hello, NodeLoad, Phase, ProtocolRange, RefusalReason, Refused,
     ValidationError, Welcome,
 };
 use serde_json::Value;
@@ -93,6 +105,7 @@ use crate::backoff::{Backoff, Jitter};
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
+use crate::usage::Outbox;
 use crate::worker::{Delivery, Snapshot, Worker};
 
 /// The route of the hello.
@@ -308,6 +321,19 @@ fn verdict(status: u16, code: &str) -> Verdict {
     }
 }
 
+/// Tells the outbox how the heartbeat that carried its load went (see the module
+/// documentation).
+fn settle(outbox: &Outbox, sent: &Result<Answer, Reason>) {
+    let Ok(answer) = sent else {
+        return outbox.failed();
+    };
+    match verdict(answer.status, &code_of(&answer.body)) {
+        Verdict::Done => outbox.delivered(),
+        Verdict::Fatal => outbox.refused(),
+        Verdict::Conflict | Verdict::Retry => outbox.failed(),
+    }
+}
+
 /// The `error` code of a refusal body, held to the wire's rules for a code; the server's
 /// text is never repeated as it came.
 fn code_of(body: &Value) -> String {
@@ -365,6 +391,7 @@ pub struct Session<'a> {
     lost_young: bool,
     hold: Option<Hold<'a>>,
     jobs: Option<Jobs<'a>>,
+    usage: Option<Arc<Outbox>>,
     /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
     carried: bool,
     /// The worker's queue had no reader when a reply was handed to it.
@@ -388,6 +415,7 @@ impl<'a> Session<'a> {
             lost_young: false,
             hold: None,
             jobs: None,
+            usage: None,
             carried: false,
             worker_gone: false,
         }
@@ -399,6 +427,16 @@ impl<'a> Session<'a> {
     pub fn with_jobs(self, worker: &'a Worker, drain: Drain) -> Self {
         Self {
             jobs: Some(Jobs { worker, drain }),
+            ..self
+        }
+    }
+
+    /// The same session carrying the load `usage` holds in its heartbeats (see the module
+    /// documentation).
+    #[must_use]
+    pub fn with_usage(self, usage: Arc<Outbox>) -> Self {
+        Self {
+            usage: Some(usage),
             ..self
         }
     }
@@ -455,8 +493,7 @@ impl<'a> Session<'a> {
         let lease = self.hold.as_ref().map(Hold::peek).unwrap_or_default();
         let jobs = self.snapshot();
         self.live.take().map(|live| {
-            let message = self.heartbeat_message(&live, lease, jobs);
-            let told = self.post(HEARTBEAT_PATH, message);
+            let told = self.send_beat(&live, lease, jobs);
             Note::Draining {
                 told: told.is_ok_and(|answer| answer.status == 200),
             }
@@ -516,11 +553,23 @@ impl<'a> Session<'a> {
             .map(|()| serde_json::to_value(&hello).unwrap_or_default())
     }
 
+    /// Sends a heartbeat carrying the outbox's load, and tells the outbox how it went.
+    fn send_beat(&mut self, live: &Live, lease: Fields, jobs: Snapshot) -> Result<Answer, Reason> {
+        let load = self.usage.as_ref().and_then(|outbox| outbox.take());
+        let message = self.heartbeat_message(live, lease, jobs, load);
+        let sent = self.post(HEARTBEAT_PATH, message);
+        if let Some(outbox) = &self.usage {
+            settle(outbox, &sent);
+        }
+        sent
+    }
+
     fn heartbeat_message(
         &self,
         live: &Live,
         lease: Fields,
         jobs: Snapshot,
+        load: Option<NodeLoad>,
     ) -> Result<Value, ValidationError> {
         // The lease puts the agent in a phase only when nothing else does.
         let phase = match (self.phase, lease.phase) {
@@ -537,7 +586,7 @@ impl<'a> Session<'a> {
             taint: jobs.taint,
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
-            load: None,
+            load,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
@@ -585,6 +634,9 @@ impl<'a> Session<'a> {
             interval,
         });
         self.proven = false;
+        self.usage
+            .iter()
+            .for_each(|outbox| outbox.set_window(interval));
         if !self.lost_young {
             self.backoff.reset();
         }
@@ -600,8 +652,7 @@ impl<'a> Session<'a> {
     fn beat_step(&mut self, live: Live) -> Step {
         let lease = self.hold.as_mut().map(Hold::fields).unwrap_or_default();
         let jobs = self.snapshot();
-        let message = self.heartbeat_message(&live, lease, jobs);
-        match self.post(HEARTBEAT_PATH, message) {
+        match self.send_beat(&live, lease, jobs) {
             Err(reason) => {
                 self.live = Some(live);
                 self.retry("heartbeat", reason, None)

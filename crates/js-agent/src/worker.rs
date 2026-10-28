@@ -23,6 +23,11 @@
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
+//! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
+//!   when `--actions-cgroup` is given: after a step it asks its [`Collector`] whether a
+//!   window has passed and, if so, reads the cgroup files on its own thread and publishes
+//!   the reading in the [`Outbox`] the session takes it from. The session never reads a
+//!   cgroup file.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -48,6 +53,7 @@ use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle};
 use crate::system::{Machine, RuntimeBuild, SharedClock};
+use crate::usage::{Collector, Outbox};
 
 /// How many orders wait for the worker. Replies beyond it are dropped, see the module.
 pub const QUEUE: usize = 16;
@@ -80,6 +86,9 @@ pub struct Plan {
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
     pub step_every: Duration,
+    /// Where the usage of the leases is published for the session to take. Without it, or
+    /// without `--actions-cgroup` in the settings, nothing is sampled.
+    pub usage: Option<Arc<Outbox>>,
 }
 
 /// What the next heartbeat carries of the jobs.
@@ -260,10 +269,10 @@ impl Worker {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
-                Ok((life, lines)) => {
+                Ok((life, usage, lines)) => {
                     own.publish(Snapshot::of(&life), lines);
                     let _ = ready.send(Ok(()));
-                    work(life, &inbox, &own, &thread_clock, step_every);
+                    work(life, usage, &inbox, &own, &thread_clock, step_every);
                 }
             }
         });
@@ -367,9 +376,13 @@ fn stall_bound_ms(step_every: Duration) -> u64 {
     u64::try_from(bound).unwrap_or(u64::MAX)
 }
 
-/// The lifecycle, built and with the previous process's containers adopted, and the lines
-/// to print about it.
-fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), String> {
+/// What `build` makes: the lifecycle, the usage collector when there is one, and the lines
+/// to print.
+type Built = (Lifecycle, Option<Collector>, Vec<String>);
+
+/// The lifecycle, built and with the previous process's containers adopted, the collector of
+/// the usage, and the lines to print about them.
+fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let Plan {
         config,
         settings,
@@ -377,6 +390,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         platform,
         watch,
         machine,
+        usage,
         ..
     } = plan;
     let stop_grace = config.stop_grace;
@@ -391,12 +405,29 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));
-    Ok((life, lines))
+    let collector = usage.and_then(|outbox| match settings.actions_cgroup() {
+        Some(dir) => Some(Collector::new(
+            machine.cgroup_files(),
+            dir,
+            machine.usage_clock(),
+            outbox,
+        )),
+        None => {
+            lines.push(NO_ACTIONS_CGROUP.to_owned());
+            None
+        }
+    });
+    Ok((life, collector, lines))
 }
+
+/// Why the heartbeat carries no load.
+const NO_ACTIONS_CGROUP: &str =
+    "usage: --actions-cgroup is not given: the heartbeat carries no load";
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(
     mut life: Lifecycle,
+    mut usage: Option<Collector>,
     inbox: &Receiver<Order>,
     shared: &Shared,
     clock: &SharedClock,
@@ -426,6 +457,11 @@ fn work(
             lines.extend(describe(&life.apply(&stops(&life))));
         }
         lines.extend(describe(&life.step()));
+        let sampled = usage
+            .as_mut()
+            .filter(|collector| collector.due())
+            .map(|collector| collector.run(&life.running()));
+        lines.extend(sampled.into_iter().flatten());
         shared.publish(Snapshot::of(&life), lines);
         shared.busy_since.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
