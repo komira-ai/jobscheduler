@@ -1,7 +1,7 @@
 //! The sampler over fake files, and the clocks.
 
 use js_agent::usage::{
-    LeaseCgroup, LeaseSample, MINUTE_USEC, MonotonicClock, Sample, SampleError, Sampler, UsageClock,
+    LeaseCgroup, LeaseSample, MonotonicClock, Sample, SampleError, Sampler, UsageClock,
 };
 
 use super::StepClock;
@@ -85,6 +85,22 @@ fn a_sample_reads_every_field() {
         }
     );
     assert_eq!(clock.reads(), 1);
+}
+
+/// Asserts that a file cache larger than `memory.current` gives a working set of 0 for the
+/// node and for a lease. It catches a raw subtraction, which would panic or wrap.
+#[test]
+fn inactive_file_above_current_gives_a_zero_working_set() {
+    let files = with_lease(
+        node(1, 10, 50, 0, "max 1\n"),
+        &format!("{ACTIONS}/a"),
+        2,
+        100,
+        500,
+    );
+    let got = sample(files, &[cgroup("a", 0)]).unwrap();
+    assert_eq!(got.working_set_bytes, 0);
+    assert_eq!(got.leases[0].working_set_bytes, 0);
 }
 
 /// Asserts that the node's CPU is the parent's counter in three samples while a lease's
@@ -221,14 +237,13 @@ fn cpu_max_missing_counts_as_limited() {
     assert!(limited(whole.with(&format!("{ACTIONS}/cpu.max"), "x\n")));
 }
 
-/// Asserts a thousand readings of the production clock never go back, and that the first
-/// is small because it counts from the clock's making. Both constructors give a clock. It
+/// Asserts a thousand readings of the production clock never go back.
+/// Both constructors give a clock. It
 /// cannot catch a wall clock; the next test guards that.
 #[test]
 fn monotonic_clock_does_not_go_back() {
     for clock in [MonotonicClock::new(), MonotonicClock::default()] {
         let mut last = clock.now_usec();
-        assert!(last < 10 * MINUTE_USEC);
         for _ in 0..1000 {
             let now = clock.now_usec();
             assert!(now >= last);

@@ -589,3 +589,36 @@ fn a_repeated_sample_carries_its_cpu_to_the_next_window() {
     assert_eq!(seen[3].covered, ["a"]);
     assert_eq!(binner.take(10, 60 * S), vec![minute("a", 0, 116, 200, 0)]);
 }
+
+/// Asserts that a window spanning a whole minute gives that minute the larger of the
+/// working sets at the window's two ends rather than 0, and that its CPU is its share.
+/// It catches a middle minute opened with `Open::new(minute, 0)`, which reports an
+/// invented zero next to a real CPU mean.
+#[test]
+fn a_minute_inside_one_window_takes_the_bracketing_working_set() {
+    let mut binner = Binner::new(30 * S);
+    binner.observe(&sample(50 * S, vec![lease("a", 0, 0, 100)]));
+    binner.observe(&sample(130 * S, vec![lease("a", 0, 80 * S, 300)]));
+    assert_eq!(
+        binner.take(10, 130 * S),
+        vec![minute("a", 1, 1000, 1000, 300)]
+    );
+}
+
+/// Asserts that a huge CPU delta over a short span saturates the mean and the peak at
+/// `u32::MAX` and keeps the mean at or under the peak. It catches an `as u32` cast, which
+/// would wrap, and a saturation applied to one field only.
+#[test]
+fn rates_saturate_at_u32_max() {
+    let mut binner = Binner::new(10 * S);
+    let huge = u64::MAX / 4;
+    for t in secs(0, 70, 10) {
+        let cpu = if t == 0 { 0 } else { huge };
+        binner.observe(&sample(t, vec![lease("a", 0, cpu, 0)]));
+    }
+    let got = binner.take(10, 70 * S);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].cpu_peak_window_millis, u32::MAX);
+    assert_eq!(got[0].cpu_mean_millis, u32::MAX);
+    assert!(got[0].cpu_mean_millis <= got[0].cpu_peak_window_millis);
+}

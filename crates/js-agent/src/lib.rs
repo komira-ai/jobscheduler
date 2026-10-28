@@ -5,8 +5,9 @@
 //! The library is the program: [`run_with`] takes the arguments, the streams to print to
 //! and the [`Services`] (the commands and files it reads the host from, the transport to
 //! the server, the sleeper and the jitter), and `main` calls [`main`], which supplies the
-//! machine's own. No clock is read anywhere but in [`usage::MonotonicClock`]
-//! (which the caller hands to the usage sampler): time passes only in the sleeper.
+//! machine's own. The usage sampler reads time only through [`usage::MonotonicClock`], which the
+//! caller hands it; apart from that and the runtime's own timestamps, time passes only
+//! in the sleeper.
 //!
 //! # Flags
 //!

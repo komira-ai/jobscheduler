@@ -282,7 +282,7 @@ impl Binner {
             self.counters.gaps += 1;
             state.rebase(now, lease.cpu_usage_usec);
         } else if now > state.last_mono {
-            self.split(id, &mut state, now, lease.cpu_usage_usec);
+            self.split(id, &mut state, (now, lease.cpu_usage_usec), ws);
             covered = true;
         }
         let minute = (now - state.started) / MINUTE_USEC;
@@ -293,10 +293,20 @@ impl Binner {
     }
 
     /// Gives each part of the window `(last_mono, now]` to its minute.
-    fn split(&mut self, id: &str, state: &mut LeaseState, now: u64, cpu: u64) {
+    ///
+    /// A minute that lies wholly inside the window has no sample of its own, so it takes
+    /// the larger of the working sets the window is bracketed by: nothing is invented.
+    fn split(&mut self, id: &str, state: &mut LeaseState, at: (u64, u64), ws: u64) {
+        let (now, cpu) = at;
         let delta = cpu - state.last_cpu;
-        for part in window_parts(state.started, state.last_mono, now, delta) {
+        let bracket = state.open.ws_max.max(ws);
+        let parts = window_parts(state.started, state.last_mono, now, delta);
+        let last = parts.len().saturating_sub(1);
+        for (n, part) in parts.into_iter().enumerate() {
             self.roll(id, state, part.minute);
+            if n < last {
+                state.open.ws_max = state.open.ws_max.max(bracket);
+            }
             state.open.cpu_usec += part.cpu_usec;
             state.open.span_usec += part.len_usec;
             state.open.peak_millis = state
