@@ -333,7 +333,7 @@ impl Binner {
             self.counters.thin_minutes += 1;
             return;
         }
-        let bucket = u16::try_from(open.index.min(u64::from(TAIL_MINUTE))).unwrap_or(TAIL_MINUTE);
+        let bucket = u16::try_from(open.index % 64).unwrap_or(TAIL_MINUTE);
         let entry = Entry {
             closed_at: self.latest,
             mean: millis(open.cpu_usec, open.span_usec),
