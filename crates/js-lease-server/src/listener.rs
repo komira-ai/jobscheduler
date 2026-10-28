@@ -139,7 +139,8 @@ async fn accept_counted(
 
 /// Serves `app` on `listener` until `stop` fires (or its sender is dropped), then
 /// drains: no new connections, each connection finishes the request it is serving, and
-/// the connections still open after `limits.drain_timeout` are cut. `slots` holds
+/// the connections still open after `limits.drain_timeout` are cut, and the cut ones are
+/// dropped before this returns. `slots` holds
 /// `limits.max_connections` slots.
 pub(crate) async fn serve(
     listener: TcpListener,
@@ -180,6 +181,10 @@ pub(crate) async fn serve(
     if drained.is_err() {
         warn!("connections still open at the end of the drain are cut");
         let _ = cut.send(());
+        // A cut task drops its connection (and the router clone in it) when it next runs,
+        // and gives its permit back after that: with every permit back, nothing of the
+        // server is held by a connection, and a restart finds the lease file free.
+        let _ = slots.gate.acquire_many(all).await;
     }
 }
 
