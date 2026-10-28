@@ -121,6 +121,10 @@ touched, the request returns to the queue with that host excluded for it for `re
 the rule above. If no other host is available the request waits unreserved until the back-off ends. Give-ups are counted per request:
 after `max_reserve_attempts` of them (default 2) the deadline of its next reservation is the pool's max wall time whatever
 `drain_deadline` says, and that reservation cannot be given up for a non-quiet host, since by then every lease on the host has ended.
+Once the count has reached the cap the scheduler does not give the reservation up at that deadline either: the deadline is the request's own
+wall time, which may be shorter than the max wall of a lease that was on the host, and the reservation stays until the host is quiet or the
+request is cancelled. The bound assumes the pool's max wall time: a request submitted with no wall time has no deadline of its own (its reservation after the cap
+never ends before the host is quiet or the request is cancelled), so a consumer that wants the bound gives every request a wall time.
 Load validation refuses nothing here; the counter alone makes the bound hold for every setting. Stopping other tenants' work was
 considered and rejected (D48): a deadline that kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's
 request destroy another's results; re-queueing wastes only the drain already spent, which the caps bound.
