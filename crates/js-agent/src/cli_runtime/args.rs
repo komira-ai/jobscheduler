@@ -181,9 +181,6 @@ pub fn hardening_args(settings: &Settings, engine: Engine) -> Vec<String> {
         ]
         .map(str::to_owned),
     );
-    if let Some(parent) = settings.cgroup_parent() {
-        args.extend(["--cgroup-parent", parent].map(str::to_owned));
-    }
     args
 }
 
