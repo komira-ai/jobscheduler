@@ -351,6 +351,29 @@ fn instances_of_other_owners_do_not_count_but_our_terminating_ones_do() {
 }
 
 #[test]
+fn the_refusal_reports_the_machines_held_and_the_cap_as_two_different_numbers() {
+    let rig = rig(live(1));
+    held_id(&rig.provider.acquire(&ask("a")));
+    rig.clock.advance(INTERVAL);
+    // Two more of our own appear beyond what this scheduler launched, so the account is over the cap.
+    let mut extra = rig.fake.instances()[0].clone();
+    extra.id = id("extra01");
+    rig.fake.add_instance(extra.clone());
+    extra.id = id("extra02");
+    rig.fake.add_instance(extra);
+    assert_eq!(
+        rig.provider.acquire(&ask("b")),
+        refused(
+            RefusalCode::Denied,
+            Reason::AtMaxMachines {
+                held: 3,
+                max_machines: 1
+            }
+        )
+    );
+}
+
+#[test]
 fn a_renamed_instance_blocks_launches_instead_of_slipping_past_max_machines() {
     let rig = rig(live(2));
     held_id(&rig.provider.acquire(&ask("a")));

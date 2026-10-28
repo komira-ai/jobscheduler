@@ -480,7 +480,8 @@ The map of each merged item to what it becomes, with the follow-up step, is in [
 ### 5.10 Machine reuse, 5.11 caps, 5.12 integrity
 Text in [design/machines.md](design/machines.md). After a job the agent removes the container and scratch, checks the host and frees the
 slot; queued work that fits goes on the same machine at once; a host is released only after `idle_timeout` (5.10). A pool never exceeds
-`max_machines` and grows by at most `max_step` per tick for demand that does not fit: overload protection, not a cost guardrail (5.11). A
+`max_machines` and grows by at most `max_step` per tick for demand that does not fit: overload protection, not a cost guardrail (5.11); the cost guard of a cloud provider is its own `max_machines`, counted over the machines
+that provider holds. A
 job is `contained` (default) or `host`; a host job or any failed check taints its machine, which is replaced or cordoned (5.12).
 
 ### 5.13 Capabilities as data
@@ -726,7 +727,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |
-| `js-provider-lambdalabs` | new | the Lambda Cloud provider (runtime layer): the API client (instance types with GPU facts and regional capacity, instances, launch, terminate), the owner-only key file, a fake, the `[[option]]` table and the choice of instance type for a GPU request; a crate-local `Elastic` contract (acquire, list, release) with ownership marks, an idempotent acquire and a release that reads back, and a cost guard (disabled and dry-run by default, `max_machines` (the provider's own count, as `provider_max_machines` is the pool's), a launch rate limit, a report-only sweep); not wired to a scheduler |
+| `js-provider-lambdalabs` | new | the Lambda Cloud provider (runtime layer): the API client (instance types with GPU facts and regional capacity, instances, launch, terminate), the owner-only key file, a fake, the `[[option]]` table and the choice of instance type for a GPU request; a crate-local `Elastic` contract (acquire, list, release) with ownership marks, an idempotent acquire and a release that reads back, and a cost guard (disabled and dry-run by default, `max_machines` (a cap on the machines the provider holds, the provider's own share of the pool's cap as `provider_max_machines` names it), a launch rate limit, a report-only sweep); not wired to a scheduler |
 | `js-provider-<kind>` | new | one crate per later kind; the core names none (5.7) |
 | `js-sched` | `crates/kbf-sched` | per-request placement, generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants; scope per D15 |
 | `js-caps` | new at step 36; `crates/kbf-caps/src/matching.rs` joins at step 15 | the typed model, version order, schema and constraint evaluator of 5.13; kbf keeps its key tables and host detection |
