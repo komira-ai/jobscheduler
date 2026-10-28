@@ -746,7 +746,8 @@ mod tests {
         // lease 2 holds 2 for three minutes; leases 3 and 4 flat (2 each).
         assert_eq!(t.mem_all_at(0), (4 + 1 + 2 + 2 + 2 + 4) * GIB);
         assert_eq!(t.mem_all_at(1), (1 + 1 + 2 + 2 + 2 + 1) * GIB);
-        assert_eq!(t.mem_all_at(3), (1 + 1 + 0 + 2 + 2 + 1) * GIB);
+        // Lease 2 has ended its life by minute 3.
+        assert_eq!(t.mem_all_at(3), (1 + 1 + 2 + 2 + 1) * GIB);
         assert_eq!(t.mem_uncovered_at(0), (4 + 2 + 4) * GIB);
         assert_eq!(t.mem_uncovered_at(1), (1 + 2 + 1) * GIB);
         for i in 0..6 {
