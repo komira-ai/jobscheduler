@@ -95,7 +95,7 @@ impl Outbox {
     }
 
     fn lock(&self) -> MutexGuard<'_, Slot> {
-        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
+        self.slot.lock().expect("poisoned")
     }
 
     /// Puts a reading where the session takes it from. A reading nobody took is replaced,
