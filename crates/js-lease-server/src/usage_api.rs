@@ -82,6 +82,7 @@ fn host_id(text: &str) -> Option<HostId> {
 /// starts with a letter or a digit: the store admits more (a leading dot or dash), the
 /// route does not, so `.` and `..` never reach it.
 fn key_id(text: &str) -> Option<ProfileKey> {
+    let text = text.split('/').next().unwrap_or_default();
     let first = text.bytes().next()?;
     let starts = first.is_ascii_lowercase() || first.is_ascii_digit();
     ProfileKey::parse(text).ok().filter(|_| starts)
