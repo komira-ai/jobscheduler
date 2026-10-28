@@ -5,6 +5,7 @@ mod acquire;
 mod config;
 mod fake;
 mod key;
+mod lagging;
 mod model;
 mod options;
 mod own;

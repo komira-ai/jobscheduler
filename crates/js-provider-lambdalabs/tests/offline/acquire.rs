@@ -117,19 +117,28 @@ fn a_launch_whose_answer_was_lost_is_unknown_and_the_retry_finds_the_instance() 
 }
 
 #[test]
-fn a_launch_that_failed_before_landing_is_launched_by_the_retry_after_the_interval() {
+fn a_launch_with_no_answer_is_retried_only_once_the_hold_has_ended() {
     let rig = rig(live(5));
     rig.fake
         .fail_next(Call::Launch, ApiError::Transport("refused".to_owned()));
     assert_eq!(rig.provider.acquire(&ask("a")), Acquired::Unknown);
     assert_eq!(rig.fake.launched(), 0);
-    // A launch request was sent: the next must wait out the API's limit.
+    // It may have landed: the retry waits for the hold, not just the API's interval.
     assert_eq!(
         rig.provider.acquire(&ask("a")),
-        Acquired::Deferred { wait: INTERVAL }
+        Acquired::Deferred {
+            wait: Duration::from_secs(600)
+        }
+    );
+    rig.clock.advance(INTERVAL);
+    assert_eq!(
+        rig.provider.acquire(&ask("a")),
+        Acquired::Deferred {
+            wait: Duration::from_secs(600) - INTERVAL
+        }
     );
     assert_eq!(rig.fake.count(Call::Launch), 1);
-    rig.clock.advance(INTERVAL);
+    rig.clock.advance(Duration::from_secs(600) - INTERVAL);
     assert_eq!(held_id(&rig.provider.acquire(&ask("a"))), "fake0001");
     assert_eq!(rig.fake.launched(), 1);
 }

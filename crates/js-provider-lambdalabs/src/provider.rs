@@ -226,6 +226,17 @@ impl LambdaProvider {
                 extras: Vec::new(),
             };
         }
+        if let Some(sent) = gate.unknown.get(wanted) {
+            // An earlier launch of this acquire got no answer and no list shows it yet:
+            // it may have landed. A second launch would be a second instance under the
+            // same acquire id, and one the cap does not count.
+            let wait = (*sent + self.config.unknown_hold).saturating_sub(now);
+            tracing::warn!(
+                ?wait,
+                "no launch: an earlier launch of this acquire is unresolved"
+            );
+            return Acquired::Deferred { wait };
+        }
         let half = live
             .iter()
             .filter(|(_, claim)| *claim == Claim::Suspect)
@@ -237,12 +248,7 @@ impl LambdaProvider {
             );
             return Self::refuse(RefusalCode::Denied, Reason::HalfMarked { count: half });
         }
-        let pending = gate
-            .unknown
-            .keys()
-            .filter(|key| key.as_str() != wanted)
-            .count();
-        let held = live.len() + pending;
+        let held = live.len() + gate.unknown.len();
         let max = self.config.max_instances.get();
         if held >= max {
             tracing::warn!(held, max, "no launch: the cap is reached");
@@ -284,9 +290,15 @@ impl LambdaProvider {
             .iter()
             .map(|id| {
                 tracing::error!(%id, "a launch started more than one instance; releasing the extra");
+                // A 404 right after a launch may be a read that lags the write, so for
+                // an extra it is not evidence of "gone".
+                let released = match self.release(id) {
+                    Released::Gone => Released::Unknown,
+                    other => other,
+                };
                 Extra {
                     id: id.clone(),
-                    released: self.release(id),
+                    released,
                 }
             })
             .collect();

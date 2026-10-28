@@ -45,3 +45,54 @@ fn an_ssh_key_name_is_one_to_sixty_four_printable_characters() {
     assert_eq!(config(&"k".repeat(65)).unwrap_err(), ConfigError::SshKey);
     assert!(ConfigError::SshKey.to_string().contains("ssh key"));
 }
+
+#[test]
+fn the_default_launch_interval_is_the_apis_twelve_seconds() {
+    use js_provider_lambdalabs::{
+        Acquired, Architecture, Elastic, FakeLambda, LambdaProvider, OptionTable,
+    };
+    use std::sync::Arc;
+
+    use crate::rig::{TABLE, ask, offer};
+
+    let fake = Arc::new(FakeLambda::new());
+    fake.set_offers(vec![offer(
+        "gpu_1x_sample",
+        75,
+        1,
+        Architecture::X86_64,
+        &["region-a"],
+    )]);
+    let clock = Arc::new(ManualClock::new());
+    // No launch_interval call: the default is what is under test.
+    let config = ElasticConfig::new(
+        SchedulerId::new("s").unwrap(),
+        "k",
+        NonZeroUsize::new(5).unwrap(),
+    )
+    .unwrap()
+    .enable()
+    .live();
+    let provider = LambdaProvider::new(
+        fake.clone(),
+        clock.clone(),
+        OptionTable::parse(TABLE).unwrap(),
+        config,
+    );
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    clock.advance(Duration::from_secs(11));
+    assert_eq!(
+        provider.acquire(&ask("b")),
+        Acquired::Deferred {
+            wait: Duration::from_secs(1)
+        }
+    );
+    clock.advance(Duration::from_secs(1));
+    assert!(matches!(
+        provider.acquire(&ask("b")),
+        Acquired::Accepted { .. }
+    ));
+}
