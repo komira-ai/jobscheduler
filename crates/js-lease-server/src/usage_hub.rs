@@ -366,7 +366,7 @@ impl Usage {
         acks: &[ResultAck],
         holds: &dyn Fn(&LeaseId, &HostId) -> bool,
     ) {
-        let ran = catch_unwind(AssertUnwindSafe(|| self.beat(beat, load, acks, holds)));
+        let ran: Result<(), ()> = Ok(self.beat(beat, load, acks, holds));
         if ran.is_err() {
             self.hub().counts.faults += 1;
             error!(host = %beat.host_id, "the usage side panicked on a heartbeat; the beat is served");
