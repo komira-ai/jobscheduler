@@ -282,7 +282,11 @@ impl World {
                     .filter(|(_, (_, _, w))| *w == worker)
                     .map(|(l, _)| *l)
                     .collect();
-                self.feed(Event::Heartbeat { worker, running });
+                self.feed(Event::Heartbeat {
+                    worker,
+                    running,
+                    load: None,
+                });
             }
         }
         let due: Vec<(LeaseId, OperationId)> = self

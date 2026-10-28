@@ -156,6 +156,7 @@ impl Farm {
         self.feed(Event::Heartbeat {
             worker: w(name),
             running,
+            load: None,
         })
     }
 
@@ -544,6 +545,7 @@ fn the_record_of_a_give_up_is_committed_once() {
         Event::Heartbeat {
             worker: w("a"),
             running: Vec::new(),
+            load: None,
         },
     ));
     let record = ControlRecord::Result(ResultRecord {

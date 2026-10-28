@@ -48,3 +48,10 @@ in K11): pools specify `max_machines` only, and nothing is kept warm. The `regis
 D35 settled by the owner (reading (a); the other reading is recorded as considered and rejected); section 17 and
 [rollout.md](rollout.md), rolling out the server, the agents and kbf as two services without generalising kbf's update coordinator; D42
 to D45; K35 and K36; step 55.
+
+## The whole-node amendment
+
+Text in [whole-node.md](whole-node.md). Added: the **whole-node lease class** (5.17, D46 to D55): exclusive, quiet before the token, reserved
+by a drain of one host, capped per pool; the merged `gpu-host` and kbf's `whole_machine` are this class; host jobs only in it; steps 46 and
+54 reworded, steps 56 to 58; K37 to K41. Deleted: `max_draining_fraction` (now `max_draining`) and the drain text of 5.15, now in
+whole-node.md.

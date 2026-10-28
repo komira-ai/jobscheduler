@@ -60,7 +60,7 @@ dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector wi
     `js-sched` (per-request placement, a consumer of level 1; conditional on D15), and update in the same PR the layering test's pure set, forbidden list and clippy-deny
     check to cover both crates. 16c: the server adapter translating events and effects. *Proves:* golden traces unchanged; `js-sched` has
     no `kbf-*` dependency; `js-sched` holds 99% line and branch with its own tests only.
-17. Move the generic durable transitions into `js-store`; kbf extension rows (floors, key floors, estimator rows, done-of) stay. *Proves:*
+17. Move the generic durable transitions into `js-store`, with the rows of the scheduler's own types (the memory and key floors, fate, the in-flight pins, the operation size keys); kbf extension rows (estimator rows, action-usage subjects, done-of) stay. *Proves:*
     recovery tests, multi-frontend tests and the rolling-upgrade test (13.7) unchanged.
 18. Move the simulation harness and invariants into `js-sim`; kbf's simulation instantiates it. *Proves:* same seeds, same golden hashes.
 

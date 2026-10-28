@@ -678,6 +678,7 @@ impl World {
         self.input(Event::Heartbeat {
             worker: worker.clone(),
             running: running.clone(),
+            load: None,
         });
         for lease in self.check.not_held(&worker, &running) {
             if let Some(run) = self.nodes[i].runs.remove(&lease) {

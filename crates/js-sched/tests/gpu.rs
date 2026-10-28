@@ -203,6 +203,7 @@ fn a_given_up_lease_frees_its_gpu() {
         h.feed(Event::Heartbeat {
             worker: w("g"),
             running: Vec::new(),
+            load: None,
         })
         .is_empty()
     );
