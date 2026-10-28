@@ -7,7 +7,8 @@
 //! registry reads `prepare_timeout`, `reserve_backoff` and `max_replace` (for a failed
 //! prepare and for how long a request's record is kept) and the caps, `drain_after`,
 //! `drain_deadline`, `reserve_backoff` and `max_reserve_attempts` of its reservations
-//! (`whole::reserve`), and the dedicated defaults for a pool that has none.
+//! (`whole::reserve`), and the dedicated defaults for a pool that has none; the lease
+//! server also hands `prepare_timeout` to its lease table.
 
 /// How long a host stays excluded for a request after a give-up or a failed prepare:
 /// five minutes.
