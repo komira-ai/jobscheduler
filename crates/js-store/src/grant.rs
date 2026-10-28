@@ -24,6 +24,10 @@ impl Rows {
     /// operation not queued and the lease row naming this lease and worker is a write the
     /// store applied before without saying so: it is taken as written.
     ///
+    /// The lease row is the codec's encoding of the whole `grant`, the cost admission
+    /// charged ([`js_types::sched::LeaseGrant::cost`]) included, so a start recovers the
+    /// lease with that cost (`StoredOperation::recovered`).
+    ///
     /// # Errors
     /// [`StateError::Missing`] if the operation is not queued and holds no such lease,
     /// [`StateError::Conflict`] if its rows changed under the write,

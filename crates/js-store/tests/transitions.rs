@@ -21,6 +21,7 @@ use js_state::{Cond, Store, Txn};
 use js_store::keys;
 use js_store::test_support::TestCodec;
 use js_store::{Ending, Progress, RowCodec, Rows, StateError};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -56,12 +57,22 @@ fn submit(rows: &Rows, operation: u64) {
     submitted.expect("submit");
 }
 
+/// What the grants of these tests were charged.
+const GRANTED_COST: LeaseCost = LeaseCost {
+    cpu_millis: 1_500,
+    memory_bytes: 3 << 30,
+    limit_bytes: 4 << 30,
+    cold: true,
+    key_hash: 0x00c0_ffee,
+};
+
 /// The grant of lease `seq` of operation `operation` to `worker`.
 fn lease_grant(operation: u64, seq: u64, worker: &str) -> LeaseGrant {
     LeaseGrant {
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new(worker),
+        cost: GRANTED_COST,
     }
 }
 

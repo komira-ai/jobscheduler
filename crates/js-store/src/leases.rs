@@ -15,8 +15,9 @@
 //! scans the `lease/` rows, as it always did, and a grant puts its row whatever is there.
 
 use js_state::Versioned;
-use js_types::sched::{LeaseGrant, LeaseId, OperationId, WorkerId};
+use js_types::sched::{LeaseId, OperationId, WorkerId};
 
+use crate::codec::HeldLease;
 use crate::load::StoredOperation;
 use crate::owner::{pair_of, pair_row};
 use crate::{Rows, StateError, keys};
@@ -44,10 +45,7 @@ impl Rows {
     ///
     /// # Errors
     /// The store cannot be read, or a row read is not one the scheduler wrote.
-    pub(crate) fn lease_of(
-        &self,
-        operation: OperationId,
-    ) -> Result<Option<LeaseGrant>, StateError> {
+    pub(crate) fn lease_of(&self, operation: OperationId) -> Result<Option<HeldLease>, StateError> {
         if self.store.get(&keys::queue(operation))?.is_some() {
             return Ok(None);
         }
@@ -55,9 +53,9 @@ impl Rows {
         if let Some(row) = self.store.get(&index)? {
             let key = keys::lease(indexed_lease(&index, &row)?);
             if let Some(held) = self.store.get(&key)? {
-                let grant = self.lease_row(&key, &held)?;
-                if grant.operation == operation {
-                    return Ok(Some(grant));
+                let entry = self.lease_entry(&key, &held)?;
+                if entry.0.operation == operation {
+                    return Ok(Some(entry));
                 }
             }
         }
@@ -65,12 +63,12 @@ impl Rows {
     }
 
     /// The lease `operation` holds, found by reading every `lease/` row.
-    fn scan_lease_of(&self, operation: OperationId) -> Result<Option<LeaseGrant>, StateError> {
+    fn scan_lease_of(&self, operation: OperationId) -> Result<Option<HeldLease>, StateError> {
         let mut lease = None;
         for (key, row) in self.scan_known(keys::LEASE)? {
-            let grant = self.lease_row(&key, &row)?;
-            if grant.operation == operation {
-                lease = Some(grant);
+            let entry = self.lease_entry(&key, &row)?;
+            if entry.0.operation == operation {
+                lease = Some(entry);
             }
         }
         Ok(lease)
@@ -84,11 +82,11 @@ impl Rows {
     pub fn held_by(&self, worker: &WorkerId) -> Result<Vec<StoredOperation>, StateError> {
         let mut held = Vec::new();
         for (key, row) in self.scan_known(keys::LEASE)? {
-            let grant = self.lease_row(&key, &row)?;
-            if grant.worker != *worker {
+            let entry = self.lease_entry(&key, &row)?;
+            if entry.0.worker != *worker {
                 continue;
             }
-            if let Some(op) = self.stored_with(grant.operation, Some(grant))? {
+            if let Some(op) = self.stored_with(entry.0.operation, Some(entry))? {
                 held.push(op);
             }
         }

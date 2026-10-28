@@ -11,6 +11,7 @@ use js_sched::Request;
 use js_state::{Cond, Store, Txn};
 use js_store::test_support::TestCodec;
 use js_store::{Ending, Rows, StateError, Submitted};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -73,6 +74,10 @@ fn grant(rows: &Rows, operation: u64, seq: u64, worker: &str) -> Result<(), Stat
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new(worker),
+        cost: LeaseCost {
+            cpu_millis: 1_000,
+            ..LeaseCost::default()
+        },
     })
 }
 

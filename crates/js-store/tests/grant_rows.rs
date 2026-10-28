@@ -26,6 +26,7 @@ use js_state::fake::{Fake, Flaw};
 use js_state::{Cond, ManualClock, Op, Store, Txn, share};
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{Ending, EpochPolicy, Rows, StoredCordon, WorkerUp};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -92,6 +93,10 @@ fn grant_of(operation: u64, seq: u64) -> LeaseGrant {
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new("node-a"),
+        cost: LeaseCost {
+            cpu_millis: 1_000,
+            ..LeaseCost::default()
+        },
     }
 }
 

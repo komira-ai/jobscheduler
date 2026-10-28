@@ -29,6 +29,9 @@ pub struct WorkerUp {
     pub caps: NodeCaps,
 }
 
+/// A lease grant as a `lease/` row holds it, and whether the row kept its cost.
+pub(crate) type HeldLease = (LeaseGrant, bool);
+
 /// What a row value holds, as [`RowCodec::read`] finds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -36,6 +39,11 @@ pub enum Value {
     Submit(Request),
     /// A lease grant (`lease/`).
     Lease(LeaseGrant),
+    /// A lease grant a binary wrote before leases kept their cost: the codec reads the lease,
+    /// worker and operation, and the grant's `cost` is a placeholder (the default). A lease
+    /// recovered from such a row carries no cost (`None`: the scheduler charges it its
+    /// request), not the placeholder.
+    LegacyLease(LeaseGrant),
     /// A daemon's registration (`session/`).
     Session(WorkerUp),
     /// A value the codec reads, but of a kind no row holds.
@@ -98,8 +106,15 @@ impl Rows {
 
     /// The grant a `lease/` row holds.
     pub(crate) fn lease_row(&self, key: &str, row: &Versioned) -> Result<LeaseGrant, StateError> {
+        Ok(self.lease_entry(key, row)?.0)
+    }
+
+    /// The grant a `lease/` row holds, and whether the row kept the grant's cost (a row of
+    /// [`Value::LegacyLease`] did not).
+    pub(crate) fn lease_entry(&self, key: &str, row: &Versioned) -> Result<HeldLease, StateError> {
         match self.codec.read(key, &row.value)? {
-            Value::Lease(grant) => Ok(grant),
+            Value::Lease(grant) => Ok((grant, true)),
+            Value::LegacyLease(grant) => Ok((grant, false)),
             other => Err(wrong(key, &other, "not a lease grant")),
         }
     }

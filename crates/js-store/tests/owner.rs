@@ -95,6 +95,7 @@ fn grant(rows: &Rows, operation: u64, seq: u64, worker: &str) -> Result<(), Stat
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new(worker),
+        cost: LeaseCost::default(),
     })
 }
 
