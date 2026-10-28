@@ -1181,6 +1181,7 @@ dependencies = [
  "js-sim",
  "js-sizing",
  "js-types",
+ "js-whole",
 ]
 
 [[package]]

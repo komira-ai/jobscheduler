@@ -14,6 +14,7 @@ mod recover;
 mod snapshot;
 mod state;
 mod view;
+mod whole;
 mod worker;
 
 pub use recover::{Fate, Recovered, RecoveredLease};
@@ -35,6 +36,8 @@ use js_types::sched::{
     OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord, StartLease,
     WaiterId, Waiting, WorkKey, WorkerId,
 };
+
+use js_whole::WholeNodeConfig;
 
 use crate::admission::{Admission, Blocked, LoadConfig};
 use crate::cordon::Cordons;
@@ -243,6 +246,13 @@ pub struct Scheduler {
     /// The worker each blocked head of the queue holds (see [`Scheduler::place`]); the
     /// last round's, kept so the hold does not wander.
     head_holds: BTreeMap<OperationId, WorkerId>,
+    /// The whole-node settings ([`Scheduler::with_whole_node`]); `None` holds a worker for
+    /// a blocked whole-machine request by leases and booking alone.
+    whole_node: Option<WholeNodeConfig>,
+    /// The longest each operation the caller named one for may run
+    /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
+    /// the log or the `Eq` memory state.
+    max_walls: BTreeMap<OperationId, Duration>,
 }
 
 impl Scheduler {
@@ -276,6 +286,8 @@ impl Scheduler {
             loss_cap: u32::MAX,
             admission: Admission::default(),
             head_holds: BTreeMap::new(),
+            whole_node: None,
+            max_walls: BTreeMap::new(),
         }
     }
 
@@ -302,6 +314,18 @@ impl Scheduler {
     #[must_use]
     pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
         self.admission.use_curves(curves);
+        self
+    }
+
+    /// This scheduler, holding the worker for a blocked whole-machine request that is the
+    /// cheapest to drain ([`js_whole::cost::drain_cost`]: the latest end bound of its
+    /// leases, then the fewest leases, then the first by name) instead of the one with the
+    /// fewest leases and the least booked. An end bound is a lease's start plus the longest
+    /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
+    /// and booking alone.
+    #[must_use]
+    pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
+        self.whole_node = Some(config);
         self
     }
 
@@ -350,6 +374,7 @@ impl Scheduler {
             self.ops.remove(&id);
             self.memory.forget(id);
             self.size_keys.remove(&id);
+            self.max_walls.remove(&id);
             self.admission.forget(id);
         }
     }
@@ -567,6 +592,7 @@ impl Scheduler {
                     &reserved,
                     &op.avoid,
                     self.reservations.get(&id),
+                    self.drain_order(&placed).as_deref(),
                 )
             {
                 reserved.insert(name.clone());

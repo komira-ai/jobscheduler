@@ -33,6 +33,7 @@ impl Scheduler {
         self.reservations.remove(&operation);
         self.memory.forget(operation);
         self.size_keys.remove(&operation);
+        self.max_walls.remove(&operation);
         Some(op.waiters)
     }
 }
