@@ -11,7 +11,7 @@
 //! | `tables` | integer quantile tables | present |
 //! | `truth` | what really happens to a run, from a row and keyed draws | present |
 //! | `predictor` | what the scheduler believes about a key | present |
-//! | `permute` | the control's permutation of belief minutes | planned |
+//! | `permute` | the control's permutation of belief minutes and the share of the beliefs it moves | present |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | present |
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
 //! | `rankers` | the score rankers 3, 4, 5 and FW5 over one scorer, the decided-key shares, the decides-differently counters and the placement-sequence hash; imports `adapter` only | present |
@@ -32,6 +32,7 @@
 pub mod adapter;
 pub mod metrics;
 pub mod model;
+pub mod permute;
 pub mod predicate;
 pub mod replay;
 pub mod rules;
