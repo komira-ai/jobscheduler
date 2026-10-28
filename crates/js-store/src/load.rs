@@ -67,6 +67,9 @@ impl StoredOperation {
             lease: self.lease.map(|grant| RecoveredLease {
                 lease: grant.lease,
                 worker: grant.worker,
+                // The store does not keep the admitted cost yet, so a recovered lease is
+                // charged its request (the scheduler's meaning of `None`).
+                cost: None,
             }),
             losses: self.losses,
             fate: self.fate,
