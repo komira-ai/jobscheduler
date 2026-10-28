@@ -16,14 +16,13 @@
 
 mod common;
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, Request};
+use js_sched::{DaemonInstance, FloorChange, Request, Requeue, RequeueReason};
 use js_state::fake::{Fake, Flaw};
-use js_state::{Cond, ManualClock, Op, Store, Txn, share};
+use js_state::{Cond, ManualClock, Store, Txn, share};
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{Ending, EpochPolicy, Rows, StoredCordon, WorkerUp};
 use js_types::sched::usage::LeaseCost;
@@ -31,7 +30,7 @@ use js_types::sched::{
     FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
 
-use common::{Racing, frontend_with};
+use common::{Racing, dump, frontend_with, only, unhex};
 
 const GOLDEN: &str = include_str!("golden/grant-rows.txt");
 
@@ -45,33 +44,6 @@ const RESULTS: [&str; 3] = [
     "000a052a036f75741a00",
     "020a053a036375741a0d0804120974696d6564206f7574",
 ];
-
-fn unhex(text: &str) -> Vec<u8> {
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex digits"))
-        .collect()
-}
-
-/// The rows of `store` under `prefixes`, a line each: key, expiry and value as hex.
-fn dump(store: &Fake, prefixes: &[&str]) -> String {
-    let mut out = String::new();
-    for (key, row) in store.scan_prefix("").expect("scan") {
-        if !prefixes.iter().any(|prefix| key.starts_with(prefix)) {
-            continue;
-        }
-        let expiry = row.expires_at.map_or_else(
-            || "-".to_owned(),
-            |at| at.as_duration().as_nanos().to_string(),
-        );
-        let value: String = row.value.iter().fold(String::new(), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        });
-        let _ = writeln!(out, "{key} expires_ns={expiry} value={value}");
-    }
-    out
-}
 
 /// The request for the action whose digest is `tag` thirty-two times, of size `tag`: the
 /// dedup text is the digest as `<hash>/<size>`, as the farm server's front names an action.
@@ -145,20 +117,13 @@ fn the_lease_index_and_done_rows_are_the_rows_of_the_golden_file() {
     rows.cordoned(&WorkerId::new("node-c"), Some(StoredCordon::Cordoned))
         .expect("a cordon");
 
-    // Operation 4 was granted, then its lease given up (a stand-in for the give-up, which
-    // belongs to a later row of this crate): one transaction, as the give-up is.
+    // Operation 4 was granted, then its lease given up: one transaction, as the give-up is.
     rows.submit(OperationId(4), &action(1), &[], Some(7))
         .expect("submit");
     rows.granted(&grant_of(4, 0)).expect("grant");
-    let given_up = Txn::new()
-        .delete(js_store::keys::lease(LeaseId::new(5, 0)), Cond::Any)
-        .delete(js_store::keys::lease_by_op(OperationId(4)), Cond::Any)
-        .put(
-            js_store::keys::queue(OperationId(4)),
-            Vec::new(),
-            Cond::Absent,
-        );
-    store.txn(given_up).expect("store").expect("given up");
+    let kept = FloorChange::default();
+    rows.requeued(&requeue(4, 0), None, None, &kept, None)
+        .expect("given up");
 
     // Operations 5 to 7 ended, one in each way a result is kept.
     for (i, result) in (0..).zip(RESULTS) {
@@ -185,41 +150,15 @@ fn the_lease_index_and_done_rows_are_the_rows_of_the_golden_file() {
     assert_eq!(dump(&store, &["lease/", "lease-by-op/", "done/"]), golden);
 }
 
-/// The transaction `txn` as the farm server's trace of the store writes it, a line for each
-/// operation: the kind, the key, the condition (`any`, `absent` or `version`, whichever
-/// version) and, for a put, the lifetime.
-fn shape(txn: &Txn) -> Vec<String> {
-    let cond = |cond: Cond| match cond {
-        Cond::Any => "any",
-        Cond::Absent => "absent",
-        Cond::Version(_) => "version",
-    };
-    txn.ops()
-        .iter()
-        .map(|op| match op {
-            Op::Put {
-                key,
-                ttl,
-                cond: held,
-                ..
-            } => {
-                let ttl = ttl.map_or_else(|| "-".to_owned(), |t| format!("{}s", t.as_secs()));
-                format!("put {key} cond={} ttl={ttl}", cond(*held))
-            }
-            Op::Delete { key, cond: held } => format!("del {key} cond={}", cond(*held)),
-            Op::Check { key, cond: held } => format!("check {key} cond={}", cond(*held)),
-            Op::Next { counter } => format!("next {counter}"),
-        })
-        .collect()
-}
-
-/// The only transaction `store` was asked for since the last look, as [`shape`] shows it.
-fn only(store: &Racing) -> Vec<String> {
-    let asked = store.asked();
-    let [txn] = &asked[..] else {
-        panic!("one transaction expected, found {}", asked.len());
-    };
-    shape(txn)
+/// The give-up of lease `(5, seq)` of `operation` on node-a, for no reason that writes a row
+/// of its own.
+fn requeue(operation: u64, seq: u64) -> Requeue {
+    Requeue {
+        operation: OperationId(operation),
+        lease: LeaseId::new(5, seq),
+        worker: WorkerId::new("node-a"),
+        reason: RequeueReason::Silent,
+    }
 }
 
 /// A frontend over a fresh store, which owns node-a, with operation 4 submitted (of the work
@@ -341,11 +280,9 @@ fn a_result_for_a_given_up_lease_and_a_refusal_write_their_operations_in_this_or
 
     let (store, rows) = owner_of_node_a();
     rows.granted(&grant_of(4, 0)).expect("grant");
-    let queue = js_store::keys::queue(OperationId(4));
-    let given_up = Txn::new()
-        .delete(js_store::keys::lease(LeaseId::new(5, 0)), Cond::Any)
-        .put(queue, Vec::new(), Cond::Absent);
-    store.txn(given_up).expect("store").expect("given up");
+    let kept = FloorChange::default();
+    rows.requeued(&requeue(4, 0), None, None, &kept, None)
+        .expect("given up");
     store.asked();
     rows.finished(OperationId(4), LeaseId::new(5, 0), &ending())
         .expect("a result");
