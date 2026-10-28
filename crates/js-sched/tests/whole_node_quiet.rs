@@ -4,6 +4,7 @@
 //! request the caps stop stays queued and [`Scheduler::whole_wait`] says why. Also how workers of every
 //! platform count toward one pool. Every time is farm time fed to the scheduler.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -35,7 +36,7 @@ fn cfg(edit: impl FnOnce(&mut WholeNodeConfig)) -> WholeNodeConfig {
 fn quiet(config: WholeNodeConfig, names: &[&str]) -> Farm {
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(config),
     );
     for name in names {
@@ -58,10 +59,10 @@ fn last(f: &Farm) -> OperationId {
     OperationId(f.s.next_operation().0 - 1)
 }
 
+both_rules! {
 /// Catches: a quiet worker taken past `max_whole_node`: with one as the cap, the first
 /// request is granted `a`, and the second, though `b` is quiet, is not granted and says
 /// the ceiling stopped it.
-#[test]
 fn a_quiet_worker_is_not_taken_at_max_whole_node() {
     let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
     assert!(ask(&mut f).is_some());
@@ -74,10 +75,11 @@ fn a_quiet_worker_is_not_taken_at_max_whole_node() {
     assert_eq!(f.held_for(second), None);
     assert_eq!(f.s.whole_mark(second), None);
 }
+}
 
+both_rules! {
 /// Catches: the cap one too low for a quiet take: with two as the cap both requests are
 /// granted a worker, and the third is not.
-#[test]
 fn one_below_max_whole_node_a_quiet_worker_is_taken() {
     let mut f = quiet(cfg(|c| c.max_whole_node = 2), &["a", "b", "c"]);
     let a = ask(&mut f).unwrap();
@@ -85,11 +87,12 @@ fn one_below_max_whole_node_a_quiet_worker_is_taken() {
     assert_ne!(a, b);
     assert_eq!(ask(&mut f), None);
 }
+}
 
+both_rules! {
 /// Catches: whole requests placed in one round not counted against each other: with one
 /// as the cap and two quiet workers, two requests queued before the same round yield one
 /// grant, and the other waits with the ceiling as its reason.
-#[test]
 fn two_requests_in_one_round_are_one_grant_at_cap_one() {
     let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
     let first = f.submit_whole(Some(secs(600)));
@@ -102,10 +105,11 @@ fn two_requests_in_one_round_are_one_grant_at_cap_one() {
         Some(WholeWait::Cap(Blocked::Ceiling))
     );
 }
+}
 
+both_rules! {
 /// Catches: a request refused for the ceiling forgotten when room returns: it stays
 /// queued, and once the first lease is released it is granted the worker.
-#[test]
 fn a_refused_quiet_take_is_granted_when_a_whole_lease_ends() {
     let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["a", "b"]);
     let first = f.submit_whole(Some(secs(600)));
@@ -118,15 +122,16 @@ fn a_refused_quiet_take_is_granted_when_a_whole_lease_ends() {
     let grants = f.advance(at);
     assert_eq!(grants.len(), 1);
 }
+}
 
+both_rules! {
 /// Catches: a request that holds a mark refused the quiet worker for the ceiling its own
 /// mark fills: with one as the cap, the request holds `a` (busy), `b` comes up quiet, and
 /// it takes `b` (its mark becomes a lease, still one whole worker).
-#[test]
 fn a_marked_request_takes_a_quiet_worker_at_the_ceiling() {
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(cfg(|c| c.max_whole_node = 1)),
     );
     f.worker("a");
@@ -139,12 +144,13 @@ fn a_marked_request_takes_a_quiet_worker_at_the_ceiling() {
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].worker, w("b"));
 }
+}
 
+both_rules! {
 /// Catches: `keep_for_ordinary` at or above the capable workers (ceiling zero) leaving a
 /// whole request placed or marked: with two workers and two kept, a request is not
 /// granted a quiet worker and holds nothing; on busy workers it holds nothing either, and
 /// both say the floor stopped it.
-#[test]
 fn nothing_is_placed_or_marked_when_the_floor_leaves_no_ceiling() {
     for kept in [2, 3] {
         let mut f = quiet(cfg(|c| c.keep_for_ordinary = kept), &["a", "b"]);
@@ -158,12 +164,12 @@ fn nothing_is_placed_or_marked_when_the_floor_leaves_no_ceiling() {
     }
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(cfg(|c| c.keep_for_ordinary = 2)),
     );
     for name in ["a", "b"] {
         f.worker(name);
-        f.lease(secs(600));
+        f.lease_on(name, secs(600));
     }
     let op = f.submit_whole(Some(secs(600)));
     assert!(f.grants().is_empty());
@@ -173,22 +179,23 @@ fn nothing_is_placed_or_marked_when_the_floor_leaves_no_ceiling() {
     );
     assert_eq!((f.held_for(op), f.s.whole_mark(op)), (None, None));
 }
+}
 
+both_rules! {
 /// Catches: the ceiling taken from the capable workers when `max_whole_node` is lower:
 /// with five workers and two as the cap, the first two requests hold a worker each; two
 /// of the three workers they do not hold are quarantined (capable falls to three, the
 /// ceiling stays two because the cap binds), both marks stay, and a third request is
 /// stopped by the ceiling, not by the floor.
-#[test]
 fn a_falling_capable_count_does_not_lower_a_ceiling_the_cap_binds() {
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(cfg(|c| c.max_whole_node = 2)),
     );
     for name in ["a", "b", "c", "d", "e"] {
         f.worker(name);
-        f.lease(secs(600));
+        f.lease_on(name, secs(600));
     }
     let first = f.submit_whole(Some(secs(600)));
     f.advance(10_000);
@@ -219,6 +226,7 @@ fn a_falling_capable_count_does_not_lower_a_ceiling_the_cap_binds() {
         Some(WholeWait::Cap(Blocked::Ceiling))
     );
 }
+}
 
 /// A mac worker, which serves whole machines like the linux ones.
 fn mac(f: &mut Farm, name: &str) {
@@ -234,10 +242,10 @@ fn mac(f: &mut Farm, name: &str) {
     f.workers.push(w(name));
 }
 
+both_rules! {
 /// Catches: the ceiling kept per platform: a pool of one linux and one mac worker, both
 /// quiet, with one as the cap: the first request is granted one worker and the second
 /// (which only the other platform's worker could run) is stopped by the ceiling.
-#[test]
 fn workers_of_every_platform_count_toward_one_ceiling() {
     let mut f = quiet(cfg(|c| c.max_whole_node = 1), &["linux"]);
     mac(&mut f, "mac");
@@ -254,15 +262,16 @@ fn workers_of_every_platform_count_toward_one_ceiling() {
         Some(WholeWait::Cap(Blocked::Ceiling))
     );
 }
+}
 
+both_rules! {
 /// Catches: `max_draining` kept per platform: with one draining slot, a request for the
 /// busy linux worker holds it, and a request for the busy mac worker is stopped by
 /// `max_draining`.
-#[test]
 fn workers_of_every_platform_count_toward_max_draining() {
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(cfg(|c| c.max_draining = 1)),
     );
     f.worker("linux");
@@ -291,15 +300,16 @@ fn workers_of_every_platform_count_toward_max_draining() {
         Some(WholeWait::Cap(Blocked::MaxDraining))
     );
 }
+}
 
+both_rules! {
 /// Catches: `max_draining` applied to a quiet take, which drains nothing: with the one
 /// draining slot taken by a linux request that holds the busy linux worker, a mac request
 /// is still granted the quiet mac worker.
-#[test]
 fn max_draining_does_not_stop_a_quiet_take() {
     let mut f = Farm::new(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_whole_node(cfg(|c| c.max_draining = 1)),
     );
     f.worker("linux");
@@ -316,4 +326,5 @@ fn max_draining_does_not_stop_a_quiet_take() {
     let grants = f.grants();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].worker, w("mac"));
+}
 }

@@ -219,6 +219,17 @@ so `max_whole_node_per_consumer` is not enforced there; the setting is read and 
 (K7): the lease server or the registry. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
 rule does not read it as taking a host from the request that holds it.*
 
+*The view of the waiting (`js-sched`).* `whole_state(op)` is one value for a queued whole-machine request when the settings are on (`None`
+otherwise, and for a request that is not a queued whole-machine one): `Early` (before `drain_after`, with the time it may hold), `Holding` (the
+worker, when the hold was made, its deadline, or none once `max_reserve_attempts` holds were given up, the give-ups so far, and whether the
+worker still has leases), `Barred` (it gave up a hold and no other worker could be held: each barred worker and when its back-off ends),
+`Stopped` (the cap or the last-capable rule of `whole_wait`), `Queued` (past `drain_after`, nothing recorded: the workers it could hold are
+held by requests ahead, or no round has run since it became due or its back-off ended; a status page may label it "Waiting") and `Unservable` (no live worker could ever run it, with `waiting`'s reason, shown verbatim and not matched on; also before `drain_after`). It reads what
+the last placement round recorded, except two things read at the time now: whether the request is before `drain_after`, and which back-offs have not ended (one that ended since the last round shows `Queued`, not `Barred`). `whole_summary()` gives the numbers the caps read between rounds:
+workers held by whole leases, marks, those marks on a busy worker (what `max_draining` bounds), `whole` (their sum), the ceiling and its inputs
+(`max_whole_node`, capable hosts, `keep_for_ordinary`, `max_draining`), and how many queued whole-machine requests wait for each reason
+(`WholeReason`, ordered). It counts with the code admission uses, so it cannot show a number the caps do not enforce.
+
 **Validation at load.** A mixed pool that sets `max_whole_node` needs `max_whole_node + keep_for_ordinary <= max_machines`, and every
 limit is at least 1 where it is a maximum; a file that breaks this is refused (D20). A dedicated pool may set `max_whole_node` below
 `max_machines`; the surplus hosts then serve nothing, which validation reports.

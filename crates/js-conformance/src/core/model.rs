@@ -54,6 +54,12 @@ pub enum Defect {
     /// A restart forgets which operations hold a lease, so each is queued and placed again
     /// at once instead of waiting out the grace for its worker.
     RecoversWithoutGrace,
+    /// A restart that finds no worker had registered forgets the operations still queued,
+    /// so work that could not be placed before the crash is lost.
+    ForgetsQueueWithoutWorkers,
+    /// A restart that finds the store was refusing writes forgets the operations still
+    /// queued, so work whose grant was never written is lost.
+    ForgetsQueueAfterRefusal,
 }
 
 /// Something the loop still has to do, in order.
@@ -167,6 +173,15 @@ impl ReferenceCore {
             }
             _ => self.counter("meta/next_seq"),
         }
+    }
+
+    /// Deletes the rows of every operation the store holds.
+    fn forget_queue(&self) {
+        let rows = self.store.scan_prefix("op/").expect("the fake store scans");
+        let txn = rows
+            .into_iter()
+            .fold(Txn::new(), |txn, (key, _)| txn.delete(key, Cond::Any));
+        self.put(txn);
     }
 
     fn put(&self, txn: Txn) {
@@ -355,6 +370,12 @@ impl CoreHarness for ReferenceCore {
     fn crash_and_restart(&mut self) {
         let empty = Fake::with_flaw(self.clock.clone(), Flaw::None);
         self.store = std::mem::replace(&mut self.store, empty).restart();
+        if self.defect == Some(Defect::ForgetsQueueWithoutWorkers) && self.streams.is_empty() {
+            self.forget_queue();
+        }
+        if self.defect == Some(Defect::ForgetsQueueAfterRefusal) && self.store_down {
+            self.forget_queue();
+        }
         self.held.clear();
         self.refusals = 0;
         self.store_down = false;

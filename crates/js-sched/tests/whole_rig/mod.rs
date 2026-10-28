@@ -129,6 +129,46 @@ impl Farm {
         self.lease_after(wall, 0)
     }
 
+    /// As [`Farm::lease`], on the worker `name`: the layout a test sets up does not depend
+    /// on which worker the placement rule would pick.
+    pub fn lease_on(&mut self, name: &str, wall: Duration) -> LeaseGrant {
+        self.place_on(name, Some(wall))
+    }
+
+    /// An action that may run `wall` (none: no wall time given), placed on the worker
+    /// `name` and started now. The other workers are cordoned for the round and uncordoned
+    /// after it, which places nothing.
+    pub fn place_on(&mut self, name: &str, wall: Option<Duration>) -> LeaseGrant {
+        let others: Vec<WorkerId> = self
+            .workers
+            .iter()
+            .filter(|worker| **worker != w(name))
+            .cloned()
+            .collect();
+        for worker in &others {
+            let worker = worker.clone();
+            assert!(self.feed(Event::Cordon { worker }).is_empty());
+        }
+        self.next_n += 1;
+        let operation = self.s.next_operation();
+        if let Some(wall) = wall {
+            self.s.set_max_wall(operation, wall);
+        }
+        self.submit(request(self.next_n, LeaseKind::Action));
+        let grant = self.grants().pop().expect("the action is placed");
+        assert_eq!(grant.operation, operation);
+        assert_eq!(grant.worker, w(name), "the lease is placed on {name}");
+        self.start(&grant);
+        for worker in others {
+            let effects = self.feed(Event::Uncordon { worker });
+            assert!(
+                effects.iter().all(|e| matches!(e, Effect::Waiting(_))),
+                "{effects:?}"
+            );
+        }
+        grant
+    }
+
     /// As [`Farm::lease`], the worker reporting the run started `delay_ms` after the grant.
     pub fn lease_after(&mut self, wall: Duration, delay_ms: u64) -> LeaseGrant {
         self.next_n += 1;
