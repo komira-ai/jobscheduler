@@ -1,6 +1,6 @@
 //! The drain cost order (design section 3) and the reservation deadline (section 4).
 
-use crate::WholeNodeConfig;
+use crate::config::WholeNodeConfig;
 
 /// What the scheduler's table shows on one host, as facts for [`drain_cost`].
 #[derive(Debug, Clone, PartialEq, Eq)]
