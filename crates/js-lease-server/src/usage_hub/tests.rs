@@ -250,6 +250,48 @@ fn a_clean_run_is_handed_over_after_its_grace_beats_with_its_late_minute() {
     assert_eq!(usage.counters().runs_learned, 1);
 }
 
+/// A key source that names a run's key once and then forgets it, as the registry does
+/// when it evicts a finished run or forgets a lost host's runs.
+struct Forgetting(Mutex<Option<ProfileKey>>);
+
+impl KeySource for Forgetting {
+    fn key_of(&self, _: &str) -> Option<ProfileKey> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+/// Asserts that the key of a clean run is taken when its acknowledgement is read and kept
+/// through the grace: a key source that has forgotten the run by the time the grace ends
+/// (the run evicted from the registry, or its host's runs forgotten) still gives the sink
+/// the run under its key, and the run is not counted as keyless. It catches a hub that
+/// asks for the key after the grace.
+#[test]
+fn a_run_forgotten_by_the_key_source_during_its_grace_is_still_learned() {
+    let fake = Arc::new(Fake::default());
+    let clock = ManualClock::new(Timestamp::from_millis(T0_MS));
+    let limits = HostLimits {
+        threads: 8,
+        memory_bytes: 1 << 34,
+    };
+    let keys = Forgetting(Mutex::new(Some(ProfileKey::parse("act.build").unwrap())));
+    let usage = Usage::new(
+        fake.clone(),
+        Arc::new(keys),
+        SharedClock::new(clock),
+        limits,
+    );
+    let minutes = [("1-1", 0, 1000, 100)];
+    let first = Some(load(1, &minutes));
+    usage.on_beat(&beat("h1", Vec::new()), first, &[], &anyone);
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
+    quiet_beats(&usage, "h1", 2);
+    let ended = fake.ended();
+    assert_eq!(ended.len(), 1);
+    assert_eq!(ended[0].key.as_str(), "act.build");
+    assert_eq!(usage.counters().runs_without_key, 0);
+}
+
 /// Asserts that the grace of a run is counted in beats of its own host: beats of another
 /// host do not shorten it. It catches a grace counted over every host's beats, which
 /// hands a run over before its host has sent the minute it was waiting for.

@@ -22,6 +22,8 @@
 //! (`runs_without_key`) and nothing is learned. The final partial minute of a lease rides
 //! on a later heartbeat, so a clean run is handed to the sink [`GRACE_BEATS`] heartbeats
 //! of its host after the one that carried its acknowledgement.
+//! The key is asked for when the acknowledgement is read and held with the run through
+//! its grace, so a run the registry evicts or forgets in the meantime is still learned.
 //!
 //! **Locks.** The one mutex here is a leaf: nothing is called while it is held but the
 //! key source (which must answer from memory and not call back into the server), and it
