@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use js_agent::{LINES_CAP, QUEUE};
+use js_agent::{Delivery, LINES_CAP, QUEUE};
 use js_agent_wire::{Command, HeartbeatReply, HeldState, Outcome};
 
 use super::fake::{Build, FakeMachine, HANG_GUARD};
@@ -23,7 +23,7 @@ fn a_result_stays_published_until_it_is_acknowledged() {
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
 
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     assert_eq!(machine.world.created(), ["r1"]);
     let snapshot = worker.snapshot();
@@ -41,7 +41,7 @@ fn a_result_stays_published_until_it_is_acknowledged() {
 
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().results.len(), 1, "no ack, no drop");
-    assert!(worker.try_deliver(acks("r1", "ACCEPTED")));
+    assert_eq!(worker.try_deliver(acks("r1", "ACCEPTED")), Delivery::Delivered);
     assert!(worker.handle().settle());
     let snapshot = worker.snapshot();
     assert!(snapshot.held.is_empty() && snapshot.results.is_empty());
@@ -59,13 +59,13 @@ fn a_start_that_waited_for_the_worker_is_stale() {
     let worker = start(&dir, &machine);
 
     machine.world.hold_creates();
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     machine.world.wait_entered(1);
     let mut late = starts(&["r2"]);
     if let Command::Start(spec) = &mut late.commands[0] {
         spec.valid_for_ms = 1000;
     }
-    assert!(worker.try_deliver(late));
+    assert_eq!(worker.try_deliver(late), Delivery::Delivered);
     machine.clock.advance(5000);
     machine.world.release();
     assert!(worker.handle().settle());
@@ -91,12 +91,16 @@ fn a_full_queue_refuses_the_next_reply_without_waiting() {
     let worker = start(&dir, &machine);
 
     machine.world.hold_creates();
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     machine.world.wait_entered(1);
     for n in 0..QUEUE {
-        assert!(worker.try_deliver(starts(&["r1"])), "reply {n} has room");
+        assert_eq!(
+            worker.try_deliver(starts(&["r1"])),
+            Delivery::Delivered,
+            "reply {n} has room"
+        );
     }
-    assert!(!worker.try_deliver(starts(&["r1"])), "the queue is full");
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Full, "the queue is full");
 
     machine.world.release();
     assert!(worker.handle().settle());
@@ -136,7 +140,7 @@ fn the_containers_of_an_earlier_process_are_held_at_start() {
     let dir = Scratch::new("jobs-worker-adopt");
     let machine = FakeMachine::new();
     let first = start(&dir, &machine);
-    assert!(first.try_deliver(starts(&["r1"])));
+    assert_eq!(first.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(first.handle().settle());
 
     let second = start(&dir, &FakeMachine::of(&machine.world));
@@ -170,7 +174,7 @@ fn a_worker_finds_an_exit_by_itself() {
     let machine = FakeMachine::new();
     let worker = js_agent::Worker::start(plan(&dir, &machine, Duration::from_millis(1)))
         .expect("the worker starts");
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     let handle = worker.handle();
     assert!(handle.wait_until(&|s| !s.held.is_empty(), HANG_GUARD));
     assert!(!handle.wait_until(&|s| !s.results.is_empty(), Duration::from_millis(1)));
@@ -191,7 +195,7 @@ fn a_closed_worker_takes_no_start_and_still_stops() {
     let dir = Scratch::new("jobs-worker-closed");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
 
     worker.close();
@@ -199,7 +203,7 @@ fn a_closed_worker_takes_no_start_and_still_stops() {
     both.commands.push(Command::Stop {
         run_id: "r1".to_owned(),
     });
-    assert!(worker.try_deliver(both));
+    assert_eq!(worker.try_deliver(both), Delivery::Delivered);
     assert!(worker.handle().settle());
 
     assert_eq!(machine.world.created(), ["r1"]);
@@ -220,7 +224,7 @@ fn stop_all_stops_every_run() {
     let dir = Scratch::new("jobs-worker-stop-all");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1", "r2"])));
+    assert_eq!(worker.try_deliver(starts(&["r1", "r2"])), Delivery::Delivered);
     assert!(worker.handle().settle());
 
     worker.stop_all();
@@ -253,7 +257,7 @@ fn a_refused_command_is_logged_by_its_place() {
     let dir = Scratch::new("jobs-worker-invalid");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let mut bad = job("r2");
     bad.run_id = String::new();
@@ -266,7 +270,7 @@ fn a_refused_command_is_logged_by_its_place() {
         ],
         ..HeartbeatReply::default()
     };
-    assert!(worker.try_deliver(reply));
+    assert_eq!(worker.try_deliver(reply), Delivery::Delivered);
     assert!(worker.handle().settle());
     assert_eq!(worker.snapshot().results[0].outcome, Outcome::Killed);
     let lines = worker.take_lines();
@@ -294,7 +298,7 @@ fn lines_over_the_cap_are_counted() {
         huge.limits.cpu_millis = 9000;
         many.commands.push(Command::Start(Box::new(huge)));
     }
-    assert!(worker.try_deliver(many));
+    assert_eq!(worker.try_deliver(many), Delivery::Delivered);
     assert!(worker.handle().settle());
     let lines = worker.take_lines();
     assert_eq!(lines.len(), LINES_CAP + 1);
@@ -313,8 +317,8 @@ fn a_worker_that_panics_is_seen_to_have_ended() {
     let handle = worker.handle();
     assert!(!worker.ended() && !handle.ended());
     machine.world.panic_at("create");
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(!handle.settle(), "the worker is gone");
     assert!(worker.ended() && handle.ended());
-    assert!(!worker.try_deliver(stops("r1")), "nobody takes a reply");
+    assert_eq!(worker.try_deliver(stops("r1")), Delivery::Gone, "nobody takes a reply");
 }

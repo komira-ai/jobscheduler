@@ -28,12 +28,15 @@
 //!   counted and dropped) and the loop around the session prints them.
 //!
 //! A worker that dies (a panic in a runtime) is seen by [`Worker::ended`]; the session
-//! then ends the agent, because jobs nobody supervises must not go on being listed.
+//! then ends the agent, because jobs nobody supervises must not go on being listed. Two
+//! signals back the end mark up: a reply the worker's queue no longer has anybody to take
+//! ([`Delivery::Gone`]), and a worker that has been inside one order or step for longer than
+//! [`STALL_STEPS`] step intervals on the lifecycle's clock ([`Worker::stalled`]).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
@@ -51,6 +54,12 @@ pub const QUEUE: usize = 16;
 
 /// How long the worker waits for an order before it steps the lifecycle by itself.
 pub const STEP_EVERY: Duration = Duration::from_secs(1);
+
+/// How many step intervals the worker may be inside one order or step before the session
+/// calls it stalled. A runtime call may be slow (an image pull, the grace of a stop), so
+/// the bound is far above any of them; a worker still inside one after it is wedged, and
+/// jobs nobody supervises must not go on being listed.
+pub const STALL_STEPS: u32 = 1800;
 
 /// The most log lines kept for the session thread to print.
 pub const LINES_CAP: usize = 256;
@@ -131,6 +140,9 @@ struct Shared {
     stop_all: AtomicBool,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
+    /// When the worker began the order or step it is inside, on the lifecycle's clock,
+    /// plus one; 0 while it waits for an order.
+    busy_since: AtomicU64,
 }
 
 /// Marks the worker as ended when the thread leaves, however it leaves. It is dropped
@@ -164,6 +176,17 @@ impl Shared {
         drop(published);
         self.changed.notify_all();
     }
+}
+
+/// What became of a reply handed to the worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// The reply waits in the queue.
+    Delivered,
+    /// The worker is busy and the queue is full: the reply was dropped.
+    Full,
+    /// Nobody reads the queue any more: the worker's thread is gone.
+    Gone,
 }
 
 /// A way to talk to the worker that can be copied: for a test to wait for it.
@@ -210,6 +233,7 @@ impl Handle {
 pub struct Worker {
     handle: Handle,
     clock: SharedClock,
+    stall_after_ms: u64,
 }
 
 impl Worker {
@@ -227,18 +251,19 @@ impl Worker {
         let shared = Arc::new(Shared::default());
         let clock = plan.machine.clock();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
+        let stall_after_ms = stall_bound_ms(step_every);
         // The thread is not joined: the agent ends with the process, and a container that
         // is still there is adopted by the next one.
         thread::spawn(move || {
             let _ending = Ending(&own);
-            match build(plan, thread_clock) {
+            match build(plan, thread_clock.clone()) {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
                 Ok((life, lines)) => {
                     own.publish(Snapshot::of(&life), lines);
                     let _ = ready.send(Ok(()));
-                    work(life, &inbox, &own, step_every);
+                    work(life, &inbox, &own, &thread_clock, step_every);
                 }
             }
         });
@@ -249,6 +274,7 @@ impl Worker {
         outcome.map(|()| Self {
             handle: Handle { orders, shared },
             clock,
+            stall_after_ms,
         })
     }
 
@@ -262,14 +288,35 @@ impl Worker {
         self.handle.snapshot()
     }
 
-    /// Hands a reply to the worker without waiting; false when the worker is busy and the
-    /// reply was dropped. The reply is stamped with the clock now, so a start that waits
-    /// in the queue has its `valid_for_ms` counted from the moment it arrived.
-    pub fn try_deliver(&self, reply: HeartbeatReply) -> bool {
+    /// A worker whose thread is gone and left no end mark, which only a fault in the
+    /// thread's exit could leave: for the tests of the signals that do not rely on the
+    /// mark. Its queue has no reader, so every reply is [`Delivery::Gone`].
+    #[doc(hidden)]
+    pub fn orphaned(clock: SharedClock) -> Self {
+        let (orders, _) = sync_channel(QUEUE);
+        Self {
+            handle: Handle {
+                orders,
+                shared: Arc::default(),
+            },
+            clock,
+            stall_after_ms: stall_bound_ms(STEP_EVERY),
+        }
+    }
+
+    /// Hands a reply to the worker without waiting: [`Delivery::Full`] when the worker is
+    /// busy and the reply was dropped, [`Delivery::Gone`] when nobody reads the queue. The
+    /// reply is stamped with the clock now, so a start that waits in the queue has its
+    /// `valid_for_ms` counted from the moment it arrived.
+    pub fn try_deliver(&self, reply: HeartbeatReply) -> Delivery {
         let received_ms = self.clock.now_ms();
         let reply = Box::new(reply);
         let order = Order::Reply { reply, received_ms };
-        self.handle.orders.try_send(order).is_ok()
+        match self.handle.orders.try_send(order) {
+            Ok(()) => Delivery::Delivered,
+            Err(TrySendError::Full(_)) => Delivery::Full,
+            Err(TrySendError::Disconnected(_)) => Delivery::Gone,
+        }
     }
 
     /// From now on a `Start` is not acted on. Stops, cancels and acknowledgements still
@@ -302,6 +349,22 @@ impl Worker {
     pub fn ended(&self) -> bool {
         self.handle.ended()
     }
+
+    /// Whether the worker has been inside one order or step for longer than
+    /// [`STALL_STEPS`] step intervals on the lifecycle's clock. A worker that waits for an
+    /// order is never stalled.
+    pub fn stalled(&self) -> bool {
+        match self.handle.shared.busy_since.load(Ordering::SeqCst) {
+            0 => false,
+            marked => self.clock.now_ms().saturating_sub(marked - 1) > self.stall_after_ms,
+        }
+    }
+}
+
+/// The time in milliseconds after which a worker stepping every `step_every` is stalled.
+fn stall_bound_ms(step_every: Duration) -> u64 {
+    let bound = step_every.saturating_mul(STALL_STEPS).as_millis();
+    u64::try_from(bound).unwrap_or(u64::MAX)
 }
 
 /// The lifecycle, built and with the previous process's containers adopted, and the lines
@@ -332,11 +395,20 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
 }
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
-fn work(mut life: Lifecycle, inbox: &Receiver<Order>, shared: &Shared, step_every: Duration) {
+fn work(
+    mut life: Lifecycle,
+    inbox: &Receiver<Order>,
+    shared: &Shared,
+    clock: &SharedClock,
+    step_every: Duration,
+) {
     loop {
         let mut lines = Vec::new();
         let mut settle = None;
-        match inbox.recv_timeout(step_every) {
+        let order = inbox.recv_timeout(step_every);
+        let begun = clock.now_ms().saturating_add(1);
+        shared.busy_since.store(begun, Ordering::SeqCst);
+        match order {
             Ok(Order::Reply { reply, received_ms }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);
                 let (reply, skipped) = match closed {
@@ -355,6 +427,7 @@ fn work(mut life: Lifecycle, inbox: &Receiver<Order>, shared: &Shared, step_ever
         }
         lines.extend(describe(&life.step()));
         shared.publish(Snapshot::of(&life), lines);
+        shared.busy_since.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
             let _ = done.send(());
         });

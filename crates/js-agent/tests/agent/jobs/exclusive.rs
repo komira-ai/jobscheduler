@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use super::drain::container_flags;
 use super::fake::FakeMachine;
 use super::start_answer;
+use crate::bounds::WakeBudget;
 use crate::support::{
     Jobs, Lowest, Scratch, Script, ScriptConnector, beat_ok, code, flags, linux_host, reply,
     run_on, welcome,
@@ -24,10 +25,12 @@ struct Settle<'a> {
     seen: &'a RefCell<Option<Handle>>,
     calls: usize,
     stop_at: usize,
+    budget: WakeBudget,
 }
 
 impl Sleeper for Settle<'_> {
     fn sleep(&mut self, _duration: Duration) -> Wake {
+        self.budget.spend();
         if let Some(handle) = self.seen.borrow().as_ref() {
             handle.settle();
         }
@@ -78,6 +81,7 @@ fn an_agent_with_jobs_ignores_a_whole_node_lease() {
         seen: &seen,
         calls: 0,
         stop_at: 5,
+        budget: WakeBudget::new(),
     };
     let jobs: Jobs<'_> = (machine, Some(&hook));
     let ran = run_on(
@@ -145,6 +149,7 @@ fn an_agent_without_container_bin_ignores_a_start_and_builds_no_worker() {
         seen: &seen,
         calls: 0,
         stop_at: 3,
+        budget: WakeBudget::new(),
     };
     let jobs: Jobs<'_> = (machine, Some(&hook));
     let ran = run_on(

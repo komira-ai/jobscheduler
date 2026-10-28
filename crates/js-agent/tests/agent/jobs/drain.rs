@@ -7,11 +7,12 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::{Drain, Exit, Handle, Session, Sleeper, Wake, Worker, drive};
+use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Wake, Worker, drive};
 use serde_json::{Value, json};
 
 use super::fake::{Build, FakeMachine};
 use super::{private, start, start_answer, starts, user};
+use crate::bounds::{Capped, WakeBudget};
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Reply, Scratch, Script, ScriptConnector, beat_ok, code, flags,
     hello, linux_host, lowest, refused, reply, run_on, welcome,
@@ -25,10 +26,12 @@ struct Settling<'a> {
     handle: Handle,
     calls: usize,
     act: Act<'a>,
+    budget: WakeBudget,
 }
 
 impl Sleeper for Settling<'_> {
     fn sleep(&mut self, _duration: Duration) -> Wake {
+        self.budget.spend();
         self.handle.settle();
         let n = self.calls;
         self.calls += 1;
@@ -43,6 +46,7 @@ fn settling<'a>(worker: &Worker, act: impl FnMut(usize) -> Wake + 'a) -> Settlin
         handle: worker.handle(),
         calls: 0,
         act: Box::new(act),
+        budget: WakeBudget::new(),
     }
 }
 
@@ -65,10 +69,10 @@ fn drained(
     let (mut script, sent) = Script::new(replies);
     let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(worker, drain);
     let mut sleeper = settling(worker, act);
-    let mut log = Vec::new();
+    let mut log = Capped::new();
     let exit = drive(&mut session, &mut sleeper, &mut log);
     let sent = sent.borrow().clone();
-    (exit, String::from_utf8(log).unwrap(), sent)
+    (exit, log.text(), sent)
 }
 
 const LONG: Drain = Drain {
@@ -92,7 +96,7 @@ fn a_job_that_ends_during_the_drain_is_reported_before_the_agent_leaves() {
     let dir = Scratch::new("jobs-drain-finish");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let replies = vec![
         welcome(1),
@@ -142,7 +146,7 @@ fn a_job_still_running_after_the_wait_is_stopped_and_reported() {
     let dir = Scratch::new("jobs-drain-stop");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let drain = Drain {
         wait: Duration::from_secs(10),
@@ -179,7 +183,7 @@ fn a_result_nobody_acknowledges_is_kept_when_the_drain_gives_up() {
     let dir = Scratch::new("jobs-drain-giveup");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let drain = Drain {
         wait: Duration::from_secs(5),
@@ -204,7 +208,7 @@ fn a_second_stop_request_ends_the_drain_at_once() {
     let dir = Scratch::new("jobs-drain-twice");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let replies = vec![welcome(1), beat_ok()];
     let (exit, log, sent) = drained(&worker, LONG, replies, |_| Wake::Stop);
@@ -239,7 +243,7 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
     let dir = Scratch::new("jobs-drain-ends");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let replies = vec![welcome(1), refused(401, "unauthorised")];
     let (exit, _, _) = drained(&worker, LONG, replies, |_| Wake::Stop);
@@ -251,7 +255,7 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
     let dir = Scratch::new("jobs-drain-dies");
     let machine = FakeMachine::new();
     let worker = start(&dir, &machine);
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let world = machine.world.clone();
     let none = Drain {
@@ -276,7 +280,7 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
     let replies = vec![welcome(1), beat_ok(), beat_ok()];
     let (exit, _, _) = drained(&worker, LONG, replies, |_| {
         world.panic_at("create");
-        assert!(worker.try_deliver(starts(&["r1"])));
+        assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
         Wake::Elapsed
     });
     assert!(matches!(exit, Exit::Failed(_)), "{exit:?}");
@@ -344,6 +348,7 @@ fn the_whole_agent_starts_its_worker_and_ends_when_it_dies() {
         seen: &seen,
         world: &world,
         calls: 0,
+        budget: WakeBudget::new(),
     };
     let jobs: Jobs<'_> = (machine, Some(&hook));
     let ran = run_on(
@@ -365,10 +370,12 @@ struct Settling2<'a> {
     seen: &'a RefCell<Option<Handle>>,
     world: &'a super::fake::World,
     calls: usize,
+    budget: WakeBudget,
 }
 
 impl Sleeper for Settling2<'_> {
     fn sleep(&mut self, _duration: Duration) -> Wake {
+        self.budget.spend();
         let handle = self.seen.borrow().clone().expect("the hook was told");
         self.calls += 1;
         if self.calls == 1 {

@@ -4,12 +4,13 @@
 use std::time::Duration;
 
 use js_agent::{
-    Answer, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, Session, Step, Transport, Worker,
+    Answer, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, STALL_STEPS, Session, Step,
+    Transport, Worker,
 };
 use serde_json::{Value, json};
 
 use super::fake::FakeMachine;
-use super::{start, start_answer, starts};
+use super::{plan, start, start_answer, starts};
 use crate::support::{Scratch, Script, beat_ok, hello, lowest, refused, reply, welcome};
 
 /// The drain the sessions of these tests carry; none of them drains.
@@ -33,7 +34,7 @@ fn answer(acks: &[(&str, &str)], taint_ack: bool) -> crate::support::Reply {
 /// A worker with `run` running, or exited with its result held.
 fn with_run(dir: &Scratch, machine: &FakeMachine, run: &str, exited: bool) -> Worker {
     let worker = start(dir, machine);
-    assert!(worker.try_deliver(starts(&[run])));
+    assert_eq!(worker.try_deliver(starts(&[run])), Delivery::Delivered);
     assert!(worker.handle().settle());
     if exited {
         machine.world.exit(run, 0);
@@ -259,10 +260,84 @@ fn a_worker_that_ended_ends_the_session() {
     assert!(matches!(session.tick(), Step::Wait { .. }));
 
     machine.world.panic_at("create");
-    assert!(worker.try_deliver(starts(&["r1"])));
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(!worker.handle().settle());
     let Step::Failed(why) = session.tick() else {
         panic!("the worker is gone");
     };
     assert!(why.contains("job worker stopped"), "{why}");
+}
+
+/// Asserts that a session ends as `Failed` when a reply finds nobody to read the worker's
+/// queue, though the worker never set its end mark: the first tick that hands the reply
+/// over notes nothing, the next one fails, and the mark is still unset. It catches a
+/// session whose only sign of a dead worker is the mark, which a thread that left some
+/// other way would never set.
+#[test]
+fn a_reply_that_finds_the_worker_gone_ends_the_session_without_the_end_mark() {
+    let machine = FakeMachine::new();
+    let worker = Worker::orphaned(machine.clock.clone());
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Gone);
+    assert!(!worker.handle().settle(), "nobody reads the queue");
+    assert!(!worker.ended(), "the thread never set the mark");
+
+    let replies = vec![welcome(1), reply(200, start_answer(&["r1"])), beat_ok()];
+    let (mut script, sent) = Script::new(replies);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    assert!(matches!(session.tick(), Step::Wait { .. }));
+    let Step::Wait { note, .. } = session.tick() else {
+        panic!("the heartbeat was answered");
+    };
+    assert_eq!(note, None, "the session says nothing yet");
+    let Step::Failed(why) = session.tick() else {
+        panic!("the worker is gone");
+    };
+    assert!(why.contains("job worker stopped"), "{why}");
+    assert!(!worker.ended());
+    assert_eq!(sent.borrow().len(), 2, "nothing is sent after the failure");
+}
+
+/// Asserts the progress watchdog: a worker that has been inside one call for exactly
+/// [`STALL_STEPS`] step intervals on the lifecycle's clock is not stalled and one more
+/// millisecond makes it stalled, which ends the session as `Failed`; a worker that waits
+/// for an order is never stalled, however far the clock has moved. It catches a session that
+/// heartbeats on over a worker that does not make progress, a bound that counts from the
+/// wrong moment, and a watchdog that fails an idle worker.
+#[test]
+fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
+    let dir = Scratch::new("jobs-session-stalled");
+    let machine = FakeMachine::new();
+    let step = Duration::from_millis(10);
+    let worker = match Worker::start(plan(&dir, &machine, step)) {
+        Ok(worker) => worker,
+        Err(why) => panic!("the worker did not start: {why}"),
+    };
+    machine.world.hold_creates();
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    machine.world.wait_entered(1);
+
+    let (mut script, _) = Script::new(vec![welcome(1), beat_ok(), beat_ok()]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    assert!(matches!(session.tick(), Step::Wait { .. }));
+    let bound = u64::from(STALL_STEPS) * 10;
+    machine.clock.advance(bound);
+    assert!(!worker.stalled());
+    assert!(matches!(session.tick(), Step::Wait { .. }), "not yet");
+    machine.clock.advance(1);
+    assert!(worker.stalled());
+    let Step::Failed(why) = session.tick() else {
+        panic!("the worker has been inside one call for too long");
+    };
+    assert!(why.contains("job worker stopped"), "{why}");
+    machine.world.release();
+
+    let dir = Scratch::new("jobs-session-idle");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    assert!(worker.handle().settle());
+    machine.clock.advance(10_000_000_000);
+    assert!(!worker.stalled(), "a worker that waits is not stalled");
+    let (mut script, _) = Script::new(vec![welcome(1)]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&worker, DRAIN);
+    assert!(matches!(session.tick(), Step::Wait { .. }));
 }

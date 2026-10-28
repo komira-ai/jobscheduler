@@ -19,6 +19,7 @@ use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
 use serde_json::{Value, json};
 
+use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
 use crate::jobs::fake::FakeMachine;
 
 /// The pool the tests' hosts ask to join.
@@ -36,6 +37,7 @@ pub struct Scratch {
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
+        bounds::install();
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("js-agent")
             .join(name);
@@ -374,18 +376,28 @@ pub fn beat_ok() -> Reply {
 pub type Sent = Rc<RefCell<Vec<(String, Value)>>>;
 
 /// A transport that answers from a list and records what it was sent. When the list is
-/// used up every post fails as if the server were down.
+/// used up every post fails as if the server were down. It panics when it is sent more than
+/// [`SENT_LIMIT`] messages: a loop that does not end would otherwise record its heartbeats
+/// until the machine is out of memory.
 pub struct Script {
     replies: VecDeque<Reply>,
     sent: Sent,
+    limit: usize,
 }
 
 impl Script {
     pub fn new(replies: Vec<Reply>) -> (Self, Sent) {
+        Self::capped(replies, SENT_LIMIT)
+    }
+
+    /// A script that panics when it is sent more than `limit` messages.
+    pub fn capped(replies: Vec<Reply>, limit: usize) -> (Self, Sent) {
+        bounds::install();
         let sent = Sent::default();
         let script = Self {
             replies: replies.into(),
             sent: sent.clone(),
+            limit,
         };
         (script, sent)
     }
@@ -393,7 +405,14 @@ impl Script {
 
 impl Transport for Script {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
-        self.sent.borrow_mut().push((path.to_owned(), body.clone()));
+        let mut sent = self.sent.borrow_mut();
+        assert!(
+            sent.len() < self.limit,
+            "the transport was sent more than {} messages: the loop that sends them does not end",
+            self.limit
+        );
+        sent.push((path.to_owned(), body.clone()));
+        drop(sent);
         self.replies
             .pop_front()
             .unwrap_or_else(|| Err("the script is used up".to_owned()))
@@ -425,6 +444,7 @@ impl Connector for ScriptConnector {
 pub struct CountingSleeper {
     pub waits: Rc<RefCell<Vec<Duration>>>,
     stop_at: usize,
+    budget: WakeBudget,
 }
 
 impl CountingSleeper {
@@ -432,12 +452,14 @@ impl CountingSleeper {
         Self {
             waits: Rc::default(),
             stop_at,
+            budget: WakeBudget::new(),
         }
     }
 }
 
 impl Sleeper for CountingSleeper {
     fn sleep(&mut self, duration: Duration) -> Wake {
+        self.budget.spend();
         let mut waits = self.waits.borrow_mut();
         waits.push(duration);
         match waits.len() >= self.stop_at {
@@ -536,7 +558,7 @@ pub fn run_on(
     jitter: &mut dyn Jitter,
     jobs: Jobs<'_>,
 ) -> Ran {
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (mut out, mut err) = (Capped::new(), Capped::new());
     let mut services = Services {
         platform: host.platform.clone(),
         commands: &host.commands,
@@ -552,8 +574,8 @@ pub fn run_on(
     let status = run_with(argv, &mut out, &mut err, &mut services);
     Ran {
         status,
-        out: String::from_utf8(out).unwrap(),
-        err: String::from_utf8(err).unwrap(),
+        out: out.text(),
+        err: err.text(),
     }
 }
 

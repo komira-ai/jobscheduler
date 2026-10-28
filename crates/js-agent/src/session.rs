@@ -63,7 +63,10 @@
 //! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
 //!   session clears it from a reply to a heartbeat that did not, so the worker never
 //!   marks as told a taint the server was not told.
-//! - A worker that has ended ends the session with [`Step::Failed`].
+//! - A worker that has ended ends the session with [`Step::Failed`]. So does one that is
+//!   found gone without having said so (a reply that finds nobody to read the queue), and
+//!   one that has been inside a single order or step for far longer than any runtime call
+//!   takes ([`Worker::stalled`]; it reads the worker's own clock, not a wall clock).
 //!
 //! - The worker does not implement [`Quiesce`]: a session built for jobs is given no
 //!   [`Session::with_quiesce`] host, so it does not follow the `exclusive` lease a reply
@@ -90,7 +93,7 @@ use crate::backoff::{Backoff, Jitter};
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
-use crate::worker::{Snapshot, Worker};
+use crate::worker::{Delivery, Snapshot, Worker};
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -364,6 +367,8 @@ pub struct Session<'a> {
     jobs: Option<Jobs<'a>>,
     /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
     carried: bool,
+    /// The worker's queue had no reader when a reply was handed to it.
+    worker_gone: bool,
 }
 
 impl<'a> Session<'a> {
@@ -384,6 +389,7 @@ impl<'a> Session<'a> {
             hold: None,
             jobs: None,
             carried: false,
+            worker_gone: false,
         }
     }
 
@@ -422,13 +428,21 @@ impl<'a> Session<'a> {
 
     /// Does one exchange: a hello when there is no session, a heartbeat when there is.
     pub fn tick(&mut self) -> Step {
-        if self.jobs.iter().any(|jobs| jobs.worker.ended()) {
+        if self.worker_down() {
             return Step::Failed(WORKER_ENDED.to_owned());
         }
         match self.live.take() {
             None => self.hello_step(),
             Some(live) => self.beat_step(live),
         }
+    }
+
+    /// Whether the job worker is gone, by its end mark, by a reply that found nobody to read
+    /// the queue, or by a stall (see [`Worker::stalled`]). The last two do not rely on the
+    /// thread having set its mark on the way out.
+    fn worker_down(&self) -> bool {
+        let down = |jobs: &Jobs<'_>| jobs.worker.ended() || jobs.worker.stalled();
+        self.worker_gone || self.jobs.iter().any(down)
     }
 
     /// Announces that the host is draining, once: one heartbeat with the phase
@@ -651,7 +665,14 @@ impl<'a> Session<'a> {
         };
         match reply == HeartbeatReply::default() {
             true => None,
-            false => (!jobs.worker.try_deliver(reply)).then_some(Note::Busy),
+            false => match jobs.worker.try_deliver(reply) {
+                Delivery::Delivered => None,
+                Delivery::Full => Some(Note::Busy),
+                Delivery::Gone => {
+                    self.worker_gone = true;
+                    None
+                }
+            },
         }
     }
 
