@@ -355,6 +355,7 @@ impl Leader {
                 self.feed(SchedEvent::Heartbeat {
                     worker: node.clone(),
                     running: running.clone(),
+                    load: None,
                 });
                 self.heard();
                 let named: Vec<LeaseId> = self.sched.not_held(&node, &running).collect();

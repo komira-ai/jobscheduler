@@ -252,6 +252,7 @@ fn a_worker_that_can_run_it_ends_the_wait_and_the_wait_restarts() {
         h.feed(Event::Heartbeat {
             worker: w("linux"),
             running: Vec::new(),
+            load: None,
         })
     };
     h.at_secs(79);
@@ -509,6 +510,7 @@ impl Harness {
         self.feed(Event::Heartbeat {
             worker: w(worker),
             running: Vec::new(),
+            load: None,
         });
         self.tick()
     }

@@ -268,6 +268,7 @@ impl World {
         self.feed(Event::Heartbeat {
             worker: worker(name),
             running,
+            load: None,
         });
     }
 
