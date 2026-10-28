@@ -96,24 +96,25 @@ fn prune_covers_every_node_and_page_and_only_its_prefix() {
         assert_eq!(
             stats,
             PruneStats {
-                scanned: 307,
+                scanned: 308,
                 deleted: 305,
                 rewritten: 0,
-                unrecognized: 1
+                unrecognized: 2
             }
         );
         assert_eq!(stored_hours(store, "a").len(), 0);
-        assert_eq!(stored_hours(store, "b").len(), 1);
+        // The current hour and the stray key that looks almost like one.
+        assert_eq!(stored_hours(store, "b").len(), 2);
         assert!(store.get("usage/key/old").unwrap().is_some());
         assert!(store.get("usage/node/stray").unwrap().is_some());
         let again = series.prune(H * 60 + NODE_RETENTION_MINUTES).unwrap();
         assert_eq!(
             again,
             PruneStats {
-                scanned: 2,
+                scanned: 3,
                 deleted: 0,
                 rewritten: 0,
-                unrecognized: 1
+                unrecognized: 2
             }
         );
     });
