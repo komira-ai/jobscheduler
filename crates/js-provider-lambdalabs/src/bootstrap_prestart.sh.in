@@ -1,0 +1,20 @@
+mkdir -p -m 0755 /usr/local/lib/js-agent
+put /usr/local/lib/js-agent/prestart.sh <<'JS_AGENT_PRESTART_END'
+@PRESTART_FRAGMENT@
+JS_AGENT_PRESTART_END
+
+put "$UNIT_DIR/js-agent-prestart.service" <<EOF
+[Unit]
+Description=js-agent pre-start fragment (supplied by the operator)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=$SCRATCH_ROOT
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -e -o pipefail /usr/local/lib/js-agent/prestart.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF

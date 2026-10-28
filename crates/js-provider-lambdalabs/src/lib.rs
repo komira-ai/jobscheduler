@@ -50,8 +50,8 @@ mod wire;
 
 pub use api::LambdaApi;
 pub use bootstrap::{
-    Bootstrap, BootstrapError, DEFAULT_SCRATCH_GIB, Fault, MAX_SCRATCH_GIB, MIN_SCRATCH_GIB,
-    UserData,
+    Bootstrap, BootstrapError, DEFAULT_SCRATCH_GIB, Fault, MAX_PRESTART_BYTES, MAX_SCRATCH_GIB,
+    MIN_SCRATCH_GIB, UserData,
 };
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{ConfigError, ElasticConfig, Mode};

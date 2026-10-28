@@ -14,6 +14,38 @@
 //! that none can be a token either: a value is a short run of letters, digits and `.`,
 //! `_`, `-` (and `/` or `:` where a path or a URL needs them), no run of 32 letters or
 //! digits is accepted, and a URL may carry no user, no query and no fragment.
+//!
+//! # The pre-start fragment
+//!
+//! Agents run on many networks, and some need a step that joins one first (a VPN, an
+//! overlay, a tunnel). Nothing of the kind is built in: the contract per launch is a
+//! scheduler URL, an optional CA bundle and the one-time join token. An operator who
+//! needs such a step supplies it as [`Bootstrap::prestart`], shell text that is empty by
+//! default.
+//!
+//! When it is empty the document has no pre-start unit and `js-agent.service` is exactly
+//! the unit described above. When it is set the bootstrap writes the text to
+//! `/usr/local/lib/js-agent/prestart.sh` and installs `js-agent-prestart.service`
+//! (`Type=oneshot`, `RemainAfterExit=yes`), which runs the text with `bash -e -o pipefail`
+//! after `network-online.target` and after the scratch mount. The bootstrap runs it once
+//! before it finishes, and a failure fails the bootstrap; `js-agent.service` gets
+//! `Requires=` and `After=` on it, so the agent never starts when it fails.
+//!
+//! The text never receives the join token: the token arrives later, over ssh, into the
+//! token file, and the bootstrap exports nothing to the fragment. The text is part of the
+//! user data, which the launch API shows to the provider's staff, so it holds no secret
+//! either: a key or a config with a secret belongs on the image, and the fragment names
+//! its path. The text is checked: at most [`MAX_PRESTART_BYTES`] bytes, no NUL or other
+//! control character (a tab and newlines excepted), no run of 32 or more letters and
+//! digits, and not the delimiter of the heredoc that carries it. It is written through a
+//! quoted heredoc, so `$`, backticks, quotes and backslashes reach the file unchanged.
+//!
+//! An example, for an operator whose instances reach the scheduler through a WireGuard
+//! interface whose config is on the image (an example only; any step fits):
+//!
+//! ```text
+//! wg-quick up wg-agent
+//! ```
 
 use std::fmt;
 
@@ -33,6 +65,19 @@ pub const MIN_SCRATCH_GIB: u32 = 10;
 
 /// The largest scratch file system, in GiB.
 pub const MAX_SCRATCH_GIB: u32 = 4096;
+
+/// The longest pre-start fragment, in bytes. The text is operator-written glue, a few
+/// commands; a larger one belongs on the image as a file the fragment runs.
+pub const MAX_PRESTART_BYTES: usize = 4096;
+
+/// The heredoc delimiter that carries the fragment; a fragment holding it is refused.
+const PRESTART_DELIMITER: &str = "JS_AGENT_PRESTART_END";
+
+/// The unit and script block that installs the fragment, with `@PRESTART_FRAGMENT@`.
+const PRESTART_UNIT: &str = include_str!("bootstrap_prestart.sh.in");
+
+/// The step that runs the fragment once, after the scratch mount is checked.
+const PRESTART_START: &str = "systemctl enable --now js-agent-prestart.service ||\n    fail \"the pre-start fragment failed: see journalctl -u js-agent-prestart.service\"";
 
 /// The longest a value may be.
 const MAX_FIELD: usize = 256;
@@ -66,6 +111,11 @@ pub struct Bootstrap<'a> {
     pub scratch_gib: Option<u32>,
     /// The container engine's absolute path.
     pub container_bin: &'a str,
+    /// The operator's pre-start fragment: shell text, at most [`MAX_PRESTART_BYTES`]
+    /// bytes, run before the agent starts and after the network and the scratch mount
+    /// are up. Empty (the default) means no such step. See the module docs for what is
+    /// checked and what the fragment does not receive (the join token).
+    pub prestart: &'a str,
 }
 
 /// Rendered cloud-init user data. Its `Debug` shows the size and a short digest, never
@@ -129,6 +179,18 @@ pub enum Fault {
     /// A path with an empty, `.` or `..` component, or the root or a trailing `/`.
     #[error("has an empty, '.' or '..' component")]
     Component,
+    /// A pre-start fragment larger than [`MAX_PRESTART_BYTES`].
+    #[error("is larger than {} bytes", MAX_PRESTART_BYTES)]
+    TooLarge,
+    /// A pre-start fragment with a NUL byte.
+    #[error("holds a NUL byte")]
+    Nul,
+    /// A pre-start fragment with a control character other than a tab or a newline.
+    #[error("holds a control character other than a tab or a newline")]
+    Control,
+    /// A pre-start fragment that holds the delimiter of the heredoc carrying it.
+    #[error("holds the heredoc delimiter {}", PRESTART_DELIMITER)]
+    Delimiter,
     /// A SHA-256 that is not 64 lowercase hex digits.
     #[error("must be 64 lowercase hex digits")]
     Digest,
@@ -208,6 +270,9 @@ impl Bootstrap<'_> {
                 second: "scratch_root",
             });
         }
+        if !self.prestart.is_empty() {
+            prestart("prestart", self.prestart)?;
+        }
         let text = TEMPLATE
             .replace("@AGENT_URL@", self.agent_url)
             .replace("@AGENT_SHA256@", self.agent_sha256)
@@ -219,6 +284,22 @@ impl Bootstrap<'_> {
             .replace("@SCRATCH_ROOT@", self.scratch_root)
             .replace("@SCRATCH_GIB@", &gib.to_string())
             .replace("@CONTAINER_BIN@", self.container_bin);
+        // The fragment goes in last, so no later replacement can touch its text.
+        let text = if self.prestart.is_empty() {
+            text.replace("@PRESTART_AFTER@", "")
+                .replace("@PRESTART_REQUIRES@\n", "")
+                .replace("@PRESTART_UNIT@\n", "")
+                .replace("@PRESTART_START@\n", "")
+        } else {
+            let fragment = self.prestart.trim_end_matches('\n');
+            text.replace("@PRESTART_AFTER@", " js-agent-prestart.service")
+                .replace("@PRESTART_REQUIRES@", "Requires=js-agent-prestart.service")
+                .replace("@PRESTART_START@", PRESTART_START)
+                .replace(
+                    "@PRESTART_UNIT@\n",
+                    &PRESTART_UNIT.replace("@PRESTART_FRAGMENT@", fragment),
+                )
+        };
         Ok(UserData(text))
     }
 }
@@ -240,6 +321,36 @@ fn plain(field: &'static str, text: &str, extra: &str) -> Result<(), BootstrapEr
         |b: u8| b.is_ascii_alphanumeric() || b".-_".contains(&b) || extra.as_bytes().contains(&b);
     if !text.bytes().all(allowed) {
         return Err(refuse(field, Fault::Character));
+    }
+    if text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|part| part.len() >= TOKEN_RUN)
+    {
+        return Err(refuse(field, Fault::TokenShaped));
+    }
+    Ok(())
+}
+
+/// The fragment: not blank, not large, no NUL or control character, not the heredoc
+/// delimiter, no token-shaped run.
+fn prestart(field: &'static str, text: &str) -> Result<(), BootstrapError> {
+    if text.trim().is_empty() {
+        return Err(refuse(field, Fault::Empty));
+    }
+    if text.len() > MAX_PRESTART_BYTES {
+        return Err(refuse(field, Fault::TooLarge));
+    }
+    if text.contains('\0') {
+        return Err(refuse(field, Fault::Nul));
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Err(refuse(field, Fault::Control));
+    }
+    if text.contains(PRESTART_DELIMITER) {
+        return Err(refuse(field, Fault::Delimiter));
     }
     if text
         .split(|c: char| !c.is_ascii_alphanumeric())

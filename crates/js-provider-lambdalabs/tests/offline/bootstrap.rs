@@ -24,6 +24,7 @@ fn good() -> Bootstrap<'static> {
         scratch_root: "/mnt/scratch/js-agent",
         scratch_gib: None,
         container_bin: "/usr/bin/docker",
+        prestart: "",
     }
 }
 

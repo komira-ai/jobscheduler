@@ -140,8 +140,9 @@ EOF
 put "$UNIT_DIR/js-agent.service" <<EOF
 [Unit]
 Description=js-agent: offers this machine to the lease server
-After=network-online.target docker.service
+After=network-online.target docker.service@PRESTART_AFTER@
 Wants=network-online.target
+@PRESTART_REQUIRES@
 RequiresMountsFor=$SCRATCH_ROOT
 ConditionPathExists=$TOKEN_FILE
 ConditionPathExists=$CA_CERT
@@ -165,6 +166,7 @@ Unit=js-agent.service
 WantedBy=multi-user.target
 EOF
 
+@PRESTART_UNIT@
 systemctl daemon-reload
 systemctl enable --now "$MOUNT_UNIT"
 mountpoint -q "$SCRATCH_ROOT" || fail "$SCRATCH_ROOT is not mounted"
@@ -172,5 +174,6 @@ mountpoint -q "$SCRATCH_ROOT" || fail "$SCRATCH_ROOT is not mounted"
     fail "$STATE_ROOT and $SCRATCH_ROOT are on one file system; js-agent refuses that"
 # The root of the new file system is ours to close: owner-only, as js-agent requires.
 chmod 0700 "$SCRATCH_ROOT"
+@PRESTART_START@
 systemctl enable --now js-agent.path
 echo "js-agent bootstrap: done; js-agent starts when $TOKEN_FILE exists"

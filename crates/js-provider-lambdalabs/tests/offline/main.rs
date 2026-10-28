@@ -9,6 +9,7 @@ mod key;
 mod lagging;
 mod model;
 mod options;
+mod prestart;
 mod own;
 mod release;
 mod rig;
