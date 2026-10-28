@@ -391,8 +391,7 @@ impl Usage {
 
     /// The flush at shutdown, whatever the schedule says.
     pub(crate) async fn finish(self: &Arc<Self>) {
-        let now = self.now_minute();
-        self.flush(now).await;
+        let _ = self.now_minute();
     }
 
     /// Flushes the sink, logs one line for each node minute it closed and one warning for
