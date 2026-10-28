@@ -19,6 +19,7 @@ mod phase;
 mod qos;
 mod state;
 mod time;
+pub mod usage;
 mod version;
 mod work;
 

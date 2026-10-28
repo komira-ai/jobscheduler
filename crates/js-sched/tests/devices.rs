@@ -256,6 +256,7 @@ fn a_booking_lasts_until_its_lease_ends() {
     h.feed(Event::Heartbeat {
         worker: w("mac"),
         running: vec![first.lease],
+        load: None,
     });
     assert!(h.grants().is_empty(), "a new session freed the device");
     for caps in [mac(&[]), mac(&[PHONE_26])] {
@@ -284,6 +285,7 @@ fn a_given_up_lease_frees_its_device() {
     h.feed(Event::Heartbeat {
         worker: w("mac"),
         running: Vec::new(),
+        load: None,
     });
     let (again, start) = h.one_start();
     assert_eq!(again.operation, first.operation);

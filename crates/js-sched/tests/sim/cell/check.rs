@@ -499,7 +499,9 @@ impl Check {
                         self.stats.requeued_at_g += 1;
                     }
                 }
-                Event::Heartbeat { worker, running } if *worker == w => {
+                Event::Heartbeat {
+                    worker, running, ..
+                } if *worker == w => {
                     let Some(&start) = self.starts.get(&lease) else {
                         self.fail(
                             "R",
@@ -561,7 +563,9 @@ impl Check {
                 }
                 self.stats.kept_before_g += kept_before_g.len() as u64;
             }
-            Event::Heartbeat { worker, running } => {
+            Event::Heartbeat {
+                worker, running, ..
+            } => {
                 for (lease, (w, _)) in held.iter().filter(|(_, (w, _))| w == worker) {
                     let Some(&start) = self.starts.get(lease) else {
                         continue;
