@@ -9,6 +9,7 @@ mod admission;
 mod cell;
 mod common;
 mod feed;
+mod outage;
 mod placement;
 mod recover;
 mod report;
