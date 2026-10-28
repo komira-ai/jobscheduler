@@ -120,6 +120,37 @@ fn gpu_class_names_offered_gpus_only() {
     );
 }
 
+/// Asserts that `--instance-file` puts the instance the file names into the hello (a line
+/// `PROVIDER:INSTANCE_ID`, surrounding white space dropped), that a hello without the flag
+/// names none, and that a file that is missing or is not that form, or names what the
+/// wire refuses, ends the program before it says hello and names the flag. It catches an
+/// agent that cannot present the instance a one-time token is bound to, and one that
+/// sends a made-up instance.
+#[test]
+fn the_instance_file_names_the_instance_in_the_hello() {
+    let path = "/etc/js-agent/instance";
+    let host = |text: &str| {
+        let mut host = linux_host();
+        host.files = host.files.with(path, text);
+        host
+    };
+    let plain = hello_of(&["--host-id", "gpu-1"], &linux_host());
+    assert!(plain.get("instance").is_none(), "{plain}");
+    let flags = ["--host-id", "gpu-1", "--instance-file", path];
+    let hello = hello_of(&flags, &host("lambdalabs:0920582c\n"));
+    assert_eq!(
+        hello["instance"],
+        json!({ "provider": "lambdalabs", "instance_id": "0920582c" })
+    );
+    let said = refused(&flags, &linux_host());
+    assert!(said.contains("--instance-file: "), "{said}");
+    assert!(said.contains("No such file"), "{said}");
+    let said = refused(&flags, &host("no-colon-here\n"));
+    assert!(said.contains("must hold PROVIDER:INSTANCE_ID"), "{said}");
+    let said = refused(&flags, &host("Not A Provider:i-1\n"));
+    assert!(said.contains("instance.provider"), "{said}");
+}
+
 /// Asserts that `os` and `arch` cannot be set as capabilities, that an operator
 /// capability of another name is passed on, and that a label the wire refuses (the
 /// reserved prefix) ends the program before it says hello.

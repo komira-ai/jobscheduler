@@ -256,6 +256,52 @@ fn a_rescue_that_does_not_finish_returns_at_its_bound() {
     assert!(lines[0].contains("did not finish"), "{lines:?}");
 }
 
+/// Asserts that a container the rescue cannot read is still given a stop, with a line
+/// that names it, and that the other two are stopped as before. It catches a rescue that
+/// treats one unreadable container as a listing it cannot make and stops nothing.
+#[test]
+fn a_container_that_cannot_be_read_is_still_stopped_by_the_rescue() {
+    let dir = Scratch::new("jobs-ends-unread");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let three = starts(&["r1", "r2", "r3"]);
+    assert_eq!(worker.try_deliver(three), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    let world = machine.world.clone();
+    let limited = rescue(&dir, &machine).limited(4, Duration::from_secs(60));
+    let gone = Worker::orphaned(machine.clock.clone(), running("r1"), limited);
+    world.fail("poll", 1);
+    let lines = gone.rescue();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("cannot read c1"), "{lines:?}");
+    assert!(lines[0].contains("poll failed"), "{lines:?}");
+    assert!(lines[0].contains("stopping it anyway"), "{lines:?}");
+    assert_eq!(stops_in(&world), 3, "{:?}", world.log());
+}
+
+/// Asserts that the rescue of an agent never stops a container that another agent (a
+/// different host id) made on the same runtime. It catches a rescue that stops every
+/// container of the runtime.
+#[test]
+fn a_rescue_never_stops_another_agents_container() {
+    let dir = Scratch::new("jobs-ends-other");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    let world = machine.world.clone();
+    world.leak("theirs", "h2");
+    assert_eq!(world.alive(), 2);
+    let limited = rescue(&dir, &machine).limited(4, Duration::from_secs(60));
+    let gone = Worker::orphaned(machine.clock.clone(), running("r1"), limited);
+    let lines = gone.rescue();
+    assert!(lines.is_empty(), "{lines:?}");
+    let log = world.log();
+    assert!(log.contains(&"stop r1".to_owned()), "{log:?}");
+    assert!(!log.contains(&"stop theirs".to_owned()), "{log:?}");
+    assert_eq!(stops_in(&world), 1, "{log:?}");
+}
+
 /// Asserts that a refusal for good, with a worker that does not answer, stops the runs
 /// through the rescue after the bound: the worker is asked, waited for, and then bypassed.
 /// It catches a refusal path that trusts a worker it cannot reach.
@@ -263,7 +309,7 @@ fn a_rescue_that_does_not_finish_returns_at_its_bound() {
 fn a_worker_that_does_not_answer_a_refusal_is_bypassed() {
     let (world, _held, dir) = world_with_r1("jobs-ends-w3");
     let machine = FakeMachine::of(&world);
-    let limited = rescue(&dir, &machine).limited(4, Duration::from_millis(50));
+    let limited = rescue(&dir, &machine).limited(4, Duration::from_secs(5));
     let stuck = Worker::orphaned(machine.clock.clone(), running("r1"), limited);
     let lines = stuck.wind_down();
     assert!(lines.is_empty(), "{lines:?}");
@@ -278,7 +324,7 @@ fn a_worker_that_does_not_answer_a_refusal_is_bypassed() {
 fn a_refusal_logs_what_it_could_not_stop() {
     let (world, _held, dir) = world_with_r1("jobs-ends-w4");
     let machine = FakeMachine::of(&world);
-    let limited = rescue(&dir, &machine).limited(4, Duration::from_millis(50));
+    let limited = rescue(&dir, &machine).limited(4, Duration::from_secs(5));
     let stuck = Worker::orphaned(machine.clock.clone(), running("r1"), limited);
     world.fail("list", 1);
     let drain = Drain {
@@ -452,8 +498,8 @@ fn exited_containers_do_not_use_up_the_rescue_limit() {
 }
 
 /// Asserts that a container the rescue cannot read the state of is still stopped: the
-/// first poll fails and the run is stopped all the same. It catches a rescue that skips
-/// what it cannot tell is running.
+/// first poll fails, the failure is named in a line, and the run is stopped all the same.
+/// It catches a rescue that skips what it cannot tell is running.
 #[test]
 fn a_container_whose_state_is_unknown_is_stopped() {
     let (world, _held, dir) = world_with_r1("jobs-ends-w11");
@@ -462,7 +508,8 @@ fn a_container_whose_state_is_unknown_is_stopped() {
     let gone = Worker::orphaned(machine.clock.clone(), running("r1"), rescuing);
     world.fail("poll", 1);
     let lines = gone.rescue();
-    assert!(lines.is_empty(), "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("cannot read c1"), "{lines:?}");
     assert!(world.log().contains(&"stop r1".to_owned()));
 }
 

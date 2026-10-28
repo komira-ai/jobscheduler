@@ -774,7 +774,8 @@ impl CliRuntime {
         }))
     }
 
-    fn listing(&self) -> Result<Vec<Found>, CliError> {
+    /// The ids `ps` prints for the containers that carry the run label and this agent's.
+    fn listed(&self) -> Result<Vec<String>, CliError> {
         let (run, agent) = (
             format!("label={}", label::RUN),
             format!("label={}={}", label::AGENT, self.host_id),
@@ -790,10 +791,18 @@ impl CliRuntime {
             &agent,
         ];
         let printed = self.call("ps", &args)?;
-        let found = printed
+        let ids = printed
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
+            .map(str::to_owned);
+        Ok(ids.collect())
+    }
+
+    fn listing(&self) -> Result<Vec<Found>, CliError> {
+        let found = self
+            .listed()?
+            .iter()
             .map(|id| self.found(id))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(found.into_iter().flatten().collect())
@@ -957,6 +966,11 @@ impl ContainerRuntime for CliRuntime {
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         self.listing().map_err(RuntimeError::from)
+    }
+
+    fn list_ids(&mut self) -> Result<Vec<ContainerId>, RuntimeError> {
+        let ids = self.listed().map_err(RuntimeError::from)?;
+        Ok(ids.into_iter().map(ContainerId).collect())
     }
 
     fn supports_gpus(&self) -> bool {

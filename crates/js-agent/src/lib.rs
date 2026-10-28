@@ -104,8 +104,11 @@
 //! holds, bounded, and the results it could not send are lost; the same when the job worker
 //! stops, which ends it with status 1, except that the stop does not go through the
 //! worker; a container that could not be stopped is named on stderr, and the agent relies
-//! on its supervisor, for example systemd `Restart=`, and on the next process adopting it;
-//! see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! on its supervisor and on the next process adopting it, so the supervisor must restart
+//! the agent after every exit, status 0 and 2 included: with systemd that is
+//! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
+//! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
+//! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
 //! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool

@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use js_registry::Registry;
+use js_agent_wire::InstanceIdentity;
+use js_registry::{Credential, OsSessions, Registry};
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -14,6 +15,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
+use crate::join_tokens::{Admission, JoinRefusal, JoinTokens};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
 use crate::util::blocking;
@@ -24,6 +26,8 @@ use crate::util::blocking;
 pub(crate) struct Agents {
     pub(crate) registry: Registry,
     pub(crate) tokens: AgentTokens,
+    /// The one-time tokens minted for launched instances.
+    pub(crate) joins: JoinTokens,
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
@@ -33,10 +37,11 @@ pub(crate) struct Agents {
     errors: AtomicU64,
 }
 
-/// Where the bindings of the lease file at `state_file` are kept: beside it.
-fn state_path(state_file: &Path) -> PathBuf {
+/// Where a file of the agent side is kept: beside the lease file at `state_file`, with
+/// `suffix` added to its name.
+fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     let mut name = state_file.file_name().unwrap_or_default().to_os_string();
-    name.push(".agents");
+    name.push(suffix);
     state_file.with_file_name(name)
 }
 
@@ -65,7 +70,12 @@ pub(crate) fn assemble(
                 pool,
                 hello_limit,
             } = *agents;
-            let path = state_path(state_file);
+            let path = state_path(state_file, ".agents");
+            let joins = JoinTokens::open(
+                state_path(state_file, ".joins"),
+                clock.clone(),
+                Box::new(OsSessions),
+            )?;
             let bindings = agent_state::load(&path)?;
             let registry = Registry::new(pool, clock.clone());
             for (host, binding) in &bindings {
@@ -75,6 +85,7 @@ pub(crate) fn assemble(
             let agents = Agents {
                 registry,
                 tokens,
+                joins,
                 limiter: HelloLimiter::new(hello_limit, clock.clone()),
                 clock: clock.clone(),
                 runs_minted: AtomicU64::new(0),
@@ -98,6 +109,12 @@ impl Agents {
         std::fs::write(&tokens, [b'j'; 40]).unwrap();
         std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
+        let joins = JoinTokens::open(
+            dir.join("joins"),
+            clock.clone(),
+            Box::new(js_registry::SequentialSessions::new()),
+        )
+        .unwrap();
         let limit = HelloLimit {
             burst: 5,
             interval: std::time::Duration::from_secs(1),
@@ -105,12 +122,45 @@ impl Agents {
         Self {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
+            joins,
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
             runs_minted: AtomicU64::new(0),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
         }
+    }
+
+    /// Lets the hello of `host` register with the one-time token `who`, consuming the
+    /// token on its first use. The check and the file write run on the pool for blocking
+    /// calls.
+    pub(crate) async fn admit_join(
+        self: &Arc<Self>,
+        who: Credential,
+        host: String,
+        instance: Option<InstanceIdentity>,
+    ) -> Result<Admission, JoinRefusal> {
+        let this = Arc::clone(self);
+        blocking(move || this.joins.admit(&who, &host, instance.as_ref())).await
+    }
+
+    /// Gives back the use that [`Agents::admit_join`] made for `host`, after the registry
+    /// refused its hello.
+    pub(crate) async fn release_join(self: &Arc<Self>, who: Credential, host: String) {
+        let this = Arc::clone(self);
+        blocking(move || this.joins.release(&who, &host)).await;
+    }
+
+    /// Whether the one-time token `who` may heartbeat for `host`; a heartbeat it serves
+    /// renews the token's credential. Runs on the pool for blocking calls, since a renewal
+    /// writes the file.
+    pub(crate) async fn serve_join(
+        self: &Arc<Self>,
+        who: Credential,
+        host: String,
+    ) -> Result<(), JoinRefusal> {
+        let this = Arc::clone(self);
+        blocking(move || this.joins.serves(&who, &host)).await
     }
 
     /// A run id no earlier run has had, in this boot or any before it: the lease table's
