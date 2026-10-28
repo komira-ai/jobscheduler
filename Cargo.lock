@@ -853,12 +853,15 @@ version = "0.1.0"
 dependencies = [
  "js-agent",
  "js-agent-wire",
+ "js-caps",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
  "js-registry",
+ "js-sched",
+ "js-state",
  "js-types",
 ]
 
@@ -909,11 +912,13 @@ dependencies = [
  "hyper",
  "hyper-util",
  "js-agent-wire",
+ "js-caps",
  "js-lease",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
  "js-registry",
+ "js-sched",
  "js-types",
  "rcgen",
  "rustix",
@@ -1014,7 +1019,10 @@ dependencies = [
 name = "js-store"
 version = "0.1.0"
 dependencies = [
+ "js-caps",
+ "js-sched",
  "js-state",
+ "js-store",
  "js-types",
  "thiserror",
 ]

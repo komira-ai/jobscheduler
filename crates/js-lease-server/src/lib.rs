@@ -327,6 +327,7 @@ mod layered;
 mod listener;
 mod rate;
 mod run_api;
+mod sched;
 mod server;
 mod ticker;
 mod tls;
