@@ -17,6 +17,7 @@
 //! | `rankers` | the score rankers 3, 4, 5 and FW5 over one scorer, the decided-key shares, the decides-differently counters and the placement-sequence hash; imports `adapter` only | present |
 //! | `rules` | the compared placement rules (the previous rule and a random one) | present |
 //! | `replay` | the loop: arrivals, rounds, truth, kills and the metrics | present |
+//! | `export` | a directory of exported per-minute series read into rows and beliefs, for the x2 example | present |
 //! | `report`, `control` | the report and the control | planned |
 //!
 //! A module takes its input as `fixture::Row` values (or a `fixture::Fixture`), never as
@@ -30,6 +31,7 @@
 // request that adds its module beside `fixture` then merges with this one without a
 // conflict.
 pub mod adapter;
+pub mod export;
 pub mod metrics;
 pub mod model;
 pub mod permute;
