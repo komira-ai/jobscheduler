@@ -87,6 +87,32 @@ pub(crate) fn assemble(
 }
 
 impl Agents {
+    /// The agent side over `registry`, with its files in `dir`, for a test that drives
+    /// the routes without a socket.
+    #[cfg(test)]
+    pub(crate) fn over(registry: Registry, clock: &SharedClock, dir: &Path) -> Self {
+        use crate::config::parse_token;
+        use crate::rate::HelloLimit;
+        let client = parse_token(&[b'c'; 40]).unwrap();
+        let tokens = dir.join("agent-tokens");
+        std::fs::write(&tokens, [b'j'; 40]).unwrap();
+        std::fs::set_permissions(&tokens, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let limit = HelloLimit {
+            burst: 5,
+            interval: std::time::Duration::from_secs(1),
+        };
+        Self {
+            registry,
+            tokens: AgentTokens::open(&tokens, &client).unwrap(),
+            limiter: HelloLimiter::new(limit, clock.clone()),
+            clock: clock.clone(),
+            runs_minted: AtomicU64::new(0),
+            store: BindingStore::new(dir.join("bindings"), Default::default()),
+            errors: AtomicU64::new(0),
+        }
+    }
+
     /// A run id no earlier run has had, in this boot or any before it: the lease table's
     /// term of this boot and a count that only grows. The term is persisted with the lease
     /// file and rises at every boot, so ids stay unique across a restart although the run

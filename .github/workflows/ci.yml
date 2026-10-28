@@ -220,15 +220,21 @@ jobs:
       # writing them for async service methods. Lines and branches, all the ratchet
       # reads, are unaffected.
       # The restored cache may come from another branch (the newest entry by prefix),
-      # and its instrumented test binaries stay in target/llvm-cov-target/debug/deps
-      # even where this branch has no such crate: cargo-llvm-cov reads every binary
-      # there, so the lcov file then names sources this tree lacks and the ratchet
-      # refuses it. Delete the test binaries (the files with no extension); cargo
-      # rebuilds the ones this tree has, and the dependency libraries stay cached.
+      # and its instrumented test binaries stay in target/llvm-cov-target even where
+      # this branch has no such crate: cargo-llvm-cov reads every binary there, so the
+      # lcov file then names sources this tree lacks and the ratchet refuses it.
+      # Delete the workspace crates' build output (crates/*/ and xtask are the only
+      # workspace members; their directories there are named like the crates, with a
+      # hash below) and the loose test binaries; cargo rebuilds what this tree has and
+      # the dependencies stay cached.
       - name: Drop test binaries left by another branch
         run: |
-          if [ -d target/llvm-cov-target/debug/deps ]; then
-            find target/llvm-cov-target/debug/deps -maxdepth 1 -type f ! -name '*.*' -delete
+          root=target/llvm-cov-target/debug
+          for d in "$root"/build/js-* "$root"/build/xtask; do
+            [ -e "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -exec rm -r {} +
+          done
+          if [ -d "$root/deps" ]; then
+            find "$root/deps" -maxdepth 1 -type f ! -name '*.*' -delete
           fi
       - run: mkdir -p target/coverage
       - name: Run the workspace tests under coverage

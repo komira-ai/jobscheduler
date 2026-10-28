@@ -20,15 +20,15 @@ whatever state the host is in, it is never drained for, and it has no cap. A who
 4. **Capped.** Pool limits (section 6) bound how many hosts are reserved or held whole, so whole-node requests cannot starve a pool.
 
 **Admission.** The class is admitted as `Admission::Whole` (6.2): the request needs a host with no lease and no run and books all of it.
-`BookAll` stays as it is (book every dimension of a host that is free, no overcommit) and is what ucdk Job classes use (D7); it has no
-reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those four, and nothing else about it differs.
+`BookAll` stays as it is (book every dimension of a host that is free, no overcommit); ucdk Job classes are to stop using it (step 59), booking their
+declared size and sharing a host (D7, D56); it has no reservation, no quiet gate, no drain and no cap. A `BookAll` start is never queued or marked, so it is unaffected unless a whole-node request waits in the same pool: then it is turned away from a host marked for that request, like any start that is not the request's own. `Whole` is `BookAll` plus those four, and nothing else about it differs.
 
 **How the old names relate (D46).**
 
 | Name | Meaning now |
 |---|---|
 | kbf `LeaseKind::WholeMachine`, class `whole_machine` | kbf's name for this class; the consumer's configuration maps it to class `whole-node` (9.4) |
-| `gpu-host`, admitted `BookAll` (the merged lease service, D32) | a **retained alias**: a whole-node class whose id stays `gpu-host` and whose `min_gpus` stays 1. It is still accepted, still reported under the id `gpu-host`, and still refuses a host without a GPU with the merged text (`class gpu-host needs at least 1 gpus`). Only its admission semantics unify with `whole-node`: it gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. Generic `whole-node` has `min_gpus` 0 (a pool of performance machines needs no GPU); GPU-ness of a request comes from its constraints (`gpus > 0`, `gpu_class`). No merged assertion changes: `classes()`, the error text and requests with class `gpu-host` are as merged. |
+| `gpu-host`, whole-node admission (merged as `BookAll`, which `Whole` extends; the merged lease service, D32) | a **retained alias**: a whole-node class whose id stays `gpu-host` and whose `min_gpus` stays 1. It is still accepted, still reported under the id `gpu-host`, and still refuses a host without a GPU with the merged text (`class gpu-host needs at least 1 gpus`). Only its admission semantics unify with `whole-node`: it gains the reservation, the quiet gate and the caps when step 46 and steps 56 and 57 land; until then it behaves as merged. Generic `whole-node` has `min_gpus` 0 (a pool of performance machines needs no GPU); GPU-ness of a request comes from its constraints (`gpus > 0`, `gpu_class`). No merged assertion changes: `classes()`, the error text and requests with class `gpu-host` are as merged. |
 | a node lease of class `action` or `vm` that books the shape of a host | not whole-node. It is a share whose size equals the host; nothing else fits beside it, but it gets no quiet start, no reservation, no drain and no cap, and it counts nothing against the whole-node caps. kbf's standing node leases (step 34b) are these. |
 
 The GPU path is this class: a GPU request is served only as a whole-node lease on a pool whose shape has a GPU (the Mac Studio machines of
@@ -87,14 +87,14 @@ the host it has and does not switch to a cheaper one later (no thrash). Two requ
 picks the cheapest host that no reservation holds. A request that is cancelled by its consumer, or whose wait ends, drops its reservation
 at once and the host returns to `serving`.
 
-**Reservations survive a restart (D55).** A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
+**Reservations survive a restart (D55).** *Today's registry keeps its marks, wait list and give-up counts in memory only, so a restart loses them: a waiting request presents again, waits again and is set a host again, and no lease or run is touched. Persisting them beside the reservation records of the lease file is a later change.* A reservation is persisted in the lease file (5.16, [deployment.md](deployment.md)), in the same
 atomic write as the leases and under the same single-writer, fsync and lock rules, before the scheduler acts on it (commit before act). A
 *reservation record* holds: the request id, the host, the time reserved, the deadline, the request's two counters (`max_reserve_attempts`
 give-ups and `max_replace` prepare failures) and its host exclusions with their end times. The record outlives the reservation only
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
 cancelled or unclaimed. The queue itself is not persisted (the table holds leases, not requests); a consumer presents the same request id
 again after a restart, as it re-presents any request, and the scheduler binds it to its record, so the drain in progress continues with its
-original deadline (extended by the boot grace, as lease TTLs are) and the counters keep the bounds of sections 4 and 5 across any number of
+original deadline (raised to at least boot plus the boot grace, never the stored deadline plus the grace; the lease-side grace is a separate setting, not yet wired) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
 defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer
@@ -144,8 +144,8 @@ request destroy another's results; re-queueing wastes only the drain already spe
    excludes that host for this request for `reserve_backoff`, and the request is placed again. A finding on the way taints the host as usual
    and ends the reservation on it.
 4. **A readiness refusal is typed and acts at once.** The agent (or a readiness hook it runs, item 5) may instead report
-   `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of at most 256 bytes
-   of text. The detail is recorded with the lease and shown to the consumer; the scheduler never parses it. The scheduler acts on the code
+   `exclusive_refused` in the heartbeat: the lease id, a **reason code** from the bounded set below, and a **detail** of text, which the receiver cuts to at most 256 bytes (the longest prefix within the bound that ends on a character
+   boundary) when it decodes the heartbeat, so a long detail never costs the beat's results, held list or typed refusal; senders should cut too. The detail is recorded with the lease and shown to the consumer; the scheduler never parses it. The scheduler acts on the code
    at once and does not wait for `prepare_timeout`:
 
    | Code | Meaning | Host | Request |
@@ -235,7 +235,16 @@ now, a reservation on a busy host. The acquire is recorded with the request id; 
 at once, before any other work can be placed on it (reserved at birth). A launch counts as a whole host against the ceiling from the
 acquire, and `max_machines` counts it as for any launch. If a busy host becomes quiet while the machine boots, the request takes the host
 and the booting machine is kept and released by the idle rule (D40). A machine that served a whole-node lease is checked at its end and
-is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released.
+is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released. A host that carries
+many bookings is drained like any other (section 3); a whole-node lease on a spot host can be lost to a reclaim, the loss case of
+section 9 ([hosts.md](hosts.md), sections 5 and 6).
+
+**An elastic pool at its machine cap (D62 to D65, [hosts.md](hosts.md) section 11).** When the pool is at `max_machines` and its queue keeps
+growing, the scheduler drains one elastic machine, lets its jobs finish for up to a grace, then terminates it and requeues the rest. It never picks a host that holds a
+whole-node lease or a reservation (the next smallest is taken), and it checks the ceiling of section 6 by host count: it does not remove a
+host if that would push the ceiling below the hosts reserved plus held. An eviction is not a reservation and counts toward neither
+`max_draining` nor `keep_for_ordinary`. A whole-node request that no live host is big enough for is demand like any other, and the biggest
+type launched may serve it (D50).
 
 ## 8. During and at the end
 
@@ -295,7 +304,7 @@ the host with `Start` and `Stop`; the scheduler never sees an action.
 ## 10. Wire and configuration, in one place
 
 Additive fields (R3), none new on the agent beyond the merged design: `HeartbeatReply.exclusive` (lease id) and `Heartbeat.exclusive_ready`
-(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail of at most 256 bytes; section 5, item 4); a renewal answer's
+(lease id); `Heartbeat.exclusive_refused` (lease id, reason code, detail cut by the receiver to at most 256 bytes; section 5, item 4); a renewal answer's
 `host_reserved`; the reservation records in the lease file (section 3). All are additive: an old reader skips and keeps them, and an old
 agent never sends a refusal and so only ever times out. Refusal constants: `exclusive-not-ready` (after `max_replace`, with the last code
 and detail), with `no-capable-host` and `no-matching-pool` as above. Pool keys are the table of section 6. A previous pool file loads unchanged: `class = "gpu-host"` stays the
@@ -342,7 +351,7 @@ VM at `preparing` destroys it and reports a finding; a timeout (a silent agent) 
 `reserve_backoff` and the retries stop at `max_replace`; a `noise-over-bound` refusal re-queues the request on another host at once,
 without waiting for `prepare_timeout`, counts toward `max_replace` and not `max_reserve_attempts`, and the same request after a drain
 give-up counts the other way; `host-unsafe` taints and `unsupported` excludes for good; an unknown code acts as `setup-failed`; a
-detail over 256 bytes is cut; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
+detail over 256 bytes is cut by the receiver to a character boundary and the heartbeat is accepted with its results, held list and code; a restart in the middle of a drain (three leases left on the reserved host, one give-up already counted)
 keeps the host reserved with the same deadline once the request is presented again, and a restart loop does not reset the counters; an
 unclaimed record is dropped after `regain_grace`; a lease lost mid-run is reported gone and the scheduler issues no rerun; `gpu-host` configs
 and lease files from the merged service load as the retained `gpu-host` alias (id, `min_gpus` 1 and error text unchanged) and its tests
