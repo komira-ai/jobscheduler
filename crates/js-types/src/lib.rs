@@ -15,9 +15,9 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod class;
-mod hex_hash;
 mod ids;
 mod labels;
+pub mod profile_key;
 mod request;
 mod resources;
 pub mod sched;
