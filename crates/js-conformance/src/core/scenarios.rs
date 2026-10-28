@@ -177,8 +177,10 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     harness.worker_up(NODE_A);
     harness.advance(SECOND);
     report_since(harness, started.len());
-    let third = harness.submit(4, 3);
+    // Counted before the submit: a core that places work as it is submitted has started the
+    // third operation by the time the crash comes, and the report after it is still due.
     let second_boot = harness.observed().released.len();
+    let third = harness.submit(4, 3);
 
     harness.crash_and_restart();
     harness.worker_up(NODE_A);
@@ -200,9 +202,10 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
         waiters == [WaiterId(2)],
         "a joined operation is recovered for its first caller, not the joiner",
     );
+    // Past, not next: a core that reserves its ids in blocks begins a new block at a restart.
     notes.expect(
-        third.0 == second.0 + 1,
-        "a join does not use up an operation id: the next operation is numbered next",
+        third.0 > second.0,
+        "the next operation is numbered past the joined one: no id is handed out twice",
     );
     for operation in [first, second, third] {
         notes.expect(

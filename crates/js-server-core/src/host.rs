@@ -144,6 +144,10 @@ impl Engine {
         opened: Opened,
         reported: Reported,
     ) {
+        // Before the registration replaces the session row the claim reads, and before the
+        // scheduler hears of the worker, whose recovered leases it books.
+        self.claim_worker(a, now, worker, &instance);
+        self.record_session(now, worker, &instance, opened.stopped, &reported);
         let link = Link {
             stream: opened.stream,
             instance: instance.clone(),

@@ -83,6 +83,15 @@ use crate::Verdict;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Stream(u64);
 
+impl Stream {
+    /// The stream a harness numbers `number`: the scenarios compare streams for equality,
+    /// and a harness over a real core numbers the registrations it makes.
+    #[must_use]
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+}
+
 /// A `Start` that left the core.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Released {

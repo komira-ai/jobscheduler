@@ -28,7 +28,8 @@ use js_sim::{
 };
 use js_types::sched::{
     Answer, Effect, FarmTime, FencePolicy, LeaseGrant, LeaseId, LeaseKind, NodePhase, OperationId,
-    Outcome, Qos, Refusal, Resources, ResultRef, StartLease, StateMachine, WorkKey, WorkerId,
+    Outcome, Qos, Refusal, Resources, ResultRef, StartLease, StateMachine, WaiterId, WorkKey,
+    WorkerId,
 };
 
 const SEEDS: u64 = 24;
@@ -163,6 +164,15 @@ impl Adapter for Wire {
     fn forget_parcel(&mut self, _: LeaseId) {}
 
     fn retain_parcels(&mut self, _: &dyn Fn(LeaseId) -> bool) {}
+
+    // The cell has no state store: the core asks for none of these.
+    fn ending(&self, _: &Effect, _: Duration) -> Option<js_store::Ending> {
+        None
+    }
+
+    fn adopted(&mut self, _: OperationId, _: WaiterId, _: Option<&[u8]>) {}
+
+    fn followed(&mut self, _: OperationId, _: &[WaiterId]) {}
 }
 
 fn leader_id() -> NodeId {
@@ -234,7 +244,7 @@ impl Leader {
             Event::Timer { tag: SUBMIT } => {
                 for n in 0..OPS {
                     self.core
-                        .submit(now, work(n), |_, _| {})
+                        .submit(now, work(n), &[], |_, _| {})
                         .expect("not fenced");
                 }
             }

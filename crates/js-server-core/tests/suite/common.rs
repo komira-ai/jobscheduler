@@ -9,13 +9,15 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, NodePhase, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, Fenced, Reported, Stage,
-    Stream, View, Writer,
+    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Reported,
+    Settles, Stage, Stream, View, Writer,
 };
+use js_store::Ending;
 use js_types::sched::{
     Answer, Effect, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Refusal, Resources,
     StartLease, WaiterId, WorkKey, WorkerId,
@@ -52,6 +54,8 @@ pub enum Call {
     },
     Forgot(OperationId),
     ForgotParcel(LeaseId),
+    Adopted(OperationId, WaiterId, Option<Vec<u8>>),
+    Followed(OperationId, Vec<WaiterId>),
 }
 
 /// An adapter that keeps what its hooks were told.
@@ -71,6 +75,8 @@ pub struct Rig {
     pub delivered: Arc<Mutex<Vec<OperationId>>>,
     /// The resent reports that reached the rig.
     pub resized: u32,
+    /// The rig cannot say how an operation ended.
+    pub no_ending: bool,
 }
 
 impl Rig {
@@ -168,6 +174,25 @@ impl Adapter for Rig {
     fn retain_parcels(&mut self, waits: &dyn Fn(LeaseId) -> bool) {
         self.parked.retain(|lease| waits(*lease));
     }
+
+    fn ending(&self, effect: &Effect, retention: Duration) -> Option<Ending> {
+        let done = match effect {
+            Effect::Answer(answer) => format!("done {}", answer.lease),
+            Effect::Refuse(refusal) => format!("refused {}", refusal.operation),
+            _ => return None,
+        };
+        let ending = Ending::new(done.into_bytes(), retention);
+        (!self.no_ending).then_some(ending)
+    }
+
+    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>) {
+        let parcel = parcel.map(<[u8]>::to_vec);
+        self.calls.push(Call::Adopted(operation, waiter, parcel));
+    }
+
+    fn followed(&mut self, operation: OperationId, waiters: &[WaiterId]) {
+        self.calls.push(Call::Followed(operation, waiters.to_vec()));
+    }
 }
 
 /// What every test does first: installs one subscriber for the test binary, so the fields of
@@ -210,7 +235,7 @@ impl Gate {
             asked: Arc::new(AtomicUsize::new(0)),
         };
         let (seen, trace) = (gate.clone(), Arc::clone(trace));
-        let writer = move |effect: &Effect| {
+        let writer = move |effect: &Effect, _: &Settles<'_>| {
             seen.asked.fetch_add(1, Ordering::SeqCst);
             let (grants, finishes) = *seen.modes.lock().expect("modes");
             let (kind, attempt) = match effect {
@@ -363,8 +388,8 @@ pub fn enrol(rig: &mut Rig, admitted: &Admitted) {
 }
 
 /// Submits `request`, enrolling the caller in the rig.
-pub fn submit_request(core: &Core<Rig>, now: u64, request: Request) -> Result<Admitted, Fenced> {
-    core.submit(at(now), request, enrol)
+pub fn submit_request(core: &Core<Rig>, now: u64, request: Request) -> Result<Admitted, NotQueued> {
+    core.submit(at(now), request, &now.to_be_bytes(), enrol)
 }
 
 /// Marks the stream closed, as the host's connection dropping would.

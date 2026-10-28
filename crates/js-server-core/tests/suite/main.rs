@@ -10,5 +10,7 @@ mod cell;
 mod common;
 mod feed;
 mod placement;
+mod recover;
 mod report;
 mod session;
+mod stored;
