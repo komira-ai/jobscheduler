@@ -125,6 +125,9 @@ impl ReferenceCore {
                 let lease = RecoveredLease {
                     lease: LeaseId::new(TERM, number(seq)),
                     worker: WorkerId::new(worker),
+                    // The model's lease rows carry no admission cost; `None` is a row
+                    // written before costs were kept, charged its request's cores.
+                    cost: None,
                 };
                 (number(operation), lease)
             })
