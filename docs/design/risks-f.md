@@ -1,4 +1,4 @@
-# Risks K19 to K46
+# Risks K19 to K48
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -86,3 +86,10 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K46. A tier member that launches and never registers.** A cloud whose machines boot but cannot reach the scheduler would take the
   demand of its tier every time it sorted first. Mitigated by the boot timeout and the failure brake of its entry (5.8, providers.md), so after
   `max_boot_failures` in a row that member is passed over (a brake, not a cost limit), and by the alert it raises.
+- **K47. A swap strands capacity or oscillates.** Retiring small hosts before the large one carries their load would dip capacity; a
+  swap up followed by a swap down would churn instances. Mitigated by retiring only as far as registered larger capacity replaces them, by
+  windows that must hold at every minute, a longer down window, a down fit below full and `swap_cooldown` (D62, D63). Residual: a load that
+  changes shape on the scale of the windows pays one extra boot per swap.
+- **K48. The headroom for a swap crosses or idles the cap.** Option B lets the count reach `max_machines + 1` during a swap; option A
+  idles one slot. Bounded by exactly one swap at a time (H11), and the owner chooses (D62). Retiring hosts count toward the cap until read
+  back Absent (5.11), so a slow-draining small host can hold a slot for as long as its longest job.

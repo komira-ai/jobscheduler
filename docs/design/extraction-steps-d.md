@@ -189,7 +189,7 @@ no cluster; step 51 adds the manifests and the image; step 52 changes clients; s
     aws, a whole-node request in a pool with an elastic entry acquires and no host is reserved; with the entry refused (quota, cooldown) it
     reserves; no other lease lands on the machine between registration and the commit.
 
-**Phase K. Hosts that run many jobs** ([hosts.md](hosts.md), D56 to D61). Step 59 needs share leases (step 29) and step 44; steps 61 to 63
+**Phase K. Hosts that run many jobs** ([hosts.md](hosts.md), D56 to D65). Step 59 needs share leases (step 29) and step 44; steps 61 to 63
 need the hierarchy (steps 30c and 31c).
 
 59. Packing and demand. Share and run bookings are placed by fit and `FirstFit` over the pool's hosts, and the scaler's demand is the
@@ -209,3 +209,8 @@ need the hierarchy (steps 30c and 31c).
 63. Tiers and further kinds. The nested `providers` entry, the price-unit check, per-tier fall-through, and the `gcp`, `azure` and on-prem
     kinds behind the trait, each with a fake. *Proves:* H8; a flat file is unchanged; the layering test still finds no cloud name in the
     core; two kinds of one tier choose by price and fall through on refusal and on outage.
+64. Swapping instance sizes ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first instance; the
+    per-minute pool sample; the swap trigger and the pool keys `swap_up_after`, `swap_down_after`, `swap_down_fit` and `swap_cooldown`;
+    the `retire` taint, the capacity-neutral retire and release; the headroom of D62 (A or B, as the owner decides); the no-capacity
+    fallback; the whole-node rules. *Proves:* H9 to H14 on the fake aws and the fake agent, including a restart mid-swap and a swap with a
+    whole-node request held and queued. D65 is not built until answered.

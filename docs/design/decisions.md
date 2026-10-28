@@ -1,8 +1,8 @@
-# Decisions D1 to D61
+# Decisions D1 to D65
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D61 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D65 with no gaps. D26 and D65 are open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -273,3 +273,32 @@ marked settled. The ids run D1 to D61 with no gaps. D26 is open. Superseded deci
   back first. Options: (a) order the whole list by price (rejected: the order is the operator's statement, and the market would reorder
   own hardware behind a cloud); (b) one pool per cloud and a consumer that chooses (rejected: every consumer would rebuild the
   fall-through); (c) the tier. Recommend (c).
+- **D62. An elastic pool scales out first, then swaps up to a larger instance type at its cap. Direction settled by the project owner; the
+  rules are chosen here.** The first request sizes the first instance (the smallest option that holds it); more demand adds instances of
+  that rung up to `max_machines` (5.8, 5.11); at the cap, with the queue building at every minute of `swap_up_after`, the scaler launches
+  one larger option, steers new work to it, marks the smaller hosts tainted with the reason `retire` as far as the larger capacity replaces
+  them, and releases each as it empties; no job is killed (the taint, drain and release paths of 5.12 and whole-node.md section 4). The
+  swap needs one slot of headroom. (A) Reserved: scale-out stops at `max_machines - 1` while a larger option exists; the cap is never
+  crossed, but a slot idles and a one-machine pool cannot scale out. (B) One extra during a swap: the count may be `max_machines + 1` while
+  exactly one swap is in flight. Recommend (B): the cap is overload protection (5.11) and a counted bound of one host for a short, rare
+  event protects as well as an idle slot, without wasting capacity every day. (A) is the choice if the owner wants the cap never crossed.
+  Text in [hosts.md](hosts.md), section 11.
+- **D63. Step down the same way, with hysteresis in both directions.** After `swap_down_after` (default 60 minutes) in which, at every
+  minute, the queue was empty and the packed bookings fit the next smaller option at no more than `swap_down_fit` (default 50 percent),
+  the pool swaps down by the steps of D62. The up window is shorter than the down window and the down fit is below full, so one burst cannot
+  cause an up followed by a down; no swap follows another within `swap_cooldown`. The judgement is on a per-minute pool sample on the
+  injected clock, which the design did not have and this adds (in memory; a restart restarts the windows, so swaps come later, never
+  sooner). Options: judge on the instant (rejected: oscillates), on the per-minute history (adopted). All four parameters are pool keys, and
+  absent means no swaps (R3).
+- **D64. The catalog is provider data; a larger type without spot capacity is skipped; whole-node requests constrain swaps.** The instance
+  types of a provider (cores, memory, GPUs, spot availability) are its launch options (D60). A swap whose next option has no capacity or is
+  refused tries the option above it, and if none is available the pool stays at its size; it never changes from spot to on-demand by
+  itself, which is the operator's order in the hierarchy (D61). A host that holds a whole-node lease or a reservation is never retired; a
+  step down never starts while a queued or held whole-node request needs the larger size; a whole-node request no live host can hold but a
+  catalog option can is accepted and launched for (D35, D50).
+- **D65. OPEN: consolidate several small instances into fewer large ones when below the cap?** Today a swap happens only at the cap (up)
+  or when quiet (down). Options: (a) no: swaps only as in D62 and D63; (b) yes: also replace many small hosts by fewer larger ones when the
+  packed bookings would fit, with the same windows. Recommend (b), consolidate: the cap counts machines, so fewer larger hosts leave more
+  of it free; larger hosts waste less to fragmentation; each host has a fixed cost; and without it a pool that once grew wide keeps its
+  small hosts while any job runs on them. Against: a larger blast radius (K43), a larger spot instance is interrupted as one, and some
+  catalogs price larger types worse per core. The rest of D62 to D64 does not depend on the answer.

@@ -3,7 +3,8 @@
 Companion to [docs/design.md](../design.md), section 5.18. Section numbers refer to design.md. This file holds the text of the hosts
 amendment: a provider brings hosts that run many jobs at once, not one machine or one VM per job; how a host's capacity is booked and
 packed; VMs inside a host, per instance type; spot hosts; price and capacity as provider data; and several clouds as several providers of
-one ordered hierarchy. The decisions are D56 to D61 ([decisions.md](decisions.md)); the risks are K42 to K46 ([risks-f.md](risks-f.md)).
+one ordered hierarchy; and how an elastic pool grows out first and then swaps to larger or smaller instance types (section 11). The
+decisions are D56 to D65 ([decisions.md](decisions.md)); the risks are K42 to K48 ([risks-f.md](risks-f.md)).
 
 ## 1. The rule in one paragraph
 
@@ -271,7 +272,7 @@ taint is read back); a spot interruption storm that does not trip the taint brak
 when the cheaper is refused; a provider outage in the first tier passed in the same tick; a flat file unchanged by the tier syntax. No
 test asserts elapsed time (R2).
 
-Steps (Phase K of [extraction-steps-d.md](extraction-steps-d.md), steps 59 to 63).
+Steps (Phase K of [extraction-steps-d.md](extraction-steps-d.md), steps 59 to 64).
 
 ## 10. Considered and rejected
 
@@ -280,3 +281,126 @@ Steps (Phase K of [extraction-steps-d.md](extraction-steps-d.md), steps 59 to 63
 - **Reusing a VM to fit more on a host.** Rejected by D29: what remains of a guest after a job cannot be shown to be clean.
 - **A price-ordered hierarchy** and **a spend cap or budget that stops launches** (N4): see section 8 and section 6.
 - **A separate scheduler for spot hosts.** The reclaim path is the existing taint, drain and host-lost paths; a second path would rot.
+
+## 11. Elastic pools: out first, then up, then down
+
+This section is about the size of the hosts an elastic entry launches. Until now a pool had one shape and each launch bought a machine of
+it (5.8). Here the shape stays the floor and the entry climbs a ladder of larger instance types when adding machines is not enough.
+Decisions D62 to D65; risks K47 and K48; step 64.
+
+**The ladder is the catalog.** The launch options of a provider for a shape (section 7) whose `totals` hold the shape, sorted by size, are
+its *catalog*: cores (`cpu_millis`), memory, GPUs, and whether spot capacity exists, all provider data (D60). A pool's *rung* is the
+option its next launch uses. Nothing here is a new kind of provider; it is the scaler of 5.8 choosing among options it already reads.
+
+**1. The first request sizes the first instance.** When the pool has no machine of that entry, the first queued request that no host can
+serve takes the **smallest option whose totals hold its booking and whose declared facts meet its constraints** (section 7's order breaks
+ties). That option becomes the pool's rung. A later request whose booking does not fit the rung takes the smallest option that does, for
+that launch only; the rung is the largest option in use by live hosts or open acquires, so a restart rebuilds it from `list` and the open
+intents (5.5) and needs nothing new in the lease file.
+
+**2. Out: more demand adds instances of the rung**, by the demand rule of 6.6, `max_step` and `cooldown`, up to `max_machines` (5.8, 5.11).
+Nothing else changes while the pool is below its cap.
+
+**3. Up: at the cap, with the queue still building, swap to a larger type.** The *trigger* is a condition over the pool's per-minute
+history (below): at every minute of the last `swap_up_after` (default 10 minutes) the pool was at `max_machines` (retiring hosts counted),
+and the demand of 6.6 for new hosts was above zero. Then, one swap at a time:
+
+1. *Launch one larger option.* The next option above the rung that meets the queue's constraints and has capacity (D64). The acquire goes
+   to the first entry that can satisfy by acquiring, under the hierarchy of section 8 as for any launch. It needs one slot of headroom:
+   **Option A, reserved.** The scaler holds one slot back: it stops scaling out at `max_machines - 1` whenever a larger option exists
+   (and uses the whole cap when none does), so the swap's host fits in the cap. The invariant "never above `max_machines`" is unchanged. Cost:
+   one slot of a pool is idle in the common case, and a pool with `max_machines = 1` cannot scale out at all. **Option B, one extra during
+   a swap.** The cap is `max_machines`, except that while exactly one swap is in flight the count may be `max_machines + 1`, until the first
+   retiring host is released. The invariant becomes "never above `max_machines + 1`, and above `max_machines` only with a swap in flight";
+   no slot idles and a one-machine pool can swap. **Recommendation: B.** The cap exists to stop a runaway loop (5.11); a bound of one more
+   host, counted, for a short and rare event, protects as well as a permanently idle slot does, and A would also make the common case worse
+   to prepare for a rare one. A is the conservative choice if the owner wants the cap never to be crossed; the rest of this section is
+   written to work with either.
+2. *Steer new work to it.* When the larger host registers, fit and `FirstFit` (6.6) already prefer it only where hierarchy order and host
+   order say so; to steer, the smaller hosts are marked retiring (next item) and so are no longer capable, and new work goes to the larger
+   host and to larger acquires the demand rule makes as slots free.
+3. *Retire the smaller hosts, capacity-neutral, never killing.* A smaller host is marked **tainted with the reason `retire`**: the
+   mechanism of D59 (a durable scheduler-side mark, 5.12), so it survives a restart. It takes no new lease or run; its running work
+   finishes (nothing is stopped, as in a reservation, whole-node.md section 4); consumers are told by `host_leaving` with no deadline
+   (D59); and, like any tainted elastic host with no lease, it is released at once when it empties (5.12, 5.8 Release). A `retire` taint
+   is not replaced by an acquire of the same size, and counts toward neither `max_taints_in_a_row` nor `max_boot_failures`. To avoid a dip
+   in capacity, a smaller host is marked only as far as the capacity of the registered larger hosts replaces it (by CPU and memory
+   together), in the drain-cost order of whole-node.md section 3 (the host that empties soonest first). As each retiring host is released
+   its slot is free for a launch at the new rung, and the demand rule fills it.
+4. *The swap ends* when no retiring host is left or `swap_cooldown` has passed. The new rung is the pool's rung.
+
+If the next option has no spot capacity, or the acquire is refused, the scaler tries the option above it, and if none is available the pool
+**stays at its current size** (the entry cannot satisfy by swapping; later entries of the hierarchy may still launch, section 8). It does
+not change terms from spot to on-demand: that is a choice between providers in the hierarchy, made by the operator's order.
+
+**4. Down, the same way, after a longer quiet period.** The trigger: at every minute of the last `swap_down_after` (default 60 minutes)
+the queue was empty and the packed bookings of the pool (the peak per minute, per dimension) would fit, at no more than `swap_down_fit`
+(default 50 percent) of capacity, on hosts of the option one rung down, within `max_machines`. Then the same four steps run with the smaller
+option, the larger hosts retiring as they empty. Step down never starts while a whole-node request needs the larger size (below), and it
+is a swap like any other: one at a time, with the headroom of the option chosen above.
+
+**5. Hysteresis, in both directions, as pool parameters.**
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `swap_up_after` | 10 minutes | the queue has been building, with the pool at its cap, at every minute of this window |
+| `swap_down_after` | 60 minutes | the pool has been quiet at every minute of this window; longer than the up window, so a pool does not oscillate |
+| `swap_down_fit` | 50 percent | how full the smaller option may be on the window's peak, so a step down does not land at the up trigger |
+| `swap_cooldown` | `swap_down_after` | no swap in either direction sooner than this after the previous one ends |
+
+A single busy or quiet minute never triggers anything: the window must hold at every minute. The thresholds are separated twice, in time
+(`swap_down_after` above `swap_up_after`) and in load (`swap_down_fit` below full), so one burst cannot cause a swap up followed by a swap
+down. All four are pool keys (R3: additive, absent means no swaps, so a pool written before this section is unchanged).
+
+**The per-minute history.** The design keeps no per-minute history of a pool today: the usage record of 12.2 is per machine lease, and the
+request history of section 7 is per class of request, not per pool. This section adds a small one, a *pool sample* taken once a minute on
+the injected clock (R2): the hosts by option and state, the queued demand in hosts (6.6), the booked and total of each dimension, and the
+queue length. It is soft state in memory; a restart empties it, so the windows start again after a restart, and the effect is only that a
+swap happens later, never sooner.
+
+**Interaction with the whole-node class (5.17, whole-node.md).** A whole-node lease books a whole host of whatever size it is, so a swap
+changes what a whole-node request can be given.
+
+- *A host that holds a whole-node lease, or is reserved for a request, is never marked retiring* (a held lease is never revoked, D49;
+  nothing is stopped for a reservation, D48). It is marked when the lease ends and the host is restored, if the swap is still in flight.
+- *A request may state the size it needs.* The whole-node request's constraints and floor decide which hosts are eligible; a host too small
+  is not eligible. If no live host is big enough but a catalog option is, the request is accepted (D35's "could launch") and the demand
+  rule asks for the smallest option that holds it, as a one-off launch that D50 commits to the request at registration. At the cap this
+  is demand that cannot be served, and it counts toward the swap-up trigger like any other.
+- *Step down never removes the last size a queued or held whole-node request needs* (the rule of D49's last capable host applies to
+  sizes): a step down is not started while a queued or held whole-node request needs the larger option, and a larger host that a
+  reservation or lease holds is not retired.
+- *The caps and the ceiling* (whole-node.md section 6) count capable hosts; a retiring host is not capable, so the swap marks hosts only
+  as far as registered larger hosts replace them (item 3), which keeps the ceiling from falling under reservations.
+- *A request no catalog option could ever hold* is refused `no-capable-host` at submit, as now.
+
+**Open question for the owner (D65): consolidating several small instances into fewer large ones.** Above, a swap replaces small hosts
+by large ones only when the pool is at its cap (up) or quiet (down). Should the scaler also consolidate when the pool is *below* its cap:
+for example twenty small hosts partly full, whose packed bookings would fit in five large ones? **Recommendation: consolidate**, with the
+same windows and parameters, not continuously. Reasons: `max_machines` counts machines, so fewer larger hosts leave more of the cap
+free for a burst; packing into larger hosts wastes less to fragmentation (a big booking fits where several small hosts each have a gap);
+each host carries a fixed cost (agent, operating system, boot) that fewer hosts pay less often; and without it a pool that once grew
+wide keeps its many small hosts for as long as any job runs on each. Against: a larger host has a larger blast radius (K43), a larger
+spot instance is interrupted as one, and some catalogs price larger types worse per core. If the owner prefers not, nothing in
+sections 1 to 5 depends on it: a swap still happens at the cap and when quiet.
+
+Invariants (continuing H1 to H8):
+
+- H9. **A swap never kills a job.** Over seeded runs, a retiring host's leases and runs end by their own end or lease end; no `Stop` is
+  sent because of a swap.
+- H10. **Capacity is not dropped by a swap.** At every step the registered capacity of non-retiring hosts is at least that of the capacity
+  that was there before the swap began, until the pool is idle.
+- H11. **At most one swap at a time**, and the count is at most `max_machines` (Option A) or `max_machines + 1` with a swap in flight
+  (Option B).
+- H12. **Hysteresis holds:** no swap starts on a window with a minute that does not meet its trigger; no swap follows another within
+  `swap_cooldown`; a seeded bursty load does not oscillate up and down.
+- H13. **A whole-node host is never retired while held or reserved**, and a step down never starts while a queued or held whole-node
+  request needs the larger size.
+- H14. **No capacity: stay.** With no larger option available (no spot capacity, refused), the pool keeps its size and no host retires.
+
+Tests: a first request that takes the smallest fitting option; a second that takes a larger one for one launch; the cap reached with the
+queue building for the window (and a minute short of it: nothing); the swap with a long job on a small host (it finishes, nothing is
+stopped, the host is released when empty); a swap whose larger option is refused, then the one above it taken, then none: stay; a restart
+mid-swap (the retire taints read back, the windows restarted, no second swap started); a swap while a whole-node request holds one small
+host and another waits for a larger size; a step down refused for a whole-node request; a bursty seeded load without oscillation. All on
+the injected clock (R2).

@@ -100,7 +100,7 @@ Added by the hosts amendment, text in [design/hosts.md](design/hosts.md): a prov
 or VM per job (5.18, D56, D57); capacity is booked as a request vector and packed by the placement rule (6.6); VM support is a
 provider-declared, agent-checked host capability per instance type (D58); spot hosts, where a reclaim notice taints, drains and reschedules
 (D59); price and capacity as provider data used for choosing, never limits (D60); several clouds as providers of the ordered hierarchy,
-with tiers (D61); steps 59 to 63; K42 to K46. Changed in place: the ucdk Job classes book their declared size and share a host (they were
+with tiers (D61); an elastic pool scales out first, then swaps to a larger or smaller instance type with hysteresis (D62 to D64; D65 open); steps 59 to 64; K42 to K48. Changed in place: the ucdk Job classes book their declared size and share a host (they were
 `BookAll`, D7), the scaler's demand is hosts after packing (5.8), and the sentences that read as one job per machine or VM.
 
 ## 2. Goals and non-goals
@@ -406,7 +406,7 @@ A full example (shapes, a `default` provider, an aws provider, pools with a hier
 kbf's own file that maps its classes to pool selectors are in [design/configuration.md](design/configuration.md). A consumer picks pools
 in its own configuration, never the scheduler's. A pool is `name`, `providers` (the ordered hierarchy; `provider` is shorthand, 5.8),
 `shape`, `class`, `labels`, `max_machines`, `provider_max_machines`, `max_step`, `idle_timeout`, `cooldown`, `boot_timeout`,
-`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
+`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_up_after`, `swap_down_after`, `swap_down_fit`, `swap_cooldown` (instance-size swaps, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
 
 Rules, enforced when the file loads and refused with the key and the line:
 
@@ -548,7 +548,8 @@ instance type: `virt` is `none`, `nested` or `bare-metal`; `vms` the slots), dec
 deadline, then reruns what is left elsewhere, through the taint, drain and host-lost paths that exist (D59). Price and capacity are provider
 data used only to choose among launch options and equal providers, never to refuse or cap (D60, N4). `aws`, `gcp`, `azure` and on-prem
 sources are providers in the one ordered hierarchy; clouds are values, an entry may be a tier of equals, and the walk falls through as in
-D39 (D61).
+D39 (D61). An elastic pool sizes its first instance to the first request, adds instances up to `max_machines`, then swaps up to a larger
+type (and later down) with hysteresis, draining the old hosts with the taint path and killing nothing (D62 to D64; hosts.md, section 11).
 
 ## 6. Placement
 
@@ -898,7 +899,7 @@ and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
 (38), needs and matching (39), kbf's table (40), the `Sandbox` seam (41), `VmRuntime` and its fake (42), the VM lifecycle (43), mixed-host
 accounting (44), several runs per lease (45), whole-node admission and readiness (46), the first real driver (47); the size fields of step 43 wait for D26.
 **Phase J, steps 56 to 58 (the whole-node class completed)**: reservation and drain (56), caps and the host-job rule (57), elastic machines (58).
-**Phase K, steps 59 to 63 (hosts that run many jobs)**: packing and demand (59), host facts for VMs (60), launch options with price and capacity data (61), spot hosts (62), tiers and further kinds (63); in [design/extraction-steps-d.md](design/extraction-steps-d.md).
+**Phase K, steps 59 to 64 (hosts that run many jobs)**: packing and demand (59), host facts for VMs (60), launch options with price and capacity data (61), spot hosts (62), tiers and further kinds (63), swapping instance sizes (64); in [design/extraction-steps-d.md](design/extraction-steps-d.md).
 **Phase G, steps 48 to 53 (one service in Kubernetes)**: readiness (48), the boot grace (49), the state check (50), manifests and image
 (51), the client side (52), the move from the single host (53). Step 54 (the GPU machines register through `js-agent`, retiring the operator-listed
 pool) closes the stepping stone. Step 55 (the rollout checks: the server's refusal of an agent major it does not speak, and the
@@ -906,9 +907,9 @@ version-pair check) follows. All are in [design/extraction-steps-d.md](design/ex
 
 ## 15. Decisions
 
-The full text of every decision, D1 to D61, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
+The full text of every decision, D1 to D65, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
 D35. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
-D61 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
+D65 with no gaps; D26 (no recommendation yet) and D65 are open. A superseded decision says by which.
 
 - D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
   restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
@@ -949,7 +950,11 @@ D61 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   settled; amends D7: ucdk Job classes book their declared size and share a host). D57 many fresh VMs on one host. D58 VM support is a
   provider-declared, agent-checked host capability per launch option. D59 a spot reclaim notice taints, drains and reschedules with the
   existing machinery. D60 price and capacity are provider data for choosing, never limits. D61 several clouds are providers in the one
-  ordered hierarchy, with tiers of equals. Text in [design/hosts.md](design/hosts.md).
+  ordered hierarchy, with tiers of equals. D62 an elastic pool scales out first and, at its cap with the queue building, swaps to a larger
+  instance type (headroom: reserved or one extra, recommend one extra). D63 step down the same way, hysteresis in both directions on a
+  per-minute pool sample. D64 the instance-type catalog is provider data, no spot capacity means try the next type or stay, whole-node
+  requests constrain swaps. D65 (**open**) consolidate several small instances into fewer large ones below the cap (recommend yes). Text in
+  [design/hosts.md](design/hosts.md).
 
 ## 16. Risks
 
@@ -996,13 +1001,13 @@ D61 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   consent in the lease token; a compromised agent still cannot get another host's lease or join another pool (5.4).
 - **K18. Taint storms.** A job class that taints every host drives replacement churn. Mitigated by replacement following `max_step`,
   `cooldown` and `max_machines`, and by `max_taints_in_a_row` stopping replacement with an alert (5.12).
-- **K19 to K46** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), for the
+- **K19 to K48** are in [design/risks-f.md](design/risks-f.md): constraints, stale facts, VM and image risks (K19 to K27), for the
   service one pod as one point of outage (K28), the whole-file rewrite (K29), the volume as the state (K30), root for secrets (K31), and
   for providers a refusal that a flapping host turns into an error (K32), a booting machine kept after its demand went (K33) and the test
   provider reaching production (K34), and for rollouts the agent fixes held behind the kbf package (K35) and the host updater's one signer
   (K36), and for the whole-node class a host job burning a registered host (K37), idle capacity while draining (K38) and quiet being the
   agent's claim (K39), and for hosts that run many jobs a flapping spot market (K42), a larger blast radius per host (K43), a wrong VM
-  capability (K44), stale price or capacity data (K45) and a tier member that never registers (K46).
+  capability (K44), stale price or capacity data (K45), a tier member that never registers (K46), a swap that strands capacity or oscillates (K47) and the headroom of a swap (K48).
 
 ## 17. Rolling out two services
 
