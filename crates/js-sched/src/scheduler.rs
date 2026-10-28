@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_types::sched::usage::{CurveSource, LeaseCost};
+use js_types::sched::usage::{CurveSource, LeaseCost, RunEnd};
 use js_types::sched::{
     Answer, ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind,
     OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord, StartLease,
@@ -40,7 +40,7 @@ use js_types::sched::{
 
 use js_whole::WholeNodeConfig;
 
-use crate::admission::{Admission, Blocked, LoadConfig};
+use crate::admission::{Admission, Blocked, LoadConfig, Profile};
 use crate::cordon::Cordons;
 use crate::fence::HANDOVER_GRACE;
 use crate::input::Request;
@@ -73,6 +73,20 @@ pub const UNSERVABLE_WAIT: Duration = Duration::from_secs(300);
 /// is not longer because every operation finished in the last retention is held in
 /// memory: at the pilot's rate of about 4 operations a second, a minute is about 240.
 pub const FINISHED_RETENTION: Duration = Duration::from_secs(60);
+
+/// How a run that ends the operation ended: on its own, killed at its own memory limit or
+/// by the node, or cut short (its result says nothing about how the action runs).
+const fn run_end_of(outcome: Outcome) -> RunEnd {
+    match outcome {
+        Outcome::Completed { .. } => RunEnd::Clean,
+        Outcome::Failed(Failure::OutOfMemory) => RunEnd::KilledAtLimit,
+        Outcome::Failed(Failure::NodeMemoryPressure) => RunEnd::BackstopKilled,
+        Outcome::Failed(Failure::Infra | Failure::Lost(_)) => RunEnd::Requeued,
+        Outcome::Failed(Failure::Timeout | Failure::Invalid | Failure::MissingInput) => {
+            RunEnd::Cancelled
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Operation {
@@ -465,14 +479,17 @@ impl Scheduler {
         Vec::new()
     }
 
-    /// Releases `operation`'s holding (booking and lease), if it has one.
-    fn release(&mut self, id: OperationId) {
+    /// Releases `operation`'s holding (booking and lease), if it has one. `end` is how its
+    /// run ended, for the shape guard ([`Admission::run_ended`]).
+    fn release(&mut self, id: OperationId, end: RunEnd) {
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
             if let Some((w, held)) = self.workers.get_mut(worker).zip(held) {
                 w.booked = w.booked.saturating_sub(held.booked);
-                w.load_state.remove(lease);
+                if let Some(ended) = w.load_state.remove(lease) {
+                    self.admission.run_ended(&ended, end);
+                }
                 w.leases -= 1;
                 if let Some(device) = &held.device {
                     w.devices.remove(device);
@@ -502,7 +519,7 @@ impl Scheduler {
         if let Some(log) = &mut self.requeues {
             log.extend(given_up);
         }
-        self.release(id);
+        self.release(id, reason.run_end());
         let op = self
             .ops
             .get_mut(&id)
@@ -557,6 +574,18 @@ impl Scheduler {
     /// does, waits with a reason ([`Effect::Waiting`] when the reason changes), and is
     /// refused once it has waited so for the unservable wait. Its refusal is committed
     /// first and leaves the queue at once, so nothing places it meanwhile.
+    /// What operation `id`, asking `request`, is charged if placed now: its cost and how
+    /// that is charged over time (`None`: flat).
+    fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
+        let retried = !self.memory.runs(id).is_empty();
+        let cost = self.admission.cost_of(id, request, retried);
+        // The shape guard judges a key's runs together: the caller's size key, which the
+        // curves are learned under, else the request's own key.
+        let guard_key = self.size_keys.get(&id).copied().unwrap_or(cost.key_hash);
+        let profile = self.admission.profile_of(id, request, &cost, guard_key);
+        (cost, profile)
+    }
+
     fn place(&mut self, effects: &mut Vec<Effect>) {
         // A grant the store cannot take is useless, and a refusal as much.
         if self.store_down {
@@ -591,8 +620,8 @@ impl Scheduler {
                 self.term,
                 self.next_seq + u64::try_from(placed.len()).unwrap_or(u64::MAX),
             );
-            let retried = !self.memory.runs(id).is_empty();
-            let cost = self.admission.cost_of(id, request, retried);
+            let (cost, profile) = self.charging(id, request);
+            let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
             // A whole-machine request avoids the workers it gave up for the back-off.
             let barred = self.drain.barred(id, now);
             let avoid = whole::Drain::avoiding(&op.avoid, &barred);
@@ -602,8 +631,9 @@ impl Scheduler {
                 avoid: &avoid,
                 not_whole: key_raised,
                 cost,
+                profile: profile.clone(),
                 lease,
-                fit_minutes: self.admission.fit_minutes(id),
+                fit_minutes,
             };
             let mut blocked = None;
             let fitted = placed.len() < round && {
@@ -680,8 +710,9 @@ impl Scheduler {
                     avoid: &op.avoid,
                     not_whole: key_raised,
                     cost,
+                    profile,
                     lease,
-                    fit_minutes: self.admission.fit_minutes(id),
+                    fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
                 if let Some(name) =
@@ -956,7 +987,7 @@ impl Scheduler {
         {
             return Vec::new();
         }
-        self.release(id);
+        self.release(id, run_end_of(record.outcome));
         let op = self.ops.get_mut(&id).expect("checked above");
         op.state = match record.outcome {
             Outcome::Completed { action_result } => OpState::Completed {

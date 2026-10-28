@@ -303,3 +303,67 @@ fn a_given_up_worker_that_empties_is_taken_only_after_the_backoff() {
     assert_eq!(grants.len(), 1);
     assert_eq!((grants[0].operation, &grants[0].worker), (op, &w("a")));
 }
+
+/// Catches: a hold given up at the request's own wall time after the attempt cap, on a worker
+/// whose lease may run longer: `a` ends within the request's wall, `b` holds a lease with
+/// twice it. With one attempt allowed the request gives `a` up once and holds `b` with its
+/// own wall time as the deadline; at that deadline, and long after, the hold stays on `b`
+/// with no second give-up, so the request cannot cycle back to `a`.
+#[test]
+fn a_hold_at_the_attempt_cap_is_not_given_up_at_the_request_wall_time() {
+    let mut f = busy(Some(cfg(0, 1)));
+    f.worker("b");
+    assert_eq!(f.lease(secs(MAX_WALL * 2)).worker, w("b"));
+    let op = ask(&mut f);
+    assert_eq!(f.held_for(op), Some(&w("a")));
+    tick_at(&mut f, 60_000);
+    assert_eq!(f.held_for(op), Some(&w("b")));
+    let m = mark(&f, op).expect("marked");
+    assert_eq!(m.deadline, t(60_000 + MAX_WALL * 1_000));
+    tick_at(&mut f, 60_000 + MAX_WALL * 1_000 - 1);
+    tick_at(&mut f, 60_000 + MAX_WALL * 1_000);
+    tick_at(&mut f, 60_000 + MAX_WALL * 2_000);
+    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert_eq!(f.held_for(op), Some(&w("b")));
+    assert_eq!(mark(&f, op), Some(m));
+}
+
+/// Catches: a one-host farm that does not hand the host over when it empties during the
+/// back-off: the only worker is given up and its lease ends before the back-off does; the
+/// request holds nothing stale and is placed on the worker at the next round.
+#[test]
+fn the_only_worker_is_taken_when_it_empties_during_the_backoff() {
+    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    f.worker("a");
+    let lease = f.lease(secs(MAX_WALL));
+    let op = ask(&mut f);
+    tick_at(&mut f, 60_000);
+    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert_eq!(f.held_for(op), None);
+    f.finish(&lease);
+    let grants = f.advance(65_000);
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    assert_eq!((grants[0].operation, &grants[0].worker), (op, &w("a")));
+    assert_eq!(mark(&f, op), None);
+}
+
+/// Catches: the give-up count outliving a finished operation: a request that gave up once
+/// is placed and finishes, and once the finished retention has passed the scheduler no
+/// longer has its count.
+#[test]
+fn a_finished_operations_give_up_count_is_dropped_with_it() {
+    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    f.worker("a");
+    let lease = f.lease(secs(MAX_WALL));
+    let op = ask(&mut f);
+    tick_at(&mut f, 60_000);
+    assert_eq!(f.s.whole_give_ups(op), 1);
+    f.finish(&lease);
+    let grants = f.advance(70_000);
+    assert_eq!(grants.len(), 1, "{grants:?}");
+    f.start(&grants[0]);
+    f.finish(&grants[0]);
+    assert_eq!(f.s.whole_give_ups(op), 1);
+    f.advance(70_000 + 61_000);
+    assert_eq!(f.s.whole_give_ups(op), 0);
+}

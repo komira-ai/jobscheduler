@@ -99,7 +99,8 @@ impl Drain {
     /// what it keeps. `None` before `drain_after` has passed. A hold that has reached its
     /// deadline and is still not placed (a worker that emptied would have been taken
     /// before this) is given up here: counted, dropped, and its worker barred until the
-    /// back-off ends.
+    /// back-off ends. A request that has given up `max_reserve_attempts` holds is not
+    /// given up again.
     pub(super) fn turn(
         &mut self,
         operation: OperationId,
@@ -112,7 +113,11 @@ impl Drain {
         }
         let mut kept = None;
         if let Some(mark) = self.marks.remove(&operation) {
-            if now >= mark.deadline {
+            // Once the count has reached the cap the hold is never given up: its deadline
+            // is the request's own wall time, and a worker may hold a lease with a longer
+            // one, so reaching it must not end the hold (whole-node.md section 4).
+            let given_up = self.give_ups.get(&operation).copied().unwrap_or(0);
+            if now >= mark.deadline && given_up < cfg.max_reserve_attempts {
                 *self.give_ups.entry(operation).or_default() += 1;
                 let until =
                     FarmTime::from_millis(now.as_millis().saturating_add(cfg.reserve_backoff_ms));
@@ -480,5 +485,42 @@ impl Scheduler {
             })
             .collect();
         last_capable_blocks(host.as_str(), position, &ordinary, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Catches: `forget` leaving one of the three maps behind: each holds an entry for the
+    /// operation (a mark, a give-up count and a back-off), and none does after it.
+    #[test]
+    fn forget_drops_the_mark_the_count_and_the_backoff() {
+        let cfg = WholeNodeConfig::dedicated(4);
+        let op = OperationId(1);
+        let other = OperationId(2);
+        let worker = WorkerId::new("a");
+        let mark = |deadline| WholeMark {
+            worker: worker.clone(),
+            made: FarmTime::from_millis(0),
+            deadline: FarmTime::from_millis(deadline),
+        };
+        let mut drain = Drain::default();
+        drain.marks.insert(op, mark(10));
+        drain.marks.insert(other, mark(10));
+        drain.turn(
+            op,
+            FarmTime::from_millis(0),
+            FarmTime::from_millis(10),
+            &cfg,
+        );
+        drain.marks.insert(op, mark(10));
+        assert_eq!(drain.give_ups.get(&op), Some(&1));
+        assert!(drain.backoff.contains_key(&op));
+        drain.forget(op);
+        assert!(!drain.marks.contains_key(&op));
+        assert!(!drain.give_ups.contains_key(&op));
+        assert!(!drain.backoff.contains_key(&op));
+        assert!(drain.marks.contains_key(&other));
     }
 }

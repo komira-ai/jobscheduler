@@ -31,9 +31,9 @@ pub const SESSION_RENEWAL: Duration = Duration::from_secs(LEASE_GRACE.as_secs() 
 /// [`LEASE_GRACE`] after its last write, and a reader that takes a missing row to mean the
 /// daemon is gone would wait one renewal interval ([`SESSION_RENEWAL`]) beyond that. The
 /// window is what is left of the two after the work and twice the margin: a derived constant,
-/// which the orphan sweep relies on ([`crate::ORPHAN_WAIT`]). The embedding server checks it
-/// against its longest heartbeat interval: a frontend that renews its rows on schedule must
-/// never withhold an acknowledgement.
+/// which the orphan sweep relies on ([`crate::ORPHAN_WAIT`]). This crate does not know the
+/// heartbeat interval a server serves: the server must keep its longest one under this
+/// window, or a frontend that renews its rows on schedule would withhold an acknowledgement.
 pub const ACK_WINDOW: Duration = ROW_LIFE.saturating_sub(RUN_LIFE);
 
 /// How long after its last write a daemon's session row, written on schedule, is certain to

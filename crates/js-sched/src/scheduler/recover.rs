@@ -319,7 +319,7 @@ fn book(worker: &mut Worker, request: &Request, lease: LeaseId, cost: LeaseCost)
             worker.whole |= worker.exclusive(request);
             worker
                 .load_state
-                .insert(lease, cost, request.kind == LeaseKind::Vm);
+                .insert(lease, cost, request.kind == LeaseKind::Vm, None);
             request.resources
         }
     };
