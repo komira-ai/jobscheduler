@@ -59,6 +59,7 @@ const GRANTED_COST: LeaseCost = LeaseCost {
     memory_bytes: 3 << 30,
     limit_bytes: 4 << 30,
     cold: true,
+    retry: true,
     key_hash: 0x00c0_ffee,
 };
 

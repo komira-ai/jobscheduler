@@ -29,6 +29,23 @@ fn on(starts: &[StartLease]) -> Vec<&str> {
     starts.iter().map(|s| s.worker.as_str()).collect()
 }
 
+/// Places `count` actions of `cpu_millis` on `worker` alone, by cordoning `others` for the
+/// round: the score packs onto the fitter worker, so a setup that wants a worker loaded
+/// says which.
+fn place_on(r: &mut Rig, worker: &str, others: &[&str], count: u64, cpu_millis: u64) {
+    for other in others {
+        r.feed(Event::Cordon { worker: w(other) });
+    }
+    for _ in 0..count {
+        r.action(cpu_millis, 4 * GIB, Some(warm(cpu_millis, 0)));
+    }
+    let starts = r.tick();
+    assert_eq!(on(&starts), vec![worker; count as usize]);
+    for other in others {
+        r.feed(Event::Uncordon { worker: w(other) });
+    }
+}
+
 fn config(mode: PlacementLoad) -> LoadConfig {
     LoadConfig {
         mode,
@@ -171,11 +188,8 @@ impl Blocked {
         r.up("b", node());
         r.baseline("a");
         r.baseline("b");
-        for _ in 0..8 {
-            r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
-        }
-        let starts = r.tick();
-        assert_eq!(on(&starts), ["a", "b", "a", "b", "a", "b", "a", "b"]);
+        place_on(&mut r, "a", &["b"], 4, 1_000);
+        place_on(&mut r, "b", &["a"], 4, 1_000);
         let held_a = r.held("a");
         let held_b = r.held("b");
         Self { r, held_a, held_b }
@@ -376,10 +390,11 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     }
     r.tick();
     r.up_with("a", node(), whole);
-    r.baseline("a");
+    r.feed(Event::Cordon { worker: w("b") });
     r.action(250, 4 * GIB, Some(warm(250, 0)));
     let light = r.tick();
     assert_eq!(on(&light), ["a"]);
+    r.feed(Event::Uncordon { worker: w("b") });
     let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
     q.resources = node();
     let head = r.submit(q);
@@ -397,6 +412,46 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     r.finish(&light[0]);
     let starts = r.round(1_000);
     assert_eq!(starts[0].operation, head);
+}
+
+/// Catches: a whole-machine lease being scored or logged as a shadow choice (the score
+/// ranks shared action work only), and one not placed on the empty worker under `on` or
+/// `shadow`: `b` holds a light lease, so the lease starts on `a`, and placing it scores
+/// nothing and logs no shadow choice.
+#[test]
+fn a_whole_machine_lease_is_not_scored_under_on_or_shadow() {
+    for mode in [PlacementLoad::On, PlacementLoad::Shadow] {
+        let mut r = Rig::new(config(mode));
+        let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
+        r.up_with("a", node(), whole.clone());
+        r.up_with("b", node(), whole);
+        r.feed(Event::Cordon { worker: w("a") });
+        r.action(250, 4 * GIB, Some(warm(250, 0)));
+        assert_eq!(on(&r.tick()), ["b"], "{mode:?}");
+        r.feed(Event::Uncordon { worker: w("a") });
+        let counts = |c: js_sched::LoadCounters| {
+            (
+                c.scored,
+                c.score_evaluations,
+                c.shadow_same_choice,
+                c.shadow_other_choice,
+            )
+        };
+        let before = counts(r.s.load_counters());
+        let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
+        q.resources = node();
+        let head = r.submit(q);
+        let starts = r.round(1_000);
+        assert_eq!(
+            starts
+                .iter()
+                .map(|s| (s.operation, s.worker.as_str()))
+                .collect::<Vec<_>>(),
+            [(head, "a")],
+            "{mode:?}"
+        );
+        assert_eq!(counts(r.s.load_counters()), before, "{mode:?}");
+    }
 }
 
 /// Catches: a draining worker taking small work because its charged load falls as its
@@ -478,6 +533,7 @@ fn the_grant_record_carries_the_cost() {
             memory_bytes: 2 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
+            retry: false,
             key_hash: key_hash(&key),
         };
         assert_ne!(want.key_hash, 0);
@@ -594,6 +650,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
             memory_bytes: 0,
             limit_bytes: 8 * GIB,
             cold: false,
+            retry: false,
             key_hash: key_hash(&key),
         })
     );
@@ -633,6 +690,21 @@ fn a_lease_recovered_onto_a_registered_worker_is_charged() {
         .collect();
     b.recover(2, OperationId(2), 0, operations);
     assert_eq!(b.load_view(&w("a")).unwrap().predicted_cpu_millis, 1_000);
+}
+
+/// Catches: the retry mark of a cost lost across a restart (a rebuilt scheduler would
+/// hand the scoring a rerun that looks like a first run): the recovered lease keeps the
+/// cost it was granted with, retry included, while cold stays as it was.
+#[test]
+fn a_recovered_lease_keeps_its_retry_mark() {
+    let (a, grants) = placed_with_grants(2);
+    let mut grants = grants;
+    grants[0].cost.retry = true;
+    let b = restarted(&a, &grants, true);
+    assert_eq!(b.lease_cost(grants[0].lease), Some(grants[0].cost));
+    assert!(b.lease_cost(grants[0].lease).unwrap().retry);
+    assert!(!b.lease_cost(grants[0].lease).unwrap().cold);
+    assert!(!b.lease_cost(grants[1].lease).unwrap().retry);
 }
 
 /// A curve source that knows a curve for every key.
@@ -715,10 +787,8 @@ fn a_head_does_not_hold_the_worker_a_whole_machine_lease_holds() {
     let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
     r.up_with("a", node(), whole.clone());
     r.up_with("b", node(), whole);
-    for _ in 0..8 {
-        r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
-    }
-    r.tick();
+    place_on(&mut r, "a", &["b"], 4, 1_000);
+    place_on(&mut r, "b", &["a"], 4, 1_000);
     let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
     q.resources = node();
     let whole_op = r.submit(q);

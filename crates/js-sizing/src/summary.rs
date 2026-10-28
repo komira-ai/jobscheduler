@@ -37,6 +37,10 @@ pub const MIXED_RATIO: u64 = 4;
 /// The latest day a summary accepts (about 2,700 years of days): later days are
 /// clamped, and a stored row beyond it is corrupt.
 pub const MAX_DAY: u32 = 1_000_000;
+/// The most minutes of a lease's life the placement score looks at: `H`, the horizon of
+/// the placement predicate. [`Summary::life_minutes`] is clamped to `1..=LIFE_HORIZON`.
+pub const LIFE_HORIZON: u8 = 30;
+
 /// The most samples a stored row may claim (far beyond any real count).
 pub(crate) const MAX_SAMPLES: u64 = 1 << 48;
 
@@ -56,6 +60,12 @@ const NEAR_LIMIT_PERCENT: u128 = 95;
 fn cpu_millis(run: &Run) -> u32 {
     let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
     millis.min(u128::from(u32::MAX)) as u32
+}
+
+/// The last minute (0-indexed) a run reached: its wall time in whole minutes, saturating
+/// at `u8::MAX`. A run under a minute reached minute 0.
+fn minutes_reached(run: &Run) -> u8 {
+    u8::try_from(run.wall_us / 60_000_000).unwrap_or(u8::MAX)
 }
 
 fn round_up(value: u64, step: u64) -> u64 {
@@ -125,6 +135,9 @@ pub struct Summary {
     pub(crate) cpu_n: u64,
     /// The last 32 CPU samples, in millicores.
     pub(crate) cpu_ring: [u32; RING],
+    /// For each run in `ring`, the last minute (0-indexed) it reached: its wall time in
+    /// whole minutes, saturating at 255. Parallel to `ring`.
+    pub(crate) minute_ring: [u8; RING],
     /// The memory a retry after an own-limit kill needs at least (0: none).
     pub(crate) oom_floor: u64,
     /// `n_total` when `oom_floor` was last raised or halved.
@@ -151,6 +164,7 @@ impl Summary {
             day_max: [0; DAYS],
             cpu_n: 0,
             cpu_ring: [0; RING],
+            minute_ring: [0; RING],
             oom_floor: 0,
             floor_anchor: 0,
             floor_day: Day(0),
@@ -240,7 +254,7 @@ impl Summary {
                     // Nothing booked and nothing measured: not a kill we can act on.
                     Err(Discard::Untrusted)
                 } else {
-                    self.record_memory(sample, false, now);
+                    self.record_memory(sample, false, now, minutes_reached(run));
                     self.record_kill(run, now, bounds);
                     Ok(())
                 }
@@ -275,6 +289,23 @@ impl Summary {
         }
     }
 
+    /// `L`, the life of an action of this key in whole minutes, from the runs in the ring:
+    /// the number of leading minutes `t` (0-indexed) that at least half of them reached,
+    /// clamped to `1..=LIFE_HORIZON`. A key whose runs are all under a minute, a key with
+    /// no runs, and a record stored before wall time was kept have `L = 1`.
+    #[must_use]
+    pub fn life_minutes(&self) -> u8 {
+        let kept = usize::try_from(self.n_total).map_or(RING, |n| n.min(RING));
+        let runs = &self.minute_ring[..kept];
+        let reached = |t: u8| runs.iter().filter(|m| **m >= t).count() * 2 >= kept;
+        let life = (0..LIFE_HORIZON)
+            .take_while(|t| kept > 0 && reached(*t))
+            .count();
+        u8::try_from(life)
+            .unwrap_or(LIFE_HORIZON)
+            .clamp(1, LIFE_HORIZON)
+    }
+
     /// Whether the key has at least one CPU sample.
     pub fn has_cpu_sample(&self) -> bool {
         self.cpu_n > 0
@@ -287,13 +318,18 @@ impl Summary {
         let near_limit = memory_max(run.booked_memory_bytes)
             .is_some_and(|limit| u128::from(peak) * 100 >= u128::from(limit) * NEAR_LIMIT_PERCENT);
         if run.limit_hits > 0 || run.swap_peak_bytes > 0 || near_limit {
-            self.record_memory(peak.min(run.booked_memory_bytes), true, now);
+            self.record_memory(
+                peak.min(run.booked_memory_bytes),
+                true,
+                now,
+                minutes_reached(run),
+            );
         } else {
-            self.record_memory(peak, false, now);
+            self.record_memory(peak, false, now, minutes_reached(run));
         }
     }
 
-    fn record_memory(&mut self, sample: u64, held: bool, now: Day) {
+    fn record_memory(&mut self, sample: u64, held: bool, now: Day, minute: u8) {
         let slot = ((self.n_total / CHUNK_RUNS) % SLOTS as u64) as usize;
         if self.n_total.is_multiple_of(CHUNK_RUNS) {
             self.chunk_max[slot] = 0;
@@ -306,6 +342,7 @@ impl Summary {
         };
         *chunk = (*chunk).max(sample);
         self.ring[(self.n_total % RING as u64) as usize] = sample;
+        self.minute_ring[(self.n_total % RING as u64) as usize] = minute;
         let day = (now.0 % DAYS as u32) as usize;
         if self.day_stamp[day] != now.0 {
             self.day_stamp[day] = now.0;
