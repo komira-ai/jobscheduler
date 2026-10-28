@@ -162,6 +162,21 @@ impl Rows {
         Ok((floors, names))
     }
 
+    /// Every memory floor the store holds now, each as its row says: for a frontend that
+    /// raises its own floors to the ones the others raised since it started. Unlike the read
+    /// of a start ([`Rows::load`]) the rows are not restamped and not compared with their
+    /// keys.
+    ///
+    /// # Errors
+    /// The store cannot be read, or a row is not a floor.
+    pub fn floors(&self) -> Result<Vec<Floor>, StateError> {
+        let mut floors = Vec::new();
+        for (key, row) in self.store.scan_prefix(keys::FLOOR)? {
+            floors.push(decode(&row.value).map_err(|why| StateError::corrupt(&key, why))?);
+        }
+        Ok(floors)
+    }
+
     /// `floor` with the larger ask of its own and the stored row's, and what a write of the
     /// row must find: the version read, or no row. A row that cannot be read counts for
     /// nothing, and is written over.

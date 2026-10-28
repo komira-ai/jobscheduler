@@ -38,7 +38,7 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use js_state::{Store, Txn, Versioned};
+use js_state::{Cond, Store, Txn, Versioned};
 use js_types::sched::WorkerId;
 
 mod blocks;
@@ -157,6 +157,15 @@ impl Rows {
     fn commit(&self, txn: Txn) -> Result<(), StateError> {
         self.store.txn(txn)??;
         Ok(())
+    }
+
+    /// A write that tells whether the store takes writes again: the empty `meta/alive` row.
+    /// A read that succeeds says nothing of it.
+    ///
+    /// # Errors
+    /// The store cannot be written.
+    pub fn ping(&self) -> Result<(), StateError> {
+        self.commit(Txn::new().put(keys::ALIVE, Vec::new(), Cond::Any))
     }
 }
 

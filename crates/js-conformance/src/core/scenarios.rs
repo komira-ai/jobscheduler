@@ -4,8 +4,9 @@ use std::time::Duration;
 use js_sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseId, OperationId, WaiterId};
 
+use super::queued;
 use super::write_path;
-use super::{CoreHarness, Released, Stream};
+use super::{CoreHarness, Released, Stream, WIDE_JOB};
 use crate::Verdict;
 
 pub(super) const NODE_A: &str = "node-a";
@@ -40,17 +41,24 @@ pub enum Scenario {
     /// released once.
     RefusedWriteIsRetriedInOrder,
     /// After a restart a lease whose worker has not registered is kept until the lease
-    /// grace has passed and then given up, and one whose worker registers and lists it is
-    /// kept.
+    /// grace has passed and then given up (its operation runs again once a worker has the
+    /// cores), and one whose worker registers and lists it is kept.
     RecoveredLeaseWaitsForItsWorker,
     /// While the store is down nothing is given up for silence, and for the grace after it
     /// returns a silent worker's lease is kept; once the grace has passed it is given up.
     StoreOutageIsWaitedOut,
+    /// An operation still queued when the process dies, for want of any worker to place it
+    /// on, is started once after the restart, answered once, and its id is not handed out
+    /// again.
+    QueuedAtCrashRunsOnce,
+    /// An operation whose grant the store was refusing when the process dies is started
+    /// once after the restart, counting only the starts after it, and answered once.
+    RefusedGrantAtCrashRunsOnce,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 7] = [
+    pub const ALL: [Scenario; 9] = [
         Scenario::StartWaitsForCommit,
         Scenario::AnsweredOnceAcrossRestart,
         Scenario::LeaseIdsNeverRepeat,
@@ -58,6 +66,8 @@ impl Scenario {
         Scenario::RefusedWriteIsRetriedInOrder,
         Scenario::RecoveredLeaseWaitsForItsWorker,
         Scenario::StoreOutageIsWaitedOut,
+        Scenario::QueuedAtCrashRunsOnce,
+        Scenario::RefusedGrantAtCrashRunsOnce,
     ];
 
     /// Runs this scenario on a fresh harness.
@@ -76,6 +86,10 @@ impl Scenario {
             }
             Self::StoreOutageIsWaitedOut => {
                 write_path::store_outage_is_waited_out(harness, &mut notes);
+            }
+            Self::QueuedAtCrashRunsOnce => queued::queued_at_crash_runs_once(harness, &mut notes),
+            Self::RefusedGrantAtCrashRunsOnce => {
+                queued::refused_grant_at_crash_runs_once(harness, &mut notes);
             }
         }
         notes.verdict()
@@ -165,20 +179,29 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     harness.advance(SECOND);
     let started = harness.observed().released;
     harness.report(first, nth(&started, 0).1);
-    // Queued when the process dies: no tick has placed it. Its twin joins it.
+    // Unanswered when the process dies, queued or already started (a core that places work
+    // at a tick has not placed it; one that places it as it is submitted has). Its twin
+    // joins it, and the next distinct job is numbered right after it: a join burns no id.
     let second = harness.submit(2, 2);
     let joined = harness.submit(3, 2);
     notes.expect(
         joined == second,
         "work already in flight is joined, not added",
     );
+    let fourth = harness.submit(5, 5);
+    notes.expect(
+        fourth.0 == second.0 + 1,
+        "a join does not use up an operation id: the next operation is numbered next",
+    );
 
     harness.crash_and_restart();
     harness.worker_up(NODE_A);
     harness.advance(SECOND);
     report_since(harness, started.len());
-    let third = harness.submit(4, 3);
+    // Counted before the submit: a core that places work as it is submitted has started the
+    // third operation by the time the crash comes, and the report after it is still due.
     let second_boot = harness.observed().released.len();
+    let third = harness.submit(4, 3);
 
     harness.crash_and_restart();
     harness.worker_up(NODE_A);
@@ -187,7 +210,7 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     harness.advance(SECOND);
 
     notes.expect(
-        operations(&harness.observed().released) == [first, second, third],
+        operations(&harness.observed().released) == [first, second, fourth, third],
         "each operation is started once across both restarts, a joined one once",
     );
     let answered = harness.observed().answered;
@@ -200,11 +223,14 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
         waiters == [WaiterId(2)],
         "a joined operation is recovered for its first caller, not the joiner",
     );
+    // Past, not next, across a restart: a core that reserves its ids in blocks begins a new
+    // block at one.
+    let ids = [first, second, fourth, third];
     notes.expect(
-        third.0 == second.0 + 1,
-        "a join does not use up an operation id: the next operation is numbered next",
+        ids.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "operation ids grow across restarts: no id is handed out twice",
     );
-    for operation in [first, second, third] {
+    for operation in [first, second, fourth, third] {
         notes.expect(
             answers_of(harness, operation) == 1,
             "each operation is answered once across both restarts",
@@ -291,7 +317,9 @@ fn stale_heartbeat_is_not_fed<H: CoreHarness>(harness: &mut H, notes: &mut Notes
 
 fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
     harness.worker_up(NODE_A);
-    let kept = harness.submit(1, 1);
+    // The first job takes all of A's cores, so the second goes to B whatever the placement
+    // rule is.
+    let kept = harness.submit(1, WIDE_JOB);
     harness.advance(SECOND);
     harness.worker_up(NODE_B);
     let lost = harness.submit(2, 2);
@@ -323,16 +351,24 @@ fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
         "a lease whose worker has not registered is kept until the grace has passed",
     );
     wait(harness, STEP * 3);
+    // The returned worker's cores are all held by the lease it listed, so the operation of
+    // the unclaimed lease has nowhere to run until that lease ends.
+    notes.expect(
+        since(harness, before.len()).is_empty(),
+        "the operation of the unclaimed lease waits while the kept lease holds the cores",
+    );
+    harness.report(kept, kept_lease);
+    harness.advance(STEP);
+    harness.heartbeat(NODE_A, stream, &[]);
     let after = since(harness, before.len());
     notes.expect(
         operations(&after) == [lost],
-        "after the grace the unclaimed lease is given up and its operation runs again",
+        "once the kept lease ends the unclaimed lease's operation runs again",
     );
     notes.expect(
         after.iter().all(|s| s.lease != lost_lease),
         "the operation runs again under a new lease",
     );
-    harness.report(kept, kept_lease);
     notes.expect(
         answers_of(harness, kept) == 1,
         "the lease its worker listed is kept: its result is accepted",

@@ -7,7 +7,7 @@
 //! effects out: when an effect is released relative to the store write it depends on, what
 //! survives a crash, which ids may be handed out twice, which heartbeats are fed. The
 //! scheduler's own simulations have no store, so none of this is checked there. This
-//! module states it as seven scenarios against [`CoreHarness`], a narrow set of operations
+//! module states it as eight scenarios against [`CoreHarness`], a narrow set of operations
 //! (submit a job, register a worker's stream, send a heartbeat, report a result, advance
 //! an injected clock, refuse the store's next writes, crash and restart, read what left the
 //! core). The scenarios do not name a transport.
@@ -44,7 +44,13 @@
 //!   persists a submission: the model writes that outside the count, and a core that
 //!   persists submissions through the same path has to keep them out of `n` too, or its
 //!   counts shift. `refuse_writes(0)` ends an outage. An adapter over a real store wraps
-//!   it to fail on request.
+//!   it to fail on request. The reference core places work at a tick, so each of its
+//!   refusals falls at a different [`CoreHarness::advance`]; a core that also places work
+//!   as it is submitted tries a grant once more before the advance a scenario waits for. An
+//!   adapter for such a core may therefore refuse every write until `n` advances of the
+//!   clock have passed: what a scenario asks is that nothing is released while the store
+//!   refuses, and that what was held is written in order once it takes writes again.
+//!   `refuse_writes` is called before the submits whose grants it should refuse.
 //! - **A restart keeps the term.** `crash_and_restart` drops everything in memory and
 //!   rebuilds from the store at the same leader term; workers register again. Lease ids
 //!   `(term, seq)` must still never repeat, which is what the sequence blocks are for. A
@@ -67,6 +73,7 @@
 //!   replaces the worker's earlier one; `heartbeat` names the stream it arrived on.
 
 mod model;
+mod queued;
 mod scenarios;
 mod write_path;
 
@@ -74,7 +81,7 @@ use std::time::Duration;
 
 use js_types::sched::{LeaseId, OperationId, WaiterId};
 
-pub use model::{Defect, ReferenceCore, UNPLACEABLE_JOB};
+pub use model::{Defect, ReferenceCore, UNPLACEABLE_JOB, WIDE_JOB};
 pub use scenarios::Scenario;
 
 use crate::Verdict;
@@ -82,6 +89,15 @@ use crate::Verdict;
 /// One registration of a worker with the core, as the harness numbers them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Stream(u64);
+
+impl Stream {
+    /// The stream a harness numbers `number`: the scenarios compare streams for equality,
+    /// and a harness over a real core numbers the registrations it makes.
+    #[must_use]
+    pub const fn new(number: u64) -> Self {
+        Self(number)
+    }
+}
 
 /// A `Start` that left the core.
 #[derive(Debug, Clone, PartialEq, Eq)]

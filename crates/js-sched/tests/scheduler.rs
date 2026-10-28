@@ -1,5 +1,7 @@
 //! The scheduler's rules, one scenario each, driven through its public inputs.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -62,7 +64,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        Self::with(Scheduler::new(1))
+        Self::with(Scheduler::new(1).with_load_config(booked::booked()))
     }
 
     fn with(s: Scheduler) -> Self {

@@ -56,7 +56,7 @@ pub struct Counts {
 }
 
 /// The cap that stops a reservation, so a status view can say why a request waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Blocked {
     /// Whole hosts are at `max_whole_node`, or at the capable hosts when nothing is kept
     /// for ordinary work.

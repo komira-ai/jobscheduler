@@ -8,9 +8,9 @@
 //! | module | holds | state |
 //! |---|---|---|
 //! | `fixture` | the trace row, the key and outcome types every other module shares, the loader and the encoder | present |
-//! | `tables` | integer quantile tables | planned |
-//! | `truth` | what really happens to a run, from a row and keyed draws | planned |
-//! | `predictor` | what the scheduler believes about a key | planned |
+//! | `tables` | integer quantile tables | present |
+//! | `truth` | what really happens to a run, from a row and keyed draws | present |
+//! | `predictor` | what the scheduler believes about a key | present |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | present |
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
@@ -37,4 +37,7 @@ pub mod replay;
 pub mod rules;
 
 pub mod fixture;
+pub mod predictor;
 pub mod rankers;
+pub mod tables;
+pub mod truth;

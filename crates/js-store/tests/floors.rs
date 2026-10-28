@@ -600,3 +600,27 @@ fn a_start_that_cannot_read_a_floor_loads_nothing() {
         .expect("deleted");
     rows.load().expect("loads once the row is gone");
 }
+
+/// Asserts that the floors the store holds now are read as their rows say, without a start's
+/// checks: all of them, a row that is not a floor refused naming its key, and a floor under
+/// another floor's key still read. Catches: a frontend that cannot see the floors the others
+/// raised, and one that fails on a row a start would have repaired.
+#[test]
+fn the_floors_held_now_are_read_as_their_rows_say() {
+    let (store, rows) = handle();
+    assert_eq!(rows.floors().expect("read"), []);
+    write(&rows, &raising(1, 0, &[]));
+    write(&rows, &raising(2, 1, &[]));
+    let mut held = rows.floors().expect("read");
+    held.sort_by_key(|floor| floor.stamp);
+    assert_eq!(held, [a_floor(1, 0), a_floor(2, 1)]);
+
+    let row = value_of(&store, &keys::floor(&key_of(1)));
+    put(&store, "floor/misnamed", row);
+    assert_eq!(rows.floors().expect("read").len(), 3);
+    assert!(rows.load().is_err(), "a start checks the key");
+
+    put(&store, "floor/zz", vec![9]);
+    let error = rows.floors().expect_err("not a floor");
+    assert!(error.to_string().contains("floor/zz"), "{error}");
+}

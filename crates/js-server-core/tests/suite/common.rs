@@ -9,13 +9,15 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, NodePhase, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, Fenced, Reported, Stage,
-    Stream, View, Writer,
+    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Reported, Settles,
+    Stage, Stream, View, Writer,
 };
+use js_store::Ending;
 use js_types::sched::{
     Answer, Effect, FarmTime, LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Refusal, Resources,
     StartLease, WaiterId, WorkKey, WorkerId,
@@ -52,6 +54,14 @@ pub enum Call {
     },
     Forgot(OperationId),
     ForgotParcel(LeaseId),
+    Adopted(OperationId, WaiterId, Option<Vec<u8>>),
+    /// The callers shown a stage of an operation another frontend runs.
+    ShowCallers(Vec<WaiterId>, Stage),
+    /// The callers of a finished operation another frontend ran, kept.
+    KeptFinished(OperationId, Vec<WaiterId>),
+    /// An operation another frontend ran ended, with its `done/` value.
+    Followed(OperationId, Vec<u8>),
+    ShowWatched(OperationId, Stage),
 }
 
 /// An adapter that keeps what its hooks were told.
@@ -71,8 +81,16 @@ pub struct Rig {
     pub delivered: Arc<Mutex<Vec<OperationId>>>,
     /// The resent reports that reached the rig.
     pub resized: u32,
+    /// The rig cannot say how an operation ended.
+    pub no_ending: bool,
     /// The names the core asked for, in order.
     pub named: Mutex<Vec<String>>,
+    /// The callers that gave up: no longer listening.
+    pub gone: BTreeSet<WaiterId>,
+    /// What each caller of an operation another frontend runs was last shown.
+    pub shown: BTreeMap<WaiterId, Stage>,
+    /// The operations clients ask for by name, and what each was last shown.
+    pub watching: BTreeMap<OperationId, Option<Stage>>,
 }
 
 impl Rig {
@@ -178,6 +196,62 @@ impl Adapter for Rig {
     fn retain_parcels(&mut self, waits: &dyn Fn(LeaseId) -> bool) {
         self.parked.retain(|lease| waits(*lease));
     }
+
+    fn ending(&self, effect: &Effect, retention: Duration) -> Option<Ending> {
+        let done = match effect {
+            Effect::Answer(answer) => format!("done {}", answer.lease),
+            Effect::Refuse(refusal) => format!("refused {}", refusal.operation),
+            _ => return None,
+        };
+        let ending = Ending::new(done.into_bytes(), retention);
+        (!self.no_ending).then_some(ending)
+    }
+
+    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>) {
+        let parcel = parcel.map(<[u8]>::to_vec);
+        self.calls.push(Call::Adopted(operation, waiter, parcel));
+    }
+
+    fn waiting_among(&self, callers: &[WaiterId]) -> Vec<WaiterId> {
+        let waiting = |caller: &WaiterId| {
+            let done = matches!(self.shown.get(caller), Some(Stage::Done(_)));
+            !self.gone.contains(caller) && !done
+        };
+        callers.iter().copied().filter(waiting).collect()
+    }
+
+    fn show_callers(&mut self, callers: &[WaiterId], stage: &Stage) {
+        for caller in callers {
+            self.shown.insert(*caller, stage.clone());
+        }
+        self.calls
+            .push(Call::ShowCallers(callers.to_vec(), stage.clone()));
+    }
+
+    fn keep_finished(&mut self, operation: OperationId, callers: Vec<WaiterId>) {
+        self.kept.insert(operation);
+        self.calls.push(Call::KeptFinished(operation, callers));
+    }
+
+    fn followed(&mut self, operation: OperationId, ended: &[u8]) {
+        self.calls.push(Call::Followed(operation, ended.to_vec()));
+    }
+
+    fn watched(&mut self) -> Vec<OperationId> {
+        let open = |stage: &Option<Stage>| !matches!(stage, Some(Stage::Done(_)));
+        let open: Vec<OperationId> = self
+            .watching
+            .iter()
+            .filter(|(_, stage)| open(stage))
+            .map(|(operation, _)| *operation)
+            .collect();
+        open
+    }
+
+    fn show_watched(&mut self, operation: OperationId, stage: &Stage) {
+        self.watching.insert(operation, Some(stage.clone()));
+        self.calls.push(Call::ShowWatched(operation, stage.clone()));
+    }
 }
 
 /// What every test does first: installs one subscriber for the test binary, so the fields of
@@ -220,7 +294,7 @@ impl Gate {
             asked: Arc::new(AtomicUsize::new(0)),
         };
         let (seen, trace) = (gate.clone(), Arc::clone(trace));
-        let writer = move |effect: &Effect| {
+        let writer = move |effect: &Effect, _: &Settles<'_>| {
             seen.asked.fetch_add(1, Ordering::SeqCst);
             let (grants, finishes) = *seen.modes.lock().expect("modes");
             let (kind, attempt) = match effect {
@@ -373,8 +447,8 @@ pub fn enrol(rig: &mut Rig, admitted: &Admitted) {
 }
 
 /// Submits `request`, enrolling the caller in the rig.
-pub fn submit_request(core: &Core<Rig>, now: u64, request: Request) -> Result<Admitted, Fenced> {
-    core.submit(at(now), request, enrol)
+pub fn submit_request(core: &Core<Rig>, now: u64, request: Request) -> Result<Admitted, NotQueued> {
+    core.submit(at(now), request, &now.to_be_bytes(), enrol)
 }
 
 /// Marks the stream closed, as the host's connection dropping would.
@@ -423,4 +497,52 @@ pub fn lines(trace: &Trace) -> Vec<String> {
 
 pub fn lease(term: u64, seq: u64) -> LeaseId {
     LeaseId::new(term, seq)
+}
+
+/// What `waiter`, a caller of an operation another frontend runs, was last shown.
+pub fn shown_to(core: &Core<Rig>, waiter: WaiterId) -> Option<Stage> {
+    core.with(|_, rig| rig.shown.get(&waiter).cloned())
+}
+
+/// A log sink a test can read back.
+#[derive(Clone, Default)]
+struct Sink(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let mut kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        kept.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+/// Runs `run` under a subscriber of its own on this thread, and returns what it logged.
+pub fn logged(run: impl FnOnce()) -> String {
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, run);
+    let kept = sink
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    String::from_utf8_lossy(&kept).into_owned()
 }

@@ -1166,6 +1166,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-types",
+ "js-whole",
  "serde_json",
  "sha2 0.11.1",
  "subtle",
@@ -1180,6 +1181,7 @@ dependencies = [
  "js-sim",
  "js-sizing",
  "js-types",
+ "js-whole",
 ]
 
 [[package]]
@@ -1187,8 +1189,11 @@ name = "js-server-core"
 version = "0.1.0"
 dependencies = [
  "js-caps",
+ "js-conformance",
  "js-sched",
  "js-sim",
+ "js-state",
+ "js-store",
  "js-types",
  "thiserror",
  "tracing",
@@ -1290,6 +1295,10 @@ dependencies = [
  "sha2 0.11.1",
  "thiserror",
 ]
+
+[[package]]
+name = "js-whole"
+version = "0.1.0"
 
 [[package]]
 name = "lazy_static"

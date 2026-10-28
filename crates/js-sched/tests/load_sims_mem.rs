@@ -1,11 +1,14 @@
 //! Simulations of admission by memory, of the fallback and of the cost a lease keeps,
 //! over the fluid model of `load_world`.
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
 use js_sched::{LoadConfig, PlacementLoad, Prediction};
 
+use load_curves::Curves;
 use load_world::{GIB, Reporting, Spec, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
@@ -15,6 +18,21 @@ fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cold: false,
         life_minutes: 1,
     }
+}
+
+/// A world for sim c's and sim i's actions, which run under a minute: with `profiles`
+/// every key has the curve of one bucket, at the prediction `hint` gives it; otherwise
+/// none has a curve.
+fn world(profiles: bool, hint: Prediction) -> World {
+    if !profiles {
+        return World::new(LoadConfig::default());
+    }
+    let curves = Curves::new("sim");
+    curves.set_all(
+        &[(u32::try_from(hint.cpu_millis).unwrap(), hint.memory_bytes)],
+        5,
+    );
+    World::with_curves(LoadConfig::default(), curves)
 }
 
 /// An action that holds 1 GiB and allocates up to `peak` at 60% of its 50 ticks, predicted
@@ -33,9 +51,18 @@ fn late_ramp(class: &'static str, peak: u64) -> Spec {
 /// 6 GiB, never put more than `C max(1, k_m)` = 96 GiB of true memory on the node, and
 /// run 16 at a time. The cold page cache (80% of RAM) is not in the working set the agent
 /// reports (`memory.current` minus the inactive file pages), so it does not keep leases out.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_late_ramps_and_tail_runs_stay_within_the_memory_bound_with(profiles);
+    }
+}
+
+fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     for n in 0..120 {
         let spec = if n % 33 == 32 {
@@ -67,9 +94,18 @@ fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound() {
 /// memory: after the leases end, the working set the agent reports stays at 110% of the
 /// node's RAM (hot file pages nothing reclaims), and a working set counted whole would refuse
 /// every lease for good. All five new actions start.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_retained_page_cache_on_an_idle_node_still_admits() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_retained_page_cache_on_an_idle_node_still_admits_with(profiles);
+    }
+}
+
+fn c_retained_page_cache_on_an_idle_node_still_admits_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     w.submit_many(3, &late_ramp("ramp", 4 * GIB));
     w.run(60);
@@ -86,9 +122,18 @@ fn c_retained_page_cache_on_an_idle_node_still_admits() {
 /// lease; capped at a quarter of the node's memory they cost 16 GiB of the 64, and the node
 /// still takes sixteen leases of 4 GiB (each with the 1 GiB it holds before it allocates
 /// the rest) while the working set stays under their predictions.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_retained_page_cache_beside_leases_costs_a_bounded_share() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_retained_page_cache_beside_leases_costs_a_bounded_share_with(profiles);
+    }
+}
+
+fn c_retained_page_cache_beside_leases_costs_a_bounded_share_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     w.nodes.get_mut("n").unwrap().cache = 64 * GIB + 64 * GIB / 10;
     // Two readings in first, so the node is charged by measurement.
@@ -206,12 +251,11 @@ fn d_one_stale_node_among_fresh_ones() {
     );
 }
 
-/// Sim d (off and shadow). Catches: `off` or `shadow` placing differently from the booked
-/// rule: the same workload gives the same starts, leases and workers under both. (The
-/// recorded traces of the existing simulations are unchanged by this work: a scheduler
-/// built with `new` places by the booked rule.)
+/// Sim d (off). Catches: `off` (the rollback switch) not placing by the booked rule: 80
+/// one-core actions on two 16-core nodes all run, and the first round starts 32 (the
+/// booked cores), whatever is predicted.
 #[test]
-fn d_off_and_shadow_place_the_same() {
+fn d_off_places_by_the_booked_rule() {
     let run = |mode| {
         let mut w = World::new(LoadConfig {
             mode,
@@ -225,7 +269,6 @@ fn d_off_and_shadow_place_the_same() {
     };
     let off = run(PlacementLoad::Off);
     assert_eq!(off.len(), 80);
-    assert_eq!(run(PlacementLoad::Shadow), off);
 }
 
 /// Sim j. Catches: costs recomputed after a restart from the current estimator, and
@@ -299,12 +342,11 @@ fn l_a_pool_sized_key_runs_on_nodes_of_different_sizes() {
     assert!(w.nodes["big"].peak_demand <= 88 * 1_100 * 147 / 75 + 1_000);
 }
 
-/// Sim m. Catches: shadow changing a placement, and verdicts that are not the ones `on`
-/// gives: on one 88-thread node, `shadow` starts what `off` starts (the same leases on the
-/// same ticks), and its verdicts of the first round are those of an `on` run: the leases
-/// `on` admits it would admit, and the rest of what `off` placed it would refuse.
+/// Sim m. Catches: `off` admitting by the charged load or `on` by the booked cores: on one
+/// 88-thread node, `off` starts 88 leases of 2 cores in the first round (88 booked cores
+/// is the whole node) and `on` starts 48 (96800 of 2000 m, the 1.1x limit).
 #[test]
-fn m_shadow_changes_nothing_and_its_verdicts_are_ons() {
+fn m_off_starts_the_booked_cores_and_on_the_charged_ones() {
     let run = |mode| {
         let mut w = World::new(LoadConfig {
             mode,
@@ -313,21 +355,12 @@ fn m_shadow_changes_nothing_and_its_verdicts_are_ons() {
         w.linux("n", 88, 512);
         w.submit_many(300, &Spec::flat("e", 2_000, 50, warm(2_000, 4 * GIB)));
         w.step();
-        let first = (w.s.load_counters(), w.stats["e"].started);
-        w.run(99);
-        (first, w.starts)
+        w.stats["e"].started
     };
-    let (on_first, _) = run(PlacementLoad::On);
-    let (off_first, off_starts) = run(PlacementLoad::Off);
-    let (shadow_first, shadow_starts) = run(PlacementLoad::Shadow);
-    assert_eq!(shadow_starts, off_starts);
-    assert_eq!(on_first.1, 48, "96800 of 2000 m: 48 leases");
-    assert_eq!(off_first.1, 88, "88 booked cores");
-    let (counters, started) = shadow_first;
-    assert_eq!(started, 88);
-    assert_eq!(counters.would_admit, on_first.0.admitted);
-    assert_eq!(counters.would_block, off_first.1 - on_first.1);
-    assert_eq!(counters.admitted, 0);
+    let on_first = run(PlacementLoad::On);
+    let off_first = run(PlacementLoad::Off);
+    assert_eq!(on_first, 48, "96800 of 2000 m: 48 leases");
+    assert_eq!(off_first, 88, "88 booked cores");
 }
 
 /// Sim n. Catches: a retry up the memory ladder counted at what was learned (2 GiB)
@@ -381,23 +414,29 @@ fn n_a_retry_is_counted_at_the_rung() {
 /// slack), and with the cost corrected to within 1.25 times the truth the same key puts at
 /// most 1.1 C on the node. (The estimator's rule that raises the cost under load is
 /// `js-sizing`'s; this checks what the scheduler does with each figure.)
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn i_an_understated_key_is_bounded_by_its_prediction() {
+    for profiles in [false, true] {
+        i_an_understated_key_is_bounded_by_its_prediction_with(profiles);
+    }
+}
+
+fn i_an_understated_key_is_bounded_by_its_prediction_with(profiles: bool) {
     let demand = |predicted: u64| {
-        let mut w = World::new(LoadConfig::default());
+        let mut w = world(profiles, warm(predicted, GIB));
         w.linux("n", 88, 512);
         w.submit_many(400, &Spec::flat("k", 4_000, 60, warm(predicted, GIB)));
         w.run(30);
         w.nodes["n"].peak_demand
     };
     let (understated, corrected) = (demand(1_000), demand(5_000));
-    assert!(
-        understated > 4_400 * 88 / 1000 * 1000,
-        "past 4.4 C: {understated}"
-    );
-    assert!(
-        understated <= 4 * 88 * 1_100 * 4 / 3,
-        "within (k / f) (1 + s) C"
-    );
+    // A covered lease is charged all of its prediction (`f` 1), with a curve or without
+    // one: the demand is at most `k (1 + s) C` = 4.4 C, as the design has it for a key
+    // whose prediction is a quarter of what it uses.
+    assert!(understated > 4_000 * 88, "past 4 C: {understated}");
+    assert!(understated <= 4_400 * 88, "within 4.4 C: {understated}");
     assert!(corrected <= 96_800 + 4_000, "{corrected}");
 }

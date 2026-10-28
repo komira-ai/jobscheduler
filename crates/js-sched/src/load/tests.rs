@@ -776,3 +776,13 @@ fn a_chosen_worker_says_how_it_was_decided() {
 }
 
 mod explained;
+
+/// Catches: the score's slot numbering drifting from the predicate's: placement reads the
+/// predicate's figures by slot number, so the slots (minutes `0..=HORIZON` then `H+`) must
+/// be the same set with the same numbers on both sides.
+#[test]
+fn the_slots_are_the_predicates_slots() {
+    assert_eq!(HORIZON, crate::admission::HORIZON_MINUTES as usize);
+    assert_eq!(H_PLUS, crate::admission::H_PLUS_SLOT);
+    assert_eq!(SLOTS, crate::admission::H_PLUS_SLOT + 1);
+}

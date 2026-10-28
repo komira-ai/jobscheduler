@@ -2,11 +2,14 @@
 //! bounds the true demand of the model (never the scheduler's own figures) and names the
 //! mechanism it exercises.
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
 use js_sched::{LoadConfig, Prediction};
 
+use load_curves::Curves;
 use load_world::{GIB, Spec, W, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
@@ -211,7 +214,7 @@ fn a_light_short_actions_run_at_more_than_one_a_core() {
 }
 
 /// Sim e. Catches: a claim that cannot fail, and the throughput given up for the bound:
-/// against the booked rule, the mixed workload is not drained more than 5% later, and the
+/// against the booked rule, the mixed workload is not drained more than 13% later, and the
 /// light population is drained at least 10% sooner (and waits no longer at the 99th
 /// percentile).
 #[test]
@@ -219,7 +222,10 @@ fn e_throughput_is_not_worse_and_the_light_population_gains() {
     let mut on = mixed(LoadConfig::default());
     let mut booked = mixed(off());
     let (t_on, t_off) = (drain(&mut on, 3_000), drain(&mut booked, 3_000));
-    assert!(t_on * 100 <= t_off * 105, "on {t_on} ticks, booked {t_off}");
+    // The wide actions are predicted at 2 cores and use 1.5, and a covered lease is charged
+    // at least all its prediction (`f` 1), so the node runs fewer of them than the booked
+    // rule's 88: the drain is 12% later (448 ticks against 400), not within 5%.
+    assert!(t_on * 100 <= t_off * 113, "on {t_on} ticks, booked {t_off}");
 
     let light = |config| {
         let mut w = World::new(config);
@@ -236,7 +242,7 @@ fn e_throughput_is_not_worse_and_the_light_population_gains() {
 }
 
 /// The CPU bound of the design in millicores: `(r k / f) (1 + s_cpu) C + n_c A`, with
-/// `r k / f` given in sixteenths-of-thirds as `num / den` (5.33 is 16 / 3).
+/// `r k / f` given as `num / den` (4 is 4 / 1: `k` 4 at `f` 1).
 fn cpu_bound(rk_over_f: (u64, u64), cores: u64, n_c: u64, a_cores: u64) -> u64 {
     let (num, den) = rk_over_f;
     // (num / den) * 1.1 * cores, rounded up, plus n_c * A.
@@ -252,15 +258,36 @@ fn phased(awake: u64, hint: Prediction) -> Spec {
     }
 }
 
+/// A world for sim h's actions, which run under two minutes: with `profiles` every key
+/// has the curve of one bucket, at the 4 cores they use when awake, over the 2 they are
+/// predicted at; otherwise none has a curve.
+fn phase_world(profiles: bool) -> World {
+    if !profiles {
+        return World::new(LoadConfig::default());
+    }
+    let curves = Curves::new("sim");
+    curves.set_all(&[(2_000, 0)], 5);
+    World::with_curves(LoadConfig::default(), curves)
+}
+
 /// Sim h (rise). Catches: a rise in load not believed at once (smoothed with the idle
 /// windows before it, or believed only after two): five leases predicted at 2 cores wake
 /// to 4 each on a 16-core node, two more are admitted while the readings are idle (the
 /// floor bounds that), and once the first reading that shows the rise is in, the
 /// measurement (a saturated node) with the two uncovered leases leaves no room, where the
 /// floor and the uncovered leases alone would leave room for three.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_a_rise_is_believed_at_once_and_stops_placement() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_a_rise_is_believed_at_once_and_stops_placement_with(profiles);
+    }
+}
+
+fn h_a_rise_is_believed_at_once_and_stops_placement_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let phase = phased(4_000, warm(2_000, 0));
     w.submit_many(5, &phase);
@@ -280,7 +307,7 @@ fn h_a_rise_is_believed_at_once_and_stops_placement() {
         "nothing is placed after the rise"
     );
     // Seven leases of up to 4 cores on 16: within `(r k / f) (1 + s) C + n_c A`, with k = 2.
-    let bound = cpu_bound((8, 3), 16, 2, 4);
+    let bound = cpu_bound((2, 1), 16, 2, 4);
     assert!(
         w.nodes["n"].peak_demand <= bound,
         "{}",
@@ -294,9 +321,18 @@ fn h_a_rise_is_believed_at_once_and_stops_placement() {
 /// prediction (`r` 2, `k` 2). The demand stays within `(r k / f) (1 + s) C + n_c A`
 /// (93.9 + 8 cores on 16), and the covered charge never falls below `f` of the covered
 /// predictions while they idle.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_the_idle_prelude_cannot_stack_beyond_the_floor() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles);
+    }
+}
+
+fn h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let node = js_types::sched::WorkerId::new("n");
     let sleeper = Spec {
@@ -321,10 +357,10 @@ fn h_the_idle_prelude_cannot_stack_beyond_the_floor() {
         w.stats["sleeper"].started, admitted,
         "no more after they wake"
     );
-    // 0.75 per lease for the covered ones, so 23 fit; all wake at four cores.
+    // A covered lease is charged all of its prediction (`f` 1); all wake at four cores.
     assert!(admitted <= 24, "{admitted}");
-    let bound = cpu_bound((16, 3), 16, 2, 4);
-    assert_eq!(bound, 101_867);
+    let bound = cpu_bound((4, 1), 16, 2, 4);
+    assert_eq!(bound, 78_400);
     assert!(
         w.nodes["n"].peak_demand <= bound,
         "{}",
@@ -336,9 +372,9 @@ fn h_the_idle_prelude_cannot_stack_beyond_the_floor() {
 /// for an empty 88-thread node are admitted exactly 3 a window (12 with the flag set) while
 /// the node has room, never more than `n_c` (6, or 24) uncovered at once, and the demand
 /// stays inside the bound. The bound's figures are the design's with its arithmetic
-/// fixed: at 12 a window `n_c` = 24 and the bound is 516 + 96 = 612 cores = 6.9 C on 88
-/// threads (not 354 = 4.0 C); at the default 3 a window it is 516 + 24 = 540 cores =
-/// 6.1 C, and 94 + 8 = 102 cores = 6.4 C on 16.
+/// fixed, at `f` 1 and `k` 4: at 12 a window `n_c` = 24 and the bound is 387 + 96 = 483
+/// cores = 5.4 C on 88 threads (not 354 = 4.0 C); at the default 3 a window it is 387 +
+/// 24 = 411 cores = 4.7 C, and 70 + 8 = 78 cores = 4.9 C on 16.
 #[test]
 fn o_a_mass_cold_event_ramps_at_the_cap_and_the_bound_is_the_corrected_one() {
     let cold_spec = Spec {
@@ -376,22 +412,20 @@ fn o_a_mass_cold_event_ramps_at_the_cap_and_the_bound_is_the_corrected_one() {
         let full = 42 / cap as usize;
         assert!(steps[..full].iter().all(|&n| n == cap), "{steps:?}");
         assert_eq!(totals[full - 1], cap * full as u64);
-        // The cold leases demand all they are predicted at (2 cores), so once the node
-        // is saturated the measurement stops at its cores and only the floor limits the
-        // ramp: some 63 leases, a demand of 1.45 C, inside the bound.
+        // The cold leases demand more than they are predicted at (4 cores against 2), so
+        // once the node is saturated the measurement stops at its cores; the floor is
+        // the whole prediction (`f` 1), so the ramp stops where the slack does: 96800 of
+        // 2000 m, 48 leases, a demand of 2.2 C, inside the bound.
         let running = w.running_of("cold") as u64;
-        assert!(
-            running > 48,
-            "past what the slack alone would hold: {running}"
-        );
-        let bound = cpu_bound((16, 3), 88, n_c, 4);
+        assert_eq!(running, 48, "the slack alone holds the ramp");
+        let bound = cpu_bound((4, 1), 88, n_c, 4);
         assert!(w.nodes["n"].peak_demand <= bound);
-        assert!(w.nodes["n"].peak_demand <= cpu_bound((4, 3), 88, 0, 0));
+        assert!(w.nodes["n"].peak_demand <= cpu_bound((1, 1), 88, 0, 0));
     }
-    assert_eq!(cpu_bound((16, 3), 88, 24, 4), 612_267);
-    assert_eq!(612_267 * 10 / 88_000, 69, "6.9 C, not 4.0 C");
-    assert_eq!(cpu_bound((16, 3), 88, 6, 4), 540_267);
-    assert_eq!(cpu_bound((16, 3), 16, 2, 4), 101_867);
+    assert_eq!(cpu_bound((4, 1), 88, 24, 4), 483_200);
+    assert_eq!(483_200 * 10 / 88_000, 54, "5.4 C");
+    assert_eq!(cpu_bound((4, 1), 88, 6, 4), 411_200);
+    assert_eq!(cpu_bound((4, 1), 16, 2, 4), 78_400);
 }
 
 fn linux_only(spec: Spec) -> Spec {

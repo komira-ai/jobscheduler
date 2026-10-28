@@ -41,6 +41,8 @@
 //!
 //! (`KBF_SIM_SEEDS=<n>` sets its seeds per scenario; the default is 200.)
 
+#[path = "../booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "../digest/mod.rs"]
 mod digest;
