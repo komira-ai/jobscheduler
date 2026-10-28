@@ -17,6 +17,20 @@
 //! never compared across nodes), wall minutes since the Unix epoch (the rows of a node
 //! series; the caller supplies them), and the store's own clock (expiry, not used here).
 
+pub mod error;
+pub mod input;
+pub mod minute;
+pub mod prune;
+pub mod recorder;
+pub mod store;
+
+pub use error::{CodecError, UsageError};
+pub use input::{ClockIn, LoadIn, MinuteIn, TAIL_MINUTE};
+pub use minute::NodeMinute;
+pub use prune::{NODE_RETENTION_MINUTES, PruneStats};
+pub use recorder::{Counters, DropReason, Limits, Observed, Recorder};
+pub use store::{NodeBuffer, NodeSeries};
+
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).
 pub const MINUTES_PER_HOUR: u64 = 60;
 
