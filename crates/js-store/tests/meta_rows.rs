@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use js_state::fake::{Fake, Flaw};
 use js_state::{ManualClock, Store, share};
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows};
 use js_types::sched::OperationId;
 
@@ -49,7 +49,9 @@ fn the_meta_rows_are_the_rows_of_the_golden_file() {
     ));
     share(&*store).expect("the shared marker");
     let codec = Arc::new(TestCodec::new());
-    let (rows, epoch) = Rows::open(store.clone(), EpochPolicy::Keep, TERM, codec).expect("open");
+    let ext = Arc::new(TestExt);
+    let (rows, epoch) =
+        Rows::open(store.clone(), EpochPolicy::Keep, TERM, codec, ext).expect("open");
     assert_eq!(epoch, TERM);
     rows.reserve_operation(OperationId(4))
         .expect("operation ids");

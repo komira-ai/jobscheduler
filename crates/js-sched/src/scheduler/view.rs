@@ -3,11 +3,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     FarmRun, LeaseId, NodePhase, OperationId, Qos, Resources, WaiterId, WorkerId,
 };
 
 use super::{OpState, Scheduler};
+use crate::admission::{LoadCounters, LoadView, Prediction};
 use crate::cordon::Cordon;
 use crate::input::Request;
 
@@ -174,6 +176,65 @@ impl Scheduler {
     #[must_use]
     pub fn booked(&self, worker: &WorkerId) -> Option<Resources> {
         self.workers.get(worker).map(|w| w.booked)
+    }
+
+    /// Feeds the estimator's prediction for `operation`: what placement charges the lease
+    /// it gets ([`Prediction`]). Not in the request, the log or the `Eq` memory state: the
+    /// caller sets it again for a queued operation after a restart, and a lease placed
+    /// keeps the cost it was charged ([`Scheduler::lease_cost`]) whatever is set later.
+    pub fn set_cost(&mut self, operation: OperationId, prediction: Prediction) {
+        self.admission.set_prediction(operation, prediction);
+    }
+
+    /// What admission charged `lease`, which a worker holds: the cost in its grant record.
+    #[must_use]
+    pub fn lease_cost(&self, lease: LeaseId) -> Option<LeaseCost> {
+        let held = self.held.get(&lease)?;
+        Some(held.cost)
+    }
+
+    /// What admission has done since the scheduler was built.
+    #[must_use]
+    pub fn load_counters(&self) -> LoadCounters {
+        let mut counters = self.admission.counters;
+        if self.admission.by_load() {
+            let limited = self
+                .workers
+                .values()
+                .filter(|w| w.alive(self.now) && w.load_state.cpu_limited())
+                .count();
+            counters.fallback_cpu_limited = u64::try_from(limited).unwrap_or(u64::MAX);
+        }
+        counters
+    }
+
+    /// How `worker` is charged as of the newest input, if it is registered.
+    #[must_use]
+    pub fn load_view(&self, worker: &WorkerId) -> Option<LoadView> {
+        let w = self.workers.get(worker)?;
+        Some(LoadView::of(
+            &w.load_state,
+            &w.capacity,
+            self.now,
+            &self.admission.cfg,
+        ))
+    }
+
+    /// The worker a blocked head of the queue, `operation`, holds for headroom, if any.
+    #[must_use]
+    pub fn head_hold(&self, operation: OperationId) -> Option<&WorkerId> {
+        self.head_holds.get(&operation)
+    }
+
+    /// How many live registered workers are charged by prediction alone (no usable
+    /// measurement) as of the newest input.
+    #[must_use]
+    pub fn fallback_workers(&self) -> usize {
+        self.workers
+            .values()
+            .filter(|w| w.alive(self.now))
+            .filter(|w| !w.load_state.fresh(self.now, &self.admission.cfg))
+            .count()
     }
 
     /// What `worker` reported it can run at once, if it is registered: its newest

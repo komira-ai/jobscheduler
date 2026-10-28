@@ -125,6 +125,7 @@ impl ReferenceCore {
                 let lease = RecoveredLease {
                     lease: LeaseId::new(TERM, number(seq)),
                     worker: WorkerId::new(worker),
+                    cost: None,
                 };
                 (number(operation), lease)
             })
