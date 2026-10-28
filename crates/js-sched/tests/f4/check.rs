@@ -64,6 +64,9 @@ struct Worker {
     process: u64,
     handover_ends: u64,
     leases: BTreeSet<LeaseId>,
+    /// Each lease it holds, with the action key and the cores it was charged when placed
+    /// (the load rule's ledger).
+    charged: BTreeMap<LeaseId, (WorkKey, u64)>,
 }
 
 impl Worker {
@@ -140,6 +143,11 @@ pub struct Checker {
     queue: BTreeSet<(Reverse<Qos>, OperationId)>,
     in_flight: BTreeMap<WorkKey, OperationId>,
     next_seq: u64,
+    /// Whether the scheduler places by load: the reference placement is `load_reference`'s,
+    /// not the booked rule's.
+    load: bool,
+    /// The worker each blocked head held after the last round (load rule).
+    holds: BTreeMap<OperationId, WorkerId>,
     needs: Vec<js_caps::Request>,
     answered: BTreeSet<WaiterId>,
     waiters: u64,
@@ -173,6 +181,8 @@ impl Checker {
             queue: BTreeSet::new(),
             in_flight: BTreeMap::new(),
             next_seq: 0,
+            load: !crate::booked::is_booked(),
+            holds: BTreeMap::new(),
             needs: Vec::new(),
             answered: BTreeSet::new(),
             waiters: 0,
@@ -319,6 +329,7 @@ impl Checker {
                             process: 0,
                             handover_ends: 0,
                             leases: BTreeSet::new(),
+                            charged: BTreeMap::new(),
                         };
                         self.workers.insert(worker, w);
                     }
@@ -733,6 +744,7 @@ impl Checker {
         let w = self.workers.get_mut(&l.worker).expect("registered");
         w.booked = sub(w.booked, resources);
         w.leases.remove(&lease);
+        w.charged.remove(&lease);
         if w.leases.is_empty() {
             w.whole = false;
         }

@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_sim::{Chance, SimRng};
-use js_types::sched::{OperationId, Qos, Resources, WaiterId};
+use js_types::sched::{OperationId, Qos, Resources, WaiterId, WorkerId};
 
 mod dedup;
 
@@ -43,6 +43,13 @@ fn cut(rng: &mut SimRng, total: u64, parts: u64) -> Vec<u64> {
 /// gives each worker one copy of every piece (it does not pack unequal pieces). Every
 /// piece is granted in the first round and fills its worker exactly; the extra unit
 /// waits and is granted at the first release that frees its axis, not before.
+///
+/// Under the load rule the cores of a worker are planned to `C (1 + s_cpu)`, not to `C`, and
+/// a lease is charged at least a core: the pieces of cores sum to that limit (each a core
+/// or more), and the extra unit is charged a core, which no full worker admits. Which
+/// worker takes which piece is the score's, so a piece may wait for a release: the
+/// reference placement says each round which, and the scenario asserts only the boundary
+/// (a worker charged exactly its limit, and the extra waiting while every worker is).
 #[derive(Debug, Default)]
 pub struct ExactPacking {
     workers: u64,
@@ -51,6 +58,10 @@ pub struct ExactPacking {
     pieces: Vec<(WaiterId, usize, [u64; 3], u64)>,
     pub full_at_start: u64,
     pub extra_on_axis: [u64; 3],
+    /// Seeds (load rule) in which every worker was charged exactly its limit after the
+    /// first round, and of those the extra unit of cores waited.
+    pub at_limit: u64,
+    pub extra_waited_at_limit: u64,
 }
 
 impl Scenario for ExactPacking {
@@ -77,8 +88,17 @@ impl Scenario for ExactPacking {
         // takes the least loaded worker, which is the next one that has not got this piece
         // yet, so each worker ends with the whole cut.
         let cap = w.fleet[0].capacity;
-        let parts = rng.between(2, 6);
-        let cpu = cut(rng, cap.cpu_millis, parts);
+        let (parts, cpu) = if crate::booked::is_booked() {
+            let parts = rng.between(2, 6);
+            (parts, cut(rng, cap.cpu_millis, parts))
+        } else {
+            // Pieces of a core or more that sum to the limit.
+            let (_, limit) = w.check.charge_room(&w.fleet[0].name);
+            let parts = rng.between(2, 6.min(limit / 1_000));
+            let spare = limit - 1_000 * parts;
+            let pieces = cut(rng, spare + parts, parts);
+            (parts, pieces.iter().map(|p| 1_000 + p - 1).collect())
+        };
         let mem = cut(rng, cap.memory_bytes, parts);
         let mut gpus = vec![0; usize::try_from(parts).unwrap()];
         for _ in 0..cap.gpus {
@@ -107,6 +127,26 @@ impl Scenario for ExactPacking {
 
     fn after_tick(&mut self, w: &mut World, _rng: &mut SimRng) {
         if w.t != 0 {
+            return;
+        }
+        if !crate::booked::is_booked() {
+            let full = w.fleet.iter().all(|spec| {
+                let (left, limit) = w.check.charge_room(&spec.name);
+                left == limit
+            });
+            if full {
+                self.at_limit += 1;
+                let (extra, axis) = self.extra.unwrap();
+                let op = w.check.op_of(extra).unwrap();
+                if axis == 0 {
+                    if !w.check.is_queued(op) {
+                        w.check
+                            .fail("F1.1", "a core more than every worker's limit was granted");
+                    }
+                    self.extra_waited_at_limit += 1;
+                }
+            }
+            self.full_at_start += 1;
             return;
         }
         for (waiter, ..) in &self.pieces {
@@ -140,10 +180,20 @@ impl Scenario for ExactPacking {
 
     fn horizon(&self) -> u64 {
         // The extra unit waits for the first release, at 200 s at most, and runs 5 s.
-        220
+        if crate::booked::is_booked() {
+            return 220;
+        }
+        // Under the load rule a piece may wait for a release too: each wave of runs, 200 s
+        // at most, places at least one piece, since a worker with nothing charged takes any.
+        200 * (self.pieces.len() as u64 + 1) + 20
     }
 
     fn finish(&mut self, w: &World) {
+        if !crate::booked::is_booked() {
+            // Every round's grants were the reference placement's (I11), which fixes when
+            // the extra unit ran.
+            return;
+        }
         let (extra, axis) = self.extra.unwrap();
         let op = w.check.op_of(extra).unwrap();
         // The first piece, on any worker, to free the extra unit's axis.
@@ -217,10 +267,20 @@ impl Scenario for EachAxis {
         let waits = |r: Resources| queued.contains(&[r.cpu_millis, r.memory_bytes, r.gpus]);
         for spec in &w.fleet {
             let (booked, cap) = w.check.room(&spec.name);
-            let free = [cap[0] - booked[0], cap[1].saturating_sub(booked[1])];
+            // The cores free to place on: what is not booked, or under the load rule what
+            // is not charged within the limit. A worker a blocked head holds takes no
+            // request behind it, so it is not one a waiting request could have gone to.
+            let (cpu_free, held) = if crate::booked::is_booked() {
+                (cap[0] - booked[0], false)
+            } else {
+                let (left, limit) = w.check.charge_room(&spec.name);
+                (limit.saturating_sub(left), w.check.is_held(&spec.name))
+            };
+            let free = [cpu_free, cap[1].saturating_sub(booked[1])];
             self.memory_over_capacity += u64::from(booked[1] > cap[1]);
             if free[1] < MEMORY_HEAVY.memory_bytes
                 && free[0] >= MEMORY_HEAVY.cpu_millis
+                && !held
                 && waits(MEMORY_HEAVY)
             {
                 self.memory_full_cpu_free += 1;
@@ -481,17 +541,28 @@ impl Scenario for QosOrder {
 
 /// F1.5 a large request behind small ones: two or three 64-core workers filled with
 /// one-core requests, then a 64-core request, then a steady stream of one-core requests
-/// at about the rate the fleet frees cores. Today the small ones take each freed core
-/// and the large one waits while they keep coming (placement holds nothing back; a wait
-/// bound is planned); it runs once they stop (L1).
+/// at about the rate the fleet frees cores. Under the booked rule the small ones take each
+/// freed core and the large one waits while they keep coming (placement holds nothing
+/// back); it runs once they stop (L1). Under the load rule the first request blocked for
+/// the load of its pool holds the worker with the most headroom, so no small one is placed
+/// there and the worker empties: the large request runs within the longest run of its
+/// holder's leases after it is held (the hold may move to a worker that is much emptier,
+/// and the bound starts again there).
 #[derive(Debug, Default)]
 pub struct LargeBehindSmall {
     workers: u64,
     stop: u64,
     large: Option<WaiterId>,
+    /// The worker the large request is held on (load rule), and since when.
+    holder: Option<(WorkerId, u64)>,
     pub passed_over: u64,
     pub waited_whole_stream: u64,
+    /// Seeds in which a head held a worker for the large request (load rule).
+    pub held: u64,
 }
+
+/// The longest a small request runs, in seconds.
+const SMALL_RUN: (u64, u64) = (20, 60);
 
 impl Scenario for LargeBehindSmall {
     fn name(&self) -> &'static str {
@@ -511,7 +582,10 @@ impl Scenario for LargeBehindSmall {
         if w.t == 0 {
             for _ in 0..self.workers * 64 {
                 let key = w.check.op_count();
-                w.submit(request(key, Qos::Ci, small, ANY), rng.between(20, 60));
+                w.submit(
+                    request(key, Qos::Ci, small, ANY),
+                    rng.between(SMALL_RUN.0, SMALL_RUN.1),
+                );
             }
         } else if w.t == 1 {
             let big = Resources::new(64_000, 8 * GIB);
@@ -520,7 +594,10 @@ impl Scenario for LargeBehindSmall {
             // About 64 * workers / 40 cores free up each second.
             for _ in 0..rng.between(self.workers, self.workers * 2 + 1) {
                 let key = w.check.op_count();
-                w.submit(request(key, Qos::Ci, small, ANY), rng.between(20, 60));
+                w.submit(
+                    request(key, Qos::Ci, small, ANY),
+                    rng.between(SMALL_RUN.0, SMALL_RUN.1),
+                );
             }
         }
     }
@@ -529,6 +606,11 @@ impl Scenario for LargeBehindSmall {
         let Some(large) = self.large.and_then(|l| w.check.op_of(l)) else {
             return;
         };
+        if let Some(holder) = w.check.holder_of(large)
+            && self.holder.as_ref().map(|(h, _)| h) != Some(holder)
+        {
+            self.holder = Some((holder.clone(), w.t));
+        }
         if w.check.is_queued(large) {
             let newer = w
                 .check
@@ -555,6 +637,18 @@ impl Scenario for LargeBehindSmall {
         let at = w.check.granted_at[&large];
         if at >= (self.stop - 1) * 1_000 {
             self.waited_whole_stream += 1;
+        }
+        if !crate::booked::is_booked() {
+            let (holder, since) = self.holder.clone().expect("a head held a worker for it");
+            self.held += 1;
+            if at > (since + SMALL_RUN.1) * 1_000 {
+                let what = format!(
+                    "the large request, held on {holder} since second {since}, was granted at \
+                     {at} ms: more than {} s after",
+                    SMALL_RUN.1
+                );
+                w.check.fail("F1.5", &what);
+            }
         }
     }
 }

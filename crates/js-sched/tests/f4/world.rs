@@ -368,20 +368,20 @@ impl World {
         // Early, so that its refusals fall before arrivals stop.
         let drain_at = rng.between(10, 20);
         let maintenance = (drain_at, drain_at + rng.between(10, 20));
+        let rule = if crate::booked::is_booked() {
+            "booked"
+        } else {
+            "load"
+        };
         let replay = format!(
-            "KBF_SIM_SEED={seed} KBF_SIM_OPS={ops} cargo test -p js-sched --test f4_fleet -- \
-             --ignored --exact replay --nocapture  ({scenario:?}, {workers} workers)"
+            "KBF_SIM_RULE={rule} KBF_SIM_SEED={seed} KBF_SIM_OPS={ops} cargo test -p js-sched \
+             --test f4_fleet -- --ignored --exact replay --nocapture  ({scenario:?}, {workers} workers)"
         );
         let wait = std::time::Duration::from_secs(WAIT_S);
         let retention = std::time::Duration::from_secs(RETENTION_S);
-        // The booked rule, on purpose: this world's reference placement (I11) and its capacity
-        // invariant (I6) are the booked rule's, the least booked worker with room and no booking
-        // past capacity. Placement by load admits CPU up to its slack above capacity and ranks by
-        // score, so a run under it fails I6 and I11 at the first round, by design; running this
-        // family under it needs a reference placement for load.
         let check = Checker::new(
             Scheduler::new(TERM)
-                .with_load_config(crate::booked::booked())
+                .with_load_config(crate::booked::current())
                 .with_unservable_wait(wait)
                 .with_finished_retention(retention),
             WAIT_S * 1_000,

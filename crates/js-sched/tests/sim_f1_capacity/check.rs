@@ -43,6 +43,9 @@ use js_types::sched::{
 
 mod round;
 
+/// The scheduler's term in every F1 run.
+pub const TERM: u64 = 1;
+
 /// The name of this test target, for the replay command.
 pub const TARGET: &str = "sim_f1_capacity";
 
@@ -143,6 +146,9 @@ struct ShadowWorker {
     booked: Axes,
     leases: u64,
     whole: bool,
+    /// Each lease it holds, with the action key and the cores it was charged when placed
+    /// (the load rule's ledger).
+    charged: BTreeMap<LeaseId, (WorkKey, u64)>,
     /// Per interned platform request: whether `caps` satisfy it.
     matches: BTreeMap<usize, bool>,
 }
@@ -264,8 +270,11 @@ pub struct Stats {
     /// Leases given up (requeued) by expiry or reconciliation.
     pub given_up: u64,
     /// Rounds in which a queued request was kept off a worker only because its
-    /// bookings exceed a shrunken capacity.
+    /// bookings exceed a shrunken capacity (under the load rule: because the cores it is
+    /// charged are past its limit).
     pub overbooked_skips: u64,
+    /// Grants (load rule) that left their worker charged exactly its limit.
+    pub limit_fills: u64,
 }
 
 /// What [`Checker::observe`] keeps between inputs.
@@ -292,6 +301,11 @@ pub struct Checker {
     answered: BTreeMap<WaiterId, u32>,
     touched_ops: BTreeSet<OperationId>,
     touched_workers: BTreeSet<WorkerId>,
+    /// Whether the scheduler places by load: the reference placement is
+    /// `load_reference`'s, not the booked rule's.
+    load: bool,
+    /// The worker each blocked head held after the last round (load rule).
+    holds: BTreeMap<OperationId, WorkerId>,
     /// The grants of the last round, in order.
     pub last_round: Vec<(OperationId, WorkerId)>,
     /// Per operation: the farm time (ms) of its first grant.
@@ -331,6 +345,8 @@ impl Checker {
             answered: BTreeMap::new(),
             touched_ops: BTreeSet::new(),
             touched_workers: BTreeSet::new(),
+            load: !crate::booked::is_booked(),
+            holds: BTreeMap::new(),
             last_round: Vec::new(),
             granted_at: BTreeMap::new(),
             finished_at: BTreeMap::new(),
@@ -343,9 +359,11 @@ impl Checker {
     /// The command that replays this run.
     pub fn replay_command(&self) -> String {
         format!(
-            "KBF_SIM_SCENARIO={} KBF_SIM_SEED={} cargo test -p js-sched --test {TARGET} -- \
-             --ignored --exact replay",
-            self.scenario, self.seed
+            "KBF_SIM_RULE={} KBF_SIM_SCENARIO={} KBF_SIM_SEED={} cargo test -p js-sched --test \
+             {TARGET} -- --ignored --exact replay",
+            if self.load { "load" } else { "booked" },
+            self.scenario,
+            self.seed
         )
     }
 
@@ -411,6 +429,7 @@ impl Checker {
             let res = op.resources;
             let w = self.workers.get_mut(&worker).expect("registered");
             w.booked = sub(w.booked, res);
+            w.charged.remove(&lease);
             w.leases -= 1;
             if w.leases == 0 {
                 w.whole = false;
@@ -464,6 +483,7 @@ impl Checker {
                         booked: [0; 3],
                         leases: 0,
                         whole: false,
+                        charged: BTreeMap::new(),
                         matches: BTreeMap::new(),
                     });
                 entry.capacity = axes(*capacity);
@@ -973,6 +993,22 @@ impl Checker {
     /// `id`'s QoS level now.
     pub fn qos_of(&self, id: OperationId) -> &Qos {
         &self.ops[&id].qos
+    }
+
+    /// The cores `worker` is charged and the most it is planned to (load rule).
+    pub fn charge_room(&self, worker: &WorkerId) -> (u64, u64) {
+        let host = self.host(worker);
+        (host.left(), host.cpu_limit())
+    }
+
+    /// Whether a blocked head held `worker` after the last round (load rule).
+    pub fn is_held(&self, worker: &WorkerId) -> bool {
+        self.holds.values().any(|w| w == worker)
+    }
+
+    /// The worker the head `id` held after the last round (load rule).
+    pub fn holder_of(&self, id: OperationId) -> Option<&WorkerId> {
+        self.holds.get(&id)
     }
 
     /// What is booked on `worker` and its capacity, as (millicores, bytes, GPUs).

@@ -4,12 +4,14 @@
 
 use std::collections::BTreeMap;
 
-use js_types::sched::{ControlRecord, Effect, LeaseId, OperationId, WorkerId};
+use js_types::sched::{ControlRecord, Effect, LeaseId, OperationId, Resources, WorkerId};
+
+use crate::load_reference::{Ask, Host, Placer};
 
 use std::cmp::Ordering;
 
 use super::{
-    Checker, Held, Room, State, add, by_load, exclusive, fits_beside, fits_whole, queue_key,
+    Checker, Held, Room, State, TERM, add, by_load, exclusive, fits_beside, fits_whole, queue_key,
 };
 
 /// At most this many grants per round: the catalog's number, written here rather than
@@ -27,6 +29,22 @@ enum Verdict {
 }
 
 impl Checker {
+    /// Worker `name` as the load reference meets it: its capacity, the GPUs it books, whether
+    /// one lease holds it alone, and what each lease was charged.
+    pub(super) fn host(&self, name: &WorkerId) -> Host {
+        let w = &self.workers[name];
+        let capacity = Resources::new(w.capacity[0], w.capacity[1]).with_gpus(w.capacity[2]);
+        let charged = w.charged.values().cloned().collect();
+        Host::new(name.clone(), capacity, w.booked[2], 0, w.whole, charged)
+    }
+
+    /// The reference placement of the load rule over `names`, the workers placement may use.
+    fn placer(&self, names: &[WorkerId]) -> Placer {
+        let hosts = names.iter().map(|n| self.host(n)).collect();
+        let next_seq = self.last_lease.map_or(0, |l| l.seq + 1);
+        Placer::new(hosts, TERM, next_seq, self.holds.clone())
+    }
+
     /// The reference verdict on queued operation `id`.
     fn verdict(&mut self, id: OperationId) -> Verdict {
         let (need, res) = {
@@ -79,47 +97,77 @@ impl Checker {
                 (n.clone(), room)
             })
             .collect();
+        let mut placer = self.load.then(|| self.placer(&names));
         let mut expected = Vec::new();
         let mut verdicts = Vec::new();
         let mut left_over = false;
         for &id in &order {
             let (need, res) = (self.ops[&id].need, self.ops[&id].resources);
+            // The workers the request may use at all: those placement may use whose caps
+            // satisfy its platform.
+            let usable: Vec<usize> = if placer.is_some() {
+                (0..names.len())
+                    .filter(|&i| self.matches(need, &names[i]))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let key = self.ops[&id].key.clone();
+            let ask = Ask {
+                operation: id,
+                key: &key,
+                resources: Resources::new(res[0], res[1]).with_gpus(res[2]),
+                pool: need,
+                candidates: &usable,
+            };
             if expected.len() < ROUND {
-                // The least loaded worker with room; of equals, the first by name.
-                let mut placed: Option<&WorkerId> = None;
-                for name in &names {
-                    let cap = self.workers[name].capacity;
-                    if fits_beside(cap, booked[name], res) && self.matches(need, name) {
-                        let better = placed.is_none_or(|best| {
-                            let load = |n: &WorkerId| (self.workers[n].capacity, booked[n]);
-                            by_load(load(name), load(best)) == Ordering::Less
-                        });
-                        if better {
-                            placed = Some(name);
+                if let Some(placer) = placer.as_mut() {
+                    self.stats.overbooked_skips += u64::from(placer.kept_off_overcharged(&ask));
+                    if let Some(i) = placer.place(&ask) {
+                        expected.push((id, names[i].clone()));
+                        verdicts.push((id, Verdict::Servable));
+                        continue;
+                    }
+                } else {
+                    // The least loaded worker with room; of equals, the first by name.
+                    let mut placed: Option<&WorkerId> = None;
+                    for name in &names {
+                        let cap = self.workers[name].capacity;
+                        if fits_beside(cap, booked[name], res) && self.matches(need, name) {
+                            let better = placed.is_none_or(|best| {
+                                let load = |n: &WorkerId| (self.workers[n].capacity, booked[n]);
+                                by_load(load(name), load(best)) == Ordering::Less
+                            });
+                            if better {
+                                placed = Some(name);
+                            }
+                        }
+                        if fits_whole(cap, res)
+                            && !fits_beside(cap, booked[name], res)
+                            && [0, 2].iter().any(|&i| booked[name].booked[i] > cap[i])
+                            && self.matches(need, name)
+                        {
+                            self.stats.overbooked_skips += 1;
                         }
                     }
-                    if fits_whole(cap, res)
-                        && !fits_beside(cap, booked[name], res)
-                        && [0, 2].iter().any(|&i| booked[name].booked[i] > cap[i])
-                        && self.matches(need, name)
-                    {
-                        self.stats.overbooked_skips += 1;
+                    if let Some(name) = placed.cloned() {
+                        let cap = self.workers[&name].capacity;
+                        let b = booked.get_mut(&name).expect("live");
+                        b.booked = add(b.booked, res);
+                        b.leases += 1;
+                        b.whole |= exclusive(cap, res);
+                        expected.push((id, name));
+                        verdicts.push((id, Verdict::Servable));
+                        continue;
                     }
                 }
-                if let Some(name) = placed.cloned() {
-                    let cap = self.workers[&name].capacity;
-                    let b = booked.get_mut(&name).expect("live");
-                    b.booked = add(b.booked, res);
-                    b.leases += 1;
-                    b.whole |= exclusive(cap, res);
-                    expected.push((id, name));
-                    verdicts.push((id, Verdict::Servable));
-                    continue;
-                }
             } else if !left_over {
-                left_over = names.iter().any(|n| {
-                    fits_beside(self.workers[n].capacity, booked[n], self.ops[&id].resources)
-                });
+                left_over = match placer.as_ref() {
+                    Some(placer) => placer.fits(&ask),
+                    None => names.iter().any(|n| {
+                        fits_beside(self.workers[n].capacity, booked[n], self.ops[&id].resources)
+                    }),
+                };
             }
             let v = self.verdict(id);
             if expected.len() == ROUND && v != Verdict::Servable {
@@ -241,12 +289,41 @@ impl Checker {
                 whole: w.whole,
             };
             let (cap, booked, res, need) = (w.capacity, w.booked, op.resources, op.need);
-            self.ensure(fits_beside(cap, room, res), "I6", || {
-                format!(
-                    "{} of {} ({res:?}) to {} with {booked:?} booked of {cap:?}",
-                    g.lease, g.operation, g.worker
-                )
-            });
+            if self.load {
+                // The documented limits of the load rule: room but for the load, and the
+                // cores charged to the worker, this lease's with them, within
+                // `C (1 + s_cpu)`.
+                let host = self.host(&g.worker);
+                let request = Resources::new(res[0], res[1]).with_gpus(res[2]);
+                self.ensure(host.admits(&request), "I6", || {
+                    format!(
+                        "{} of {} ({res:?}) to {} with {} millicores charged of {} ({booked:?} \
+                         booked of {cap:?})",
+                        g.lease,
+                        g.operation,
+                        g.worker,
+                        host.left(),
+                        host.cpu_limit()
+                    )
+                });
+                self.stats.limit_fills +=
+                    u64::from(host.left() + host.new_charge(&request) == host.cpu_limit());
+                // Its record carries what it was charged: its cores cut to the worker's, and
+                // the memory limit it runs under.
+                self.ensure(
+                    g.cost.cpu_millis == host.charge_of(&request)
+                        && g.cost.limit_bytes == request.memory_bytes,
+                    "I6",
+                    || format!("{} of {} was charged {:?}", g.lease, g.operation, g.cost),
+                );
+            } else {
+                self.ensure(fits_beside(cap, room, res), "I6", || {
+                    format!(
+                        "{} of {} ({res:?}) to {} with {booked:?} booked of {cap:?}",
+                        g.lease, g.operation, g.worker
+                    )
+                });
+            }
             self.ensure(self.live(&g.worker), "I7", || {
                 format!("{} to {}, which is not live", g.lease, g.worker)
             });
@@ -285,6 +362,9 @@ impl Checker {
             self.fail("I11", &what);
         }
         self.last_round = got;
+        if let Some(placer) = placer {
+            self.holds = placer.holds().clone();
+        }
     }
 
     fn grant(&mut self, id: OperationId, lease: LeaseId, worker: &WorkerId) {
@@ -300,6 +380,8 @@ impl Checker {
         op.since = None;
         let w = self.workers.get_mut(worker).expect("registered");
         w.whole |= exclusive(w.capacity, op.resources);
+        w.charged
+            .insert(lease, (op.key.clone(), op.resources[0].min(w.capacity[0])));
         w.booked = add(w.booked, op.resources);
         w.leases += 1;
         self.held.insert(

@@ -44,6 +44,11 @@ use js_types::sched::{
     WaiterId, WorkerId,
 };
 
+use crate::load_reference::{Ask, Host, Placer};
+
+/// The scheduler's term in every F3 run.
+const TERM: u64 = 1;
+
 /// The scheduler's grace G, in milliseconds.
 pub const GRACE_MS: u64 = 60_000;
 /// The prefix of the reason work waits with while only cordoned workers could run it.
@@ -161,6 +166,9 @@ struct Holding {
     lost: bool,
     /// It holds the node alone: an action at the worker's whole memory when granted.
     alone: bool,
+    /// The cores it was charged when granted (the load rule's ledger): its request's, cut to
+    /// the worker's.
+    cores: u64,
     committed: bool,
     /// A worker's result of it was proposed (a silent worker's lease is then given up
     /// with no charge: that result decides the operation).
@@ -206,6 +214,11 @@ pub struct Check {
     ops: BTreeMap<OperationId, ShadowOp>,
     holding: BTreeMap<OperationId, Holding>,
     newest_grant: Option<LeaseId>,
+    /// Whether the scheduler places by load: the reference placement is `load_reference`'s,
+    /// not the booked rule's.
+    load: bool,
+    /// The worker each blocked head held after the last round (load rule).
+    holds: BTreeMap<OperationId, WorkerId>,
     newest_committed: BTreeMap<OperationId, LeaseId>,
     answered_waiters: BTreeSet<WaiterId>,
     pub seen: Seen,
@@ -223,6 +236,8 @@ impl Check {
             ops: BTreeMap::new(),
             holding: BTreeMap::new(),
             newest_grant: None,
+            load: !crate::booked::is_booked(),
+            holds: BTreeMap::new(),
             newest_committed: BTreeMap::new(),
             answered_waiters: BTreeSet::new(),
             seen: Seen::default(),
@@ -235,9 +250,11 @@ impl Check {
         let (scenario, seed) = self.label;
         panic!(
             "{invariant} violated: {what}\n  scenario {scenario}, seed {seed}, step {}, t={} ms\n  \
-             replay: KBF_SIM_SCENARIO={scenario} KBF_SIM_SEED={seed} cargo test -p js-sched \
-             --test f3_fleet -- --ignored --exact replay",
-            self.step, self.now
+             replay: KBF_SIM_RULE={rule} KBF_SIM_SCENARIO={scenario} KBF_SIM_SEED={seed} cargo \
+             test -p js-sched --test f3_fleet -- --ignored --exact replay",
+            self.step,
+            self.now,
+            rule = if self.load { "load" } else { "booked" }
         );
     }
 
@@ -427,6 +444,13 @@ impl Check {
         queue.sort_by_key(|id| (Reverse(self.ops[id].request.qos.clone()), *id));
         let names: Vec<WorkerId> = self.workers.keys().cloned().collect();
         let mut round = Round::default();
+        let mut placer = self.load.then(|| {
+            let hosts = names.iter().map(|n| self.host(n)).collect();
+            let next_seq = self.newest_grant.map_or(0, |l| l.seq + 1);
+            Placer::new(hosts, TERM, next_seq, self.holds.clone())
+        });
+        // The platform requests seen this round: a request's pool is the one its platform is.
+        let mut pools: Vec<js_caps::Request> = Vec::new();
         for id in queue {
             let request = &self.ops[&id].request;
             let usable = |w: &WorkerId, cordoned: bool| {
@@ -441,27 +465,56 @@ impl Check {
                     && !self.ops[&id].avoid.contains(w)
                     && self.workers[w].capacity.fits(&request.resources)
             });
-            // The least loaded worker with room; of equals, the first by name.
-            let load = |w: &WorkerId| {
-                let (held, leases, _) = booked.get(w).copied().unwrap_or_default();
-                (self.workers[w].capacity, held, leases)
+            let fit = if let Some(placer) = placer.as_mut() {
+                // The load rule: the reference placement of `load_reference`.
+                let pool = pools
+                    .iter()
+                    .position(|p| *p == request.needs)
+                    .unwrap_or_else(|| {
+                        pools.push(request.needs.clone());
+                        pools.len() - 1
+                    });
+                let usable: Vec<usize> = (0..names.len())
+                    .filter(|&i| {
+                        usable(&names[i], false)
+                            && !(elsewhere && self.ops[&id].avoid.contains(&names[i]))
+                    })
+                    .collect();
+                let ask = Ask {
+                    operation: id,
+                    key: &request.key,
+                    resources: request.resources,
+                    pool,
+                    candidates: &usable,
+                };
+                if round.grants.len() < PLACEMENT_ROUND {
+                    placer.place(&ask).map(|i| &names[i])
+                } else {
+                    None
+                }
+            } else {
+                // The least loaded worker with room; of equals, the first by name.
+                let load = |w: &WorkerId| {
+                    let (held, leases, _) = booked.get(w).copied().unwrap_or_default();
+                    (self.workers[w].capacity, held, leases)
+                };
+                names
+                    .iter()
+                    .filter(|w| {
+                        let (held, leases, whole) = booked.get(*w).copied().unwrap_or_default();
+                        usable(w, false)
+                            && room(
+                                self.workers[*w].capacity,
+                                held,
+                                whole,
+                                leases,
+                                request.resources,
+                            )
+                            && !(elsewhere && self.ops[&id].avoid.contains(*w))
+                    })
+                    .min_by(|a, b| by_load(load(a), load(b)))
+                    .filter(|_| round.grants.len() < PLACEMENT_ROUND)
             };
-            let fit = names
-                .iter()
-                .filter(|w| {
-                    let (held, leases, whole) = booked.get(*w).copied().unwrap_or_default();
-                    usable(w, false)
-                        && room(
-                            self.workers[*w].capacity,
-                            held,
-                            whole,
-                            leases,
-                            request.resources,
-                        )
-                        && !(elsewhere && self.ops[&id].avoid.contains(*w))
-                })
-                .min_by(|a, b| by_load(load(a), load(b)))
-                .filter(|_| round.grants.len() < PLACEMENT_ROUND);
             let class = match fit {
                 Some(w) => {
                     let alone = exclusive(self.workers[w].capacity, request.resources);
@@ -493,7 +546,31 @@ impl Check {
             }
             round.classes.insert(id, class);
         }
+        if let Some(placer) = placer {
+            self.holds = placer.holds().clone();
+        }
         round
+    }
+
+    /// Worker `name` as the load reference meets it: its capacity, the GPUs and VM slots its
+    /// holdings book, whether one holds it alone, and what each was charged.
+    fn host(&self, name: &WorkerId) -> Host {
+        let booked = self.booked_on(name);
+        let (_, whole) = self.holds_on(name);
+        let charged = self
+            .holding
+            .iter()
+            .filter(|(_, h)| h.worker == *name)
+            .map(|(id, h)| (self.ops[id].request.key.clone(), h.cores))
+            .collect();
+        Host::new(
+            name.clone(),
+            self.workers[name].capacity,
+            booked.gpus,
+            booked.vms,
+            whole,
+            charged,
+        )
     }
 
     /// Checks what the scheduler emitted for one input, then its state against the
@@ -536,19 +613,41 @@ impl Check {
                     self.ensure(!self.cordons.contains_key(&g.worker), "I8", || {
                         format!("{g:?} to a worker that is {:?}", self.cordons[&g.worker])
                     });
-                    let booked = self.booked_on(&g.worker);
-                    let (leases, whole) = self.holds_on(&g.worker);
-                    self.ensure(
-                        room(w.capacity, booked, whole, leases, op.request.resources),
-                        "I6",
-                        || {
+                    if self.load {
+                        // The documented limits of the load rule: room but for the load, and
+                        // the cores charged to the worker, this lease's with them, within
+                        // `C (1 + s_cpu)`; its record carries what it was charged.
+                        let host = self.host(&g.worker);
+                        let request = op.request.resources;
+                        self.ensure(host.admits(&request), "I6", || {
                             format!(
-                                "{g:?}: {booked:?} booked in {leases} leases (alone: {whole}) \
-                                 and the request do not fit {:?}",
+                                "{g:?}: {} millicores charged of {} and the request do not fit {:?}",
+                                host.left(),
+                                host.cpu_limit(),
                                 w.capacity
                             )
-                        },
-                    );
+                        });
+                        self.ensure(
+                            g.cost.cpu_millis == host.charge_of(&request)
+                                && g.cost.limit_bytes == request.memory_bytes,
+                            "I6",
+                            || format!("{g:?} was charged {:?}", g.cost),
+                        );
+                    } else {
+                        let booked = self.booked_on(&g.worker);
+                        let (leases, whole) = self.holds_on(&g.worker);
+                        self.ensure(
+                            room(w.capacity, booked, whole, leases, op.request.resources),
+                            "I6",
+                            || {
+                                format!(
+                                    "{g:?}: {booked:?} booked in {leases} leases (alone: {whole}) \
+                                     and the request do not fit {:?}",
+                                    w.capacity
+                                )
+                            },
+                        );
+                    }
                     self.newest_grant = Some(g.lease);
                     let (downs, lost) = (w.downs, w.down);
                     self.holding.insert(
@@ -559,6 +658,7 @@ impl Check {
                             downs,
                             lost,
                             alone: exclusive(w.capacity, op.request.resources),
+                            cores: op.request.resources.cpu_millis.min(w.capacity.cpu_millis),
                             committed: false,
                             proposed: false,
                         },
