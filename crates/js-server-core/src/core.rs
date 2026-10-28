@@ -3,7 +3,8 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, Request, UNSERVABLE_WAIT};
+use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, LoadConfig, Request, UNSERVABLE_WAIT};
+use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
 
@@ -28,6 +29,13 @@ pub struct Config {
     /// How long a finished operation is kept, which a late request for its result still
     /// finds.
     pub finished_retention: Duration,
+    /// How the scheduler admits actions; `None` is the scheduler's default, placement by
+    /// load. `Some` with `PlacementLoad::Off` is the rollback switch to the booked rule,
+    /// for nodes that do not send load readings yet.
+    pub load: Option<LoadConfig>,
+    /// How long a lease whose node has no session row anywhere is left before the intake
+    /// poll requeues it ([`Core::intake`]).
+    pub orphan_wait: Duration,
 }
 
 impl Config {
@@ -38,6 +46,8 @@ impl Config {
             term,
             unservable_wait: UNSERVABLE_WAIT,
             finished_retention: FINISHED_RETENTION,
+            load: None,
+            orphan_wait: ORPHAN_WAIT,
         }
     }
 
@@ -45,6 +55,21 @@ impl Config {
     #[must_use]
     pub const fn with_unservable_wait(mut self, wait: Duration) -> Self {
         self.unservable_wait = wait;
+        self
+    }
+
+    /// This configuration, admitting actions as `load` says instead of by the scheduler's
+    /// default. `PlacementLoad::Off` in it places by the booked rule.
+    #[must_use]
+    pub const fn with_load_config(mut self, load: LoadConfig) -> Self {
+        self.load = Some(load);
+        self
+    }
+
+    /// This configuration, requeueing a lease whose node has no session row after `wait`.
+    #[must_use]
+    pub const fn with_orphan_wait(mut self, wait: Duration) -> Self {
+        self.orphan_wait = wait;
         self
     }
 
@@ -96,6 +121,10 @@ pub enum NotQueued {
     /// out of the rows: the request asks again, and queues afresh once it is.
     #[error("the work's previous run is finishing; the request is not queued")]
     Finishing,
+    /// A newer writer holds the state store: this core writes nothing more, and takes no
+    /// work.
+    #[error("this scheduler was superseded by a newer writer of the state store")]
+    Superseded,
 }
 
 /// An operator action named a node that never registered.
@@ -136,9 +165,9 @@ pub enum NodeAction {
 }
 
 /// What the lock covers: the engine, and the adapter it calls.
-struct Locked<A> {
-    engine: Engine,
-    adapter: A,
+pub(crate) struct Locked<A> {
+    pub(crate) engine: Engine,
+    pub(crate) adapter: A,
 }
 
 /// The server's core. Cheap to share: every method takes `&self`.
@@ -183,10 +212,12 @@ impl<A: Adapter> Core<A> {
     /// this frontend in the store, and is the epoch of a store that has none. `now` is the
     /// farm time of the start: the lease grace of a lease the store holds runs from it.
     ///
-    /// The start takes up every unfinished operation the store holds, leased ones too, and
-    /// assumes no other frontend of the store is live: a lease another running frontend
-    /// holds would be given up here once the grace has passed, and its operation run twice.
-    /// (The queued-only start of several frontends is not in this core yet.)
+    /// The start takes up the operations that wait for a lease, and none that holds one: the
+    /// lease belongs to the frontend its node is connected to, which may be another than this
+    /// one, and a lease taken up here would be given up once the lease grace had passed, and
+    /// its operation run twice. A leased operation is taken up when its node says `Hello`
+    /// here ([`Core::register`]); if the node never does, the orphan sweep of the intake poll
+    /// ([`Core::intake`]) requeues its lease. An operator's cordons are taken up too.
     ///
     /// # Errors
     /// The store cannot be read or written, or holds a row that is not one the scheduler
@@ -238,7 +269,7 @@ impl<A: Adapter> Core<A> {
         self.state.get_mut().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn lock(&self) -> MutexGuard<'_, Locked<A>> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Locked<A>> {
         // Nothing under the lock panics midway through a change.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -254,7 +285,8 @@ impl<A: Adapter> Core<A> {
     /// queued only once the store has it, and a request for work the store holds an
     /// operation for joins that operation. An operation that holds a lease on a node
     /// another frontend owns is not taken up ([`Held::Elsewhere`]): the scheduler hears
-    /// nothing of the request. A core with no store ignores `parcel`.
+    /// nothing of the request, and its caller is followed through the store
+    /// ([`Core::intake`]). A core with no store ignores `parcel`.
     ///
     /// # Errors
     /// The core is fenced, or the store did not take the request: nothing is queued.
@@ -271,12 +303,17 @@ impl<A: Adapter> Core<A> {
         let Locked { engine, adapter } = &mut *locked;
         let admitted = engine.admit(adapter, &request, parcel, now)?;
         enrol(adapter, &admitted);
-        if admitted.held == Held::Here {
-            let event = Event::Submit {
-                waiter: admitted.waiter,
-                request,
-            };
-            engine.feed_quiet(adapter, now, event);
+        match admitted.held {
+            Held::Here => {
+                let event = Event::Submit {
+                    waiter: admitted.waiter,
+                    request,
+                };
+                engine.feed_quiet(adapter, now, event);
+            }
+            // The operation is another frontend's: this scheduler never holds it, and the
+            // caller is shown what the store says of it at the intake polls.
+            Held::Elsewhere(operation) => engine.keep_following(operation, vec![admitted.waiter]),
         }
         Ok(admitted)
     }
@@ -484,7 +521,9 @@ impl<A: Adapter> Core<A> {
     /// places no work on its nodes (each is cordoned in the scheduler alone), so the
     /// operations it holds queued are left for the other frontends. It goes on with
     /// everything else: a `Result` and a heartbeat of a lease it holds are taken, and its
-    /// callers are answered. Nothing undoes it.
+    /// callers are answered, from its own nodes and from what the other frontends write
+    /// ([`Core::intake`]); the intake poll takes in no operation another frontend queued.
+    /// Nothing undoes it.
     pub fn close_intake(&self) {
         self.lock().engine.closed = true;
     }

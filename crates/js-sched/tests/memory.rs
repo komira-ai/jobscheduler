@@ -3,6 +3,8 @@
 //! largest node that could run it, the floor its action key keeps, and a busy node's
 //! kill, which reruns at the same booking and counts against the node.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -83,7 +85,9 @@ struct Farm {
 impl Farm {
     fn new() -> Self {
         Self {
-            s: Scheduler::new(1).recording_requeues(),
+            s: Scheduler::new(1)
+                .with_load_config(booked::booked())
+                .recording_requeues(),
             now: FarmTime::default(),
         }
     }
@@ -650,7 +654,9 @@ fn a_memory_kill_of_a_lease_given_up_changes_nothing() {
 #[test]
 fn floors_are_bounded() {
     let mut f = Farm::new();
-    f.s = Scheduler::new(1).with_memory_floors(1);
+    f.s = Scheduler::new(1)
+        .with_load_config(booked::booked())
+        .with_memory_floors(1);
     f.node("a", 16, linux());
     for n in 1..=2 {
         f.submit(u64::from(n), request(n, GIB));
@@ -671,7 +677,9 @@ fn floors_are_bounded() {
 #[test]
 fn a_floor_change_names_the_raise_and_the_forgotten_keys_once() {
     let mut f = Farm::new();
-    f.s = Scheduler::new(1).with_memory_floors(1);
+    f.s = Scheduler::new(1)
+        .with_load_config(booked::booked())
+        .with_memory_floors(1);
     f.node("a", 16, linux());
     let mut ops = Vec::new();
     for n in 1..=2 {
@@ -701,7 +709,9 @@ fn a_floor_change_names_the_raise_and_the_forgotten_keys_once() {
         FloorChange::default()
     );
 
-    let mut successor = Scheduler::new(2).with_memory_floors(1);
+    let mut successor = Scheduler::new(2)
+        .with_load_config(booked::booked())
+        .with_memory_floors(1);
     successor.restore_floors(vec![
         Floor {
             key: key(1),

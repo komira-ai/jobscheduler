@@ -154,7 +154,9 @@ pub struct World {
 
 impl World {
     fn new(name: &str, seed: u64, fleet: Vec<Spec>, wait_secs: u64) -> Self {
-        let sched = Scheduler::new(1).with_unservable_wait(Duration::from_secs(wait_secs));
+        let sched = Scheduler::new(1)
+            .with_load_config(crate::booked::booked())
+            .with_unservable_wait(Duration::from_secs(wait_secs));
         let mut world = Self {
             sched,
             check: Checker::new(name, seed, wait_secs * 1_000),

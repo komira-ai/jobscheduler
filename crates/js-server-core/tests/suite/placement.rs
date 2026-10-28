@@ -7,7 +7,7 @@ use crate::common::{
     Call, GIB, Rig, at, beat, block_on, calls, core, core_by, lease, request, started, submit,
     submit_request, up, worker,
 };
-use js_sched::Cordon;
+use js_sched::{Cordon, LoadConfig, PlacementLoad};
 use js_server_core::{
     Admitted, Config, Core, NodeAction, NotQueued, PlaceError, Stage, UnknownNode,
 };
@@ -196,4 +196,44 @@ fn the_callers_of_a_finished_operation_are_forgotten_after_the_retention() {
     block_on(core.tick(at(5_000)));
     block_on(core.tick(at(9_000)));
     assert!(calls(&core).contains(&Call::Forgot(admitted.operation)));
+}
+
+/// The workers the first two one-core actions start on, submitted a round apart, with two
+/// idle nodes up.
+fn first_two_starts(config: &Config) -> Vec<String> {
+    let core = core_by(config);
+    up(&core, 0, "node-a", "d1");
+    up(&core, 0, "node-b", "d2");
+    submit(&core, 1, 1);
+    block_on(core.tick(at(1_000)));
+    submit(&core, 2, 2);
+    block_on(core.tick(at(2_000)));
+    calls(&core)
+        .into_iter()
+        .filter_map(|call| match call {
+            Call::Start { worker, .. } => Some(worker.as_str().to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Catches: a core that does not place by load by default, and a `Config` whose load
+/// setting never reaches the scheduler: by load the second action goes to the fuller node
+/// (fill before open), by the booked rule (the off switch) it spreads to the empty one.
+#[test]
+fn a_core_places_by_load_unless_the_off_switch_is_set() {
+    assert_eq!(
+        first_two_starts(&Config::new(1)),
+        ["node-a", "node-a"],
+        "by load"
+    );
+    let off = LoadConfig {
+        mode: PlacementLoad::Off,
+        ..LoadConfig::default()
+    };
+    assert_eq!(
+        first_two_starts(&Config::new(1).with_load_config(off)),
+        ["node-a", "node-b"],
+        "by the booked rule"
+    );
 }

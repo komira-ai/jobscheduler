@@ -10,6 +10,7 @@ mod load_rig;
 #[path = "support_score_z_ad/mod.rs"]
 mod support_score_z_ad;
 
+use js_sched::LoadConfig;
 use load_rig::{GIB, Rig, w, warm};
 use support_score_z_ad::{hold, host, place};
 
@@ -19,7 +20,14 @@ const WORKING_SET: u64 = 32 * GIB;
 
 /// Two hosts named `first` and `second`, each holding the same four leases.
 fn pair(first: &str, second: &str) -> Rig {
-    let mut r = Rig::on();
+    // These show the score's key 3, which reads how full a host looks. They keep the floor
+    // `f` of 750 they were written for: at 1000 a trusted host measured below its
+    // predictions is charged those predictions, as a fallback host is, and no host looks
+    // fuller than the other for being unmeasured.
+    let mut r = Rig::new(LoadConfig {
+        cpu_floor_permille: 750,
+        ..LoadConfig::default()
+    });
     r.up(first, host(352));
     r.up(second, host(352));
     hold(&mut r, first, &[second], HELD, warm(4_000, 8 * GIB));

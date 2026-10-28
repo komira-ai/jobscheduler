@@ -2,13 +2,13 @@
 //! what it can say of the store (rows moved from the farm core's tests of the same rules, with
 //! the store's rows read from the store itself).
 
-use js_server_core::{Config, Core, NotQueued, Reason, Report, Standing, Taken};
+use js_server_core::{Config, Core, Held, NotQueued, Reason, Report, Stage, Standing, Taken};
 use js_store::{EpochBump, EpochPolicy, Progress};
 use js_types::sched::{LeaseId, OperationId, Outcome, ResultRef, WaiterId};
 
 use crate::common::{
-    Call, Rig, at, beat, block_on, calls, core, lease, reported, request, started, submit,
-    submit_request, up, up_after, worker,
+    Call, Rig, at, beat, block_on, calls, core, lease, reported, request, shown_to, started,
+    submit, submit_request, up, up_after, worker,
 };
 use crate::stored::Setup;
 
@@ -40,10 +40,12 @@ fn parcel(n: u64) -> Option<Vec<u8>> {
 }
 
 /// Asserts that a core started over a store holding a leased and a queued operation takes up
-/// both, each for a caller of its own that is told of the parcel the first process kept, holds
-/// the lease for its node, and numbers new operations and leases past the blocks every earlier
+/// the queued one for a caller of its own that is told of the parcel the first process kept,
+/// takes the leased one up only when its node says `Hello` (then holding the lease for it, for
+/// a caller of its own), and numbers new operations and leases past the blocks every earlier
 /// start reserved. Catches: a restart that forgets an operation, one that numbers from zero
-/// again (two operations of one id), and one that loses the parcel.
+/// again (two operations of one id), one that loses the parcel, and one that takes up a lease
+/// whose node may be connected to another frontend.
 #[test]
 fn a_start_takes_up_the_operations_the_store_holds_and_numbers_past_them() {
     let setup = Setup::new();
@@ -61,19 +63,19 @@ fn a_start_takes_up_the_operations_the_store_holds_and_numbers_past_them() {
 
     assert_eq!(
         calls(&second),
-        [
-            Call::Adopted(OperationId(0), WaiterId(0), parcel(1)),
-            Call::Adopted(OperationId(1), WaiterId(1), parcel(2)),
-        ]
+        [Call::Adopted(OperationId(1), WaiterId(0), parcel(2))]
     );
     assert_eq!(second.epoch(), Some(1));
+    assert_eq!(second.queued_operations(), 1);
+    let held = |core: &Core<Rig>| core.with(|view, _| view.sched().leases_on(&worker("node-a")));
+    assert_eq!(held(&second), [], "the lease waits for its node");
+
+    up_after(&second, 5_000, "node-a", ("d1", ""), reported(1));
     assert_eq!(
-        second.queued_operations(),
-        1,
-        "the leased one is not queued"
+        calls(&second)[1],
+        Call::Adopted(OperationId(0), WaiterId(1), parcel(1))
     );
-    let held = second.with(|view, _| view.sched().leases_on(&worker("node-a")).len());
-    assert_eq!(held, 1);
+    assert_eq!(held(&second), [lease(1, 0)]);
     // A new operation and a new lease are numbered in blocks past the first start's.
     up(&second, 6_000, "node-b", "d2");
     let admitted = submit(&second, 6_001, 3);
@@ -231,12 +233,14 @@ fn a_request_joins_a_queued_operation_another_frontend_wrote() {
     assert_eq!(started(&core), [lease(1, 0)]);
 }
 
-/// Pins a limit of this start: it takes up every unfinished operation, a lease another live
-/// frontend holds too, and gives that lease up once the lease grace has passed without its
-/// node registering here, so the operation would run twice. A start that shares a store with
-/// running frontends must change this on purpose, and this test with it.
+/// Asserts that a start over a store another frontend still runs does not take up that
+/// frontend's leases: the scheduler holds none of them, so none is given up after the lease
+/// grace, the lease row and its operation's rows stand, and no loss is counted. A request for
+/// the work follows the operation through the store. This replaces the test that pinned the
+/// start taking every lease up, which ran an operation twice once the grace had passed.
+/// Catches: a start that gives up the leases of a frontend that is still running them.
 #[test]
-fn a_start_over_a_store_another_frontend_still_runs_takes_up_its_leases() {
+fn a_start_over_a_store_another_frontend_still_runs_follows_its_leases() {
     let setup = Setup::new();
     let running = setup.core(1);
     up(&running, 0, "node-a", "d1");
@@ -245,13 +249,24 @@ fn a_start_over_a_store_another_frontend_still_runs_takes_up_its_leases() {
     let second = setup.core_with(&Config::new(2), Rig::default(), 0);
 
     let held = second.with(|view, _| view.sched().leases_on(&worker("node-a")).len());
-    assert_eq!(held, 1, "the other frontend's lease is taken up");
+    assert_eq!(held, 0, "the other frontend's lease is not taken up");
+    assert_eq!(calls(&second), [], "and no caller is adopted for it");
     block_on(second.tick(at(60_001)));
+    second.intake(at(60_002));
     assert!(
-        calls(&second).contains(&Call::Requeued(lease(1, 0))),
-        "and given up after the grace: {:?}",
+        !calls(&second)
+            .iter()
+            .any(|call| matches!(call, Call::Requeued(_))),
+        "nothing is given up after the grace: {:?}",
         calls(&second)
     );
-    assert_eq!(setup.store.rows_of("loss/").len(), 1);
-    assert_eq!(leased.operation, OperationId(0));
+    assert_eq!(setup.store.rows_of("loss/").len(), 0);
+    assert_eq!(setup.store.rows_of("lease/").len(), 1, "the lease stands");
+
+    let joined = submit(&second, 60_003, 1);
+    assert_eq!(joined.held, Held::Elsewhere(leased.operation));
+    finish(&running, 60_004, "node-a", leased.operation, lease(1, 0));
+    second.intake(at(60_005));
+    let ended = Some(Stage::Done(b"done 1.0".to_vec()));
+    assert_eq!(shown_to(&second, joined.waiter), ended);
 }

@@ -30,8 +30,11 @@
 //!   predicted cost of the leases no reading covers yet, plus the cost of the new lease,
 //!   stays within its CPU and its memory, each charged at a cost the lease keeps from its
 //!   grant to its result; a worker with no usable reading is charged by predicted cost
-//!   alone. A scheduler built with [`Scheduler::new`] still places by the booked rule
-//!   until [`Scheduler::with_load_config`] turns this on (the default of [`LoadConfig`]).
+//!   alone. A scheduler built with [`Scheduler::new`] places this way, by the defaults of
+//!   [`LoadConfig`]: planned to 1.1x of the worker's CPU (`--placement-cpu-slack`) and
+//!   1.0x of its memory.
+//!   [`PlacementLoad::Off`], set through [`Scheduler::with_load_config`], is the rollback
+//!   switch to the booked rule; it is not a supported mode.
 //!   The rule, its settings and its counters are described in the `admission` module's
 //!   source;
 //! - iOS device leases ([`DEVICE_LEASES_PER_WORKER`]): a request with `ios.device=1`
@@ -41,10 +44,11 @@
 //! - whole-machine leases: one goes only to a worker that holds no lease, and books
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
-//!   until it has emptied. An action at the whole memory of a worker (the last step of
-//!   the memory ladder) holds none: it waits until some worker's free memory meets its
-//!   request, which under sustained spread load can be long, and nothing reserves a
-//!   worker for it;
+//!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An
+//!   action at the whole memory of a worker (the last step of the memory ladder) holds
+//!   none: it waits until some worker's free memory meets its request, which under
+//!   sustained spread load can be long, and nothing reserves a worker for it;
 //! - work no live worker can run (none satisfies its platform, or none that does is
 //!   large enough) waits with a reason its callers see, and is refused after
 //!   [`UNSERVABLE_WAIT`], the refusal committed before its callers are answered;
@@ -109,8 +113,8 @@ mod scheduler;
 mod servable;
 
 pub use admission::{
-    FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction,
-    ShadowChoice,
+    FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, MAX_CPU_SLACK_PERMILLE,
+    PlacementLoad, Prediction,
 };
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
@@ -126,5 +130,5 @@ pub use scheduler::memory::{
 pub use scheduler::{
     Avoided, FINISHED_RETENTION, Fate, LeasePhase, LeaseView, MAX_AVOIDED, OpState,
     PLACEMENT_ROUND, QueueGroup, QueueView, Recovered, RecoveredLease, Scheduler, Snapshot,
-    UNSERVABLE_WAIT, WaitingGroup, platform_label,
+    UNSERVABLE_WAIT, WaitingGroup, WholeMark, WholeWait, platform_label,
 };

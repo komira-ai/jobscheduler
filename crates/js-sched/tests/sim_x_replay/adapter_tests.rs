@@ -664,7 +664,13 @@ fn conformance_measured_above_predictions_loses_and_the_measurement_wins() {
 /// takes the measurement when it is the smaller term.
 #[test]
 fn conformance_the_floor_binds_when_the_reading_is_low() {
-    let mut r = Rig::on();
+    // The score model carries its own floor, `FLOOR_PERMILLE` (750), which is what it is
+    // checked against; the scheduler's default is 1000, where its floor is the whole
+    // prediction (2,000).
+    let mut r = Rig::new(js_sched::LoadConfig {
+        cpu_floor_permille: u32::try_from(FLOOR_PERMILLE).unwrap(),
+        ..js_sched::LoadConfig::default()
+    });
     r.up("a", node());
     r.up("b", node());
     load(&mut r, "a", &["b"], 2);

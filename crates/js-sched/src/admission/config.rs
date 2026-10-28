@@ -8,29 +8,29 @@ use js_types::sched::{FarmTime, Resources};
 /// Whether placement reads the load.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PlacementLoad {
-    /// Admit and rank by measured and predicted load.
+    /// Admit and rank by measured and predicted load. The placement.
     #[default]
     On,
-    /// Place as `Off` does, and count what `On` would have decided
-    /// ([`LoadCounters::would_admit`], [`LoadCounters::would_block`]).
-    Shadow,
-    /// Admit by the booked rule: free booked CPUs, memory never summed.
+    /// Admit by the booked rule: free booked CPUs, memory never summed. Not a supported
+    /// mode: an emergency switch for rollback, set through
+    /// [`crate::Scheduler::with_load_config`].
     Off,
 }
 
 /// The settings of the load predicate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoadConfig {
-    /// Whether placement reads the load. Default `On`.
+    /// Whether placement reads the load. Default `On`; `Off` is for rollback only.
     pub mode: PlacementLoad,
     /// The heartbeat interval `W`; readings are stale after three of them and the cold
     /// cap counts per window. Default 5 s.
     pub window: Duration,
     /// `f`, in thousandths: the covered leases are charged at least this share of their
-    /// predicted cores. Default 750; kept within 500 to 1000.
+    /// predicted cores. Default 1000 (a constant-duty lease is charged all of them); kept
+    /// within 500 to 1000.
     pub cpu_floor_permille: u32,
     /// `s_cpu`, in thousandths: the CPU the predicate lets a worker be charged above its
-    /// capacity. Default 100.
+    /// capacity (`--placement-cpu-slack`). Default 100 (1.1x); 0 is 1.0x. At most 1000.
     pub s_cpu_permille: u32,
     /// `s_mem`, in thousandths. Default 0.
     pub s_mem_permille: u32,
@@ -56,12 +56,13 @@ pub struct LoadConfig {
     /// The node guard on flat memory (`d`, in thousandths): a lease charged by a memory
     /// curve is admitted only if the flat memory costs of every lease on the worker,
     /// its own included, stay within `(1 + d) * C_mem`. Never applies to a whole-host
-    /// lease. `None` (the default) turns it off; the suggested value is 250.
+    /// lease. `None` turns it off. Default `Some(0)`: the sum of flat costs stays within
+    /// the worker's memory.
     pub flat_memory_slack_permille: Option<u32>,
     /// End a new lease's charge at its expected life: the P90 of its key's wall minutes
     /// (read through [`CurveSource::wall_minutes_p90`]) plus this many minutes, instead
     /// of charging it for the whole horizon. The lease's own present minute is always
-    /// charged. `None` (the default) turns it off; the suggested value is 2.
+    /// charged. `None` turns it off. Default `Some(2)`.
     pub expected_life_delta_minutes: Option<u32>,
     /// `--placement-score-balance`: how much of the other resource's leftover the fit
     /// counts, as `b/2` of the binding term ([`crate::Scorer`], key 5). Default 1; kept
@@ -75,10 +76,13 @@ pub struct LoadConfig {
     pub key_share_percent: u32,
 }
 
+/// The most CPU slack `--placement-cpu-slack` accepts, in thousandths: 2.0x of the cores.
+pub const MAX_CPU_SLACK_PERMILLE: u32 = 1000;
+
 /// Why [`LoadConfig::apply_flag`] refused a flag.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlagError {
-    /// Not a placement score flag.
+    /// Not a placement flag.
     Unknown(String),
     /// The value is not a number in the flag's range.
     Invalid {
@@ -105,7 +109,7 @@ impl Default for LoadConfig {
         Self {
             mode: PlacementLoad::On,
             window: Duration::from_secs(5),
-            cpu_floor_permille: 750,
+            cpu_floor_permille: 1000,
             s_cpu_permille: 100,
             s_mem_permille: 0,
             cold_per_window: None,
@@ -113,8 +117,8 @@ impl Default for LoadConfig {
             profile: true,
             profile_memory: true,
             profile_floor_permille: 750,
-            flat_memory_slack_permille: None,
-            expected_life_delta_minutes: None,
+            flat_memory_slack_permille: Some(0),
+            expected_life_delta_minutes: Some(2),
             score_balance: 1,
             score_slack_tol_ppm: 10_000,
             key_share_percent: 25,
@@ -132,6 +136,7 @@ impl LoadConfig {
             cpu_floor_permille: floor,
             cold_per_window: self.cold_per_window.map(|n| n.max(1)),
             file_share_permille: self.file_share_permille.min(1000),
+            s_cpu_permille: self.s_cpu_permille.min(MAX_CPU_SLACK_PERMILLE),
             profile_floor_permille: self.profile_floor_permille.clamp(500, floor),
             score_balance: self.score_balance.min(crate::load::MAX_BALANCE),
             key_share_percent: self.key_share_percent.min(100),
@@ -139,10 +144,12 @@ impl LoadConfig {
         }
     }
 
-    /// Sets the score flag `name` (`--placement-score-balance`, `--placement-score-slack-tol-ppm`
-    /// or `--placement-key-share`, with or without the leading dashes) to `value`. Nothing
-    /// changes on an error. The balance is 0 to 4 and the key share 0 to 100 (a trailing `%`
-    /// is allowed); a value outside is refused rather than clamped, so a typo is not run.
+    /// Sets the placement flag `name` (`--placement-score-balance`,
+    /// `--placement-score-slack-tol-ppm`, `--placement-key-share` or
+    /// `--placement-cpu-slack`, with or without the leading dashes) to `value`. Nothing
+    /// changes on an error. The balance is 0 to 4, the key share 0 to 100 (a trailing `%`
+    /// is allowed) and the CPU slack 0 to 1000 thousandths (0 is 1.0x of the cores); a
+    /// value outside is refused rather than clamped, so a typo is not run.
     ///
     /// # Errors
     /// [`FlagError`] for another flag or a value out of range.
@@ -161,6 +168,13 @@ impl LoadConfig {
             }
             "placement-score-slack-tol-ppm" => {
                 self.score_slack_tol_ppm = value.parse().map_err(|_| invalid())?;
+            }
+            "placement-cpu-slack" => {
+                let n: u32 = value.parse().map_err(|_| invalid())?;
+                if n > MAX_CPU_SLACK_PERMILLE {
+                    return Err(invalid());
+                }
+                self.s_cpu_permille = n;
             }
             "placement-key-share" => {
                 let n: u32 = value
@@ -277,7 +291,7 @@ mod tests {
 
     /// Catches: the profile floor `g` outside 0.5 to `f` (a curve charged below half of
     /// the flat cost, or above the floor the covered flat leases get), the switches not
-    /// on and the two owner-decision settings not off by default.
+    /// on and the two guard settings not set by default.
     #[test]
     fn the_profile_floor_stays_between_a_half_and_the_flat_floor() {
         let with = |f, g| {
@@ -291,6 +305,7 @@ mod tests {
         assert_eq!(with(750, 100).profile_floor_permille, 500);
         assert_eq!(with(750, 600).profile_floor_permille, 600);
         assert_eq!(with(750, 900).profile_floor_permille, 750, "not above f");
+        assert_eq!(with(1000, 900).profile_floor_permille, 900);
         assert_eq!(
             with(600, 750).profile_floor_permille,
             600,
@@ -304,9 +319,12 @@ mod tests {
         let d = LoadConfig::default();
         assert!(d.profile);
         assert!(d.profile_memory);
-        assert_eq!(d.profile_floor_permille, d.cpu_floor_permille);
-        assert_eq!(d.flat_memory_slack_permille, None);
-        assert_eq!(d.expected_life_delta_minutes, None);
+        assert_eq!(
+            d.profile_floor_permille, 750,
+            "g stays at 750 under f = 1000"
+        );
+        assert_eq!(d.flat_memory_slack_permille, Some(0));
+        assert_eq!(d.expected_life_delta_minutes, Some(2));
     }
 
     /// Catches: the default cold cap not being one per 32 cores rounded up (3 on 88
@@ -328,6 +346,23 @@ mod tests {
         assert_eq!(set.cold_cap(&Resources::new(88_000, 0)), 12);
     }
 
+    /// Catches: a default that plans memory past a worker's, charges a covered lease below
+    /// its prediction, leaves the memory guard or the expected-life end off, or keeps the
+    /// booked rule: placement by load, `s_cpu` 100 (1.1x), `s_mem` 0, `f` 1000, the guard
+    /// at `d` 0 and the charge ended at the expected life plus 2 minutes.
+    #[test]
+    fn the_defaults_place_by_load_with_the_guard_and_expected_life_on() {
+        let d = LoadConfig::default();
+        assert_eq!(d.mode, PlacementLoad::On);
+        assert_eq!((d.s_cpu_permille, d.s_mem_permille), (100, 0));
+        assert_eq!(d.cpu_floor_permille, 1000);
+        assert_eq!(d.flat_memory_slack_permille, Some(0));
+        assert_eq!(d.expected_life_delta_minutes, Some(2));
+        let cap = Resources::new(8_000, 1000);
+        assert_eq!((d.cpu_limit(&cap), d.mem_limit(&cap)), (8_800, 1000));
+        assert_eq!(d.floor_of(1_500), 1_500);
+    }
+
     /// Catches: limits computed with the slack on the wrong resource, overflowing, or
     /// the floor rounded down (an under-charge).
     #[test]
@@ -338,13 +373,24 @@ mod tests {
         assert_eq!(cfg.mem_limit(&cap), 1000);
         let loose = LoadConfig {
             s_mem_permille: 500,
+            s_cpu_permille: 0,
             ..cfg
         };
         assert_eq!(loose.mem_limit(&cap), 1500);
+        assert_eq!(loose.cpu_limit(&cap), 88_000, "0 is 1.0x");
         assert_eq!(cfg.cpu_limit(&Resources::new(u64::MAX, 0)), u64::MAX);
-        assert_eq!(cfg.floor_of(1000), 750);
-        assert_eq!(cfg.floor_of(1), 1, "rounded up");
-        assert_eq!(cfg.floor_of(u64::MAX), 13_835_058_055_282_163_712);
+        let three_quarters = LoadConfig {
+            cpu_floor_permille: 750,
+            ..cfg
+        };
+        assert_eq!(three_quarters.floor_of(1000), 750);
+        assert_eq!(three_quarters.floor_of(1), 1, "rounded up");
+        assert_eq!(
+            three_quarters.floor_of(u64::MAX),
+            13_835_058_055_282_163_712
+        );
+        assert_eq!(cfg.floor_of(1000), 1000);
+        assert_eq!(cfg.floor_of(u64::MAX), u64::MAX);
         assert_eq!(cfg.window_usec(), 5_000_000);
         assert_eq!(cfg.window_index(FarmTime::from_millis(4_999)), 0);
         assert_eq!(cfg.window_index(FarmTime::from_millis(5_000)), 1);
@@ -370,6 +416,12 @@ mod tests {
             ),
             (3, 2_500, 40)
         );
+        assert_eq!(cfg.apply_flag("--placement-cpu-slack", "250"), Ok(()));
+        assert_eq!(cfg.s_cpu_permille, 250);
+        assert_eq!(cfg.apply_flag("placement-cpu-slack", "0"), Ok(()));
+        assert_eq!(cfg.s_cpu_permille, 0);
+        assert_eq!(cfg.apply_flag("placement-cpu-slack", "1000"), Ok(()));
+        assert_eq!(cfg.s_cpu_permille, 1000);
         assert_eq!(cfg.apply_flag("placement-key-share", "100"), Ok(()));
         assert_eq!(cfg.key_share_percent, 100);
         let before = cfg;
@@ -378,6 +430,9 @@ mod tests {
             ("--placement-score-balance", "-1"),
             ("--placement-score-slack-tol-ppm", "1%"),
             ("--placement-key-share", "101"),
+            ("--placement-cpu-slack", "1001"),
+            ("--placement-cpu-slack", "-1"),
+            ("--placement-cpu-slack", "10%"),
             ("--placement-key-share", ""),
         ] {
             assert_eq!(
@@ -393,6 +448,12 @@ mod tests {
             Err(FlagError::Unknown("--placement-s-cpu".to_owned()))
         );
         assert_eq!(cfg, before);
+        let wild = LoadConfig {
+            s_cpu_permille: 5_000,
+            ..LoadConfig::default()
+        }
+        .normalised();
+        assert_eq!(wild.s_cpu_permille, MAX_CPU_SLACK_PERMILLE);
         assert_eq!(
             FlagError::Unknown("--placement-s-cpu".to_owned()).to_string(),
             "unknown placement flag --placement-s-cpu"

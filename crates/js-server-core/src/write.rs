@@ -8,7 +8,8 @@
 //! no row names, and a result is never written before the grant it follows. A writer that
 //! cannot be reached holds everything behind the earliest row it refused; a writer that
 //! refuses a row for good drops that record's remaining effects, and one that finds
-//! another writer's work in the way also undoes what the core did for the record.
+//! another writer's work in the way also undoes what the core did for the record. Once a
+//! newer writer holds the store, everything held is dropped and nothing is written.
 
 use std::collections::VecDeque;
 
@@ -40,6 +41,10 @@ pub enum Attempt {
     /// They cannot be written, and trying again cannot help: the effect and the rest of
     /// its record are dropped.
     Dropped,
+    /// The store says a newer writer holds it: nothing this core writes can succeed any more.
+    /// The effect is dropped as one refused for good is, and so is every record held, once
+    /// and for all ([`Core::superseded`](crate::Core::superseded)).
+    Superseded,
 }
 
 /// What the core knows of the effect it asks a writer to write, besides the effect.
@@ -95,6 +100,19 @@ impl Engine {
     pub(crate) fn release_unwritten(&mut self, a: &mut dyn Adapter) -> Vec<Effect> {
         let mut ready = Vec::new();
         loop {
+            if self.superseded {
+                let held: usize = self.unwritten.iter().map(|b| b.effects.len()).sum();
+                if held > 0 {
+                    self.write_drops += held as u64;
+                    tracing::error!(held, "a newer writer holds the store: held effects dropped");
+                }
+                // Only the held answers' parcels go: an answer already written and in
+                // `ready` is settled with its own after this returns.
+                for batch in std::mem::take(&mut self.unwritten) {
+                    self.forget_details(a, batch.effects);
+                }
+                return ready;
+            }
             let Some(front) = self.unwritten.front() else {
                 return ready;
             };
@@ -115,9 +133,6 @@ impl Engine {
                 (None, None) => Settles::Nothing,
             };
             let attempt = self.writer.write(&effect, &settles);
-            if attempt == Attempt::Transient {
-                self.unreachable = true;
-            }
             match attempt {
                 Attempt::Taken => {
                     self.unwritten
@@ -126,13 +141,15 @@ impl Engine {
                     ready.push(effect);
                 }
                 Attempt::Transient => {
+                    self.unreachable = true;
                     let held: usize = self.unwritten.iter().map(|b| b.effects.len()).sum();
                     tracing::warn!(held, "writer holds back records; retried later");
                     return ready;
                 }
-                Attempt::Stale | Attempt::Disowned | Attempt::Dropped => {
+                Attempt::Stale | Attempt::Disowned | Attempt::Dropped | Attempt::Superseded => {
                     self.write_drops += 1;
                     tracing::error!("a committed record's remaining effects were dropped");
+                    self.superseded |= attempt == Attempt::Superseded;
                     let dropped = self.unwritten.pop_front().map(|b| b.effects);
                     let dropped = dropped.unwrap_or_default();
                     // Another frontend's work stands in a stale write's place: this core
@@ -143,7 +160,7 @@ impl Engine {
                     if attempt == Attempt::Stale {
                         self.lost_race(a, &dropped);
                     } else {
-                        self.follow_finishes(a, &dropped);
+                        self.follow_finishes(&dropped);
                     }
                     self.forget_details(a, dropped);
                 }
@@ -201,19 +218,21 @@ impl Engine {
                 self.lose_grant(a, start);
             }
         }
-        self.follow_finishes(a, dropped);
+        self.follow_finishes(dropped);
     }
 
-    /// Hands the callers of the results and refusals among the `dropped` effects to the
-    /// adapter, to be answered from the store: a finish that was not written (the daemon
-    /// moved to another frontend, or another frontend finished the operation) is the
-    /// store's to tell.
-    fn follow_finishes(&mut self, a: &mut dyn Adapter, dropped: &VecDeque<Effect>) {
+    /// Keeps the callers of the results and refusals among the `dropped` effects, to be
+    /// answered from the store: a finish that was not written (the daemon moved to another
+    /// frontend, or another frontend finished the operation) is the store's to tell.
+    pub(crate) fn follow_finishes(&mut self, dropped: &VecDeque<Effect>) {
         for effect in dropped {
-            match effect {
-                Effect::Answer(answer) => a.followed(answer.operation, &answer.waiters),
-                Effect::Refuse(refusal) => a.followed(refusal.operation, &refusal.waiters),
-                Effect::Start(_) | Effect::Commit(_) | Effect::Waiting(_) => {}
+            let ended = match effect {
+                Effect::Answer(answer) => Some((answer.operation, answer.waiters.clone())),
+                Effect::Refuse(refusal) => Some((refusal.operation, refusal.waiters.clone())),
+                Effect::Start(_) | Effect::Commit(_) | Effect::Waiting(_) => None,
+            };
+            if let Some((operation, callers)) = ended {
+                self.keep_following(operation, callers);
             }
         }
     }
@@ -227,10 +246,8 @@ impl Engine {
             .for_each(|operation| self.undone(a, operation, start));
     }
 
-    /// `operation`, whose grant `start` was undone, is forgotten if the store has no queue
-    /// row for it: another frontend leased or finished it, and its callers follow the
-    /// store. A row that cannot be read leaves it queued, and a requeue the store has not
-    /// taken yet is why the row is not there: the operation stays.
+    /// `operation`, whose grant `start` was undone: asks the store where it stands. A row
+    /// that cannot be read is looked at again by the next poll.
     fn undone(&mut self, a: &mut dyn Adapter, operation: OperationId, start: &StartLease) {
         tracing::info!(
             %operation,
@@ -243,9 +260,8 @@ impl Engine {
             looked = Some(rows.queue_version(operation)?);
             Ok(())
         });
-        if looked == Some(None) && !self.requeue_pending(operation) {
-            let waiters = self.sched.forget_queued(operation).unwrap_or_default();
-            a.followed(operation, &waiters);
-        }
+        looked
+            .into_iter()
+            .for_each(|row| self.reconcile(a, operation, row));
     }
 }

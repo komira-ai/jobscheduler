@@ -4,7 +4,7 @@
 #[path = "load_rig/mod.rs"]
 mod load_rig;
 
-use js_sched::{EVALUATIONS_PER_WORKER, Event, Load, LoadConfig, PlacementLoad, least_loaded};
+use js_sched::{EVALUATIONS_PER_WORKER, Event, Load, LoadConfig, least_loaded};
 use js_types::sched::{LeaseKind, Resources, StartLease, WorkKey};
 
 use load_rig::{GIB, Rig, w, warm};
@@ -200,77 +200,33 @@ fn a_worker_measured_above_its_predictions_loses() {
     assert_eq!(r.s.load_counters().chose_distrusted, 0);
 }
 
-/// Shows: in `Shadow` mode the lease is placed by the booked rule, and the log carries the
-/// previous least-loaded choice beside the score's, for the same admitted workers.
+/// Shows: the public `least_loaded` ranks workers of different sizes by the larger of
+/// their CPU and memory shares of what is held, then by lease count, takes the first of
+/// equals, and gives nothing for no candidate.
 #[test]
-fn shadow_logs_the_previous_choice_beside_the_scored_one() {
-    let mut r = Rig::new(LoadConfig {
-        mode: PlacementLoad::Shadow,
-        ..LoadConfig::default()
-    });
-    r.up("a", node());
-    r.up("b", node());
-    for _ in 0..3 {
-        r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
-    }
-    let starts = r.tick();
-    assert_eq!(starts.len(), 3);
-    let log = r.s.take_shadow_choices();
-    assert_eq!(log.len(), 3);
-    // The previous rule spreads; the score packs once a worker holds something.
-    assert_eq!(on(&starts), ["a", "b", "a"], "placed by the booked rule");
-    let name = |n: &Option<js_types::sched::WorkerId>| n.as_ref().map(|n| n.as_str().to_owned());
-    assert_eq!(name(&log[1].previous).as_deref(), Some("b"), "the emptier");
-    assert_eq!(name(&log[1].scored).as_deref(), Some("a"), "the fitter");
-    let c = r.s.load_counters();
-    assert_eq!(c.shadow_same_choice + c.shadow_other_choice, 3);
-    assert!(
-        c.shadow_other_choice > 0,
-        "best fit differs from the spread"
-    );
-    assert!(r.s.take_shadow_choices().is_empty(), "taken once");
-}
-
-/// Shows: the public `least_loaded` over the figures a worker's load view gives is the
-/// choice the shadow log records as the previous rule's, for workers of different sizes
-/// and loads, at every placement of a run (so a sim can use the function as its baseline).
-#[test]
-fn the_public_least_loaded_rule_is_the_shadow_logs_previous_choice() {
-    let mut r = Rig::new(LoadConfig {
-        mode: PlacementLoad::Shadow,
-        ..LoadConfig::default()
-    });
-    let capacity = |name: &str| match name {
-        "a" => Resources::new(8_000, 32 * GIB),
-        "b" => Resources::new(16_000, 64 * GIB),
-        _ => Resources::new(4_000, 16 * GIB),
-    };
-    for name in ["a", "b", "c"] {
-        r.up(name, capacity(name));
-    }
-    let mut differs_from_first = false;
-    for i in 0..9u64 {
-        r.action(
-            500 + 250 * (i % 4),
-            2 * GIB,
-            Some(warm(500 + 250 * (i % 4), GIB)),
-        );
-        let loads: Vec<(js_types::sched::WorkerId, Load)> = ["a", "b", "c"]
-            .iter()
-            .map(|name| {
-                let view = r.s.load_view(&w(name)).expect("registered");
-                let left = Resources::new(view.left_cpu_millis, view.left_memory_bytes);
-                let held = r.held(name).len();
-                (w(name), Load::new(left, capacity(name), held))
-            })
-            .collect();
-        let refs: Vec<_> = loads.iter().map(|(n, l)| (n, *l)).collect();
-        let want = least_loaded(&refs).cloned();
-        assert_eq!(r.tick().len(), 1);
-        let log = r.s.take_shadow_choices();
-        assert_eq!(log.len(), 1);
-        assert_eq!(log[0].previous, want, "placement {i}");
-        differs_from_first |= want != Some(w("a"));
-    }
-    assert!(differs_from_first, "the rule moved off the first worker");
+fn the_public_least_loaded_rule_ranks_by_share_then_leases() {
+    let small = Resources::new(4_000, 16 * GIB);
+    let large = Resources::new(16_000, 64 * GIB);
+    let (a, b, c) = (w("a"), w("b"), w("c"));
+    // `a` holds 2 of 4 cores, `b` 4 of 16, `c` 4 of 16 in more leases.
+    let held = Resources::new(2_000, 0);
+    let held_large = Resources::new(4_000, 0);
+    let ranked = [
+        (&a, Load::new(held, small, 2)),
+        (&b, Load::new(held_large, large, 4)),
+        (&c, Load::new(held_large, large, 5)),
+    ];
+    assert_eq!(least_loaded(&ranked), Some(&b), "the smaller share");
+    assert_eq!(least_loaded(&ranked[2..]), Some(&c));
+    let tied = [
+        (&a, Load::new(held_large, large, 4)),
+        (&b, Load::new(held_large, large, 4)),
+    ];
+    assert_eq!(least_loaded(&tied), Some(&a), "the first of equals");
+    let memory = [
+        (&a, Load::new(Resources::new(0, 8 * GIB), small, 1)),
+        (&b, Load::new(Resources::new(3_000, 0), small, 1)),
+    ];
+    assert_eq!(least_loaded(&memory), Some(&a), "memory 0.5 below CPU 0.75");
+    assert_eq!(least_loaded(&[]), None);
 }

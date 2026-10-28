@@ -32,8 +32,10 @@ pub type Delivery = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// What the callers of an operation that has not started are shown.
 ///
-/// The core decides this much; the stage a caller sees once the operation runs, or ends,
-/// is the adapter's ([`Adapter::start`], [`Adapter::settle`]).
+/// The core decides this much of what a caller of an operation this core holds is shown;
+/// the stage once it runs or ends here is the adapter's ([`Adapter::start`],
+/// [`Adapter::settle`]). The callers of an operation another frontend runs are shown
+/// [`Stage::Executing`] and [`Stage::Done`], which the core reads from the state store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Stage {
@@ -43,6 +45,12 @@ pub enum Stage {
     Waiting(String),
     /// As [`Stage::Waiting`], but it has started before, so a drain keeps its streams.
     WaitingKept(String),
+    /// Running on a worker of another frontend, as the state store says
+    /// ([`Core::intake`](crate::Core::intake), [`Core::follow`](crate::Core::follow)).
+    Executing,
+    /// Ended, as the state store says: the value of the operation's `done/` row, which is
+    /// the adapter's own bytes ([`Adapter::ending`]).
+    Done(Vec<u8>),
 }
 
 /// A worker's newest stream.
@@ -156,7 +164,28 @@ pub trait Adapter: Send {
     /// ([`Core::submit`](crate::Core::submit)), if it kept any.
     fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>);
 
-    /// The finish of `operation` was not written, because the state store holds another
-    /// writer's: its callers `waiters` are answered from the store, not by this core.
-    fn followed(&mut self, operation: OperationId, waiters: &[WaiterId]);
+    /// The callers among `callers` still waiting: not answered, and still listening (a caller
+    /// that gave up is not).
+    fn waiting_among(&self, callers: &[WaiterId]) -> Vec<WaiterId>;
+
+    /// Shows `stage` to `callers`, waking whoever watches them only if it changed. The
+    /// callers of an operation another frontend took are shown [`Stage::Executing`] while
+    /// it holds a lease, and [`Stage::Done`] once its result is in the store.
+    fn show_callers(&mut self, callers: &[WaiterId], stage: &Stage);
+
+    /// Keeps `callers` of the finished `operation` until the core says it no longer holds the
+    /// operation ([`Adapter::forget_dropped`]): the operation was finished by another
+    /// frontend, and its retention starts when the core saw it end.
+    fn keep_finished(&mut self, operation: OperationId, callers: Vec<WaiterId>);
+
+    /// The operation `operation`, which another frontend ran, ended; `ended` is the value of
+    /// its `done/` row. Called once, as its callers are shown [`Stage::Done`].
+    fn followed(&mut self, operation: OperationId, ended: &[u8]);
+
+    /// The operations clients ask for by name that the core does not hold, whose channels
+    /// someone still watches and which have not been shown a result.
+    fn watched(&mut self) -> Vec<OperationId>;
+
+    /// Shows `stage` to the watchers of `operation`, one [`Adapter::watched`] named.
+    fn show_watched(&mut self, operation: OperationId, stage: &Stage);
 }

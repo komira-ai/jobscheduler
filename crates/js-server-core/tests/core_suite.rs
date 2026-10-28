@@ -6,6 +6,11 @@
 //! and the same farm time, so the lease term (the store's epoch) and the blocks of lease
 //! sequences are the store's.
 //!
+//! The harness polls the store's intake at every advance, as a server does, and its core
+//! requeues a lease whose node has no session at the second look of the orphan sweep: a start
+//! takes up no leased operation (its node may be connected to another frontend), so the lease
+//! of a node that never comes back is given up by that sweep, not by the start.
+//!
 //! The suite's reference core stays as it is. For each of its six defects there is a broken
 //! variant of this harness, not of the core (the core has no switch to break): a writer
 //! that takes a grant without writing it, a writer that deletes a finished operation's lease
@@ -25,7 +30,7 @@ use js_caps::NodeCaps;
 use js_conformance::Verdict;
 use js_conformance::core::{
     self, Answered, CoreHarness, Observed, Released, Scenario, Stream as HarnessStream,
-    UNPLACEABLE_JOB,
+    UNPLACEABLE_JOB, WIDE_JOB,
 };
 use js_sched::DaemonInstance;
 use js_server_core::{
@@ -282,7 +287,21 @@ impl Adapter for Probe {
         }
     }
 
-    fn followed(&mut self, _: OperationId, _: &[WaiterId]) {}
+    fn waiting_among(&self, _: &[WaiterId]) -> Vec<WaiterId> {
+        Vec::new()
+    }
+
+    fn show_callers(&mut self, _: &[WaiterId], _: &Stage) {}
+
+    fn keep_finished(&mut self, _: OperationId, _: Vec<WaiterId>) {}
+
+    fn followed(&mut self, _: OperationId, _: &[u8]) {}
+
+    fn watched(&mut self) -> Vec<OperationId> {
+        Vec::new()
+    }
+
+    fn show_watched(&mut self, _: OperationId, _: &Stage) {}
 }
 
 /// How a broken variant of the harness differs from the correct one.
@@ -327,10 +346,13 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 /// The request a job number stands for: one core, one GiB, a container; different numbers
-/// are different work, and the unplaceable job asks for more cores than any worker has.
+/// are different work, the unplaceable job asks for more cores than any worker has and the
+/// wide job for all of a worker's (4).
 fn request(job: u8) -> js_sched::Request {
     let cores = if job == UNPLACEABLE_JOB {
         1_000_000
+    } else if job == WIDE_JOB {
+        4_000
     } else {
         1_000
     };
@@ -396,7 +418,10 @@ impl Harness {
             callers: BTreeMap::new(),
         };
         let storage = Storage::new(self.store.clone(), self.codec.clone(), Arc::new(TestExt));
-        let core = Core::open(&Config::new(TERM), probe, storage, self.at()).expect("opened");
+        // The suite's scenario gives an unclaimed lease up once its node has had no session for
+        // the grace: the sweep acts on its second look, with no further wait.
+        let config = Config::new(TERM).with_orphan_wait(Duration::ZERO);
+        let core = Core::open(&config, probe, storage, self.at()).expect("opened");
         self.core = Some(match self.broken {
             Break::TakesGrantsUnwritten => core.with_writer(takes_grants_unwritten),
             Break::LeavesFinishedOperations => {
@@ -526,6 +551,9 @@ impl CoreHarness for Harness {
     fn advance(&mut self, by: Duration) {
         self.clock.advance(by);
         self.now += u64::try_from(by.as_millis()).expect("small");
+        // A server polls the store for what other frontends did between ticks; a lease whose
+        // node never comes back is requeued by that poll's orphan sweep.
+        self.core().intake(self.at());
         block_on(self.core().tick(self.at()));
         self.store.advanced();
     }

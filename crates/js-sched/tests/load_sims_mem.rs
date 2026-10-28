@@ -251,12 +251,11 @@ fn d_one_stale_node_among_fresh_ones() {
     );
 }
 
-/// Sim d (off and shadow). Catches: `off` or `shadow` placing differently from the booked
-/// rule: the same workload gives the same starts, leases and workers under both. (The
-/// recorded traces of the existing simulations are unchanged by this work: a scheduler
-/// built with `new` places by the booked rule.)
+/// Sim d (off). Catches: `off` (the rollback switch) not placing by the booked rule: 80
+/// one-core actions on two 16-core nodes all run, and the first round starts 32 (the
+/// booked cores), whatever is predicted.
 #[test]
-fn d_off_and_shadow_place_the_same() {
+fn d_off_places_by_the_booked_rule() {
     let run = |mode| {
         let mut w = World::new(LoadConfig {
             mode,
@@ -270,7 +269,6 @@ fn d_off_and_shadow_place_the_same() {
     };
     let off = run(PlacementLoad::Off);
     assert_eq!(off.len(), 80);
-    assert_eq!(run(PlacementLoad::Shadow), off);
 }
 
 /// Sim j. Catches: costs recomputed after a restart from the current estimator, and
@@ -344,12 +342,11 @@ fn l_a_pool_sized_key_runs_on_nodes_of_different_sizes() {
     assert!(w.nodes["big"].peak_demand <= 88 * 1_100 * 147 / 75 + 1_000);
 }
 
-/// Sim m. Catches: shadow changing a placement, and verdicts that are not the ones `on`
-/// gives: on one 88-thread node, `shadow` starts what `off` starts (the same leases on the
-/// same ticks), and its verdicts of the first round are those of an `on` run: the leases
-/// `on` admits it would admit, and the rest of what `off` placed it would refuse.
+/// Sim m. Catches: `off` admitting by the charged load or `on` by the booked cores: on one
+/// 88-thread node, `off` starts 88 leases of 2 cores in the first round (88 booked cores
+/// is the whole node) and `on` starts 48 (96800 of 2000 m, the 1.1x limit).
 #[test]
-fn m_shadow_changes_nothing_and_its_verdicts_are_ons() {
+fn m_off_starts_the_booked_cores_and_on_the_charged_ones() {
     let run = |mode| {
         let mut w = World::new(LoadConfig {
             mode,
@@ -358,21 +355,12 @@ fn m_shadow_changes_nothing_and_its_verdicts_are_ons() {
         w.linux("n", 88, 512);
         w.submit_many(300, &Spec::flat("e", 2_000, 50, warm(2_000, 4 * GIB)));
         w.step();
-        let first = (w.s.load_counters(), w.stats["e"].started);
-        w.run(99);
-        (first, w.starts)
+        w.stats["e"].started
     };
-    let (on_first, _) = run(PlacementLoad::On);
-    let (off_first, off_starts) = run(PlacementLoad::Off);
-    let (shadow_first, shadow_starts) = run(PlacementLoad::Shadow);
-    assert_eq!(shadow_starts, off_starts);
-    assert_eq!(on_first.1, 48, "96800 of 2000 m: 48 leases");
-    assert_eq!(off_first.1, 88, "88 booked cores");
-    let (counters, started) = shadow_first;
-    assert_eq!(started, 88);
-    assert_eq!(counters.would_admit, on_first.0.admitted);
-    assert_eq!(counters.would_block, off_first.1 - on_first.1);
-    assert_eq!(counters.admitted, 0);
+    let on_first = run(PlacementLoad::On);
+    let off_first = run(PlacementLoad::Off);
+    assert_eq!(on_first, 48, "96800 of 2000 m: 48 leases");
+    assert_eq!(off_first, 88, "88 booked cores");
 }
 
 /// Sim n. Catches: a retry up the memory ladder counted at what was learned (2 GiB)
@@ -445,20 +433,10 @@ fn i_an_understated_key_is_bounded_by_its_prediction_with(profiles: bool) {
         w.nodes["n"].peak_demand
     };
     let (understated, corrected) = (demand(1_000), demand(5_000));
-    if profiles {
-        // A covered lease with a curve is charged all of its prediction, not three quarters
-        // of it: the demand is at most 4.4 C, as the design has it.
-        assert!(understated > 4_000 * 88, "past 4 C: {understated}");
-        assert!(understated <= 4_400 * 88, "within 4.4 C: {understated}");
-    } else {
-        assert!(
-            understated > 4_400 * 88 / 1000 * 1000,
-            "past 4.4 C: {understated}"
-        );
-        assert!(
-            understated <= 4 * 88 * 1_100 * 4 / 3,
-            "within (k / f) (1 + s) C"
-        );
-    }
+    // A covered lease is charged all of its prediction (`f` 1), with a curve or without
+    // one: the demand is at most `k (1 + s) C` = 4.4 C, as the design has it for a key
+    // whose prediction is a quarter of what it uses.
+    assert!(understated > 4_000 * 88, "past 4 C: {understated}");
+    assert!(understated <= 4_400 * 88, "within 4.4 C: {understated}");
     assert!(corrected <= 96_800 + 4_000, "{corrected}");
 }
