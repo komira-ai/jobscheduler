@@ -202,7 +202,7 @@ impl Scheduler {
                 let mut held = Held {
                     operation: id,
                     booked: request.resources,
-                    cost: Admission::with_digest(
+                    cost: Admission::with_key_hash(
                         cost.unwrap_or_else(|| Admission::booked_cost(&request)),
                         &request,
                     ),

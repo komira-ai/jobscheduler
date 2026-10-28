@@ -275,15 +275,15 @@ impl WorkerLoad {
             .is_some_and(|m| u64::from(m) > self.totals.cpu_covered)
     }
 
-    /// The predicted cores of the action leases, covered or not, whose key digest is
-    /// `digest`. A digest of 0 (no key known) matches none.
-    pub(crate) fn same_key_millis(&self, digest: u64) -> u64 {
-        if digest == 0 {
+    /// The predicted cores of the action leases, covered or not, whose key hash is
+    /// `hash`. A hash of 0 (no key known) matches none.
+    pub(crate) fn same_key_millis(&self, hash: u64) -> u64 {
+        if hash == 0 {
             return 0;
         }
         self.ledger
             .values()
-            .filter(|e| !e.vm && e.cost.key_hash == digest)
+            .filter(|e| !e.vm && e.cost.key_hash == hash)
             .fold(0, |sum, e| sum.saturating_add(charge(&e.cost).cpu_millis))
     }
 
@@ -466,15 +466,15 @@ mod tests {
         assert_eq!(*load.totals(), Totals::default());
     }
 
-    fn keyed(cpu: u64, digest: u64) -> LeaseCost {
+    fn keyed(cpu: u64, hash: u64) -> LeaseCost {
         LeaseCost {
-            key_hash: digest,
+            key_hash: hash,
             ..cost(cpu, 0)
         }
     }
 
     /// Catches: the same-key sum counting a lease of another key, a VM, or leases with no
-    /// key known (digest 0 matches nothing, not each other), or not counting covered and
+    /// key known (hash 0 matches nothing, not each other), or not counting covered and
     /// uncovered leases alike.
     #[test]
     fn the_same_key_sum_counts_only_that_key_covered_or_not() {

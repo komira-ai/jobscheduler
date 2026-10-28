@@ -501,9 +501,9 @@ impl Admission {
         }
     }
 
-    /// `cost` with the digest of `request`'s key if it has none and the request is an
-    /// action: a cost record written before the digest was kept is rebuilt with it.
-    pub(crate) fn with_digest(cost: LeaseCost, request: &Request) -> LeaseCost {
+    /// `cost` with the key hash of `request`'s key if it has none and the request is an
+    /// action: a cost record written before the key hash was kept is rebuilt with it.
+    pub(crate) fn with_key_hash(cost: LeaseCost, request: &Request) -> LeaseCost {
         if cost.key_hash == 0 && request.kind == LeaseKind::Action {
             LeaseCost {
                 key_hash: key_hash(&request.key),

@@ -701,20 +701,6 @@ fn the_choice_is_always_an_admitted_candidate_and_does_not_depend_on_their_order
 }
 
 #[test]
-fn the_key_digest_is_fnv1a_over_length_prefixed_class_and_dedup() {
-    let key = |class: &str, dedup: &str| WorkKey::new(class, dedup);
-    // Pinned (computed apart from this code): the same in every process and version.
-    assert_eq!(key_digest(&key("load", "k0")), 0x166112a93dc8f404);
-    assert_ne!(key_digest(&key("ab", "c")), key_digest(&key("a", "bc")));
-    assert_ne!(key_digest(&key("a", "")), key_digest(&key("", "a")));
-    assert_ne!(
-        key_digest(&key("", "")),
-        0,
-        "0 is reserved for no key known"
-    );
-}
-
-#[test]
 fn the_score_flags_default_and_stay_in_range() {
     let cfg = crate::LoadConfig::default();
     assert_eq!(

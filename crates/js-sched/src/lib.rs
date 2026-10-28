@@ -101,7 +101,7 @@ mod input;
 mod load;
 pub use load::{
     Charge, Choice, EVALUATIONS_PER_WORKER, H_PLUS, HORIZON, HostFacts, LeaseFacts, MAX_BALANCE,
-    PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer, key_digest,
+    PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer,
 };
 mod requeue;
 mod scheduler;

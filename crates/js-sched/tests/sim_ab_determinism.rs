@@ -690,7 +690,7 @@ fn restarted(s: &Scheduler, grants: &[LeaseGrant], order: &[&str]) -> Scheduler 
 
 /// After a restart, with the state rebuilt from the persisted cost records and the
 /// workers registering in another order, the same request goes to the same worker, and
-/// the rebuilt figures are the originals (each worker's left side, key digest included).
+/// the rebuilt figures are the originals (each worker's left side, key hash included).
 #[test]
 fn a_restart_rebuilt_from_the_cost_records_chooses_the_same_worker() {
     let loads = [("w1", 1), ("w2", 3), ("w3", 2)];

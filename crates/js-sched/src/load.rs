@@ -20,7 +20,7 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::BTreeMap;
 
 use js_types::sched::usage::LeaseCost;
-use js_types::sched::{LeaseId, Resources, WorkKey, WorkerId};
+use js_types::sched::{LeaseId, Resources, WorkerId};
 
 /// A worker's load; the smaller is the less loaded. This is the previous ranking: placement
 /// by load chooses by the score ([`Scorer`]) and keeps this only for the shadow log
@@ -459,14 +459,6 @@ fn residual(t: u64, load: u64, new: u64) -> (u128, u128) {
 fn tie_hash(lease: LeaseId, worker: &WorkerId) -> u64 {
     let lease = format!("{}-{}", lease.term, lease.seq);
     fnv1a(&[lease.as_bytes(), worker.as_str().as_bytes()])
-}
-
-/// The digest a lease's cost record keeps of its action key: the 64-bit FNV-1a hash of
-/// `len(class) as u32 LE, class, len(dedup) as u32 LE, dedup`. Never 0: 0 in a cost record
-/// means "no key known" and matches nothing.
-#[must_use]
-pub fn key_digest(key: &WorkKey) -> u64 {
-    fnv1a(&[key.class.as_bytes(), key.dedup.as_bytes()]).max(1)
 }
 
 /// FNV-1a over each part preceded by its length as a `u32` in little-endian bytes, so that
