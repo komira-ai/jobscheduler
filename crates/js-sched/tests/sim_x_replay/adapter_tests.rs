@@ -137,6 +137,7 @@ fn the_model_answers_the_seam_from_the_figures_it_was_given() {
         }
     );
     assert!(m.lease().cold);
+    assert!(!m.lease().retry);
     // Slot 0 is the rule with the measurement: max(900, ceil(0.75 * 800)) + 70 and
     // max(3_000_000, 2_000_000 + 400_000).
     assert_eq!(
