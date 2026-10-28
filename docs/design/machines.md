@@ -8,7 +8,9 @@ Companion to [docs/design.md](../design.md), sections 5.4 and 5.8. Section numbe
 and is never reused, not even by the next run of the same lease (5.14, [vm-backend.md](vm-backend.md)). For a VM job, step 1 below is
 "stop and destroy the VM and delete its clone", and the checks of step 2 include the VM store check.
 
-A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs in a row before it is given up.
+A machine is the expensive thing and a job is the cheap one, so a machine serves many jobs, at once and in a row, before it is given up.
+Many VM runs and many containers are on one host at the same time, each booked against the host's capacity (5.15, 5.18); each VM run is
+still a fresh VM.
 
 **After every job, in this order, `js-agent`:**
 

@@ -1,0 +1,16 @@
+# Golden trace hashes: the SHA-256 of the full trace of each seeded simulation run.
+#
+# Do not edit by hand. A change to any hash means a simulation now makes a different
+# decision or writes its trace differently. Regenerate them only on purpose, with the
+# command the failing test prints, and justify each changed line in the pull request.
+# A change that only moves code must leave every hash as it is.
+format 1
+core-cell/base/seed-0 f5975e9c80f2af3def1c100bfdc58e5c1b1ba4e226ba8691f57cc58bfc2a865e
+core-cell/base/seed-1 35c12b7ccb1f04c04b6cbe938754a0e2979cbd7ffd2531b32a235c50366a6b9d
+core-cell/base/seed-2 deebb4cb45f2db0853b840af2abacca8d761f7dd286766d36d44492958a28b98
+core-cell/drop-first-start/seed-0 fd9f46a27fbc2218b0773aae2e11fcdc7bcd0a700023c8041b53404afe5899b0
+core-cell/drop-first-start/seed-1 1dc265f6f18621da064e0cb9090279bdb24bb08b79bb5edc590eabfbc2f22457
+core-cell/drop-first-start/seed-2 c8ad158bfe7aee79f776082792f50a4ddc719acf6548bbac314b833afe04da17
+core-cell/flaky-writer/seed-0 6a26d96c3fffb5d13fe33caf4c0e2a923a474c2470f6c7bce58231dc9e7dbcbe
+core-cell/flaky-writer/seed-1 ee84522dd92b852ef683c6bbdc35a1b1210775b521ef459745db471ffa5f3bf0
+core-cell/flaky-writer/seed-2 bca899f466f9b1ef8ff47cd708e8fb04d7dc88c233008af4d2a25ef554687c3c

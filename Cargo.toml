@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
@@ -14,8 +14,18 @@ publish = false
 # `name.workspace = true` (members add the features they need). A dependency enters
 # Cargo.lock only when a member first uses it.
 [workspace.dependencies]
+async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false }
+# Grant verification and the lease-user key encodings (js-mac-session).
+base64 = "0.23.1"
+# macOS only (js-vmm): Virtualization.framework and the block and dispatch types its
+# completion handlers and queues use.
+block2 = "0.6.2"
 clap = { version = "4.6.7", features = ["derive"] }
+# macOS only (js-mac-session): CFData for the caller's audit token.
+core-foundation = "0.10.1"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2.17"
 hex = "0.4.3"
@@ -26,6 +36,18 @@ hyper-util = { version = "0.1.21", default-features = false }
 # Calls rustix has no portable form of (js-testkit: mkfifo, and a
 # signal to ignore one).
 libc = "0.2.190"
+# macOS only (js-vmm, js-mac-session): the Objective-C runtime and the Foundation binding.
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+# macOS only (js-mac-session): OpenDirectory, for the per-lease users.
+objc2-open-directory = { version = "0.3.2", default-features = false, features = ["std"] }
+# macOS only (js-vmm): the Virtualization bindings.
+objc2-virtualization = { version = "0.3.2", features = ["block2", "dispatch2", "bitflags"] }
+# The container runner (js-contain) writes OCI bundles with oci-spec and drives `crun`
+# with the runc client.
+oci-spec = "0.7.1"
+# macOS only (js-vmm): the property lists of the guest disk, as values, not through serde.
+plist = { version = "1.10.1", default-features = false }
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
 # no TLS (an `sslmode=require` URL is refused rather than downgraded).
 postgres = "0.19.10"
@@ -33,6 +55,7 @@ postgres = "0.19.10"
 rand_chacha = "0.10.0"
 # Test certificates only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+runc = { version = "0.3.0", features = ["async"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
 # format and WAL behaviour do not depend on the host's libsqlite3. No default features: no
 # statement cache (hashlink) and no wasm shim.
@@ -40,12 +63,15 @@ rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"
 rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+# macOS only (js-mac-session): the caller's code signature against a pinned requirement.
+security-framework = { version = "3.7.0", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 subtle = "2.6.1"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
+time = { version = "0.3.55", default-features = false, features = ["formatting", "macros", "parsing", "std"] }
 tokio = "1.53.2"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
@@ -57,6 +83,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-pro
 # so a missing one fails the build.
 [workspace.lints.rust]
 missing_docs = "warn"
+# `coverage` is set by cargo-llvm-cov (the coverage job compiles with it).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 disallowed_methods = "allow"
@@ -72,3 +100,29 @@ incremental = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+
+# The replay simulations in these crates run in CI test builds, so the crates (not
+# their dependencies) are optimised there. `cargo test` builds everything it compiles
+# (the unit-test binaries and the libraries the integration tests link) with the
+# `test` profile, so this half alone reaches it; a `dev` override would only slow
+# debug builds. A name that matches no package only draws a cargo warning:
+# crates/xtask/tests/profile_overrides.rs checks the names.
+[profile.test.package.js-sched]
+opt-level = 2
+
+[profile.test.package.js-sim]
+opt-level = 2
+
+[profile.test.package.js-sizing]
+opt-level = 2
+
+[profile.test.package.js-types]
+opt-level = 2
+
+# The coverage job builds with this profile (`cargo llvm-cov --profile coverage`): it
+# is `dev`, so no package is optimised and the instrumentation sees every line. An
+# optimised build inlines small functions and closures away, and their lines then read
+# as missed. cargo-llvm-cov takes no `--config`, and cargo has no environment variable
+# for a per-package override, so the job cannot undo the `test` overrides above.
+[profile.coverage]
+inherits = "dev"

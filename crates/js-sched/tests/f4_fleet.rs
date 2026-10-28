@@ -63,6 +63,8 @@
 //! `js-sim` kernel, for network faults), which builds on the cell nodes family F2
 //! moves out of `sim_cell`.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;

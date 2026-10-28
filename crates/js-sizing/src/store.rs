@@ -41,6 +41,9 @@ pub struct Estimate {
     pub cpu_millis: u32,
     /// The level of the summary the sizes came from.
     pub level: Level,
+    /// `L`, the key's life in minutes, from the level the sizes came from
+    /// ([`Summary::life_minutes`]).
+    pub life_minutes: u8,
 }
 
 /// How the CPU measurements of finished runs were treated, since the store was made.
@@ -333,6 +336,7 @@ impl Summaries {
             memory_bytes: memory,
             cpu_millis: chosen.cpu(bounds).max(hint.cpu_millis.unwrap_or(0)),
             level,
+            life_minutes: chosen.life_minutes(),
         })
     }
 }

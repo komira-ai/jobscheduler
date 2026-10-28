@@ -1,0 +1,16 @@
+# The `fate/`, `floor/`, `keyfloor/`, `loss/` and `queue/` rows a frontend writes when a lease is
+# given up, as a file (tests/giveup_rows.rs). The first section is, for one store a frontend
+# opened and used (operation 4 granted its lease and given up for a memory kill, with a fate, a
+# raised floor, a raised key floor naming a size summary and a loss count), the rows of those
+# kinds: key, expiry and value as hex. Its lines are those of the farm server's golden file of
+# scheduler rows, copied unchanged.
+# The second section is a row an earlier release wrote and this one reads: a version 1 `fate/`
+# row (a booking and the memory runs only, no budgets). The farm server's golden files hold no
+# version 1 row; this one is built from the layout the format documents.
+fate/0000000000000004 expires_ns=- value=0200000004000000000000000200066e6f64652d61000000010000000001000000100000000000066e6f64652d620000000400000000000000000400066e6f64652d610000066e6f64652d62010000066e6f64652d63010100066e6f64652d63020000000200066e6f64652d6100066e6f64652d6200000003
+floor/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1 expires_ns=- value=010000000400000000000000000000000200046d61696e303130313031303130313031303130313031303130313031303130313031303130313031303130313031303130313031303130313031303130313031303130312f31
+keyfloor/0000000000000007 expires_ns=- value=0100000000000000070000000400000000000000000000000200496573742f36643631363936652f3663363936653735373832663738333833363566333633342f632f303132333435363738396162636465662f30303030303030303030303030303037
+loss/0000000000000004 expires_ns=- value=0000000000000002
+queue/0000000000000004 expires_ns=- value=
+# Rows an earlier release wrote
+fate/0000000000000005 expires_ns=- value=0100000004000000000000000100066e6f64652d61000000010000000000

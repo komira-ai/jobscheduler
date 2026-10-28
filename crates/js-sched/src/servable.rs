@@ -17,9 +17,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_caps::NodeCaps;
 use js_types::sched::{FarmTime, LeaseKind, NodePhase, Resources, WorkerId};
+use js_whole::cost::DrainCost;
 
+use std::sync::Arc;
+
+use js_types::sched::LeaseId;
+use js_types::sched::usage::LeaseCost;
+
+use crate::admission::{
+    Admission, Blocked, Left, Profile, Ratio, Refusal, binding, clamped, new_charge, pick,
+};
 use crate::cordon::Cordons;
 use crate::input::Request;
+use crate::load::{Charge, HostFacts, LeaseFacts, Load, SLOTS, SlotHost, SlotLoad, least_loaded};
 use crate::scheduler::Worker;
 
 /// Whether some live worker could run a request, ignoring what is booked.
@@ -34,9 +44,60 @@ pub(crate) enum Verdict {
     Cordoned(String),
 }
 
+/// One request to place: what it is, which workers are out, and what it will be charged.
+pub(crate) struct Attempt<'a> {
+    pub(crate) request: &'a Request,
+    /// Workers held for a whole-machine lease or a blocked head ahead of it.
+    pub(crate) reserved: &'a BTreeSet<WorkerId>,
+    /// Workers its earlier runs ended on as the farm's fault.
+    pub(crate) avoid: &'a BTreeSet<WorkerId>,
+    /// A key floor raised its memory: a worker it would own whole is out.
+    pub(crate) not_whole: bool,
+    /// What it is charged if placed now (before the clamp to a worker's capacity).
+    pub(crate) cost: LeaseCost,
+    /// How it is charged over time, if it is (see [`Admission::profile_of`]).
+    pub(crate) profile: Option<Arc<Profile>>,
+    /// The lease it gets if placed now.
+    pub(crate) lease: LeaseId,
+    /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
+    /// score's fit looks at.
+    pub(crate) fit_minutes: u8,
+}
+
+/// A candidate the predicate admitted, with what it computed for it.
+struct Passed<'a> {
+    name: &'a WorkerId,
+    /// The previous ranking's load of the worker.
+    load: Load,
+    /// What the worker is charged before the new lease.
+    left: Left,
+    /// What the new lease is charged on it (clamped to its capacity).
+    cost: LeaseCost,
+}
+
+/// Where a request was placed.
+pub(crate) struct Placed {
+    pub(crate) worker: WorkerId,
+    /// What was booked on the worker.
+    pub(crate) booked: Resources,
+    /// The iOS device booked, by id.
+    pub(crate) device: Option<String>,
+    /// What the lease is charged.
+    pub(crate) cost: LeaseCost,
+}
+
+/// The outcome of [`Servable::fit`].
+pub(crate) struct Fit {
+    pub(crate) placed: Option<Placed>,
+    /// Why the load kept it from a worker, when some worker had room but for that.
+    pub(crate) blocked: Option<Blocked>,
+}
+
 /// The live workers of one round, and the platform matches made so far.
 #[derive(Debug)]
 pub(crate) struct Servable {
+    /// The farm time of the round.
+    now: FarmTime,
     /// Live workers placement may use, in name order.
     live: Vec<WorkerId>,
     /// Live workers placement skips because they are cordoned or not serving, in name
@@ -45,6 +106,25 @@ pub(crate) struct Servable {
     /// For each platform request and lease kind seen this round, the indices into
     /// `live` of the workers that serve the kind and satisfy the request.
     memo: Vec<((js_caps::Request, LeaseKind), Vec<usize>)>,
+}
+
+/// The new lease's charge `slot` minutes ahead on `worker` as the predicate counts it, as
+/// `(millicores, bytes)`, where `left` is what the worker is charged now. It is the one
+/// function behind `Scheduler::charge_at` and the figures the score reads, so the two
+/// cannot differ. `cost` is the lease's cost before the clamp to the worker; `profile` is
+/// how it is charged over time, which an action that would own the worker whole is not
+/// (it is charged flat).
+pub(crate) fn charge_on(
+    worker: &Worker,
+    request: &Request,
+    cost: LeaseCost,
+    profile: Option<&Arc<Profile>>,
+    left: &Left,
+    slot: usize,
+) -> (u64, u64) {
+    let cost = clamped(cost, &worker.capacity);
+    let profile = profile.filter(|_| !worker.exclusive(request));
+    new_charge(&cost, profile.map(|p| &**p), left, &worker.capacity, slot)
 }
 
 /// Whether a node that offers `caps` runs a driver serving `kind`.
@@ -66,6 +146,7 @@ impl Servable {
             .map(|(name, _)| name.clone())
             .partition(|name| cordons.skips(name) || workers[name].phase != NodePhase::Serving);
         Self {
+            now,
             live,
             cordoned,
             memo: Vec::new(),
@@ -94,19 +175,27 @@ impl Servable {
     }
 
     /// The least loaded live worker not in `reserved` that serves `request`'s kind,
-    /// satisfies its platform and has room for it now: the one with the least booked, as
-    /// a share of its capacity (the larger of its CPU and memory shares), then the fewest
-    /// leases, then the first by name ([`Worker::load`]). Books it there and returns the
+    /// satisfies its platform and has room for it now. Books it there and returns the
     /// worker with what was booked: the request vector for an action, the worker's whole
-    /// capacity for a whole-machine lease; and the iOS device, for a request that asks for
-    /// one ([`Worker::free_device`]).
+    /// capacity for a whole-machine lease; the iOS device, for a request that asks for
+    /// one ([`Worker::free_device`]); and what the lease is charged ([`LeaseCost`]).
     ///
     /// The platform and room are decided first and the load only ranks the workers that
-    /// pass: a Mac is never the least loaded worker for Linux work. A whole-machine lease,
-    /// and an action at the whole host's memory, go only to a worker with no lease, so
-    /// every candidate has nothing booked and the first by name is taken. Such an action
-    /// waits until some worker's free memory meets its request; nothing reserves a worker
-    /// for it.
+    /// pass: a Mac is never the least loaded worker for Linux work. A worker in
+    /// `reserved` (held for a whole-machine lease or for a blocked head), one that a
+    /// whole-machine lease holds, and one that is draining or cordoned
+    /// ([`Servable::new`]) are out before the load predicate is read and before any
+    /// ranking, so a worker that is being emptied for someone is never the least loaded
+    /// one for small work.
+    ///
+    /// For an action under [`crate::PlacementLoad::On`], room is the load predicate
+    /// ([`Admission`]) and the ranking is by what the worker is charged
+    /// ([`Worker::load_charged`]); under `Off` (the rollback switch) the booked rule and the
+    /// booked ranking decide ([`Worker::has_room`], [`Worker::load`]). A whole-machine
+    /// lease, and an action at the whole host's memory, go only to a worker with no lease,
+    /// so every candidate has nothing booked and the first by name is taken. Such an
+    /// action waits until some worker's free memory meets its request; nothing reserves a
+    /// worker for it.
     ///
     /// With `not_whole` (a request a key floor raised) a worker whose memory the request
     /// equals is skipped: there it would own the host. [`Servable::roomy`] tells whether
@@ -119,27 +208,58 @@ impl Servable {
     pub(crate) fn fit(
         &mut self,
         workers: &mut BTreeMap<WorkerId, Worker>,
-        request: &Request,
-        reserved: &BTreeSet<WorkerId>,
-        avoid: &BTreeSet<WorkerId>,
-        not_whole: bool,
-    ) -> Option<(WorkerId, Resources, Option<String>)> {
+        adm: &mut Admission,
+        attempt: &Attempt<'_>,
+    ) -> Fit {
+        let request = attempt.request;
         let at = self.matching(workers, request);
-        let skip = self.avoided(at, workers, request, avoid);
-        let name = self.memo[at]
+        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let by_load = adm.by_load() && request.kind == LeaseKind::Action;
+        let now = self.now;
+        // The workers that pass everything but the load predicate.
+        let candidates: Vec<&WorkerId> = self.memo[at]
             .1
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
-                !reserved.contains(*name)
+                !attempt.reserved.contains(*name)
                     && !skip.contains(*name)
-                    && workers[*name].has_room(request)
-                    && (!not_whole || !workers[*name].exclusive(request))
+                    && workers[*name].has_room(request, by_load)
+                    && (!attempt.not_whole || !workers[*name].exclusive(request))
             })
+            .collect();
+        let mut blocked = None;
+        let chosen = if by_load {
+            let (admitted, why) = Self::admitted(adm, workers, &candidates, attempt, now);
+            blocked = why;
+            Self::scored(adm, workers, &admitted, attempt, now)
+        } else {
             // The first of the least loaded: `live` is in name order.
-            .min_by_key(|name| workers[*name].load())?
-            .clone();
+            candidates
+                .iter()
+                .copied()
+                .min_by_key(|name| workers[*name].load())
+        };
+        let Some(name) = chosen.cloned() else {
+            if let Some(why) = blocked {
+                adm.count_blocked(why);
+            }
+            return Fit {
+                placed: None,
+                blocked,
+            };
+        };
         let worker = workers.get_mut(&name).expect("live workers are registered");
+        let (cost, left) = Self::charged(adm, worker, attempt, now);
+        let profile = Self::profile_on(worker, attempt).cloned();
+        if request.kind == LeaseKind::Action {
+            if by_load {
+                adm.count_admitted(&request.key, &cost, left.fallback, profile.as_deref());
+            }
+            if cost.cold {
+                worker.load_state.note_cold(now, &adm.cfg);
+            }
+        }
         let booked = match request.kind {
             LeaseKind::WholeMachine => {
                 worker.whole = true;
@@ -152,9 +272,253 @@ impl Servable {
         };
         worker.booked = worker.booked.saturating_add(booked);
         worker.leases += 1;
+        match request.kind {
+            LeaseKind::Action => worker
+                .load_state
+                .insert(attempt.lease, cost, false, profile),
+            LeaseKind::Vm => worker.load_state.insert(attempt.lease, cost, true, None),
+            LeaseKind::WholeMachine => {}
+        }
         let device = worker.free_device(&request.needs).map(str::to_owned);
         worker.devices.extend(device.clone());
-        Some((name, booked, device))
+        Fit {
+            placed: Some(Placed {
+                worker: name,
+                booked,
+                device,
+                cost,
+            }),
+            blocked: None,
+        }
+    }
+
+    /// The candidates the predicate admits, each with its load and charge, and why none
+    /// was, if none: `Load` if any was refused on CPU or memory, `ColdCap` if the cold
+    /// cap alone refused. `None` when there was no candidate to refuse.
+    fn admitted<'a>(
+        adm: &Admission,
+        workers: &BTreeMap<WorkerId, Worker>,
+        candidates: &[&'a WorkerId],
+        attempt: &Attempt<'_>,
+        now: FarmTime,
+    ) -> (Vec<Passed<'a>>, Option<Blocked>) {
+        let mut admitted = Vec::new();
+        let (mut load, mut cold) = (false, false);
+        for &name in candidates {
+            let w = &workers[name];
+            let cost = clamped(attempt.cost, &w.capacity);
+            let left = w.load_state.left(now, &w.capacity, &adm.cfg);
+            match w.load_state.admits(
+                &cost,
+                Self::profile_on(w, attempt).map(|p| &**p),
+                &left,
+                &w.capacity,
+                now,
+                &adm.cfg,
+            ) {
+                Ok(()) => admitted.push(Passed {
+                    name,
+                    load: w.load_charged(&left),
+                    left,
+                    cost,
+                }),
+                Err(Refusal::ColdCap) => cold = true,
+                Err(_) => load = true,
+            }
+        }
+        let why = if !admitted.is_empty() {
+            None
+        } else if load {
+            Some(Blocked::Load)
+        } else if cold {
+            Some(Blocked::ColdCap)
+        } else {
+            None
+        };
+        (admitted, why)
+    }
+
+    /// How `attempt` is charged over time on `worker`: as its profile says, except that an
+    /// action at the whole host's memory runs alone and is charged flat.
+    fn profile_on<'a>(worker: &Worker, attempt: &'a Attempt<'_>) -> Option<&'a Arc<Profile>> {
+        attempt
+            .profile
+            .as_ref()
+            .filter(|_| !worker.exclusive(attempt.request))
+    }
+
+    fn loads<'a>(admitted: &[Passed<'a>]) -> Vec<(&'a WorkerId, Load)> {
+        admitted.iter().map(|p| (p.name, p.load)).collect()
+    }
+
+    /// The worker among `admitted`, the workers that passed everything including the
+    /// predicate, that the score chooses. A worker the request would own whole
+    /// ([`Worker::exclusive`], decided per worker) keeps the previous rule and is not
+    /// scored: the score ranks the workers that stay shared, so a mixed pool where the
+    /// request fills a small worker but not a large one scores the large ones. When every
+    /// admitted worker would be owned whole, the least loaded is taken. Nothing is scored
+    /// for a single candidate. Only an action reaches here: its callers place by load
+    /// for actions only.
+    ///
+    /// The score reads each worker's left side and the new lease's charge at every slot
+    /// (minutes `0..=HORIZON` and `H+`), the figures [`Scheduler::load_at`] and
+    /// [`Scheduler::charge_at`] give; at slot 0 they are what the predicate admitted the
+    /// lease with. A lease charged flat reads the same at every slot.
+    ///
+    /// [`Scheduler::load_at`]: crate::Scheduler::load_at
+    /// [`Scheduler::charge_at`]: crate::Scheduler::charge_at
+    fn scored<'a>(
+        adm: &mut Admission,
+        workers: &BTreeMap<WorkerId, Worker>,
+        admitted: &[Passed<'a>],
+        attempt: &Attempt<'_>,
+        now: FarmTime,
+    ) -> Option<&'a WorkerId> {
+        let request = attempt.request;
+        let shared: Vec<&Passed<'a>> = admitted
+            .iter()
+            .filter(|p| !workers[p.name].exclusive(request))
+            .collect();
+        match shared.as_slice() {
+            [] => return least_loaded(&Self::loads(admitted)),
+            [only] => return Some(only.name),
+            _ => {}
+        }
+        let hosts = shared
+            .iter()
+            .map(|p| {
+                let w = &workers[p.name];
+                let facts = HostFacts {
+                    cpu_capacity_millis: 0,
+                    memory_capacity_bytes: 0,
+                    fit_minutes: attempt.fit_minutes,
+                    fallback: p.left.fallback,
+                    measured_above_predicted: w.load_state.measured_above_covered(),
+                    same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),
+                    new_key_millis: 0,
+                    uncovered_leases: w.load_state.uncovered_leases(),
+                };
+                // The figures the predicate charges at every slot; slot 0 is what it
+                // admitted the lease with (`p.left`, `p.cost`).
+                let mut left = [Charge::default(); SLOTS];
+                let mut new = [Charge::default(); SLOTS];
+                for at in 0..SLOTS {
+                    let (cpu_millis, memory_bytes) =
+                        w.load_state.left_at(at, now, &w.capacity, &adm.cfg);
+                    left[at] = Charge {
+                        cpu_millis,
+                        memory_bytes,
+                    };
+                    let (cpu_millis, memory_bytes) = charge_on(
+                        w,
+                        request,
+                        attempt.cost,
+                        attempt.profile.as_ref(),
+                        &p.left,
+                        at,
+                    );
+                    new[at] = Charge {
+                        cpu_millis,
+                        memory_bytes,
+                    };
+                }
+                (
+                    p.name.clone(),
+                    SlotHost::new(&w.capacity, left, new, p.cost.cpu_millis, facts),
+                )
+            })
+            .collect();
+        let model = SlotLoad {
+            lease: LeaseFacts {
+                lease: attempt.lease,
+                cold: attempt.cost.cold,
+                retry: attempt.cost.retry,
+            },
+            hosts,
+        };
+        let names: Vec<&'a WorkerId> = shared.iter().map(|p| p.name).collect();
+        let mut scorer = adm.scorer();
+        let choice = scorer.choose_among(&model, &names)?;
+        adm.count_scored(scorer.evaluations(), &choice);
+        Some(choice.worker)
+    }
+
+    /// The cost `attempt` is charged on `worker`, and what the worker is charged before it.
+    fn charged(
+        adm: &Admission,
+        worker: &Worker,
+        attempt: &Attempt<'_>,
+        now: FarmTime,
+    ) -> (LeaseCost, Left) {
+        let cost = match attempt.request.kind {
+            LeaseKind::Action => clamped(attempt.cost, &worker.capacity),
+            // A VM is charged what it books; a whole-machine lease is not on the ledger.
+            LeaseKind::Vm | LeaseKind::WholeMachine => attempt.cost,
+        };
+        let left = worker.load_state.left(now, &worker.capacity, &adm.cfg);
+        (cost, left)
+    }
+
+    /// The worker a blocked head of the queue holds: of the workers `request` could run
+    /// on but for the load, not in `reserved` or skipped for `avoid` and not owned whole
+    /// by the request, the one with the smallest binding ratio, keeping `kept` while its
+    /// ratio is within a tenth of the best ([`pick`]). `None` when no worker could take
+    /// it at all.
+    pub(crate) fn hold_for_head(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        adm: &Admission,
+        attempt: &Attempt<'_>,
+        kept: Option<&WorkerId>,
+    ) -> Option<WorkerId> {
+        let request = attempt.request;
+        let at = self.matching(workers, request);
+        let skip = self.avoided(at, workers, request, attempt.avoid);
+        let now = self.now;
+        let ratios: Vec<(&WorkerId, Ratio)> = self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| {
+                let w = &workers[*name];
+                !attempt.reserved.contains(*name)
+                    && !skip.contains(*name)
+                    && !w.exclusive(request)
+                    && w.has_room(request, true)
+            })
+            .map(|name| {
+                let w = &workers[name];
+                let cost = clamped(attempt.cost, &w.capacity);
+                let left = w.load_state.left(now, &w.capacity, &adm.cfg);
+                // The charge of the new lease at the present minute.
+                let profile = Self::profile_on(w, attempt);
+                let (new_cpu, new_mem) = profile.map_or_else(
+                    || (left.charged_cpu(&cost), cost.memory_bytes),
+                    |p| {
+                        (
+                            p.new_cpu(0).min(w.capacity.cpu_millis),
+                            p.new_mem(0).min(w.capacity.memory_bytes),
+                        )
+                    },
+                );
+                let ratio = binding(
+                    (left.cpu.saturating_add(new_cpu), w.capacity.cpu_millis),
+                    (left.mem.saturating_add(new_mem), w.capacity.memory_bytes),
+                );
+                (name, ratio)
+            })
+            .collect();
+        pick(&ratios, kept).cloned()
+    }
+
+    /// The pool `request` is run from: the platform and kind it needs, shared by every
+    /// request that needs the same.
+    pub(crate) fn pool(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+    ) -> usize {
+        self.matching(workers, request)
     }
 
     /// Whether some live worker placement may use that serves `request` could take it
@@ -174,7 +538,8 @@ impl Servable {
 
     /// The worker to hold for a whole-machine `request` that fits nowhere now: `kept`
     /// if it still could run it, else the one that could which holds the fewest leases,
-    /// then has the least booked, then comes first by name. Never one in `reserved`,
+    /// then has the least booked, then comes first by name; with `drain` (the workers by
+    /// drain cost, cheapest first), the first of those that could. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease
     /// holds a worker (the caller asks only for one); an action at a worker's whole
     /// memory waits until some worker has no lease, and nothing reserves one for it.
@@ -185,6 +550,7 @@ impl Servable {
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
         kept: Option<&WorkerId>,
+        drain: Option<&[DrainCost]>,
     ) -> Option<WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, avoid);
@@ -201,6 +567,12 @@ impl Servable {
         if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
             return Some(kept.clone());
         }
+        if let Some(drain) = drain {
+            return drain
+                .iter()
+                .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
+                .map(|name| (*name).clone());
+        }
         candidates
             .into_iter()
             .min_by_key(|name| {
@@ -208,6 +580,25 @@ impl Servable {
                 (w.leases, w.booked)
             })
             .cloned()
+    }
+
+    /// The live workers placement may use that could run `request` once their bookings
+    /// end and that are not in `reserved`: where an ordinary request that waits could go.
+    pub(crate) fn capable(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+    ) -> Vec<&WorkerId> {
+        let at = self.matching(workers, request);
+        self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| {
+                !reserved.contains(*name) && workers[*name].capacity.fits(&request.resources)
+            })
+            .collect()
     }
 
     /// The workers of `avoid` that placement skips for `request`, whose matching live

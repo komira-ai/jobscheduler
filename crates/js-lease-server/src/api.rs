@@ -1,7 +1,7 @@
 //! The routes, the authentication in front of them, and the state they share.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use js_lease::{AcquireError, LeaseTable, ReleaseOutcome, TickReport};
 use js_provider::Provider;
-use js_registry::Registry;
+use js_registry::{Registry, WholeCounts};
 use serde::Serialize;
 use tokio::sync::Mutex;
 use tracing::{error, info};
@@ -43,6 +43,8 @@ pub(crate) struct Shared {
     agents: Option<Arc<Agents>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
+    /// The whole-node counts the last tick logged.
+    counted: std::sync::Mutex<WholeCounts>,
 }
 
 impl Shared {
@@ -53,6 +55,7 @@ impl Shared {
             agents,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
+            counted: std::sync::Mutex::new(WholeCounts::default()),
         }
     }
 
@@ -87,19 +90,33 @@ impl Shared {
         self.save_errors.load(Ordering::SeqCst)
     }
 
-    /// Ticks the table, logs what changed and counts a failed write. The lock is held
-    /// for the table call alone.
+    /// Ticks the table, then advances the agent registry (when the server has one) so its
+    /// reservations and prepare deadlines act on this tick, logs what changed and counts
+    /// a failed write. The lock is held for the table call alone.
     pub(crate) async fn tick(&self) -> TickReport {
         let report = self.table.lock().await.tick();
-        self.record(&report);
+        let counts = match &self.agents {
+            Some(agents) => {
+                // The marks are brought up to this tick, so the counts and the next
+                // renewal read what the tick left.
+                agents.registry.advance();
+                agents.registry.whole_counts()
+            }
+            None => WholeCounts::default(),
+        };
+        self.record(&report, counts);
         if let Some(agents) = &self.agents {
             agents.refresh().await;
         }
         report
     }
 
-    fn record(&self, report: &TickReport) {
-        if report.changed() {
+    fn record(&self, report: &TickReport, counts: WholeCounts) {
+        let moved = std::mem::replace(
+            &mut *self.counted.lock().unwrap_or_else(PoisonError::into_inner),
+            counts,
+        ) != counts;
+        if report.changed() || moved {
             info!(
                 expired = report.expired.len(),
                 freed = report.freed.len(),
@@ -107,6 +124,9 @@ impl Shared {
                 dropped = report.dropped.len(),
                 pending = report.pending,
                 releasing = report.releasing,
+                reserved = counts.reserved,
+                held = counts.held,
+                queued = counts.queued,
                 "tick changed leases"
             );
         }
@@ -216,9 +236,17 @@ async fn renew(
         false => parse::<RenewBody>(&body)?,
     };
     let ttl = ask.ttl_seconds.map(std::time::Duration::from_secs);
-    let expires_at = shared.table.lock().await.renew(&id, ttl)?;
+    // The table's lock is held while the registry is asked, as the lock order says.
+    let mut table = shared.table.lock().await;
+    let expires_at = table.renew(&id, ttl)?;
+    let host_reserved = shared.agents.as_ref().is_some_and(|agents| {
+        let host = agents.registry.host_of(&id);
+        host.is_some_and(|host| agents.registry.is_reserved(&host))
+    });
+    drop(table);
     let renewed = Renewed {
         expires_at_ms: expires_at.millis(),
+        host_reserved,
     };
     Ok(json(StatusCode::OK, &renewed))
 }
@@ -255,6 +283,9 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     };
     json(StatusCode::OK, &list)
 }
+
+#[cfg(test)]
+mod whole_view_tests;
 
 #[cfg(test)]
 mod tests {
