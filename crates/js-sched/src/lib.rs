@@ -42,10 +42,10 @@
 //!   all of it, so nothing is placed beside it; one that fits nowhere holds a worker
 //!   that could run it, in queue (QoS) order, and less urgent work is not placed there
 //!   until it has emptied (with [`Scheduler::with_whole_node`] the worker is the one
-//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An action at the whole memory of a worker (the last step of
-//!   the memory ladder) holds none: it waits until some worker's free memory meets its
-//!   request, which under sustained spread load can be long, and nothing reserves a
-//!   worker for it;
+//!   cheapest to drain: the latest end bound of its leases, then the fewest leases). An
+//!   action at the whole memory of a worker (the last step of the memory ladder) holds
+//!   none: it waits until some worker's free memory meets its request, which under
+//!   sustained spread load can be long, and nothing reserves a worker for it;
 //! - work no live worker can run (none satisfies its platform, or none that does is
 //!   large enough) waits with a reason its callers see, and is refused after
 //!   [`UNSERVABLE_WAIT`], the refusal committed before its callers are answered;
