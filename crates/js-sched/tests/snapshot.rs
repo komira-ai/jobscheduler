@@ -113,6 +113,7 @@ impl Harness {
         let event = Event::Heartbeat {
             worker: w(name),
             running: self.s.leases_on(&w(name)),
+            load: None,
         };
         self.feed(event);
     }
@@ -382,6 +383,7 @@ fn avoiding(n: u8) -> Harness {
     h.feed(Event::Heartbeat {
         worker: w("a"),
         running: Vec::new(),
+        load: None,
     });
     h.feed(Event::Cordon { worker: w("a") });
     h.now = 62;

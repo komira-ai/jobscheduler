@@ -57,6 +57,7 @@ fn heartbeat(s: &mut Scheduler, now: Duration) {
     let event = Event::Heartbeat {
         worker: WorkerId::new("node-a"),
         running: Vec::new(),
+        load: None,
     };
     assert!(feed(s, now, event).is_empty());
 }

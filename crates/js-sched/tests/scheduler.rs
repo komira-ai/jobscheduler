@@ -122,6 +122,7 @@ impl Harness {
             self.feed(Event::Heartbeat {
                 worker: w(name),
                 running,
+                load: None,
             })
             .is_empty()
         );
