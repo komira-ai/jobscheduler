@@ -10,6 +10,7 @@
 
 use std::fmt;
 
+use js_types::sched::usage::RunEnd;
 use js_types::sched::{LeaseId, LostWhy, OperationId, WorkerId};
 
 /// A lease given up, its operation sent back to the queue to be granted again.
@@ -65,6 +66,18 @@ pub enum RequeueReason {
 }
 
 impl RequeueReason {
+    /// How the run of the lease ended, for the per-minute store and the shape guard: a
+    /// kill at its own limit or by the node's backstop, or else a run that did not run to
+    /// its end.
+    #[must_use]
+    pub(crate) const fn run_end(&self) -> RunEnd {
+        match self {
+            Self::OutOfMemory { .. } => RunEnd::KilledAtLimit,
+            Self::NodeMemoryPressure => RunEnd::BackstopKilled,
+            _ => RunEnd::Requeued,
+        }
+    }
+
     /// Whether the give-up is a lost lease: the node was silent, the daemon was
     /// replaced, restarted or reconnected without the lease. They count toward the cap
     /// on lost leases ([`crate::LOSS_REQUEUES`]). The ones a worker reports, the memory

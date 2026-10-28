@@ -1,13 +1,17 @@
 //! The scheduler's rows in the state store: their keys, the blocks of ids a frontend
 //! numbers with, the epoch it serves under, which frontend owns a daemon's node, a daemon's
 //! session, how an operator placed a node, and the unfinished operations (their `op/`,
-//! `queue/`, `inflight/` and `opkey/` rows, and the load of them at a start), over
+//! `queue/`, `inflight/` and `opkey/` rows, and the load of them at a start), how those
+//! operations move on (the grant of a lease, a lease given up with the loss count, fate and
+//! memory floors that follow it, a result, a refusal, and the `done/` row an operation
+//! leaves), and the orphan sweep that gives up the leases of nodes no frontend hears, over
 //! [`js_state::Store`] and nothing else.
 //!
 //! The keys ([`keys`]) and the bytes of the `meta/`, `owner/`, `cordon/`, `queue/`,
-//! `inflight/` and `opkey/` rows are those of the farm server's state store, byte for byte
-//! (`tests/golden/`): a store written by either reads under the other, and rows only ever
-//! gain new kinds, never new fields.
+//! `lease-by-op/`, `inflight/`, `opkey/`, `loss/`, `fate/`, `floor/` and `keyfloor/` rows are
+//! those of the farm server's state store, byte for byte (`tests/golden/`): a store written by
+//! either reads under the other, and rows only ever gain new kinds, never new fields. The
+//! value of a `done/` row is the embedding server's, and this crate keeps it as it is.
 //!
 //! [`Rows`] is a frontend's handle on a store. It takes time from the store's own clock and
 //! does no I/O but through the store, so the crate is pure in the sense of `clippy.toml`.
@@ -34,7 +38,7 @@ use std::ops::Range;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use js_state::{Store, Txn, Versioned};
+use js_state::{Cond, Store, Txn, Versioned};
 use js_types::sched::WorkerId;
 
 mod blocks;
@@ -44,14 +48,19 @@ mod epoch;
 mod error;
 mod ext;
 mod fate;
+mod finish;
+mod floor;
+mod grant;
 mod inflight;
 pub mod keys;
 mod leases;
 mod load;
 mod opkey;
 mod owner;
+mod requeue;
 mod session;
 mod submit;
+mod sweep;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
@@ -61,10 +70,12 @@ pub use cordon::StoredCordon;
 pub use epoch::{EpochBump, EpochPolicy};
 pub use error::StateError;
 pub use ext::Ext;
+pub use finish::{DONE_FLOOR, Ending, Progress};
 pub use load::{Stored, StoredOperation};
 pub use owner::{Arrival, OWNER_CACHE_TTL, Owner};
-pub use session::SESSION_RENEWAL;
+pub use session::{ACK_WINDOW, SESSION_RENEWAL};
 pub use submit::Submitted;
+pub use sweep::{ORPHAN_WAIT, Orphans};
 
 use owner::Ownership;
 
@@ -146,6 +157,15 @@ impl Rows {
     fn commit(&self, txn: Txn) -> Result<(), StateError> {
         self.store.txn(txn)??;
         Ok(())
+    }
+
+    /// A write that tells whether the store takes writes again: the empty `meta/alive` row.
+    /// A read that succeeds says nothing of it.
+    ///
+    /// # Errors
+    /// The store cannot be written.
+    pub fn ping(&self) -> Result<(), StateError> {
+        self.commit(Txn::new().put(keys::ALIVE, Vec::new(), Cond::Any))
     }
 }
 

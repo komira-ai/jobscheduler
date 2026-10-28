@@ -202,7 +202,10 @@ impl Scheduler {
                 let mut held = Held {
                     operation: id,
                     booked: request.resources,
-                    cost: cost.unwrap_or_else(|| Admission::booked_cost(&request)),
+                    cost: Admission::with_key_hash(
+                        cost.unwrap_or_else(|| Admission::booked_cost(&request)),
+                        &request,
+                    ),
                     device: None,
                     start_sent: Some(sent),
                     granted_at: self.now,
@@ -316,7 +319,7 @@ fn book(worker: &mut Worker, request: &Request, lease: LeaseId, cost: LeaseCost)
             worker.whole |= worker.exclusive(request);
             worker
                 .load_state
-                .insert(lease, cost, request.kind == LeaseKind::Vm);
+                .insert(lease, cost, request.kind == LeaseKind::Vm, None);
             request.resources
         }
     };

@@ -16,10 +16,11 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 
-use js_sched::{Fate, Recovered, RecoveredLease, Request};
+use js_sched::{Fate, Floor, KeyFloor, Recovered, RecoveredLease, Request};
 use js_state::{Version, Versioned};
 use js_types::sched::{LeaseGrant, OperationId, WaiterId, WorkerId};
 
+use crate::codec::HeldLease;
 use crate::cordon::StoredCordon;
 use crate::{Rows, StateError, fate, keys, number, opkey};
 
@@ -32,6 +33,15 @@ pub struct Stored {
     pub next_seq: u64,
     /// Every unfinished operation, in id order.
     pub operations: Vec<StoredOperation>,
+    /// Every memory floor, oldest stamp first (two floors with one stamp in key order, the
+    /// later with the next stamp).
+    pub floors: Vec<Floor>,
+    /// Every key floor, in the same order. Empty when size keys are not read
+    /// ([`Rows::set_read_size_keys`]).
+    pub key_floors: Vec<KeyFloor>,
+    /// The size summary each key floor decays with, for those whose row names one: the size
+    /// key and the name, as the writer gave it ([`Rows::requeued`]).
+    pub key_names: Vec<(u64, String)>,
     /// Every node an operator placed, in node-name order.
     pub cordons: Vec<(WorkerId, StoredCordon)>,
 }
@@ -45,6 +55,10 @@ pub struct StoredOperation {
     pub request: Request,
     /// The committed lease it holds.
     pub lease: Option<LeaseGrant>,
+    /// Whether the lease row kept the cost it was granted: false for a row of
+    /// [`crate::Value::LegacyLease`], whose grant then holds a placeholder cost. True when
+    /// there is no lease.
+    pub cost_kept: bool,
     /// How many of its leases were lost.
     pub losses: u32,
     /// What its kills for memory and other faults changed, if it had any.
@@ -57,9 +71,14 @@ pub struct StoredOperation {
 }
 
 impl StoredOperation {
-    /// This operation as the scheduler takes it up, held for `waiter`.
+    /// This operation as the scheduler takes it up, held for `waiter`. A recovered lease
+    /// carries the cost it was granted (`Some`), so the scheduler charges it the same. A
+    /// lease whose row did not keep a cost (written before costs were kept, see
+    /// [`StoredOperation::cost_kept`]) carries `None`, which the scheduler charges as the
+    /// lease's request.
     #[must_use]
     pub fn recovered(self, waiter: WaiterId) -> Recovered {
+        let kept = self.cost_kept;
         Recovered {
             operation: self.operation,
             request: self.request,
@@ -67,13 +86,19 @@ impl StoredOperation {
             lease: self.lease.map(|grant| RecoveredLease {
                 lease: grant.lease,
                 worker: grant.worker,
-                // The store does not keep the admitted cost yet, so a recovered lease is
-                // charged its request (the scheduler's meaning of `None`).
-                cost: None,
+                cost: kept.then_some(grant.cost),
             }),
             losses: self.losses,
             fate: self.fate,
         }
+    }
+}
+
+/// A lease as a row holds it, as the lease and whether its cost was kept (true with no lease).
+fn split(held: Option<HeldLease>) -> (Option<LeaseGrant>, bool) {
+    match held {
+        Some((grant, kept)) => (Some(grant), kept),
+        None => (None, true),
     }
 }
 
@@ -95,9 +120,9 @@ fn size_key_row(key: &str, row: &Versioned) -> Result<u64, StateError> {
 impl Rows {
     /// Whether the `opkey/` rows are read. A store that never had the learned sizes on
     /// holds none, and with them off a row an earlier run left is neither loaded nor
-    /// allowed to fail a start. The transaction that ends an operation (it comes with the
-    /// grant and finish rows) will delete its `opkey/` row whatever this says, so rows an
-    /// earlier run left are cleaned up as their operations end. Reading is on until this says otherwise.
+    /// allowed to fail a start. The transaction that ends an operation ([`Rows::finished`],
+    /// [`Rows::refused`]) deletes its `opkey/` row whatever this says, so rows an earlier run
+    /// left are cleaned up as their operations end. Reading is on until this says otherwise.
     pub fn set_read_size_keys(&self, read: bool) {
         self.size_keys.store(read, Ordering::SeqCst);
     }
@@ -110,8 +135,8 @@ impl Rows {
     pub fn load(&self) -> Result<Stored, StateError> {
         let mut leases = BTreeMap::new();
         for (key, row) in self.scan_known_logged(keys::LEASE)? {
-            let grant = self.lease_row(&key, &row)?;
-            leases.insert(grant.operation, grant);
+            let entry = self.lease_entry(&key, &row)?;
+            leases.insert(entry.0.operation, entry);
         }
         let mut losses = BTreeMap::new();
         for (key, row) in self.store.scan_prefix(keys::LOSS)? {
@@ -131,14 +156,22 @@ impl Rows {
                 size_keys.insert(operation, size_key_row(&key, &row)?);
             }
         }
+        let floors = self.stored_floors()?;
+        let (key_floors, key_names) = if self.size_keys.load(Ordering::SeqCst) {
+            self.stored_key_floors()?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let mut operations = Vec::new();
         for (key, row) in self.scan_known_logged(keys::OPERATION)? {
             let request = self.request_row(&key, &row)?;
             let operation = keys::operation_of(keys::OPERATION, &key)?;
+            let (lease, cost_kept) = split(leases.remove(&operation));
             operations.push(StoredOperation {
                 operation,
                 request,
-                lease: leases.remove(&operation),
+                lease,
+                cost_kept,
                 losses: losses.remove(&operation).unwrap_or(0),
                 fate: fates.remove(&operation),
                 parcel: parcels.remove(&operation),
@@ -149,6 +182,9 @@ impl Rows {
             next_operation: self.counter(keys::NEXT_OP)?,
             next_seq: self.counter(keys::NEXT_SEQ)?,
             operations,
+            floors,
+            key_floors,
+            key_names,
             cordons: self.cordons()?,
         })
     }
@@ -170,17 +206,18 @@ impl Rows {
     pub(crate) fn stored_with(
         &self,
         operation: OperationId,
-        known: Option<LeaseGrant>,
+        known: Option<HeldLease>,
     ) -> Result<Option<StoredOperation>, StateError> {
         let key = keys::operation(operation);
         let Some(row) = self.store.get(&key)? else {
             return Ok(None);
         };
         let request = self.request_row(&key, &row)?;
-        let lease = match known {
-            Some(grant) => Some(grant),
+        let held = match known {
+            Some(entry) => Some(entry),
             None => self.lease_of(operation)?,
         };
+        let (lease, cost_kept) = split(held);
         let loss = keys::loss(operation);
         let losses = self
             .store
@@ -206,6 +243,7 @@ impl Rows {
             operation,
             request,
             lease,
+            cost_kept,
             losses,
             fate,
             parcel,

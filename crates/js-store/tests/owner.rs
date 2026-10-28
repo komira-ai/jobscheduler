@@ -3,22 +3,21 @@
 //! owner may make, and the look at the owner row that a heartbeat's acknowledgement waits
 //! on. Each test stands two handles over one store for two frontends.
 //!
-//! The writes of a lease are the transactions of a grant, a lease given up and a result;
-//! those belong to later rows of this crate, so the tests make stand-ins that touch the
-//! same rows under the same conditions: each is built, checked with [`Rows::guard`] and
-//! committed with [`Rows::commit_owned`], as the transactions are.
+//! The writes of a lease are the transactions of a grant, a lease given up and a result
+//! ([`Rows::granted`], [`Rows::requeued`], [`Rows::finished`]).
 
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, Request};
+use js_sched::{DaemonInstance, Floor, FloorChange, Request, Requeue, RequeueReason};
 use js_state::{Cond, Store, Txn};
 use js_store::keys;
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{
-    CAS_TRIES, EpochPolicy, OWNER_CACHE_TTL, Owner, RowCodec, Rows, StateError, WorkerUp,
+    CAS_TRIES, Ending, EpochPolicy, OWNER_CACHE_TTL, Owner, RowCodec, Rows, StateError, WorkerUp,
 };
 use js_types::sched::usage::LeaseCost;
 use js_types::sched::{FarmTime, LeaseGrant, LeaseId, OperationId, Resources, WorkKey, WorkerId};
@@ -87,66 +86,44 @@ fn queue(store: &Racing, operation: u64) {
     store.txn(put).expect("store").expect("queued");
 }
 
-/// A stand-in for the grant of `operation` under the lease `(5, seq)` on `worker`: the
-/// queue row goes, the lease row and its index row are put, and the transaction is
-/// conditional on the version of the queue row it read. The lease row holds a value the
-/// test codec reads as one a later binary wrote, which a look at the node's leases skips:
-/// these tests are about who may write the row, and the reading of real ones is tested in
-/// `tests/load.rs`.
-fn grant(
-    rows: &Rows,
-    store: &Racing,
-    operation: u64,
-    seq: u64,
-    worker: &str,
-) -> Result<(), StateError> {
-    let (worker, operation) = (WorkerId::new(worker), OperationId(operation));
-    let queued = store.get(&keys::queue(operation)).expect("read");
-    let version = queued.expect("a queued operation").version;
-    let txn = Txn::new()
-        .delete(keys::queue(operation), Cond::Version(version))
-        .put(
-            keys::lease(LeaseId::new(5, seq)),
-            b"later lease".to_vec(),
-            Cond::Absent,
-        )
-        .put(keys::lease_by_op(operation), owner_row(5, seq), Cond::Any);
-    let txn = rows.guard(txn, &worker)?;
-    rows.commit_owned(&worker, txn)
+/// The grant of `operation` under the lease `(5, seq)` on `worker`.
+fn grant(rows: &Rows, operation: u64, seq: u64, worker: &str) -> Result<(), StateError> {
+    rows.granted(&LeaseGrant {
+        lease: LeaseId::new(5, seq),
+        operation: OperationId(operation),
+        worker: WorkerId::new(worker),
+        cost: LeaseCost::default(),
+    })
 }
 
-/// A stand-in for the end of the lease `(5, seq)` of `operation` on node-a, as a result
-/// ends it: the lease rows go and a `done/` row is put.
-fn finish(rows: &Rows, store: &Racing, operation: u64, seq: u64) -> Result<(), StateError> {
-    let lease = store.get(&keys::lease(LeaseId::new(5, seq))).expect("read");
-    let version = lease.expect("a lease").version;
-    let txn = Txn::new()
-        .delete(keys::lease(LeaseId::new(5, seq)), Cond::Version(version))
-        .delete(keys::lease_by_op(OperationId(operation)), Cond::Any)
-        .put(
-            keys::done(OperationId(operation)),
-            b"done".to_vec(),
-            Cond::Absent,
-        );
-    let txn = rows.guard(txn, &node())?;
-    rows.commit_owned(&node(), txn)
+/// The result of the lease `(5, seq)` of `operation`, which is on node-a: the operation ends
+/// with a `done/` row.
+fn finish(rows: &Rows, operation: u64, seq: u64) -> Result<(), StateError> {
+    let ending = Ending::new(b"done".to_vec(), Duration::from_secs(1));
+    rows.finished(OperationId(operation), LeaseId::new(5, seq), &ending)
 }
 
-/// A stand-in for the lease `(5, seq)` of `operation` on node-a given up: the lease rows
-/// go and the operation is queued again.
-fn give_up(rows: &Rows, store: &Racing, operation: u64, seq: u64) -> Result<(), StateError> {
-    let lease = store.get(&keys::lease(LeaseId::new(5, seq))).expect("read");
-    let version = lease.expect("a lease").version;
-    let txn = Txn::new()
-        .delete(keys::lease(LeaseId::new(5, seq)), Cond::Version(version))
-        .delete(keys::lease_by_op(OperationId(operation)), Cond::Any)
-        .put(
-            keys::queue(OperationId(operation)),
-            Vec::new(),
-            Cond::Absent,
-        );
-    let txn = rows.guard(txn, &node())?;
-    rows.commit_owned(&node(), txn)
+/// The give-up of the lease `(5, seq)` of `operation` on node-a.
+fn requeue(operation: u64, seq: u64) -> Requeue {
+    Requeue {
+        operation: OperationId(operation),
+        lease: LeaseId::new(5, seq),
+        worker: node(),
+        reason: RequeueReason::Silent,
+    }
+}
+
+/// `rows` gives the lease `(5, seq)` of `operation` on node-a up: the lease rows go and the
+/// operation is queued again.
+fn give_up(rows: &Rows, operation: u64, seq: u64) -> Result<(), StateError> {
+    let kept = FloorChange::default();
+    rows.requeued(&requeue(operation, seq), None, None, &kept, None)
+}
+
+/// Queues operation `operation` with its `op/` row, which a give-up needs to find.
+fn submit(rows: &Rows, operation: u64) {
+    let submitted = rows.submit(OperationId(operation), &request(), &[], None);
+    submitted.expect("submit");
 }
 
 fn is_stale<T>(result: &Result<T, StateError>) -> bool {
@@ -223,17 +200,17 @@ fn a_frontend_a_daemon_has_left_grants_its_node_nothing() {
     queue(&store, 5);
     let txns = store.commit_stats().txns;
 
-    let refused = grant(&left, &store, 4, 0, "node-a");
+    let refused = grant(&left, 4, 0, "node-a");
 
     assert!(is_stale(&refused), "{refused:?}");
     assert_eq!(store.commit_stats().txns, txns, "a stale grant wrote");
     assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (2, 0));
     assert_eq!(rows(&store, "lease-by-op/"), 0);
-    let again = grant(&left, &store, 4, 1, "node-a");
+    let again = grant(&left, 4, 1, "node-a");
     assert!(is_stale(&again), "{again:?}");
 
-    grant(&left, &store, 5, 2, "node-b").expect("a node never claimed");
-    grant(&taker, &store, 4, 3, "node-a").expect("the owner's grant");
+    grant(&left, 5, 2, "node-b").expect("a node never claimed");
+    grant(&taker, 4, 3, "node-a").expect("the owner's grant");
     assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (0, 2));
     assert_eq!(rows(&store, "lease-by-op/"), 2);
 }
@@ -245,13 +222,13 @@ fn a_frontend_a_daemon_has_left_grants_its_node_nothing() {
 fn a_lease_is_given_up_and_finished_only_by_the_owner_of_its_node() {
     let (store, _, [left, taker]) = frontends([1, 2]);
     left.arrive(&node(), at(0)).expect("a Hello");
-    queue(&store, 4);
-    grant(&left, &store, 4, 0, "node-a").expect("a grant");
+    submit(&left, 4);
+    grant(&left, 4, 0, "node-a").expect("a grant");
     taker.arrive(&node(), at(1)).expect("moved");
     let txns = store.commit_stats().txns;
 
-    let given_up = give_up(&left, &store, 4, 0);
-    let finished = finish(&left, &store, 4, 0);
+    let given_up = give_up(&left, 4, 0);
+    let finished = finish(&left, 4, 0);
 
     assert!(is_stale(&given_up), "{given_up:?}");
     assert!(is_stale(&finished), "{finished:?}");
@@ -259,7 +236,7 @@ fn a_lease_is_given_up_and_finished_only_by_the_owner_of_its_node() {
     assert_eq!((rows(&store, "lease/"), rows(&store, "done/")), (1, 0));
     assert_eq!(rows(&store, "lease-by-op/"), 1);
 
-    finish(&taker, &store, 4, 0).expect("the owner's result");
+    finish(&taker, 4, 0).expect("the owner's result");
     assert_eq!((rows(&store, "lease/"), rows(&store, "done/")), (0, 1));
     assert_eq!(rows(&store, "lease-by-op/"), 0);
 }
@@ -270,13 +247,45 @@ fn a_lease_is_given_up_and_finished_only_by_the_owner_of_its_node() {
 fn the_owner_of_a_node_gives_its_lease_up() {
     let (store, _, [first]) = frontends([1]);
     first.arrive(&node(), at(0)).expect("a Hello");
-    queue(&store, 4);
-    grant(&first, &store, 4, 0, "node-a").expect("a grant");
+    submit(&first, 4);
+    grant(&first, 4, 0, "node-a").expect("a grant");
 
-    give_up(&first, &store, 4, 0).expect("a give-up");
+    give_up(&first, 4, 0).expect("a give-up");
 
     assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (1, 0));
     assert_eq!(rows(&store, "lease-by-op/"), 0);
+}
+
+/// Asserts that a lease given up by the frontend a daemon has left, which is refused as
+/// stale, still writes the floor the kill raised: a floor is the scheduler's, and the refused
+/// give-up is not tried again. The lease and the queue stay as the owner has them; and that a
+/// give-up that changes no floor writes nothing when it is refused.
+#[test]
+fn a_give_up_refused_for_the_owner_still_writes_the_floors() {
+    let (store, _, [left, taker]) = frontends([1, 2]);
+    left.arrive(&node(), at(0)).expect("a Hello");
+    submit(&left, 4);
+    grant(&left, 4, 0, "node-a").expect("a grant");
+    taker.arrive(&node(), at(1)).expect("moved");
+    let floors = FloorChange {
+        raised: Some(Floor {
+            key: request().key,
+            ask: 2 << 30,
+            stamp: 1,
+        }),
+        ..FloorChange::default()
+    };
+    let none = FloorChange::default();
+
+    let unchanged = left.requeued(&requeue(4, 0), None, None, &none, None);
+    assert!(is_stale(&unchanged), "{unchanged:?}");
+    assert_eq!(rows(&store, "floor/"), 0, "a refusal wrote a floor");
+
+    let refused = left.requeued(&requeue(4, 0), None, None, &floors, None);
+
+    assert!(is_stale(&refused), "{refused:?}");
+    assert_eq!(rows(&store, "floor/"), 1);
+    assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (0, 1));
 }
 
 /// Asserts that a frontend whose node's owner row is gone writes nothing for the node: it
@@ -288,7 +297,7 @@ fn a_frontend_whose_owner_row_is_gone_writes_nothing_for_the_node() {
     queue(&store, 4);
     remove(&store, OWNER_ROW);
 
-    let refused = grant(&first, &store, 4, 0, "node-a");
+    let refused = grant(&first, 4, 0, "node-a");
 
     assert!(is_stale(&refused), "{refused:?}");
     assert_eq!(rows(&store, "lease/"), 0);
@@ -305,11 +314,11 @@ fn a_node_that_changes_hands_between_the_read_and_the_commit_is_stale() {
     let moved = Txn::new().put(OWNER_ROW, owner_row(2, 2), Cond::Any);
     store.land(OWNER_ROW, moved);
 
-    let refused = grant(&first, &store, 4, 0, "node-a");
+    let refused = grant(&first, 4, 0, "node-a");
 
     assert!(is_stale(&refused), "{refused:?}");
     assert_eq!((rows(&store, "queue/"), rows(&store, "lease/")), (1, 0));
-    let later = grant(&first, &store, 4, 1, "node-a");
+    let later = grant(&first, 4, 1, "node-a");
     assert!(is_stale(&later), "{later:?}");
 }
 
@@ -324,7 +333,7 @@ fn a_conflict_on_another_row_is_not_a_change_of_owner() {
     let taken = Txn::new().delete(queued.clone(), Cond::Any);
     store.land(&queued, taken);
 
-    let refused = grant(&first, &store, 4, 0, "node-a");
+    let refused = grant(&first, 4, 0, "node-a");
 
     assert!(is_conflict(&refused), "{refused:?}");
     assert!(first.owns(&node(), at(100)).expect("a look"));
@@ -346,7 +355,7 @@ fn a_frontend_that_loses_every_try_for_a_node_gives_it_up() {
     let lost = first.arrive(&node(), at(0));
 
     assert!(is_conflict(&lost), "{lost:?}");
-    let refused = grant(&first, &store, 4, 0, "node-a");
+    let refused = grant(&first, 4, 0, "node-a");
     assert!(is_stale(&refused), "{refused:?}");
 }
 
@@ -389,7 +398,7 @@ fn a_node_another_frontend_claimed_is_not_owned() {
     assert!(!first.owns(&node(), at(60)).expect("read"));
     assert!(second.owns(&node(), at(60)).expect("read"));
     queue(&store, 4);
-    let refused = grant(&first, &store, 4, 0, "node-a");
+    let refused = grant(&first, 4, 0, "node-a");
     assert!(is_stale(&refused), "{refused:?}");
 }
 
@@ -463,7 +472,7 @@ fn an_owner_row_that_is_not_one_is_refused_naming_it() {
     assert!(said.contains(OWNER_ROW), "{said}");
     assert!(said.contains("not a 16-byte owner"), "{said}");
     queue(&store, 4);
-    let unclaimed = grant(&first, &store, 4, 0, "node-a");
+    let unclaimed = grant(&first, 4, 0, "node-a");
     assert!(is_stale(&unclaimed), "{unclaimed:?}");
     for length in [12, 17] {
         overwrite(&store, OWNER_ROW, vec![9; length]);
@@ -475,7 +484,7 @@ fn an_owner_row_that_is_not_one_is_refused_naming_it() {
     second.arrive(&node(), at(0)).expect("a Hello");
     queue(&store, 4);
     overwrite(&store, OWNER_ROW, vec![1, 2, 3]);
-    let refused = grant(&second, &store, 4, 0, "node-a");
+    let refused = grant(&second, 4, 0, "node-a");
     assert!(is_corrupt(&refused), "{refused:?}");
     let look = second.owns(&node(), at(100));
     assert!(is_corrupt(&look), "{look:?}");
@@ -489,7 +498,7 @@ fn a_store_with_owner_and_index_rows_reads_as_it_did_without_them() {
     let (store, _, [first]) = frontends([1]);
     first.arrive(&node(), at(0)).expect("a Hello");
     queue(&store, 4);
-    grant(&first, &store, 4, 0, "node-a").expect("a grant");
+    grant(&first, 4, 0, "node-a").expect("a grant");
     assert_eq!(rows(&store, "owner/"), 1);
     assert_eq!(rows(&store, "lease-by-op/"), 1);
 
@@ -533,13 +542,13 @@ fn a_claim_made_again_after_an_unread_arrival_reports_the_owner_it_replaced() {
 
     assert!(unread.is_err(), "{unread:?}");
     queue(&store, 4);
-    let refused = grant(&taker, &store, 4, 0, "node-a");
+    let refused = grant(&taker, 4, 0, "node-a");
     assert!(is_stale(&refused), "{refused:?}");
 
     store.set_unreadable(None);
     let again = taker.arrive(&node(), at(2)).expect("the claim again");
     assert_eq!(again.previous, Some(named(1, 1)));
-    grant(&taker, &store, 4, 1, "node-a").expect("owned again");
+    grant(&taker, 4, 1, "node-a").expect("owned again");
     let later = taker.arrive(&node(), at(3)).expect("a Hello");
     assert_eq!(later.previous, Some(named(2, 3)));
 }

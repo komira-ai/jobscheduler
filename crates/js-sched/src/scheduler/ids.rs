@@ -7,6 +7,7 @@
 use std::cmp::Reverse;
 use std::ops::Range;
 
+use js_types::sched::usage::RunEnd;
 use js_types::sched::{LeaseId, OperationId};
 
 use super::{OpState, Scheduler};
@@ -56,7 +57,7 @@ impl Scheduler {
         if !matches!(self.ops[&id].state, OpState::Leased { .. }) {
             return None;
         }
-        self.release(id);
+        self.release(id, RunEnd::Requeued);
         let op = self
             .ops
             .get_mut(&id)

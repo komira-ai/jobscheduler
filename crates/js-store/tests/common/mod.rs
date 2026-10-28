@@ -3,14 +3,15 @@
 
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fmt::Write as _;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_state::fake::{Fake, Flaw};
 use js_state::{
-    Changes, Commit, CommitStats, Conflict, ManualClock, Revision, ScanPage, ScanRange, Store,
-    StoreError, StoreTime, Txn, Versioned,
+    Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Op, Revision, ScanPage, ScanRange,
+    Store, StoreError, StoreTime, Txn, Versioned,
 };
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows, StateError};
@@ -25,6 +26,8 @@ pub struct Racing {
     down: AtomicBool,
     unreadable: Mutex<Option<String>>,
     ack_lost: AtomicBool,
+    asked: Mutex<Vec<Txn>>,
+    lease_scans: AtomicUsize,
 }
 
 impl Racing {
@@ -37,7 +40,21 @@ impl Racing {
             down: AtomicBool::new(false),
             unreadable: Mutex::new(None),
             ack_lost: AtomicBool::new(false),
+            asked: Mutex::new(Vec::new()),
+            lease_scans: AtomicUsize::new(0),
         })
+    }
+
+    /// How many times every `lease/` row has been scanned.
+    pub fn lease_scans(&self) -> usize {
+        self.lease_scans.load(Ordering::SeqCst)
+    }
+
+    /// Every transaction the store was asked to apply since the last call, in order, as it
+    /// was asked: whether it committed or not. The transactions of a landing are not among
+    /// them.
+    pub fn asked(&self) -> Vec<Txn> {
+        std::mem::take(&mut *self.asked.lock().expect("lock"))
     }
 
     /// The next write is applied and then reported as failed, as a connection lost after the
@@ -73,6 +90,10 @@ impl Store for Racing {
         if self.down.load(Ordering::SeqCst) {
             return Err(StoreError::Failed("the store is down".to_owned()));
         }
+        self.asked
+            .lock()
+            .expect("lock")
+            .extend(batch.iter().cloned());
         let names = |key: &str| {
             let mut ops = batch.iter().flat_map(Txn::ops);
             ops.any(|op| op.key_cond().is_some_and(|(named, _)| named == key))
@@ -98,6 +119,8 @@ impl Store for Racing {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.lease_scans
+            .fetch_add(usize::from(prefix == "lease/"), Ordering::SeqCst);
         self.inner.scan_prefix(prefix)
     }
 
@@ -135,6 +158,71 @@ pub fn open(
         Arc::new(TestCodec::new()),
         Arc::new(TestExt),
     )
+}
+
+/// The bytes of the hex digits `text`.
+pub fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex digits"))
+        .collect()
+}
+
+/// The rows of `store` under `prefixes`, a line each: key, expiry and value as hex.
+pub fn dump(store: &Fake, prefixes: &[&str]) -> String {
+    let mut out = String::new();
+    for (key, row) in store.scan_prefix("").expect("scan") {
+        if !prefixes.iter().any(|prefix| key.starts_with(prefix)) {
+            continue;
+        }
+        let expiry = row.expires_at.map_or_else(
+            || "-".to_owned(),
+            |at| at.as_duration().as_nanos().to_string(),
+        );
+        let value: String = row.value.iter().fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+        let _ = writeln!(out, "{key} expires_ns={expiry} value={value}");
+    }
+    out
+}
+
+/// The transaction `txn` as the farm server's trace of the store writes it, a line for each
+/// operation: the kind, the key, the condition (`any`, `absent` or `version`, whichever
+/// version) and, for a put, the lifetime.
+pub fn shape(txn: &Txn) -> Vec<String> {
+    let cond = |cond: Cond| match cond {
+        Cond::Any => "any",
+        Cond::Absent => "absent",
+        Cond::Version(_) => "version",
+    };
+    txn.ops()
+        .iter()
+        .map(|op| match op {
+            Op::Put {
+                key,
+                ttl,
+                cond: held,
+                ..
+            } => {
+                let ttl = ttl.map_or_else(|| "-".to_owned(), |t| format!("{}s", t.as_secs()));
+                format!("put {key} cond={} ttl={ttl}", cond(*held))
+            }
+            Op::Delete { key, cond: held } => format!("del {key} cond={}", cond(*held)),
+            Op::Check { key, cond: held } => format!("check {key} cond={}", cond(*held)),
+            Op::Next { counter } => format!("next {counter}"),
+        })
+        .collect()
+}
+
+/// The only transaction `store` was asked for since the last look, as [`shape`] shows it.
+pub fn only(store: &Racing) -> Vec<String> {
+    let asked = store.asked();
+    let [txn] = &asked[..] else {
+        panic!("one transaction expected, found {}", asked.len());
+    };
+    shape(txn)
 }
 
 /// A handle over `store` for the frontend numbered `id`, which kept the epoch it found or

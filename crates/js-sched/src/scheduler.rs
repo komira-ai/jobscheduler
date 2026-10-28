@@ -14,6 +14,7 @@ mod recover;
 mod snapshot;
 mod state;
 mod view;
+mod whole;
 mod worker;
 
 pub use recover::{Fate, Recovered, RecoveredLease};
@@ -22,6 +23,7 @@ pub use snapshot::{
     platform_label,
 };
 pub use state::OpState;
+pub use whole::WholeMark;
 pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
@@ -29,14 +31,16 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_types::sched::usage::{CurveSource, LeaseCost};
+use js_types::sched::usage::{CurveSource, LeaseCost, RunEnd};
 use js_types::sched::{
     Answer, ControlRecord, Effect, Failure, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind,
     OperationId, Outcome, Qos, Refusal, RefusalRecord, Resources, ResultRecord, StartLease,
     WaiterId, Waiting, WorkKey, WorkerId,
 };
 
-use crate::admission::{Admission, Blocked, LoadConfig};
+use js_whole::WholeNodeConfig;
+
+use crate::admission::{Admission, Blocked, LoadConfig, Profile};
 use crate::cordon::Cordons;
 use crate::fence::HANDOVER_GRACE;
 use crate::input::Request;
@@ -44,7 +48,7 @@ use crate::requeue::{Requeue, RequeueReason};
 use crate::servable::{Attempt, Placed, Servable, Verdict};
 use memory::{MemoryLadder, MemoryState};
 
-/// At most this many leases are granted per [`Event::Tick`] (one log flush per round).
+/// At most this many leases are granted per [`crate::Event::Tick`] (one log flush per round).
 pub const PLACEMENT_ROUND: usize = 256;
 
 /// How long a queued operation may wait while no live worker can run it (none
@@ -69,6 +73,20 @@ pub const UNSERVABLE_WAIT: Duration = Duration::from_secs(300);
 /// is not longer because every operation finished in the last retention is held in
 /// memory: at the pilot's rate of about 4 operations a second, a minute is about 240.
 pub const FINISHED_RETENTION: Duration = Duration::from_secs(60);
+
+/// How a run that ends the operation ended: on its own, killed at its own memory limit or
+/// by the node, or cut short (its result says nothing about how the action runs).
+const fn run_end_of(outcome: Outcome) -> RunEnd {
+    match outcome {
+        Outcome::Completed { .. } => RunEnd::Clean,
+        Outcome::Failed(Failure::OutOfMemory) => RunEnd::KilledAtLimit,
+        Outcome::Failed(Failure::NodeMemoryPressure) => RunEnd::BackstopKilled,
+        Outcome::Failed(Failure::Infra | Failure::Lost(_)) => RunEnd::Requeued,
+        Outcome::Failed(Failure::Timeout | Failure::Invalid | Failure::MissingInput) => {
+            RunEnd::Cancelled
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct Operation {
@@ -243,6 +261,16 @@ pub struct Scheduler {
     /// The worker each blocked head of the queue holds (see [`Scheduler::place`]); the
     /// last round's, kept so the hold does not wander.
     head_holds: BTreeMap<OperationId, WorkerId>,
+    /// The whole-node settings ([`Scheduler::with_whole_node`]); `None` holds a worker for
+    /// a blocked whole-machine request by leases and booking alone.
+    whole_node: Option<WholeNodeConfig>,
+    /// The longest each operation the caller named one for may run
+    /// ([`Scheduler::set_max_wall`]), until the operation is retired. Not in the request,
+    /// the log or the `Eq` memory state.
+    max_walls: BTreeMap<OperationId, Duration>,
+    /// The marks, give-up counts and back-offs of whole-machine requests
+    /// ([`Scheduler::whole_mark`]); empty without whole-node settings.
+    drain: whole::Drain,
 }
 
 impl Scheduler {
@@ -276,6 +304,9 @@ impl Scheduler {
             loss_cap: u32::MAX,
             admission: Admission::default(),
             head_holds: BTreeMap::new(),
+            whole_node: None,
+            max_walls: BTreeMap::new(),
+            drain: whole::Drain::default(),
         }
     }
 
@@ -302,6 +333,28 @@ impl Scheduler {
     #[must_use]
     pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
         self.admission.use_curves(curves);
+        self
+    }
+
+    /// This scheduler, holding the worker for a blocked whole-machine request that is the
+    /// cheapest to drain ([`js_whole::cost::drain_cost`]: the latest end bound of its
+    /// leases, then the fewest leases, then the first by name) instead of the one with the
+    /// fewest leases and the least booked. An end bound is a lease's start plus the longest
+    /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
+    /// and booking alone.
+    ///
+    /// A worker that fits (one with no lease) is taken at once. A request that fits
+    /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
+    /// and marks it ([`Scheduler::whole_mark`]) with a deadline from
+    /// [`js_whole::cost::reserve_deadline`] (the longest it may run is the one given with
+    /// [`Scheduler::set_max_wall`]; with none, no deadline but `drain_deadline`). At the
+    /// deadline, if the worker is still busy, the hold is given up: counted, dropped, the
+    /// worker barred to the request for `reserve_backoff`, and another held if there is
+    /// one. Nothing running is stopped. The marks, counts and back-offs are in memory
+    /// only; a recovered scheduler has none, so every count restarts at zero.
+    #[must_use]
+    pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
+        self.whole_node = Some(config);
         self
     }
 
@@ -350,6 +403,8 @@ impl Scheduler {
             self.ops.remove(&id);
             self.memory.forget(id);
             self.size_keys.remove(&id);
+            self.max_walls.remove(&id);
+            self.drain.forget(id);
             self.admission.forget(id);
         }
     }
@@ -411,14 +466,17 @@ impl Scheduler {
         Vec::new()
     }
 
-    /// Releases `operation`'s holding (booking and lease), if it has one.
-    fn release(&mut self, id: OperationId) {
+    /// Releases `operation`'s holding (booking and lease), if it has one. `end` is how its
+    /// run ended, for the shape guard ([`Admission::run_ended`]).
+    fn release(&mut self, id: OperationId, end: RunEnd) {
         let op = self.ops.get_mut(&id).expect("released operations exist");
         if let Some((lease, worker)) = op.state.holding() {
             let held = self.held.remove(&lease);
             if let Some((w, held)) = self.workers.get_mut(worker).zip(held) {
                 w.booked = w.booked.saturating_sub(held.booked);
-                w.load_state.remove(lease);
+                if let Some(ended) = w.load_state.remove(lease) {
+                    self.admission.run_ended(&ended, end);
+                }
                 w.leases -= 1;
                 if let Some(device) = &held.device {
                     w.devices.remove(device);
@@ -448,7 +506,7 @@ impl Scheduler {
         if let Some(log) = &mut self.requeues {
             log.extend(given_up);
         }
-        self.release(id);
+        self.release(id, reason.run_end());
         let op = self
             .ops
             .get_mut(&id)
@@ -503,6 +561,18 @@ impl Scheduler {
     /// does, waits with a reason ([`Effect::Waiting`] when the reason changes), and is
     /// refused once it has waited so for the unservable wait. Its refusal is committed
     /// first and leaves the queue at once, so nothing places it meanwhile.
+    /// What operation `id`, asking `request`, is charged if placed now: its cost and how
+    /// that is charged over time (`None`: flat).
+    fn charging(&self, id: OperationId, request: &Request) -> (LeaseCost, Option<Arc<Profile>>) {
+        let retried = !self.memory.runs(id).is_empty();
+        let cost = self.admission.cost_of(id, request, retried);
+        // The shape guard judges a key's runs together: the caller's size key, which the
+        // curves are learned under, else the request's own key.
+        let guard_key = self.size_keys.get(&id).copied().unwrap_or(cost.key_hash);
+        let profile = self.admission.profile_of(id, request, &cost, guard_key);
+        (cost, profile)
+    }
+
     fn place(&mut self, effects: &mut Vec<Effect>) {
         // A grant the store cannot take is useless, and a refusal as much.
         if self.store_down {
@@ -520,6 +590,7 @@ impl Scheduler {
         let mut stuck = Vec::new();
         let mut reserved = BTreeSet::new();
         let mut reservations = BTreeMap::new();
+        let mut marks = BTreeMap::new();
         let mut head_holds = BTreeMap::new();
         let mut held_pools = BTreeSet::new();
         for &(_, id) in &self.queue {
@@ -536,15 +607,20 @@ impl Scheduler {
                 self.term,
                 self.next_seq + u64::try_from(placed.len()).unwrap_or(u64::MAX),
             );
-            let retried = !self.memory.runs(id).is_empty();
-            let cost = self.admission.cost_of(id, request, retried);
+            let (cost, profile) = self.charging(id, request);
+            let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
+            // A whole-machine request avoids the workers it gave up for the back-off.
+            let barred = self.drain.barred(id, now);
+            let avoid = whole::Drain::avoiding(&op.avoid, &barred);
             let attempt = Attempt {
                 request,
                 reserved: &reserved,
-                avoid: &op.avoid,
+                avoid: &avoid,
                 not_whole: key_raised,
                 cost,
+                profile: profile.clone(),
                 lease,
+                fit_minutes,
             };
             let mut blocked = None;
             let fitted = placed.len() < round && {
@@ -557,19 +633,41 @@ impl Scheduler {
             } else {
                 servable.verdict(&self.workers, request)
             };
-            if !fitted
-                && request.kind == LeaseKind::WholeMachine
-                && verdict == Verdict::Servable
-                && let Some(name) = servable.reserve(
-                    &self.workers,
-                    request,
-                    &reserved,
-                    &op.avoid,
-                    self.reservations.get(&id),
-                )
-            {
-                reserved.insert(name.clone());
-                reservations.insert(id, name);
+            if !fitted && request.kind == LeaseKind::WholeMachine && verdict == Verdict::Servable {
+                let held = match &self.whole_node {
+                    None => servable.reserve(
+                        &self.workers,
+                        request,
+                        &reserved,
+                        &op.avoid,
+                        self.reservations.get(&id),
+                        None,
+                    ),
+                    Some(cfg) => {
+                        let turn = self.drain.turn(id, op.queued_at, now, cfg);
+                        turn.and_then(|turn| {
+                            let out: BTreeSet<WorkerId> =
+                                reserved.union(&turn.barred).cloned().collect();
+                            let avoid = whole::Drain::avoiding(&op.avoid, &turn.barred);
+                            let name = servable.reserve(
+                                &self.workers,
+                                request,
+                                &out,
+                                &avoid,
+                                turn.kept.as_ref().map(|m| &m.worker),
+                                self.drain_order(&placed).as_deref(),
+                            )?;
+                            let max_wall = self.max_walls.get(&id).copied();
+                            let mark = self.drain.mark(id, &name, turn.kept, now, cfg, max_wall);
+                            marks.insert(id, mark);
+                            Some(name)
+                        })
+                    }
+                };
+                if let Some(name) = held {
+                    reserved.insert(name.clone());
+                    reservations.insert(id, name);
+                }
             }
             // A blocked head holds the worker with the most headroom, one per pool:
             // requests after it in queue order are not placed there, so the worker
@@ -587,7 +685,9 @@ impl Scheduler {
                     avoid: &op.avoid,
                     not_whole: key_raised,
                     cost,
+                    profile,
                     lease,
+                    fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
                 if let Some(name) =
@@ -616,6 +716,7 @@ impl Scheduler {
             self.undo_key_raise(id);
         }
         self.reservations = reservations;
+        self.drain.marks = marks;
         self.head_holds = head_holds;
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not
@@ -860,7 +961,7 @@ impl Scheduler {
         {
             return Vec::new();
         }
-        self.release(id);
+        self.release(id, run_end_of(record.outcome));
         let op = self.ops.get_mut(&id).expect("checked above");
         op.state = match record.outcome {
             Outcome::Completed { action_result } => OpState::Completed {

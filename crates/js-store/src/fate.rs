@@ -26,6 +26,58 @@ const FAULT_INFRA: u8 = 2;
 const DAEMON_RESTARTED: u8 = 0;
 const FENCED: u8 = 1;
 
+fn name(row: &mut Vec<u8>, worker: &WorkerId) -> Option<()> {
+    let bytes = worker.as_str().as_bytes();
+    row.extend(u16::try_from(bytes.len()).ok()?.to_be_bytes());
+    row.extend(bytes);
+    Some(())
+}
+
+fn count(row: &mut Vec<u8>, n: usize) -> Option<()> {
+    row.extend(u32::try_from(n).ok()?.to_be_bytes());
+    Some(())
+}
+
+/// `fate` as a row value (version 2), or `None` if a worker's name or a list is too long
+/// for it.
+pub(crate) fn encode(fate: &Fate) -> Option<Vec<u8>> {
+    let mut row = vec![VERSION];
+    row.extend(fate.booked_bytes.to_be_bytes());
+    count(&mut row, fate.memory_runs.len())?;
+    for run in &fate.memory_runs {
+        name(&mut row, &run.worker)?;
+        row.extend(run.booked.to_be_bytes());
+        match run.kill {
+            MemoryKill::NodePressure => row.push(PRESSURE),
+            MemoryKill::OwnLimit { cap } => {
+                row.push(OWN_LIMIT);
+                row.extend(cap.to_be_bytes());
+            }
+        }
+    }
+    count(&mut row, fate.farm_runs.len())?;
+    for run in &fate.farm_runs {
+        name(&mut row, &run.worker)?;
+        match run.fault {
+            FarmFault::NodeMemoryPressure => row.push(FAULT_PRESSURE),
+            FarmFault::Lost(why) => {
+                row.push(FAULT_LOST);
+                row.push(match why {
+                    LostWhy::DaemonRestarted => DAEMON_RESTARTED,
+                    LostWhy::Fenced => FENCED,
+                });
+            }
+            FarmFault::Infra => row.push(FAULT_INFRA),
+        }
+    }
+    count(&mut row, fate.avoid.len())?;
+    for worker in &fate.avoid {
+        name(&mut row, worker)?;
+    }
+    row.extend(fate.not_started.to_be_bytes());
+    Some(row)
+}
+
 /// A row value as a [`Fate`], or what is wrong with it.
 pub(crate) fn decode(row: &[u8]) -> Result<Fate, &'static str> {
     let mut at = Reader(row);

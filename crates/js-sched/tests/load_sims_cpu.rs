@@ -2,11 +2,14 @@
 //! bounds the true demand of the model (never the scheduler's own figures) and names the
 //! mechanism it exercises.
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
 use js_sched::{LoadConfig, Prediction};
 
+use load_curves::Curves;
 use load_world::{GIB, Spec, W, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
@@ -14,6 +17,7 @@ fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
@@ -22,14 +26,15 @@ fn cold(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: true,
+        life_minutes: 1,
     }
 }
 
 /// Sim f. Catches: sums not updated after each placement, so one round places more than
 /// the headroom (all sixty on the first worker, or more than the predicate allows on
-/// each), and a spread that ignores rank. Three 8-core workers take 8 leases of a core
-/// each (8800 of 1000), however the submissions come in, and a burst of twelve is spread
-/// four to a worker.
+/// each), and a placement that ignores the score. Three 8-core workers take 8 leases of a
+/// core each (8800 of 1000), however the submissions come in, and a burst of twelve is
+/// placed by best fit: eight on one worker, four on a second, none on the third.
 #[test]
 fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
     for (first, second) in [(60, 0), (30, 30), (12, 0)] {
@@ -44,9 +49,16 @@ fn f_a_burst_in_one_round_is_admitted_up_to_the_headroom_and_spread() {
             w.submit_many(second, &spec);
             w.step();
         }
-        let per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
+        let mut per: Vec<usize> = ["n0", "n1", "n2"].map(|n| w.running_on(n)).to_vec();
         if first == 12 {
-            assert_eq!(per, [4, 4, 4], "spread by rank");
+            // Best fit: the first worker fills to its 8 cores, the second takes the rest,
+            // whichever workers the score picks.
+            per.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(
+                per,
+                [8, 4, 0],
+                "placed by the score, not above the headroom"
+            );
         } else {
             assert_eq!(per, [8, 8, 8], "up to the headroom and no further: {per:?}");
         }
@@ -243,15 +255,36 @@ fn phased(awake: u64, hint: Prediction) -> Spec {
     }
 }
 
+/// A world for sim h's actions, which run under two minutes: with `profiles` every key
+/// has the curve of one bucket, at the 4 cores they use when awake, over the 2 they are
+/// predicted at; otherwise none has a curve.
+fn phase_world(profiles: bool) -> World {
+    if !profiles {
+        return World::new(LoadConfig::default());
+    }
+    let curves = Curves::new("sim");
+    curves.set_all(&[(2_000, 0)], 5);
+    World::with_curves(LoadConfig::default(), curves)
+}
+
 /// Sim h (rise). Catches: a rise in load not believed at once (smoothed with the idle
 /// windows before it, or believed only after two): five leases predicted at 2 cores wake
 /// to 4 each on a 16-core node, two more are admitted while the readings are idle (the
 /// floor bounds that), and once the first reading that shows the rise is in, the
 /// measurement (a saturated node) with the two uncovered leases leaves no room, where the
 /// floor and the uncovered leases alone would leave room for three.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_a_rise_is_believed_at_once_and_stops_placement() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_a_rise_is_believed_at_once_and_stops_placement_with(profiles);
+    }
+}
+
+fn h_a_rise_is_believed_at_once_and_stops_placement_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let phase = phased(4_000, warm(2_000, 0));
     w.submit_many(5, &phase);
@@ -285,9 +318,18 @@ fn h_a_rise_is_believed_at_once_and_stops_placement() {
 /// prediction (`r` 2, `k` 2). The demand stays within `(r k / f) (1 + s) C + n_c A`
 /// (93.9 + 8 cores on 16), and the covered charge never falls below `f` of the covered
 /// predictions while they idle.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (2 cores), which must give the same bounds.
 #[test]
 fn h_the_idle_prelude_cannot_stack_beyond_the_floor() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles);
+    }
+}
+
+fn h_the_idle_prelude_cannot_stack_beyond_the_floor_with(profiles: bool) {
+    let mut w = phase_world(profiles);
     w.linux("n", 16, 64);
     let node = js_types::sched::WorkerId::new("n");
     let sleeper = Spec {
@@ -437,14 +479,13 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
     );
     // Leases that end one after the other, 12 to 26 ticks in: room appears piecemeal, which
     // is what a stream of small work fills up.
+    // The score packs the first eight leases onto one Linux worker and the next eight onto
+    // the other, so each worker's leases end in the same four steps.
     for i in 0..8 {
         let ticks = 12 + 2 * i;
-        let lease = Spec::flat("small", 1_000, ticks, warm(1_000, 0));
-        w.submit_many(2, &linux_only(lease.clone()));
-        w.submit(&on_mac(Spec {
-            class: "msmall",
-            ..lease
-        }));
+        let lease = Spec::flat("small", 1_000, 12 + 2 * (i % 4), warm(1_000, 0));
+        w.submit_many(2, &linux_only(lease));
+        w.submit(&on_mac(Spec::flat("msmall", 1_000, ticks, warm(1_000, 0))));
     }
     w.run(2);
     assert_eq!(w.running_on("n0") + w.running_on("n1"), 16);
@@ -481,10 +522,11 @@ fn b_a_blocked_head_starts_within_the_bound_and_pools_do_not_meet() {
         w.step();
     }
     let bound = 24 + 2 * W + 1;
+    let linux_bound = 17 + 2 * W + 1;
     let head_at = first_start(&w, "head", submitted).expect("the head starts");
     let mac_at = first_start(&w, "mhead", submitted).expect("the Mac head starts");
     let second_at = first_start(&w, "head2", submitted).expect("the second head starts");
-    assert!(head_at <= submitted + bound, "head at {head_at}");
+    assert!(head_at <= submitted + linux_bound, "head at {head_at}");
     assert!(mac_at <= submitted + bound, "mac head at {mac_at}");
     assert!(second_at >= head_at, "queue order: {second_at} {head_at}");
     assert!(

@@ -109,11 +109,15 @@ fn a_submitted_operation_is_loaded_queued() {
                 operation: OperationId(4),
                 request: request(1),
                 lease: None,
+                cost_kept: true,
                 losses: 0,
                 fate: None,
                 parcel: Some(vec![1, 2]),
                 size_key: None,
             }],
+            floors: Vec::new(),
+            key_floors: Vec::new(),
+            key_names: Vec::new(),
             cordons: Vec::new(),
         }
     );
@@ -741,4 +745,75 @@ fn the_stored_epoch_follows_the_epoch_row() {
 
     remove(&store, "meta/epoch");
     assert_eq!(rows.stored_epoch().expect("read"), 0);
+}
+
+/// What a grant of these tests was charged: every figure is set.
+const CHARGED: LeaseCost = LeaseCost {
+    cpu_millis: 1_500,
+    memory_bytes: 3 << 30,
+    limit_bytes: 4 << 30,
+    cold: true,
+    retry: true,
+    key_hash: 0x00c0_ffee,
+};
+
+/// Asserts that a lease granted with a cost is recovered with that cost, whether the start
+/// loads it or a look at the operation (or at the node's leases) finds it: the lease row
+/// keeps the whole grant, and the scheduler is told `Some(cost)`.
+#[test]
+fn a_granted_lease_is_recovered_with_the_cost_it_was_granted() {
+    let (_, _, [rows]) = frontends([1]);
+    rows.submit(OperationId(4), &request(1), &[], None)
+        .expect("submit");
+    let grant = LeaseGrant {
+        cost: CHARGED,
+        ..grant_of(4, 0)
+    };
+    rows.granted(&grant).expect("grant");
+
+    let mut stored = rows.load().expect("load");
+    let loaded = stored.operations.remove(0);
+    let looked = rows.stored_operation(OperationId(4)).expect("read");
+    let held = rows.held_by(&node()).expect("read").remove(0);
+
+    for op in [loaded, looked.expect("an operation"), held] {
+        assert_eq!(op.lease.as_ref(), Some(&grant));
+        assert!(op.cost_kept);
+        let recovered = op.recovered(WaiterId(1)).lease.expect("a lease");
+        assert_eq!(recovered.lease, grant.lease);
+        assert_eq!(recovered.cost, Some(CHARGED));
+    }
+}
+
+/// Asserts that a lease row written before costs were kept is recovered with no cost (`None`,
+/// which the scheduler charges as the request), not with the placeholder the codec read, and
+/// that the lease itself is still recovered.
+#[test]
+fn a_lease_row_without_a_cost_is_recovered_with_none() {
+    let (store, codec, [rows]) = frontends([1]);
+    rows.submit(OperationId(4), &request(1), &[], None)
+        .expect("submit");
+    let grant = LeaseGrant {
+        cost: CHARGED,
+        ..grant_of(4, 0)
+    };
+    let row = codec.legacy_lease(&grant);
+    let index = [5_u64.to_be_bytes(), 0_u64.to_be_bytes()].concat();
+    let put = Txn::new()
+        .delete(keys::queue(grant.operation), Cond::Any)
+        .put(keys::lease(grant.lease), row, Cond::Any)
+        .put(keys::lease_by_op(grant.operation), index, Cond::Any);
+    store.txn(put).expect("store").expect("the old grant");
+
+    let mut stored = rows.load().expect("load");
+    let loaded = stored.operations.remove(0);
+    let looked = rows.stored_operation(OperationId(4)).expect("read");
+    let held = rows.held_by(&node()).expect("read").remove(0);
+
+    for op in [loaded, looked.expect("an operation"), held] {
+        assert!(!op.cost_kept);
+        let recovered = op.recovered(WaiterId(1)).lease.expect("a lease");
+        assert_eq!((recovered.lease, recovered.worker), (grant.lease, node()));
+        assert_eq!(recovered.cost, None);
+    }
 }

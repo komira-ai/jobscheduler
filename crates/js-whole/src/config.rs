@@ -1,6 +1,6 @@
 //! The pool settings of the whole-node class (design whole-node.md, section 6 and the
 //! timing keys of sections 3 to 5): plain data with the defaults of the design's table.
-//! Nothing here reads a clock or a file; [`crate::PoolConfig::with_whole_node`] checks a
+//! Nothing here reads a clock or a file; `js_registry::PoolConfig::with_whole_node` checks a
 //! value against its pool.
 //!
 //! A pool file's values are loaded into this type and put on the registry's pool. The
@@ -17,8 +17,9 @@ pub const DEFAULT_RESERVE_BACKOFF_MS: u64 = 300_000;
 /// minutes.
 pub const DEFAULT_PREPARE_TIMEOUT_MS: u64 = 600_000;
 /// The default time after a boot in which an unclaimed reservation record is kept: the
-/// wire's heartbeat grace, since hosts re-announce themselves within it.
-pub const DEFAULT_REGAIN_GRACE_MS: u64 = js_agent_wire::DEFAULT_GRACE_MS;
+/// wire's heartbeat grace (`js_agent_wire::DEFAULT_GRACE_MS`, which a js-registry test
+/// keeps equal to this), since hosts re-announce themselves within it.
+pub const DEFAULT_REGAIN_GRACE_MS: u64 = 15_000;
 
 /// What an operator decides about the whole-node class of one pool. Times are
 /// milliseconds. The fields are public so a file's overrides read as struct update on a
@@ -95,7 +96,7 @@ impl WholeNodeConfig {
     }
 
     /// The first setting that is zero where zero is meaningless, by key name.
-    pub(crate) fn zero_key(&self) -> Option<&'static str> {
+    pub fn zero_key(&self) -> Option<&'static str> {
         let counts = [
             ("max_whole_node", self.max_whole_node as u64),
             ("max_draining", self.max_draining as u64),

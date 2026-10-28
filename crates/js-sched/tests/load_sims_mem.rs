@@ -1,11 +1,14 @@
 //! Simulations of admission by memory, of the fallback and of the cost a lease keeps,
 //! over the fluid model of `load_world`.
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
 use js_sched::{LoadConfig, PlacementLoad, Prediction};
 
+use load_curves::Curves;
 use load_world::{GIB, Reporting, Spec, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
@@ -13,7 +16,23 @@ fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
+}
+
+/// A world for sim c's and sim i's actions, which run under a minute: with `profiles`
+/// every key has the curve of one bucket, at the prediction `hint` gives it; otherwise
+/// none has a curve.
+fn world(profiles: bool, hint: Prediction) -> World {
+    if !profiles {
+        return World::new(LoadConfig::default());
+    }
+    let curves = Curves::new("sim");
+    curves.set_all(
+        &[(u32::try_from(hint.cpu_millis).unwrap(), hint.memory_bytes)],
+        5,
+    );
+    World::with_curves(LoadConfig::default(), curves)
 }
 
 /// An action that holds 1 GiB and allocates up to `peak` at 60% of its 50 ticks, predicted
@@ -32,9 +51,18 @@ fn late_ramp(class: &'static str, peak: u64) -> Spec {
 /// 6 GiB, never put more than `C max(1, k_m)` = 96 GiB of true memory on the node, and
 /// run 16 at a time. The cold page cache (80% of RAM) is not in the working set the agent
 /// reports (`memory.current` minus the inactive file pages), so it does not keep leases out.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_late_ramps_and_tail_runs_stay_within_the_memory_bound_with(profiles);
+    }
+}
+
+fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     for n in 0..120 {
         let spec = if n % 33 == 32 {
@@ -66,9 +94,18 @@ fn c_late_ramps_and_tail_runs_stay_within_the_memory_bound() {
 /// memory: after the leases end, the working set the agent reports stays at 110% of the
 /// node's RAM (hot file pages nothing reclaims), and a working set counted whole would refuse
 /// every lease for good. All five new actions start.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_retained_page_cache_on_an_idle_node_still_admits() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_retained_page_cache_on_an_idle_node_still_admits_with(profiles);
+    }
+}
+
+fn c_retained_page_cache_on_an_idle_node_still_admits_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     w.submit_many(3, &late_ramp("ramp", 4 * GIB));
     w.run(60);
@@ -85,9 +122,18 @@ fn c_retained_page_cache_on_an_idle_node_still_admits() {
 /// lease; capped at a quarter of the node's memory they cost 16 GiB of the 64, and the node
 /// still takes sixteen leases of 4 GiB (each with the 1 GiB it holds before it allocates
 /// the rest) while the working set stays under their predictions.
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn c_retained_page_cache_beside_leases_costs_a_bounded_share() {
-    let mut w = World::new(LoadConfig::default());
+    for profiles in [false, true] {
+        c_retained_page_cache_beside_leases_costs_a_bounded_share_with(profiles);
+    }
+}
+
+fn c_retained_page_cache_beside_leases_costs_a_bounded_share_with(profiles: bool) {
+    let mut w = world(profiles, warm(250, 4 * GIB));
     w.linux("n", 8, 64);
     w.nodes.get_mut("n").unwrap().cache = 64 * GIB + 64 * GIB / 10;
     // Two readings in first, so the node is charged by measurement.
@@ -380,23 +426,39 @@ fn n_a_retry_is_counted_at_the_rung() {
 /// slack), and with the cost corrected to within 1.25 times the truth the same key puts at
 /// most 1.1 C on the node. (The estimator's rule that raises the cost under load is
 /// `js-sizing`'s; this checks what the scheduler does with each figure.)
+///
+/// Run twice: with keys that have no curve, and with keys that have one bucket at their
+/// prediction (these actions run under a minute), which must give the same bounds.
 #[test]
 fn i_an_understated_key_is_bounded_by_its_prediction() {
+    for profiles in [false, true] {
+        i_an_understated_key_is_bounded_by_its_prediction_with(profiles);
+    }
+}
+
+fn i_an_understated_key_is_bounded_by_its_prediction_with(profiles: bool) {
     let demand = |predicted: u64| {
-        let mut w = World::new(LoadConfig::default());
+        let mut w = world(profiles, warm(predicted, GIB));
         w.linux("n", 88, 512);
         w.submit_many(400, &Spec::flat("k", 4_000, 60, warm(predicted, GIB)));
         w.run(30);
         w.nodes["n"].peak_demand
     };
     let (understated, corrected) = (demand(1_000), demand(5_000));
-    assert!(
-        understated > 4_400 * 88 / 1000 * 1000,
-        "past 4.4 C: {understated}"
-    );
-    assert!(
-        understated <= 4 * 88 * 1_100 * 4 / 3,
-        "within (k / f) (1 + s) C"
-    );
+    if profiles {
+        // A covered lease with a curve is charged all of its prediction, not three quarters
+        // of it: the demand is at most 4.4 C, as the design has it.
+        assert!(understated > 4_000 * 88, "past 4 C: {understated}");
+        assert!(understated <= 4_400 * 88, "within 4.4 C: {understated}");
+    } else {
+        assert!(
+            understated > 4_400 * 88 / 1000 * 1000,
+            "past 4.4 C: {understated}"
+        );
+        assert!(
+            understated <= 4 * 88 * 1_100 * 4 / 3,
+            "within (k / f) (1 + s) C"
+        );
+    }
     assert!(corrected <= 96_800 + 4_000, "{corrected}");
 }

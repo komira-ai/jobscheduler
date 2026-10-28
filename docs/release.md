@@ -41,10 +41,18 @@ A gap to know: a run skipped because `main` moved is made up by the newer push's
 push fails `ci` (or its release run fails), nothing releases the skipped change until the next push
 that passes `ci` and ships code. Nothing runs on a timer.
 
-Each job holds only the permission it needs: `contents: read` for plan, build, sums and verify (plus
-`attestations: read` for verify), `id-token` and `attestations` write for `attest`, `contents`
-write for `publish` (the tag and the release). No job that holds a write permission runs repository
-code.
+7. `gamma` (off until its variables are set, below) sets the release as the desired version of the
+   services `js-server` and then `js-agent` on the update coordinator and waits for each to
+   converge.
+
+Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums and
+verify (plus `attestations: read` for verify), `id-token` and `attestations` write for `attest`,
+`contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`. No job
+that holds a write permission runs repository code, except that `gamma` runs the `xtask` binary
+that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
+dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
+actions, no permission at the top, `id-token` write in `attest` and `gamma` only) are pinned by
+`crates/xtask/tests/release_workflow.rs`.
 
 ## What is released
 
@@ -152,6 +160,51 @@ Not proven until the first real run on `main`, and fixed there if it differs:
   before anything is published if they differ);
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
+
+## The gamma step
+
+After a release is published, `gamma` tells the farm's update coordinator which version of each
+service is wanted, so the hosts that run js-lease-server and js-agent update themselves. It runs
+`cargo xtask deploy` (`crates/xtask/src/deploy.rs`, which documents the calls) for two services, in
+this order, each waiting for its hosts before the next is set (servers upgrade before agents, so a
+failed or blocked `js-server` leaves `js-agent` untouched):
+
+| Service | Binary it runs |
+|---|---|
+| `js-server` | `js-lease-server` |
+| `js-agent` | `js-agent` |
+
+Per service the job reads `GET /v1/convergence?service=NAME` (the hosts live now are the baseline),
+sets the version with `POST /v1/desired` (`{"service": NAME, "version": V, ...}`), then polls the
+convergence every 30 seconds with a fresh OIDC token each time (audience: the coordinator's URL).
+It passes when the coordinator says `converged` and every role has at least as many hosts at the
+version as were live before. It fails when a host failed its update (`blocked`), when a role lost
+hosts, when the counts have not changed for 20 minutes, after 60 minutes, when the token is
+refused (401, 403: the coordinator's allow-list must name this repository, this workflow on `main`
+and these two services), or when another writer replaced the desired version.
+
+**The version text** is the release version `X.Y.Z` of the `plan` job: the text `release stamp`
+puts in the build, which each of the three binaries prints as the last word of `--version`
+(`build` checks it) and which `js-lease-server` and `js-agent` report as their version in the
+coordinator heartbeat. It is not the tag (`vX.Y.Z`) and has no commit suffix. It is defined in
+one place, `deploy::check_version`, which refuses anything but three numbers without leading
+zeros, so a different form fails the job before any call is made, whether or not a coordinator
+is set. The workflow passes the plan's `version` output and derives nothing from it.
+
+**It is off by default.** With the repository variable `JS_COORDINATOR_URL` empty or unset the job
+prints `::notice::the deploy step is off` and passes. It sets nothing and holds no secret.
+Repository variables (Settings, Secrets and variables, Actions, Variables):
+
+| Variable | Meaning |
+|---|---|
+| `JS_COORDINATOR_URL` | the coordinator's control address, `https://<name>:<port>`; unset: the step is off |
+| `JS_COORDINATOR_CA` | the CA certificate (public, PEM text) the coordinator's certificate chains to; unset: the runner's system roots |
+| `TS_CLIENT_ID`, `TS_AUDIENCE` | when the coordinator is reachable only on a Tailscale network: the trust credential the job joins it with, as an ephemeral node tagged `tag:ci`, using its own OIDC token; either unset: no join |
+
+The coordinator must already run the services `js-server` and `js-agent` and allow this
+repository's `release` workflow on `main` to set them; until it does, the calls are refused and
+the job fails, so leave `JS_COORDINATOR_URL` unset until then. The job fails the run's last step
+only: the release is already published, and "Re-run failed jobs" repeats the step.
 
 ## Recovery
 
