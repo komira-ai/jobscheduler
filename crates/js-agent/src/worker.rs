@@ -59,12 +59,16 @@ pub const STEP_EVERY: Duration = Duration::from_secs(1);
 /// runtime before it counts as stalled: each call may take [`CALL_LIMIT`] and, for a stop,
 /// the stop grace on top, and [`STALL_MARGIN`] more is allowed for everything else. A drain
 /// that stops many runs at once legitimately takes this long, so the bound grows with the
-/// calls and the grace; `calls` is at least 1.
+/// calls and the grace; `calls` is held to between 1 and [`STALL_CALLS_MAX`], or a host with
+/// thousands of runs would have no watchdog at all.
 pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     let each = CALL_LIMIT.saturating_add(stop_grace);
-    let calls = u32::try_from(calls.max(1)).unwrap_or(u32::MAX);
+    let calls = u32::try_from(calls.clamp(1, STALL_CALLS_MAX)).unwrap_or(u32::MAX);
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
+
+/// The most calls [`stall_bound`] allows time for.
+pub const STALL_CALLS_MAX: usize = 64;
 
 /// What is allowed on top of the calls of [`stall_bound`].
 pub const STALL_MARGIN: Duration = Duration::from_secs(60);
@@ -418,7 +422,8 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len(),
             _ => 0,
         });
-        let calls = life.held().len().saturating_add(asked);
+        // A run held may cost two calls (a stop, then an inspect or a remove).
+        let calls = life.held().len().saturating_mul(2).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls).as_millis();
         let bound = u64::try_from(bound).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
