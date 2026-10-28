@@ -28,6 +28,7 @@ use js_types::sched::{
 
 use crate::adapter::{Adapter, Link, Stage, View};
 use crate::core::{Admitted, Config, Held, NotQueued};
+use crate::intake::Intake;
 use crate::store::Unsettled;
 use crate::write::{Attempt, Batch, Settles, Writer};
 
@@ -110,6 +111,16 @@ pub(crate) struct Engine {
     /// What the daemons of the other frontends offer, as the last look at the store's
     /// session rows read it ([`Engine::look_at_remote_sessions`]).
     pub(crate) remote: Vec<(NodeCaps, Resources)>,
+    /// A write was refused because a newer writer holds the state store: nothing this core
+    /// writes can succeed any more. Never cleared; unlike an outage, nothing ends it.
+    pub(crate) superseded: bool,
+    /// For each operation this core's callers wait on ([`Core::follow`](crate::Core::follow))
+    /// that the last looks found neither unfinished nor ended, how many looks in a row. Only
+    /// logged: no look count ends a caller's wait.
+    pub(crate) untraced_kept: BTreeMap<OperationId, u32>,
+    /// What the intake poll keeps between two looks at the state store
+    /// ([`Core::intake`](crate::Core::intake)).
+    pub(crate) intake: Intake,
 }
 
 impl Engine {
@@ -152,6 +163,9 @@ impl Engine {
             unclaimed: BTreeMap::new(),
             stuck: BTreeMap::new(),
             remote: Vec::new(),
+            superseded: false,
+            untraced_kept: BTreeMap::new(),
+            intake: Intake::new(config.orphan_wait),
         }
     }
 
@@ -267,9 +281,14 @@ impl Engine {
     ///
     /// A grant the writer has not taken for a lease the scheduler has given up is never
     /// written: it would put the lease back, held by no one.
-    fn log_requeues(&mut self, a: &mut dyn Adapter) {
+    pub(crate) fn log_requeues(&mut self, a: &mut dyn Adapter) {
         let given_up = self.sched.take_requeues();
         self.settle_requeues(&given_up);
+        // The queue row a give-up writes is this core's own: the intake poll finds the
+        // operation queued as it left it, not queued again by another frontend.
+        for requeue in &given_up {
+            self.intake.rewrote(requeue.operation);
+        }
         for requeue in given_up {
             a.requeued(&requeue);
             let Requeue {
@@ -289,8 +308,9 @@ impl Engine {
     /// Forgets the callers, and their channels, of every finished operation the
     /// scheduler has dropped. Every input ends here.
     pub(crate) fn forget_dropped(&mut self, a: &mut dyn Adapter) {
-        let sched = &self.sched;
-        a.forget_dropped(&|operation| sched.state(operation).is_some());
+        let (sched, intake) = (&self.sched, &self.intake);
+        let held = |operation| sched.state(operation).is_some() || intake.keeps(operation);
+        a.forget_dropped(&held);
         self.answered
             .retain(|_, operation| sched.state(*operation).is_some());
         self.ever_started

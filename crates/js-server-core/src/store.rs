@@ -107,15 +107,15 @@ impl Writer for StoreWriter {
 /// How the write that failed with `error` ended. Only a store that cannot be reached is an
 /// outage; a write that lost a compare-and-set or found its row gone is the store working;
 /// a write for a node another frontend owns is dropped, and so is one that cannot be encoded
-/// or reads a row that is not the scheduler's.
+/// or reads a row that is not the scheduler's; a store that says a newer writer holds it
+/// supersedes this core.
 pub(crate) const fn classify(error: &StateError) -> Attempt {
     match error {
         StateError::Store(StoreError::Failed(_)) => Attempt::Transient,
         StateError::Missing(_) | StateError::Conflict(_) => Attempt::Stale,
         StateError::StaleOwner(_) => Attempt::Disowned,
-        StateError::Store(StoreError::Fenced)
-        | StateError::Corrupt { .. }
-        | StateError::Codec(_) => Attempt::Dropped,
+        StateError::Store(StoreError::Fenced) => Attempt::Superseded,
+        StateError::Corrupt { .. } | StateError::Codec(_) => Attempt::Dropped,
     }
 }
 
@@ -126,6 +126,13 @@ pub(crate) struct Unsettled {
     losses: Option<u32>,
     fate: Option<Fate>,
     floors: FloorChange,
+}
+
+impl Unsettled {
+    /// The operation the lease belongs to.
+    pub(crate) const fn operation(&self) -> OperationId {
+        self.requeue.operation
+    }
 }
 
 impl NodeAction {
@@ -149,7 +156,12 @@ fn millis(duration: Duration) -> u64 {
 /// The scheduler input that places a node as its `cordon/` row says, at farm time `now`
 /// when the store's clock reads `at` milliseconds: a drain ends as far from `now` as its
 /// deadline is from `at`.
-fn cordon_event(worker: WorkerId, cordon: StoredCordon, now: FarmTime, at: u64) -> Event {
+pub(crate) fn cordon_event(
+    worker: WorkerId,
+    cordon: StoredCordon,
+    now: FarmTime,
+    at: u64,
+) -> Event {
     match cordon {
         StoredCordon::Cordoned => Event::Cordon { worker },
         StoredCordon::Draining { deadline_unix_ms } => Event::Drain {
@@ -165,13 +177,13 @@ impl Engine {
     /// `first` is the process term, which names this frontend in the store's `owner/` rows
     /// and is the epoch of a store that has none; the scheduler's term is the epoch.
     ///
-    /// Every unfinished operation is taken up, one that holds a lease too: it waits for its
-    /// node to register for the lease grace, and is given up if the node does not. This
-    /// start assumes no other frontend of the store is live: it would take up, and after
-    /// the grace give up, the leases of a frontend that is still running them (the farm
-    /// server takes up only the queued ones, and the leased ones of the nodes that register
-    /// with it; this core does not yet). Each is held for a caller of its
-    /// own ([`Adapter::adopted`]). The first blocks of operation ids and lease sequences are
+    /// The operations that wait for a lease are taken up, and none that holds one: the
+    /// lease belongs to the frontend its node is connected to, which may be another than
+    /// this, and a lease taken up here would be given up after the lease grace and its
+    /// operation run twice. A leased operation is taken up when its node says `Hello` here
+    /// ([`Engine::claim_worker`]); if the node never does, the orphan sweep requeues it
+    /// ([`Engine::take_intake`]). Each operation taken up is held for a caller of its own
+    /// ([`Adapter::adopted`]). The first blocks of operation ids and lease sequences are
     /// reserved past everything any frontend of the store reserved, so a start never takes
     /// an id an earlier one took.
     ///
@@ -202,6 +214,7 @@ impl Engine {
         let recovered: Vec<Recovered> = stored
             .operations
             .into_iter()
+            .filter(|op| op.lease.is_none())
             .map(|op| self.take_stored(a, op))
             .collect();
         let first_operation = rows.reserve_operation(OperationId(stored.next_operation))?;
@@ -212,6 +225,7 @@ impl Engine {
         self.sched.use_seq_block(seqs);
         let at = rows.store_ms();
         for (worker, cordon) in stored.cordons {
+            self.intake.cordons.insert(worker.clone(), cordon);
             let none = self
                 .sched
                 .apply(Input::new(now, cordon_event(worker, cordon, now, at)));
@@ -267,8 +281,10 @@ impl Engine {
         };
         tracing::error!(%error, "the state store did not take {what}");
         let attempt = classify(&error);
-        if attempt == Attempt::Transient {
-            self.unreachable = true;
+        match attempt {
+            Attempt::Transient => self.unreachable = true,
+            Attempt::Superseded => self.superseded = true,
+            _ => {}
         }
         attempt
     }
@@ -282,6 +298,16 @@ impl Engine {
         let Some(rows) = self.rows.clone() else {
             return;
         };
+        if self.superseded {
+            // The store is reachable but this core may not write it, so it stays unavailable
+            // (no grant, no lease given up) and never pings back.
+            if !self.store_down {
+                tracing::error!("the state store has a newer writer: this scheduler takes no work");
+                self.store_down = true;
+                self.sched.store_unavailable();
+            }
+            return;
+        }
         if self.unreachable && !self.store_down {
             tracing::warn!("the state store is unavailable: no lease is given up or granted");
             self.store_down = true;
@@ -439,7 +465,11 @@ impl Engine {
             Ok(())
         });
         if attempt != Attempt::Taken {
-            return Err(NotQueued::Unavailable);
+            return Err(if self.superseded {
+                NotQueued::Superseded
+            } else {
+                NotQueued::Unavailable
+            });
         }
         if let Some(Submitted::Queued(used)) = &submitted {
             self.sched.skip_to(*used);
@@ -527,6 +557,15 @@ impl Engine {
         Ok(())
     }
 
+    /// The nodes whose newest stream is open.
+    pub(crate) fn connected(&self, a: &dyn Adapter) -> BTreeSet<WorkerId> {
+        self.links
+            .iter()
+            .filter(|(worker, link)| a.stream_open(worker, link.stream))
+            .map(|(worker, _)| worker.clone())
+            .collect()
+    }
+
     /// Reads the daemons of the other frontends from the `session/` rows, and shows again
     /// the stage of the operations that wait for a worker, now that it is known whether one
     /// of them could run each ([`Engine::republish_stuck`]). Nothing needs the list unless an
@@ -536,12 +575,7 @@ impl Engine {
             self.remote.clear();
             return;
         }
-        let connected: BTreeSet<WorkerId> = self
-            .links
-            .iter()
-            .filter(|(worker, link)| a.stream_open(worker, link.stream))
-            .map(|(worker, _)| worker.clone())
-            .collect();
+        let connected = self.connected(&*a);
         let mut remote = None;
         self.attempt("a session look", &mut |rows| {
             remote = Some(rows.remote_sessions(&connected)?);

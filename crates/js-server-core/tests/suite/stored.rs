@@ -11,14 +11,17 @@ use std::time::Duration;
 use js_server_core::{Config, Core, Storage};
 use js_state::fake::{Fake, Flaw};
 use js_state::{
-    Changes, Commit, CommitStats, Conflict, ManualClock, Op, Revision, ScanPage, ScanRange, Store,
-    StoreError, StoreTime, Txn, Versioned,
+    Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Op, Revision, ScanPage, ScanRange,
+    Store, StoreError, StoreTime, Txn, Versioned,
 };
 use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows};
 use js_types::sched::OperationId;
 
 use crate::common::{Rig, at, begin};
+
+/// A write another frontend makes, as a closure.
+type Landing = Box<dyn FnOnce() + Send>;
 
 /// The in-memory store, failing the reads and writes of the rows under a prefix on request.
 pub struct Racing {
@@ -28,6 +31,11 @@ pub struct Racing {
     fenced: AtomicBool,
     unreadable: Mutex<Option<String>>,
     unwritable: Mutex<Option<String>>,
+    /// A write applied just before the next read of a row under a prefix: another frontend's
+    /// write landing between two reads of one look.
+    before_read: Mutex<Option<(String, Landing)>>,
+    /// How many scans of each prefix were made.
+    scans: Mutex<Vec<String>>,
 }
 
 impl Racing {
@@ -40,7 +48,52 @@ impl Racing {
             fenced: AtomicBool::new(false),
             unreadable: Mutex::new(None),
             unwritable: Mutex::new(None),
+            before_read: Mutex::new(None),
+            scans: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Writes `value` at `key` as a writer of its own.
+    pub fn put(&self, key: &str, value: Vec<u8>) {
+        self.write(Txn::new().put(key, value, Cond::Any));
+    }
+
+    /// Deletes the row at `key` as a writer of its own.
+    pub fn remove(&self, key: &str) {
+        self.write(Txn::new().delete(key, Cond::Any));
+    }
+
+    /// Runs `landing` just before the next read of a row under `prefix` (once).
+    pub fn before_read(&self, prefix: &str, landing: impl FnOnce() + Send + 'static) {
+        let mut slot = self
+            .before_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *slot = Some((prefix.to_owned(), Box::new(landing)));
+    }
+
+    /// How many scans of the rows under `prefix` were made so far.
+    pub fn scans_of(&self, prefix: &str) -> usize {
+        let scans = self.scans.lock().unwrap_or_else(PoisonError::into_inner);
+        scans
+            .iter()
+            .filter(|scanned| scanned.as_str() == prefix)
+            .count()
+    }
+
+    fn landing(&self, key: &str) {
+        let mut slot = self
+            .before_read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if slot
+            .as_ref()
+            .is_some_and(|(prefix, _)| key.starts_with(prefix.as_str()))
+        {
+            let (_, landing) = slot.take().expect("checked");
+            drop(slot);
+            landing();
+        }
     }
 
     /// The store takes no writes (and says so as a store that cannot be reached does), or
@@ -126,6 +179,7 @@ impl Store for Racing {
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
+        self.landing(key);
         if self.reads_fail(key) {
             return Err(StoreError::Failed(format!("{key} cannot be read")));
         }
@@ -133,6 +187,10 @@ impl Store for Racing {
     }
 
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
+        self.scans
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(prefix.to_owned());
         if self.reads_fail(prefix) {
             return Err(StoreError::Failed(format!("{prefix} cannot be read")));
         }
@@ -188,6 +246,12 @@ impl Setup {
     /// A frontend built from `config`, over `rig`, started at farm time `now`.
     pub fn core_with(&self, config: &Config, rig: Rig, now: u64) -> Core<Rig> {
         Core::open(config, rig, self.storage(), at(now)).expect("opened")
+    }
+
+    /// Ends `operation` in the store as another frontend does: its `done/` row, `value`.
+    pub fn ended_elsewhere(&self, operation: OperationId, value: &[u8]) {
+        let put = Txn::new().put(js_store::keys::done(operation), value.to_vec(), Cond::Any);
+        self.store.write(put);
     }
 
     /// A handle that writes the rows as another frontend of the store does.

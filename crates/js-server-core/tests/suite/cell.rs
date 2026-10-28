@@ -184,7 +184,21 @@ impl Adapter for Wire {
 
     fn adopted(&mut self, _: OperationId, _: WaiterId, _: Option<&[u8]>) {}
 
-    fn followed(&mut self, _: OperationId, _: &[WaiterId]) {}
+    fn waiting_among(&self, _: &[WaiterId]) -> Vec<WaiterId> {
+        Vec::new()
+    }
+
+    fn show_callers(&mut self, _: &[WaiterId], _: &Stage) {}
+
+    fn keep_finished(&mut self, _: OperationId, _: Vec<WaiterId>) {}
+
+    fn followed(&mut self, _: OperationId, _: &[u8]) {}
+
+    fn watched(&mut self) -> Vec<OperationId> {
+        Vec::new()
+    }
+
+    fn show_watched(&mut self, _: OperationId, _: &Stage) {}
 }
 
 fn leader_id() -> NodeId {
