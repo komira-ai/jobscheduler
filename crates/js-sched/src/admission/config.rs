@@ -41,13 +41,14 @@ pub struct LoadConfig {
     /// in the working set (see `WorkerLoad::working_set_counted`). Default 250; at most
     /// 1000.
     pub file_share_permille: u32,
-    /// Profile admission: a key with a learned curve is charged per minute and the
-    /// predicate is checked over the next 30 minutes. The operator's off switch for CPU
-    /// (memory has its own, [`LoadConfig::profile_memory`]); with both off the flat rule
+    /// Profile admission in CPU: a key with a learned curve is charged its cores per
+    /// minute and the predicate is checked over the next 30 minutes. The operator's off
+    /// switch for CPU, apart from the one for memory ([`LoadConfig::profile_memory`]): a
+    /// switch that is off charges that resource flat, and with both off the flat rule
     /// applies. Default on.
     pub profile: bool,
-    /// Memory is charged by the curve's remaining maximum. Needs [`LoadConfig::profile`].
-    /// Default on.
+    /// Profile admission in memory: a key with a learned curve is charged the curve's
+    /// remaining maximum. Independent of [`LoadConfig::profile`]. Default on.
     pub profile_memory: bool,
     /// `g`, in thousandths: a curve charges a lease at least this share of its flat
     /// cores. Default 750; kept within 500 and `f`.

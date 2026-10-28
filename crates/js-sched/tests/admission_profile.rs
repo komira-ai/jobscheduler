@@ -349,7 +349,7 @@ fn minutes_of_strangers_and_of_flat_leases_change_nothing() {
 
 /// Catches: the profile layer not what lets two leases whose busy minutes differ share a
 /// worker that their flat costs would fill (the point of it), and the operator's off
-/// switch not restoring the flat rule: 56 cores each, 112 > 110 flat, 60 + 42 by curve.
+/// switches not restoring the flat rule: 56 cores each, 112 > 110 flat, 60 + 42 by curve.
 #[test]
 fn profiles_admit_what_the_flat_rule_refuses_and_the_switch_turns_them_off() {
     let (r, placed) = busy_pair(LoadConfig::default(), 56_000);
@@ -358,6 +358,7 @@ fn profiles_admit_what_the_flat_rule_refuses_and_the_switch_turns_them_off() {
     assert_eq!((c.profile_cpu, c.profile_memory), (2, 2));
     let off = LoadConfig {
         profile: false,
+        profile_memory: false,
         ..LoadConfig::default()
     };
     let (r, placed) = busy_pair(off, 56_000);
@@ -391,6 +392,30 @@ fn the_memory_switch_is_apart_from_the_cpu_one() {
     r.keyed("m2", 1_000, 8 * GIB, warm(1_000, 8 * GIB));
     assert!(r.tick().is_empty(), "memory held flat: 8 + 8 > 15 for good");
     assert_eq!(ahead(&r, 9).1, 8 * GIB);
+}
+
+/// Catches: the CPU switch turning the memory profile off with it (a lease past its peak
+/// charged the peak again) or leaving CPU by curve: with CPU off and memory on, CPU is flat
+/// (56 + 56 > 110) and memory is by the curve (1 + 8 <= 15).
+#[test]
+fn the_cpu_switch_is_apart_from_the_memory_one() {
+    let cpu_off = LoadConfig {
+        profile: false,
+        ..LoadConfig::default()
+    };
+    let (r, placed) = busy_pair(cpu_off, 56_000);
+    assert_eq!(placed, 1, "CPU is flat: 56 + 56 > 110");
+    let c = r.s.load_counters();
+    assert_eq!((c.profile_cpu, c.profile_memory), (0, 1));
+    let (mut r, curves) = cluster_on(cpu_off, Resources::new(100_000, 15 * GIB));
+    let points: Vec<(u32, u64)> = [2, 8, 8, 1].iter().map(|&g| (1_000, g * GIB)).collect();
+    curves.set("m1", &points, 5);
+    curves.set("m2", &points, 5);
+    let first = place(&mut r, "m1", warm(1_000, 8 * GIB));
+    r.window_clocked("a", 1_000, GIB, &[first.lease], &[(first.lease, 3)], &[]);
+    assert_eq!(ahead(&r, 9).1, GIB, "past its peak: the curve's tail");
+    r.keyed("m2", 1_000, 8 * GIB, warm(1_000, 8 * GIB));
+    assert_eq!(r.tick().len(), 1, "memory by curve: 1 + 8 <= 15");
 }
 
 /// Catches: both switches off not being the flat rule exactly: the same events with a

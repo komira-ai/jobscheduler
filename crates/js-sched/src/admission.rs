@@ -33,8 +33,9 @@
 //!   the predicate is checked at every minute of the next 30 and once for what each lease
 //!   asks for from then on. The measurement enters at the first minute only. Cold keys,
 //!   demoted keys, retries and workers charged by prediction alone are charged flat, as
-//!   before. Both switches ([`LoadConfig::profile`], [`LoadConfig::profile_memory`]) off
-//!   give the flat rule exactly.
+//!   before. The switches are independent ([`LoadConfig::profile`] for CPU,
+//!   [`LoadConfig::profile_memory`] for memory): a resource whose switch is off is charged
+//!   flat, and both off give the flat rule exactly.
 //! - The shape guard (`guard.rs`) charges a resource of a key flat for 8 runs when its
 //!   curve misfit in 2 of the last 3 runs or 3 of the last 10.
 //!
@@ -370,7 +371,9 @@ impl Admission {
     /// over time: by its key's curve (in CPU, in memory, or both), up to an expected life,
     /// or flat, which is `None`.
     ///
-    /// A key is charged by curve when the setting is on, it has a prediction that is not
+    /// A key is charged by curve in CPU when [`LoadConfig::profile`] is on and in memory
+    /// when [`LoadConfig::profile_memory`] is on, independently: a switch that is off
+    /// charges that resource flat. Either way the key has a prediction that is not
     /// cold, its curve was fitted from [`MIN_RUNS`] runs or more, the lease is not a
     /// retry up the memory ladder (charged flat at its rung), and the shape guard has not
     /// demoted the resource.
@@ -388,8 +391,8 @@ impl Admission {
         }
         let cfg = &self.cfg;
         self.hints.get(&operation).filter(|p| !p.cold)?;
-        let curve = cfg
-            .profile
+        // CPU and memory each follow their own switch: a curve is read when either is on.
+        let curve = (cfg.profile || cfg.profile_memory)
             .then(|| self.curves.0.curve(&request.key))
             .flatten()
             .filter(|c| c.runs() >= MIN_RUNS && !c.points().is_empty());
@@ -406,9 +409,9 @@ impl Admission {
         let charged = curve.is_some();
         let choice = Choice {
             curve,
-            cpu: cpu_left == 0,
+            cpu: cfg.profile && cpu_left == 0,
             mem: cfg.profile_memory && mem_left == 0,
-            demoted_cpu: charged && cpu_left > 0,
+            demoted_cpu: charged && cfg.profile && cpu_left > 0,
             demoted_mem: charged && cfg.profile_memory && mem_left > 0,
             life,
             floor_permille: cfg.profile_floor_permille,

@@ -581,6 +581,7 @@ fn shadow_counts_the_verdicts_of_the_profile_predicate() {
         let config = LoadConfig {
             mode: PlacementLoad::Shadow,
             profile,
+            profile_memory: profile,
             ..LoadConfig::default()
         };
         let (r, placed) = busy_pair(config, 56_000);
@@ -622,6 +623,7 @@ fn a_blocked_head_holds_the_worker_by_its_charge_now() {
     let hold = |profile: bool| {
         let config = LoadConfig {
             profile,
+            profile_memory: profile,
             ..LoadConfig::default()
         };
         let curves = Curves::new("load");

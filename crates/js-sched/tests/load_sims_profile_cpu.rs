@@ -117,6 +117,7 @@ fn p_non_overlapping_busy_phases_are_admitted_together_under_profiles() {
 
     let flat = LoadConfig {
         profile: false,
+        profile_memory: false,
         ..LoadConfig::default()
     };
     let (mut w, _) = node(flat);
@@ -345,6 +346,7 @@ fn stream(config: LoadConfig) -> Stream {
 fn af_short_actions_are_refused_by_the_tail_charge_unless_it_ends_at_their_life() {
     let flat = stream(LoadConfig {
         profile: false,
+        profile_memory: false,
         ..LoadConfig::default()
     });
     assert_eq!((flat.started, flat.p95, flat.blocked), (600, 0, 0));
