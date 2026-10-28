@@ -9,9 +9,10 @@
 
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Request};
+use js_state::Versioned;
 use js_types::sched::{LeaseGrant, Resources, WorkerId};
 
-use crate::StateError;
+use crate::{Rows, StateError};
 
 /// What a daemon's registration says, as its `session/` row keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,4 +72,68 @@ pub trait RowCodec: Send + Sync {
     /// # Errors
     /// [`StateError::Corrupt`], naming `key`, if the bytes are not a value of this codec.
     fn read(&self, key: &str, bytes: &[u8]) -> Result<Value, StateError>;
+}
+
+/// The error for the row `key`, which holds a command this binary does not know.
+fn not_known(key: &str) -> StateError {
+    StateError::corrupt(key, "a command this binary does not know")
+}
+
+/// Why `value`, which a row holds, is not the `what` the reader wants.
+fn wrong(key: &str, value: &Value, what: &str) -> StateError {
+    if matches!(value, Value::Unknown) {
+        not_known(key)
+    } else {
+        StateError::corrupt(key, what)
+    }
+}
+
+impl Rows {
+    /// Whether `bytes`, the value of the row `key`, hold a command this binary does not
+    /// know, which a later one wrote. A value that is malformed is not: a scan leaves it
+    /// for the reader to refuse.
+    pub(crate) fn is_unknown(&self, key: &str, bytes: &[u8]) -> bool {
+        matches!(self.codec.read(key, bytes), Ok(Value::Unknown))
+    }
+
+    /// The grant a `lease/` row holds.
+    pub(crate) fn lease_row(&self, key: &str, row: &Versioned) -> Result<LeaseGrant, StateError> {
+        match self.codec.read(key, &row.value)? {
+            Value::Lease(grant) => Ok(grant),
+            other => Err(wrong(key, &other, "not a lease grant")),
+        }
+    }
+
+    /// The request an `op/` row holds.
+    pub(crate) fn request_row(&self, key: &str, row: &Versioned) -> Result<Request, StateError> {
+        match self.codec.read(key, &row.value)? {
+            Value::Submit(request) => Ok(request),
+            other => Err(wrong(key, &other, "not a request")),
+        }
+    }
+
+    /// The rows under `prefix` that a scan can use: a row that holds a command this binary
+    /// does not know is left out, and every other row stays, for the scan to read or
+    /// refuse. It logs nothing: a scan a request makes would repeat it per request.
+    pub(crate) fn scan_known(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StateError> {
+        let mut rows = self.store.scan_prefix(prefix)?;
+        rows.retain(|(key, row)| !self.is_unknown(key, &row.value));
+        Ok(rows)
+    }
+
+    /// [`Rows::scan_known`], logging the key of each row it leaves out: for a start.
+    pub(crate) fn scan_known_logged(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, Versioned)>, StateError> {
+        let mut rows = self.store.scan_prefix(prefix)?;
+        rows.retain(|(key, row)| {
+            let unknown = self.is_unknown(key, &row.value);
+            if unknown {
+                tracing::warn!(%key, "a row holds a command this binary does not know: skipped");
+            }
+            !unknown
+        });
+        Ok(rows)
+    }
 }

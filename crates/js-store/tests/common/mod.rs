@@ -12,7 +12,7 @@ use js_state::{
     Changes, Commit, CommitStats, Conflict, ManualClock, Revision, ScanPage, ScanRange, Store,
     StoreError, StoreTime, Txn, Versioned,
 };
-use js_store::test_support::TestCodec;
+use js_store::test_support::{TestCodec, TestExt};
 use js_store::{EpochPolicy, Rows, StateError};
 
 /// A store that applies a transaction of another frontend just before a write of this one
@@ -24,6 +24,7 @@ pub struct Racing {
     landings: Mutex<Vec<(String, Txn)>>,
     down: AtomicBool,
     unreadable: Mutex<Option<String>>,
+    ack_lost: AtomicBool,
 }
 
 impl Racing {
@@ -35,7 +36,14 @@ impl Racing {
             landings: Mutex::new(Vec::new()),
             down: AtomicBool::new(false),
             unreadable: Mutex::new(None),
+            ack_lost: AtomicBool::new(false),
         })
+    }
+
+    /// The next write is applied and then reported as failed, as a connection lost after the
+    /// commit reports it: the rows are in, and nobody knows.
+    pub fn lose_next_ack(&self) {
+        self.ack_lost.store(true, Ordering::SeqCst);
     }
 
     /// The store's clock moves on by `by`.
@@ -75,7 +83,11 @@ impl Store for Racing {
             self.inner.txn(landing)?.expect("the landing write");
         }
         drop(queued);
-        self.inner.apply_batch(batch)
+        let applied = self.inner.apply_batch(batch)?;
+        if self.ack_lost.swap(false, Ordering::SeqCst) {
+            return Err(StoreError::Failed("the connection closed".to_owned()));
+        }
+        Ok(applied)
     }
 
     fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
@@ -116,7 +128,13 @@ pub fn open(
     policy: EpochPolicy,
     first: u64,
 ) -> Result<(Rows, u64), StateError> {
-    Rows::open(store, policy, first, Arc::new(TestCodec::new()))
+    Rows::open(
+        store,
+        policy,
+        first,
+        Arc::new(TestCodec::new()),
+        Arc::new(TestExt),
+    )
 }
 
 /// A handle over `store` for the frontend numbered `id`, which kept the epoch it found or
@@ -124,7 +142,7 @@ pub fn open(
 pub fn frontend_with(store: &Arc<Racing>, id: u64, codec: &Arc<TestCodec>) -> Rows {
     let store: Arc<dyn Store> = store.clone();
     let codec = codec.clone();
-    Rows::open(store, EpochPolicy::Keep, id, codec)
+    Rows::open(store, EpochPolicy::Keep, id, codec, Arc::new(TestExt))
         .expect("open")
         .0
 }

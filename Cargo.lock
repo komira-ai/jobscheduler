@@ -931,6 +931,8 @@ dependencies = [
  "js-store",
  "js-types",
  "thiserror",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
