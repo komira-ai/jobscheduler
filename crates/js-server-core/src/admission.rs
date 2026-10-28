@@ -55,27 +55,3 @@ impl Admission for AllowAll {
         Ok(())
     }
 }
-
-/// Hears every host that reports it stops its own runs ([`Reported::self_fence`]).
-///
-/// The scheduler gives a silent host's lease to another host after a grace that is longer
-/// than the time a self-fencing host takes to stop. A host that does not stop on its own
-/// would run the work twice, so it is refused when it registers.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SelfFencedOnly;
-
-impl Admission for SelfFencedOnly {
-    fn allow_host(&self, worker: &WorkerId, reported: &Reported) -> Result<(), Denied> {
-        if reported.self_fence {
-            Ok(())
-        } else {
-            Err(Denied::new(format!(
-                "{worker} does not report that it fences itself"
-            )))
-        }
-    }
-
-    fn allow_beat(&self, _: &WorkerId, _: &Beat) -> Result<(), Denied> {
-        Ok(())
-    }
-}

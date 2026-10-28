@@ -31,21 +31,16 @@ pub struct Reported {
     pub caps: NodeCaps,
     /// What it is doing besides running leases.
     pub phase: NodePhase,
-    /// Whether it stops a run on its own when the server has not acknowledged it for the
-    /// scheduler's self-fence time. The scheduler gives a silent host's lease to another
-    /// after a longer grace, which is only safe if the host did stop.
-    pub self_fence: bool,
 }
 
 impl Reported {
-    /// A serving host with `capacity` and `caps`, which self-fences.
+    /// A serving host with `capacity` and `caps`.
     #[must_use]
     pub const fn serving(capacity: Resources, caps: NodeCaps) -> Self {
         Self {
             capacity,
             caps,
             phase: NodePhase::Serving,
-            self_fence: true,
         }
     }
 
@@ -53,13 +48,6 @@ impl Reported {
     #[must_use]
     pub fn in_phase(mut self, phase: NodePhase) -> Self {
         self.phase = phase;
-        self
-    }
-
-    /// This report, from a host that does not self-fence.
-    #[must_use]
-    pub fn without_self_fence(mut self) -> Self {
-        self.self_fence = false;
         self
     }
 }
