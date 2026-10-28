@@ -376,5 +376,9 @@ pub(crate) fn lenient_load<'de, D>(deserializer: D) -> Result<Option<NodeLoad>, 
 where
     D: Deserializer<'de>,
 {
-    Value::deserialize(deserializer).map(|value| NodeLoad::from_value(&value))
+    Value::deserialize(deserializer).and_then(|value| {
+        NodeLoad::from_value(&value)
+            .map(Some)
+            .ok_or_else(|| <D::Error as serde::de::Error>::custom("bad load"))
+    })
 }
