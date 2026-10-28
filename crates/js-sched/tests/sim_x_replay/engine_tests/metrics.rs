@@ -4,8 +4,8 @@
 use super::{TableBeliefs, busy, flat, row, run, small_config};
 use crate::engine::metrics::Metrics;
 use crate::engine::metrics::{
-    A9, Counters, Fnv, G0, Unbalanced, Uninformative, cpu_ppm, long_run_share_ppm, nearest_rank,
-    oversize_rows,
+    Counters, Fnv, Guards, LoopBounds, Unbalanced, Uninformative, cpu_ppm, long_run_share_ppm,
+    nearest_rank, oversize_rows,
 };
 use crate::engine::model::Pool;
 use crate::engine::rankers::{Choose, LeastLoaded, Pick, Ranker};
@@ -80,10 +80,10 @@ fn oversize_and_long_run_counts() {
 #[test]
 fn sample_guards_fail_a_short_trace() {
     let w = busy();
-    let scaled = G0 {
+    let scaled = Guards {
         min_window_samples: 5_000,
         min_minute_samples: 600,
-        ..G0::default()
+        ..Guards::default()
     };
     assert_eq!(
         scaled.check(&w.run.metrics),
@@ -97,7 +97,7 @@ fn sample_guards_fail_a_short_trace() {
     let mut cfg = small_config(2, 4, 16_384);
     cfg.warm_up_min = 0;
     let short = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
-    let bad = G0::default()
+    let bad = Guards::default()
         .check(&short.metrics)
         .expect_err("a minute of data");
     assert!(
@@ -121,11 +121,11 @@ fn sample_guards_fail_a_short_trace() {
 #[test]
 fn cold_and_oversize_guards() {
     let w = busy();
-    let relaxed = G0 {
+    let relaxed = Guards {
         min_window_samples: 0,
         min_minute_samples: 0,
         min_span_minutes: 0,
-        ..G0::default()
+        ..Guards::default()
     };
     assert_eq!(relaxed.check(&w.run.metrics), Ok(()));
     let all_warm = TableBeliefs::uniform(w.rows.len(), &flat(2_000, 600));
@@ -159,12 +159,12 @@ fn the_stability_guard_trips_on_a_queue_that_never_drains() {
     assert_eq!((c.placed, c.completed), (0, 0));
     assert_eq!(c.queued_at_end, w.rows.len() as u64);
     assert_eq!(r.metrics.check_books(), Ok(()));
-    let relaxed = G0 {
+    let relaxed = Guards {
         min_window_samples: 0,
         min_minute_samples: 0,
         min_span_minutes: 0,
         cold_share_ppm: (0, 1_000_000),
-        ..G0::default()
+        ..Guards::default()
     };
     let bad = relaxed.check(&r.metrics).expect_err("nothing was served");
     assert!(
@@ -297,7 +297,7 @@ fn rounds_that_stop_early_count_the_leases_they_never_looked_at() {
         "attempts = placed + 32 at the most"
     );
     assert!(c.rounds_with_unexamined >= 1);
-    assert_eq!(c.check_a9(1, true), Ok(()));
+    assert_eq!(c.check_loop_bounds(1, true), Ok(()));
     let table = r.metrics.render();
     assert!(table.contains("never examined"), "{table}");
     assert!(table.contains("at most 9"), "{table}");
@@ -311,14 +311,14 @@ fn rounds_that_stop_early_count_the_leases_they_never_looked_at() {
     assert_eq!(r.metrics.check_books(), Ok(()));
 }
 
-/// Catches: the A9 bounds that cannot trip. Each is broken in a counter set by hand (a
+/// Catches: the LoopBounds bounds that cannot trip. Each is broken in a counter set by hand (a
 /// runaway that looks at a lease twice in a round, a round that looks past its refusals,
 /// a scorer that reports evaluations that are not 64 per candidate or scored a host that
 /// was not handed to it), and the clean counters of a real run pass.
 #[test]
-fn the_a9_bounds_trip_on_synthetic_loops() {
+fn the_loop_bounds_trip_on_synthetic_loops() {
     let w = busy();
-    assert_eq!(w.run.metrics.counters.check_a9(2, true), Ok(()));
+    assert_eq!(w.run.metrics.counters.check_loop_bounds(2, true), Ok(()));
 
     let base = Counters {
         attempts: 10,
@@ -327,14 +327,14 @@ fn the_a9_bounds_trip_on_synthetic_loops() {
         evaluations: 4 * 64,
         ..Counters::default()
     };
-    assert_eq!(base.check_a9(2, true), Ok(()));
+    assert_eq!(base.check_loop_bounds(2, true), Ok(()));
     let looped = Counters {
         attempts: 11,
         ..base.clone()
     };
     assert_eq!(
-        looped.check_a9(2, true),
-        Err(A9::Attempts {
+        looped.check_loop_bounds(2, true),
+        Err(LoopBounds::Attempts {
             attempts: 11,
             bound: 10
         })
@@ -344,8 +344,8 @@ fn the_a9_bounds_trip_on_synthetic_loops() {
         ..base.clone()
     };
     assert_eq!(
-        past_refusals.check_a9(2, true),
-        Err(A9::RoundAttempts { excess: 33 })
+        past_refusals.check_loop_bounds(2, true),
+        Err(LoopBounds::RoundAttempts { excess: 33 })
     );
     let over = Counters {
         scored_candidates: 21,
@@ -353,8 +353,8 @@ fn the_a9_bounds_trip_on_synthetic_loops() {
         ..base.clone()
     };
     assert_eq!(
-        over.check_a9(2, true),
-        Err(A9::ScoredOverHosts {
+        over.check_loop_bounds(2, true),
+        Err(LoopBounds::ScoredOverHosts {
             scored: 21,
             bound: 20
         })
@@ -364,14 +364,14 @@ fn the_a9_bounds_trip_on_synthetic_loops() {
         ..base.clone()
     };
     assert_eq!(
-        twice.check_a9(2, true),
-        Err(A9::Evaluations {
+        twice.check_loop_bounds(2, true),
+        Err(LoopBounds::Evaluations {
             evaluations: 512,
             expected: 256
         })
     );
     assert_eq!(
-        twice.check_a9(2, false),
+        twice.check_loop_bounds(2, false),
         Ok(()),
         "flat fit may evaluate more"
     );
@@ -379,14 +379,14 @@ fn the_a9_bounds_trip_on_synthetic_loops() {
         evaluations: 4 * 64 - 1,
         ..base.clone()
     };
-    assert!(fewer.check_a9(2, false).is_err());
+    assert!(fewer.check_loop_bounds(2, false).is_err());
     let beyond = Counters {
         scored_beyond_candidates: 1,
         ..base
     };
     assert_eq!(
-        beyond.check_a9(2, true),
-        Err(A9::ScoredBeyondCandidates { extra: 1 })
+        beyond.check_loop_bounds(2, true),
+        Err(LoopBounds::ScoredBeyondCandidates { extra: 1 })
     );
 }
 
@@ -420,8 +420,8 @@ fn scoring_a_marked_or_refused_host_is_counted() {
         "one host too many each time"
     );
     assert!(matches!(
-        c.check_a9(2, true),
-        Err(A9::ScoredBeyondCandidates { .. })
+        c.check_loop_bounds(2, true),
+        Err(LoopBounds::ScoredBeyondCandidates { .. })
     ));
     assert!(
         r.placements.iter().all(|p| p.host == 0),
@@ -434,7 +434,7 @@ fn scoring_a_marked_or_refused_host_is_counted() {
         c.scored_placements > 0,
         "some placements had two candidates"
     );
-    assert_eq!(c.check_a9(2, true), Ok(()));
+    assert_eq!(c.check_loop_bounds(2, true), Ok(()));
     assert_eq!(
         r.metrics
             .decided
@@ -507,12 +507,12 @@ fn window_percentiles_need_20_000_samples() {
 /// leases at the end. Exactly 1% (10 000 ppm) is uninformative; one lease fewer is not.
 #[test]
 fn the_queued_at_end_guard_is_strictly_under_one_percent() {
-    let relaxed = G0 {
+    let relaxed = Guards {
         min_window_samples: 0,
         min_minute_samples: 0,
         min_span_minutes: 0,
         cold_share_ppm: (0, 1_000_000),
-        ..G0::default()
+        ..Guards::default()
     };
     let with = |submitted: u64, queued_at_end: u64| Metrics {
         counters: Counters {

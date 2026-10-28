@@ -40,7 +40,7 @@ fn memory_kills_take_the_largest_then_the_newest_and_the_books_balance() {
     assert_eq!(m.books.completed_core_ms, 200_000);
     assert_eq!(m.books.host_core_ms, 205_000);
     assert_eq!(m.check_books(), Ok(()));
-    assert_eq!(m.counters.check_a9(1, true), Ok(()));
+    assert_eq!(m.counters.check_loop_bounds(1, true), Ok(()));
 
     let (rows, beliefs) = kill_world([400, 450, 300], [0, 0, 5_000]);
     let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
@@ -176,7 +176,7 @@ fn a_round_stops_at_32_refusals_in_total_not_in_a_row() {
     let c = &r.metrics.counters;
     assert_eq!(c.worst_round_excess, 32);
     assert!(c.unexamined_max >= 5, "{}", c.unexamined_max);
-    assert_eq!(c.check_a9(1, true), Ok(()));
+    assert_eq!(c.check_loop_bounds(1, true), Ok(()));
 }
 
 /// Catches: the previous rule ranking by what the scheduler believes and not by what the
@@ -273,7 +273,7 @@ fn the_busy_world_balances() {
     assert_eq!(c.placed, c.submitted);
     assert_eq!(c.completed, c.submitted);
     assert_eq!(m.check_books(), Ok(()));
-    assert_eq!(c.check_a9(2, true), Ok(()));
+    assert_eq!(c.check_loop_bounds(2, true), Ok(()));
     let placed: u64 = m.by_hour.values().map(|h| h.placed).sum();
     let cold: u64 = m.by_hour.values().map(|h| h.cold).sum();
     assert_eq!((placed, cold), (7_200, 720));
@@ -386,7 +386,7 @@ fn a_slice_of_the_committed_trace_replays_and_balances() {
         3_000
     );
     assert_eq!(m.check_books(), Ok(()));
-    assert_eq!(c.check_a9(6, true), Ok(()));
+    assert_eq!(c.check_loop_bounds(6, true), Ok(()));
     let cold: u64 = m.by_hour.values().map(|h| h.cold).sum();
     assert!(cold > 0 && cold < c.placed, "{cold} of {}", c.placed);
     assert!(m.metric_minutes > 0 && !m.window_ppm.is_empty());

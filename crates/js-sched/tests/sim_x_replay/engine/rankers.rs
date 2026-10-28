@@ -5,17 +5,17 @@
 //! scorer) plugs in by implementing the trait and edits nothing here. Two rankers live
 //! here:
 //!
-//! * [`LeastLoaded`] - the previous rule, a stand-in for the pure function the scorer's
-//!   branch will export. It is pinned to the flat rule's `Load` (the larger of the CPU,
-//!   memory and lease shares of what the predicate charges the host, then fewer leases)
-//!   and takes the first of equals in name order, as shipped.
+//! * [`LeastLoaded`] - the previous rule, through the shipped [`js_sched::Load`] and
+//!   [`js_sched::least_loaded`] (the larger of the CPU, memory and lease shares of what the
+//!   predicate charges the host, then fewer leases; the first of equals in name order).
 //! * [`Random`] - a uniformly random feasible host, drawn from a stream of its own for
 //!   each lease, so adding a lease, a ranker or a retry shifts no other lease's draws.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use js_sched::{Load, least_loaded};
 use js_sim::SimRng;
+use js_types::sched::{Resources, WorkerId};
 
 use super::metrics::Decided;
 use super::model::{Belief, HostState};
@@ -73,79 +73,41 @@ pub trait Ranker {
     fn placed(&mut self, _lease: usize) {}
 }
 
-/// `booked / capacity`, compared exactly: a share of a host that has none of a resource is
-/// 0 whatever is booked.
-#[derive(Clone, Copy, Debug)]
-struct Share {
-    booked: u64,
-    capacity: u64,
+/// The load of a host of `capacity` (`cpu_millis`, `mem_mib`, lease cap) that is charged
+/// `cpu_millis` and `mem_mib` and holds `leases` leases, as the shipped ranking
+/// ([`js_sched::Load`]) orders hosts: the largest of its CPU, memory and lease shares,
+/// then how many leases it holds. Memory goes in as bytes; the scale is the same on both
+/// sides of a share, so it changes no order.
+pub fn load_of(cpu_millis: u64, mem_mib: u64, capacity: (u64, u64, u64), leases: usize) -> Load {
+    let mib = |m: u64| m.saturating_mul(1 << 20);
+    let resources = |cpu_millis: u64, mem_mib: u64, leases: Option<u64>| Resources {
+        cpu_millis,
+        memory_bytes: mib(mem_mib),
+        leases,
+        ..Resources::default()
+    };
+    Load::new(
+        resources(cpu_millis, mem_mib, None),
+        resources(capacity.0, capacity.1, Some(capacity.2)),
+        leases,
+    )
 }
 
-impl Share {
-    fn new(booked: u64, capacity: u64) -> Self {
-        if capacity == 0 {
-            Self {
-                booked: 0,
-                capacity: 1,
-            }
-        } else {
-            Self { booked, capacity }
-        }
-    }
-}
-
-impl Ord for Share {
-    fn cmp(&self, other: &Self) -> Ordering {
-        (u128::from(self.booked) * u128::from(other.capacity))
-            .cmp(&(u128::from(other.booked) * u128::from(self.capacity)))
-    }
-}
-
-impl PartialOrd for Share {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for Share {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
-    }
-}
-
-impl Eq for Share {}
-
-/// A host's load as the previous rule orders hosts: the largest of its CPU, memory and
-/// lease shares, then how many leases it holds. The smaller is the less loaded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Load {
-    share: Share,
-    leases: usize,
-}
-
-impl Load {
-    /// The load of a host of `capacity` (`cpu_millis`, `mem_mib`, lease cap) that is
-    /// charged `cpu_millis` and `mem_mib` and holds `leases` leases.
-    pub fn new(cpu_millis: u64, mem_mib: u64, capacity: (u64, u64, u64), leases: usize) -> Self {
-        let cpu = Share::new(cpu_millis, capacity.0);
-        let mem = Share::new(mem_mib, capacity.1);
-        let held = u64::try_from(leases).unwrap_or(u64::MAX);
-        let lease_share = Share::new(held, capacity.2);
-        Self {
-            share: cpu.max(mem).max(lease_share),
-            leases,
-        }
-    }
-}
-
-/// The host of the least load among `loads` (host index, load); the first of equals.
-/// A stand-in for the pure function the scorer's branch will export; the tests pin it to
-/// the flat rule's load cases.
+/// The host of the least load among `loads` (host index, load); the first of equals. It is
+/// [`js_sched::least_loaded`] over names that stand for the host indexes.
 pub fn least_loaded_standin(loads: &[(usize, Load)]) -> Option<usize> {
-    loads
+    let names: Vec<WorkerId> = loads
         .iter()
-        .min_by_key(|(_, load)| *load)
-        .map(|(host, _)| *host)
+        .map(|(host, _)| WorkerId::new(host.to_string()))
+        .collect();
+    let admitted: Vec<(&WorkerId, Load)> = names
+        .iter()
+        .zip(loads)
+        .map(|(name, (_, load))| (name, *load))
+        .collect();
+    let chosen = least_loaded(&admitted)?;
+    let at = names.iter().position(|n| std::ptr::eq(n, chosen))?;
+    Some(loads[at].0)
 }
 
 /// The previous rule: the least loaded candidate.
@@ -163,7 +125,7 @@ impl Ranker for LeastLoaded {
                 let cap = &host.cap;
                 (
                     h,
-                    Load::new(
+                    load_of(
                         l.cpu_millis,
                         l.mem_mib,
                         (cap.cpu_millis, cap.mem_mib, u64::from(cap.leases)),

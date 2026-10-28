@@ -90,7 +90,7 @@ pub enum Decided {
     TieBreak(u8),
 }
 
-/// Counts of what the engine did; the bounds of [`Counters::check_a9`] are over these.
+/// Counts of what the engine did; the bounds of [`Counters::check_loop_bounds`] are over these.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Counters {
     /// Rows handed to the replay.
@@ -140,10 +140,10 @@ pub struct Counters {
     pub rounds_with_unexamined: u64,
 }
 
-/// Which bound of the engine's loop a run broke ("A9": the counted bounds on what the
-/// loop and a scorer do, checked by [`Counters::check_a9`]).
+/// Which bound of the engine's loop a run broke: the counted bounds on what the loop and
+/// a scorer do, checked by [`Counters::check_loop_bounds`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum A9 {
+pub enum LoopBounds {
     /// Evaluations are not `64 x` the candidates scored.
     Evaluations {
         /// Reported.
@@ -183,7 +183,7 @@ impl Counters {
     /// passes `false` and is held to at least that), no more scored than hosts times
     /// attempts, no round looks at more than its placements plus 32, and no lease is
     /// looked at twice in a round. The first one broken is returned.
-    pub fn check_a9(&self, hosts: usize, exact: bool) -> Result<(), A9> {
+    pub fn check_loop_bounds(&self, hosts: usize, exact: bool) -> Result<(), LoopBounds> {
         let expected = EVALUATIONS_PER_WORKER * self.scored_candidates;
         let evaluations_ok = if exact {
             self.evaluations == expected
@@ -191,30 +191,30 @@ impl Counters {
             self.evaluations >= expected
         };
         if !evaluations_ok {
-            return Err(A9::Evaluations {
+            return Err(LoopBounds::Evaluations {
                 evaluations: self.evaluations,
                 expected,
             });
         }
         if self.scored_beyond_candidates > 0 {
-            return Err(A9::ScoredBeyondCandidates {
+            return Err(LoopBounds::ScoredBeyondCandidates {
                 extra: self.scored_beyond_candidates,
             });
         }
         let bound = self.attempts * hosts as u64;
         if self.scored_candidates > bound {
-            return Err(A9::ScoredOverHosts {
+            return Err(LoopBounds::ScoredOverHosts {
                 scored: self.scored_candidates,
                 bound,
             });
         }
         if self.worst_round_excess > SCAN_REFUSALS {
-            return Err(A9::RoundAttempts {
+            return Err(LoopBounds::RoundAttempts {
                 excess: self.worst_round_excess,
             });
         }
         if self.attempts > self.lease_rounds {
-            return Err(A9::Attempts {
+            return Err(LoopBounds::Attempts {
                 attempts: self.attempts,
                 bound: self.lease_rounds,
             });
@@ -499,11 +499,11 @@ impl Metrics {
     }
 }
 
-/// The registered limits of the guards every assertion of the sims carries ("G0"): a run
+/// The registered limits of the guards every assertion of the sims carries: a run
 /// that fails one of them measured too little, or a pool that was not serving, and says
 /// nothing either way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct G0 {
+pub struct Guards {
     /// Host-windows in the metric window.
     pub min_window_samples: u64,
     /// Host-minutes in it.
@@ -520,7 +520,7 @@ pub struct G0 {
     pub max_wait_p99_ms: u64,
 }
 
-impl Default for G0 {
+impl Default for Guards {
     fn default() -> Self {
         Self {
             min_window_samples: 20_000,
@@ -601,7 +601,7 @@ impl std::fmt::Display for Uninformative {
     }
 }
 
-impl G0 {
+impl Guards {
     /// Every guard that `m` fails (none: it may be read).
     pub fn check(&self, m: &Metrics) -> Result<(), Vec<Uninformative>> {
         let mut bad = Vec::new();

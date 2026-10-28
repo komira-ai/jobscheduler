@@ -4,12 +4,12 @@ use super::flat;
 use crate::engine::model::{HostState, Pool};
 use crate::engine::predicate::Params;
 use crate::engine::rankers::{
-    Choose, Load, Pick, Random, Ranker, least_loaded_standin, splitmix64, stream_seed,
+    Choose, Pick, Random, Ranker, least_loaded_standin, load_of, splitmix64, stream_seed,
 };
 
-/// The flat rule's `Load::new` with no lease cap: `(booked, capacity)` of each resource.
-fn load(cpu: (u64, u64), mem: (u64, u64), leases: usize) -> Load {
-    Load::new(cpu.0, mem.0, (cpu.1, mem.1, 0), leases)
+/// The shipped `Load` with no lease cap: `(booked, capacity)` of each resource.
+fn load(cpu: (u64, u64), mem: (u64, u64), leases: usize) -> js_sched::Load {
+    load_of(cpu.0, mem.0, (cpu.1, mem.1, 0), leases)
 }
 
 const GIB: u64 = 1 << 30;
@@ -63,7 +63,7 @@ fn a_resource_without_capacity_counts_for_nothing() {
 #[test]
 fn a_capped_host_is_ranked_by_its_lease_share_too() {
     let capped = |cap: Option<u64>, leases: usize| {
-        Load::new(
+        load_of(
             leases as u64 * 1_000,
             0,
             (32_000, 0, cap.unwrap_or(0)),

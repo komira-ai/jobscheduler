@@ -18,6 +18,16 @@
 //! residents, and a cold lease is admitted only while the host's cold count of the round
 //! is under the cold cap (`ceil(C_cpu / 32 cores)`).
 //!
+//! What the stand-in leaves out of the merged rule, so a result is read with it in mind:
+//!
+//! * no VM term (`V_cpu`, `V_mem`) for a VM lease;
+//! * no fallback for a node that has reported nothing, and no 1000 m minimum charge;
+//! * no `working_set_counted` gate: the working set always counts;
+//! * the cold cap per window is fixed at `ceil(C_cpu / 32 cores)`, not configurable;
+//! * no exclusive-worker case, which the merged rule admits without scoring;
+//! * no hold of the head of the queue on the host with the most headroom while it is
+//!   blocked.
+//!
 //! The order of the checks fixes which refusal is reported: the lease cap, slot 0 (CPU,
 //! then memory), the later slots in order, and the cold cap last, so a cold cap is
 //! reported only when it is the only obstacle (as the flat rule reports it).
