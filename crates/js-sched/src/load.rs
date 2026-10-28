@@ -15,6 +15,19 @@
 //!
 //! The previous ranking ([`Load`], [`least_loaded`]) is kept as a pure function for the
 //! shadow log and for leases that bypass scoring.
+//!
+//! # How this implementation reads the design
+//!
+//! Four points of the design are read one way here, and the tests pin each.
+//!
+//! - The slots `tau` in `0..H` are inclusive of `H`: 31 minute slots (minutes 0 to 30,
+//!   with `H = 30`) plus the `H+` slot make 32 ([`SLOTS`]), 64 evaluations per candidate
+//!   ([`EVALUATIONS_PER_WORKER`]).
+//! - The lease id in the tie-break hash is its `term-seq` text (`1-2`, the form on the
+//!   root wire), not the `Display` of `js_types::sched::LeaseId` (`1.2`).
+//! - A capacity of 0 is taken as 1, so no residual divides by zero.
+//! - After the hash, a final tie-break on the worker id makes the order total: two
+//!   candidates are never equal, whatever the hash.
 
 use std::cmp::{Ordering, Reverse};
 use std::collections::BTreeMap;
