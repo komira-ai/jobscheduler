@@ -110,16 +110,35 @@ pub(crate) struct StoredLease {
     pub extra: toml::Table,
 }
 
+/// The exclusive lock of a table's file, released when this is dropped.
+///
+/// An `flock` belongs to the open file description, not to the descriptor, and a
+/// description lives until every copy of the descriptor is closed. A process forked while
+/// the lock is held (any spawn of a child by another thread of this process, as in a test
+/// binary that restarts a server on one thread and starts programs on others) carries a
+/// copy until it execs, so closing the file would leave the table locked for as long as
+/// that takes. Dropping unlocks first, which no copy outlives, so the file can be opened
+/// again once the drop returns.
+#[derive(Debug)]
+pub(crate) struct Lock(fs::File);
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // An error leaves the close that follows to release the lock, as before.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Takes the exclusive lock of the table at `path`: a sibling `.lock` file, locked for
-/// as long as the returned file lives. A second table over the same path fails here
+/// as long as the returned [`Lock`] lives. A second table over the same path fails here
 /// with a `WouldBlock` error instead of issuing the same ids.
-pub(crate) fn lock(path: &Path) -> Result<fs::File, OpenError> {
+pub(crate) fn lock(path: &Path) -> Result<Lock, OpenError> {
     let lock = sibling(path, ".lock");
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(false).write(true);
     let locked = options
         .open(&lock)
-        .and_then(|file| file.try_lock().map(|()| file).map_err(io::Error::from));
+        .and_then(|file| file.try_lock().map(|()| Lock(file)).map_err(io::Error::from));
     locked.map_err(|source| OpenError::Lock { path: lock, source })
 }
 
