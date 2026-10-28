@@ -105,21 +105,44 @@ fn renew_is_capped_at_token_time_plus_max_wall() {
     assert_eq!(info(&table).ends_at, end);
 }
 
-/// Asserts that a whole lease the provider never reports ready is expired and stopped
-/// at the prepare timeout and not before, and that the tick lists it.
+/// Asserts that a whole lease the provider never answers for is observed at the prepare
+/// timeout (not expired by it) and expired and stopped by the next tick, and not before.
+/// It catches a table that stops the lease at its deadline without asking the provider,
+/// and one that never expires a lease the provider is silent about.
 #[test]
-fn a_whole_lease_never_ready_expires_at_the_prepare_timeout() {
+fn a_whole_lease_never_ready_is_observed_at_the_prepare_timeout_and_expired_after() {
     let (mut table, clock, _scratch) = table("whole_never", settings());
     pending_whole(&mut table, 3600);
     clock.advance(secs(599));
     table.provider_mut().script_unknown(Call::Observe, false);
     assert!(!table.tick().changed());
     clock.advance(secs(1));
+    table.provider_mut().script_unknown(Call::Observe, false);
+    let report = table.tick();
+    assert!(report.expired.is_empty(), "{report:?}");
+    assert_eq!(states(&table), vec![(id(), LeaseState::Pending)]);
+    clock.advance(secs(5));
     let report = table.tick();
     assert_eq!(report.expired, vec![id()]);
     assert_eq!(report.freed, vec![id()]);
     assert!(table.list().is_empty());
     assert!(table.provider().booked().is_empty());
+}
+
+/// Asserts that at the deadline the provider's answer decides: an observation that finds
+/// the lease gone drops it with no stop from the table, which is how a provider that
+/// ended the lease as a failed prepare is heard. It catches an expiry that runs before
+/// the observation and so stops a lease the provider has already ended.
+#[test]
+fn a_pending_whole_lease_the_provider_ended_at_its_deadline_is_dropped_not_expired() {
+    let (mut table, clock, _scratch) = table("whole_ended", settings());
+    pending_whole(&mut table, 3600);
+    clock.advance(secs(600));
+    table.provider_mut().stop(&id());
+    let report = table.tick();
+    assert_eq!(report.dropped, vec![id()]);
+    assert!(report.expired.is_empty(), "{report:?}");
+    assert!(table.list().is_empty());
 }
 
 /// Asserts that the prepare timeout is a setting, and that a pending whole lease whose
