@@ -50,7 +50,7 @@ fn burst_table_p99_is_two_and_the_others_have_their_spreads() {
     let p = |table: &Table, per_mille: u64| at(table, (per_mille << 20) / 1000);
     let p99 = p(&LN32, 990);
     assert!((1_900_000..=2_100_000).contains(&p99), "LN32 p99 {p99}");
-    // Median over P90 of the hand-world run means: the doc's 0.75.
+    // Median over P90 of the hand-world run means: 0.75.
     let (median, p90) = (p(&LN2245, 500), p(&LN2245, 900));
     assert!(
         74 * p90 <= 100 * median && 100 * median <= 76 * p90,
@@ -105,4 +105,33 @@ fn table_ends_are_pinned() {
     assert_eq!(draw(&LN32, u64::MAX), 2_725_932);
     assert_eq!((LN15[0], LN15[LEN - 1]), (602_715, 1_620_683));
     assert_eq!((LN2245[0], LN2245[LEN - 1]), (464_797, 2_042_726));
+}
+
+#[test]
+fn table_bodies_are_pinned_at_interior_entries_and_by_checksum() {
+    // The ends alone leave the body free: one interior entry edited by hand, still
+    // monotone and still near mean 1, would shift every draw that lands on it. Five
+    // interior entries of each table and a position-weighted checksum over all of them.
+    let probe = |t: &Table| [128, 256, 512, 768, 896].map(|i| t[i]);
+    let weighted = |t: &Table| -> u64 {
+        t.iter()
+            .enumerate()
+            .map(|(i, &v)| (i as u64 + 1) * u64::from(v))
+            .sum()
+    };
+    assert_eq!(
+        probe(&LN32),
+        [657_280, 765_185, 949_424, 1_178_258, 1_372_426]
+    );
+    assert_eq!(
+        probe(&LN15),
+        [831_995, 893_442, 988_519, 1_093_816, 1_174_893]
+    );
+    assert_eq!(
+        probe(&LN2245),
+        [753_026, 837_769, 974_667, 1_134_094, 1_262_194]
+    );
+    assert_eq!(weighted(&LN32), 617_889_334_726);
+    assert_eq!(weighted(&LN15), 568_789_408_766);
+    assert_eq!(weighted(&LN2245), 590_449_471_596);
 }

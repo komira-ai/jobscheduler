@@ -4,6 +4,7 @@
 
 use crate::engine::fixture::{KeyIx, Outcome, Row};
 
+mod jitter;
 mod keyed;
 mod sanity;
 mod series;

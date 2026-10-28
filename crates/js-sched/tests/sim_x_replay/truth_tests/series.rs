@@ -8,12 +8,12 @@ use crate::engine::truth::{
     TruthConfig, apportion, build, hand_run_cpu_ms,
 };
 
-fn cfg(seed: u64) -> TruthConfig {
+pub(super) fn cfg(seed: u64) -> TruthConfig {
     TruthConfig::new(seed)
 }
 
 /// The key index of the first key whose class under `cfg` is `shape`.
-fn key_of(shape: Shape, cfg: &TruthConfig) -> u16 {
+pub(super) fn key_of(shape: Shape, cfg: &TruthConfig) -> u16 {
     (0..u16::MAX)
         .find(|&k| cfg.mix.class_of(cfg.seed, KeyIx(k)) == shape)
         .expect("some key has every class")
@@ -98,8 +98,22 @@ fn a_sample_of_the_committed_trace_conserves_cpu() {
     for (run, row) in runs.iter().zip(&fx.rows) {
         outcomes.insert(run.outcome);
         assert_eq!(
-            (run.cpu_ms, run.wall_ms, run.outcome),
-            (row.cpu_ms, row.wall_ms, row.outcome)
+            (
+                run.start_ms,
+                run.key,
+                run.cpu_ms,
+                run.wall_ms,
+                run.peak_mem_mib,
+                run.outcome
+            ),
+            (
+                row.start_ms,
+                row.key,
+                row.cpu_ms,
+                row.wall_ms,
+                row.peak_mem_mib,
+                row.outcome
+            )
         );
     }
     assert!(
@@ -167,22 +181,25 @@ fn a_partial_minute_and_a_partial_window_are_cut_over_the_ticks_they_hold() {
 #[test]
 fn bursts_are_keyed_by_lease_and_seed() {
     // Same row, same lease_ix, same seed: the same windows. A change of either shifts
-    // them; a stream shared between leases would make order matter.
-    let key = 3;
+    // them; a stream shared between leases would make order matter. The key is flat in
+    // both seeds, so its class, shift and noise cannot be what moves the windows: only
+    // the burst draw is left to differ.
+    let (one, two) = (cfg(1), cfg(2));
+    let key = (0..u16::MAX)
+        .find(|&k| {
+            one.mix.class_of(1, KeyIx(k)) == Shape::Flat
+                && two.mix.class_of(2, KeyIx(k)) == Shape::Flat
+        })
+        .expect("a key flat in both seeds");
     let r = row(key, 600_000, 1_200_000);
-    let a = Run::new(&r, 9, &cfg(1));
-    assert_eq!(
-        a.minute_windows(2),
-        Run::new(&r, 9, &cfg(1)).minute_windows(2)
-    );
+    let a = Run::new(&r, 9, &one);
+    assert_eq!(a.shape, Run::new(&r, 9, &two).shape);
+    assert_eq!(a.minute_windows(2), Run::new(&r, 9, &one).minute_windows(2));
     assert_ne!(
         a.minute_windows(2),
-        Run::new(&r, 10, &cfg(1)).minute_windows(2)
+        Run::new(&r, 10, &one).minute_windows(2)
     );
-    assert_ne!(
-        a.minute_windows(2),
-        Run::new(&r, 9, &cfg(2)).minute_windows(2)
-    );
+    assert_ne!(a.minute_windows(2), Run::new(&r, 9, &two).minute_windows(2));
 }
 
 #[test]
@@ -306,10 +323,10 @@ fn templates_have_mean_one_over_a_runs_life() {
 }
 
 #[test]
-fn templates_have_the_shapes_the_design_names() {
-    // Idle prelude is the step of the CPU sims' `phased()`: demand 0 for 20 of 120
-    // units, then constant at 6/5 of the mean. Sleeper: 40 of 100 idle. Late peak: 0.5
-    // until 0.7, then 2.0, divided by its mean 0.95. Ramp: 2u.
+fn templates_have_the_stated_shapes() {
+    // Idle prelude: demand 0 for 20 of 120 units, then constant at 6/5 of the mean.
+    // Sleeper: 40 of 100 idle. Late peak: 0.5 until 0.7, then 2.0, divided by its mean
+    // 0.95. Ramp: 2u.
     let vector = |shape: Shape, ticks| {
         (0..ticks)
             .map(|t| shape.weight_ppm(t, ticks))
@@ -501,13 +518,37 @@ fn the_memory_scenario_scales_one_key_span_in_ten_and_shares_it() {
     }
     let spans: Vec<u64> = (0..300).map(|s| at(5, s * 60_000, &mem)).collect();
     assert!(spans.contains(&1000) && spans.contains(&1300));
+    // The span is 60 s: the last millisecond of one and the first of the next draw again
+    // (about one key in five differs), while any two starts inside a span agree.
+    let across = (0..2000u16)
+        .filter(|&k| at(k, 59_999, &mem) != at(k, 60_000, &mem))
+        .count();
+    assert!(
+        (200..=520).contains(&across),
+        "{across} of 2000 keys differ"
+    );
+    for k in 0..2000u16 {
+        assert_eq!(at(k, 60_000, &mem), at(k, 119_999, &mem), "key {k}");
+    }
+    // The seed keys the draw: another seed scales another set of keys.
+    let other = TruthConfig {
+        mem_scale_permille: 1300,
+        ..cfg(2)
+    };
+    let differ = (0..2000u16)
+        .filter(|&k| at(k, 0, &mem) != at(k, 0, &other))
+        .count();
+    assert!(
+        (200..=520).contains(&differ),
+        "{differ} of 2000 keys differ"
+    );
     assert_eq!(MEM_SPIKE_ONE_IN, 10);
 }
 
 #[test]
 fn hand_world_run_means_vary_around_the_key_mean() {
     // Over 20,000 leases the mean is the key's (the table has mean 1), the median over P90
-    // is the doc's 0.75, and the draw is keyed by lease.
+    // is 0.75, and the draw is keyed by lease.
     let mut xs: Vec<u64> = (0..20_000)
         .map(|l| hand_run_cpu_ms(1, l, 1_000_000))
         .collect();

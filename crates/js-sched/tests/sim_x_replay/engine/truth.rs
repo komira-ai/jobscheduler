@@ -285,8 +285,7 @@ pub fn apportion(total: u64, weights: &[u128]) -> Vec<u64> {
 }
 
 /// A hand-made world's run: `key_mean_cpu_ms` scaled by a draw from [`tables::LN2245`], so
-/// the runs of a key vary around its mean the way the doc's lognormal does (median over P90
-/// of 0.75). A trace's runs carry their own means and do not use this.
+/// the runs of a key vary around its mean as a lognormal does (median over P90 of 0.75). A trace's runs carry their own means and do not use this.
 pub fn hand_run_cpu_ms(seed: u64, lease_ix: u32, key_mean_cpu_ms: u64) -> u64 {
     let factor = tables::draw(
         &tables::LN2245,
@@ -467,7 +466,7 @@ impl Run {
 
 /// Tick `t` read through a template delayed by `shift` minutes (negative: advanced), the
 /// ends held.
-fn shifted(t: u64, shift: i64, ticks: u64) -> u64 {
+pub fn shifted(t: u64, shift: i64, ticks: u64) -> u64 {
     let by = shift.unsigned_abs() * MINUTE_TICKS;
     if shift >= 0 {
         t.saturating_sub(by)

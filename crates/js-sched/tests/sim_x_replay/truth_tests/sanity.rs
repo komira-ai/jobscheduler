@@ -21,7 +21,7 @@ fn p90(v: &mut [u64]) -> u64 {
 fn warm_leases_run_below_their_keys_p90_by_the_stated_band() {
     // The ground-truth model is only a fair test of a learner if a run's mean cores,
     // against the P90 of the key's earlier runs (the 32 latest that ended before this one
-    // started, three or more of them), is distributed as the design states: median ratio
+    // started, three or more of them), is distributed within a stated band: median ratio
     // within [0.55, 0.90] and the share of runs above the P90 within [5%, 25%]. A truth
     // that scrambled cpu against wall, or a fixture whose keys do not repeat, leaves it.
     let fx = Fixture::embedded().expect("the committed fixture loads");
@@ -32,7 +32,7 @@ fn warm_leases_run_below_their_keys_p90_by_the_stated_band() {
     let mut above = 0usize;
     for (i, run) in runs.iter().enumerate() {
         while let Some(&Reverse((end, j))) = ending.peek() {
-            if end > run.start_ms {
+            if end >= run.start_ms {
                 break;
             }
             ending.pop();
