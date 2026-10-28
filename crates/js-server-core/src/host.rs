@@ -21,6 +21,16 @@ use crate::engine::Engine;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Stream(u64);
 
+impl Stream {
+    /// The number the core gave this stream: the first stream it opens is 0, and each later
+    /// one is the next. A host that names streams on its own wire uses it, and finds the
+    /// stream again by comparing numbers.
+    #[must_use]
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+}
+
 /// What a host says about itself when it registers, and again when its report changes.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -227,5 +237,21 @@ impl Engine {
             a.cancel(&self.view(), worker, lease);
         }
         Some(answers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Stream;
+
+    /// Catches an accessor that answers another number than the stream's, or numbers that
+    /// order differently from the streams (a host comparing numbers would take a replaced
+    /// stream for the newest).
+    #[test]
+    fn a_streams_number_is_the_one_it_was_given_and_orders_as_it_does() {
+        assert_eq!(Stream(0).number(), 0);
+        assert_eq!(Stream(41).number(), 41);
+        assert!(Stream(6) < Stream(7));
+        assert!(Stream(6).number() < Stream(7).number());
     }
 }
