@@ -357,7 +357,7 @@ impl Runs {
         &mut self,
         host: &HostId,
         lease: &LeaseId,
-        mut spec: JobSpec,
+        (mut spec, work_key): (JobSpec, Option<WorkKey>),
         shape: &Resources,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
