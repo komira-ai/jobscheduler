@@ -39,12 +39,14 @@ fn a_load_changes_nothing_the_scheduler_does() {
         seq: 7,
         cpu_usage_usec: u64::MAX,
         mono_usec: 1,
-        working_set_bytes: u64::MAX,
-        active_file_bytes: 2,
+        memory_working_set_bytes: u64::MAX,
+        memory_active_file_bytes: 2,
         covered: vec![LeaseId::new(1, 1)],
+        lease_clocks: vec![],
+        minutes: vec![],
         actions_cpu_limited: true,
-        throttled_usec: 3,
-        pressure_some_total_usec: 4,
+        cpu_throttled_usec: 3,
+        cpu_pressure_some_total_usec: 4,
     };
     let (mut with, mut without) = (farm(), farm());
     assert_eq!(

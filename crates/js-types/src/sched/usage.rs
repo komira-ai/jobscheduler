@@ -29,19 +29,23 @@ pub struct NodeLoad {
     pub cpu_usage_usec: u64,
     /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
     /// minus the inactive file pages.
-    pub working_set_bytes: u64,
+    pub memory_working_set_bytes: u64,
     /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
-    /// Hot page cache that `working_set_bytes` still counts; admission caps this part.
-    pub active_file_bytes: u64,
+    /// Hot page cache that `memory_working_set_bytes` still counts; admission caps this part.
+    pub memory_active_file_bytes: u64,
     /// The leases that ran for the whole window since the previous reading, by the
     /// agent's own start.
     pub covered: Vec<LeaseId>,
     /// Whether the actions cgroup has a CPU limit.
     pub actions_cpu_limited: bool,
     /// Cumulative time the actions cgroup was throttled, in microseconds. Telemetry only.
-    pub throttled_usec: u64,
+    pub cpu_throttled_usec: u64,
     /// Cumulative `some` total of the CPU pressure, in microseconds. Telemetry only.
-    pub pressure_some_total_usec: u64,
+    pub cpu_pressure_some_total_usec: u64,
+    /// When each running lease started, on the agent's clock.
+    pub lease_clocks: Vec<LeaseClock>,
+    /// Closed per-minute records of running leases, oldest first.
+    pub minutes: Vec<LeaseMinute>,
 }
 
 impl NodeLoad {
@@ -62,15 +66,15 @@ impl NodeLoad {
         Some(u32::try_from(milli).unwrap_or(u32::MAX))
     }
 
-    /// The working set admission counts: `working_set_bytes` less the active file pages
+    /// The working set admission counts: `memory_working_set_bytes` less the active file pages
     /// beyond `file_share_permille` thousandths of `mem_capacity_bytes`, which are page
     /// cache and not demand. Saturates at 0.
     #[must_use]
     pub fn admission_working_set(&self, mem_capacity_bytes: u64, file_share_permille: u32) -> u64 {
         let share = u128::from(mem_capacity_bytes) * u128::from(file_share_permille) / 1000;
-        let excess = u128::from(self.active_file_bytes).saturating_sub(share);
+        let excess = u128::from(self.memory_active_file_bytes).saturating_sub(share);
         let excess = u64::try_from(excess).unwrap_or(u64::MAX);
-        self.working_set_bytes.saturating_sub(excess)
+        self.memory_working_set_bytes.saturating_sub(excess)
     }
 
     /// Whether this reading is older than [`STALE_WINDOWS`] windows of `window_usec` at
@@ -88,13 +92,13 @@ pub struct LeaseMinute {
     /// The lease.
     pub lease: LeaseId,
     /// The minute since the lease's own start, from 0.
-    pub minute: u16,
+    pub minute: u32,
     /// Mean cores over the minute, in millicores.
-    pub mean_cores_milli: u32,
+    pub cpu_mean_millis: u32,
     /// The busiest single sampling window of the minute, in millicores.
-    pub peak_window_milli: u32,
+    pub cpu_peak_window_millis: u32,
     /// The largest working set seen in the minute, in bytes.
-    pub working_set_max_bytes: u64,
+    pub ws_max_bytes: u64,
 }
 
 /// When a running lease started, on the agent's monotonic clock.
@@ -303,10 +307,10 @@ mod tests {
         assert_eq!(next.busy_millicores_since(&a), Some(1000));
     }
 
-    fn with_file(working_set_bytes: u64, active_file_bytes: u64) -> NodeLoad {
+    fn with_file(memory_working_set_bytes: u64, memory_active_file_bytes: u64) -> NodeLoad {
         NodeLoad {
-            working_set_bytes,
-            active_file_bytes,
+            memory_working_set_bytes,
+            memory_active_file_bytes,
             ..NodeLoad::default()
         }
     }
@@ -435,9 +439,9 @@ mod tests {
         let m = LeaseMinute {
             lease,
             minute: 3,
-            mean_cores_milli: 4,
-            peak_window_milli: 5,
-            working_set_max_bytes: 6,
+            cpu_mean_millis: 4,
+            cpu_peak_window_millis: 5,
+            ws_max_bytes: 6,
         };
         let other = LeaseMinute { minute: 4, ..m };
         assert_eq!(m, LeaseMinute { ..m });
