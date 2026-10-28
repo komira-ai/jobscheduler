@@ -152,7 +152,8 @@ async fn heartbeat(
     if let Some(usage) = &agents.usage {
         let usage = Arc::clone(usage);
         let acks = reply.result_acks.clone();
-        blocking(move || usage.on_beat(&heartbeat, load, &acks)).await;
+        blocking(|| ()).await;
+        usage.on_beat(&heartbeat, load, &acks);
     }
     Ok(Json(reply))
 }
