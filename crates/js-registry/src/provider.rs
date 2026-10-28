@@ -24,7 +24,8 @@ use crate::registry::Registry;
 ///   `Unknown` (accepted, waiting) when its start carries a request id and some host
 ///   could, however busy; see [`crate::Registry::queue_position`]. Without a request
 ///   id it answers `NoCapacity` and the consumer retries. A request that used up its
-///   tries to get a host ready answers `ExclusiveNotReady`.
+///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
+///   record, so the next start of the request is a fresh one).
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost
