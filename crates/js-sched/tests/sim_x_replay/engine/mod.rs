@@ -10,7 +10,7 @@
 //! | `fixture` | the trace row, the key and outcome types every other module shares, the loader and the encoder | present |
 //! | `tables` | integer quantile tables | present |
 //! | `truth` | what really happens to a run, from a row and keyed draws | present |
-//! | `predictor` | what the scheduler believes about a key | planned |
+//! | `predictor` | what the scheduler believes about a key | present |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
@@ -26,6 +26,7 @@
 
 pub mod adapter;
 pub mod fixture;
+pub mod predictor;
 pub mod rankers;
 pub mod tables;
 pub mod truth;
