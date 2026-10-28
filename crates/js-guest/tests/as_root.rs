@@ -8,7 +8,7 @@
 //!   user, since it refuses root) it reports `System`. The daemon is the control: an
 //!   agent that always said `Aqua` would pass the first check alone.
 //!
-//! Every test is `#[ignore]`: each needs root. CI runs them with `cargo xtask sudo-test
+//! Every test but the scratch-name check is `#[ignore]`: each needs root. CI runs them with `cargo xtask sudo-test
 //! -p kbf-guest --test as_root`, which builds this file as the runner's user and runs
 //! the binary through `sudo -n` with `--ignored` (GitHub's hosted runners allow
 //! passwordless sudo).
@@ -77,6 +77,24 @@ fn run_bounded(args: &[std::ffi::OsString]) -> Output {
 /// and `serve` does not create its socket first. The token file holds a valid token,
 /// so a `serve` that skipped the refusal would bind its socket: the socket check
 /// catches that on its own, before the exit status is read.
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's files and dropping the second does
+/// not remove the first. It needs no root, so it is not ignored.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    std::fs::write(first.0.join("f"), "one").unwrap();
+    let second = Scratch::new("same-name");
+    assert_ne!(first.0, second.0);
+    assert!(
+        first.0.join("f").exists(),
+        "a second scratch removed the first"
+    );
+    let kept = first.0.join("f");
+    drop(second);
+    assert_eq!(std::fs::read(kept).unwrap(), b"one");
+}
+
 #[test]
 #[ignore = "needs root: run by `cargo xtask sudo-test -p kbf-guest --test as_root`"]
 fn as_root_every_subcommand_refuses_and_exits_2() {
