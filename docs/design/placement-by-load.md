@@ -54,7 +54,7 @@ Each admitted lease carries, in `Worker`'s per-lease map, a `LeaseCost { p_milli
 separate fields (the request's `Resources.memory_bytes` stays the cgroup limit, as `has_room` already treats it, so nothing that reads it changes), the profile curves used at admission (at most 64 buckets of two
 `u32`, 512 bytes; empty for a flat lease), the agent-reported start that defines `covered`, and `key_hash: u64` (for the same-key share in the score): FNV-1a 64 over the class bytes, a `0xff` separator byte, then the dedup bytes (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`). The covered and uncovered sets are derived from `NodeLoad.covered` and `started_mono` and are not stored. `Event::Heartbeat` gains
 `load: Option<NodeLoad>`. **The cost is persisted with the lease** (in the lease record that replay reads) and is the value used after a restart: a recovered lease is never re-estimated from the current estimator, so the sums
-before and after a restart agree. This is data in the pure crate; the estimator is never read inside the scheduler's decision, only at admission by the caller that produces the cost. The store does not yet persist the cost, so until it does a lease recovered through the store is charged its request (tracked as a jobscheduler issue).
+before and after a restart agree. This is data in the pure crate; the estimator is never read inside the scheduler's decision, only at admission by the caller that produces the cost. The store does not yet persist the cost, so until it does a lease recovered through the store is charged its request (jobscheduler#96).
 
 ## What goes away in kbf
 | Today | Under this design |
