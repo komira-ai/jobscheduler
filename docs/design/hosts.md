@@ -313,7 +313,7 @@ Steps (Phase K of [extraction-steps-d.md](extraction-steps-d.md), steps 59 to 64
 - **A separate scheduler for spot hosts.** The reclaim path is the existing taint, drain and host-lost paths; a second path would rot.
 - **Draining the small instances at the cap, with headroom for one extra host, and consolidating below the cap.** Considered for section
   11 and replaced by the simpler rule there: the drain needed a headroom slot (reserved, or one over the cap), bounds for long jobs and a
-  precedence rule among taints, and consolidation needed logic of its own. Jobs are retryable, so the pool terminates and requeues.
+  precedence rule among taints, and consolidation needed logic of its own. Jobs are retryable, so the pool drains, then requeues what is left.
 
 ## 11. An elastic pool at its machine cap
 
@@ -339,10 +339,10 @@ No second swap starts while a victim has not read back Absent (Unknown included)
    running jobs are expected to finish soonest. **The estimate** is the one the design already has for a drain, the *end bound*
    (whole-node.md section 3): for each lease and run on the host, its start plus its max wall time (12.1), minus now, and zero for a host
    with none; where a consumer or the run service has a better predicted remaining time for a job (the sizing history of section 7, or
-   per-minute profiles if they are adopted; none is built into this design today), the smaller of the two is used. A job with no
+   per-minute profiles if they are adopted (proposed in jobscheduler#59); none is built into this design today), the smaller of the two is used. A job with no
    prediction is *unknown* and counts as its max wall time, so an unknown ranks as the slowest to finish, never the fastest. Hosts whose
    expected drain is within `swap_drain_grace` tie, and among the tied the smallest wins: smallest by `cpu_millis`, then memory, then
-   fewest bookings, then lowest host id; a host whose expected drain is beyond the grace ranks after all of those, by expected drain. A registered `default` host is never chosen (the scheduler did not
+   fewest bookings, then lowest host id; a host whose expected drain is beyond the grace ranks after all of those, by expected drain, and ties there break the same way (smallest, then memory, then fewest bookings, then lowest host id). A registered `default` host is never chosen (the scheduler did not
    create it). **Never chosen:** a host that holds a whole-node lease or a reservation (the next smallest is taken); a host already tainted
    for a reclaim; a host holding a run that has already been evicted `max_evictions` (default 3) times; and a host whose removal would push
    the whole-node ceiling below the whole-node hosts reserved plus held (the ceiling counts hosts, `min(max_whole_node, capable_hosts -
@@ -365,7 +365,8 @@ No second swap starts while a victim has not read back Absent (Unknown included)
    (at most `max_machines` times the depth of the catalog). `max_evictions` is an extra bound on one request, not the only one.
 4. *Wait one window.* The window starts when the new machine is up (registered and serving), not when the victim was marked. A drain in
    progress blocks the next swap, since no second swap starts while a victim has not read back Absent; so a repeat comes at the later of
-   the window's end and the victim's disappearance. At the window's end the same test runs on the new samples; if the queue has eased,
+   the window's end and the victim's disappearance. The window and the drain overlap, so swaps come at most once per `max(swap_window,
+   drain)`, where the drain is at most `swap_drain_grace`. At the window's end the same test runs on the new samples; if the queue has eased,
    nothing more is done, and if it has not, the swap repeats with the next victim and the biggest option again. Overshoot is accepted:
    the pool may end with bigger machines than the load needed. There is no logic to consolidate machines or to undo an overshoot except
    the scale-down below.
