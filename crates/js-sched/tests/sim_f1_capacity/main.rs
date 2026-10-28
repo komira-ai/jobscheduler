@@ -20,11 +20,20 @@
 //! reached the situations it is about, so a check that cannot fail shows up as a
 //! failed sweep, not a green one.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement (`check.rs`; `../load_reference/mod.rs` for the load rule). The generators
+//! are the same; a scenario whose subject is the booked layout asserts the load rule's
+//! equivalent under load (F1.1 fills each worker to its planned limit, F1.2 counts the
+//! cores charged, F1.5 bounds the wait of a held request). The golden trace hashes are
+//! the booked rule's. `KBF_SIM_RULE=booked` selects the rule of a replay or the long
+//! sweep (`load` by default).
+//!
 //! A failure names the scenario, the seed, the input step, the invariant and the
 //! command that replays it:
 //!
 //! ```text
-//! KBF_SIM_SCENARIO=F1.4 KBF_SIM_SEED=17 cargo test -p js-sched --test sim_f1_capacity -- --ignored --exact replay
+//! KBF_SIM_RULE=load KBF_SIM_SCENARIO=F1.4 KBF_SIM_SEED=17 cargo test -p js-sched --test sim_f1_capacity -- --ignored --exact replay
 //! ```
 //!
 //! The scenarios are run by name (`scenarios::by_name`), so the replay takes the
@@ -41,11 +50,14 @@
 //!
 //! (`KBF_SIM_SEEDS=<n>` sets its seeds per scenario; the default is 200.)
 
+#[macro_use]
 #[path = "../booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "../digest/mod.rs"]
 mod digest;
+#[path = "../load_reference/mod.rs"]
+mod load_reference;
 
 mod check;
 #[path = "../golden_file/mod.rs"]
@@ -59,7 +71,7 @@ use scenarios::{
     BatchUnderInteractive, CapacityShrink, Dedup, EachAxis, ExactPacking, Gpus, JoinAfterFinish,
     LargeBehindSmall, QosOrder, Rounds,
 };
-use world::{Scenario, run};
+use world::{Scenario, run as run_world};
 
 /// Runs `make()` once per seed in `seeds`, handing each finished scenario and world to
 /// `each`.
@@ -70,32 +82,46 @@ fn sweep<S: Scenario>(
 ) {
     for seed in seeds {
         let mut scenario = make();
-        let world = run(&mut scenario, seed);
+        let world = run_world(&mut scenario, seed);
         each(&scenario, &world);
     }
 }
 
-#[test]
+both_rules! {
 fn f1_1_exact_packing() {
     let mut full = 0;
     let mut axes = [0; 3];
     let mut exact = 0;
+    let (mut at_limit, mut extra_waited, mut limit_fills) = (0, 0, 0);
     sweep(0..48, ExactPacking::default, |s, w| {
         full += s.full_at_start;
         exact += w.check.stats.exact_fills;
+        at_limit += s.at_limit;
+        extra_waited += s.extra_waited_at_limit;
+        limit_fills += w.check.stats.limit_fills;
         for (a, n) in axes.iter_mut().zip(s.extra_on_axis) {
             *a += n;
         }
     });
-    assert_eq!(full, 48, "every seed fills its workers exactly at second 0");
-    assert!(exact > 0);
+    if booked::is_booked() {
+        assert_eq!(full, 48, "every seed fills its workers exactly at second 0");
+        assert!(exact > 0);
+    } else {
+        // Which worker takes which piece is the score's, so not every seed fills every
+        // worker; the boundary is reached, and a core more is not admitted at it.
+        assert!(at_limit > 0, "no seed charged every worker exactly its limit");
+        assert!(
+            extra_waited > 0,
+            "no seed offered a core more to workers all at their limit"
+        );
+        assert!(limit_fills > 0, "no grant filled a worker to its limit");
+    }
     assert!(
         axes[0] > 0 && axes[2] > 0 && axes[1] == 0,
         "one unit more on each axis that is booked: {axes:?}"
     );
 }
 
-#[test]
 fn f1_2_each_axis_full_on_its_own() {
     let (mut memory, mut cpu, mut over) = (0, 0, 0);
     sweep(0..8, EachAxis::default, |s, _| {
@@ -108,7 +134,6 @@ fn f1_2_each_axis_full_on_its_own() {
     assert!(over > 0, "no worker's memory limits summed past its memory");
 }
 
-#[test]
 fn f1_3_whole_gpus() {
     let (mut refused, mut grants) = (0, 0);
     sweep(0..16, Gpus::default, |s, _| {
@@ -119,7 +144,6 @@ fn f1_3_whole_gpus() {
     assert!(grants > 0);
 }
 
-#[test]
 fn f1_4_qos_order_when_saturated() {
     let (mut passed, mut skips, mut refusals, mut promotions) = (0, 0, 0, 0);
     sweep(0..8, QosOrder::default, |s, w| {
@@ -140,22 +164,26 @@ fn f1_4_qos_order_when_saturated() {
     assert!(promotions > 0, "the swarm's dedup keys promoted nothing");
 }
 
-#[test]
 fn f1_5_a_large_request_behind_small_ones() {
-    let (mut passed, mut waited) = (0, 0);
+    let (mut passed, mut waited, mut held) = (0, 0, 0);
     sweep(0..4, LargeBehindSmall::default, |s, _| {
         passed += s.passed_over;
         waited += s.waited_whole_stream;
+        held += s.held;
     });
     // Today's behaviour, not a failure: the small ones pass it while they keep coming.
     assert!(passed > 0);
-    assert!(
-        waited > 0,
-        "the large request never waited out the whole stream"
-    );
+    if booked::is_booked() {
+        assert!(
+            waited > 0,
+            "the large request never waited out the whole stream"
+        );
+    } else {
+        assert_eq!(waited, 0, "a held request waited out the whole stream");
+        assert_eq!(held, 4, "a head held a worker for the large request in every seed");
+    }
 }
 
-#[test]
 fn f1_6_batch_under_steady_interactive() {
     let mut waits = 0;
     sweep(0..4, BatchUnderInteractive::default, |s, _| {
@@ -164,7 +192,6 @@ fn f1_6_batch_under_steady_interactive() {
     assert!(waits > 0, "batch never waited behind interactive work");
 }
 
-#[test]
 fn f1_7_dedup_and_promotion() {
     let (mut joins, mut promotions, mut unjoinable) = (0, 0, 0);
     let (mut other, mut networked, mut dnc) = (0, 0, 0);
@@ -187,7 +214,6 @@ fn f1_7_dedup_and_promotion() {
     assert!(other > 0 && networked > 0 && dnc > 0);
 }
 
-#[test]
 fn f1_8_a_join_after_the_twin_finished() {
     let (mut answered, mut refused, mut rejoins) = (0, 0, 0);
     sweep(0..16, JoinAfterFinish::default, |s, w| {
@@ -202,7 +228,6 @@ fn f1_8_a_join_after_the_twin_finished() {
     assert_eq!(rejoins, answered + refused);
 }
 
-#[test]
 fn f1_9_capacity_shrinks_below_bookings_then_grows() {
     let (mut shrunk, mut skips, mut grown) = (0, 0, 0);
     sweep(0..8, CapacityShrink::default, |s, w| {
@@ -215,7 +240,6 @@ fn f1_9_capacity_shrinks_below_bookings_then_grows() {
     assert!(grown > 0, "no grant used room that grew in the same second");
 }
 
-#[test]
 fn f1_10_more_than_one_round() {
     let (mut full, mut past_cut, mut unservable, mut refused) = (0, 0, 0, 0);
     sweep(0..4, Rounds::default, |s, w| {
@@ -233,7 +257,6 @@ fn f1_10_more_than_one_round() {
     );
 }
 
-#[test]
 fn seeds_replay() {
     // Two of the cheaper scenarios: one with dedup joins and promotions, one with
     // capacity changes. Every scenario runs on the same world and checker, so the
@@ -242,12 +265,13 @@ fn seeds_replay() {
     for name in ["F1.7", "F1.9"] {
         let hash = |seed| {
             let mut s = scenarios::by_name(name).unwrap();
-            run(s.as_mut(), seed).trace_hash()
+            run_world(s.as_mut(), seed).trace_hash()
         };
         let three = hash(3);
         assert_eq!(three, hash(3), "{name}: seed 3 replays");
         assert_ne!(three, hash(4), "{name}: seeds 3 and 4 differ");
     }
+}
 }
 
 /// The trace hash of every scenario under each pinned seed.
@@ -258,7 +282,7 @@ fn golden_runs() -> Vec<(String, js_sim::TraceHash)> {
             let mut scenario = scenarios::by_name(name).unwrap();
             runs.push((
                 format!("{name}/seed-{seed}"),
-                run(scenario.as_mut(), seed).trace_hash(),
+                run_world(scenario.as_mut(), seed).trace_hash(),
             ));
         }
     }
@@ -270,20 +294,35 @@ fn golden_runs() -> Vec<(String, js_sim::TraceHash)> {
 /// scenario's trace under three seeds is compared with the checked-in hash.
 #[test]
 fn traces_match_their_golden_hashes() {
-    golden_file::golden("f1").assert_matches(&golden_runs());
+    // The golden hashes are the booked rule's traces.
+    booked::under(booked::booked(), || {
+        golden_file::golden("f1").assert_matches(&golden_runs());
+    });
 }
 
 /// Rewrites the F1 lines of `tests/golden/trace-hashes.txt`.
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
-    golden_file::golden("f1")
-        .regenerate(&golden_runs())
-        .unwrap();
+    booked::under(booked::booked(), || {
+        golden_file::golden("f1")
+            .regenerate(&golden_runs())
+            .unwrap();
+    });
 }
 
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
+}
+
+/// The rule a replay or the long sweep runs under: `KBF_SIM_RULE` is `load` (the default)
+/// or `booked`.
+fn rule() -> js_sched::LoadConfig {
+    match env("KBF_SIM_RULE").as_deref() {
+        None | Some("load") => js_sched::LoadConfig::default(),
+        Some("booked") => booked::booked(),
+        Some(other) => panic!("KBF_SIM_RULE is load or booked, not {other:?}"),
+    }
 }
 
 /// Replays one seed of one scenario: `KBF_SIM_SCENARIO` and `KBF_SIM_SEED`.
@@ -295,14 +334,16 @@ fn replay() {
         .expect("set KBF_SIM_SEED")
         .parse()
         .expect("KBF_SIM_SEED is a number");
-    let mut scenario = scenarios::by_name(&name).expect("a scenario name, F1.1 to F1.10");
-    let world = run(scenario.as_mut(), seed);
-    println!(
-        "{name} seed {seed}: {} inputs, {} grants, trace {}",
-        world.inputs,
-        world.check.stats.grants,
-        world.trace_hash()
-    );
+    booked::under(rule(), || {
+        let mut scenario = scenarios::by_name(&name).expect("a scenario name, F1.1 to F1.10");
+        let world = run_world(scenario.as_mut(), seed);
+        println!(
+            "{name} seed {seed}: {} inputs, {} grants, trace {}",
+            world.inputs,
+            world.check.stats.grants,
+            world.trace_hash()
+        );
+    });
 }
 
 /// Many more seeds of every scenario than CI runs.
@@ -310,10 +351,12 @@ fn replay() {
 #[ignore = "long: run with --ignored --release"]
 fn long_sweep() {
     let seeds: u64 = env("KBF_SIM_SEEDS").map_or(200, |s| s.parse().expect("a number"));
-    for name in scenarios::NAMES {
-        for seed in 0..seeds {
-            let mut scenario = scenarios::by_name(name).unwrap();
-            run(scenario.as_mut(), seed);
+    booked::under(rule(), || {
+        for name in scenarios::NAMES {
+            for seed in 0..seeds {
+                let mut scenario = scenarios::by_name(name).unwrap();
+                run_world(scenario.as_mut(), seed);
+            }
         }
-    }
+    });
 }

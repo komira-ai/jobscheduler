@@ -3,6 +3,7 @@
 //! operation of the key picks up at the next placement round, strictly below the memory
 //! of the largest live node, and which a successor books the same way.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -73,7 +74,7 @@ struct Farm {
 
 impl Farm {
     fn new() -> Self {
-        Self::over(Scheduler::new(1).with_load_config(booked::booked()))
+        Self::over(Scheduler::new(1).with_load_config(booked::current()))
     }
 
     fn over(s: Scheduler) -> Self {
@@ -184,10 +185,10 @@ fn farm_with_floor_16() -> Farm {
     f
 }
 
+both_rules! {
 /// Catches the certain win's absence: a changed digest of a key that was killed starts
 /// the ladder again at 4 GiB (the digest floor does not know it), so it is killed again
 /// and climbs 4 -> 16 once more.
-#[test]
 fn a_new_digest_of_a_killed_key_starts_at_the_floor() {
     let mut f = farm_with_floor_16();
     f.submit_keyed(2, request(2, 4 * GIB), KEY);
@@ -203,11 +204,12 @@ fn a_new_digest_of_a_killed_key_starts_at_the_floor() {
     assert_eq!(third.resources.memory_bytes, 32 * GIB);
     assert_eq!(f.s.key_floor(KEY), Some(32 * GIB));
 }
+}
 
+both_rules! {
 /// Catches a key floor applied only when an operation is queued: operations of the key
 /// already waiting when the kill happens still start at their old booking (and are
 /// killed, one by one, for what the first kill taught). One core, so two of them wait.
-#[test]
 fn queued_operations_pick_up_the_floor_at_placement() {
     let mut f = Farm::new();
     f.node("one-core", 1, 64);
@@ -228,13 +230,14 @@ fn queued_operations_pick_up_the_floor_at_placement() {
     // The grant, not only the request, books it: the node counts it.
     assert_eq!(f.s.booked(&w("one-core")).unwrap().memory_bytes, 16 * GIB);
 }
+}
 
+both_rules! {
 /// Catches a key floor that lets one request raise another's: the key stands for
 /// (instance, platform class, basis, shape), so an action under another key (another
 /// instance, or another platform) is untouched, and so is one with no key. The
 /// scheduler keeps floors per key value; hashing the instance in is the front door's
 /// job (and tested there).
-#[test]
 fn another_key_and_no_key_are_unchanged() {
     let mut f = farm_with_floor_16();
     let mut other = request(2, 4 * GIB);
@@ -248,11 +251,12 @@ fn another_key_and_no_key_are_unchanged() {
     }
     assert_eq!(f.s.key_floor(KEY + 1), None);
 }
+}
 
+both_rules! {
 /// Catches a key floor for a request that is not an ordinary action: a request for GPUs
 /// books by another measure, and a whole-machine lease books the machine. Both ignore a
 /// `size_key` they carry, in what they book and in what they leave behind when killed.
-#[test]
 fn only_an_action_without_gpus_has_a_key_floor() {
     let mut f = farm_with_floor_16();
     let mut gpu_caps = linux();
@@ -302,15 +306,18 @@ fn only_an_action_without_gpus_has_a_key_floor() {
     assert_eq!(rerun.resources.memory_bytes, 16 * GIB);
     assert_eq!(f.s.key_floor(KEY + 1), None, "a GPU kill left a key floor");
 }
+}
 
+both_rules! {
 /// Catches 50 concurrent kills of one key counted as 50 events: each kill of an
 /// operation booked below the floor already in force belongs to the event that set it,
 /// so the floor is one rung (16 GiB), not a rung per kill, and every retry and every
 /// later digest books exactly it.
-#[test]
 fn a_burst_of_kills_is_one_event() {
     let mut f = Farm::new();
-    f.node("wide", 128, 256);
+    // 50 retries at 16 GiB are charged 800 GiB together under placement by load (a retry is
+    // charged the rung it runs under), so the node has the memory for all of them at once.
+    f.node("wide", 128, 1_024);
     for n in 1..=50u8 {
         f.submit_keyed(u64::from(n), request(n, 4 * GIB), KEY);
     }
@@ -338,13 +345,14 @@ fn a_burst_of_kills_is_one_event() {
     assert_eq!(next.len(), 50);
     assert!(next.iter().all(|s| s.resources.memory_bytes == 16 * GIB));
 }
+}
 
+both_rules! {
 /// Catches a key floor at or above the memory of the largest node: the ladder's last
 /// step is the whole host (an exclusive lease that runs alone), and a floor there would
 /// put every digest of the key on a whole host. On a 16 GiB farm the kill at 4 GiB
 /// retries at the cap, 16 GiB, and the key floor stays at 15.75 GiB, so a new digest
 /// runs beside another lease.
-#[test]
 fn a_key_floor_stays_below_the_largest_node() {
     let mut f = Farm::new();
     f.node("a", 8, 16);
@@ -362,11 +370,12 @@ fn a_key_floor_stays_below_the_largest_node() {
     f.submit(3, request(3, 4 * GIB));
     assert_eq!(only(f.tick()).resources.memory_bytes, 4 * GIB);
 }
+}
 
+both_rules! {
 /// Catches the bound taken from the wrong nodes: a node that is gone, one that does not
 /// satisfy the platform and one without the CPUs do not count; the largest of the rest
 /// does, cordoned or not.
-#[test]
 fn the_bound_is_the_largest_live_node_that_could_run_it() {
     let mut f = Farm::new();
     let mac = NodeCaps::from_report([("arch", "arm64"), ("os", "macos")])
@@ -421,13 +430,14 @@ fn the_bound_is_the_largest_live_node_that_could_run_it() {
     empty.submit_keyed(1, request(1, 4 * GIB), KEY);
     assert!(empty.tick().is_empty());
 }
+}
 
+both_rules! {
 /// Property: over generated farms (node memories from 6 to 200 GiB, CPUs from 1 to 16)
 /// and generated kill chains, a key floor is never at or above the memory of the
 /// largest node that matches, so no booking it makes owns a host; and a new digest of
 /// the key starts at the floor, at the raised size, or at its own, never above the
 /// floor.
-#[test]
 fn generated_farms_never_book_a_whole_host_from_a_key_floor() {
     let mut rng = SimRng::from_seed(SEED);
     let mut floors = 0;
@@ -483,11 +493,12 @@ fn generated_farms_never_book_a_whole_host_from_a_key_floor() {
     }
     assert!(floors > 100, "the property is vacuous: {floors} floors");
 }
+}
 
+both_rules! {
 /// A floor equal to a smaller worker's memory would book that worker whole: placement
 /// takes the larger worker instead (the smaller one wins every tie by name here), and
 /// with only the smaller one left to run on the operation books what it asked for.
-#[test]
 fn a_key_floor_never_books_a_smaller_worker_whole() {
     let mut f = Farm::new();
     f.node("a-small", 8, 32);
@@ -521,13 +532,14 @@ fn a_key_floor_never_books_a_smaller_worker_whole() {
     assert_eq!(last.worker, w("a-small"));
     assert_eq!(last.resources.memory_bytes, 4 * GIB);
 }
+}
 
+both_rules! {
 /// After a leader change a recovered lease books the request the store holds, not the
 /// key floor: a sibling's kill may have set the floor after the lease was granted, and
 /// the lease runs under its own limit. Its kill then steps the ladder from there and is
 /// part of the event that set the floor (the floor does not rise again), and a queued
 /// operation is raised at the successor's first round.
-#[test]
 fn a_recovered_lease_books_what_the_store_holds_and_its_kill_is_no_new_event() {
     let mut f = Farm::new();
     f.node("big", 8, 64);
@@ -544,7 +556,7 @@ fn a_recovered_lease_books_what_the_store_holds_and_its_kill_is_no_new_event() {
 
     // What the state store holds: the submitted requests, the lease of the second, the
     // key floor; the third is queued.
-    let mut successor = Scheduler::new(2).with_load_config(booked::booked());
+    let mut successor = Scheduler::new(2).with_load_config(booked::current());
     successor.restore_key_floors(vec![KeyFloor {
         key: KEY,
         ask: 16 * GIB,
@@ -589,12 +601,13 @@ fn a_recovered_lease_books_what_the_store_holds_and_its_kill_is_no_new_event() {
     assert_eq!(again.resources.memory_bytes, 16 * GIB);
     assert_eq!(g.s.key_floor(KEY), Some(16 * GIB));
 }
+}
 
+both_rules! {
 /// Catches a key floor missing from the value two schedulers are compared by, and one
 /// that is not handed to the state store with the requeue: the memory state differs
 /// when only a key floor differs; the change names the raised key floor and the evicted
 /// keys once; and rows given back to a successor floor a new request.
-#[test]
 fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     let mut f = farm_with_floor_16();
     let mut same = farm_with_floor_16();
@@ -614,7 +627,7 @@ fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     // The change of the first kill of a farm with room for one key floor.
     let mut g = Farm::over(
         Scheduler::new(1)
-            .with_load_config(booked::booked())
+            .with_load_config(booked::current())
             .with_memory_floors(1),
     );
     g.node("big", 8, 64);
@@ -640,7 +653,7 @@ fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     );
     assert_eq!(second.key_evicted, Vec::<u64>::new());
     // Given back, it floors a fresh request.
-    let mut successor = Scheduler::new(2).with_load_config(booked::booked());
+    let mut successor = Scheduler::new(2).with_load_config(booked::current());
     successor.restore_key_floors(vec![second.key_raised.expect("raised")]);
     assert_eq!(successor.key_floor(KEY + 2), Some(16 * GIB));
     assert_eq!(successor.key_floor(KEY + 1), None);
@@ -650,12 +663,13 @@ fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     assert_eq!(only(h.tick()).resources.memory_bytes, 16 * GIB);
     // Nothing is held for a request that has no key.
 }
+}
 
+both_rules! {
 /// Catches a floor that outlives the node that made it possible: the big node leaves
 /// while an operation raised to 32 GiB waits, and the only node left has 16. Without
 /// the re-clamp the operation would wait for a node that is not coming and be refused
 /// "all smaller than its request" after the unservable wait.
-#[test]
 fn an_operation_raised_beyond_the_remaining_nodes_is_lowered_not_refused() {
     let mut f = Farm::new();
     f.node("big", 1, 64);
@@ -692,6 +706,7 @@ fn an_operation_raised_beyond_the_remaining_nodes_is_lowered_not_refused() {
     }
     assert!(moved.iter().all(|s| s.worker == w("small")));
 }
+}
 
 fn floor(ask_gib: u64, stamp: u64) -> KeyFloor {
     KeyFloor {
@@ -701,10 +716,10 @@ fn floor(ask_gib: u64, stamp: u64) -> KeyFloor {
     }
 }
 
+both_rules! {
 /// With a floor held and no live worker that could run an operation, the operation keeps
 /// what it asked for; the first worker that can takes it at the floor, kept under that
 /// worker's memory.
-#[test]
 fn an_operation_waits_unraised_for_a_worker_and_is_raised_under_the_one_that_comes() {
     let mut f = Farm::new();
     f.s.restore_key_floors(vec![floor(32, 0)]);
@@ -714,10 +729,11 @@ fn an_operation_waits_unraised_for_a_worker_and_is_raised_under_the_one_that_com
     let start = only(f.tick());
     assert_eq!(start.resources.memory_bytes, 16 * GIB - 256 * MIB);
 }
+}
 
+both_rules! {
 /// A floor above an operation's memory that the live workers cannot give leaves the
 /// operation as it is: it already asks for as much as they could give it.
-#[test]
 fn an_operation_that_already_asks_what_the_workers_can_give_is_left_alone() {
     let mut f = Farm::new();
     f.node("small", 8, 16);
@@ -726,10 +742,11 @@ fn an_operation_that_already_asks_what_the_workers_can_give_is_left_alone() {
     let start = only(f.tick());
     assert_eq!(start.resources.memory_bytes, 16 * GIB - 256 * MIB);
 }
+}
 
+both_rules! {
 /// A floor raised again while an operation waits raises it again, from what it asked for
 /// first: the operation books the larger floor.
-#[test]
 fn a_floor_raised_again_while_an_operation_waits_raises_it_again() {
     let mut f = Farm::new();
     f.node("one-core", 1, 64);
@@ -742,12 +759,13 @@ fn a_floor_raised_again_while_an_operation_waits_raises_it_again() {
     let next = only(f.end(&held, ok()));
     assert_eq!(next.resources.memory_bytes, 32 * GIB);
 }
+}
 
+both_rules! {
 /// The caller lowers a floor it has decided is no longer needed: a queued operation then
 /// books the lower floor, the lowered floor keeps its place in the order and is handed
 /// back to write down, and a floor is never raised this way or invented for an unknown
 /// key.
-#[test]
 fn a_lowered_key_floor_is_what_the_next_operation_books() {
     let mut f = farm_with_floor_16();
     assert_eq!(f.s.lower_key_floor(KEY + 1, 8 * GIB), None, "no such floor");
@@ -767,10 +785,11 @@ fn a_lowered_key_floor_is_what_the_next_operation_books() {
     f.submit_keyed(3, request(3, 4 * GIB), KEY);
     assert_eq!(only(f.tick()).resources.memory_bytes, 4 * GIB);
 }
+}
 
+both_rules! {
 /// A kill after a floor was lowered raises it again from where it stands: the ladder's
 /// rung above the booking that was killed.
-#[test]
 fn a_kill_after_a_lowered_floor_raises_it_again() {
     let mut f = farm_with_floor_16();
     f.s.lower_key_floor(KEY, 8 * GIB).expect("lowered");
@@ -780,4 +799,5 @@ fn a_kill_after_a_lowered_floor_raises_it_again() {
     let rerun = f.killed(&start);
     assert_eq!(rerun.resources.memory_bytes, 16 * GIB);
     assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
+}
 }

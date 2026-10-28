@@ -6,12 +6,12 @@
 use js_sched::{Event, OpState};
 use js_types::sched::{LeaseId, NodePhase, OperationId, Qos};
 
-use super::{GIB, Harness, request, w};
+use super::{GIB, Harness, booked, request, w};
 
+both_rules! {
 /// Catches: an accessor that answers for an operation or worker the scheduler does not
 /// hold, or that gives another operation's request, QoS or size key; a term that is not
 /// the leader's.
-#[test]
 fn the_accessors_answer_for_the_operation_or_worker_they_are_asked_about() {
     let mut h = Harness::new();
     h.worker("a", 8_000, 8 * GIB);
@@ -36,11 +36,12 @@ fn the_accessors_answer_for_the_operation_or_worker_they_are_asked_about() {
     assert_eq!(h.s.phase(&w("a")), Some(&NodePhase::Serving));
     assert_eq!(h.s.phase(&w("b")), None);
 }
+}
 
+both_rules! {
 /// Catches: a `Started` report for a lease the operation no longer holds (a report that
 /// overtook a re-grant) that moves the operation to running, and so ends the start grace
 /// of the lease it does hold.
-#[test]
 fn a_started_report_for_another_lease_leaves_the_operation_leased() {
     let mut h = Harness::new();
     h.worker("a", 8_000, 8 * GIB);
@@ -65,4 +66,5 @@ fn a_started_report_for_another_lease_leaves_the_operation_leased() {
         lease: grant.lease,
     });
     assert!(h.running(&grant));
+}
 }

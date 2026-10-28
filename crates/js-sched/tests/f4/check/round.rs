@@ -2,6 +2,24 @@
 //! with room) and verdict.
 
 use super::*;
+use crate::load_reference::{Ask, Host, Placer};
+
+impl Checker {
+    /// Worker `name` as the load reference meets it: its capacity, the GPUs and VM slots it
+    /// books, whether one lease holds it alone, and what each lease was charged.
+    fn host(&self, name: &WorkerId) -> Host {
+        let w = &self.workers[name];
+        let charged = w.charged.values().cloned().collect();
+        Host::new(
+            name.clone(),
+            w.capacity,
+            w.booked.gpus,
+            w.booked.vms,
+            w.whole,
+            charged,
+        )
+    }
+}
 
 impl Checker {
     /// One placement round, checked against the reference (I1, I6 to I8, I10, I11, L2).
@@ -33,6 +51,10 @@ impl Checker {
         let mut grants: Vec<(OperationId, WorkerId)> = Vec::new();
         let mut notes: Vec<(OperationId, Verdict)> = Vec::new();
         let mut room_short = false;
+        let mut placer = self.load.then(|| {
+            let hosts = live.iter().map(|n| self.host(n)).collect();
+            Placer::new(hosts, TERM, self.next_seq, self.holds.clone())
+        });
         for &(_, id) in &self.queue {
             let op = &self.ops[usize::try_from(id.0).expect("ids fit")];
             let class = (op.needs, op.request.resources);
@@ -63,27 +85,43 @@ impl Checker {
                 )
             };
             if grants.len() < PLACEMENT_ROUND && (avoids || !no_room.contains(&class)) {
-                // The least loaded worker with room; of equals, the first by name.
-                let fit = m
-                    .iter()
-                    .copied()
-                    .filter(|&i| {
-                        let (booked, leases, whole) = held_on(&extra, i);
-                        room(
-                            self.workers[live[i]].capacity,
-                            booked,
-                            whole,
-                            leases,
-                            op.request.resources,
-                        ) && !(elsewhere && avoided(i))
-                    })
-                    .min_by(|&a, &b| {
-                        let load = |i: usize| {
-                            let (booked, leases, _) = held_on(&extra, i);
-                            (self.workers[live[i]].capacity, booked, leases)
-                        };
-                        by_load(load(a), load(b))
-                    });
+                let fit = if let Some(placer) = placer.as_mut() {
+                    // The load rule: the reference placement of `load_reference`.
+                    let usable: Vec<usize> = m
+                        .iter()
+                        .copied()
+                        .filter(|&i| !(elsewhere && avoided(i)))
+                        .collect();
+                    let ask = Ask {
+                        operation: id,
+                        key: &op.request.key,
+                        resources: op.request.resources,
+                        pool: op.needs,
+                        candidates: &usable,
+                    };
+                    placer.place(&ask)
+                } else {
+                    // The least loaded worker with room; of equals, the first by name.
+                    m.iter()
+                        .copied()
+                        .filter(|&i| {
+                            let (booked, leases, whole) = held_on(&extra, i);
+                            room(
+                                self.workers[live[i]].capacity,
+                                booked,
+                                whole,
+                                leases,
+                                op.request.resources,
+                            ) && !(elsewhere && avoided(i))
+                        })
+                        .min_by(|&a, &b| {
+                            let load = |i: usize| {
+                                let (booked, leases, _) = held_on(&extra, i);
+                                (self.workers[live[i]].capacity, booked, leases)
+                            };
+                            by_load(load(a), load(b))
+                        })
+                };
                 match fit {
                     Some(i) => {
                         let alone = exclusive(self.workers[live[i]].capacity, op.request.resources);
@@ -139,6 +177,8 @@ impl Checker {
 
         // Grants: the explicit invariants first, then the reference placement.
         let mut booked_now: BTreeMap<WorkerId, (Resources, usize, bool)> = BTreeMap::new();
+        // Under the load rule, each granted worker as the grants of this round leave it.
+        let mut hosts_now: BTreeMap<WorkerId, Host> = BTreeMap::new();
         for g in &granted {
             if self.next_seq != g.lease.seq || g.lease.term != TERM {
                 self.violated(
@@ -151,24 +191,53 @@ impl Checker {
                 self.violated("I7", format!("{g:?} to an unregistered worker"));
             };
             let op = self.op(g.operation);
-            let held =
-                booked_now
+            if self.load {
+                // The documented limits of the load rule: room but for the load, and the
+                // cores charged to the worker, this lease's with them, within
+                // `C (1 + s_cpu)`. The lease's record carries what it was charged: its
+                // cores cut to the worker's, and the memory limit it runs under.
+                let host = hosts_now
                     .entry(g.worker.clone())
-                    .or_insert((w.booked, w.leases.len(), w.whole));
-            if !room(w.capacity, held.0, held.2, held.1, op.request.resources) {
-                self.violated(
-                    "I6",
-                    format!(
-                        "{g:?} placed beside {:?} booked ({} leases, alone: {}) on capacity {:?}",
-                        held.0, held.1, held.2, w.capacity
-                    ),
+                    .or_insert_with(|| self.host(&g.worker));
+                let request = op.request.resources;
+                if !host.admits(&request) {
+                    self.violated(
+                        "I6",
+                        format!(
+                            "{g:?} placed with {} millicores charged of {} on capacity {:?}",
+                            host.left(),
+                            host.cpu_limit(),
+                            w.capacity
+                        ),
+                    );
+                }
+                if g.cost.cpu_millis != host.charge_of(&request)
+                    || g.cost.limit_bytes != request.memory_bytes
+                {
+                    self.violated("I6", format!("{g:?} was charged {:?}", g.cost));
+                }
+                host.book(&op.request.key, &request);
+            } else {
+                let held = booked_now.entry(g.worker.clone()).or_insert((
+                    w.booked,
+                    w.leases.len(),
+                    w.whole,
+                ));
+                if !room(w.capacity, held.0, held.2, held.1, op.request.resources) {
+                    self.violated(
+                        "I6",
+                        format!(
+                            "{g:?} placed beside {:?} booked ({} leases, alone: {}) on capacity {:?}",
+                            held.0, held.1, held.2, w.capacity
+                        ),
+                    );
+                }
+                *held = (
+                    add(held.0, op.request.resources),
+                    held.1 + 1,
+                    held.2 || exclusive(w.capacity, op.request.resources),
                 );
             }
-            *held = (
-                add(held.0, op.request.resources),
-                held.1 + 1,
-                held.2 || exclusive(w.capacity, op.request.resources),
-            );
             if !w.alive(now) || !self.needs[op.needs].matches(&w.caps) {
                 self.violated(
                     "I7",
@@ -188,6 +257,10 @@ impl Checker {
                 "I11",
                 format!("placement differs from the reference\n  expected {grants:?}\n  got      {got:?}"),
             );
+        }
+
+        if let Some(placer) = placer {
+            self.holds = placer.holds().clone();
         }
 
         // Verdicts: who is told what, and who is refused.
@@ -262,10 +335,13 @@ impl Checker {
 
         for (g, (id, _)) in granted.iter().zip(&grants) {
             let resources = self.op(*id).request.resources;
+            let key = self.op(*id).request.key.clone();
             let w = self.workers.get_mut(&g.worker).expect("checked");
             w.booked = add(w.booked, resources);
             w.whole |= exclusive(w.capacity, resources);
             w.leases.insert(g.lease);
+            let cores = resources.cpu_millis.min(w.capacity.cpu_millis);
+            w.charged.insert(g.lease, (key, cores));
             self.touched_workers.insert(g.worker.clone());
             let qos = self.op(*id).request.qos.clone();
             self.queue.remove(&(Reverse(qos), *id));

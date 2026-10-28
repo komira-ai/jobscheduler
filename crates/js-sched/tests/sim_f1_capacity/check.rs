@@ -2,9 +2,8 @@
 //! checked after every input (catalog section 4, `docs/design/simulation.md`).
 //!
 //! The shadow is written from the scheduler's contract, not from its code: it keeps
-//! its own queue, bookings, leases and dedup map, and its own reference placement (the
-//! least loaded worker with room) and unservable verdict, and compares the scheduler's
-//! effects and public state with them
+//! its own queue, bookings, leases and dedup map, and its own reference placement and
+//! unservable verdict, and compares the scheduler's effects and public state with them
 //! after each input. Nothing here calls `Resources::fits` or `saturating_sub`: a
 //! defect there must not also bend the reference.
 //!
@@ -18,7 +17,16 @@
 //! but F1 feeds none, so F1 does not exercise them. Not checked here: I9 (drain states)
 //! and I12 (no daemon model in the in-process world).
 //!
-//! I6 is checked per axis the request uses: a grant is allowed when, on the CPU and GPU
+//! The reference placement is the one of the rule the test runs under. Under the booked
+//! rule it is the least loaded worker with room, written here. Under placement by load it is
+//! `load_reference` (the design's predicate, score and head hold, written from the design
+//! and calling nothing in `js-sched`), and I6 is that rule's limit: a worker is charged
+//! cores up to a tenth over its own, never more, and GPUs and VM slots within its count;
+//! I11 holds each round's grants to the reference placement exactly. Everything else (I1 to
+//! I5, I7, I8, I10, I13, I14, L1, L2, and the bookings the scheduler reports) does not
+//! depend on the rule and is checked the same under both.
+//!
+//! I6, booked rule, is checked per axis the request uses: a grant is allowed when, on the CPU and GPU
 //! axes on which the request is not zero, what is booked plus the request fits the
 //! capacity. Memory is not booked against a worker (an action's memory is the limit it
 //! first runs under): the request needs a worker with that much memory, and an action
@@ -41,7 +49,11 @@ use js_types::sched::{
     WorkerId,
 };
 
+mod query;
 mod round;
+
+/// The scheduler's term in every F1 run.
+pub const TERM: u64 = 1;
 
 /// The name of this test target, for the replay command.
 pub const TARGET: &str = "sim_f1_capacity";
@@ -143,6 +155,9 @@ struct ShadowWorker {
     booked: Axes,
     leases: u64,
     whole: bool,
+    /// Each lease it holds, with the action key and the cores it was charged when placed
+    /// (the load rule's ledger).
+    charged: BTreeMap<LeaseId, (WorkKey, u64)>,
     /// Per interned platform request: whether `caps` satisfy it.
     matches: BTreeMap<usize, bool>,
 }
@@ -264,8 +279,11 @@ pub struct Stats {
     /// Leases given up (requeued) by expiry or reconciliation.
     pub given_up: u64,
     /// Rounds in which a queued request was kept off a worker only because its
-    /// bookings exceed a shrunken capacity.
+    /// bookings exceed a shrunken capacity (under the load rule: because the cores it is
+    /// charged are past its limit).
     pub overbooked_skips: u64,
+    /// Grants (load rule) that left their worker charged exactly its limit.
+    pub limit_fills: u64,
 }
 
 /// What [`Checker::observe`] keeps between inputs.
@@ -292,6 +310,11 @@ pub struct Checker {
     answered: BTreeMap<WaiterId, u32>,
     touched_ops: BTreeSet<OperationId>,
     touched_workers: BTreeSet<WorkerId>,
+    /// Whether the scheduler places by load: the reference placement is
+    /// `load_reference`'s, not the booked rule's.
+    load: bool,
+    /// The worker each blocked head held after the last round (load rule).
+    holds: BTreeMap<OperationId, WorkerId>,
     /// The grants of the last round, in order.
     pub last_round: Vec<(OperationId, WorkerId)>,
     /// Per operation: the farm time (ms) of its first grant.
@@ -331,6 +354,8 @@ impl Checker {
             answered: BTreeMap::new(),
             touched_ops: BTreeSet::new(),
             touched_workers: BTreeSet::new(),
+            load: !crate::booked::is_booked(),
+            holds: BTreeMap::new(),
             last_round: Vec::new(),
             granted_at: BTreeMap::new(),
             finished_at: BTreeMap::new(),
@@ -343,9 +368,11 @@ impl Checker {
     /// The command that replays this run.
     pub fn replay_command(&self) -> String {
         format!(
-            "KBF_SIM_SCENARIO={} KBF_SIM_SEED={} cargo test -p js-sched --test {TARGET} -- \
-             --ignored --exact replay",
-            self.scenario, self.seed
+            "KBF_SIM_RULE={} KBF_SIM_SCENARIO={} KBF_SIM_SEED={} cargo test -p js-sched --test \
+             {TARGET} -- --ignored --exact replay",
+            if self.load { "load" } else { "booked" },
+            self.scenario,
+            self.seed
         )
     }
 
@@ -411,6 +438,7 @@ impl Checker {
             let res = op.resources;
             let w = self.workers.get_mut(&worker).expect("registered");
             w.booked = sub(w.booked, res);
+            w.charged.remove(&lease);
             w.leases -= 1;
             if w.leases == 0 {
                 w.whole = false;
@@ -464,6 +492,7 @@ impl Checker {
                         booked: [0; 3],
                         leases: 0,
                         whole: false,
+                        charged: BTreeMap::new(),
                         matches: BTreeMap::new(),
                     });
                 entry.capacity = axes(*capacity);
@@ -948,46 +977,5 @@ impl Checker {
                 format!("{name} still holds leases at the end")
             });
         }
-    }
-
-    /// Whether every operation is finished.
-    pub fn all_done(&self) -> bool {
-        self.ops.values().all(|op| op.state.done())
-    }
-
-    /// Operations submitted so far.
-    pub fn op_count(&self) -> u64 {
-        self.next_op
-    }
-
-    /// Whether `id` is queued (in the shadow's queue).
-    pub fn is_queued(&self, id: OperationId) -> bool {
-        self.ops.get(&id).is_some_and(Self::queued)
-    }
-
-    /// The operation `waiter` is attached to.
-    pub fn op_of(&self, waiter: WaiterId) -> Option<OperationId> {
-        self.waiter_op.get(&waiter).copied()
-    }
-
-    /// `id`'s QoS level now.
-    pub fn qos_of(&self, id: OperationId) -> &Qos {
-        &self.ops[&id].qos
-    }
-
-    /// What is booked on `worker` and its capacity, as (millicores, bytes, GPUs).
-    pub fn room(&self, worker: &WorkerId) -> ([u64; 3], [u64; 3]) {
-        let w = &self.workers[worker];
-        (w.booked, w.capacity)
-    }
-
-    /// The queued operations, most urgent first.
-    pub fn queue(&self) -> impl Iterator<Item = OperationId> + '_ {
-        self.queue.iter().map(|(_, _, id)| *id)
-    }
-
-    /// `id`'s request vector, as (millicores, bytes, GPUs).
-    pub fn resources_of(&self, id: OperationId) -> [u64; 3] {
-        self.ops[&id].resources
     }
 }

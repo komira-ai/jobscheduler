@@ -7,9 +7,10 @@
 //! worker placement picked (a test follows the worker a start names).
 //!
 //! A test that asserts the booked layout itself (the least booked worker, then the fewest
-//! leases, then the first by name: the spread, a lost run's budget on a named node, the
-//! reference-model simulations) stays on the booked rule through [`booked`], the rollback
-//! switch. Placement by load is tested by the `admission_*`, `load_*` and score suites.
+//! leases, then the first by name: the spread) stays on the booked rule through [`booked`],
+//! the rollback switch. The reference-model simulations (F1, F3, F4) run under both rules,
+//! each against its own reference placement (the load rule's is `load_reference`).
+//! Placement by load is also tested by the `admission_*`, `load_*` and score suites.
 
 #![allow(
     dead_code,
@@ -46,10 +47,11 @@ pub fn is_booked() -> bool {
     current().mode == PlacementLoad::Off
 }
 
-/// Runs `body` with [`current`] giving `config`.
-pub fn under(config: LoadConfig, body: fn()) {
+/// Runs `body` with [`current`] giving `config`, on this thread: a thread a test spawns
+/// takes the rule by running its own body under it.
+pub fn under<T>(config: LoadConfig, body: impl FnOnce() -> T) -> T {
     CURRENT.with(|c| c.set(config));
-    body();
+    body()
 }
 
 /// Declares tests that hold under both rules: for each `fn name() { .. }` a module `name`
@@ -61,17 +63,17 @@ macro_rules! both_rules {
             #[allow(unused_imports)]
             use super::*;
 
-            fn run() $body
+            fn the_test_body() $body
 
             // The canary: each variant checks the rule it runs under before the body.
             fn as_booked() {
                 assert_eq!(booked::current().mode, js_sched::PlacementLoad::Off);
-                run();
+                the_test_body();
             }
 
             fn as_load() {
                 assert_eq!(booked::current().mode, js_sched::PlacementLoad::On);
-                run();
+                the_test_body();
             }
 
             #[test]
