@@ -27,7 +27,8 @@ pub trait LambdaApi: Send + Sync {
 
     /// One instance. An instance the API does not know is
     /// [`ApiError::Api`] with [`ErrorCode::ObjectDoesNotExist`](crate::ErrorCode) and
-    /// status 404; [`ApiError::is_absent`] tells that case from every other failure.
+    /// status 404; [`ApiError::is_absent`] tells that case from every other failure (it
+    /// is for this call only), and the instance returned is always the one asked for.
     ///
     /// # Errors
     ///

@@ -99,6 +99,8 @@ impl HttpApi {
             .proxy(None)
             .max_redirects(0)
             .http_status_as_error(false)
+            // Redirects are off, so this cannot differ from them today; it keeps an
+            // https client from ever speaking plain http should that change.
             .https_only(https)
             .timeout_global(Some(limit))
             .max_idle_connections(0)
@@ -165,7 +167,14 @@ impl LambdaApi for HttpApi {
     }
 
     fn get_instance(&self, id: &InstanceId) -> Result<Instance, ApiError> {
-        wire::one_instance(&self.get(&format!("/instances/{id}"))?)
+        let found = wire::one_instance(&self.get(&format!("/instances/{id}"))?)?;
+        // A caller that terminates what it read must be sure it read the one it asked for.
+        match found.id == *id {
+            true => Ok(found),
+            false => Err(ApiError::Malformed(
+                "the answer is for another instance than the one asked for".to_owned(),
+            )),
+        }
     }
 }
 

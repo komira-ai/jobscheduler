@@ -133,6 +133,10 @@ impl ApiError {
     /// Whether this is the API saying, for a read by id, that the instance does not exist:
     /// status 404 with `global/object-does-not-exist`. `global/not-found` may also mean
     /// "not permitted", and every other failure says nothing about the instance.
+    ///
+    /// Meaningful for [`LambdaApi::get_instance`](crate::LambdaApi::get_instance) only:
+    /// the same error from a list or the instance types would not mean that an instance
+    /// is gone, and must not be read as such.
     pub fn is_absent(&self) -> bool {
         matches!(
             self,

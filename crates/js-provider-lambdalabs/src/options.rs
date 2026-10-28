@@ -1,6 +1,10 @@
 //! The `[[option]]` rows of the configuration: which Lambda instance types the provider
 //! may use, and what GPUs each one brings. Parsing and checking only; nothing chooses
 //! among the rows here.
+//!
+//! The row fields (`instance_type`, `gpu_class`, `gpus`) are not yet the shape of the
+//! design's `[[provider.option]]` table (`shape`, `id`, `facts`). They are to be aligned
+//! with it before anything reads the table beyond parsing.
 
 use std::collections::BTreeSet;
 use std::fmt;

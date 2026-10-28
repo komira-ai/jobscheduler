@@ -15,6 +15,19 @@ fn files(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Whether `text` holds `needle` in any letter case.
+fn names(text: &str, needle: &str) -> bool {
+    text.to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+#[test]
+fn the_scan_is_blind_to_letter_case_in_neither_direction() {
+    assert!(names("see Example.COM here", "example.com"));
+    assert!(names("see example.com here", "EXAMPLE.com"));
+    assert!(!names("see example.org here", "example.com"));
+}
+
 #[test]
 fn nothing_names_the_production_host() {
     // Built from parts so that this file does not hold them either.
@@ -29,11 +42,7 @@ fn nothing_names_the_production_host() {
             continue;
         };
         for needle in &needles {
-            assert!(
-                !text.contains(needle.as_str()),
-                "{} names {needle}",
-                path.display()
-            );
+            assert!(!names(&text, needle), "{} names {needle}", path.display());
         }
     }
 }

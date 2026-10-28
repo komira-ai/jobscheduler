@@ -256,3 +256,23 @@ fn only_object_does_not_exist_on_a_404_reads_as_absent() {
         );
     }
 }
+
+#[test]
+fn an_answer_for_another_instance_than_the_one_asked_for_is_malformed() {
+    let server = Server::plain();
+    // The fixture is the instance a1b2...; the route is another one's.
+    server.on(
+        "GET /api/v1/instances/ffffffffffffffffffffffffffffffff",
+        Reply::json(200, &fixture("instance.json")),
+    );
+    let err = client(&server, "key-one")
+        .get_instance(&id("ffffffffffffffffffffffffffffffff"))
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Malformed(_)), "{err:?}");
+    // The right one still reads.
+    server.on(ONE, Reply::json(200, &fixture("instance.json")));
+    let found = client(&server, "key-one")
+        .get_instance(&id("a1b2c3d4e5f60718293a4b5c6d7e8f90"))
+        .unwrap();
+    assert_eq!(found.id.as_str(), "a1b2c3d4e5f60718293a4b5c6d7e8f90");
+}
