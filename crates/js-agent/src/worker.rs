@@ -36,7 +36,7 @@
 //! then ends the agent, because jobs nobody supervises must not go on being listed. Two
 //! signals back the end mark up: a reply the worker's queue no longer has anybody to take
 //! ([`Delivery::Gone`]), and a worker that has been inside one order or step for longer than
-//! [`STALL_STEPS`] step intervals on the lifecycle's clock ([`Worker::stalled`]).
+//! [`stall_bound`] on the lifecycle's clock ([`Worker::stalled`]).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use js_agent_wire::{Command, HeartbeatReply, HeldRun, RunResult, Taint};
 
-use crate::cli_runtime::Settings;
+use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle};
@@ -61,11 +61,19 @@ pub const QUEUE: usize = 16;
 /// How long the worker waits for an order before it steps the lifecycle by itself.
 pub const STEP_EVERY: Duration = Duration::from_secs(1);
 
-/// How many step intervals the worker may be inside one order or step before the session
-/// calls it stalled. A runtime call may be slow (an image pull, the grace of a stop), so
-/// the bound is far above any of them; a worker still inside one after it is wedged, and
-/// jobs nobody supervises must not go on being listed.
-pub const STALL_STEPS: u32 = 1800;
+/// The time a worker may be inside one order or step that must make `calls` calls to the
+/// runtime before it counts as stalled: each call may take [`CALL_LIMIT`] and, for a stop,
+/// the stop grace on top, and [`STALL_MARGIN`] more is allowed for everything else. A drain
+/// that stops many runs at once legitimately takes this long, so the bound grows with the
+/// calls and the grace; `calls` is at least 1.
+pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
+    let each = CALL_LIMIT.saturating_add(stop_grace);
+    let calls = u32::try_from(calls.max(1)).unwrap_or(u32::MAX);
+    each.saturating_mul(calls).saturating_add(STALL_MARGIN)
+}
+
+/// What is allowed on top of the calls of [`stall_bound`].
+pub const STALL_MARGIN: Duration = Duration::from_secs(60);
 
 /// The most log lines kept for the session thread to print.
 pub const LINES_CAP: usize = 256;
@@ -149,9 +157,9 @@ struct Shared {
     stop_all: AtomicBool,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
-    /// When the worker began the order or step it is inside, on the lifecycle's clock,
-    /// plus one; 0 while it waits for an order.
-    busy_since: AtomicU64,
+    /// When the order or step the worker is inside is due to be done, on the lifecycle's
+    /// clock ([`stall_bound`] after it began), plus one; 0 while it waits for an order.
+    busy_until: AtomicU64,
 }
 
 /// Marks the worker as ended when the thread leaves, however it leaves. It is dropped
@@ -242,7 +250,6 @@ impl Handle {
 pub struct Worker {
     handle: Handle,
     clock: SharedClock,
-    stall_after_ms: u64,
 }
 
 impl Worker {
@@ -260,7 +267,7 @@ impl Worker {
         let shared = Arc::new(Shared::default());
         let clock = plan.machine.clock();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
-        let stall_after_ms = stall_bound_ms(step_every);
+        let stop_grace = plan.config.stop_grace;
         // The thread is not joined: the agent ends with the process, and a container that
         // is still there is adopted by the next one.
         thread::spawn(move || {
@@ -272,7 +279,14 @@ impl Worker {
                 Ok((life, usage, lines)) => {
                     own.publish(Snapshot::of(&life), lines);
                     let _ = ready.send(Ok(()));
-                    work(life, usage, &inbox, &own, &thread_clock, step_every);
+                    work(
+                        life,
+                        usage,
+                        &inbox,
+                        &own,
+                        &thread_clock,
+                        (step_every, stop_grace),
+                    );
                 }
             }
         });
@@ -283,7 +297,6 @@ impl Worker {
         outcome.map(|()| Self {
             handle: Handle { orders, shared },
             clock,
-            stall_after_ms,
         })
     }
 
@@ -299,17 +312,25 @@ impl Worker {
 
     /// A worker whose thread is gone and left no end mark, which only a fault in the
     /// thread's exit could leave: for the tests of the signals that do not rely on the
-    /// mark. Its queue has no reader, so every reply is [`Delivery::Gone`].
+    /// mark. Its queue has no reader, so every reply is [`Delivery::Gone`]; it publishes
+    /// `snapshot` and no more.
     #[doc(hidden)]
-    pub fn orphaned(clock: SharedClock) -> Self {
+    pub fn orphaned(clock: SharedClock, snapshot: Snapshot) -> Self {
         let (orders, _) = sync_channel(QUEUE);
+        let published = Published {
+            snapshot,
+            ..Published::default()
+        };
+        let shared = Shared {
+            published: Mutex::new(published),
+            ..Shared::default()
+        };
         Self {
             handle: Handle {
                 orders,
-                shared: Arc::default(),
+                shared: Arc::new(shared),
             },
             clock,
-            stall_after_ms: stall_bound_ms(STEP_EVERY),
         }
     }
 
@@ -359,21 +380,15 @@ impl Worker {
         self.handle.ended()
     }
 
-    /// Whether the worker has been inside one order or step for longer than
-    /// [`STALL_STEPS`] step intervals on the lifecycle's clock. A worker that waits for an
-    /// order is never stalled.
+    /// Whether the worker has been inside one order or step for longer than its
+    /// [`stall_bound`] on the lifecycle's clock. A worker that waits for an order is never
+    /// stalled.
     pub fn stalled(&self) -> bool {
-        match self.handle.shared.busy_since.load(Ordering::SeqCst) {
+        match self.handle.shared.busy_until.load(Ordering::SeqCst) {
             0 => false,
-            marked => self.clock.now_ms().saturating_sub(marked - 1) > self.stall_after_ms,
+            due => self.clock.now_ms() > due - 1,
         }
     }
-}
-
-/// The time in milliseconds after which a worker stepping every `step_every` is stalled.
-fn stall_bound_ms(step_every: Duration) -> u64 {
-    let bound = step_every.saturating_mul(STALL_STEPS).as_millis();
-    u64::try_from(bound).unwrap_or(u64::MAX)
 }
 
 /// What `build` makes: the lifecycle, the usage collector when there is one, and the lines
@@ -431,14 +446,21 @@ fn work(
     inbox: &Receiver<Order>,
     shared: &Shared,
     clock: &SharedClock,
-    step_every: Duration,
+    (step_every, stop_grace): (Duration, Duration),
 ) {
     loop {
         let mut lines = Vec::new();
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
-        let begun = clock.now_ms().saturating_add(1);
-        shared.busy_since.store(begun, Ordering::SeqCst);
+        let asked = order.as_ref().map_or(0, |order| match order {
+            Order::Reply { reply, .. } => reply.commands.len(),
+            _ => 0,
+        });
+        let calls = life.held().len().saturating_add(asked);
+        let bound = stall_bound(stop_grace, calls).as_millis();
+        let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+        let due = clock.now_ms().saturating_add(bound).saturating_add(1);
+        shared.busy_until.store(due, Ordering::SeqCst);
         match order {
             Ok(Order::Reply { reply, received_ms }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);
@@ -463,7 +485,7 @@ fn work(
             .map(|collector| collector.run(&life.running()));
         lines.extend(sampled.into_iter().flatten());
         shared.publish(Snapshot::of(&life), lines);
-        shared.busy_since.store(0, Ordering::SeqCst);
+        shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
             let _ = done.send(());
         });

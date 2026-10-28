@@ -7,7 +7,8 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Wake, Worker, drive};
+use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Snapshot, Wake, Worker, drive};
+use js_agent_wire::{HeldRun, HeldState};
 use serde_json::{Value, json};
 
 use super::fake::{Build, FakeMachine};
@@ -284,6 +285,38 @@ fn a_refusal_or_a_dead_worker_ends_the_loop() {
         Wake::Elapsed
     });
     assert!(matches!(exit, Exit::Failed(_)), "{exit:?}");
+}
+
+/// Asserts that a worker found gone while the agent drains ends the drain as failed, though
+/// the worker never set its end mark: the agent holds a running job, the stop request
+/// comes, the first drain heartbeat hands a reply to a queue nobody reads, and the next tick
+/// fails. It catches a drain that goes on waiting for the jobs of a worker whose end only
+/// the queue shows.
+#[test]
+fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
+    let machine = FakeMachine::new();
+    let running = HeldRun {
+        run_id: "r1".to_owned(),
+        state: HeldState::Running,
+    };
+    let held = Snapshot {
+        held: vec![running],
+        ..Snapshot::default()
+    };
+    let worker = Worker::orphaned(machine.clock.clone(), held);
+    let replies = vec![
+        welcome(1),
+        reply(200, start_answer(&["r2"])),
+        beat_ok(),
+        beat_ok(),
+    ];
+    let (exit, _, sent) = drained(&worker, LONG, replies, |n| match n {
+        0 => Wake::Stop,
+        _ => Wake::Elapsed,
+    });
+    assert!(matches!(exit, Exit::Failed(_)), "{exit:?}");
+    assert!(!worker.ended(), "the end mark was never set");
+    assert_eq!(phases(&sent), ["serving", "draining"]);
 }
 
 /// The flags that start an agent with containers over `dir`.
