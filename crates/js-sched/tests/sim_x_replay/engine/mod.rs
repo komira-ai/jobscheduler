@@ -14,7 +14,8 @@
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
 //! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
-//! | `rankers`, `report`, `control` | the compared placement rules, the report and the control | planned |
+//! | `rankers` | the score rankers 3, 4, 5 and FW5 over one scorer, the decided-key shares, the decides-differently counters and the placement-sequence hash; imports `adapter` only | present |
+//! | `report`, `control` | the report and the control | planned |
 //!
 //! A module takes its input as `fixture::Row` values (or a `fixture::Fixture`), never as
 //! bytes, so a hand-made trace in a test and the committed one go through the same code.
@@ -25,3 +26,4 @@
 
 pub mod adapter;
 pub mod fixture;
+pub mod rankers;
