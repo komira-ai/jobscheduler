@@ -20,6 +20,7 @@
 //! | exclusive refusal `detail` | [`MAX_REFUSAL_DETAIL`] bytes, no control or format character |
 //! | GPUs | [`MAX_GPUS`] devices or indices; uuid and model [`MAX_GPU_TEXT_LEN`] bytes |
 //! | lists in a heartbeat or reply | [`MAX_HELD`] held runs, [`MAX_RESULTS`] results or acks, [`MAX_COMMANDS`] commands |
+//! | node load in a heartbeat | [`MAX_LOAD_LEASES`] ids in each of `covered` and `clocks`, [`MAX_LOAD_MINUTES`] minute records, minute index 0 to [`TAIL_MINUTE`], lease ids [`MAX_LEASE_REF_LEN`] bytes |
 //! | shape and limits | [`MAX_CPU_MILLIS`], [`MAX_MEMORY_BYTES`], [`MAX_PIDS`], [`MAX_WALL_MS`], [`MAX_LEASE_CAP`] |
 //! | session timing | [`MIN_HEARTBEAT_INTERVAL_MS`], [`MAX_HEARTBEAT_INTERVAL_MS`], [`MAX_GRACE_MS`] |
 
@@ -99,3 +100,23 @@ pub const MIN_HEARTBEAT_INTERVAL_MS: u64 = 250;
 pub const MAX_HEARTBEAT_INTERVAL_MS: u64 = 60 * 60 * 1000;
 /// Longest grace a welcome may set, in milliseconds (one day).
 pub const MAX_GRACE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Most lease ids in a load's `covered` list, and most records in its `clocks` list. A
+/// node of 88 threads has 88 leases at most; an agent with more sends the 96 oldest.
+pub const MAX_LOAD_LEASES: usize = 96;
+/// Most minute records in one load. A full node closes about 96 minutes a minute and
+/// beats 12 times a minute, so this is 12 times the need; a backlog drains over beats.
+pub const MAX_LOAD_MINUTES: usize = 64;
+/// The last minute index a load names. It means "this minute or later": the agent folds
+/// every later minute into it with the larger value of each field, and a receiver merges
+/// repeats of it the same way. It is one less than the 64 points of a curve.
+pub const TAIL_MINUTE: u16 = 63;
+/// Longest lease id in a load, in bytes: `u64::MAX-u64::MAX`. A load's lease id is held to
+/// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
+pub const MAX_LEASE_REF_LEN: usize = 41;
+/// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
+/// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
+/// the longest ids a beat stays under three quarters of it; a test fixes those totals.
+/// This is not a guarantee for every valid beat: `MAX_HELD` and `MAX_RESULTS` allow far
+/// more, and a beat over the server's limit is refused there.
+pub const HEARTBEAT_BODY_BUDGET: usize = 65_536;

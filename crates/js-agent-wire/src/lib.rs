@@ -78,8 +78,9 @@
 //! - the `Usage` message (what a run measurably used, with the `basis` of the
 //!   measurement) and the per-message extension slot design 5.2 and 10.3 describe: the
 //!   run-delivery change, the first that has a measured run to report and a field a
-//!   major could not add on its own. Neither exists in this crate yet, so nothing here
-//!   reports usage.
+//!   major could not add on its own. Neither exists in this crate yet. What exists is the
+//!   host's own load, [`NodeLoad`]: an optional, lenient part of a heartbeat that reports
+//!   per-minute CPU and memory per lease, never a run's `Usage`.
 //!
 //! # Layout
 //!
@@ -87,7 +88,8 @@
 //! a [`HelloReply`]; over HTTP the welcome is bare and a refusal is the API's
 //! `{"error", "supported"}` body, see [`HelloReply`]), [`Heartbeat`] and
 //! [`HeartbeatReply`] keep it, and a reply carries [`Command`]s down while a heartbeat
-//! carries [`RunResult`]s up until each is acknowledged. [`refusal`] holds the codes a
+//! carries [`RunResult`]s up until each is acknowledged and may carry a [`NodeLoad`]
+//! (telemetry: a bad one is dropped, never the beat). [`refusal`] holds the codes a
 //! refusal carries.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -99,6 +101,7 @@ mod heartbeat;
 mod hello;
 mod image;
 pub mod limits;
+mod load;
 pub mod protocol;
 pub mod refusal;
 
@@ -111,6 +114,7 @@ pub use heartbeat::{
 pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,
 };
+pub use load::{LeaseClock, LeaseMinute, LoadDrops, NodeLoad, lease_parts};
 pub use protocol::{PROTOCOL_MAJOR, PROTOCOL_NAME, ProtocolRange};
 
 /// The heartbeat interval the server proposes in [`Welcome`] unless its configuration

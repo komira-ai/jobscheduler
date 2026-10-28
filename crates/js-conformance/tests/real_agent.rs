@@ -247,6 +247,7 @@ impl Agent {
             taint: None,
             exclusive_ready: self.prepared.take(),
             exclusive_refused: None,
+            load: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
         self.prepared = reply.exclusive.clone();

@@ -405,6 +405,7 @@ impl<'a> Session<'a> {
             taint: None,
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
+            load: None,
         };
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
