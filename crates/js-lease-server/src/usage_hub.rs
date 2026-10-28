@@ -207,7 +207,7 @@ impl Hub {
                         },
                     );
                 }
-                None => self.counts.runs_without_key += 1,
+                None => {}
             }
         }
     }
