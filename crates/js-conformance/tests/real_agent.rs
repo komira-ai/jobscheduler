@@ -448,21 +448,22 @@ fn a_whole_node_lease_is_usable_after_the_agent_reports_it_ready() {
     assert_eq!(words(&agent.beat(&registry)), ["start r1"]);
 }
 
-/// Asserts that two agents joined under one name get two scratch roots and two state
-/// roots, each named with this process's id: the directories under the target directory
-/// whose names carry `-<pid>-` and the agents' name are four. It catches a root named by
+/// Asserts that two agents joined under one name (each to a registry of its own, since a
+/// host joins a registry once) get two scratch roots and two state roots, each named with
+/// this process's id: the directories under the target directory whose names carry
+/// `-<pid>-` and the agents' name are four. It catches a root named by
 /// the test alone, which a second run of this binary (a coverage run beside a test run)
 /// or a second agent of the name would remove under the first.
 #[test]
 fn agents_of_one_name_get_roots_of_their_own() {
-    let registry = registry();
-    let _first = Agent::join(&registry, "same-root");
-    let _second = Agent::join(&registry, "same-root");
+    let _first = Agent::join(&registry(), "same-root");
+    let _second = Agent::join(&registry(), "same-root");
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
     let mine = format!("-{}-", std::process::id());
     let roots = fs::read_dir(target)
         .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("real-agent-same-root") && name.contains(&mine))
         .count();
     assert_eq!(roots, 4);
