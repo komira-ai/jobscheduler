@@ -505,3 +505,72 @@ fn the_summary_follows_the_capable_hosts() {
     assert_eq!((s.capable_hosts, s.ceiling), (2, 1));
     assert_eq!((s.max_whole_node, s.max_draining), (9, 9));
 }
+
+/// Catches: the back-off read at the wrong time: after it ended and before any round the
+/// request shows `Queued`, as it holds nothing and bars nothing now; a round then holds the
+/// worker again.
+#[test]
+fn an_ended_backoff_shows_queued_until_the_next_round() {
+    let (mut f, _) = busy(cfg(0, 2), &[("a", 600)]);
+    let op = ask(&mut f);
+    tick_at(&mut f, 70_000);
+    assert!(matches!(state(&f, op), WholeState::Barred { .. }));
+    f.at(85_000);
+    f.beat();
+    assert_eq!(state(&f, op), WholeState::Queued);
+    tick_at(&mut f, 85_000);
+    assert!(matches!(state(&f, op), WholeState::Holding { .. }));
+}
+
+/// Catches: `Barred` checked before `Stopped`: a request that gave up its hold on `a` (barred
+/// there) and whose only other worker `b` is the last capable one of an older ordinary
+/// request shows the stop, as `whole_wait` does.
+#[test]
+fn a_request_both_barred_and_stopped_shows_the_stop() {
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
+    let worker = |f: &mut Farm, name: &str, cores: u64| {
+        f.feed(Event::WorkerUp {
+            worker: w(name),
+            instance: DaemonInstance::new(name),
+            predecessor_stopped: false,
+            capacity: Resources::new(cores * 1_000, 2 * cores * GIB),
+            caps: caps(),
+        });
+        f.workers.push(w(name));
+    };
+    worker(&mut f, "a", 8);
+    assert_eq!(f.lease(secs(60)).worker, w("a"));
+    worker(&mut f, "b", 16);
+    assert_eq!(f.lease(secs(600)).worker, w("b"));
+    f.next_n += 1;
+    f.submit(Request {
+        resources: Resources::new(16_000, GIB),
+        ..request(f.next_n, LeaseKind::Action)
+    });
+    assert!(f.grants().is_empty(), "only b could run it, and it is busy");
+    let op = ask(&mut f);
+    assert_eq!(state(&f, op), holding("a", 10_000, Some(70_000), 0));
+    tick_at(&mut f, 70_000);
+    assert_eq!(f.s.whole_give_ups(op), 1);
+    assert_eq!(f.s.whole_wait(op), Some(WholeWait::LastCapable));
+    assert_eq!(state(&f, op), WholeState::Stopped(WholeWait::LastCapable));
+}
+
+/// Catches: `Unservable` checked after `Early`: a request no worker could run is unservable
+/// at once, though it is before `drain_after`.
+#[test]
+fn an_unservable_request_is_not_shown_as_early() {
+    let (mut f, _) = busy(cfg(30_000, 2), &[("a", 600)]);
+    f.next_n += 1;
+    let op = f.s.next_operation();
+    f.submit(Request {
+        resources: Resources::new(64_000, GIB),
+        ..request(f.next_n, LeaseKind::WholeMachine)
+    });
+    assert!(f.grants().is_empty());
+    assert!(matches!(state(&f, op), WholeState::Unservable { .. }));
+}

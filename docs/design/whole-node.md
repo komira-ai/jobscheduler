@@ -224,8 +224,8 @@ otherwise, and for a request that is not a queued whole-machine one): `Early` (b
 worker, when the hold was made, its deadline, or none once `max_reserve_attempts` holds were given up, the give-ups so far, and whether the
 worker still has leases), `Barred` (it gave up a hold and no other worker could be held: each barred worker and when its back-off ends),
 `Stopped` (the cap or the last-capable rule of `whole_wait`), `Queued` (past `drain_after`, nothing recorded: the workers it could hold are
-held by requests ahead, or no round has run since) and `Unservable` (no live worker could ever run it, with `waiting`'s reason). It reads what
-the last placement round recorded; only `Early` is read at the time now. `whole_summary()` gives the numbers the caps read between rounds:
+held by requests ahead, or no round has run since it became due or its back-off ended; a status page may label it "Waiting") and `Unservable` (no live worker could ever run it, with `waiting`'s reason, shown verbatim and not matched on; also before `drain_after`). It reads what
+the last placement round recorded, except two things read at the time now: whether the request is before `drain_after`, and which back-offs have not ended (one that ended since the last round shows `Queued`, not `Barred`). `whole_summary()` gives the numbers the caps read between rounds:
 workers held by whole leases, marks, those marks on a busy worker (what `max_draining` bounds), `whole` (their sum), the ceiling and its inputs
 (`max_whole_node`, capable hosts, `keep_for_ordinary`, `max_draining`), and how many queued whole-machine requests wait for each reason
 (`WholeReason`, ordered). It counts with the code admission uses, so it cannot show a number the caps do not enforce.

@@ -5,7 +5,9 @@
 //! Both read what the placement rounds recorded, the marks, give-ups, back-offs and
 //! waits ([`Scheduler::whole_mark`], [`Scheduler::whole_give_ups`],
 //! [`Scheduler::whole_wait`]), and count with the code the caps use, so neither can
-//! drift from what admission enforces.
+//! drift from what admission enforces. Two things are read at the scheduler's time now
+//! instead: whether a request is before `drain_after`, and which back-offs have not
+//! ended, so a back-off that ended since the last round no longer shows as barring.
 
 use std::collections::BTreeMap;
 
@@ -53,13 +55,16 @@ pub enum WholeState {
     /// It has waited out `drain_after` and a cap, or the last-capable rule, stopped a
     /// hold ([`Scheduler::whole_wait`]).
     Stopped(WholeWait),
-    /// It has waited out `drain_after`, holds nothing and no cap or give-up is the reason:
-    /// the workers it could hold are held by requests ahead of it, or no placement round
-    /// has run since it became due.
+    /// It has waited out `drain_after` and holds nothing, and no cap, give-up or
+    /// unservable reason is recorded. Either every worker it could hold is held by a
+    /// request ahead of it, or no placement round has run since it became due (or since
+    /// its back-off ended). A status page may label it "Waiting".
     Queued,
-    /// No live worker could ever hold it; the reason is [`Scheduler::waiting`]'s.
+    /// No live worker could ever hold it. It is shown before `drain_after` too: the
+    /// first round that finds no worker records it.
     Unservable {
-        /// Why no live worker can run it.
+        /// Why no live worker can run it: the string [`Scheduler::waiting`] returns, whose
+        /// wording is free text. An embedder shows it verbatim and never matches on it.
         reason: String,
     },
 }
@@ -132,7 +137,9 @@ impl Scheduler {
     /// settings on ([`Scheduler::with_whole_node`]); `None` without them, or if
     /// `operation` is not a queued whole-machine request (unknown, cancelled, placed or
     /// finished). The marks, waits and back-offs are as of the last placement round;
-    /// whether it is before `drain_after` is read at the scheduler's time now.
+    /// whether it is before `drain_after`, and which back-offs have not ended, are read at
+    /// the scheduler's time now: a back-off that ended since the last round shows
+    /// [`WholeState::Queued`], not [`WholeState::Barred`], until the next round.
     #[must_use]
     pub fn whole_state(&self, operation: OperationId) -> Option<WholeState> {
         let cfg = self.whole_node.as_ref()?;
