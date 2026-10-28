@@ -6,7 +6,7 @@ use std::fs;
 use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, hosts, listed, restarted, session, start_agents};
-use crate::joins::{MINT, beat_with, code, hello, mint, minted};
+use crate::joins::{MINT, beat_with, code, hello, minted};
 use crate::support::{Harness, LogCapture, Reply, TOKEN, request};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
