@@ -30,6 +30,9 @@ pub struct NodeLoad {
     /// Memory in use by the actions cgroup that cannot simply be dropped: `memory.current`
     /// minus the inactive file pages.
     pub working_set_bytes: u64,
+    /// The actions cgroup's active file pages (`active_file` of `memory.stat`), in bytes.
+    /// Hot page cache that `working_set_bytes` still counts; admission caps this part.
+    pub active_file_bytes: u64,
     /// The leases that ran for the whole window since the previous reading, by the
     /// agent's own start.
     pub covered: Vec<LeaseId>,
@@ -57,6 +60,17 @@ impl NodeLoad {
         }
         let milli = u128::from(used) * 1000 / u128::from(window);
         Some(u32::try_from(milli).unwrap_or(u32::MAX))
+    }
+
+    /// The working set admission counts: `working_set_bytes` less the active file pages
+    /// beyond `file_share_permille` thousandths of `mem_capacity_bytes`, which are page
+    /// cache and not demand. Saturates at 0.
+    #[must_use]
+    pub fn admission_working_set(&self, mem_capacity_bytes: u64, file_share_permille: u32) -> u64 {
+        let share = u128::from(mem_capacity_bytes) * u128::from(file_share_permille) / 1000;
+        let excess = u128::from(self.active_file_bytes).saturating_sub(share);
+        let excess = u64::try_from(excess).unwrap_or(u64::MAX);
+        self.working_set_bytes.saturating_sub(excess)
     }
 
     /// Whether this reading is older than [`STALE_WINDOWS`] windows of `window_usec` at
@@ -287,6 +301,47 @@ mod tests {
         let mut next = b;
         next.seq = 2;
         assert_eq!(next.busy_millicores_since(&a), Some(1000));
+    }
+
+    fn with_file(working_set_bytes: u64, active_file_bytes: u64) -> NodeLoad {
+        NodeLoad {
+            working_set_bytes,
+            active_file_bytes,
+            ..NodeLoad::default()
+        }
+    }
+
+    #[test]
+    fn active_file_up_to_its_share_is_counted_in_full() {
+        // Share is 25% of 1000 = 250.
+        assert_eq!(with_file(800, 0).admission_working_set(1000, 250), 800);
+        assert_eq!(with_file(800, 249).admission_working_set(1000, 250), 800);
+        assert_eq!(with_file(800, 250).admission_working_set(1000, 250), 800);
+    }
+
+    #[test]
+    fn active_file_beyond_its_share_is_taken_off() {
+        assert_eq!(with_file(800, 251).admission_working_set(1000, 250), 799);
+        assert_eq!(with_file(800, 600).admission_working_set(1000, 250), 450);
+        // A zero share removes all of it; a zero capacity too.
+        assert_eq!(with_file(800, 600).admission_working_set(1000, 0), 200);
+        assert_eq!(with_file(800, 600).admission_working_set(0, 250), 200);
+    }
+
+    #[test]
+    fn the_admission_working_set_saturates() {
+        // The excess is larger than the working set.
+        assert_eq!(with_file(100, 900).admission_working_set(1000, 250), 0);
+        // Extremes do not overflow.
+        assert_eq!(
+            with_file(u64::MAX, u64::MAX).admission_working_set(u64::MAX, 1000),
+            u64::MAX
+        );
+        assert_eq!(with_file(u64::MAX, u64::MAX).admission_working_set(0, 0), 0);
+        assert_eq!(
+            with_file(u64::MAX, u64::MAX).admission_working_set(u64::MAX, u32::MAX),
+            u64::MAX
+        );
     }
 
     #[test]
