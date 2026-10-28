@@ -113,7 +113,7 @@ impl Collector {
         let covered = binner.observe(&sample).covered;
         let minutes = binner.take(MAX_LOAD_MINUTES, sample.mono_usec);
         sample.leases.clear();
-        self.seq += 1;
+        self.seq = 1;
         self.outbox.publish(Reading {
             seq: self.seq,
             clocks: clocks(running),
