@@ -94,7 +94,7 @@ give-ups and `max_replace` prepare failures) and its host exclusions with their 
 while the request lives (it carries the counters of a request between reservations) and is deleted when the request is granted, refused,
 cancelled or unclaimed. The queue itself is not persisted (the table holds leases, not requests); a consumer presents the same request id
 again after a restart, as it re-presents any request, and the scheduler binds it to its record, so the drain in progress continues with its
-original deadline (extended by the boot grace, as lease TTLs are) and the counters keep the bounds of sections 4 and 5 across any number of
+original deadline (raised to at least boot plus the boot grace, never the stored deadline plus the grace; the lease-side grace is a separate setting wired by M3-n) and the counters keep the bounds of sections 4 and 5 across any number of
 restarts. A record not claimed within `regain_grace` of the boot is dropped, and the host returns to `serving`. Why persisted: the drain
 is the expensive step (up to a max wall time of idle host), and a restart that dropped it would restart every drain and let a restart loop
 defeat `max_reserve_attempts`. A restore from a snapshot reads the records as they were then; a record naming a host or request that no longer

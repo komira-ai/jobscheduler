@@ -7,5 +7,6 @@ mod expiry;
 mod ids;
 mod persistence;
 mod renew_release;
+mod reservations;
 mod support;
 mod whole;
