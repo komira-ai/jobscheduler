@@ -20,10 +20,6 @@ use js_sched::Request as SchedRequest;
 use js_types::sched::{LeaseId as SchedLeaseId, LeaseKind, Qos, WorkKey, WorkerId};
 use js_types::{HostId, IdError, Request, Resources, Shape};
 
-/// The architecture a shape is taken to have when its capabilities name none. A node
-/// report must say one; hosts of this server run Linux containers.
-const DEFAULT_ARCH: &str = "x86_64";
-
 /// The driver a shape's node reports: jobs run in containers.
 const DRIVER: &str = "container";
 
@@ -71,11 +67,10 @@ pub(crate) fn booking(resources: &Resources) -> js_types::sched::Resources {
 /// The report is rendered from the shape: `cpus` (whole cores, rounded down), `mem_gib`
 /// (whole GiB, rounded down), `gpu` and `gpu.kind` from its resources, the `container`
 /// driver, and every capability entry the scheduler reads. A capability named like one
-/// of those the resources decide is ignored. A shape that names no `arch` is taken to be
-/// `x86_64`.
+/// of those the resources decide is ignored. A shape must name its `arch`.
 ///
 /// # Errors
-/// [`MapError::Report`] when a capability is not a valid report entry (an unknown `arch`,
+/// [`MapError::Report`] when a capability is not a valid report entry (no `arch`, an unknown `arch`,
 /// a countable entry that is not a whole number).
 pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCaps), MapError> {
     let resources = shape.resources();
@@ -85,9 +80,6 @@ pub(crate) fn host(shape: &Shape) -> Result<(js_types::sched::Resources, NodeCap
         .filter(|(key, _)| !FROM_RESOURCES.contains(&key.as_str()))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    if !shape.capabilities().contains_key("arch") {
-        entries.push(("arch".into(), DEFAULT_ARCH.into()));
-    }
     entries.push(("drivers".into(), DRIVER.into()));
     entries.push(("cpus".into(), (resources.cpu_millis() / 1000).to_string()));
     entries.push((
@@ -211,8 +203,10 @@ mod tests {
     }
 
     fn shape(resources: Resources, capabilities: &[(&str, &str)]) -> Shape {
-        let caps: Capabilities = capabilities
+        // Every test shape names an arch unless it says another.
+        let caps: Capabilities = [("arch", "x86_64")]
             .iter()
+            .chain(capabilities)
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         Shape::new(resources, caps)
@@ -292,7 +286,7 @@ mod tests {
     }
 
     /// Capabilities travel both ways: a host's `os` satisfies a request for it and not a
-    /// request for another; an `arch` in the shape replaces the default.
+    /// request for another; an `arch` in the shape decides what `arch` requests match.
     #[test]
     fn capabilities_are_matched() {
         let (capacity, caps) = host(&shape(
@@ -308,6 +302,7 @@ mod tests {
         assert!(!ask(&[("arch", "x86_64")]).runnable_on(&caps, &capacity));
         let (_, plain) = host(&shape(resources(4000, 1 << 30, 0, None), &[])).unwrap();
         assert!(ask(&[("arch", "x86_64")]).runnable_on(&plain, &capacity));
+        assert!(!ask(&[("arch", "arm64")]).runnable_on(&plain, &capacity));
     }
 
     /// Bad capabilities are refused with a typed error, not dropped: a shape with an
@@ -337,6 +332,27 @@ mod tests {
             }
         );
         assert!(needs(&request(gpu, &[("gpu.kind", "a100")])).is_ok());
+    }
+
+    /// A shape that names no `arch` is refused, naming the key, rather than advertised
+    /// as some architecture.
+    #[test]
+    fn a_shape_without_arch_is_refused() {
+        let bare = Shape::new(resources(1000, 1 << 30, 0, None), Capabilities::new());
+        let err = host(&bare).unwrap_err();
+        assert_eq!(err, MapError::Report(ReportError::NoArch));
+        assert!(err.to_string().contains("\"arch\""), "{err}");
+    }
+
+    /// Cores and memory are reported in whole units, rounded down: 1500 millis is one
+    /// core and 1.5 GiB is one GiB.
+    #[test]
+    fn partial_cores_and_gib_round_down() {
+        let (capacity, caps) = host(&shape(resources(1500, 3 << 29, 0, None), &[])).unwrap();
+        assert_eq!(caps.consumables[&js_caps::Consumable::Cpus], 1);
+        assert_eq!(caps.consumables[&js_caps::Consumable::MemGib], 1);
+        assert_eq!(capacity.cpu_millis, 1500);
+        assert_eq!(capacity.memory_bytes, 3 << 29);
     }
 
     /// A capability that names a key the resources decide does not override them.
@@ -377,6 +393,7 @@ mod tests {
             let id = SchedLeaseId::new(term, seq);
             let text = lease_text(id);
             assert_eq!(text, format!("{term}-{seq}"));
+            assert_eq!(text, js_types::LeaseId::new(term, seq).to_string());
             assert_eq!(lease_id(&text).unwrap(), id);
         }
     }
