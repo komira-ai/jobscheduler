@@ -73,16 +73,32 @@ pub(super) struct Turn {
 }
 
 impl Drain {
-    /// The workers `operation` avoids at `now`: those whose back-off has not ended.
-    pub(super) fn barred(&self, operation: OperationId, now: FarmTime) -> BTreeSet<WorkerId> {
+    /// The workers `operation` avoids at `now`, each with when its back-off ends
+    /// (exclusive): those whose back-off has not ended.
+    pub(super) fn barred_until(
+        &self,
+        operation: OperationId,
+        now: FarmTime,
+    ) -> BTreeMap<WorkerId, FarmTime> {
         self.backoff
             .get(&operation)
-            .map_or_else(BTreeSet::new, |m| {
+            .map_or_else(BTreeMap::new, |m| {
                 m.iter()
                     .filter(|(_, until)| **until > now)
-                    .map(|(worker, _)| worker.clone())
+                    .map(|(worker, until)| (worker.clone(), *until))
                     .collect()
             })
+    }
+
+    /// The workers `operation` avoids at `now`: those whose back-off has not ended.
+    pub(super) fn barred(&self, operation: OperationId, now: FarmTime) -> BTreeSet<WorkerId> {
+        self.barred_until(operation, now).into_keys().collect()
+    }
+
+    /// Whether the hold of `operation` is given up when its deadline comes: not once it
+    /// has given up `max_reserve_attempts` holds.
+    pub(super) fn gives_up(&self, operation: OperationId, cfg: &WholeNodeConfig) -> bool {
+        self.give_ups.get(&operation).copied().unwrap_or(0) < cfg.max_reserve_attempts
     }
 
     /// `avoid` with the workers `barred` added.
@@ -118,8 +134,7 @@ impl Drain {
             // Once the count has reached the cap the hold is never given up: its deadline
             // is the request's own wall time, and a worker may hold a lease with a longer
             // one, so reaching it must not end the hold (whole-node.md section 4).
-            let given_up = self.give_ups.get(&operation).copied().unwrap_or(0);
-            if now >= mark.deadline && given_up < cfg.max_reserve_attempts {
+            if now >= mark.deadline && self.gives_up(operation, cfg) {
                 *self.give_ups.entry(operation).or_default() += 1;
                 let until =
                     FarmTime::from_millis(now.as_millis().saturating_add(cfg.reserve_backoff_ms));
@@ -202,6 +217,15 @@ impl Round {
             self.ordinary.push((position, operation));
         }
     }
+}
+
+/// The ceiling of `limits`: the most workers that may be whole at once.
+pub(super) fn ceiling_of(limits: Limits) -> usize {
+    ceiling(
+        limits.max_whole_node,
+        limits.capable_hosts,
+        limits.keep_for_ordinary,
+    )
 }
 
 /// How a worker counts toward the capable hosts of the pool.
@@ -366,11 +390,7 @@ impl Scheduler {
             request: format!("{:020}", id.0),
             at: m.made.as_millis(),
         }));
-        let bound = ceiling(
-            limits.max_whole_node,
-            limits.capable_hosts,
-            limits.keep_for_ordinary,
-        );
+        let bound = ceiling_of(limits);
         for name in ceiling_excess(&marks, bound) {
             self.drain.marks.remove(&names[&name]);
         }
@@ -460,6 +480,22 @@ impl Scheduler {
                 round.limits,
             )
             .is_ok()
+    }
+
+    /// The limits and the counts the caps read between placement rounds: the same
+    /// [`Scheduler::whole_limits`] and [`Scheduler::whole_counts`] a round reads, with
+    /// the marks as the last round left them and none made yet.
+    pub(super) fn whole_at_rest(&self, cfg: &WholeNodeConfig) -> (Limits, Counts, usize) {
+        let held = self.whole_held().len();
+        let round = Round {
+            on: true,
+            limits: self.whole_limits(cfg),
+            held,
+            ordinary: Vec::new(),
+            marks: BTreeMap::new(),
+            waits: BTreeMap::new(),
+        };
+        (round.limits, self.whole_counts(&round), held)
     }
 
     /// What the caps count now: whole workers (held leases, marks not yet reached this
