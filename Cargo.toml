@@ -87,7 +87,10 @@ incremental = false
 debug = "line-tables-only"
 incremental = false
 
-# The replay simulations in these crates run in CI test builds, so the crates (not their dependencies) are optimised.
+# The replay simulations in these crates run in CI test builds, so the crates (not
+# their dependencies) are optimised. `test` inherits `dev`, so either half alone
+# reaches `cargo test`; both are spelled out as above. A name that matches no package
+# only draws a cargo warning: crates/xtask/tests/profile_overrides.rs checks the names.
 [profile.dev.package.js-sched]
 opt-level = 2
 
