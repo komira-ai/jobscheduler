@@ -54,9 +54,9 @@ fn round_trip_of_hand_rows_and_every_outcome() {
     rows.push(row(
         1 << 40,
         1,
-        u64::MAX / 2,
-        u64::MAX / 3,
-        1 << 20,
+        coarse_ms(u64::MAX / 2),
+        coarse_ms(u64::MAX / 3),
+        1 << 16,
         Outcome::Evicted,
     ));
     let bytes = encode(&rows);
@@ -290,6 +290,51 @@ fn refuses_a_zero_wall() {
 }
 
 #[test]
+fn refuses_an_uncoarsened_wall_cpu_or_memory() {
+    // 12_345 ms keeps four significant figures; 1_025 MiB is not a multiple of 4.
+    let mut rows = small();
+    rows[1].wall_ms = 12_345;
+    rows[1].cpu_ms = 12_000;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "wall",
+            value: 12_345,
+            coarse: 12_300
+        })
+    );
+    let mut rows = small();
+    rows[1].cpu_ms = 12_345;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "cpu",
+            value: 12_345,
+            coarse: 12_300
+        })
+    );
+    let mut rows = small();
+    rows[1].peak_mem_mib = 1_025;
+    assert_eq!(
+        Fixture::load(&encode(&rows)),
+        Err(FixtureError::Uncoarsened {
+            row: 1,
+            field: "peak memory",
+            value: 1_025,
+            coarse: 1_028
+        })
+    );
+    // The same values, coarsened, load.
+    let mut rows = small();
+    rows[1].wall_ms = coarse_ms(12_345);
+    rows[1].cpu_ms = coarse_ms(12_345);
+    rows[1].peak_mem_mib = coarse_mem_mib(1_025);
+    assert!(Fixture::load(&encode(&rows)).is_ok());
+}
+
+#[test]
 fn refuses_every_truncation() {
     // Cut at each byte of a small file, of the first records of the committed one, and at
     // a spread of points of the rest: always a refusal, and always for running out of bytes.
@@ -409,6 +454,12 @@ fn errors_say_what_is_wrong() {
         FixtureError::StartOverflow { row: 5 },
         FixtureError::BadOutcome { row: 6, code: 7 },
         FixtureError::ZeroWall { row: 8 },
+        FixtureError::Uncoarsened {
+            row: 20,
+            field: "wall",
+            value: 21,
+            coarse: 22,
+        },
         FixtureError::KeyOutOfRange {
             row: 9,
             key: 10,
