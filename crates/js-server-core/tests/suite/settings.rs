@@ -6,7 +6,6 @@
 
 use js_caps::NodeCaps;
 use js_sched::MemoryLadder;
-use js_sched::fence::LEASE_GRACE;
 use js_server_core::{Config, Core, Report, Reported, WholeNodeConfig};
 use js_types::sched::{Failure, LeaseId, LeaseKind, OperationId, Outcome, Resources, WorkKey};
 
@@ -14,10 +13,6 @@ use crate::common::{
     Call, GIB, Rig, at, beat, block_on, calls, core_by, lease, request, submit, submit_request, up,
     up_after, worker,
 };
-
-fn millis(duration: std::time::Duration) -> u64 {
-    u64::try_from(duration.as_millis()).expect("small")
-}
 
 fn key(n: u64) -> WorkKey {
     WorkKey::new("main", format!("action-{n}"))
@@ -39,20 +34,30 @@ fn kill(core: &Core<Rig>, now: u64, operation: OperationId, lease: LeaseId) {
 #[test]
 fn a_configured_ladder_sets_the_memory_floor_each_kill_raises() {
     let ladder = MemoryLadder::from_gib(&[2, 8]).expect("a ladder");
-    let core = core_by(&Config::new(1).with_memory_ladder(ladder));
-    let stream = up(&core, 0, "node-a", "d1");
-    let admitted = submit(&core, 10, 1);
-    let floor = |core: &Core<Rig>| core.with(|view, _| view.sched().memory_floor(&key(1)));
+    // Without the setting: the default rungs, 4 then 16 GiB.
+    for (config, rungs) in [
+        (Config::new(1).with_memory_ladder(ladder), [2, 8]),
+        (Config::new(1), [4, 16]),
+    ] {
+        let core = core_by(&config);
+        let stream = up(&core, 0, "node-a", "d1");
+        let admitted = submit(&core, 10, 1);
+        let floor = |core: &Core<Rig>| core.with(|view, _| view.sched().memory_floor(&key(1)));
 
-    kill(&core, 20, admitted.operation, lease(1, 0));
-    assert_eq!(
-        floor(&core),
-        Some(2 * GIB),
-        "the first rung above its booking"
-    );
-    beat(&core, 30, ("node-a", stream), 1, &[]);
-    kill(&core, 40, admitted.operation, lease(1, 1));
-    assert_eq!(floor(&core), Some(8 * GIB), "the second rung");
+        kill(&core, 20, admitted.operation, lease(1, 0));
+        assert_eq!(
+            floor(&core),
+            Some(rungs[0] * GIB),
+            "the first rung above its booking: {config:?}"
+        );
+        beat(&core, 30, ("node-a", stream), 1, &[]);
+        kill(&core, 40, admitted.operation, lease(1, 1));
+        assert_eq!(
+            floor(&core),
+            Some(rungs[1] * GIB),
+            "the second rung: {config:?}"
+        );
+    }
 }
 
 /// Catches: `memory_floors` ignored: with a bound of one, raising the floor of a second
@@ -85,33 +90,35 @@ fn a_bound_of_one_forgets_the_older_memory_floor() {
 }
 
 /// Catches: `loss_requeues` ignored: with a count of two the second lost lease refuses the
-/// operation (its callers are told), where the default count of three runs it again.
+/// operation (its callers are told), where the default count of three refuses it on the
+/// third and not before.
 #[test]
 fn a_loss_count_of_two_refuses_the_operation_on_the_second_lost_lease() {
-    for (config, refused) in [
-        (Config::new(1).with_loss_requeues(2), true),
-        (Config::new(1), false),
+    for (config, count) in [
+        (Config::new(1).with_loss_requeues(2), 2),
+        (Config::new(1), 3),
     ] {
         let core = core_by(&config);
-        let stream = up(&core, 0, "node-a", "d1");
+        up(&core, 0, "node-a", "d1");
         let admitted = submit(&core, 0, 1);
-        let grace = millis(LEASE_GRACE);
 
-        // The lease goes silent past its grace and is granted again.
-        block_on(core.tick(at(grace + 1)));
-        assert!(
-            !calls(&core).contains(&Call::Refuse(admitted.operation)),
-            "one loss runs it again: {config:?}"
-        );
-        beat(&core, grace + 2, ("node-a", stream), 1, &[]);
-
-        // And again.
-        block_on(core.tick(at(2 * grace + 3)));
-        assert_eq!(
-            calls(&core).contains(&Call::Refuse(admitted.operation)),
-            refused,
-            "{config:?}"
-        );
+        // The daemon registers again and lists no lease: a lease lost to a reconnect
+        // charges no farm rerun, so the loss count alone decides when the operation ends.
+        for loss in 1..=count {
+            let now = loss * 100;
+            let stream = up(&core, now, "node-a", "d1");
+            beat(&core, now + 1, ("node-a", stream), 1, &[]);
+            assert_eq!(
+                core.with(|view, _| view.sched().losses(admitted.operation)),
+                Some(u32::try_from(loss).expect("small")),
+                "losses after reconnect {loss}: {config:?}"
+            );
+            assert_eq!(
+                calls(&core).contains(&Call::Refuse(admitted.operation)),
+                loss == count,
+                "after loss {loss}: {config:?}"
+            );
+        }
     }
 }
 
@@ -149,5 +156,8 @@ fn a_whole_machine_request_holds_a_busy_node_as_the_whole_node_setting_says() {
         }
         block_on(core.tick(at(held_at)));
         assert_eq!(holder(&core), Some(worker("node-a")), "{config:?}");
+        // A hold under whole-node settings carries a mark; one without them has none.
+        let marked = core.with(|view, _| view.sched().whole_mark(admitted.operation).is_some());
+        assert_eq!(marked, held_at > 0, "{config:?}");
     }
 }
