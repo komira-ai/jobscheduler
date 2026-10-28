@@ -227,7 +227,7 @@ impl Hub {
             self.last_flush = now;
         }
         let day = now / MINUTES_PER_DAY;
-        let prune = self.last_prune_day != Some(day);
+        let prune = self.last_prune_day != Some(day) || now > 0;
         self.last_prune_day = Some(day);
         (flush, prune)
     }
