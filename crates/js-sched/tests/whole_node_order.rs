@@ -234,3 +234,19 @@ fn recovered_leases_end_a_wall_time_after_the_recovery() {
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("a")));
 }
+
+/// Catches: an end bound that overflows: a lease whose wall time is more than a
+/// millisecond count can hold, started after farm time zero, ends at the latest time there
+/// is, so the worker holding it drains last, and no sum wraps or panics.
+#[test]
+fn an_unrepresentable_wall_time_saturates_to_the_latest_end() {
+    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    f.at(5_000);
+    f.worker("a");
+    f.lease(std::time::Duration::MAX);
+    f.worker("b");
+    f.lease(secs(86_400));
+    f.lease(secs(86_400));
+    let whole = f.whole();
+    assert_eq!(f.held_for(whole), Some(&w("b")));
+}
