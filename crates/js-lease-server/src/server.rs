@@ -161,7 +161,7 @@ impl Running {
     }
 
     /// The curves learned from runs that ended cleanly, for admission to read as its
-    /// `CurveSource` (they implement it, keyed by `js_types::sched::usage::profile_key`).
+    /// `CurveSource` (they implement it, keyed by `js_types::profile_key::profile_key`).
     /// `None` without agent registration, with `--usage-off`, or with a sink that learns
     /// none.
     pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {

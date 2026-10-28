@@ -23,8 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
+use js_types::profile_key::profile_key;
 use js_types::sched::WorkKey;
-use js_types::sched::usage::profile_key;
 use js_usage::{
     NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder,
     RunSeries,
