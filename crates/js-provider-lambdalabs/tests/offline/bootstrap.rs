@@ -2,7 +2,9 @@
 //! properties of the script that no input can change (no token, a gated service, a
 //! checked download).
 
-use js_provider_lambdalabs::{Bootstrap, BootstrapError, Fault};
+use js_provider_lambdalabs::{
+    Bootstrap, BootstrapError, DEFAULT_SCRATCH_GIB, Fault, MAX_SCRATCH_GIB, MIN_SCRATCH_GIB,
+};
 
 const GOLDEN: &str = include_str!("../fixtures/bootstrap_user_data.sh");
 
@@ -20,6 +22,7 @@ fn good() -> Bootstrap<'static> {
         token_file: "/etc/js-agent/token",
         state_root: "/var/lib/js-agent/state",
         scratch_root: "/mnt/scratch/js-agent",
+        scratch_gib: None,
         container_bin: "/usr/bin/docker",
     }
 }
@@ -454,7 +457,9 @@ fn the_steps_are_guarded_so_a_second_run_changes_nothing() {
         assert!(text.contains(guard), "{guard}");
     }
     // Directories that exist are checked, never changed.
-    assert!(!text.contains("chmod 0700"));
+    // The one chmod 0700 is of the root of the file system the script made itself.
+    assert_eq!(text.matches("chmod 0700").count(), 1);
+    assert!(text.contains("chmod 0700 \"$SCRATCH_ROOT\"\n"));
     assert!(!text.contains("chown"));
 }
 
@@ -510,4 +515,71 @@ fn every_refusal_has_a_message_that_names_the_input() {
         overlap.to_string(),
         "token_file and state_root are the same path or one lies in the other"
     );
+}
+
+#[test]
+fn the_scratch_size_defaults_to_200_gib_and_is_bounded() {
+    assert_eq!(DEFAULT_SCRATCH_GIB, 200);
+    assert!(GOLDEN.contains("SCRATCH_GIB=200\n"));
+    let size = |gib| Bootstrap { scratch_gib: Some(gib), ..good() };
+    // The default is the same document as asking for 200.
+    assert_eq!(size(200).render(), good().render());
+    assert!(render(&size(64)).contains("SCRATCH_GIB=64\n"));
+    assert!(render(&size(MIN_SCRATCH_GIB)).contains("SCRATCH_GIB=10\n"));
+    assert!(render(&size(MAX_SCRATCH_GIB)).contains("SCRATCH_GIB=4096\n"));
+    for gib in [0, 1, MIN_SCRATCH_GIB - 1, MAX_SCRATCH_GIB + 1, u32::MAX] {
+        assert_eq!(size(gib).render(), Err(BootstrapError::ScratchSize { gib }));
+    }
+    assert_eq!(
+        BootstrapError::ScratchSize { gib: 5 }.to_string(),
+        "scratch_gib: 5 is outside 10 to 4096 GiB"
+    );
+}
+
+#[test]
+fn the_scratch_root_is_a_loop_file_system_made_once_and_mounted_at_every_boot() {
+    let text = render(&good());
+    let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no {needle:?}"));
+    // The image sits next to the mount point, is allocated in full (not sparse, not RAM)
+    // and formatted only while it is a temporary file.
+    assert!(text.contains("SCRATCH_IMAGE=\"$SCRATCH_ROOT.img\"\n"));
+    assert!(text.contains("fallocate -l \"${SCRATCH_GIB}G\" \"$SCRATCH_IMAGE.partial\""));
+    assert!(text.contains("mkfs.ext4 -q -F -m 0 -L js-scratch \"$SCRATCH_IMAGE.partial\""));
+    assert!(!text.contains("Type=tmpfs"));
+    assert!(text.contains("if [ ! -e \"$SCRATCH_IMAGE\" ]; then\n"));
+    assert!(at("fallocate -l") < at("mkfs.ext4 -q"));
+    assert!(at("mkfs.ext4 -q") < at("mv -f \"$SCRATCH_IMAGE.partial\" \"$SCRATCH_IMAGE\""));
+    // mkfs runs only inside the guard on a missing image: nothing else formats.
+    assert_eq!(text.matches("mkfs.").count() - text.matches("mkfs.ext4 -q").count(), 1);
+    assert_eq!(text.matches("mkfs.ext4 -q").count(), 1);
+    // Free space is checked before the image is made.
+    assert!(at("FREE_RESERVE_GIB))") < at("fallocate -l"));
+    assert!(text.contains("FREE_RESERVE_GIB=50\n"));
+    // A systemd mount unit mounts it, at every boot, with the flags below.
+    assert!(text.contains("MOUNT_UNIT=$(systemd-escape -p --suffix=mount \"$SCRATCH_ROOT\")"));
+    assert!(text.contains(
+        "[Mount]\nWhat=$SCRATCH_IMAGE\nWhere=$SCRATCH_ROOT\nType=ext4\nOptions=loop,nodev,nosuid,noatime\n\n[Install]\nWantedBy=local-fs.target\n"
+    ));
+    assert!(text.contains("systemctl enable --now \"$MOUNT_UNIT\"\n"));
+    // The script checks the result: mounted, and not the state root's device.
+    assert!(text.contains("mountpoint -q \"$SCRATCH_ROOT\" ||"));
+    assert!(text.contains("are on one file system; js-agent refuses that"));
+    assert!(at("mountpoint -q") < at("enable --now js-agent.path"));
+    // The flags keep a job from making devices or setuid files on the scratch.
+    for flag in ["nodev", "nosuid"] {
+        assert!(text.contains(flag));
+    }
+    assert!(!text.contains("noexec"));
+}
+
+#[test]
+fn the_agent_does_not_start_without_the_scratch_mount() {
+    let text = render(&good());
+    let head = text.split("[Service]").next().unwrap();
+    let unit = head.rsplit("[Unit]").next().unwrap();
+    assert!(unit.contains("RequiresMountsFor=$SCRATCH_ROOT\n"));
+    // The mount unit itself needs the file system that holds the image.
+    assert!(text.contains("RequiresMountsFor=$SCRATCH_IMAGE\n"));
+    // The gate is a requirement, not a soft want.
+    assert!(!text.contains("nofail"));
 }

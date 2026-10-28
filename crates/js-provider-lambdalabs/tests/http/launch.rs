@@ -70,6 +70,7 @@ fn bootstrap() -> js_provider_lambdalabs::UserData {
         token_file: "/etc/js-agent/token",
         state_root: "/var/lib/js-agent/state",
         scratch_root: "/mnt/scratch/js-agent",
+        scratch_gib: None,
         container_bin: "/usr/bin/docker",
     }
     .render()

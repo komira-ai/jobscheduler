@@ -22,6 +22,18 @@ use sha2::{Digest, Sha256};
 /// The script, with `@NAME@` where an input goes.
 const TEMPLATE: &str = include_str!("bootstrap.sh.in");
 
+/// The scratch file system's size when the inputs give none, in GiB. Lambda's smaller GPU
+/// instances have a 512 GiB disk: 200 GiB for job scratch leaves the rest for the system,
+/// the container images and the state root, and the script refuses to start when less
+/// than this size plus 50 GiB is free, so a disk that is too small fails loudly.
+pub const DEFAULT_SCRATCH_GIB: u32 = 200;
+
+/// The smallest scratch file system, in GiB.
+pub const MIN_SCRATCH_GIB: u32 = 10;
+
+/// The largest scratch file system, in GiB.
+pub const MAX_SCRATCH_GIB: u32 = 4096;
+
 /// The longest a value may be.
 const MAX_FIELD: usize = 256;
 
@@ -46,8 +58,12 @@ pub struct Bootstrap<'a> {
     pub token_file: &'a str,
     /// The agent's state root.
     pub state_root: &'a str,
-    /// The agent's scratch root.
+    /// The agent's scratch root: the mount point of a file system of its own.
     pub scratch_root: &'a str,
+    /// The size of that file system in GiB, from [`MIN_SCRATCH_GIB`] to
+    /// [`MAX_SCRATCH_GIB`]; `None` is [`DEFAULT_SCRATCH_GIB`]. It is an ext4 image on the
+    /// instance disk, allocated in full, mounted `nodev,nosuid,noatime`.
+    pub scratch_gib: Option<u32>,
     /// The container engine's absolute path.
     pub container_bin: &'a str,
 }
@@ -129,6 +145,16 @@ pub enum BootstrapError {
         /// What is wrong with it.
         fault: Fault,
     },
+    /// The scratch size is outside the bounds.
+    #[error(
+        "scratch_gib: {gib} is outside {} to {} GiB",
+        MIN_SCRATCH_GIB,
+        MAX_SCRATCH_GIB
+    )]
+    ScratchSize {
+        /// The size asked for.
+        gib: u32,
+    },
     /// Two paths are, or lie in, one another.
     #[error("{first} and {second} are the same path or one lies in the other")]
     Overlap {
@@ -158,6 +184,10 @@ impl Bootstrap<'_> {
         path("state_root", self.state_root)?;
         path("scratch_root", self.scratch_root)?;
         path("container_bin", self.container_bin)?;
+        let gib = self.scratch_gib.unwrap_or(DEFAULT_SCRATCH_GIB);
+        if !(MIN_SCRATCH_GIB..=MAX_SCRATCH_GIB).contains(&gib) {
+            return Err(BootstrapError::ScratchSize { gib });
+        }
         if lies_in(self.state_root, self.scratch_root)
             || lies_in(self.scratch_root, self.state_root)
         {
@@ -187,6 +217,7 @@ impl Bootstrap<'_> {
             .replace("@TOKEN_FILE@", self.token_file)
             .replace("@STATE_ROOT@", self.state_root)
             .replace("@SCRATCH_ROOT@", self.scratch_root)
+            .replace("@SCRATCH_GIB@", &gib.to_string())
             .replace("@CONTAINER_BIN@", self.container_bin);
         Ok(UserData(text))
     }

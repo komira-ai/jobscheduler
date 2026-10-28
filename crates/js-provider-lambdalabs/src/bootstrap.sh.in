@@ -13,7 +13,10 @@ CA_CERT='@CA_CERT@'
 TOKEN_FILE='@TOKEN_FILE@'
 STATE_ROOT='@STATE_ROOT@'
 SCRATCH_ROOT='@SCRATCH_ROOT@'
+SCRATCH_GIB=@SCRATCH_GIB@
+FREE_RESERVE_GIB=50
 CONTAINER_BIN='@CONTAINER_BIN@'
+SCRATCH_IMAGE="$SCRATCH_ROOT.img"
 AGENT_BIN=/usr/local/bin/js-agent
 UNIT_DIR=/etc/systemd/system
 
@@ -26,7 +29,7 @@ fail() {
 
 # The image is expected to carry the driver, the container engine and the NVIDIA
 # container toolkit. Nothing is installed here: a missing piece ends the bootstrap.
-for tool in curl sha256sum systemctl stat mktemp cmp install; do
+for tool in curl sha256sum systemctl systemd-escape stat mktemp cmp install df fallocate mkfs.ext4 mountpoint; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
 done
 command -v nvidia-smi >/dev/null 2>&1 || fail "nvidia-smi is not installed: there is no NVIDIA driver"
@@ -58,12 +61,32 @@ private_dir() {
     [ $((0$(stat -c %a "$1") & $2)) -eq 0 ] || fail "$1 is open to other users (mode $(stat -c %a "$1"))"
 }
 private_dir "$STATE_ROOT" 077
-private_dir "$SCRATCH_ROOT" 077
 private_dir "$(dirname "$TOKEN_FILE")" 022
 private_dir "$(dirname "$CA_CERT")" 022
-if [ "$(stat -c %d "$STATE_ROOT")" = "$(stat -c %d "$SCRATCH_ROOT")" ]; then
-    echo "js-agent bootstrap: warning: $STATE_ROOT and $SCRATCH_ROOT are on one file system; js-agent refuses a state root that shares a device with the scratch root" >&2
+
+# The scratch root is its own file system: an ext4 image of SCRATCH_GIB GiB on the instance
+# disk (not tmpfs: that would take the RAM the GPU jobs need), mounted by a systemd mount
+# unit at every boot. js-agent refuses a state root that shares a device with the scratch
+# root, so a job that fills the scratch cannot stop the taint marker from being written.
+# The image is allocated in full, so it cannot grow into the space the state root and the
+# container images need. It is formatted once, as a temporary file that is renamed when it
+# is complete: an image that exists is never formatted again, and a half-made one is never
+# mounted.
+SCRATCH_PARENT=$(dirname "$SCRATCH_ROOT")
+mkdir -p -m 0700 "$SCRATCH_PARENT"
+if [ ! -e "$SCRATCH_IMAGE" ]; then
+    avail_kib=$(df --output=avail -k "$SCRATCH_PARENT" | tail -n 1)
+    [ $((avail_kib / 1048576)) -ge $((SCRATCH_GIB + FREE_RESERVE_GIB)) ] ||
+        fail "the disk holding $SCRATCH_PARENT has $((avail_kib / 1048576)) GiB free; the scratch image needs $SCRATCH_GIB GiB and $FREE_RESERVE_GIB GiB must stay free"
+    rm -f "$SCRATCH_IMAGE.partial"
+    fallocate -l "${SCRATCH_GIB}G" "$SCRATCH_IMAGE.partial" ||
+        fail "cannot allocate $SCRATCH_GIB GiB for $SCRATCH_IMAGE"
+    chmod 0600 "$SCRATCH_IMAGE.partial"
+    mkfs.ext4 -q -F -m 0 -L js-scratch "$SCRATCH_IMAGE.partial"
+    mv -f "$SCRATCH_IMAGE.partial" "$SCRATCH_IMAGE"
 fi
+mkdir -p -m 0700 "$SCRATCH_ROOT"
+MOUNT_UNIT=$(systemd-escape -p --suffix=mount "$SCRATCH_ROOT")
 
 # The agent: kept when it is already the expected build, otherwise downloaded and
 # checked before it is moved into place.
@@ -97,6 +120,21 @@ put() {
     fi
 }
 
+put "$UNIT_DIR/$MOUNT_UNIT" <<EOF
+[Unit]
+Description=js-agent scratch root (an ext4 image on the instance disk)
+RequiresMountsFor=$SCRATCH_IMAGE
+
+[Mount]
+What=$SCRATCH_IMAGE
+Where=$SCRATCH_ROOT
+Type=ext4
+Options=loop,nodev,nosuid,noatime
+
+[Install]
+WantedBy=local-fs.target
+EOF
+
 # The service does not start without the token file and the CA file; the path unit
 # starts it when the token file appears.
 put "$UNIT_DIR/js-agent.service" <<EOF
@@ -104,6 +142,7 @@ put "$UNIT_DIR/js-agent.service" <<EOF
 Description=js-agent: offers this machine to the lease server
 After=network-online.target docker.service
 Wants=network-online.target
+RequiresMountsFor=$SCRATCH_ROOT
 ConditionPathExists=$TOKEN_FILE
 ConditionPathExists=$CA_CERT
 
@@ -127,5 +166,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
+systemctl enable --now "$MOUNT_UNIT"
+mountpoint -q "$SCRATCH_ROOT" || fail "$SCRATCH_ROOT is not mounted"
+[ "$(stat -c %d "$STATE_ROOT")" != "$(stat -c %d "$SCRATCH_ROOT")" ] ||
+    fail "$STATE_ROOT and $SCRATCH_ROOT are on one file system; js-agent refuses that"
+# The root of the new file system is ours to close: owner-only, as js-agent requires.
+chmod 0700 "$SCRATCH_ROOT"
 systemctl enable --now js-agent.path
 echo "js-agent bootstrap: done; js-agent starts when $TOKEN_FILE exists"
