@@ -5,11 +5,11 @@
 use std::time::Duration;
 
 use js_sched::fence::LEASE_GRACE;
-use js_server_core::{Config, Core, NotQueued, Report, Reported, Taken};
+use js_server_core::{Config, Core, NotQueued, Report, Reported, Stage, Taken};
 use js_types::sched::{Failure, Outcome, Resources};
 
 use crate::common::{
-    Call, GIB, Rig, at, beat, block_on, calls, caps, lease, request, started, submit,
+    Call, GIB, Rig, at, beat, block_on, calls, caps, lease, request, shown_to, started, submit,
     submit_request, up, up_after, worker,
 };
 use crate::recover::finish;
@@ -276,8 +276,10 @@ fn a_result_the_store_refuses_for_good_is_dropped() {
     assert_eq!(taken, Taken::Dropped);
     assert_eq!(core.dropped_writes(), 1);
     assert!(calls(&core).contains(&Call::ForgotParcel(lease(1, 0))));
-    let waiter = admitted.waiter;
-    assert!(calls(&core).contains(&Call::Followed(admitted.operation, vec![waiter])));
+    setup.ended_elsewhere(admitted.operation, b"ended elsewhere");
+    core.intake(at(3));
+    let ended = Stage::Done(b"ended elsewhere".to_vec());
+    assert_eq!(shown_to(&core, admitted.waiter), Some(ended));
 }
 
 /// Asserts that a result whose rows another writer removed (the operation is neither held
@@ -302,7 +304,12 @@ fn a_result_for_rows_another_writer_removed_is_stale_and_followed() {
 
     assert_eq!(taken, Taken::Dropped);
     assert_eq!(core.dropped_writes(), 1);
-    let followed = Call::Followed(admitted.operation, vec![admitted.waiter]);
+    assert_eq!(shown_to(&core, admitted.waiter), None);
+    setup.ended_elsewhere(admitted.operation, b"ended elsewhere");
+    core.intake(at(3));
+    let ended = Stage::Done(b"ended elsewhere".to_vec());
+    assert_eq!(shown_to(&core, admitted.waiter), Some(ended));
+    let followed = Call::Followed(admitted.operation, b"ended elsewhere".to_vec());
     assert!(calls(&core).contains(&followed));
 }
 
@@ -321,14 +328,18 @@ fn a_finish_the_adapter_cannot_describe_is_dropped_and_its_callers_followed() {
     let taken = finish(&core, 2, "node-a", admitted.operation, lease(1, 0));
 
     assert_eq!(taken, Taken::Dropped);
-    let followed = Call::Followed(admitted.operation, vec![admitted.waiter]);
-    assert!(calls(&core).contains(&followed));
+    assert_eq!(shown_to(&core, admitted.waiter), None);
 
     let mut huge = request(2);
     huge.resources = Resources::new(1_000_000, GIB);
     let refused = submit_request(&core, 3, huge).expect("queued");
     block_on(core.tick(at(5_000)));
-    let followed = Call::Followed(refused.operation, vec![refused.waiter]);
-    assert!(calls(&core).contains(&followed), "{:?}", calls(&core));
     assert_eq!(core.dropped_writes(), 2);
+
+    setup.ended_elsewhere(admitted.operation, b"first");
+    setup.ended_elsewhere(refused.operation, b"second");
+    core.intake(at(6_000));
+    let shown = |waiter| shown_to(&core, waiter);
+    assert_eq!(shown(admitted.waiter), Some(Stage::Done(b"first".to_vec())));
+    assert_eq!(shown(refused.waiter), Some(Stage::Done(b"second".to_vec())));
 }
