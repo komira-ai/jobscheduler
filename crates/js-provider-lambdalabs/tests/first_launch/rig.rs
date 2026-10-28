@@ -145,6 +145,7 @@ pub struct Rig {
     pub state: PathBuf,
     pub sleeps: RefCell<Vec<Duration>>,
     pub connected: RefCell<Vec<String>>,
+    pub bundles: RefCell<Vec<Option<PathBuf>>>,
     pub connect_error: RefCell<Option<SetupError>>,
 }
 
@@ -175,6 +176,7 @@ impl Rig {
             dir,
             sleeps: RefCell::new(Vec::new()),
             connected: RefCell::new(Vec::new()),
+            bundles: RefCell::new(Vec::new()),
             connect_error: RefCell::new(None),
         }
     }
@@ -211,8 +213,9 @@ impl Rig {
             log: &self.sleeps,
             hook,
         };
-        let connect = |base: &str, _key: &ApiKey, _ca: Option<&Path>| {
+        let connect = |base: &str, _key: &ApiKey, ca: Option<&Path>| {
             self.connected.borrow_mut().push(base.to_owned());
+            self.bundles.borrow_mut().push(ca.map(Path::to_path_buf));
             match self.connect_error.borrow().clone() {
                 Some(why) => Err(why),
                 None => Ok(self.fake.clone() as Arc<dyn LambdaApi>),

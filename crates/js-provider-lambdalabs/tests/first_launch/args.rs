@@ -272,3 +272,16 @@ fn a_client_that_cannot_be_built_is_reported_before_any_call() {
     assert!(out.contains("an https base URL needs a CA bundle"), "{out}");
     assert_eq!(rig.fake.calls(), Vec::new());
 }
+
+#[test]
+fn a_ca_bundle_flag_reaches_the_client_and_is_absent_otherwise() {
+    let rig = Rig::new();
+    let (status, out) = rig.exec(&rig.args(&["--ca-bundle", "/roots.pem"]));
+    assert_eq!(status, 0, "{out}");
+    let (status, out) = rig.exec(&rig.args(&[]));
+    assert_eq!(status, 0, "{out}");
+    assert_eq!(
+        rig.bundles.borrow().as_slice(),
+        [Some(std::path::PathBuf::from("/roots.pem")), None]
+    );
+}

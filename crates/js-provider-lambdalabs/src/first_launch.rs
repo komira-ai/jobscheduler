@@ -58,8 +58,7 @@ const SSH_OUTPUT: usize = 4000;
 /// What to paste back after a run that did what was asked.
 const STOP_DONE: &str = "paste back everything printed above, from the plan line to here.";
 /// What to paste back after a run whose check failed but whose instance is gone.
-const STOP_CHECK_FAILED: &str =
-    "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
+const STOP_CHECK_FAILED: &str = "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
 /// The class every row of the generated table carries: the runner asks for any GPU.
 const ANY_GPU: &str = "any";
 
