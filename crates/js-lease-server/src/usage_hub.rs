@@ -190,7 +190,7 @@ impl Hub {
                 self.counts.runs_without_series += 1;
                 continue;
             };
-            let clean = matches!(result.outcome, Outcome::Succeeded | Outcome::Failed);
+            let clean = matches!(result.outcome, Outcome::Succeeded | Outcome::Failed | Outcome::Killed | Outcome::TimedOut);
             if !clean {
                 continue;
             }
