@@ -498,8 +498,8 @@ fn exited_containers_do_not_use_up_the_rescue_limit() {
 }
 
 /// Asserts that a container the rescue cannot read the state of is still stopped: the
-/// first poll fails and the run is stopped all the same. It catches a rescue that skips
-/// what it cannot tell is running.
+/// first poll fails, the failure is named in a line, and the run is stopped all the same.
+/// It catches a rescue that skips what it cannot tell is running.
 #[test]
 fn a_container_whose_state_is_unknown_is_stopped() {
     let (world, _held, dir) = world_with_r1("jobs-ends-w11");
@@ -508,7 +508,8 @@ fn a_container_whose_state_is_unknown_is_stopped() {
     let gone = Worker::orphaned(machine.clock.clone(), running("r1"), rescuing);
     world.fail("poll", 1);
     let lines = gone.rescue();
-    assert!(lines.is_empty(), "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("cannot read c1"), "{lines:?}");
     assert!(world.log().contains(&"stop r1".to_owned()));
 }
 
