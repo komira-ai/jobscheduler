@@ -16,7 +16,14 @@ use crate::state::LeaseState;
 pub struct Settings {
     default_ttl: Duration,
     max_ttl: Duration,
+    prepare_timeout: Duration,
+    boot_grace: Duration,
+    regain_grace: Duration,
 }
+
+/// How long a whole-node lease may wait to be observed ready when nothing says
+/// otherwise: 600 s, the default of [`Settings::prepare_timeout`].
+pub const DEFAULT_PREPARE_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl Settings {
     /// Settings with these bounds. `default_ttl` must be positive and at most
@@ -31,7 +38,58 @@ impl Settings {
         Ok(Self {
             default_ttl,
             max_ttl,
+            prepare_timeout: DEFAULT_PREPARE_TIMEOUT,
+            boot_grace: Duration::ZERO,
+            regain_grace: Duration::ZERO,
         })
+    }
+
+    /// The same settings with `prepare_timeout` as the longest a whole-node lease waits,
+    /// pending, to be observed ready. A whole lease's ttl and maximum wall time count from
+    /// the moment it is observed ready, so this is the only bound on the wait. It must be
+    /// positive; it defaults to [`DEFAULT_PREPARE_TIMEOUT`] (600 s). The request's maximum
+    /// wall time does not shorten the wait.
+    pub fn with_prepare_timeout(
+        mut self,
+        prepare_timeout: Duration,
+    ) -> Result<Self, SettingsError> {
+        if prepare_timeout.is_zero() {
+            return Err(SettingsError::PrepareNotPositive);
+        }
+        self.prepare_timeout = prepare_timeout;
+        Ok(self)
+    }
+
+    /// The same settings with the restart grace of reservation records: on open, every
+    /// held record's deadline becomes the later of the stored deadline and the boot plus
+    /// `boot_grace`, and every record may be claimed until `regain_grace` after the boot
+    /// ([`ReservationRecord::claim_by`]). Both default to zero. A restored
+    /// deadline is `max(stored, boot + boot_grace)`, so a restart loop holds it at
+    /// `now + boot_grace` while the loop lasts and never grows it beyond that.
+    ///
+    /// This grace applies to reservation records only. Lease records have no restart
+    /// grace in this crate; the lease-side grace is wired by the server step that
+    /// persists reservation marks and adds the boot-grace flag (plan step M3-n), and
+    /// that setting is separate from this one.
+    pub fn with_restart_grace(mut self, boot_grace: Duration, regain_grace: Duration) -> Self {
+        self.boot_grace = boot_grace;
+        self.regain_grace = regain_grace;
+        self
+    }
+
+    /// The floor of a restored reservation's deadline: the boot plus this.
+    pub fn boot_grace(&self) -> Duration {
+        self.boot_grace
+    }
+
+    /// How long after the boot a restored reservation record may still be claimed.
+    pub fn regain_grace(&self) -> Duration {
+        self.regain_grace
+    }
+
+    /// The longest a whole-node lease waits, pending, to be observed ready.
+    pub fn prepare_timeout(&self) -> Duration {
+        self.prepare_timeout
     }
 
     /// The ttl a client that names none gets.
@@ -150,4 +208,56 @@ pub struct Booking {
     /// The state the file has the lease in: a host is named for a held lease and for a
     /// releasing one, whose booking stays counted until the provider confirms the stop.
     pub state: LeaseState,
+}
+
+/// Until when a host is excluded for a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExclusionEnd {
+    /// Until this instant.
+    At(Timestamp),
+    /// For the life of the request.
+    Forever,
+}
+
+/// A host a request must not be placed on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exclusion {
+    /// The excluded host.
+    pub host: HostId,
+    /// Until when.
+    pub until: ExclusionEnd,
+}
+
+/// The part of a reservation record that exists while a host is reserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    /// The reserved host.
+    pub host: HostId,
+    /// When it was reserved.
+    pub reserved_at: Timestamp,
+    /// When the reservation lapses. After an open, the stored deadline plus the boot
+    /// grace.
+    pub deadline: Timestamp,
+}
+
+/// One row of the reservation ledger, kept in the lease file. The table stores and
+/// returns these and decides nothing about them: a record naming a host or request that
+/// no longer exists is dropped by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservationRecord {
+    /// The request the record is for; one record per request.
+    pub request_id: String,
+    /// The reservation, or `None` for a request between reservations, which keeps only
+    /// its counters and exclusions.
+    pub held: Option<Held>,
+    /// How many reservations of the request were given up.
+    pub give_ups: u32,
+    /// How many prepares of the request failed.
+    pub prepare_failures: u32,
+    /// The hosts excluded for the request.
+    pub exclusions: Vec<Exclusion>,
+    /// Set on a record restored by an open, never written: the boot plus the regain
+    /// grace, after which the caller drops the record if nobody claimed it. `None` on
+    /// a record the caller made.
+    pub claim_by: Option<Timestamp>,
 }

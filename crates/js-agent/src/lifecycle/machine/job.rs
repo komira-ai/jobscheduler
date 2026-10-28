@@ -49,13 +49,18 @@ pub(super) fn cleanup_taint(run_id: Option<&str>, code: &str) -> Taint {
 
 /// The taint of a post-job check that found something or could not run.
 pub(super) fn check_taint(run_id: &str, found: &CheckFinding) -> Taint {
+    check_taint_of(Some(run_id), found)
+}
+
+/// The taint of a check that found something, for a run that may not be known.
+pub(super) fn check_taint_of(run_id: Option<&str>, found: &CheckFinding) -> Taint {
     let why = match found {
         CheckFinding::Residue { .. } => reason::RESIDUE,
         CheckFinding::Unchecked { .. } => reason::UNCHECKED,
     };
     Taint {
         reason: why.to_owned(),
-        run_id: Some(run_id.to_owned()),
+        run_id: run_id.map(str::to_owned),
         check: Some(found.code().to_owned()),
     }
 }

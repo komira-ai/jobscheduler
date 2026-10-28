@@ -58,10 +58,19 @@
 //! expires_at_ms = 1060000
 //! ends_at_ms = 4600000      # acquired_at plus the request's maximum wall time
 //! validation_run = "val-7"  # optional
+//! whole = true              # optional: a whole-node class; absent means not whole
+//! ttl_ms = 60000            # a pending whole lease only: the granted ttl ...
+//! wall_ms = 3600000         # ... and maximum wall time, both counted from ready
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
 //! ```
+//!
+//! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
+//! expiry is the settings' prepare timeout, not its ttl, and when the provider is first
+//! seen to have it ready (a start answered `Started`, or an observation of `Present`)
+//! its expiry becomes that moment plus the ttl and its end that moment plus the maximum
+//! wall time. A file without these fields loads as not whole.
 //!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
@@ -114,6 +123,21 @@
 //! older build refuse the file; that field is a follow-up and does not exist yet, so
 //! such a change cannot be made before it.
 //!
+//! # Reservation records
+//!
+//! The file also holds a ledger of reservation records ([`ReservationRecord`]) beside
+//! the leases, as `[[reservation]]` tables counted by `reservation_count` (written only
+//! when above zero; a file with fewer rows than it counts is refused like a cut lease
+//! list). They are written in the same atomic replace as the leases, so a record never
+//! outlives a crash without the leases it was saved with. The table keeps the ledger
+//! whole and decides nothing about it: [`LeaseTable::set_reservations`] replaces it (the
+//! next tick writes it) and [`LeaseTable::reservations`] reads it. An open returns each
+//! held deadline raised to at least the boot plus [`Settings::boot_grace`] (never the
+//! stored deadline plus the grace, so repeated restarts do not accumulate it; lease
+//! records get no such grace here) and stamps every record with
+//! `claim_by`, the boot plus [`Settings::regain_grace`]. A file without the rows loads
+//! an empty ledger; fields of a later version in a row are kept on rewrite.
+//!
 //! # Id limits
 //!
 //! A term and a sequence are written as TOML integers, so each stops at `i64::MAX`. The
@@ -125,6 +149,7 @@
 mod book;
 mod clock;
 mod error;
+mod reservations;
 mod state;
 mod store;
 mod table;
@@ -134,4 +159,7 @@ pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
-pub use types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+pub use types::{
+    Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
+    ReservationRecord, Settings, TickReport,
+};

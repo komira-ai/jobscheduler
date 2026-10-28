@@ -124,6 +124,7 @@ pub use refusal::Refusal;
 pub use registry::{HostState, HostView, Registry};
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
+pub use whole::queue::MAX_WAITING_REQUESTS;
 pub use whole::requests::{Exclusion, NotReady, RequestKey, RequestRecord};
 pub use whole::reserve::Reservation;
 pub use whole_config::{

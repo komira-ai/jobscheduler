@@ -36,7 +36,14 @@
 //! has been prepared and never times out.
 //!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
-//! falls back to `Committed` (the same lease and commit time) until it reports again.
+//! falls back to `Committed` until it reports again, and the commit time becomes the
+//! hello: the agent gets a whole `prepare_timeout` from its hello, however long the lease
+//! was in use or the agent was gone. A `Committed` host that says hello keeps its commit
+//! time, so an agent that keeps restarting cannot postpone the deadline.
+//!
+//! A ready report that arrives within one tick of the deadline can lose to the expiry,
+//! which is checked first. That is benign: the lease ends as a failed prepare and the
+//! host restores.
 
 use js_lease::Timestamp;
 use js_types::LeaseId;
@@ -153,10 +160,10 @@ impl Exclusive {
         }
     }
 
-    /// The state after the host said hello again.
-    pub(crate) fn after_hello(self) -> Self {
+    /// The state after the host said hello at `now`.
+    pub(crate) fn after_hello(self, now: Timestamp) -> Self {
         match self {
-            Self::Ready { lease, at } => Self::Committed { lease, at },
+            Self::Ready { lease, .. } => Self::Committed { lease, at: now },
             Self::Restoring { .. } => Self::Restoring { told: false },
             other => other,
         }

@@ -19,7 +19,9 @@
 #[allow(dead_code, reason = "mixed-pool inputs, used by a later step")]
 pub(crate) mod caps;
 pub(crate) mod cost;
+pub(crate) mod ending;
 pub(crate) mod exclusive;
+pub(crate) mod placement;
 pub(crate) mod queue;
 pub(crate) mod reasons;
 pub(crate) mod requests;

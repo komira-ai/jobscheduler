@@ -8,7 +8,9 @@ use crate::book::{self, Book, Seen, Step};
 use crate::clock::{Clock, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
-use crate::types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+use crate::types::{
+    Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, ReservationRecord, Settings, TickReport,
+};
 
 /// The lease table over one provider. See the crate docs for the rules.
 ///
@@ -39,7 +41,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         path: impl Into<PathBuf>,
         boot: Boot,
     ) -> Result<Self, OpenError> {
-        let book = Book::load(settings, path.into(), boot)?;
+        let book = Book::load(settings, path.into(), boot, clock.now())?;
         let mut table = Self {
             provider,
             clock,
@@ -47,7 +49,8 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         };
         for id in table.book.held_ids() {
             let seen = table.provider.observe(&id);
-            table.book.settle_observe(&id, seen);
+            let now = table.clock.now();
+            table.book.settle_observe(&id, seen, now);
         }
         table.save()?;
         Ok(table)
@@ -61,6 +64,11 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// the lease pending and is an [`AcquireError::Unconfirmed`]; [`Self::tick`]
     /// resolves it. The lease expires at the earlier of `now + ttl` and `now` plus the
     /// request's maximum wall time.
+    ///
+    /// A lease of a whole-node class (admission `Whole`) is different while it waits:
+    /// pending, it expires after the settings' prepare timeout (600 s unless set), and its ttl and maximum
+    /// wall time count from the moment the provider is seen to have it ready (a start
+    /// answered `Started`, or a later observation of `Present`), not from this call.
     pub fn acquire(
         &mut self,
         request: Request,
@@ -132,7 +140,7 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
                 }
                 Step::Resolve => {
                     let seen = self.provider.observe(&id);
-                    match self.book.settle_observe(&id, seen) {
+                    match self.book.settle_observe(&id, seen, now) {
                         Seen::Confirmed => report.confirmed.push(id),
                         Seen::Gone => report.dropped.push(id),
                         Seen::Unsure => {}
@@ -151,6 +159,19 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// Every lease of the table with its state, in id order.
     pub fn list(&self) -> Vec<LeaseInfo> {
         self.book.list()
+    }
+
+    /// Replaces the reservation ledger with `records`; the next [`Self::tick`] writes
+    /// the file. Two records of one request keep the later. The table stores them and
+    /// decides nothing about them.
+    pub fn set_reservations(&mut self, records: Vec<ReservationRecord>) {
+        self.book.set_reservations(records);
+    }
+
+    /// The reservation ledger, in request id order: as set, or as the open restored it
+    /// (held deadlines extended by the boot grace, `claim_by` stamped).
+    pub fn reservations(&self) -> Vec<ReservationRecord> {
+        self.book.reservations()
     }
 
     /// The term of this boot: the first boot of a file takes 1 and every later boot the
