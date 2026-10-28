@@ -244,6 +244,7 @@ mod tests {
             taint: None,
             exclusive_ready: None,
             exclusive_refused: None,
+            load: None,
         };
         let hello: Hello = serde_json::from_value(json!({
             "protocol": { "min": 2, "max": 3 },

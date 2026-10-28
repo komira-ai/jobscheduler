@@ -102,6 +102,7 @@ pub fn heartbeat() -> Heartbeat {
         }),
         exclusive_ready: None,
         exclusive_refused: None,
+        load: None,
     }
 }
 

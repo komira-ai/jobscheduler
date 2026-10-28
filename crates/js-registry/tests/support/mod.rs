@@ -145,6 +145,7 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         taint: None,
         exclusive_ready: None,
         exclusive_refused: None,
+        load: None,
     }
 }
 

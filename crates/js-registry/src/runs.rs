@@ -607,6 +607,7 @@ mod tests {
             taint: None,
             exclusive_ready: None,
             exclusive_refused: None,
+            load: None,
         }
     }
 
