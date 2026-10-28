@@ -48,14 +48,17 @@ pub enum Scenario {
     /// returns a silent worker's lease is kept; once the grace has passed it is given up.
     StoreOutageIsWaitedOut,
     /// An operation still queued when the process dies, for want of any worker to place it
-    /// on, is started once after the restart, answered once, and
-    /// its id is not handed out again.
+    /// on, is started once after the restart, answered once, and its id is not handed out
+    /// again.
     QueuedAtCrashRunsOnce,
+    /// An operation whose grant the store was refusing when the process dies is started
+    /// once after the restart, counting only the starts after it, and answered once.
+    RefusedGrantAtCrashRunsOnce,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 8] = [
+    pub const ALL: [Scenario; 9] = [
         Scenario::StartWaitsForCommit,
         Scenario::AnsweredOnceAcrossRestart,
         Scenario::LeaseIdsNeverRepeat,
@@ -64,6 +67,7 @@ impl Scenario {
         Scenario::RecoveredLeaseWaitsForItsWorker,
         Scenario::StoreOutageIsWaitedOut,
         Scenario::QueuedAtCrashRunsOnce,
+        Scenario::RefusedGrantAtCrashRunsOnce,
     ];
 
     /// Runs this scenario on a fresh harness.
@@ -84,6 +88,9 @@ impl Scenario {
                 write_path::store_outage_is_waited_out(harness, &mut notes);
             }
             Self::QueuedAtCrashRunsOnce => queued::queued_at_crash_runs_once(harness, &mut notes),
+            Self::RefusedGrantAtCrashRunsOnce => {
+                queued::refused_grant_at_crash_runs_once(harness, &mut notes);
+            }
         }
         notes.verdict()
     }

@@ -51,6 +51,9 @@ pub enum Defect {
     /// A restart that finds no worker had registered forgets the operations still queued,
     /// so work that could not be placed before the crash is lost.
     ForgetsQueueWithoutWorkers,
+    /// A restart that finds the store was refusing writes forgets the operations still
+    /// queued, so work whose grant was never written is lost.
+    ForgetsQueueAfterRefusal,
 }
 
 /// Something the loop still has to do, in order.
@@ -362,6 +365,9 @@ impl CoreHarness for ReferenceCore {
         let empty = Fake::with_flaw(self.clock.clone(), Flaw::None);
         self.store = std::mem::replace(&mut self.store, empty).restart();
         if self.defect == Some(Defect::ForgetsQueueWithoutWorkers) && self.streams.is_empty() {
+            self.forget_queue();
+        }
+        if self.defect == Some(Defect::ForgetsQueueAfterRefusal) && self.store_down {
             self.forget_queue();
         }
         self.held.clear();

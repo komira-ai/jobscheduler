@@ -6,13 +6,16 @@
 //! and the same farm time, so the lease term (the store's epoch) and the blocks of lease
 //! sequences are the store's.
 //!
-//! The suite's reference core stays as it is. For each of its six defects there is a broken
+//! The suite's reference core stays as it is. Of its eight defects, six have a broken
 //! variant of this harness, not of the core (the core has no switch to break): a writer
 //! that takes a grant without writing it, a writer that deletes a finished operation's lease
 //! row and leaves its `op/` row, a store that forgets the lease sequence counter, a host
 //! that sends a replaced stream's heartbeat on the newest stream, a store whose refusal
 //! reads as final, and a store whose scan of the lease rows comes back empty. Each turns
-//! the scenario the defect belongs to red.
+//! the scenario the defect belongs to red. The other two (a restart that forgets the queue
+//! when no worker had registered, and one that forgets it after a refused grant) are
+//! model-only: they break a rule of the model's boot, and the core is checked against their
+//! scenarios by passing them.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -565,7 +568,7 @@ fn failures(report: &core::CoreReport) -> Vec<(Scenario, Verdict)> {
     report.results.iter().filter(failed).cloned().collect()
 }
 
-/// Asserts that the durable core passes the eight scenarios of the core-driver suite, over
+/// Asserts that the durable core passes the nine scenarios of the core-driver suite, over
 /// the in-memory store behind the wrapper that refuses lease and result writes. Catches: a
 /// `Start` before its grant is in the store, an operation answered twice across a restart,
 /// a lease id handed out twice, a replaced stream's heartbeat fed, a refused write that is

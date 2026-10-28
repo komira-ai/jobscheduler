@@ -68,6 +68,14 @@ fn forgetting_the_queue_when_no_worker_had_registered_fails_queued_at_crash_runs
 }
 
 #[test]
+fn forgetting_the_queue_after_a_refused_grant_fails_refused_grant_at_crash_runs_once() {
+    only_fails(
+        Defect::ForgetsQueueAfterRefusal,
+        Scenario::RefusedGrantAtCrashRunsOnce,
+    );
+}
+
+#[test]
 fn the_failure_text_names_what_was_wrong() {
     let report = core::run(|| ReferenceCore::broken(Defect::StartBeforeCommit));
     let text = report.results.iter().find_map(|(_, v)| match v {
