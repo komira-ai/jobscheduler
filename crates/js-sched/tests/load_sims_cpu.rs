@@ -244,9 +244,10 @@ fn phased(awake: u64, hint: Prediction) -> Spec {
 
 /// Sim h (rise). Catches: a rise in load not believed at once (smoothed with the idle
 /// windows before it, or believed only after two): five leases predicted at 2 cores wake
-/// to 4 each on a 16-core node, five more are admitted while the readings are idle
-/// (the floor bounds that), and once the first reading that shows the rise is in, no lease
-/// is placed.
+/// to 4 each on a 16-core node, two more are admitted while the readings are idle (the
+/// floor bounds that), and once the first reading that shows the rise is in, the
+/// measurement (a saturated node) with the two uncovered leases leaves no room, where the
+/// floor and the uncovered leases alone would leave room for three.
 #[test]
 fn h_a_rise_is_believed_at_once_and_stops_placement() {
     let mut w = World::new(LoadConfig::default());
@@ -255,21 +256,20 @@ fn h_a_rise_is_believed_at_once_and_stops_placement() {
     w.submit_many(5, &phase);
     w.run(21);
     let flat = Spec::flat("late", 2_000, 300, warm(2_000, 0));
-    w.submit_many(5, &flat);
+    w.submit_many(2, &flat);
     w.run(4);
     assert_eq!(
-        w.stats["late"].started, 5,
+        w.stats["late"].started, 2,
         "admitted against the idle readings"
     );
     // The reading at the end of tick 24 covers a window with all five awake.
     w.submit_many(10, &flat);
-    let started = w.stats["late"].started;
     w.run(30);
     assert_eq!(
-        w.stats["late"].started, started,
+        w.stats["late"].started, 2,
         "nothing is placed after the rise"
     );
-    // Ten leases of up to 4 cores on 16: within `(r k / f) (1 + s) C + n_c A`, with k = 2.
+    // Seven leases of up to 4 cores on 16: within `(r k / f) (1 + s) C + n_c A`, with k = 2.
     let bound = cpu_bound((8, 3), 16, 2, 4);
     assert!(
         w.nodes["n"].peak_demand <= bound,
