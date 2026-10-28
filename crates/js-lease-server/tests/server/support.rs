@@ -16,6 +16,7 @@ use js_lease_server::{
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
+use js_testkit::dir::TestDir;
 use js_types::ProviderId;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -31,16 +32,19 @@ pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
 /// when the test ends.
 pub struct Scratch {
     pub dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-lease-server")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease-server"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -57,12 +61,6 @@ impl Scratch {
 
     pub fn state(&self) -> PathBuf {
         self.path("leases.toml")
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

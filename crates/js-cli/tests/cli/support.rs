@@ -21,6 +21,7 @@ use js_lease_server::{
 use js_pool_static::EXAMPLE_CONFIG;
 use js_provider::Call;
 use js_provider_fake::FakeProvider;
+use js_testkit::dir::TestDir;
 use js_types::{HostId, ProviderId, Resources, Shape};
 use serde_json::Value;
 use tokio::runtime::{Handle, Runtime};
@@ -49,16 +50,16 @@ pub const HOST: [&str; 10] = [
 /// when the test ends.
 pub struct Scratch {
     dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-cli")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let owner = TestDir::under(Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-cli"), name);
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -71,12 +72,6 @@ impl Scratch {
         fs::write(&path, text).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
         path
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 

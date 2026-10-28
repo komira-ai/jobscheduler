@@ -973,6 +973,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-testkit",
  "js-types",
  "rcgen",
  "rustix",
@@ -985,6 +986,7 @@ dependencies = [
 name = "js-client"
 version = "0.1.0"
 dependencies = [
+ "js-testkit",
  "rcgen",
  "rustix",
  "rustls",
@@ -1008,6 +1010,7 @@ dependencies = [
  "js-registry",
  "js-sched",
  "js-state",
+ "js-testkit",
  "js-types",
 ]
 
@@ -1090,6 +1093,7 @@ dependencies = [
  "js-provider-fake",
  "js-registry",
  "js-sched",
+ "js-testkit",
  "js-types",
  "rcgen",
  "rustix",

@@ -22,6 +22,7 @@ use js_agent_wire::{
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
+use js_testkit::dir::TestDir;
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
@@ -175,6 +176,8 @@ struct Agent {
     /// it ready (the real agent has no preparation step yet, so a prepared host is one
     /// that has seen the word).
     prepared: Option<String>,
+    /// The scratch and state roots, removed after the lifecycle that uses them is gone.
+    _dirs: (TestDir, TestDir),
 }
 
 fn credential() -> Credential {
@@ -184,16 +187,11 @@ fn credential() -> Credential {
 impl Agent {
     /// An agent for host `a` that has said hello to `registry`.
     fn join(registry: &Registry, name: &str) -> Self {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join(format!("real-agent-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let state = dir.with_file_name(format!("real-agent-{name}-state"));
-        let _ = fs::remove_dir_all(&state);
-        fs::create_dir_all(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let dir = TestDir::under(&target, &format!("real-agent-{name}"));
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let state = TestDir::under(&target, &format!("real-agent-{name}-state"));
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let config = Config {
             capacity: Capacity {
                 cpu_millis: 4000,
@@ -202,8 +200,8 @@ impl Agent {
             },
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
-            scratch: ScratchRoot::open(&dir).unwrap(),
-            state: StateRoot::open(&state).unwrap(),
+            scratch: ScratchRoot::open(dir.path()).unwrap(),
+            state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
         };
         let fake = Fake::default();
@@ -220,6 +218,7 @@ impl Agent {
             epoch: 0,
             session: String::new(),
             prepared: None,
+            _dirs: (dir, state),
         };
         agent.hello(registry);
         agent
