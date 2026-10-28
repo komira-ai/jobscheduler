@@ -1,0 +1,16 @@
+# The `owner/`, `session/` and `cordon/` rows of a store one frontend opened and used, as js-store
+# writes them: the key, when the store's clock expires it (nanoseconds, `-` for a row that does
+# not expire) and the value as hex.
+#
+# The `owner/` and `cordon/` lines are the lines of the farm server's golden file of scheduler
+# rows for the same calls (a shared store opened under term 0x0102030405060708, with ids
+# reserved, node-a's `Hello`, its registration, and two cordons), copied unchanged. The
+# `session/` line has that file's key and expiry (a lease grace and the ticks of the store's
+# clock after the registration); its value is the test codec's, because the bytes of a
+# session row belong to the codec the embedding server supplies. A change to this file needs a
+# reason: a store written by an earlier release holds these rows as they are, and the release
+# after this one must read them.
+cordon/node-b expires_ns=- value=01000000000012d687
+cordon/node-c expires_ns=- value=00
+owner/node-a expires_ns=- value=01020304050607080000000000000001
+session/node-a expires_ns=60010000000 value=73657373696f6e2030

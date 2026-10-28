@@ -3,100 +3,20 @@
 //! compare-and-set on the counter rows, an epoch created once and kept, and the operator's
 //! raise of it.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+mod common;
 
-use js_state::fake::{Fake, Flaw};
-use js_state::{
-    Changes, Commit, CommitStats, Cond, Conflict, ManualClock, Revision, ScanPage, ScanRange,
-    Store, StoreError, StoreTime, Txn, Versioned,
-};
+use std::sync::Arc;
+
+use js_state::{Cond, Conflict, Store, StoreError, Txn};
 use js_store::keys::{EPOCH, NEXT_OP, NEXT_SEQ};
 use js_store::{CAS_TRIES, EpochBump, EpochPolicy, ID_BLOCK, Rows, StateError};
-use js_types::sched::OperationId;
+use js_types::sched::{OperationId, WorkerId};
 
-/// A store that applies a transaction of another frontend just before a write of this one
-/// that names the transaction's key, oldest first: a write landing between this
-/// frontend's read of a row and its own write of it.
-struct Racing {
-    inner: Fake,
-    landings: Mutex<Vec<(String, Txn)>>,
-    down: AtomicBool,
-}
-
-impl Racing {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
-            landings: Mutex::new(Vec::new()),
-            down: AtomicBool::new(false),
-        })
-    }
-
-    /// `landing` is applied before the next write that names `key`.
-    fn land(&self, key: &str, landing: Txn) {
-        let mut queued = self.landings.lock().expect("lock");
-        queued.push((key.to_owned(), landing));
-    }
-
-    /// The store takes writes again, or not.
-    fn set_down(&self, down: bool) {
-        self.down.store(down, Ordering::SeqCst);
-    }
-}
-
-impl Store for Racing {
-    fn apply_batch(&self, batch: Vec<Txn>) -> Result<Vec<Result<Commit, Conflict>>, StoreError> {
-        if self.down.load(Ordering::SeqCst) {
-            return Err(StoreError::Failed("the store is down".to_owned()));
-        }
-        let names = |key: &str| {
-            let mut ops = batch.iter().flat_map(Txn::ops);
-            ops.any(|op| op.key_cond().is_some_and(|(named, _)| named == key))
-        };
-        let mut queued = self.landings.lock().expect("lock");
-        if let Some(at) = queued.iter().position(|(key, _)| names(key)) {
-            let (_, landing) = queued.remove(at);
-            self.inner.txn(landing)?.expect("the landing write");
-        }
-        drop(queued);
-        self.inner.apply_batch(batch)
-    }
-
-    fn get(&self, key: &str) -> Result<Option<Versioned>, StoreError> {
-        self.inner.get(key)
-    }
-
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Versioned)>, StoreError> {
-        self.inner.scan_prefix(prefix)
-    }
-
-    fn scan_range(&self, scan: ScanRange<'_>) -> Result<ScanPage, StoreError> {
-        self.inner.scan_range(scan)
-    }
-
-    fn changes(&self, after: Revision, limit: usize) -> Result<Changes, StoreError> {
-        self.inner.changes(after, limit)
-    }
-
-    fn reap_expired(&self) -> Result<usize, StoreError> {
-        self.inner.reap_expired()
-    }
-
-    fn commit_stats(&self) -> CommitStats {
-        self.inner.commit_stats()
-    }
-
-    fn now(&self) -> StoreTime {
-        self.inner.now()
-    }
-}
+use common::{Racing, open};
 
 /// A handle over `store` that kept the epoch it found or made (100 in an empty store).
 fn rows_over(store: &Arc<Racing>) -> Rows {
-    Rows::open(store.clone(), EpochPolicy::Keep, 100)
-        .expect("open")
-        .0
+    open(store.clone(), EpochPolicy::Keep, 100).expect("open").0
 }
 
 fn counter(store: &Racing, key: &str) -> u64 {
@@ -308,7 +228,7 @@ fn the_frontend_that_loses_the_race_to_make_the_epoch_keeps_the_winners() {
     let store = Racing::new();
     store.land(EPOCH, set(EPOCH, 777));
 
-    let (_, epoch) = Rows::open(store.clone(), EpochPolicy::Keep, 100).expect("open");
+    let (_, epoch) = open(store.clone(), EpochPolicy::Keep, 100).expect("open");
 
     assert_eq!(epoch, 777);
     assert_eq!(counter(&store, EPOCH), 777);
@@ -329,7 +249,7 @@ fn a_bump_that_loses_a_race_bumps_what_it_reads_next() {
     assert_eq!(counter(&store, EPOCH), 501);
     store.land(EPOCH, set(EPOCH, 900));
 
-    let (_, epoch) = Rows::open(store.clone(), EpochPolicy::Bump, 1).expect("open");
+    let (_, epoch) = open(store.clone(), EpochPolicy::Bump, 1).expect("open");
 
     assert_eq!(epoch, 901);
 }
@@ -345,7 +265,7 @@ fn an_open_that_loses_every_try_is_refused_with_the_conflict() {
         store.land(EPOCH, set(EPOCH, raised));
     }
 
-    let refused = Rows::open(store.clone(), EpochPolicy::Bump, 1).err();
+    let refused = open(store.clone(), EpochPolicy::Bump, 1).err();
 
     assert!(
         matches!(refused, Some(StateError::Conflict(_))),
@@ -365,7 +285,7 @@ fn a_bump_raises_the_stored_epoch_by_one_each_time() {
 
     assert_eq!(first, bump(100, 101));
     assert_eq!(second, bump(101, 102));
-    let (_, epoch) = Rows::open(store.clone(), EpochPolicy::Keep, 1).expect("open");
+    let (_, epoch) = open(store.clone(), EpochPolicy::Keep, 1).expect("open");
     assert_eq!(epoch, 102);
     spoil(&store, EPOCH);
     let corrupt = rows.bump_epoch();
@@ -390,7 +310,7 @@ fn an_epoch_that_is_not_a_number_refuses_the_open() {
         let store = Racing::new();
         spoil(&store, EPOCH);
 
-        let refused = Rows::open(store.clone(), policy, 1).err();
+        let refused = open(store.clone(), policy, 1).err();
 
         assert!(
             matches!(&refused, Some(StateError::Corrupt { key, .. }) if key == EPOCH),
@@ -420,7 +340,7 @@ fn a_store_that_is_down_refuses_every_write_with_its_own_error() {
     }
     let fresh = Racing::new();
     fresh.set_down(true);
-    let refused = Rows::open(fresh, EpochPolicy::Keep, 1).err();
+    let refused = open(fresh, EpochPolicy::Keep, 1).err();
     assert!(matches!(refused, Some(StateError::Store(_))), "{refused:?}");
 
     store.set_down(false);
@@ -461,6 +381,14 @@ fn an_error_says_which_row_and_why() {
                 why: "not an 8-byte number".to_owned(),
             },
             "the state store row meta/epoch cannot be read: not an 8-byte number",
+        ),
+        (
+            StateError::StaleOwner(WorkerId::new("node-a")),
+            "the node node-a belongs to another frontend: the write is stale",
+        ),
+        (
+            StateError::Codec("a request is too large".to_owned()),
+            "a state store value cannot be encoded: a request is too large",
         ),
     ];
     for (error, text) in texts {

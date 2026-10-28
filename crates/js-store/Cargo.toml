@@ -7,7 +7,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# `test_support`: a row codec for tests. Test-only: a production build carries none of
+# it. A crate whose tests need it enables it in its `[dev-dependencies]` entry for js-store.
+test-support = []
+
 [dependencies]
+# The node report and the scheduler's request and daemon instance appear in the signatures
+# of the row codec.
+js-caps = { path = "../js-caps" }
+js-sched = { path = "../js-sched" }
 js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
 thiserror.workspace = true
@@ -15,6 +24,8 @@ thiserror.workspace = true
 [dev-dependencies]
 # The in-memory fake store: the tests run the rows over it.
 js-state = { path = "../js-state", features = ["test-support"] }
+# This crate's own tests see the test codec.
+js-store = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true
