@@ -1,8 +1,8 @@
-# Decisions D1 to D52
+# Decisions D1 to D61
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D61 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -22,8 +22,9 @@ marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded deci
   realization beside ucdk's direct launcher (11.1).
 - **D6. Fence.** (a) self-fence for everything; (b) the class declares a default (self-fence unless the definition declares hermetic or
   idempotent) and every request resolves and records its fence at submit, so no default is silent. Recommend (b).
-- **D7. Memory booking for non-kbf classes.** (a) same as kbf; (b) `BookAll` for ucdk job classes, with the declared size as booking and
-  ceiling and history advisory only. Recommend (b); kbf actions keep today's rule.
+- **D7. Memory booking for non-kbf classes. Amended by D56.** (a) same as kbf; (b) `Book` for ucdk job classes, with the declared size as
+  booking and ceiling and history advisory only, so that many jobs share a host (it first said `BookAll`, a whole free host for each job).
+  Recommend (b); kbf actions keep today's rule.
 - **D8. Validation run id and label key.** The caller mints; the scheduler carries and applies; the key is `jobscheduler.dev/validation-run`
   (12.3). Recommend yes.
 - **D9. Triggers.** Cron-like triggers live in job definitions as data, with UJ3 semantics, when Job is realized by jobscheduler; the
@@ -184,7 +185,7 @@ marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded deci
   resource request under `Book` or `BookAll`; (b) a class `whole-node` with its own admission `Whole`: exclusive, quiet, reserved by a
   drain, capped. Adopted: (b). A big request is placed beside other work, starts on any state, is never drained for and has no cap; the
   owner's requirement (nothing else placed for the lease, drained first, the shape for GPU testing) is a different promise. `BookAll` stays
-  for ucdk Job classes (D7) without reservation, quiet or cap. kbf's `whole_machine` and the merged `gpu-host` are this class (a pool
+  as an admission (a whole free host for one lease; ucdk Job classes book a share, D7, D56) without reservation, quiet or cap. kbf's `whole_machine` and the merged `gpu-host` are this class (a pool
   `class = "gpu-host"` loads as `whole-node`); the GPU path on the Mac Studio machines is a whole-node lease, and a GPU request under any
   other class matches no GPU pool (D32). A node lease that books a whole shape under `Book` is not whole-node. Text in
   [whole-node.md](whole-node.md).
@@ -233,3 +234,42 @@ marked settled. The ids run D1 to D52 with no gaps. D26 is open. Superseded deci
   id is bound to its record and the drain continues; an unclaimed record is dropped after `regain_grace`. Alternative: not persisted, so a
   restart drops every mark and the drains restart; rejected, since a drain costs up to a max wall time of idle host, and a restart loop
   would reset the give-up counter and defeat the bound of D48.
+- **D56. A provider brings hosts that run many jobs; capacity is booked as a request vector and packed by the placement rule. Direction
+  settled by the project owner; the rules are chosen here. Amends D7.** (a) One machine or one VM for each job; (b) a host sized to hold
+  many jobs, each run booking its request vector (a container its CPU and memory under `Book`; a VM its CPUs, memory and one `vms` slot in
+  full; a share lease the vector it names), packed by the pipeline of 6.1 with `FirstFit` in a pool that scales (6.5, 6.6); new machines
+  are launched only for the hosts the queued bookings need after packing. Adopted: (b). It is the rule the earlier text already
+  followed for reuse (D23) and sharing (5.15); what changes is that ucdk Job classes book their declared size under `Book` instead of a
+  whole free host under `BookAll` (D7), and that the scaler's demand is hosts after packing. `BookAll` stays an admission a class may
+  name. Rejected: a machine for each job (a boot for every job, K9 thrash), and a VM on its own machine (a machine boot on top of the VM
+  boot of D29). Text in [hosts.md](hosts.md).
+- **D57. Many fresh VMs on one host.** A VM run still gets a fresh VM, destroyed after the run and never reused (D29, unchanged). Several
+  such VMs exist on one host at once, up to its `vms` slots, each booked in full (5.15), alongside containers. Options: (a) a VM per
+  machine (rejected: see D56); (b) a pool of reusable VMs (rejected by D29); (c) many fresh VMs on a host. Adopted: (c).
+- **D58. VM support is a provider-declared, agent-checked host capability of a launch option.** The provider declares, per launch option
+  (instance type and terms), `virt` (`none`, `nested`, `bare-metal`) and the `vms` its host can run; the agent probes and reports the
+  least of its flag and what the probe allows; the placement rule reads `vms`, `virt` and `lifecycle` as host facts (5.13). A declared
+  option whose probe fails serves containers only, with an alert, and is not tainted. Options: (a) trust the declaration; (b) trust the
+  probe alone; (c) the declaration decides what the scaler may launch for a VM request, the probe decides what is true. Recommend (c): (a)
+  places VMs on hosts that cannot run them, and (b) cannot know before launch which option to buy. Facts stay unverified claims (K27).
+- **D59. Spot hosts: a reclaim notice taints, drains and reschedules, with the machinery that exists.** The provider's `events()` stream
+  (or, without it, the agent's `draining` phase on the cloud's shutdown signal) gives the notice. In that tick the scheduler records the
+  host as tainted with the reason `reclaim` (so the cordon survives a restart, 5.12), asks consumers through a renewal flag `host_leaving`
+  with `leaves_at` (additive, the sibling of `host_reserved`) to place nothing new and release, lets running work finish until the
+  deadline, requeues what had not started, and at the deadline or on a read-back Absent gives up what is left and reruns it elsewhere
+  against the platform-fault budget (8.1). The usual replacement acquire follows. A reclaim taint counts toward neither
+  `max_taints_in_a_row` nor `max_boot_failures`. Options: (a) treat a notice as nothing and wait for the loss (orderly work lost for
+  nothing); (b) a new reclaim state machine (a second path that will rot); (c) the above. Recommend (c).
+- **D60. Price and capacity are provider data used for choosing, never limits.** A provider reports, per launch option, a price in its own
+  unit and advisory capacity signals; the scheduler uses them as sort keys to choose among options inside a provider and among providers
+  inside a tier (D61): lowest price, then best capacity signal, then id. They refuse nothing and stop no launch; there is no cost
+  guardrail, spend cap, budget or dollar model in the scheduler (N4). A refused acquire cools down the option that was refused. Options:
+  (a) no price data (spot choice is then the operator's static list); (b) price as a guardrail (rejected by N4); (c) as above. Recommend (c).
+- **D61. Several clouds are several providers in the one ordered hierarchy; a tier groups equals.** `aws`, `gcp`, `azure` and on-prem
+  sources are kinds of provider behind the one trait; clouds are values in a provider's table, never branches on a name in the core, and a
+  kind may appear twice under two names. The pool's `providers` list keeps the order of D39; an entry may be a tier, an inner list of
+  providers that are equals, among which D60 chooses (a flat list means what it did). A tier is passed over only when none of its members
+  can satisfy now; an unreachable or refused member is passed over in the same tick; release runs the other way, so the last tier is given
+  back first. Options: (a) order the whole list by price (rejected: the order is the operator's statement, and the market would reorder
+  own hardware behind a cloud); (b) one pool per cloud and a consumer that chooses (rejected: every consumer would rebuild the
+  fall-through); (c) the tier. Recommend (c).

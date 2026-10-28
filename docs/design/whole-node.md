@@ -20,8 +20,8 @@ whatever state the host is in, it is never drained for, and it has no cap. A who
 4. **Capped.** Pool limits (section 6) bound how many hosts are reserved or held whole, so whole-node requests cannot starve a pool.
 
 **Admission.** The class is admitted as `Admission::Whole` (6.2): the request needs a host with no lease and no run and books all of it.
-`BookAll` stays as it is (book every dimension of a host that is free, no overcommit) and is what ucdk Job classes use (D7); it has no
-reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those four, and nothing else about it differs.
+`BookAll` stays as it is (book every dimension of a host that is free, no overcommit); ucdk Job classes no longer use it, they book their
+declared size and share a host (D7, D56); it has no reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those four, and nothing else about it differs.
 
 **How the old names relate (D46).**
 
@@ -235,7 +235,9 @@ now, a reservation on a busy host. The acquire is recorded with the request id; 
 at once, before any other work can be placed on it (reserved at birth). A launch counts as a whole host against the ceiling from the
 acquire, and `max_machines` counts it as for any launch. If a busy host becomes quiet while the machine boots, the request takes the host
 and the booting machine is kept and released by the idle rule (D40). A machine that served a whole-node lease is checked at its end and
-is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released.
+is then an ordinary elastic host, released by `idle_timeout` (5.10). A registered `default` host is never released. A host that carries
+many bookings is drained like any other (section 3); a whole-node lease on a spot host can be lost to a reclaim, the loss case of
+section 9 ([hosts.md](hosts.md), sections 5 and 6).
 
 ## 8. During and at the end
 
