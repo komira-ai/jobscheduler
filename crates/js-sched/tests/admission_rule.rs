@@ -344,11 +344,13 @@ fn file_pages_beside_a_small_lease_count_for_a_bounded_share() {
 }
 
 /// Catches: a configurable memory slack ignored (`s_mem`): with a quarter more allowed,
-/// ten leases of 4 GiB fit 32 GiB and the eleventh does not.
+/// ten leases of 4 GiB fit 32 GiB and the eleventh does not (the flat-memory guard is set
+/// to the same slack, as at its default of none it would stop the ninth).
 #[test]
 fn the_memory_slack_is_the_configured_one() {
     let mut r = Rig::new(LoadConfig {
         s_mem_permille: 250,
+        flat_memory_slack_permille: Some(250),
         ..LoadConfig::default()
     });
     r.up("a", node());

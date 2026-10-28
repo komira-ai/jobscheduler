@@ -246,12 +246,6 @@ impl Profile {
         self.cpu_by_curve() || self.mem_by_curve() || self.life.is_some()
     }
 
-    /// Whether the memory of the lease is charged by curve (what the flat-memory guard
-    /// applies to).
-    pub(crate) fn memory_profiled(&self) -> bool {
-        self.mem_by_curve()
-    }
-
     /// What a new lease of this profile is charged in CPU at `slot`.
     pub(crate) const fn new_cpu(&self, slot: usize) -> u64 {
         self.new_cpu.at(slot)

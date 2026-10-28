@@ -378,7 +378,6 @@ fn x_a_retry_waits_for_the_flat_booking_that_blocks_it_and_then_runs() {
 /// (16 GiB) admitted beside a 20 GiB lease that a curve charges 1 GiB, on a 32 GiB worker:
 /// the flat costs sum to 36, so the retry waits until that lease ends, then runs.
 #[test]
-#[ignore = "#127: the flat-memory guard applies to uncurved admissions"]
 fn x_a_retry_waits_for_a_curve_charged_booking_that_blocks_it_by_flat_cost() {
     let mut w = retry_beside_a_big_booking(LoadConfig::default(), true);
     assert_eq!(w.running_of("k"), 0, "refused beside o by the flat sum");
