@@ -278,7 +278,7 @@ impl Binner {
         if lease.cpu_usage_usec < state.last_cpu {
             self.counters.counter_back += 1;
             state.rebase(now, lease.cpu_usage_usec);
-        } else if now - state.last_mono > self.window_usec.saturating_mul(3) {
+        } else if now - state.last_mono > self.window_usec.saturating_mul(3000) {
             self.counters.gaps += 1;
             state.rebase(now, lease.cpu_usage_usec);
         } else if now > state.last_mono {
