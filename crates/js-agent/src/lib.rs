@@ -98,8 +98,8 @@
 //! quiet means. The agent started by [`run_with`] does not run jobs yet, so it gives the
 //! session no host and ignores `exclusive`; the change that wires the lifecycle to the
 //! session implements [`Quiesce`] on its worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
-//! until a flag sets it. The VM check and the readiness hook of the design are later
-//! changes.
+//! until a flag sets it. The VM check of the design is a later change; the readiness hook
+//! (`--readiness-hook`, see `readiness`) wraps the host in [`Hooked`].
 //!
 //! # Secrets
 //!
@@ -122,6 +122,7 @@ mod facts;
 mod host;
 pub mod integrity;
 pub mod lifecycle;
+mod readiness;
 mod run;
 mod session;
 mod signals;
@@ -140,10 +141,14 @@ use cli_runtime::Settings;
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
-    Platform, SystemCommands, SystemFiles, detect, host_id, machine_id,
+    Platform, Ran, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
 use lifecycle::{Local, StateRoot};
+pub use readiness::{
+    EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
+    ReadinessHook, Verdict, hook_runner,
+};
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
 pub use signals::SystemSleeper;
@@ -263,6 +268,9 @@ fn execute(
     });
     let checked = offer.hello.validate();
     checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
+    // The hook is checked now for the same reason; the change that wires the lifecycle
+    // to the session wraps its host in `Hooked`.
+    ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
     // The job flags are checked now so a wrong one stops the agent before it registers.
     // The change that runs jobs builds the lifecycle from them.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;

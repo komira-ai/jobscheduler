@@ -13,6 +13,7 @@
 //! and digest convert to and from them at the edges. The test at the foot of this file
 //! refuses a build name in the code of any file of the module.
 
+pub mod fence;
 mod lease;
 mod phase;
 mod qos;
@@ -58,6 +59,7 @@ mod tests {
     #[test]
     fn the_generic_files_name_no_build_type() {
         let clean = [
+            ("fence.rs", include_str!("sched/fence.rs")),
             ("lease.rs", include_str!("sched/lease.rs")),
             ("phase.rs", include_str!("sched/phase.rs")),
             ("qos.rs", include_str!("sched/qos.rs")),
