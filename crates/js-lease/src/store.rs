@@ -136,9 +136,11 @@ pub(crate) fn lock(path: &Path) -> Result<Lock, OpenError> {
     let lock = sibling(path, ".lock");
     let mut options = fs::OpenOptions::new();
     options.create(true).truncate(false).write(true);
-    let locked = options
-        .open(&lock)
-        .and_then(|file| file.try_lock().map(|()| Lock(file)).map_err(io::Error::from));
+    let locked = options.open(&lock).and_then(|file| {
+        file.try_lock()
+            .map(|()| Lock(file))
+            .map_err(io::Error::from)
+    });
     locked.map_err(|source| OpenError::Lock { path: lock, source })
 }
 
