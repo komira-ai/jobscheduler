@@ -91,6 +91,7 @@ mod input;
 mod load;
 mod requeue;
 mod scheduler;
+pub mod score;
 mod servable;
 
 pub use cordon::Cordon;
