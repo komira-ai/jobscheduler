@@ -59,10 +59,7 @@ struct State {
     log: Vec<String>,
     /// The call that panics, once.
     panic_at: Option<&'static str>,
-    /// The control group directory of the container of each run.
-    cgroups: BTreeMap<String, PathBuf>,
-    /// The directory a container with no control group of its own is in, as
-    /// `<dir>/docker-<run>.scope`.
+    /// The directory every container is in, as `<dir>/docker-<run>.scope`.
     cgroup_base: Option<PathBuf>,
 }
 
@@ -97,13 +94,7 @@ impl World {
         });
     }
 
-    /// The runtime reports `dir` as the control group of the container of `run_id`.
-    pub fn set_cgroup(&self, run_id: &str, dir: &str) {
-        self.lock().cgroups.insert(run_id.to_owned(), dir.into());
-    }
-
-    /// Every container is in `<dir>/docker-<run>.scope`, unless its run has a control group
-    /// of its own.
+    /// Every container is in `<dir>/docker-<run>.scope`.
     pub fn set_cgroup_base(&self, dir: &str) {
         self.lock().cgroup_base = Some(dir.into());
     }
@@ -265,15 +256,8 @@ impl ContainerRuntime for Runtime {
     fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
         let state = self.0.lock();
         let run = &state.containers.get(&id.0)?.run_id;
-        let own = state.cgroups.get(run).cloned();
-        own.or_else(|| {
-            Some(
-                state
-                    .cgroup_base
-                    .as_ref()?
-                    .join(format!("docker-{run}.scope")),
-            )
-        })
+        let base = state.cgroup_base.as_ref()?;
+        Some(base.join(format!("docker-{run}.scope")))
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
@@ -320,30 +304,33 @@ pub struct FakeMachine {
 
 /// Cgroup files the test writes and the worker thread reads, and the threads that read.
 #[derive(Clone, Default)]
-pub struct SharedFiles(Arc<Mutex<(BTreeMap<String, String>, Vec<ThreadId>)>>);
+pub struct SharedFiles(Arc<Mutex<Files>>);
+
+#[derive(Default)]
+struct Files {
+    text: BTreeMap<String, String>,
+    readers: Vec<ThreadId>,
+}
 
 impl SharedFiles {
     /// The file at `path` holds `text` from now on.
     pub fn set(&self, path: &str, text: &str) {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        state.0.insert(path.to_owned(), text.to_owned());
+        state.text.insert(path.to_owned(), text.to_owned());
     }
 
     /// The threads that read a file, one entry for each read.
     pub fn readers(&self) -> Vec<ThreadId> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .1
-            .clone()
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.readers.clone()
     }
 }
 
 impl FileReader for SharedFiles {
     fn read(&self, path: &str) -> Result<String, String> {
         let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        state.1.push(std::thread::current().id());
-        let found = state.0.get(path).cloned();
+        state.readers.push(std::thread::current().id());
+        let found = state.text.get(path).cloned();
         found.ok_or_else(|| format!("{path}: No such file or directory"))
     }
 
