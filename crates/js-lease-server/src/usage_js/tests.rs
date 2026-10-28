@@ -210,3 +210,16 @@ fn the_prune_moves_the_curves_to_the_day() {
     sink.prune(1440 * (js_usage::STALE_DAYS + 5)).unwrap();
     assert!(curves.curve(&work()).is_none());
 }
+
+/// Asserts that a usage file that cannot be opened (its directory does not exist) refuses
+/// the start and names `--usage-db`. It catches a server that starts without its store
+/// and silently records nothing.
+#[test]
+fn a_usage_file_that_will_not_open_refuses_the_start_naming_the_flag() {
+    let setup = StoreSetup {
+        db: PathBuf::from("/nonexistent-usage-directory/usage.db"),
+        profile_store_bytes: 1 << 20,
+    };
+    let refused = open(&setup, 0).err().unwrap();
+    assert_eq!(refused.flag(), "--usage-db");
+}

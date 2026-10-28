@@ -49,10 +49,10 @@ pub(crate) struct StoreSetup {
 pub(crate) fn open(setup: &StoreSetup, today: u64) -> Result<Arc<dyn UsageSink>, StartupError> {
     let clock = Arc::new(SystemClock::default());
     let store = SqliteStore::open(&setup.db, clock, Options::default())
-        .map_err(|err| StartupError::new("--usage-db", err))?;
+        .map_err(StartupError::because("--usage-db"))?;
     let store: Arc<dyn Store> = Arc::new(store);
     let usage = NodeUsage::over(store, setup.profile_store_bytes, today)
-        .map_err(|err| StartupError::new("--usage-db", err))?;
+        .map_err(StartupError::because("--usage-db"))?;
     info!(
         db = %setup.db.display(),
         profile_store_bytes = setup.profile_store_bytes,
