@@ -6,7 +6,14 @@
 //! checked and given to the sink, the lease minutes the sink had not seen are filed per
 //! lease, and the results the beat carried are read for runs that ended cleanly. The
 //! reply to the heartbeat is never touched: a load that is bad costs the usage data of
-//! that beat and nothing else.
+//! that beat and nothing else, and so does a panic in the sink or the key source, which
+//! is caught and counted as a fault.
+//!
+//! **Whose minutes.** A track is bound to the host that began it. A lease's minutes are
+//! filed only when the registry holds that lease for the host whose beat carried them
+//! (and, once filed, only from that host), so one host cannot move another's series or
+//! fill the table with lease ids it invented; such minutes are counted in
+//! `minutes_unheld`.
 //!
 //! **Clean runs.** A result the registry acknowledged `ACCEPTED` with the outcome
 //! `succeeded` or `failed` is a run that ended cleanly; any other outcome (killed, timed
@@ -27,7 +34,8 @@
 //! `node minute` line for each node minute the flush closed, and one warning for each
 //! node and minute that had readings dropped.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
@@ -80,7 +88,10 @@ pub struct UsageCounters {
     /// Lease minutes not filed because the most leases a server keeps minutes for were
     /// already on file.
     pub minutes_refused: u64,
-    /// Calls to the sink that failed.
+    /// Lease minutes not filed because the registry does not hold their lease for the
+    /// host that sent them, or because another host's minutes of the lease are on file.
+    pub minutes_unheld: u64,
+    /// Calls to the sink that failed, and heartbeats whose usage work panicked.
     pub faults: u64,
     /// What the sink counted.
     pub sink: SinkCounters,
@@ -91,6 +102,7 @@ type Minutes = BTreeMap<u16, (u32, u64)>;
 
 /// A lease whose run is not over.
 struct Track {
+    host: HostId,
     minutes: Minutes,
     touched: u64,
 }
@@ -125,25 +137,43 @@ fn merge(slots: &mut Minutes, m: &MinuteIn) {
 }
 
 impl Hub {
-    /// Files the fresh minutes of a beat: with the lease's ending when it has one, else
-    /// with its running track, which is begun unless [`MAX_TRACKS`] are on file.
-    fn add_minutes(&mut self, fresh: &[MinuteIn], now: u64) {
+    /// Files the fresh minutes of a beat of `host`: with the lease's ending when it has
+    /// one, else with its running track, which is begun unless [`MAX_TRACKS`] are on
+    /// file. A lease on file belongs to the host that began it; a new one is begun only
+    /// for a lease in `held` (the leases the registry holds for `host`).
+    fn add_minutes(
+        &mut self,
+        host: &HostId,
+        fresh: &[MinuteIn],
+        held: &BTreeSet<LeaseId>,
+        now: u64,
+    ) {
         for m in fresh {
             if let Some(ending) = self.ending.get_mut(&m.lease) {
-                merge(&mut ending.minutes, m);
+                match ending.host == *host {
+                    true => merge(&mut ending.minutes, m),
+                    false => self.counts.minutes_unheld += 1,
+                }
                 continue;
             }
-            let known = self.running.contains_key(&m.lease);
-            if !known && self.running.len() >= MAX_TRACKS {
-                self.counts.minutes_refused += 1;
-                continue;
+            match self.running.get_mut(&m.lease) {
+                Some(track) if track.host == *host => {
+                    track.touched = now;
+                    merge(&mut track.minutes, m);
+                }
+                Some(_) => self.counts.minutes_unheld += 1,
+                None if !held.contains(&m.lease) => self.counts.minutes_unheld += 1,
+                None if self.running.len() >= MAX_TRACKS => self.counts.minutes_refused += 1,
+                None => {
+                    let mut track = Track {
+                        host: host.clone(),
+                        minutes: Minutes::new(),
+                        touched: now,
+                    };
+                    merge(&mut track.minutes, m);
+                    self.running.insert(m.lease, track);
+                }
             }
-            let track = self.running.entry(m.lease).or_insert_with(|| Track {
-                minutes: Minutes::new(),
-                touched: now,
-            });
-            track.touched = now;
-            merge(&mut track.minutes, m);
         }
     }
 
@@ -323,8 +353,30 @@ impl Usage {
 
     /// What a heartbeat that the registry accepted tells the usage side. `load` is the
     /// heartbeat's load, taken out of it; `acks` are the registry's verdicts on its
-    /// results. Blocks on the sink: call it on the pool for blocking calls.
-    pub(crate) fn on_beat(&self, beat: &Heartbeat, load: Option<NodeLoad>, acks: &[ResultAck]) {
+    /// results; `holds` says whether the registry holds a lease for a host. Blocks on the
+    /// sink: call it on the pool for blocking calls. A panic in the sink or the key source
+    /// is caught and counted as a fault: it must not cost the beat its reply.
+    pub(crate) fn on_beat(
+        &self,
+        beat: &Heartbeat,
+        load: Option<NodeLoad>,
+        acks: &[ResultAck],
+        holds: &dyn Fn(&LeaseId, &HostId) -> bool,
+    ) {
+        let ran = catch_unwind(AssertUnwindSafe(|| self.beat(beat, load, acks, holds)));
+        if ran.is_err() {
+            self.hub().counts.faults += 1;
+            error!(host = %beat.host_id, "the usage side panicked on a heartbeat; the beat is served");
+        }
+    }
+
+    fn beat(
+        &self,
+        beat: &Heartbeat,
+        load: Option<NodeLoad>,
+        acks: &[ResultAck],
+        holds: &dyn Fn(&LeaseId, &HostId) -> bool,
+    ) {
         let Some(host) = host_of(&beat.host_id) else {
             self.hub().counts.records_dropped += 1;
             return;
@@ -334,9 +386,17 @@ impl Usage {
             Some(load) => self.observe(&host, beat.epoch, load, now),
             None => Vec::new(),
         };
+        // Asked before the hub is taken: the registry's lock is never taken under it.
+        let held: BTreeSet<LeaseId> = fresh
+            .iter()
+            .map(|m| m.lease)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|lease| holds(lease, &host))
+            .collect();
         let finished = {
             let mut hub = self.hub();
-            hub.add_minutes(&fresh, now);
+            hub.add_minutes(&host, &fresh, &held, now);
             let finished = hub.beat_done(&host);
             hub.results(&host, beat, acks, &*self.keys, now);
             finished
