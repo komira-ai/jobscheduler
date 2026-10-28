@@ -224,9 +224,9 @@ mod tests {
     /// system or a trust-everything store.
     #[test]
     fn no_ca_cert_means_the_bundled_public_roots() {
-        assert!(matches!(roots(true, None), Ok(RootCerts::WebPki)));
-        let plain = roots(false, None);
-        assert!(matches!(plain, Ok(RootCerts::Specific(none)) if none.is_empty()));
+        // Compared as text: a `matches!` arm that never fails is a branch no test takes.
+        assert_eq!(format!("{:?}", roots(true, None).unwrap()), "WebPki");
+        assert_eq!(format!("{:?}", roots(false, None).unwrap()), "Specific([])");
         // What `RootCerts::WebPki` means in ureq: exactly this crate's anchors.
         let bundled = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
