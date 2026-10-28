@@ -28,6 +28,7 @@ fn reply(commands: Vec<Command>) -> HeartbeatReply {
         commands,
         result_acks: Vec::new(),
         taint_ack: false,
+        exclusive: None,
     }
 }
 
@@ -226,5 +227,37 @@ fn a_single_acknowledgement_is_checked() {
         let err = ack(bad).validate().unwrap_err();
         assert_eq!(err.field(), "result_acks.run_id");
         assert_eq!(err.code(), refusal::INVALID_REPLY);
+    }
+}
+
+/// The lease id of `exclusive` is held to the id alphabet and length: a good one, one at
+/// the cap and none pass; an empty, path-like or over-long one fails `exclusive` and
+/// leaves the commands and acknowledgements alone. It catches an unchecked peer string
+/// reaching the agent's lease bookkeeping.
+#[test]
+fn reply_exclusive_lease_id_is_checked() {
+    let with = |id: Option<String>| HeartbeatReply {
+        exclusive: id,
+        ..reply(vec![stop("r1")])
+    };
+    for good in [None, Some("1-1".to_string()), Some("a".repeat(MAX_ID_LEN))] {
+        assert_eq!(with(good).validate().exclusive, Ok(()));
+    }
+    let cases = [
+        ("", Rule::Empty),
+        ("../x", Rule::BadChars),
+        (&"a".repeat(MAX_ID_LEN + 1), Rule::TooLong),
+    ];
+    for (id, rule) in cases {
+        let body = with(Some(id.to_string()));
+        let check = body.validate();
+        assert_eq!(check.commands, vec![&stop("r1")]);
+        assert_eq!(check.acks, Ok(()));
+        expect(
+            check.exclusive.unwrap_err(),
+            "exclusive",
+            rule,
+            refusal::INVALID_REPLY,
+        );
     }
 }

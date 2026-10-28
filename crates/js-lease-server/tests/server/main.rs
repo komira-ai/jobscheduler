@@ -8,6 +8,7 @@ mod agents;
 mod agents_restart;
 mod agents_support;
 mod agents_tokens;
+mod agents_whole;
 mod auth;
 mod binary;
 mod limits;

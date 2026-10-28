@@ -46,6 +46,10 @@ fn refusal_codes_snapshot() {
         refusal::HOST_LISTED,
         refusal::RATE_LIMITED,
         refusal::BODY_TOO_LARGE,
+        refusal::EXCLUSIVE_NOT_READY,
+        refusal::NO_CAPABLE_HOST,
+        refusal::NO_MATCHING_POOL,
+        refusal::NOT_READY,
     ];
     assert_eq!(
         codes.join(" "),
@@ -54,7 +58,7 @@ fn refusal_codes_snapshot() {
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
-         body-too-large"
+         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready"
     );
 }
 
@@ -195,5 +199,6 @@ fn round_trip_of_every_message() {
             ack: Ack::Stale,
         }],
         taint_ack: true,
+        exclusive: None,
     });
 }

@@ -18,7 +18,14 @@ use crate::registry::Registry;
 ///   grace period) and serving, and whose booked shape fits the request. A host that
 ///   is lost, awaiting, draining, quarantined, tainted or in any other phase than
 ///   serving takes no new lease. With no host to book it answers `NoCapacity` for a
-///   request the pool's shape fits, `NoFit` for one it cannot.
+///   request the pool's shape fits, `NoFit` for one it cannot. A whole-node request
+///   (`Admission::Whole`) that fits the pool answers `NoCapableHost` when no known host
+///   could ever be given whole (none is untainted and of a fitting shape), and
+///   `Unknown` (accepted, waiting) when its start carries a request id and some host
+///   could, however busy; see [`crate::Registry::queue_position`]. Without a request
+///   id it answers `NoCapacity` and the consumer retries. A request that used up its
+///   tries to get a host ready answers `ExclusiveNotReady` once (that start removes its
+///   record, so the next start of the request is a fresh one).
 /// - **Stop** frees the booking at once and reads back `Absent`, as it does for a lost
 ///   host: the table asked for the end of the lease.
 /// - **Observe** says `Present` while the host is live and `Unknown` once it is lost
@@ -41,8 +48,8 @@ impl RegisteredProvider {
     }
 
     /// The same provider serving `classes` instead of the pool's one. As for the static
-    /// pool, `start` refuses, with `UnsupportedClass`, a class whose admission is not
-    /// `BookAll`, because every lease holds a whole host.
+    /// pool, `start` refuses, with `UnsupportedClass`, a class whose admission does
+    /// not book a whole host (`BookAll` or `Whole`), because every lease holds one.
     pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
         self.classes = classes;
         self
@@ -65,6 +72,12 @@ impl RegisteredProvider {
     /// hello, the host is admitted as any other and the lease observes `Present` on it.
     /// The refusals are those of [`js_pool_static::StaticPool::seat`] except `Unlisted`,
     /// which this never returns.
+    ///
+    /// For a whole-node pool the booking is put back `Committed`, unless the host lists
+    /// held runs, when it is put back `Ready`. That assumes the held runs are the
+    /// lease's own. Leftover runs of a lease that has ended, followed by a registry
+    /// restart, would seat `Ready` on a host that is not quiet; this is rare, and the
+    /// registry does not tell the two cases apart.
     ///
     /// `binding` is what the awaiting host's hello must match: the caller passes the
     /// binding it persisted when it admitted the host, and a hello from another

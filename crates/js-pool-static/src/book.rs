@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_provider::{HostCapacity, Observed, RefusalCode, StartAck, StartSpec};
-use js_types::{Admission, HostId, LeaseId, ResourceClass, Shape};
+use js_types::{HostId, LeaseId, ResourceClass, Shape};
 
 /// Why [`HostBook::seat`] booked nothing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -84,11 +84,11 @@ impl HostBook {
     }
 
     /// The refusal for a spec whose class the provider cannot lease whole: a class it
-    /// does not list, or one whose admission is not `BookAll`. `None` when the provider
+    /// does not list, or one whose admission does not book a whole host. `None` when the provider
     /// can lease it.
     pub fn class_gate(classes: &[ResourceClass], spec: &StartSpec) -> Option<RefusalCode> {
         let listed = classes.contains(spec.class());
-        let whole = matches!(spec.class().admission(), Admission::BookAll);
+        let whole = spec.class().admission().books_whole_host();
         let leasable = [listed, whole].into_iter().all(|ok| ok);
         (!leasable).then_some(RefusalCode::UnsupportedClass)
     }

@@ -1,4 +1,4 @@
-# Risks K19 to K36
+# Risks K19 to K48
 
 Moved from design.md section 16 to keep that file under its size limit; K1 to K18 stay there. Section numbers refer to design.md.
 
@@ -11,7 +11,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   covered by any check here.
 - **K22. VMs starve containers on the host.** A booted VM holds its CPUs and memory in full for its run. Mitigated by counting it in full, the offer rule, the `vms` ceiling and containers admitted against the total less VM memory (5.15).
 - **K23. Base image drift.** A mutable image would make two leases differ. Mitigated by immutable names, a digest pinned in the `Start` and verified (5.14).
-- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and a drain rule with a drain deadline and at most one draining host per pool (5.15, vm-backend.md).
+- **K24. A whole-node lease never becomes ready, is shared by mistake, is starved, or idles the pool.** Mitigated by the withheld token, `prepare_timeout` with a retry cap and back-off, the offer invariant, and the reservation, drain bound and caps of the whole-node class (5.17, [whole-node.md](whole-node.md); K38).
 - **K25. Boot cost per run.** A boot for every run, since no VM is reused. Bounded by the size choice of D26; a warm pool is future work.
 - **K26. Wire growth.** Facts add bytes to every hello; new limits bound them and an agent over them is refused as any other (13.6).
 - **K27. Advertised facts are unverified claims.** A registered agent can claim any fact, `sandbox=vm` isolation included. Bounded: facts never override pool selection by class and labels, the lease token still binds one consumer, and a lie costs queueing, misplacement or refusal and the agent its taint and deny-file path; a consumer needing isolation leases from a pool whose operator it trusts (Trust, capabilities.md).
@@ -49,3 +49,49 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   signed by another key is not installable by it, and widening the trust (a second signer, or one shared signer) widens who can put code
   on every host. Not solved by this design: it is a security decision for the owner before any option that ships jobscheduler packages
   through the helper (D45). Until then the agent ships only inside the kbf package.
+- **K37. A host job burns a registered host.** A whole-node lease that allows host jobs taints its host at the grant (D51); a registered
+  host stays tainted until an operator reimages it, so a dedicated GPU or performance pool of few machines loses capacity for each such
+  lease. Mitigated by host jobs off by default and needing four consents, by GPU and performance runs being `contained`, and by an elastic
+  machine being replaced. Not mitigated: a pool that allows host jobs on its only machines.
+- **K38. Draining idles capacity, and a long lease holds a reservation.** A reserved host does no new work until it is quiet, up to its
+  `drain_deadline`, and a consumer that ignores `host_reserved` keeps its lease to its TTL or max wall time (D48). Bounded by `max_draining`,
+  the ceiling and `keep_for_ordinary` (D49), by cost-ordered host choice, by the give-up and back-off, and by acquiring a machine in an
+  elastic pool before draining (D50). Residual: a pool of long leases pays most of a max wall time of idle per whole-node lease.
+- **K39. Quiet is the agent's claim.** The readiness report is the agent's own (K17, K27): a wrong or hostile agent can say it is quiet while
+  something runs, and a performance result taken beside it is wrong. The scheduler's own table (no lease, no placed run) and the
+  withheld token cover the work it knows of; a lie costs the agent its taint and deny-file path, and a consumer needing a trustworthy
+  measurement leases from a pool whose operator it trusts (whole-node.md).
+- **K40. A refusing hook or agent starves a request.** A readiness hook that always refuses, or an agent that refuses falsely, can cycle a
+  request through hosts. Bounded: each refusal excludes the host for the request, counts toward `max_replace` (D54), and the request then
+  fails `exclusive-not-ready` with the last code and detail, so the consumer sees why. Residual: a hostile agent can waste up to `max_replace`
+  drains' worth of other hosts' idle time; it is already able to stall by silence (K39), and the taint path applies to `host-unsafe`.
+- **K41. A persisted reservation outlives its use.** A record kept across a restart can hold a host for a consumer that has gone. Bounded by
+  `regain_grace` after boot for an unclaimed record, by the drain deadline for a claimed one, and by deletion with the request (D55). Residual:
+  a restore from an old snapshot reads old marks; a record naming a missing host or request is dropped at boot.
+- **K42. A spot market that flaps churns hosts.** Interruptions taint and replace hosts in a loop, and a replacement may be interrupted
+  too. A reclaim taint is excluded from `max_taints_in_a_row` and `max_boot_failures` (D59), so those brakes still mean a bad job class or
+  a bad image. The loop is bounded by `max_step`, `cooldown`, `max_machines` and the provider shares, and steered by the capacity signal
+  of D60 (a recently interrupted option sorts later) and by a tier that holds another cloud or an on-demand provider. Residual: a pool
+  whose every option is interrupted pays boots and reruns until the market settles; the platform-fault budget bounds the reruns (8.1).
+- **K43. A shared host is a larger blast radius.** One host loss, reclaim, taint or kernel fault ends many jobs of many consumers at once,
+  where a machine per job would lose one. Mitigated by the notice and drain of D59, the platform-fault budget for reruns, taint on any
+  finding, and the choice of a host size (the shape is a floor; an operator sizes hosts for the loss they accept). Not mitigated: an
+  unannounced loss of a full host.
+- **K44. A declared VM capability is wrong.** A launch option that says `virt = nested` and cannot run a VM would waste a boot per
+  attempt. Mitigated by the agent's probe (D58: the host reports zero slots and an alert), by the failure being recorded per option so the
+  option cools down, and by a conformance case with a lying option. Residual: the first launch of a wrong option is wasted.
+- **K45. Stale or wrong price and capacity data choose badly.** Data that is old, or wrong by mistake or by a hostile provider crate,
+  picks an expensive or unavailable option. It cannot refuse a request or exceed a cap (D60); the cost is a worse choice or a refused
+  acquire that cools the option down. The data is read once per tick on the injected clock, so a bad choice is reproducible in a test.
+- **K46. A tier member that launches and never registers.** A cloud whose machines boot but cannot reach the scheduler would take the
+  demand of its tier every time it sorted first. Mitigated by the boot timeout and the failure brake of its entry (5.8, providers.md), so after
+  `max_boot_failures` in a row that member is passed over (a brake, not a cost limit), and by the alert it raises.
+- **K47. A swap delays the victim's machine and overshoots.** The victim drains for up to `swap_drain_grace` (D63), so the cost is that
+  delay; work is lost only for a job still running past the grace, which is then rerun without failing and without charge. The biggest type
+  may be more than the load needed (D62). Bounded by one swap per window and per victim, by the victim choice that prefers hosts that empty
+  within the grace and by the protected hosts (D64), by `max_evictions` per request, and by launching before draining (a refused launch
+  loses nothing). Residual: jobs longer than the grace lose their progress once per eviction, and a lasting overshoot is undone only by the
+  scale-down of D65.
+- **K48. The cap is crossed by one machine during a swap.** The swap's launch is counted with the victim until the victim reads back Absent,
+  so the count is `max_machines + 1` for up to the drain grace (D62). Bounded by one swap per victim (H10); a terminate that reads back
+  Unknown holds the extra machine until it is resolved (5.6), and the reaper's release retry applies (12.1).

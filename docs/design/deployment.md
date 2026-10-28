@@ -84,7 +84,7 @@ args: ["--listen", "<pod-address>:7300", "--boot", "resume",
   flushed.
 - **PodDisruptionBudget.** With one replica, any voluntary eviction is an outage. `minAvailable: 1` makes an automated node drain (a node
   upgrade, a scale-down) wait for a person, who deletes the pod at a moment of their choosing, not one in the middle of a whole-node
-  lease preparing (5.15). The price is a manual step on every drain, which is the point; leases are durable, so the deletion is safe.
+  lease preparing (5.17). The price is a manual step on every drain, which is the point; leases are durable, so the deletion is safe.
 - **Network.** A `NetworkPolicy` admits ingress only on the one port. Egress is to the capacity providers' endpoints once there are any.
 
 ## The state store

@@ -18,6 +18,9 @@
 //!   retries both.
 //! - **Time acts in one place.** Only [`LeaseTable::tick`] expires a lease. Between
 //!   ticks a lapsed lease is still listed, and a renew of it is refused as expired.
+//!   The server's tick (`js-lease-server`) ticks the table first and then advances the
+//!   agent registry, so a registry that reaches its own deadline (a reservation's drain
+//!   deadline, a prepare deadline) acts on the same tick and not at the next poll.
 //! - **Wall time bounds a lease's life, as the clock reads it.** A lease is never
 //!   renewed past its acquisition plus the request's maximum wall time. The bound is a
 //!   wall-clock instant, so a system clock stepped back (a time sync, a resumed VM)
@@ -58,10 +61,29 @@
 //! expires_at_ms = 1060000
 //! ends_at_ms = 4600000      # acquired_at plus the request's maximum wall time
 //! validation_run = "val-7"  # optional
+//! whole = true              # optional: a whole-node class; absent means not whole
+//! ttl_ms = 60000            # a pending whole lease only: the granted ttl ...
+//! wall_ms = 3600000         # ... and maximum wall time, both counted from ready
 //!
 //! [lease.labels]            # the caller's labels
 //! team = "infra"
 //! ```
+//!
+//! A lease of a whole-node class (admission `Whole`) waits differently while pending: its
+//! expiry is the settings' prepare timeout, not its ttl, and when the provider is first
+//! seen to have it ready (a start answered `Started`, or an observation of `Present`)
+//! its expiry becomes that moment plus the ttl and its end that moment plus the maximum
+//! wall time. A file without these fields loads as not whole.
+//!
+//! The prepare timeout is also the provider's own deadline for a failed prepare, and the
+//! provider decides what a missed one means (it counts the failure and holds it against
+//! the host). So a tick that finds a pending whole lease at its deadline observes it
+//! first, which lets the provider end it; only a lease the provider still has no answer
+//! for after that observation is expired, by the tick after. A ready report that reaches
+//! the provider within one tick of the deadline can therefore lose to the deadline; that
+//! is benign, since the host is restored when the lease is stopped. The note that the
+//! deadline has been observed is kept in memory: after a restart the lease is observed
+//! once more.
 //!
 //! On open, a lease stored as `held` is observed once: present stays held (on the host
 //! the provider names), absent is dropped, unknown is kept.
@@ -114,6 +136,21 @@
 //! older build refuse the file; that field is a follow-up and does not exist yet, so
 //! such a change cannot be made before it.
 //!
+//! # Reservation records
+//!
+//! The file also holds a ledger of reservation records ([`ReservationRecord`]) beside
+//! the leases, as `[[reservation]]` tables counted by `reservation_count` (written only
+//! when above zero; a file with fewer rows than it counts is refused like a cut lease
+//! list). They are written in the same atomic replace as the leases, so a record never
+//! outlives a crash without the leases it was saved with. The table keeps the ledger
+//! whole and decides nothing about it: [`LeaseTable::set_reservations`] replaces it (the
+//! next tick writes it) and [`LeaseTable::reservations`] reads it. An open returns each
+//! held deadline raised to at least the boot plus [`Settings::boot_grace`] (never the
+//! stored deadline plus the grace, so repeated restarts do not accumulate it; lease
+//! records get no such grace here) and stamps every record with
+//! `claim_by`, the boot plus [`Settings::regain_grace`]. A file without the rows loads
+//! an empty ledger; fields of a later version in a row are kept on rewrite.
+//!
 //! # Id limits
 //!
 //! A term and a sequence are written as TOML integers, so each stops at `i64::MAX`. The
@@ -125,6 +162,7 @@
 mod book;
 mod clock;
 mod error;
+mod reservations;
 mod state;
 mod store;
 mod table;
@@ -134,4 +172,7 @@ pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
-pub use types::{Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, Settings, TickReport};
+pub use types::{
+    Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
+    ReservationRecord, Settings, TickReport,
+};
