@@ -1,0 +1,51 @@
+{
+  "data": {
+    "gpu_8x_example": {
+      "instance_type": {
+        "name": "gpu_8x_example",
+        "description": "8x Example GPU (80 GB)",
+        "gpu_description": "Example GPU (80 GB)",
+        "price_cents_per_hour": 1200,
+        "specs": { "vcpus": 128, "memory_gib": 1800, "storage_gib": 6000, "gpus": 8 },
+        "architecture": "x86_64"
+      },
+      "regions_with_capacity_available": []
+    },
+    "gpu_1x_sample": {
+      "instance_type": {
+        "name": "gpu_1x_sample",
+        "description": "1x Sample GPU (24 GB)",
+        "gpu_description": "Sample GPU (24 GB)",
+        "price_cents_per_hour": 75,
+        "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 },
+        "architecture": "x86_64",
+        "note_added_later": true
+      },
+      "regions_with_capacity_available": [
+        { "name": "region-b", "description": "Place B" },
+        { "name": "region-a", "description": "Place A" }
+      ]
+    },
+    "gpu_1x_arm_sample": {
+      "instance_type": {
+        "name": "gpu_1x_arm_sample",
+        "description": "1x Arm Sample GPU",
+        "gpu_description": "Arm Sample GPU",
+        "price_cents_per_hour": 149,
+        "specs": { "vcpus": 64, "memory_gib": 400, "storage_gib": 4000, "gpus": 1 },
+        "architecture": "arm64"
+      },
+      "regions_with_capacity_available": [
+        { "name": "region-a", "description": "Place A" }
+      ]
+    },
+    "gpu_odd_arch": {
+      "instance_type": {
+        "name": "gpu_odd_arch",
+        "price_cents_per_hour": 10,
+        "specs": { "vcpus": 4, "memory_gib": 16, "storage_gib": 100, "gpus": 1 },
+        "architecture": "risc\u0001v"
+      }
+    }
+  }
+}

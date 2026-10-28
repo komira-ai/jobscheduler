@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/internal-error",
+    "message": "An internal server error occurred. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-internal"
+  }
+}

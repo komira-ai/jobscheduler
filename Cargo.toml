@@ -36,6 +36,8 @@ hyper-util = { version = "0.1.21", default-features = false }
 # Calls rustix has no portable form of (js-testkit: mkfifo, and a
 # signal to ignore one).
 libc = "0.2.190"
+# Dev-dependency of js-provider-lambdalabs: a sink for the HTTP client's own log lines.
+log = "0.4.34"
 # macOS only (js-vmm, js-mac-session): the Objective-C runtime and the Foundation binding.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }

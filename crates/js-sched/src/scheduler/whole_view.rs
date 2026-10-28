@@ -17,6 +17,7 @@ use js_whole::caps::Blocked;
 
 use super::whole::{WholeWait, ceiling_of};
 use super::{OpState, Scheduler};
+use crate::unservable::Unservable;
 
 /// Why a queued whole-machine request is not yet granted a worker, with settings on
 /// ([`Scheduler::whole_state`]).
@@ -63,9 +64,12 @@ pub enum WholeState {
     /// No live worker could ever hold it. It is shown before `drain_after` too: the
     /// first round that finds no worker records it.
     Unservable {
-        /// Why no live worker can run it: the string [`Scheduler::waiting`] returns, whose
-        /// wording is free text. An embedder shows it verbatim and never matches on it.
+        /// Why no live worker can run it: the string [`Scheduler::waiting`] returns. An
+        /// embedder shows it verbatim; its wording is not an interface.
         reason: String,
+        /// The same reason as a value ([`Scheduler::unservable`]): match on it, count or
+        /// group by it. `reason` is its `Display`.
+        cause: Unservable,
     },
 }
 
@@ -185,7 +189,8 @@ impl Scheduler {
         let op = &self.ops[&operation];
         if let Some(unservable) = &op.unservable {
             return WholeState::Unservable {
-                reason: unservable.reason.clone(),
+                reason: unservable.text.clone(),
+                cause: unservable.reason.clone(),
             };
         }
         let may_hold_at =
