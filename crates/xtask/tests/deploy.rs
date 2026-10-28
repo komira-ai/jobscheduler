@@ -1113,3 +1113,28 @@ fn an_answer_that_is_not_json_fails_and_the_real_clock_waits_between_reads() {
     deploy::deploy(&plan, &farm.token_service(), &roots, &mut out).expect("deploy");
     assert_eq!(farm.coordinator_calls().len(), 4);
 }
+
+/// Asserts that a read with no desired version is shown as `(none)` and, being no longer
+/// this release's, ends the deploy as superseded.
+#[test]
+fn a_read_with_no_desired_version_is_superseded_by_none() {
+    let farm = Farm::start(|call| match call {
+        Call::Read { posted: false, .. } => conv("converged", "0.1.0", ("server", 1, 0, 0, 0)),
+        Call::Read { .. } => (
+            200,
+            json!({"state": "converged", "roles": [
+                {"role": "server", "at_desired": 0, "updating": 0, "failed": 0, "down": 0}
+            ]}),
+        ),
+        Call::Post { .. } => (200, json!({})),
+    });
+    let (result, log, _) = farm.deploy(&farm.plan(&["js-server"]));
+    assert_eq!(
+        result,
+        Err(Error::Superseded {
+            service: "js-server".to_owned(),
+            desired: "(none)".to_owned()
+        })
+    );
+    assert!(log.contains("farm: converged, desired (none)"), "{log}");
+}
