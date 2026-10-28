@@ -86,3 +86,28 @@ incremental = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+
+# The replay simulations in these crates run in CI test builds, so the crates (not their dependencies) are optimised.
+[profile.dev.package.js-sched]
+opt-level = 2
+
+[profile.dev.package.js-sim]
+opt-level = 2
+
+[profile.dev.package.js-sizing]
+opt-level = 2
+
+[profile.dev.package.js-types]
+opt-level = 2
+
+[profile.test.package.js-sched]
+opt-level = 2
+
+[profile.test.package.js-sim]
+opt-level = 2
+
+[profile.test.package.js-sizing]
+opt-level = 2
+
+[profile.test.package.js-types]
+opt-level = 2
