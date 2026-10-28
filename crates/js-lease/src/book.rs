@@ -26,7 +26,7 @@ pub(crate) enum Step {
     Expire,
     /// Releasing: stop again.
     Retry,
-    /// Pending: observe.
+    /// Pending: observe (a pending whole lease at its deadline too, once).
     Resolve,
 }
 
@@ -66,6 +66,10 @@ pub(crate) struct Record {
     whole: bool,
     /// Set while a whole lease is pending: what its clock starts from when it is ready.
     token: Option<Token>,
+    /// Set (in memory only) once a pending whole lease has been observed at or after its
+    /// prepare deadline and the provider still had no answer. Until then the deadline
+    /// observes the lease instead of expiring it; see [`Record::step`].
+    deadline_observed: bool,
     request_labels: BTreeMap<String, String>,
     validation_run: Option<String>,
     labels: Labels,
@@ -100,6 +104,7 @@ impl Record {
             ends_at: Timestamp::from_millis(stored.ends_at_ms),
             whole: stored.whole,
             token,
+            deadline_observed: false,
             request_labels: stored.labels.clone(),
             validation_run: stored.validation_run.clone(),
             labels,
@@ -168,11 +173,29 @@ impl Record {
         }
     }
 
+    /// Notes an observation that found no answer: at or after the deadline of a pending
+    /// whole lease it is the one the provider is given before the table expires the lease.
+    fn note_unknown_at(&mut self, now: Timestamp) {
+        let pending_whole = self.whole && self.state == LeaseState::Pending;
+        self.deadline_observed |= pending_whole && self.expires_at <= now;
+    }
+
+    /// A pending whole lease's deadline is the provider's prepare deadline too, and the
+    /// provider decides what a missed one means (a failed prepare, which it counts and
+    /// holds against the host). So a pending whole lease that has reached its deadline is
+    /// observed first; only when that observation still has no answer does the next tick
+    /// expire it (the table's own stop, which the provider does not count as a failure).
     fn step(&self, now: Timestamp) -> Step {
         if self.state == LeaseState::Releasing {
             return Step::Retry;
         }
-        if self.expires_at <= now {
+        let unasked = [
+            self.whole,
+            self.state == LeaseState::Pending,
+            !self.deadline_observed,
+        ];
+        let unasked = unasked.into_iter().all(|yes| yes);
+        if self.expires_at <= now && !unasked {
             return Step::Expire;
         }
         if self.state == LeaseState::Pending {
@@ -381,6 +404,7 @@ impl Book {
             ends_at,
             whole,
             token,
+            deadline_observed: false,
             request_labels: request.labels.clone(),
             validation_run: request.validation_run.clone(),
             labels: spec.labels().clone(),
@@ -485,7 +509,11 @@ impl Book {
                 self.leases.remove(id);
                 Seen::Gone
             }
-            Observed::Unknown => Seen::Unsure,
+            Observed::Unknown => {
+                let record = self.leases.get_mut(id);
+                let _ = record.map(|record| record.note_unknown_at(now));
+                Seen::Unsure
+            }
         }
     }
 
