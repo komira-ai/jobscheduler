@@ -11,6 +11,7 @@ mod common;
 mod feed;
 mod frontends;
 mod handover;
+mod hooks;
 mod intake;
 mod outage;
 mod owners;

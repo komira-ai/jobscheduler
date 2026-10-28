@@ -137,6 +137,10 @@ impl Engine {
         // Named before the feed: a report that finishes the operation may drop its callers.
         let name = a.name(&self.view(), operation);
         let recorded_before = self.runs_recorded(operation);
+        // The time is told first, so a hook that reads the adapter's clock sees this
+        // report's, not the previous feed's; the feed tells it again.
+        a.clock(now);
+        a.before_report(&self.view(), worker, &report);
         let event = Event::Report {
             operation,
             lease,
@@ -176,6 +180,7 @@ impl Engine {
                 tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
             }
         }
+        a.after_report(&self.view(), worker, &report, &answers, taken);
         (answers, taken)
     }
 
