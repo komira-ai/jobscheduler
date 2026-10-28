@@ -16,12 +16,15 @@
 --max-requests default=100 required=false
 --max-ttl default=3600s required=false
 --pool-config default=none required=false
+--profile-store-bytes default=268435456 required=false
 --read-timeout default=30s required=false
 --state-file default=none required=true
 --tick default=5s required=false
 --tls-cert default=none required=false
 --tls-key default=none required=false
 --token-file default=none required=true
+--usage-db default=none required=false
+--usage-off default=none required=false values=true|false
 --write-timeout default=10s required=false
 
 == routes ==
