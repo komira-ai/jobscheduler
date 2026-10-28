@@ -68,7 +68,7 @@ fn a_stop_is_honoured_within_one_poll_step() {
     assert_interrupted_and_terminated(&rig, status, &out);
     assert!(rig.sleeps.borrow().is_empty(), "{out}");
     assert_eq!(rig.clock_secs(), 0);
-    let lists_with_one_look = rig.fake.count(Call::List);
+    let lists_with_one_look = rig.fake.count(Call::ListInstances);
 
     // Read 2 is the first iteration's top, which a request that came during the launch
     // reaches before any list: one look fewer than above.
@@ -78,7 +78,7 @@ fn a_stop_is_honoured_within_one_poll_step() {
     let (status, out) = rig.exec(&args);
     assert_interrupted_and_terminated(&rig, status, &out);
     assert!(rig.sleeps.borrow().is_empty(), "{out}");
-    assert_eq!(rig.fake.count(Call::List) + 1, lists_with_one_look, "{out}");
+    assert_eq!(rig.fake.count(Call::ListInstances) + 1, lists_with_one_look, "{out}");
 }
 
 #[test]
@@ -173,7 +173,10 @@ fn the_teardown_command_is_printed_right_after_the_state_file_is_written() {
         .position(|l| *l == line)
         .unwrap_or_else(|| panic!("no teardown line:\n{out}"));
     // Before the launch is announced and before any wait line.
-    let launched = lines.iter().position(|l| l.starts_with("launched:")).unwrap();
+    let launched = lines
+        .iter()
+        .position(|l| l.starts_with("launched:"))
+        .unwrap();
     let waiting = lines.iter().position(|l| l.contains(": status ")).unwrap();
     assert!(at < launched && at < waiting, "{out}");
 }
