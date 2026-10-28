@@ -568,6 +568,7 @@ fn a_cost_above_the_node_is_clamped_to_it() {
             memory_bytes: 32 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
+            retry: false,
             key_hash: 0,
         })
     );
@@ -591,6 +592,7 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
             memory_bytes: 2 * GIB,
             limit_bytes: 4 * GIB,
             cold: false,
+            retry: false,
             key_hash: 0,
         })
     );
@@ -604,6 +606,7 @@ fn a_retry_up_the_ladder_is_charged_at_the_rung() {
             memory_bytes: 16 * GIB,
             limit_bytes: 16 * GIB,
             cold: false,
+            retry: true,
             key_hash: 0,
         })
     );
@@ -684,6 +687,7 @@ fn a_request_without_a_prediction_is_charged_its_cores_and_no_memory() {
             memory_bytes: 0,
             limit_bytes: 16 * GIB,
             cold: false,
+            retry: false,
             key_hash: 0,
         })
     );

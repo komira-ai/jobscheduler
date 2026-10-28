@@ -368,6 +368,7 @@ impl Admission {
             memory_bytes: if retried { memory.max(limit) } else { memory },
             limit_bytes: limit,
             cold,
+            retry: retried,
             key_hash: key_hash(&request.key),
         }
     }
@@ -383,6 +384,7 @@ impl Admission {
                 memory_bytes: r.memory_bytes,
                 limit_bytes: r.memory_bytes,
                 cold: false,
+                retry: false,
                 key_hash: key_hash(&request.key),
             },
             _ => LeaseCost {
@@ -390,6 +392,7 @@ impl Admission {
                 memory_bytes: 0,
                 limit_bytes: r.memory_bytes,
                 cold: false,
+                retry: false,
                 key_hash: key_hash(&request.key),
             },
         }
