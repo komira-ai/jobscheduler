@@ -494,6 +494,7 @@ mod tests {
                 memory_bytes: 1 << 30,
                 limit_bytes: 2 << 30,
                 cold: true,
+                retry: false,
                 key_hash: 7,
             },
         });

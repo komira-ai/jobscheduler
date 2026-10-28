@@ -478,6 +478,7 @@ fn the_grant_record_carries_the_cost() {
             memory_bytes: 2 * GIB,
             limit_bytes: 8 * GIB,
             cold: false,
+            retry: false,
             key_hash: key_hash(&key),
         };
         assert_ne!(want.key_hash, 0);
@@ -594,6 +595,7 @@ fn a_recovered_lease_with_no_cost_is_charged_its_request() {
             memory_bytes: 0,
             limit_bytes: 8 * GIB,
             cold: false,
+            retry: false,
             key_hash: key_hash(&key),
         })
     );
@@ -633,6 +635,21 @@ fn a_lease_recovered_onto_a_registered_worker_is_charged() {
         .collect();
     b.recover(2, OperationId(2), 0, operations);
     assert_eq!(b.load_view(&w("a")).unwrap().predicted_cpu_millis, 1_000);
+}
+
+/// Catches: the retry mark of a cost lost across a restart (a rebuilt scheduler would
+/// hand the scoring a rerun that looks like a first run): the recovered lease keeps the
+/// cost it was granted with, retry included, while cold stays as it was.
+#[test]
+fn a_recovered_lease_keeps_its_retry_mark() {
+    let (a, grants) = placed_with_grants(2);
+    let mut grants = grants;
+    grants[0].cost.retry = true;
+    let b = restarted(&a, &grants, true);
+    assert_eq!(b.lease_cost(grants[0].lease), Some(grants[0].cost));
+    assert!(b.lease_cost(grants[0].lease).unwrap().retry);
+    assert!(!b.lease_cost(grants[0].lease).unwrap().cold);
+    assert!(!b.lease_cost(grants[1].lease).unwrap().retry);
 }
 
 /// A curve source that knows a curve for every key.

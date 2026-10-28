@@ -32,6 +32,7 @@ fn grant() -> LeaseGrant {
             memory_bytes: 2 << 30,
             limit_bytes: 4 << 30,
             cold: true,
+            retry: true,
             key_hash: 0x1234,
         },
     }
