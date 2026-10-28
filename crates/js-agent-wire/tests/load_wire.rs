@@ -242,6 +242,10 @@ fn a_malformed_record_is_dropped_alone() {
             json!(7),
             json!([]),
         ];
+        if key == "covered" {
+            // Any string is a well-formed element at decode; `vet` judges the grammar.
+            bad.retain(|item| !item.is_string());
+        }
         for field in removable {
             let mut cut = good.clone();
             if let Some(object) = cut.as_object_mut() {
