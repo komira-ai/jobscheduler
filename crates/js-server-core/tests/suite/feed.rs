@@ -1,6 +1,6 @@
 //! The feed loop: a record is committed, its rows are written, and only then are its
-//! effects carried out (moved from the farm core's tests of the same rule, with the
-//! store's refusal played by a writer).
+//! effects carried out, with the store's refusal played by a writer. The tests are new,
+//! written against the rules that moved from kbf's farm.
 
 use std::time::Duration;
 
@@ -8,8 +8,8 @@ use crate::common::{
     Call, GIB, Gate, Rig, Trace, at, beat, block_on, calls, close, core, gated, gated_by, lease,
     lines, reported, request, started, submit, submit_request, up, up_after,
 };
-use js_sched::FARM_RERUNS;
 use js_sched::fence::{LEASE_GRACE, START_GRACE};
+use js_sched::{FARM_RERUNS, NOT_STARTED_RERUNS};
 use js_server_core::{Attempt, Config, Core};
 use js_types::sched::{OperationId, Resources};
 
@@ -188,6 +188,23 @@ fn a_run_lost_in_a_proven_restart_past_the_farm_reruns_is_answered_by_the_heartb
         stream = up_after(&core, 10 + round, "node-a", (&new, &old), reported(8));
         beat(&core, 10 + round, ("node-a", stream), 1, &[]);
     }
+    assert_eq!(settled(&core), [admitted.operation]);
+}
+
+/// Catches: a node that drops every `Start` (it stays connected and never lists the lease)
+/// keeping the operation for ever: each lease is given up once its `Start` has been out for
+/// the start grace, and past the budget for leases not started the operation is answered.
+#[test]
+fn a_node_that_drops_every_start_is_given_the_work_until_the_budget_ends() {
+    let core = core();
+    let stream = up(&core, 0, "node-a", "d1");
+    let admitted = submit(&core, 0, 1);
+    let grace = millis(START_GRACE) + 1;
+    let rounds = u64::from(NOT_STARTED_RERUNS) + 1;
+    for round in 1..=rounds {
+        beat(&core, round * grace, ("node-a", stream), round, &[]);
+    }
+    assert_eq!(started(&core).len() as u64, rounds);
     assert_eq!(settled(&core), [admitted.operation]);
 }
 

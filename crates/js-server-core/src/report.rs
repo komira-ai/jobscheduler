@@ -134,6 +134,8 @@ impl Engine {
             lease,
             outcome,
         } = report;
+        // Named before the feed: a report that finishes the operation may drop its callers.
+        let name = a.name(&self.view(), operation);
         let recorded_before = self.runs_recorded(operation);
         let event = Event::Report {
             operation,
@@ -165,7 +167,7 @@ impl Engine {
         if taken == Taken::Held {
             self.owed.insert(lease, worker.clone());
         }
-        let (operation, node) = (a.name(&self.view(), operation), worker);
+        let (operation, node) = (name, worker);
         match outcome {
             Outcome::Completed { .. } => {
                 tracing::info!(%operation, %lease, %node, accepted, "lease finished ok");

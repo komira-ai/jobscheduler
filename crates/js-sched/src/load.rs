@@ -43,11 +43,11 @@ use js_types::sched::{LeaseId, Resources, WorkerId};
 /// memory share and its lease share (its leases of its lease cap, if it reports one) of
 /// what is booked, then how many leases it holds. Under admission by load the figures are
 /// what the load predicate charges the worker before a new lease (measured plus predicted
-/// cost, [`crate::admission`]) instead of what is booked, as exact fractions all the same.
+/// cost, `admission`) instead of what is booked, as exact fractions all the same.
 ///
 /// Both shares count because the node's limits differ in what happens at the end: a node
 /// out of cores runs its actions slowly, a node out of memory kills them. A share is not
-/// capped at 1: admission books no memory ([`crate::scheduler::Worker::has_room`]), so a
+/// capped at 1: admission books no memory (`Worker::has_room`), so a
 /// worker can hold leases whose memory is more than it has, and the worker with more
 /// of it booked is still the one to avoid. (A cap would make every such worker a tie,
 /// exactly when the farm is busy.)
@@ -227,6 +227,8 @@ pub struct ScoreConfig {
 
 /// How key 5, the fit, is computed. Keys 1 to 4 and the tie-breaks are the same in every
 /// shape; only the fit changes, so a harness can run every shape through one code path.
+/// Placement always uses [`FitShape::Squared`]; the other shapes are for comparing
+/// rankers in simulations, which are integration tests and so cannot see `cfg(test)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FitShape {
     /// The weighted sum of `2 * min^2 + b * (max - min)^2` over the lease's `L` minutes.
@@ -258,7 +260,8 @@ impl ScoreConfig {
         })
     }
 
-    /// This config with the fit computed as `fit`.
+    /// This config with the fit computed as `fit`. Placement never calls it: it scores with
+    /// the default, [`FitShape::Squared`].
     #[must_use]
     pub const fn with_fit(mut self, fit: FitShape) -> Self {
         self.fit = fit;

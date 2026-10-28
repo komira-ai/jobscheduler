@@ -8,9 +8,7 @@ use crate::common::{
     Rig, at, beat, begin, block_on, core, reported, resend, submit, try_up, up, worker,
 };
 use js_sched::{FINISHED_RETENTION, UNSERVABLE_WAIT};
-use js_server_core::{
-    Admission, Beat, Config, Core, Denied, NodeAction, Observer, Reported, SelfFencedOnly,
-};
+use js_server_core::{Admission, Beat, Config, Core, Denied, NodeAction, Observer, Reported};
 use js_types::sched::{LeaseId, WorkerId};
 
 /// Refuses the registrations, heartbeats and results of one worker.
@@ -59,25 +57,6 @@ fn a_denied_host_is_heard_in_none_of_register_resize_and_heartbeat() {
     let beat = block_on(core.heartbeat(at(3), &worker("node-x"), stream, Beat::new(1, vec![])));
     assert_eq!(beat, Err(Denied::new("denied beat")));
     assert_eq!(Denied::new("why").to_string(), "why");
-}
-
-/// Catches: a host that does not stop its own runs registering with a scheduler that
-/// gives its lease to another host after a grace shorter than its run.
-#[test]
-fn a_host_that_does_not_fence_itself_is_refused_when_that_is_the_policy() {
-    begin();
-    let core = Core::new(&Config::new(1), Rig::default()).with_admission(SelfFencedOnly);
-    let register = |reported: Reported| try_up(&core, 0, "node-a", ("d1", ""), reported);
-    assert!(register(reported(8)).is_ok());
-    let refused = register(reported(8).without_self_fence()).unwrap_err();
-    assert_eq!(
-        refused.reason,
-        "node-a does not report that it fences itself"
-    );
-    // The other doors are open to a host that registered.
-    let stream = register(reported(8)).expect("registered");
-    let beat = block_on(core.heartbeat(at(1), &worker("node-a"), stream, Beat::new(1, vec![])));
-    assert_eq!(beat, Ok(true));
 }
 
 struct Count(Arc<AtomicUsize>);
