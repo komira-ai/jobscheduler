@@ -140,11 +140,13 @@ fn prune_reports_a_failed_store_and_a_run_is_taken() {
     sink.flush(101).unwrap();
     assert_eq!(sink.prune(101), Ok(()));
     assert_eq!(sink.range(&host(), 0, 200).len(), 1);
-    sink.prune(100 + js_usage::NODE_RETENTION_MINUTES + 120)
-        .unwrap();
-    assert!(sink.range(&host(), 0, 200).is_empty());
+    let late = 100 + js_usage::NODE_RETENTION_MINUTES + 120;
     fail.store(true, Ordering::SeqCst);
-    assert!(sink.prune(5).is_err());
+    assert!(sink.prune(late).is_err());
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(sink.range(&host(), 0, 200).len(), 1);
+    sink.prune(late).unwrap();
+    assert!(sink.range(&host(), 0, 200).is_empty());
     let end = RunEnd {
         key: crate::usage::ProfileKey::parse("k").unwrap(),
         lease: LeaseId::new(1, 1),
