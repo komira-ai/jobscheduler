@@ -1,13 +1,15 @@
 //! The scheduler's rows in the state store: their keys, the blocks of ids a frontend
 //! numbers with, the epoch it serves under, which frontend owns a daemon's node, a daemon's
 //! session, how an operator placed a node, and the unfinished operations (their `op/`,
-//! `queue/`, `inflight/` and `opkey/` rows, and the load of them at a start), over
-//! [`js_state::Store`] and nothing else.
+//! `queue/`, `inflight/` and `opkey/` rows, and the load of them at a start), how those
+//! operations move on (the grant of a lease, a result, a refusal, and the `done/` row an
+//! operation leaves), over [`js_state::Store`] and nothing else.
 //!
 //! The keys ([`keys`]) and the bytes of the `meta/`, `owner/`, `cordon/`, `queue/`,
-//! `inflight/` and `opkey/` rows are those of the farm server's state store, byte for byte
-//! (`tests/golden/`): a store written by either reads under the other, and rows only ever
-//! gain new kinds, never new fields.
+//! `lease-by-op/`, `inflight/` and `opkey/` rows are those of the farm server's state store,
+//! byte for byte (`tests/golden/`): a store written by either reads under the other, and
+//! rows only ever gain new kinds, never new fields. The value of a `done/` row is the
+//! embedding server's, and this crate keeps it as it is.
 //!
 //! [`Rows`] is a frontend's handle on a store. It takes time from the store's own clock and
 //! does no I/O but through the store, so the crate is pure in the sense of `clippy.toml`.
@@ -44,6 +46,8 @@ mod epoch;
 mod error;
 mod ext;
 mod fate;
+mod finish;
+mod grant;
 mod inflight;
 pub mod keys;
 mod leases;
@@ -61,6 +65,7 @@ pub use cordon::StoredCordon;
 pub use epoch::{EpochBump, EpochPolicy};
 pub use error::StateError;
 pub use ext::Ext;
+pub use finish::{DONE_FLOOR, Ending, Progress};
 pub use load::{Stored, StoredOperation};
 pub use owner::{Arrival, OWNER_CACHE_TTL, Owner};
 pub use session::SESSION_RENEWAL;
