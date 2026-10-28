@@ -10,6 +10,6 @@
 mod adapter_tests;
 mod engine;
 mod fixture_tests;
-mod truth_tests;
 #[path = "../load_rig/mod.rs"]
 mod load_rig;
+mod truth_tests;
