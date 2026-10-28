@@ -243,7 +243,14 @@ impl Engine {
     fn take_stored(&mut self, a: &mut dyn Adapter, op: StoredOperation) -> Recovered {
         let waiter = WaiterId(self.next_waiter);
         self.next_waiter += 1;
-        a.adopted(op.operation, waiter, op.parcel.as_deref());
+        a.adopted(
+            op.operation,
+            waiter,
+            op.parcel.as_deref(),
+            &op.request,
+            op.lease.as_ref(),
+            op.size_key,
+        );
         if let Some(grant) = &op.lease {
             // A recovered operation that holds a lease has been started: if it is queued
             // again, its streams read `WaitingKept`, and its node's `Result` names a lease

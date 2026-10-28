@@ -7,8 +7,8 @@ use js_store::{EpochBump, EpochPolicy, Progress};
 use js_types::sched::{LeaseId, OperationId, Outcome, ResultRef, WaiterId};
 
 use crate::common::{
-    Call, Rig, at, beat, block_on, calls, core, lease, reported, request, shown_to, started,
-    submit, submit_request, up, up_after, worker,
+    Adoption, Call, Rig, at, beat, block_on, calls, core, lease, reported, request, shown_to,
+    started, submit, submit_request, up, up_after, worker,
 };
 use crate::stored::Setup;
 
@@ -81,6 +81,51 @@ fn a_start_takes_up_the_operations_the_store_holds_and_numbers_past_them() {
     let admitted = submit(&second, 6_001, 3);
     assert_eq!(admitted.operation, OperationId(1024));
     assert_eq!(started(&second), [lease(1, 1024), lease(1, 1025)]);
+}
+
+/// Asserts that `adopted` is told, for a queued and for a leased operation of a store, the
+/// request, the lease and the size key of that operation's own rows (read here by a handle of
+/// another frontend): the queued one has no lease, the leased one the grant its row holds
+/// (told when its node says `Hello`), and neither has a size key, because a core over a store
+/// leaves the learned sizes to its adapter. Catches: a request or a grant swapped between two
+/// operations, a lease told for the queued one, a grant with another cost than the row's, and
+/// a core that tells the adapter nothing of the operation so it must read the store.
+#[test]
+fn adopted_is_told_the_request_the_lease_and_the_size_key_of_each_stored_operation() {
+    let setup = Setup::new();
+    let first = setup.core(1);
+    up_after(&first, 0, "node-a", ("d1", ""), reported(1));
+    let leased = submit(&first, 1, 1);
+    let queued = submit(&first, 2, 2);
+    drop(first);
+    let rows = setup.rows(9);
+    let row = |operation| {
+        rows.stored_operation(operation)
+            .expect("read")
+            .expect("held")
+    };
+    let (leased_row, queued_row) = (row(leased.operation), row(queued.operation));
+    assert!(leased_row.lease.is_some() && queued_row.lease.is_none());
+    assert_ne!(leased_row.request, queued_row.request);
+
+    let second = setup.core_with(&Config::new(1), Rig::default(), 5_000);
+    let told = |core: &Core<Rig>| core.with(|_, rig| rig.adoptions.clone());
+    let queued_told = Adoption {
+        operation: queued.operation,
+        request: queued_row.request,
+        lease: None,
+        size_key: None,
+    };
+    assert_eq!(told(&second), std::slice::from_ref(&queued_told));
+
+    up_after(&second, 5_000, "node-a", ("d1", ""), reported(1));
+    let leased_told = Adoption {
+        operation: leased.operation,
+        request: leased_row.request,
+        lease: leased_row.lease,
+        size_key: None,
+    };
+    assert_eq!(told(&second), [queued_told, leased_told]);
 }
 
 /// Asserts that a result for a lease an earlier process granted is taken once the node

@@ -91,6 +91,15 @@ pub enum Hook {
     StreamOpen(WorkerId),
 }
 
+/// What `adopted` was told of an operation besides its caller and parcel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Adoption {
+    pub operation: OperationId,
+    pub request: Request,
+    pub lease: Option<LeaseGrant>,
+    pub size_key: Option<u64>,
+}
+
 /// An adapter that keeps what its hooks were told.
 #[derive(Default)]
 pub struct Rig {
@@ -98,6 +107,8 @@ pub struct Rig {
     pub hooks: Mutex<Vec<Hook>>,
     pub trace: Trace,
     pub calls: Vec<Call>,
+    /// What each `adopted` was told of its operation, in order.
+    pub adoptions: Vec<Adoption>,
     /// The streams whose connection is open.
     pub open: BTreeSet<(WorkerId, Stream)>,
     /// The leases a report was parked for.
@@ -287,7 +298,21 @@ impl Adapter for Rig {
         (!self.no_ending).then_some(ending)
     }
 
-    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>) {
+    fn adopted(
+        &mut self,
+        operation: OperationId,
+        waiter: WaiterId,
+        parcel: Option<&[u8]>,
+        request: &Request,
+        lease: Option<&LeaseGrant>,
+        size_key: Option<u64>,
+    ) {
+        self.adoptions.push(Adoption {
+            operation,
+            request: request.clone(),
+            lease: lease.cloned(),
+            size_key,
+        });
         let parcel = parcel.map(<[u8]>::to_vec);
         self.calls.push(Call::Adopted(operation, waiter, parcel));
     }
