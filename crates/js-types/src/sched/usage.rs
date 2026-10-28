@@ -15,6 +15,26 @@ pub const STALE_WINDOWS: u64 = 3;
 /// The most points a [`Curve`] holds: minutes 0 to 63 since the lease's start.
 pub const MAX_CURVE_POINTS: usize = 64;
 
+/// What admission charged one lease when it placed it: fixed then, kept until the lease's
+/// result, and written into the grant record so that a scheduler rebuilt from the log or
+/// the state store holds the same figure and never asks the estimator again.
+///
+/// The three memory-like figures are kept apart on purpose: the predicted peak is what
+/// admission sums, the limit is the memory the lease first runs under (the rung of the
+/// memory ladder), and neither is the other.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LeaseCost {
+    /// Predicted cores, in millicores (`p`).
+    pub cpu_millis: u64,
+    /// Predicted memory peak, in bytes (`m`); 0 when nothing predicted it.
+    pub memory_bytes: u64,
+    /// The memory limit the lease runs under, in bytes: the rung it was granted at.
+    pub limit_bytes: u64,
+    /// The key had no usable estimate: the cold costs were charged, and the lease counted
+    /// against the worker's cold cap.
+    pub cold: bool,
+}
+
 /// One reading of the node's action cgroup, taken by the agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodeLoad {
@@ -372,6 +392,34 @@ mod tests {
         };
         assert!(source.curve(&key("hit")).is_some());
         assert!(source.curve(&key("miss")).is_none());
+    }
+
+    #[test]
+    fn a_lease_cost_compares_by_every_field() {
+        let c = LeaseCost {
+            cpu_millis: 1,
+            memory_bytes: 2,
+            limit_bytes: 3,
+            cold: false,
+        };
+        assert_eq!(c, LeaseCost { ..c });
+        assert_ne!(c, LeaseCost { cpu_millis: 9, ..c });
+        assert_ne!(
+            c,
+            LeaseCost {
+                memory_bytes: 9,
+                ..c
+            }
+        );
+        assert_ne!(
+            c,
+            LeaseCost {
+                limit_bytes: 9,
+                ..c
+            }
+        );
+        assert_ne!(c, LeaseCost { cold: true, ..c });
+        assert_eq!(LeaseCost::default().cpu_millis, 0);
     }
 
     #[test]

@@ -316,6 +316,7 @@ pub fn effects(effects: &[Effect]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use js_types::sched::usage::LeaseCost;
     use js_types::sched::{LeaseGrant, RefusalRecord, ResultRecord};
 
     use super::*;
@@ -487,6 +488,13 @@ mod tests {
             lease: lease_id(),
             operation: OperationId(3),
             worker: w("a"),
+            // The charge is data for the state store, not part of the trace text.
+            cost: LeaseCost {
+                cpu_millis: 750,
+                memory_bytes: 1 << 30,
+                limit_bytes: 2 << 30,
+                cold: true,
+            },
         });
         let result = ControlRecord::Result(ResultRecord {
             lease: lease_id(),

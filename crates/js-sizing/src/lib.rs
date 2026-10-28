@@ -43,7 +43,10 @@
 //!   strictly below it, and an estimate (with the client's hint) that would reach it is
 //!   [`Fallback::OverCap`]: the caller books cold and the ladder and digest floors
 //!   decide.
-//! * **CPU.** `round_up_250m(P90(cpu_usage / wall))`, clamped to `[250 m, node cpus]`
+//! * **CPU.** `round_up_250m(P90(cpu_usage / wall))`, where P90 is the nearest rank over
+//!   the samples that exist (the `ceil(0.9 n)`-th smallest of `n`, so the largest for one
+//!   to nine samples; the order of the ring does not matter to it), clamped to
+//!   `[250 m, node cpus]`
 //!   (a 0.3-core action costs 500 m); [`COLD_CPU_MILLIS`] with no CPU sample. A sample taken at or
 //!   above [`CPU_PRESSURE_MAX_PERMILLE`] node pressure, or with no pressure reading, is
 //!   kept only when it exceeds the key's current estimate ([`COLD_CPU_MILLIS`] for a key

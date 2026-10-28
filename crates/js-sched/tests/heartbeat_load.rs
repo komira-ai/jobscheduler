@@ -1,5 +1,6 @@
-//! A heartbeat's `load` is accepted and not yet read: the scheduler answers a heartbeat
-//! with a load exactly as it answers the same heartbeat without one.
+//! A scheduler that was not given a load configuration (the booked rule) accepts a
+//! heartbeat's `load` and does not act on it: it answers a heartbeat with a load exactly
+//! as it answers the same heartbeat without one.
 
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, Event, Input, Scheduler};
