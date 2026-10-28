@@ -83,7 +83,7 @@ impl Collector {
     /// operator should read: the reason the node could not be read, once, and how many
     /// minutes were dropped since the last run, when any were.
     pub fn run(&mut self, running: &[RunningLease]) -> Vec<String> {
-        let mut lines = self.sample(running);
+        let lines = self.sample(running);
         let _ = self.drops();
         lines
     }
