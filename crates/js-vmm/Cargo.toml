@@ -1,0 +1,42 @@
+[package]
+name = "js-vmm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The VM helper for macOS VM leases. Today it holds the feasibility probes (`probe`,
+# `probe-bench`) and the base-image builder (`image base`). It is the one binary that
+# needs the virtualization entitlement; every Virtualization.framework call lives in
+# `src/vz/`, macOS only. Its signing test stays in kbf until the signing tooling moves.
+[[bin]]
+name = "js-vmm"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+base64.workspace = true
+hex.workspace = true
+js-guest = { path = "../js-guest" }
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+dispatch2.workspace = true
+objc2.workspace = true
+plist.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSURL", "NSError", "NSArray", "NSData", "NSDictionary", "NSFileHandle", "NSValue", "NSObject", "NSEnumerator", "NSRunLoop", "NSDate", "NSFileManager", "NSProcessInfo"] }
+objc2-virtualization.workspace = true
+
+[dev-dependencies]
+js-testkit = { path = "../js-testkit" }
+serde_json.workspace = true
+
+[lints]
+workspace = true
