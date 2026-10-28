@@ -18,8 +18,13 @@ use js_state::Versioned;
 use js_types::sched::{LeaseGrant, LeaseId, OperationId, WorkerId};
 
 use crate::load::StoredOperation;
-use crate::owner::pair_of;
+use crate::owner::{pair_of, pair_row};
 use crate::{Rows, StateError, keys};
+
+/// The value of the `lease-by-op/` row of `lease`.
+pub(crate) fn lease_by_op_row(lease: LeaseId) -> Vec<u8> {
+    pair_row(lease.term, lease.seq)
+}
 
 /// The lease a `lease-by-op/` row names.
 fn indexed_lease(key: &str, row: &Versioned) -> Result<LeaseId, StateError> {
