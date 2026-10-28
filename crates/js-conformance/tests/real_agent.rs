@@ -20,7 +20,7 @@ use js_agent_wire::{
     Ack, Command, Heartbeat, HeartbeatReply, Isolation, JobSpec, Limits, Outcome, Phase,
 };
 use js_lease::{ManualClock, Timestamp};
-use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
+use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
@@ -43,8 +43,12 @@ fn shape() -> Shape {
 }
 
 fn registry() -> Registry {
+    registry_of(class())
+}
+
+fn registry_of(class: ResourceClass) -> Registry {
     let name = ProviderId::new("pool").unwrap();
-    let config = PoolConfig::new(name, class(), shape(), 2);
+    let config = PoolConfig::new(name, class, shape(), 2);
     Registry::new(config, ManualClock::new(Timestamp::from_millis(1_000_000)))
 }
 
@@ -167,6 +171,10 @@ struct Agent {
     fake: Fake,
     epoch: u64,
     session: String,
+    /// The lease the last reply told the agent to prepare for; the next heartbeat reports
+    /// it ready (the real agent has no preparation step yet, so a prepared host is one
+    /// that has seen the word).
+    prepared: Option<String>,
 }
 
 fn credential() -> Credential {
@@ -211,6 +219,7 @@ impl Agent {
             fake,
             epoch: 0,
             session: String::new(),
+            prepared: None,
         };
         agent.hello(registry);
         agent
@@ -236,8 +245,11 @@ impl Agent {
             held: self.life.held(),
             results: self.life.results(),
             taint: None,
+            exclusive_ready: self.prepared.take(),
+            exclusive_refused: None,
         };
         let reply = registry.heartbeat(&message, &credential()).unwrap();
+        self.prepared = reply.exclusive.clone();
         self.life.apply(&reply);
         self.life.step();
         reply
@@ -402,4 +414,36 @@ fn a_lease_end_stops_the_run_then_the_host_is_quiet() {
         StartAck::Started { .. }
     ));
     assert_eq!(agent.fake.alive(), 0);
+}
+
+/// Asserts the exclusive gate against the real agent. A whole-node lease is answered
+/// Unknown and reads Unknown while pending; the first heartbeat reply names it in
+/// `exclusive`, and a run queued then is refused as not ready and sent to nobody; the
+/// agent's next heartbeat reports it ready, the lease reads Present, and the same run
+/// is queued, started and acknowledged as for any lease. It catches a start the
+/// registry answers `Started` before the host is prepared, a reply that does not tell
+/// the agent what to prepare for, and a ready report the registry does not read.
+#[test]
+fn a_whole_node_lease_is_usable_after_the_agent_reports_it_ready() {
+    let registry = registry_of(ResourceClass::whole_node());
+    let mut agent = Agent::join(&registry, "whole");
+    let whole = ResourceClass::whole_node();
+    let request = Request {
+        class: whole.id().clone(),
+        ..start_spec(1).request().clone()
+    };
+    let lease = LeaseId::new(1, 1);
+    let mut provider = registry.provider();
+    let spec = StartSpec::new(lease, request, &[whole]).unwrap();
+    assert!(matches!(provider.start(spec), StartAck::Unknown));
+    assert_eq!(provider.observe(&lease), Observed::Unknown);
+
+    let told = agent.beat(&registry);
+    assert_eq!(told.exclusive, Some(lease.to_string()));
+    assert!(registry.queue_run(&host(), &lease, job("r1")).is_err());
+    agent.beat(&registry);
+    assert!(matches!(provider.observe(&lease), Observed::Present { .. }));
+
+    registry.queue_run(&host(), &lease, job("r1")).unwrap();
+    assert_eq!(words(&agent.beat(&registry)), ["start r1"]);
 }

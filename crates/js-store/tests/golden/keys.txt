@@ -1,0 +1,63 @@
+# The keys of the scheduler's rows: one line for each, the name of the key function and the
+# key it builds from the input in tests/keys.rs.
+#
+# The first section holds, unchanged, the keys of the farm server's golden file of scheduler
+# rows, for the same operations, leases, nodes and work. The second holds inputs that file
+# leaves out (the extremes of an id, a class with a `/` or a character outside ASCII, an
+# empty class), with the key the farm server's key functions give them. A change to this file
+# needs a reason: a store written by an earlier release holds these rows under these keys,
+# and the release after this one must find them.
+#
+# Prefixes of the kinds of row
+prefix OPERATION op/
+prefix QUEUE queue/
+prefix LEASE lease/
+prefix LEASE_BY_OP lease-by-op/
+prefix SESSION session/
+prefix OWNER owner/
+prefix CORDON cordon/
+prefix DONE done/
+prefix LOSS loss/
+prefix FATE fate/
+prefix FLOOR floor/
+prefix KEY_FLOOR keyfloor/
+prefix OPKEY opkey/
+prefix INFLIGHT inflight/
+prefix EPOCH meta/epoch
+prefix ALIVE meta/alive
+prefix NEXT_OP meta/next_op
+prefix NEXT_SEQ meta/next_seq
+#
+# The keys of the farm server's golden file
+operation op/0000000000000004
+operation op/0000000000000008
+queue queue/0000000000000004
+lease lease/0000000000000005.0000000000000004
+lease_by_op lease-by-op/0000000000000008
+session session/node-a
+owner owner/node-a
+cordon cordon/node-b
+cordon cordon/node-c
+done done/0000000000000005
+done done/0000000000000006
+done done/0000000000000007
+loss loss/0000000000000004
+fate fate/0000000000000004
+opkey opkey/0000000000000004
+opkey opkey/0000000000000008
+floor floor/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1
+key_floor keyfloor/0000000000000007
+inflight inflight/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1
+inflight inflight/6d61696e/0909090909090909090909090909090909090909090909090909090909090909/9
+#
+# Inputs that file leaves out
+operation op/0000000000000000
+operation op/ffffffffffffffff
+lease lease/ffffffffffffffff.0000000000000001
+key_floor keyfloor/ffffffffffffffff
+session session/a/b
+floor floor/612f62/x/1
+floor floor/c3a9/x/1
+floor floor//x/1
+floor floor/010f/x/1
+inflight inflight/612f62/x/1

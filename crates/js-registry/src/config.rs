@@ -1,7 +1,9 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
-use js_types::{ProviderId, ResourceClass, Shape};
+use js_types::{Admission, ProviderId, ResourceClass, Shape};
+
+use crate::WholeNodeConfig;
 
 /// How long a lost host that holds no booking is kept, unless the operator says
 /// otherwise: one day.
@@ -18,6 +20,22 @@ pub enum ConfigError {
     /// [`MAX_LOST_RETENTION_MS`].
     #[error("the lost-host retention must be between one minute and thirty days")]
     LostRetention,
+    /// The pool's class is not a whole-node class or a mixed one, so whole-node
+    /// settings mean nothing on it.
+    #[error("whole-node settings need a class that offers the whole-node lease")]
+    WholeNodeClass,
+    /// A setting that is a maximum, a count or a time is zero where zero is meaningless.
+    #[error("{0} must be at least 1")]
+    WholeZero(&'static str),
+    /// A dedicated pool has no ordinary work to keep hosts for.
+    #[error("keep_for_ordinary is for mixed pools; a dedicated pool keeps none")]
+    DedicatedKeep,
+    /// A mixed pool whose whole-node hosts and ordinary floor do not fit its size.
+    #[error("max_whole_node plus keep_for_ordinary must not exceed max_machines")]
+    WholeCeiling,
+    /// A dedicated pool that allows more whole hosts than it has machines.
+    #[error("max_whole_node must not exceed max_machines")]
+    WholeAboveMachines,
 }
 
 /// What an operator decides about a pool of self-registering hosts.
@@ -30,6 +48,7 @@ pub struct PoolConfig {
     heartbeat_interval_ms: u64,
     grace_ms: u64,
     lost_retention_ms: u64,
+    whole_node: Option<WholeNodeConfig>,
 }
 
 impl PoolConfig {
@@ -50,6 +69,7 @@ impl PoolConfig {
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             grace_ms: DEFAULT_GRACE_MS,
             lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
+            whole_node: None,
         }
     }
 
@@ -91,6 +111,46 @@ impl PoolConfig {
             }
             false => Err(ConfigError::LostRetention),
         }
+    }
+
+    /// The same pool with the whole-node settings `whole`, checked against the pool: its
+    /// class must be `Whole` (a dedicated pool) or `Book` (a mixed one); every maximum,
+    /// count and time except `drain_after_ms` is at least 1; a dedicated pool keeps no
+    /// host for ordinary work and has `max_whole_node <= max_machines`; a mixed pool has
+    /// `max_whole_node + keep_for_ordinary <= max_machines`.
+    pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Result<Self, ConfigError> {
+        let mixed = match self.class.admission() {
+            Admission::Whole => false,
+            Admission::Book(_) => true,
+            Admission::BookAll => return Err(ConfigError::WholeNodeClass),
+        };
+        if let Some(key) = whole.zero_key() {
+            return Err(ConfigError::WholeZero(key));
+        }
+        match (mixed, whole.keep_for_ordinary) {
+            (false, 1..) => return Err(ConfigError::DedicatedKeep),
+            (false, _) if whole.max_whole_node > self.max_machines => {
+                return Err(ConfigError::WholeAboveMachines);
+            }
+            (true, _) if whole.max_whole_node + whole.keep_for_ordinary > self.max_machines => {
+                return Err(ConfigError::WholeCeiling);
+            }
+            _ => {}
+        }
+        self.whole_node = Some(whole);
+        Ok(self)
+    }
+
+    /// The whole-node settings, when the pool has them.
+    pub fn whole_node(&self) -> Option<&WholeNodeConfig> {
+        self.whole_node.as_ref()
+    }
+
+    /// How many hosts of a dedicated pool can never be whole because `max_whole_node`
+    /// is below `max_machines`; they serve nothing. Zero for a pool without settings.
+    pub fn whole_surplus(&self) -> usize {
+        let whole = self.whole_node.as_ref();
+        whole.map_or(0, |w| self.max_machines.saturating_sub(w.max_whole_node))
     }
 
     pub(crate) fn name(&self) -> &ProviderId {

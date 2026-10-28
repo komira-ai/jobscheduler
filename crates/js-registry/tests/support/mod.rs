@@ -1,6 +1,8 @@
 //! Fixtures the registry tests share.
 #![allow(dead_code)]
 
+pub mod world;
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -143,6 +145,8 @@ pub fn heartbeat(host: &str, epoch: u64) -> Heartbeat {
         held: Vec::new(),
         results: Vec::new(),
         taint: None,
+        exclusive_ready: None,
+        exclusive_refused: None,
     }
 }
 

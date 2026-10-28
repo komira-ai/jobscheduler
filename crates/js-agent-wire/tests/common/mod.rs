@@ -100,6 +100,8 @@ pub fn heartbeat() -> Heartbeat {
             run_id: Some("run-1".into()),
             check: Some("new_mount".into()),
         }),
+        exclusive_ready: None,
+        exclusive_refused: None,
     }
 }
 
