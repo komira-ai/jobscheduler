@@ -3,10 +3,14 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, LoadConfig, Request, UNSERVABLE_WAIT};
+use js_sched::{
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Request,
+    UNSERVABLE_WAIT,
+};
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
+use js_whole::WholeNodeConfig;
 
 use crate::adapter::{Adapter, Delivery, View};
 use crate::admission::{Admission, AllowAll, Denied};
@@ -36,6 +40,17 @@ pub struct Config {
     /// How long a lease whose node has no session row anywhere is left before the intake
     /// poll requeues it ([`Core::intake`]).
     pub orphan_wait: Duration,
+    /// The rungs an action's memory booking climbs after it passes its own memory limit;
+    /// `None` is [`MemoryLadder::default`].
+    pub memory_ladder: Option<MemoryLadder>,
+    /// The most memory floors the scheduler keeps; `None` is [`js_sched::MEMORY_FLOORS`].
+    pub memory_floors: Option<usize>,
+    /// How many times an operation's lease may be lost before the operation is refused
+    /// instead of run again (the loss that reaches this count refuses it).
+    pub loss_requeues: u32,
+    /// How the scheduler holds and drains workers for whole-machine requests; `None` holds
+    /// a worker at once, with no drain wait, deadline or give-up.
+    pub whole_node: Option<WholeNodeConfig>,
 }
 
 impl Config {
@@ -48,7 +63,43 @@ impl Config {
             finished_retention: FINISHED_RETENTION,
             load: None,
             orphan_wait: ORPHAN_WAIT,
+            memory_ladder: None,
+            memory_floors: None,
+            loss_requeues: LOSS_REQUEUES,
+            whole_node: None,
         }
+    }
+
+    /// This configuration, climbing `ladder` after an action passes its own memory limit
+    /// instead of [`MemoryLadder::default`].
+    #[must_use]
+    pub fn with_memory_ladder(mut self, ladder: MemoryLadder) -> Self {
+        self.memory_ladder = Some(ladder);
+        self
+    }
+
+    /// This configuration, keeping at most `bound` memory floors instead of
+    /// [`js_sched::MEMORY_FLOORS`]; past that, the one raised longest ago is forgotten first.
+    #[must_use]
+    pub const fn with_memory_floors(mut self, bound: usize) -> Self {
+        self.memory_floors = Some(bound);
+        self
+    }
+
+    /// This configuration, refusing an operation whose lease has been lost `count` times
+    /// instead of [`LOSS_REQUEUES`].
+    #[must_use]
+    pub const fn with_loss_requeues(mut self, count: u32) -> Self {
+        self.loss_requeues = count;
+        self
+    }
+
+    /// This configuration, holding and draining workers for whole-machine requests as
+    /// `whole` says ([`Scheduler::with_whole_node`](js_sched::Scheduler::with_whole_node)).
+    #[must_use]
+    pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Self {
+        self.whole_node = Some(whole);
+        self
     }
 
     /// This configuration, refusing unservable work after `wait`.
