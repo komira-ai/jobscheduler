@@ -8,7 +8,9 @@ use crate::common::{
     submit_request, up, worker,
 };
 use js_sched::Cordon;
-use js_server_core::{Admitted, Config, Core, Fenced, NodeAction, Stage, UnknownNode};
+use js_server_core::{
+    Admitted, Config, Core, NodeAction, NotQueued, PlaceError, Stage, UnknownNode,
+};
 use js_types::sched::{OperationId, Resources};
 
 fn shown(core: &Core<Rig>) -> Vec<Stage> {
@@ -117,7 +119,7 @@ fn an_action_names_a_registered_node_and_a_drain_pauses_at_its_deadline() {
     let core = core();
     assert_eq!(
         core.place(at(0), &worker("node-x"), NodeAction::Cordon),
-        Err(UnknownNode("node-x".to_owned()))
+        Err(PlaceError::Unknown(UnknownNode("node-x".to_owned())))
     );
     let stream = up(&core, 0, "node-a", "d1");
     submit(&core, 1, 1);
@@ -144,8 +146,8 @@ fn a_fenced_core_takes_nothing_until_it_is_resumed() {
     let stream = up(&core, 0, "node-a", "d1");
     submit(&core, 1, 1);
     core.fence();
-    let refused: Result<Admitted, Fenced> = submit_request(&core, 2, request(2));
-    assert_eq!(refused, Err(Fenced));
+    let refused: Result<Admitted, NotQueued> = submit_request(&core, 2, request(2));
+    assert_eq!(refused, Err(NotQueued::Fenced));
     assert_eq!(
         refused.unwrap_err().to_string(),
         "this frontend is handing its work to its successor"

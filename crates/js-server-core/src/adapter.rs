@@ -16,9 +16,13 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use js_sched::{DaemonInstance, NodePhase, Requeue, Scheduler};
-use js_types::sched::{Answer, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WorkerId};
+use js_store::Ending;
+use js_types::sched::{
+    Answer, Effect, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId, WorkerId,
+};
 
 use crate::host::Stream;
 
@@ -139,4 +143,20 @@ pub trait Adapter: Send {
     /// Keeps what is kept for the reports whose lease `waits` says still wait for their
     /// answer to be written.
     fn retain_parcels(&mut self, waits: &dyn Fn(LeaseId) -> bool);
+
+    /// How the operation `effect` finishes ended, as its `done/` row keeps it for at least
+    /// `retention` (the finished retention): what its callers are told, in the adapter's own
+    /// bytes. `None` for an effect that finishes nothing, or one the adapter cannot say how
+    /// it ended: the write is then refused as stale, and nothing is carried out for it.
+    fn ending(&self, effect: &Effect, retention: Duration) -> Option<Ending>;
+
+    /// The operation `operation`, which the state store holds, was taken up for the caller
+    /// `waiter` the core numbered, who no client waits on: a request for the same work
+    /// joins it. `parcel` is what the process that queued it kept with it
+    /// ([`Core::submit`](crate::Core::submit)), if it kept any.
+    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>);
+
+    /// The finish of `operation` was not written, because the state store holds another
+    /// writer's: its callers `waiters` are answered from the store, not by this core.
+    fn followed(&mut self, operation: OperationId, waiters: &[WaiterId]);
 }
