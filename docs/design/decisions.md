@@ -273,24 +273,29 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   back first. Options: (a) order the whole list by price (rejected: the order is the operator's statement, and the market would reorder
   own hardware behind a cloud); (b) one pool per cloud and a consumer that chooses (rejected: every consumer would rebuild the
   fall-through); (c) the tier. Recommend (c).
-- **D62. At its machine cap with a growing queue, an elastic pool terminates its smallest instance and launches the biggest type it can
-  get. Settled by the project owner; the details are chosen here.** The first request sizes the first instance (the smallest option that
+- **D62. At its machine cap with a growing queue, an elastic pool launches the biggest type it can get and retires its smallest instance.
+  Settled by the project owner; the details are chosen here.** The first request sizes the first instance (the smallest option that
   holds it) and more demand adds instances up to `max_machines` (5.8, 5.11). Only when the pool has been at the cap, with queued demand
-  that has not eased, at every sample of one observation window (`swap_window`, default 10 minutes), the scaler picks the smallest elastic
-  machine and the biggest option the provider can get, launches it, terminates the victim once the launch is accepted, then waits one
-  window and repeats if the queue has not eased. Overshoot is accepted. There is no consolidation logic and no drain at the cap: the earlier
-  draft (a drain with headroom for one extra host, reserved or over the cap, and open consolidation below the cap) is replaced, because jobs
-  are retryable and the drain needed bounds for long jobs and a taint precedence rule. Launch before kill, so a refused launch loses no
-  machine; the count may be `max_machines + 1` between the accepted launch and the victim's read-back Absent. Text in
-  [hosts.md](hosts.md), section 11.
-- **D63. "Kill" is terminate now and requeue; an eviction charges no budget.** The victim is recorded tainted `evict`, terminated, and
-  read back; its work goes through the lost-host path of 5.6 (leases given up and the consumer told, scheduler-placed runs requeued as a new
-  attempt). The attempt ends `evicted` and counts against no budget: not the platform-fault budget, not the loss count that refuses a
-  poison operation, not a task failure. Options: (a) charge it as a platform fault or a loss (rejected: it is the scheduler's choice, and a
-  busy pool would exhaust a job's retries for nothing); (b) charge nothing (adopted), with `max_evictions` (default 3) per request, after
-  which its host is passed over as a victim, so one request cannot be hit for ever. A terminate that reads back Unknown frees nothing (5.6).
-- **D64. What is never the victim, and the catalog.** Never chosen: a registered `default` host, a host with a whole-node lease or a
-  reservation (the next smallest is taken), a host with a `reclaim` notice, a host holding a request evicted `max_evictions` times, and a
+  that has not eased, at every sample of one observation window (`swap_window`, default 10 minutes), the scaler picks a victim and the
+  biggest option the provider can get, launches it, drains the victim once the launch is accepted (D63), then waits one window, counted
+  from when the new machine is up, and repeats if the queue has not eased. No second swap starts while a victim has not read back Absent.
+  Overshoot is accepted. There is no consolidation logic at the cap: the earlier draft (a drain with headroom for one extra host and open
+  consolidation below the cap) is replaced. **Launch before drain is decided (owner's confirmation):** a refused launch loses no machine;
+  the count may be `max_machines + 1` between the accepted launch and the victim's read-back Absent. Text in [hosts.md](hosts.md), section 11.
+- **D63. Drain before terminate; an eviction charges no budget and fails nothing. Decided by the project owner.** The victim is recorded
+  tainted `evict` (no new work) and its running jobs finish; it is terminated when it empties or at the end of the drain grace
+  (`swap_drain_grace`, default 30 minutes, a pool key, never an environment variable), whichever is first. Only jobs still running at the
+  end of the grace go through the lost-host path of 5.6 (leases given up and the consumer told, scheduler-placed runs requeued as a new
+  attempt); they are never reported failed. The attempt ends `evicted` and counts against no budget: not the platform-fault budget, not
+  the loss count that refuses a poison operation, not a task failure. Options: (a) terminate at once (rejected by the owner: builds must
+  not just fail); (b) charge it as a platform fault or a loss (rejected: it is the scheduler's choice); (c) drain, then requeue the rest,
+  charging nothing (adopted), with `max_evictions` (**decided: 3**) per request, after which its host is passed over as a victim, so one
+  request cannot be hit for ever. A terminate that reads back Unknown frees nothing (5.6).
+- **D64. The victim, what is never the victim, and the catalog.** The victim is the smallest host whose running jobs are expected to finish
+  soonest: hosts whose expected drain (the end bound of whole-node.md section 3, or a better predicted remaining time where a consumer has
+  one) is within the grace tie and the smallest of them wins; others rank after, by expected drain; a job with no prediction counts as its
+  max wall time. Never chosen: a registered `default` host, a host with a whole-node lease or a
+  reservation (the next candidate is taken), a host with a `reclaim` notice, a host holding a request evicted `max_evictions` times, and a
   host whose removal would push the whole-node ceiling (counted by hosts) below reserved plus held. The biggest option is found by walking
   the provider's catalog downward and skipping a type with no capacity, spot or on-demand, or one cooling down (provider data, D60); a
   refused launch uses the existing per-option `cooldown`; the pool stays as it is if the biggest obtainable type is not larger than the
@@ -299,6 +304,6 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   minutes) the queue is empty and the booked share (the tighter of CPU and memory) is below `scale_down_util` (default 30 percent); then one
   elastic machine per window, the least booked, is marked tainted `retire` and released when empty. Nothing is killed; the mark is cleared
   if the queue becomes non-empty. Hysteresis is the longer window and the utilization floor against the 10-minute window and the growing
-  queue of D62; all four keys (`swap_window`, `scale_down_window`, `scale_down_util`, `max_evictions`) are pool keys, absent means the pool
+  queue of D62; all five keys (`swap_window`, `swap_drain_grace`, `scale_down_window`, `scale_down_util`, `max_evictions`) are pool keys, absent means the pool
   never swaps or scales down by this rule (R3). The judgement is on a per-minute pool sample, which the design did not have; it is in
   memory and a restart restarts the windows (swaps come later, never sooner).

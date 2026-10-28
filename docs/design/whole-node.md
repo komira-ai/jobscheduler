@@ -240,7 +240,7 @@ many bookings is drained like any other (section 3); a whole-node lease on a spo
 section 9 ([hosts.md](hosts.md), sections 5 and 6).
 
 **An elastic pool at its machine cap (D62 to D65, [hosts.md](hosts.md) section 11).** When the pool is at `max_machines` and its queue keeps
-growing, the scheduler terminates its smallest elastic machine and requeues that machine's jobs. It never picks a host that holds a
+growing, the scheduler drains one elastic machine, lets its jobs finish for up to a grace, then terminates it and requeues the rest. It never picks a host that holds a
 whole-node lease or a reservation (the next smallest is taken), and it checks the ceiling of section 6 by host count: it does not remove a
 host if that would push the ceiling below the hosts reserved plus held. An eviction is not a reservation and counts toward neither
 `max_draining` nor `keep_for_ordinary`. A whole-node request that no live host is big enough for is demand like any other, and the biggest

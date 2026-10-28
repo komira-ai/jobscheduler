@@ -86,11 +86,12 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K46. A tier member that launches and never registers.** A cloud whose machines boot but cannot reach the scheduler would take the
   demand of its tier every time it sorted first. Mitigated by the boot timeout and the failure brake of its entry (5.8, providers.md), so after
   `max_boot_failures` in a row that member is passed over (a brake, not a cost limit), and by the alert it raises.
-- **K47. A swap throws away work and overshoots.** The victim's running jobs lose their progress and are rerun (D63), and the biggest type
-  may be more than the load needed (D62). Accepted by the owner: jobs are retryable, and the swap acts only at the cap with a queue that has
-  not eased for a window. Bounded by one swap per window, by the protected hosts (D64), by `max_evictions` per request, and by launching
-  before killing (a refused launch loses nothing). Residual: a pool whose queue is long because jobs are long loses their progress, and a
-  lasting overshoot is undone only by the scale-down of D65.
+- **K47. A swap delays the victim's machine and overshoots.** The victim drains for up to `swap_drain_grace` (D63), so the cost is that
+  delay; work is lost only for a job still running past the grace, which is then rerun without failing and without charge. The biggest type
+  may be more than the load needed (D62). Bounded by one swap per window and per victim, by the victim choice that prefers hosts that empty
+  within the grace and by the protected hosts (D64), by `max_evictions` per request, and by launching before draining (a refused launch
+  loses nothing). Residual: jobs longer than the grace lose their progress once per eviction, and a lasting overshoot is undone only by the
+  scale-down of D65.
 - **K48. The cap is crossed by one machine during a swap.** The swap's launch is counted with the victim until the victim reads back Absent,
-  so the count is `max_machines + 1` for that time (D62). Bounded by one swap per window (H10); a terminate that reads back Unknown holds
-  the extra machine until it is resolved (5.6), and the reaper's release retry applies (12.1).
+  so the count is `max_machines + 1` for up to the drain grace (D62). Bounded by one swap per victim (H10); a terminate that reads back
+  Unknown holds the extra machine until it is resolved (5.6), and the reaper's release retry applies (12.1).

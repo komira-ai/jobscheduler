@@ -400,7 +400,7 @@ A full example (shapes, a `default` provider, an aws provider, pools with a hier
 kbf's own file that maps its classes to pool selectors are in [design/configuration.md](design/configuration.md). A consumer picks pools
 in its own configuration, never the scheduler's. A pool is `name`, `providers` (the ordered hierarchy; `provider` is shorthand, 5.8),
 `shape`, `class`, `labels`, `max_machines`, `provider_max_machines`, `max_step`, `idle_timeout`, `cooldown`, `boot_timeout`,
-`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_window`, `scale_down_window`, `scale_down_util`, `max_evictions` (the swap at the cap and scale-down, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
+`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_window`, `swap_drain_grace`, `scale_down_window`, `scale_down_util`, `max_evictions` (the swap at the cap and scale-down, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
 
 Rules, enforced when the file loads and refused with the key and the line:
 
@@ -931,7 +931,7 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   it). D47 admission and reservation (queue under D35, one host per request, least drain). D48 the drain bound re-queues and never kills.
   D49 caps (`max_whole_node`, `max_draining`, per consumer, a floor for ordinary work). D50 elastic providers acquire before draining.
   D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
-- D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (kill the smallest, launch the biggest; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
+- D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (launch the biggest, drain the smallest to finish its jobs within a grace; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
 
 ## 16. Risks
 

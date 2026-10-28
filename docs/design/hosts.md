@@ -24,7 +24,7 @@ finish to the deadline, then reruns what is left elsewhere, through the taint, d
 capacity are provider data used only to choose among launch options and equal providers, never to refuse or cap (D60, N4). `aws`, `gcp`,
 `azure` and on-prem sources are providers in the one ordered hierarchy; clouds are values, an entry may be a tier of equals, and the walk
 falls through as in D39 (D61). An elastic pool sizes its first instance to the first request and adds instances up to `max_machines`;
-only at the cap, with the queue still growing, it terminates its smallest instance and launches the biggest type it can get, and later
+only at the cap, with the queue still growing, it launches the biggest type it can get and drains its smallest instance (jobs finish within a grace, the rest are requeued), and later
 scales down only when the queue is empty and utilization is low (D62 to D65).
 
 Three words used below. **Booking:** the part of a host's capacity (the resource vector of section 3 of design.md) that a lease or a run
@@ -335,8 +335,14 @@ demand was above zero, and the **first** swap of an episode needs the queue to h
 the first); a **repeat** after an action needs only that the queue has not eased (the last sample not below the first of the new window).
 No second swap starts while a victim has not read back Absent (Unknown included). Then, in one tick:
 
-1. *Choose the victim.* The **smallest** elastic machine of the first elastic entry that can launch a larger option: smallest by
-   `cpu_millis`, then memory, then fewest bookings, then lowest host id. A registered `default` host is never chosen (the scheduler did not
+1. *Choose the victim.* An elastic machine of the first elastic entry that can launch a larger option, preferring the smallest whose
+   running jobs are expected to finish soonest. **The estimate** is the one the design already has for a drain, the *end bound*
+   (whole-node.md section 3): for each lease and run on the host, its start plus its max wall time (12.1), minus now, and zero for a host
+   with none; where a consumer or the run service has a better predicted remaining time for a job (the sizing history of section 7, or
+   per-minute profiles if they are adopted; none is built into this design today), the smaller of the two is used. A job with no
+   prediction is *unknown* and counts as its max wall time, so an unknown ranks as the slowest to finish, never the fastest. Hosts whose
+   expected drain is within `swap_drain_grace` tie, and among the tied the smallest wins: smallest by `cpu_millis`, then memory, then
+   fewest bookings, then lowest host id; a host whose expected drain is beyond the grace ranks after all of those, by expected drain. A registered `default` host is never chosen (the scheduler did not
    create it). **Never chosen:** a host that holds a whole-node lease or a reservation (the next smallest is taken); a host already tainted
    for a reclaim; a host holding a run that has already been evicted `max_evictions` (default 3) times; and a host whose removal would push
    the whole-node ceiling below the whole-node hosts reserved plus held (the ceiling counts hosts, `min(max_whole_node, capable_hosts -
@@ -348,27 +354,37 @@ No second swap starts while a victim has not read back Absent (Unknown included)
    pool stays as it is. **Thrash guard:** the swap fires only if the chosen option would hold at least one queued, unplaced request that no
    current host can take (its booking, constraints and class limits fit the option, and quota and the whole-node caps allow it). If the
    queue is blocked by something a bigger machine does not fix (a whole-node cap, a per-class limit, quota, a constraint only the current
-   type meets), nothing is terminated and nothing is launched.
-3. *Launch first, then terminate.* The launch is recorded and called (with the booking of the victim still counted); only when the
-   provider answers `Accepted` is the victim terminated. A refused launch cools down that option by the existing per-option `cooldown`
-   (section 7, 5.8) and the walk of item 2 continues in the same tick; if every option is refused nothing is terminated and nothing is
-   lost. Because of this order the count may be `max_machines + 1` until the victim reads back Absent. That is the one launch the swap is
-   allowed over the cap; it is bounded by one swap per window, and launches stay refused at or above the cap otherwise.
+   type meets), nothing is drained and nothing is launched.
+3. *Launch first, then drain the victim (decided).* The launch is recorded and called (with the booking of the victim still counted);
+   only when the provider answers `Accepted` is the victim marked to drain. A refused launch cools down that option by the existing
+   per-option `cooldown` (section 7, 5.8) and the walk of item 2 continues in the same tick; if every option is refused nothing is
+   drained and nothing is lost. Because of this order the count may be `max_machines + 1` until the victim reads back Absent, that is, for
+   at most the drain grace. That is the one launch the swap is allowed over the cap; it is bounded by one swap per window, and launches
+   stay refused at or above the cap otherwise.
    **Structural bound:** each swap replaces a machine with a strictly larger type or does nothing, so the swaps of one episode are finite
    (at most `max_machines` times the depth of the catalog). `max_evictions` is an extra bound on one request, not the only one.
-4. *Wait one window.* The window restarts at the action. At its end the same test runs on the new samples; if the queue has eased, nothing
-   more is done, and if it has not, the swap repeats with the next smallest victim and the biggest option again. Overshoot is accepted:
+4. *Wait one window.* The window starts when the new machine is up (registered and serving), not when the victim was marked. A drain in
+   progress blocks the next swap, since no second swap starts while a victim has not read back Absent; so a repeat comes at the later of
+   the window's end and the victim's disappearance. At the window's end the same test runs on the new samples; if the queue has eased,
+   nothing more is done, and if it has not, the swap repeats with the next victim and the biggest option again. Overshoot is accepted:
    the pool may end with bigger machines than the load needed. There is no logic to consolidate machines or to undo an overshoot except
    the scale-down below.
 
-**What "kill" means.** The victim is terminated right away, not drained, and its running jobs are put back in the queue to be retried
-elsewhere. Jobs are retryable, so this costs the work done so far and nothing else. It uses the existing paths:
+**What the eviction means: drain, then terminate.** The victim stops taking new work, its running jobs are left to **finish** (a build must
+not simply fail), and the machine is terminated when it empties or when the drain grace ends, whichever is first. Only jobs still running
+at the end of the grace are put back in the queue to be retried elsewhere; they are never reported as failed. It uses the existing paths:
 
-- *Nothing new is placed.* The scheduler records the victim durably as tainted with the reason `evict` (the mark of D59), so no new lease
-  or run lands on it, then calls `release` (terminate, then read back, 5.5).
-- *The lost-host path.* A host that reads back Absent is a lost host: its leases are given up and its work is rerun, by the rule of 5.6 and
-  absence.md. For a lease a consumer holds (kbf), the lease is lost and the consumer is told, and it reruns its placements in another
-  lease (9.1). For a run the scheduler placed itself (ucdk), the run is requeued, a new attempt (retries-and-runs.md, 8.1, 8.3).
+- *Nothing new is placed.* The scheduler records the victim durably as tainted with the reason `evict` (the mark of D59, which survives a
+  restart), so no new lease or run lands on it, and tells consumers by `host_leaving` with `leaves_at` set to the end of the grace (D59).
+  Its running work continues, as it does for a reserved host (whole-node.md section 4). The drain grace is the pool key
+  `swap_drain_grace`, default 30 minutes, given in the configuration file or by flag (R4), never by an environment variable. It is shorter
+  than a job's max wall time on purpose; the cost of a longer job is stated in K47.
+- *Terminate.* When the host holds no lease and no run, or at the end of the grace, the scheduler calls `release` (terminate, then read
+  back, 5.5). A host that empties is terminated at once, so most evictions cost no lost work.
+- *The lost-host path, for what remains.* A host that reads back Absent is a lost host: the leases and runs still on it are given up and
+  rerun, by the rule of 5.6 and absence.md. For a lease a consumer holds (kbf), the lease is lost and the consumer is told, and it reruns
+  its placements in another lease (9.1). For a run the scheduler placed itself (ucdk), the run is requeued, a new attempt
+  (retries-and-runs.md, 8.1, 8.3).
 - *Fence and Unknown.* Nothing continues on a terminated machine; the agent's own fence (5.4) covers a machine that is cut off but not
   yet stopped. If the terminate reads back Unknown, nothing is freed and the leases stay booked (5.6); a run-on lease is given up only when
   the machine is proven stopped (registration.md, Lifecycle).
@@ -381,8 +397,8 @@ elsewhere. Jobs are retryable, so this costs the work done so far and nothing el
   lease's request id goes up, and a consumer that presents the same request id when it asks for a replacement lease (as it does for a
   whole-node request, whole-node.md section 3) carries the count with it; the record is dropped when the request ends. A consumer that
   presents no stable request id has no count across leases, and then only the structural bound above applies.
-- *The cap.* An evicted host leaves the count when its terminate reads back Absent (5.11); until then it counts, and the swap's launch is
-  the one extra of item 3.
+- *The cap.* An evicted host leaves the count when its terminate reads back Absent (5.11); until then, draining included, it counts, and
+  the swap's launch is the one extra of item 3.
 
 **Scale down: one signal, kept apart from the swap.** The only scale-down signal is that the queue has drained and utilization is low:
 at every sample of `scale_down_window` (default 60 minutes) the queue was empty and the booked share of the pool (the tighter of CPU and
@@ -399,13 +415,16 @@ a growing queue), and a window must hold at every sample, so one burst or one qu
 | `swap_window` | 10 minutes | the observation window of the swap up, and the wait after each action |
 | `scale_down_window` | 60 minutes | the window in which the queue must stay empty and utilization low |
 | `scale_down_util` | 30 percent | the utilization below which a scale-down may start |
-| `max_evictions` | 3 | evictions of one request after which its host is not chosen as a victim |
+| `swap_drain_grace` | 30 minutes | how long a victim may finish its running jobs before it is terminated and the rest requeued |
+| `max_evictions` | 3 | evictions of one request after which its host is not chosen as a victim (decided) |
 
-All four are pool keys (R3: additive; absent keys mean the pool never swaps and never scales down by this rule, so a pool written before
+All five are pool keys (R3: additive; absent keys mean the pool never swaps and never scales down by this rule, so a pool written before
 this section is unchanged). A refused launch uses the existing `cooldown`.
 
-**Long jobs.** A long job on a small machine does not stall the pool at its cap: the victim is terminated and its job requeued. That is
-the cost of the rule, stated in K47.
+**Long jobs.** A long job on a small machine does not stall the pool at its cap for longer than the grace: it keeps running until it
+finishes or `swap_drain_grace` ends, then it is requeued as a new attempt, outcome `evicted`, charged to no budget, and counted toward
+`max_evictions`. Lost work is only what a job had done past the grace (K47). The victim choice prefers hosts that will empty within the
+grace, so most evictions lose nothing.
 
 **Interaction with the whole-node class (5.17, whole-node.md).**
 
@@ -424,30 +443,37 @@ or is lost before the window ends, it is handled as any reclaimed host (taint `r
 ordinary scale-out refills it by the demand rule, with the capacity signal of section 7 steering the provider away from the option just
 interrupted; a swap happens again only if the pool is back at the cap and the trigger holds. A victim that has a reclaim notice is not chosen (item 1). If a retiring (scale-down) host receives a notice, `reclaim`
 takes precedence over `retire`: the reason becomes `reclaim` (both kept), the notice's deadline applies, and its work follows section 6.
-A `reclaim` mark on an `evict` host changes nothing: it is already terminating.
+A `reclaim` notice on an `evict` host (draining): `reclaim` takes precedence, the earlier of the notice's deadline and the end of the
+grace applies, and the work follows section 6.
 
 Invariants (continuing H1 to H8):
 
 - H9. **A swap happens only at the cap with a window that did not ease**: no victim is chosen unless at every sample of the last window the
   pool was at or above `max_machines` with demand above zero, and the queue grew strictly (first swap) or did not shrink (repeat), and the
   chosen option would hold a queued request no current host can take.
-- H10. **One swap per window**, and the count never exceeds `max_machines + 1`, and exceeds `max_machines` only between an accepted swap
-  launch and the victim's read-back Absent.
+- H10. **One swap per window and per victim**, and the count never exceeds `max_machines + 1`, and exceeds `max_machines` only between an
+  accepted swap launch and the victim's read-back Absent (a drain in progress blocks the next swap).
 - H11. **The victim is never protected**: never a registered `default` host, never a host with a whole-node lease or reservation, never a
   `reclaim` host, never one whose removal pushes the ceiling (by host count) below reserved plus held, never one holding a run evicted
   `max_evictions` times.
-- H12. **Launch before kill**: no machine is terminated by a swap before its replacement launch is `Accepted`; a pool whose every option is
-  refused terminates nothing.
-- H13. **An eviction charges no budget**: the attempt ends `evicted`, no platform-fault count, no loss count, no task failure; the work is
-  requeued once per eviction, and no lease on the host is lost without the host reading back Absent.
+- H12. **Launch before drain, drain before terminate**: no machine is marked to drain by a swap before its replacement launch is
+  `Accepted`; a pool whose every option is refused drains nothing; the victim takes no new work after the mark; it is terminated when it
+  is empty or at the end of `swap_drain_grace`, whichever is first.
+- H13. **An eviction charges no budget and fails nothing**: a job that finishes within the grace ends with its own result; one still
+  running at the end of the grace ends `evicted` (never `failed`), with no platform-fault count, no loss count, no task failure, and is
+  requeued once; no lease on the host is lost without the host reading back Absent.
 - H14. **Scale-down needs both signals** at every sample of its window (queue empty, utilization below the floor), kills nothing, and
   clears its mark when the queue becomes non-empty.
 
-Tests: the pool at its cap with the queue growing for a full window selects the smallest elastic machine and the biggest option, and a
-window one sample short does nothing; a queue that eases after the action ends the swap, and one that does not repeats it with the next
+Tests: the pool at its cap with the queue growing for a full window selects a victim and the biggest option, and a window one sample
+short does nothing; among victims whose expected drain is within the grace the smallest is chosen, one with a sooner expected finish
+beats a smaller one beyond the grace, and a host with an unknown job ranks as its max wall time; a victim with a job that finishes
+inside the grace takes no new work, lets the job finish with its own result and is terminated when empty; a job still running at the end
+of the grace is requeued, ends `evicted` and not `failed`, and the machine is terminated; the window starts when the new machine is up,
+and a draining victim blocks a second swap; the grace is read from the pool key and not from the environment; a queue that eases after the action ends the swap, and one that does not repeats it with the next
 smallest; the biggest type without capacity is skipped and the next one taken, and when every type is refused nothing is terminated and
 the refused options cool down; the smallest host holds a whole-node lease (the next smallest is taken) and a reservation (the same); a
-removal that would push the ceiling below reserved plus held is skipped; a running job on the victim is requeued, ends `evicted`, spends
+removal that would push the ceiling below reserved plus held is skipped; a job on the victim still running past the grace spends
 no platform-fault or loss count, and a request evicted `max_evictions` times protects its host; a terminate that reads back Unknown
 frees nothing and starts no second swap; the new biggest host receives a reclaim notice mid-window, the pool is below its cap and
 ordinary scale-out refills it with the capacity signal steering away; a queue blocked by a whole-node cap, a per-class limit, quota or a

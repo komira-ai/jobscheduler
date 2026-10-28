@@ -210,7 +210,8 @@ need the hierarchy (steps 30c and 31c).
     kinds behind the trait, each with a fake. *Proves:* H8; a flat file is unchanged; the layering test still finds no cloud name in the
     core; two kinds of one tier choose by price and fall through on refusal and on outage.
 64. The cap-time swap and scale-down ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first
-    instance; the per-minute pool sample; the swap trigger and the pool keys `swap_window`, `scale_down_window`, `scale_down_util` and
-    `max_evictions`; the victim choice and its protected hosts; launch before kill; the `evict` taint, the `evicted` attempt outcome that
+    instance; the per-minute pool sample; the swap trigger and the pool keys `swap_window`, `scale_down_window`, `scale_down_util`,
+    `swap_drain_grace` and `max_evictions`; the victim choice (expected drain, then smallest) and its protected hosts; launch before drain;
+    drain, then terminate when empty or at the grace; the `evict` taint, the `evicted` attempt outcome that
     charges no budget; the walk down the catalog on no capacity; the `retire` scale-down. *Proves:* H9 to H14 on the fake aws and the fake
     agent, including a restart mid-window, a reclaim notice on the new host mid-window, and a swap with a whole-node request held and queued.

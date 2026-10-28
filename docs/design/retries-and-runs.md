@@ -11,8 +11,8 @@ so a Job whose container exits non-zero is retried exactly as under the cloud's 
 The ladder and loss axes are extra capabilities, not part of the portable contract. The ucdk conformance kit has a UJ1/UJ2 case that
 fails on a non-zero exit; step 24b adds the axis.
 
-An attempt can also end `evicted`: the scheduler terminated its machine on purpose, because the pool was at its machine cap with a growing
-queue (D62, hosts.md section 11). It is requeued as a new attempt and **charges no budget**: not platform fault, not loss, not task failure
+An attempt can also end `evicted`: the scheduler retired its machine on purpose, because the pool was at its machine cap with a growing
+queue (D62, hosts.md section 11), and the attempt was still running when the drain grace ended; it is never reported failed. It is requeued as a new attempt and **charges no budget**: not platform fault, not loss, not task failure
 (D63). The attempt record keeps the outcome, so a request evicted `max_evictions` times can be counted and its host passed over.
 
 ## 8.3 Run records
