@@ -9,11 +9,9 @@
 //!
 //! - It is removed when the agent reports a lease of the request ready (`granted`).
 //! - A request that used up `max_replace` is *terminal*: its next start is refused
-//!   `NoCapacity`, and that refusal removes the record, so the start after it is a fresh
-//!   request. `NoCapacity` is what a caller waits on, so until a later change adds the
-//!   `exclusive-not-ready` refusal code a consumer sees a terminal request as capacity
-//!   that does not come, not as the typed refusal; [`Registry::not_ready`] holds the
-//!   reason until the refusal has been delivered.
+//!   `ExclusiveNotReady` (wire `exclusive-not-ready`), and that refusal removes the
+//!   record and its exclusions, so the start after it is a fresh request.
+//!   [`Registry::not_ready`] holds the reason until the refusal has been delivered.
 //! - A record with no committed lease whose request has not been started for
 //!   `Rules::idle_horizon_ms` is dropped, terminal or not, with its exclusions
 //!   (`ForLife` ones included): the consumer is gone, and the records stay bounded by the
@@ -106,7 +104,7 @@ pub struct RequestRecord {
     /// The last prepare failure, if there was one.
     pub last: Option<NotReady>,
     /// Whether the request has used up `max_replace`. Its next start is refused
-    /// `NoCapacity` (see the module documentation) and removes the record.
+    /// `ExclusiveNotReady` (see the module documentation) and removes the record.
     pub terminal: bool,
 }
 
