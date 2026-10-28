@@ -7,4 +7,5 @@
 //! * `fixture_tests` - the committed trace and the loader that reads it.
 
 mod engine;
+mod engine_tests;
 mod fixture_tests;
