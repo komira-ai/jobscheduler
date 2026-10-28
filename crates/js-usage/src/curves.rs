@@ -173,7 +173,7 @@ mod tests {
         c.touch(&pk("a"), 150);
         assert!(c.curve(&wk("c", "a")).is_some());
         c.touch(&pk("a"), 120);
-        c.set_today(211);
+        c.set_today(210);
         assert!(
             c.curve(&wk("c", "a")).is_some(),
             "an older touch does not lower the day"
