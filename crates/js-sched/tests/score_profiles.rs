@@ -116,6 +116,67 @@ fn a_late_peak_keeps_a_curved_lease_off_the_host_that_is_over_then() {
     );
 }
 
+/// Minutes of the curves whose peak comes after the horizon.
+const LONG_MINUTES: usize = 45;
+/// The minute those curves peak at: past `HORIZON`, so only the `H+` slot sees it.
+const LATE: usize = 40;
+
+/// A curve of `quiet` millicores for `LONG_MINUTES` minutes except `peak` at minute
+/// `LATE`, with the working set `ws` throughout.
+fn peaking_late(quiet: u32, peak: u32, ws: u64) -> Vec<(u32, u64)> {
+    let mut cores = vec![quiet; LONG_MINUTES];
+    cores[LATE] = peak;
+    flat_ws(&cores, ws)
+}
+
+/// Catches: the `H+` slot left out of what the score reads: `a` holds a lease of 70 cores
+/// that asks for 80 at minute 40, and the new lease asks for 10 cores and 25 at minute 40.
+/// In the horizon `a` is the tighter fit (80% against `b`'s 70%), but from minute 30 on it
+/// is at 105% (under the 110% limit, so admitted) where `b` is at 85%: the lease goes to
+/// `b`, and the host chosen has no slack.
+#[test]
+fn a_peak_past_the_horizon_keeps_a_lease_off_the_host_that_is_over_then() {
+    let curves = Curves::new("load");
+    curves.set("la", &peaking_late(70_000, 80_000, HELD_WS), 5);
+    curves.set("lb", &peaking_late(60_000, 60_000, HELD_WS), 5);
+    curves.set("n", &peaking_late(10_000, 25_000, NEW_WS), 5);
+    let mut r = Rig::with_curves(LoadConfig::default(), curves);
+    for name in ["a", "b"] {
+        r.up(name, node());
+        r.set_clock(name, HOUR);
+        r.baseline(name);
+        r.window(name, 0, 0, &[]);
+    }
+    hold(&mut r, "a", "b", "la", 70_000);
+    hold(&mut r, "b", "a", "lb", 60_000);
+    for name in ["a", "b"] {
+        r.window(name, 0, 0, &[]);
+    }
+    let op = submit(&mut r, "n");
+    for slot in [0, PEAK, HORIZON] {
+        assert_eq!(with_lease(&r.s, op, "a", slot).0, 80_000, "a, slot {slot}");
+        assert_eq!(with_lease(&r.s, op, "b", slot).0, 70_000, "b, slot {slot}");
+    }
+    assert_eq!(
+        with_lease(&r.s, op, "a", H_PLUS).0,
+        105_000,
+        "a from minute 30 on"
+    );
+    assert_eq!(
+        with_lease(&r.s, op, "b", H_PLUS).0,
+        85_000,
+        "b from minute 30 on"
+    );
+    let started = r.tick();
+    assert_eq!(started.len(), 1);
+    assert_eq!(started[0].worker, w("b"));
+    assert_eq!(
+        r.s.load_counters().chose_slack,
+        0,
+        "the host chosen fits at H+"
+    );
+}
+
 /// Catches: the same placement going wrong the other way, and the control for the test
 /// above: the same two hosts and a lease of the same size now (10 cores) charged flat, which
 /// brings `a` to exactly 100% at minute 10, not over. Nothing is over anywhere, the fit
