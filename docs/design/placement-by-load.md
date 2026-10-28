@@ -129,62 +129,75 @@ Persisting above `(1 + s_cpu) C` needs leases whose real use exceeds their predi
 The rule above charges each lease one number for its whole life. Many actions are not flat: a fetch phase, then a burst, then an upload. Two actions whose
 busy minutes do not overlap can share a node that two flat peaks cannot. With profiles on, a lease's cost is a curve over minutes since its start, and admission
 checks the node's predicted load at every future minute within a horizon, not only the peak. Profiles are a refinement behind their own flag
-(`--placement-profile off|shadow|on`, default `off`; they need `--placement-load` at `shadow` or `on`); with it `off` everything above is exactly the flat rule.
+(`--placement-profile off|shadow|on` with `--placement-profile-pools`, so they are enabled per pool; default `off`; they need `--placement-load` at `shadow` or `on` for the pool). With it `off` everything above is exactly the flat rule. CPU profiles come first: the memory curve is separately flagged (`--placement-profile-memory off|shadow|on`, default `off`) and stays shadow-only until its misfit metric (below) has data. With memory profiles `off`, memory is admitted by the flat hold-to-end rule above even in a pool whose CPU profiles are `on`.
 
 **1. Sampling.** The daemon already reads each running lease's cgroup every `W` (for `r`). It now bins those reads by minutes since the lease's own start
-(the agent's clock, the same start `covered` uses): per closed minute, the mean cores (`delta cpu.stat usage_usec / delta mono`), the peak single-window
+(the agent's clock, the same actual start `covered` uses, so an image pull or a held start does not shift the curve): per closed minute, the mean cores (`delta cpu.stat usage_usec / delta mono`), the peak single-window
 cores, and the maximum working set (`memory.current` minus `inactive_file` of the lease cgroup). The minutes are read while the lease runs, not only at its end.
-They reach the server in the heartbeat: `NodeLoad.minutes`, `repeated LeaseMinute { LeaseId lease = 1; uint32 minute = 2; uint32 cpu_mean_millis = 3;
+They reach the server in the heartbeat: `NodeLoad.minutes` and `repeated LeaseClock { LeaseId lease = 1; uint64 started_mono_usec = 2; }` (field 9, the agent's start of each running lease; the server's elapsed minutes `e_i` are `(latest accepted mono_usec - started_mono_usec) / 60 s`, rounded down, and 0 for a lease not yet reported), `repeated LeaseMinute { LeaseId lease = 1; uint32 minute = 2; uint32 cpu_mean_millis = 3;
 uint32 cpu_peak_window_millis = 4; uint64 ws_max_bytes = 5; }` (about 24 bytes). At most one record per running lease per minute, and at most 64 records
-in one heartbeat; the daemon keeps unsent minutes for 10 minutes and drops the older ones (a record is idempotent by `(lease, minute)`, so a resend after a
-reconnect is harmless). With the default lease cap this is on the order of a few kilobytes a minute. The final partial minute of a lease rides on its result.
+in one heartbeat, oldest minute first and then by lease id: twelve heartbeats a minute carry 768 records, above the lease count of a node, so a healthy node never
+queues. After an outage the daemon keeps unsent minutes for 10 minutes and drains them 64 a heartbeat (256 leases take about 3.5 minutes to catch up); older minutes
+are dropped and counted (`minutes_dropped`), and a run missing more than a fifth of its minutes does not enter the ring. A record is idempotent by `(lease, minute)`, so a resend after a
+reconnect is harmless. The final partial minute of a lease rides on its result.
 Per node, nothing new is sent: the server derives the node's per-minute series from the cumulative `cpu_usage_usec` and the working set already in `NodeLoad`.
 
 **2. Retention.** In the scheduler's state store, two tables, both numbers only:
 - `key_profile`, per action key (the existing key digest, per platform class): a ring of the last 32 runs' per-minute series (cores and working set, up to
-  64 minutes a run; minute 63 holds everything from 63 on), and the fitted profile. At most about 25 KB for a key with long runs, a few hundred bytes for
-  a key whose runs last a minute or two. The whole table is bounded by `--profile-store-bytes` (default 256 MiB), evicting the least recently used key, and ages
-  with the same staleness rule as the cost estimate.
-- `node_minute`, per node: minute, mean cores, working-set maximum, lease count; kept 14 days (about 20 000 rows of 32 bytes per node), pruned daily.
+  64 minutes a run; bucket 63 is the maximum of the per-minute means from minute 63 on, conservative), and the fitted profile. Only runs that ended on their own enter the ring: a run killed
+by the memory ladder or the pressure backstop, cancelled or requeued is truncated and would bias the curve low, so it is excluded (the ladder's rerun enters). At most about 25 KB for a key with long runs, a few hundred bytes for
+  a key whose runs last a minute or two. The whole table is bounded by `--profile-store-bytes` (default 256 MiB), evicting the least recently used key (an evicted key is charged flat until it is relearned), and ages
+  with the same staleness rule as the cost estimate. A row is written when a run ends, not per minute.
+- `node_minute`, per node: minute, mean cores, working-set maximum, lease count; kept 14 days (14 x 1440 rows of 32 bytes, about 0.65 MB per node), pruned daily. It is telemetry, never an admission input: the server buffers a node's rows and writes them in one batch every 5 minutes, so a scheduler crash loses at most 5 minutes of it.
 Per-lease raw minutes are not kept outside the ring. Nothing else is stored: no argument vector, path, environment, user or output, only the key digest, the node
 identifier the scheduler already holds, and counts. The telemetry tables are public-safe by construction.
 
 **Profile shape: absolute minutes since start, not normalised to run length.** Admission aligns a running lease by its elapsed time and does not know when it
 will end; a normalised curve would need a run-length forecast, and where run lengths vary a normalised curve smears the busy phase across the run. In absolute
 minutes the variation in run length simply shows as the spread of runs reaching each minute. The fit, per minute `t`: the P90 across the ring's runs that reached `t`
-of mean cores, and of working set (with the memory margin of the flat rule, `1.2 x max + 128 MiB`), then **dilated** by `delta = 2` minutes (each value is the
-maximum of the fitted values within `t +- delta`) so a busy phase that starts a little early or late is still covered. A minute reached by fewer than a quarter of the
+of mean cores, and of working set (with the memory margin of the flat rule, `1.2 x max + 128 MiB`). Under node pressure the flat rule's keep-if-higher applies per minute: a
+minute from a run taken at or above 100 permille CPU pressure, or with none, enters the fit only where it exceeds the current fit at that minute (the key's flat cost for a key
+with no curve), else it counts as missing, so a starved run cannot flatten the curve. The values are then **dilated** by `delta = 2` minutes (each value is the
+maximum of the fitted values within `t +- delta`) so a busy phase that starts a little early or late is still covered. Dilation costs co-admissions: two busy phases are co-admitted only with an idle gap of at least `2 delta + 1 = 5` minutes between them, and shadow counts the verdicts that `delta = 0` would have admitted and `delta = 2` refused (`profile_dilation_missed`). A minute reached by fewer than a quarter of the
 runs holds the previous value (the tail); a lease that outlives the curve is charged the tail. A run under a minute is one bucket, which is the flat cost.
 `p_bar` below is the key's flat cost (the P90 of whole-run means, as above).
 
-**3. Use in admission.** A lease's charge at minute `t` since its start is `c_i(t) = max(curve_i(t), g * p_bar_i)`, with `g = 0.6`
-(`--placement-profile-floor`, range 0.5 to `f`): the profile can lower a lease's charge in its idle minutes, never below `g` times its flat cost. Cold keys, keys
+**3. Use in admission.** A lease's charge at minute `t` since its start is `c_i(t) = max(curve_i(t), g * p_bar_i)`, with `g = f = 0.75`
+(`--placement-profile-floor`, range 0.5 to `f`; lowered only on shadow data): the profile can lower a lease's charge in its idle minutes, never below `g` times its flat cost. Cold keys, keys
 with fewer than 3 usable runs, keys demoted by the shape guard, and every worker in fallback have no curve: they are charged flat (`p_bar` and the floor `f`),
-exactly as before. For a candidate worker, with `e_i` the elapsed minutes of each running lease and `H` the horizon (default 30 minutes), admit when for every
-`tau` in `0..H`:
+exactly as before: a covered flat lease is charged `f * p_bar` and an uncovered one `p_bar`, and a profile lease is floored at the same `g * p_bar` with `g = f`, so mixed sums are consistent. For a candidate worker, with `e_i` the elapsed minutes of each running lease and `H` the horizon (default 30 minutes), admit when for every
+`tau` in `0..H`, and once more at `tau = H+` (below):
 
     CPU:     F_tau + sum(c_i(e_i + tau), uncovered) + V_cpu + c_new(tau)  <=  C_cpu * (1 + s_cpu),    F_0 = max(M, sum(c_i(e_i), covered)), F_tau = sum(c_i(e_i + tau), covered)
-    memory:  max( sum(R_i(tau), all), working_set_0 + sum(R_i(tau), uncovered) ) + V_mem + R_new(tau)  <=  C_mem * (1 + s_mem)
+    CPU, H+: every lease charged its remaining maximum of c_i from minute e_i + H on (the tail included), summed with V_cpu and the new lease's remaining maximum  <=  C_cpu * (1 + s_cpu)
+    memory (profile memory on only; otherwise the flat rule):  max( sum(R_i(tau), all), working_set_0 + sum(R_i(tau), uncovered) ) + V_mem + R_new(tau)  <=  C_mem * (1 + s_mem)
 
 At `tau = 0` the measurement still enters (it can only raise the figure); at later minutes only the curves do. An uncovered lease (the in-flight rule) is
 charged the maximum of its curve over its first two minutes, so a lease that has just started is never counted at its quiet start. `R_i(tau)` is the
 **remaining maximum** of lease `i`'s memory curve from minute `e_i + tau` on, including the tail, and never less than its current working set: memory is held until the
 lease's peak is behind it, then released, never before. Cold and flat leases hold their cost to the end as before. Memory is the one place a curve could
-hurt (it is not compressible), which is why it uses the remaining maximum and the P90-plus-margin fit, and why the kill ladder is unchanged.
-The scheduler keeps each worker's predicted load as an array over the horizon, updated at each placement and each minute, so a candidate costs `O(H)`;
-beyond `H` the charge is the remaining maximum.
+hurt (it is not compressible), and the flat rule's guarantee, that predicted memory never decays, is dropped by the remaining maximum: after its curve's peak a lease that
+allocates again is charged only its working set. The booking and the lease's cgroup limit (`1.5 x booking + 512 MiB`) stay at the flat cost, and the ladder is unchanged, so such a lease is
+bounded by that limit and killed individually. With profile memory on the node bound is `(1 + s_mem) C_mem * max(1, k_m)` with `k_m` the worst lease's working set over its charge, for which the p99.9
+criterion below must hold. **Memory misfit** is a lease-minute whose working set exceeds its remaining maximum `R_i`; it is counted per key and fleet-wide, and is the memory trigger of the shape guard (two of the last 3 runs with
+a misfit demote the key's memory curve to the flat hold for 8 runs). Memory profiles stay shadow-only until the misfit metric has data in the exit criteria.
+The scheduler keeps each worker's predicted load as an array over the horizon, updated at each placement and each minute, so a candidate costs `O(H)`.
+The `H+` check covers what lies beyond `H` (two busy phases at minute 40, and any lease longer than `H`) with the conservative remaining maxima, so the sum is within `(1 + s_cpu) C` at every
+minute, inside the horizon by the curves and past it by the maxima.
 
-**The bound with profiles.** Replace `f` by `g`: the covered charge of every lease is at least `g * p_bar_i`, and a lease's demand in a window is at most
-`r k p_bar_i` (the definitions of `r` and `k` above, `k` the whole-run mean over `p_bar`), so each lease's demand is at most `(r k / g)` times its charge,
-and the sum of the charges is within `(1 + s_cpu) C` at every minute. Hence
+**The bound with profiles.** Define `k_c` as the lease-minute's actual mean cores over its charge `c_i(t)` (histogrammed per lease-minute; a minute counts only when the actual exceeds
+the charge by at least 250 m, so a tiny charge cannot dominate) and `q` as the peak window of that minute over the minute's mean. A profile lease's demand in a window is at most `q k_c c_i`; a flat lease's is at most
+`r k p_bar_i` with a charge of at least `f p_bar_i` (the bound above). The sum of the charges is within `(1 + s_cpu) C` at every minute, so
 
-    P_cpu  <=  (r k / g) * (1 + s_cpu) * C  +  n_c * A
+    P_cpu  <=  max( r k / f , q k_c ) * (1 + s_cpu) * C  +  n_c * A
 
-At the defaults (`g = 0.6`, `r, k <= 2`, `A <= 4`): `r k / g = 6.67`; on 88 threads `6.67 * 1.1 * 88 + 24 = 645 + 24 = 669 cores = 7.6 C`, on 16 threads
-`6.67 * 17.6 + 8 = 125 cores = 7.8 C`. That is the worst case at the criteria, about 1.5 C above the flat rule's 6.1 C, and it is the price of the lower floor. A misprediction of the
-curve's shape (a busy phase where the curve said idle) is not a new term in the bound: it is what the floor `g` limits. It is measured as `k_c`, the lease-minute's actual mean cores over its
-charge, histogrammed per lease-minute. The **shape guard**: a key whose last 3 runs include 2 with a minute at `k_c > 1.5` is demoted to the flat cost for its next 8 runs and counted. The
-choice of `g` (and so 6.1 C against 7.6 C) is the one policy question this raises; the flag keeps the flat rule one setting away.
+With the criteria (`r, k <= 2` at p99, `q <= 2`, `k_c <= 1.5` at p99, `A <= 4`) and `g = f = 0.75`: the flat term is 5.33 and the profile term 3, so the figures are those of the flat rule,
+**540 cores = 6.1 C on 88 threads and 102 cores = 6.4 C on 16**; a pool whose demand is only profile leases is bounded by `3 * 1.1 * 88 + 24 = 314 cores = 3.6 C` (`3 * 17.6 + 8 = 61` cores = 3.8 C on 16).
+The profile term is a statement at the criteria, not a hard cap: a profile that is wrong (a busy phase where the curve said idle) has a large `k_c` for its minutes, and the hard limit there is only the floor,
+`r_b k / g` with `r_b` the key's own peak ratio (3 to 4 for a bursty key), about 8 to 11 for one lease type, before the guard acts. That is why the shape guard and the exit criterion exist and why sim q
+asserts a wrong profile. The **shape guard** (per key): 2 of the last 3 runs with a minute at `k_c > 2.0` demote the key to the flat cost for its next 8 runs, counted. It is looser than the fleet criterion (`k_c <= 1.5` at p99), which
+is a statement about the whole population, so that a single noisy minute does not demote a key. Lowering `g` below `f` (admitting more at a larger worst case, `r k / g`) is a later decision from shadow data
+and not part of shipping; the flag keeps the flat rule one setting away.
 
 ## Starvation
 No tiers; queue order is kept. A **pool** is the set of workers a request can run on (platform, drivers, devices, avoid set), as `Servable` computes it.
@@ -220,7 +233,7 @@ round. Work ahead of the head is never held back.
 | js scheduler | `js_sched::Event::Heartbeat` gains `load: Option<NodeLoad>`; the predicate and shares live in one pure module (`load.rs`) with shared test vectors, because kbf-sched is a copy |
 | Profiles | `js-sizing`: the per-key ring, the dilated P90 fit, the shape guard; the scheduler's per-worker load array over the horizon; the `key_profile` and `node_minute` tables in the state store |
 | Cost | `js-sizing`: floor 250 m, scaled samples, the learning rule, `Observed` says why a sample was dropped |
-| Flags | `--placement-load off\|shadow\|on` and `--placement-load-pools` (pools that are `on`; the rest stay at their mode) on kbf-server and as a `Scheduler` setter plus `js-lease-server::Config` field; `--placement-cold-per-window`, `--placement-cpu-floor` (`f`, default 0.75, range 0.5 to 1), `--placement-profile off|shadow|on`, `--placement-profile-floor` (`g`, default 0.6), `--profile-store-bytes`, `--placement-s-cpu`, `--placement-s-mem`. On kbf-node: `--actions-cpu-max=on\|off` (default `on`, today's behaviour); `off` makes `limit_cpus` write `max` and skip the limit, and the operator sets it on the nodes of a pool when that pool goes `on` (the node starts first, then the pool mode flips). The server does not trust the pairing: `actions_cpu_limited` in the heartbeat puts a worker of an `on` pool that still has a limit in the fallback and raises a counter, and a node with `off` in a pool that is not `on` is merely under-limited, reported the same way. |
+| Flags | `--placement-load off\|shadow\|on` and `--placement-load-pools` (pools that are `on`; the rest stay at their mode) on kbf-server and as a `Scheduler` setter plus `js-lease-server::Config` field; `--placement-cold-per-window`, `--placement-cpu-floor` (`f`, default 0.75, range 0.5 to 1), `--placement-profile off|shadow|on`, `--placement-profile-pools`, `--placement-profile-memory off|shadow|on`, `--placement-profile-floor` (`g`, default 0.75 = `f`), `--profile-store-bytes`, `--placement-s-cpu`, `--placement-s-mem`. On kbf-node: `--actions-cpu-max=on\|off` (default `on`, today's behaviour); `off` makes `limit_cpus` write `max` and skip the limit, and the operator sets it on the nodes of a pool when that pool goes `on` (the node starts first, then the pool mode flips). The server does not trust the pairing: `actions_cpu_limited` in the heartbeat puts a worker of an `on` pool that still has a limit in the fallback and raises a counter, and a node with `off` in a pool that is not `on` is merely under-limited, reported the same way. |
 | Daemon protection | the daemon writes `supervisor/cpu.weight` = 1000 (flag `--supervisor-cpu-weight`, default 1000) beside its existing `supervisor/memory.min` write in kbf-driver-container `delegate.rs`; `actions/` stays 100. The storage unit gets `CPUWeight=1000` in its packaged systemd unit (a sibling unit, so the unit weight applies). Not a kbf-server flag. |
 | Learned sizes | `shadow` or `on` with `--learned-sizes=off` is refused at start-up, since the CPU estimate exists only with learned sizes. |
 
@@ -242,8 +255,9 @@ verdict differences.
 
 | Step | Numeric exit criteria |
 |---|---|
-| shadow to canary pool | signal fresh on at least 99% of heartbeats of container workers; p99 `k <= 2`, p99 `r <= 2`, p99 cold-run mean cores `<= 4`, p99 warm `k_m <= 1.3`; the core-second-weighted mean of `k` per node at least `f` (the floor acts on the sum, so the weighted mean is the figure that matters), and the share of node-windows where `f * P_c > M` (the floor binds) reported and not above 10%, otherwise the floor binds in normal phases and `f` or the costs are wrong; keys without a CPU sample at most 5% of started leases |
-| profile shadow to profile on | with `--placement-profile=shadow` for 7 days: p99 `k_c <= 1.5` over lease-minutes of profile keys; at most 1% of lease-minutes above 2 x charge; shape-guard demotions at most 5% of profile keys; the verdict differences show the extra co-admissions |
+| shadow to canary pool | signal fresh on at least 99% of heartbeats of container workers; p99 `k <= 2`, p99 `r <= 2`, p99 cold-run mean cores `<= 4`, p99 warm `k_m <= 1.3`; the mean of `k` per node weighted by `p_i` times time at least `f` (the floor acts on the sum of `p_i`), and the share of node-windows where `f * P_c > M` (the floor binds) reported and not above 10%, otherwise the floor binds in normal phases and `f` or the costs are wrong; keys without a CPU sample at most 5% of started leases |
+| profile shadow to profile on (CPU) | with `--placement-profile=shadow` for 7 days: p99 `k_c <= 1.5` over lease-minutes of profile keys; p99 `q <= 2`; at most 1% of lease-minutes above 2 x charge; shape-guard demotions at most 5% of profile keys; `minutes_dropped` under 1% of minutes; the verdict differences show the extra co-admissions and `profile_dilation_missed` the lost ones |
+| profile memory shadow to on | at least 7 days of shadow with memory misfit (working set above the remaining maximum) in at most 0.1% of lease-minutes and no lease within a kill of its limit that the flat rule would not also have had |
 | canary to wide | over a canary period of at least 7 days of traffic: the daemon's `cpu.pressure` and lease self-fence trips not above the control pools' (this is what measures the supervisor weight); p99 measured CPU / `C` at most 1.25 and never above the bound; ladder retries and node-pressure kills not above the control pools; queue wait p95 not more than 10% above control; mean measured CPU / `C` above control |
 
 ## Simulation tests
@@ -267,9 +281,9 @@ demand, not the scheduler's own figures. The last column names the mechanism the
 | m | Shadow: placements identical to `off`; logged verdicts equal the first-round verdicts of an `on` run; histograms count every lease | shadow isolation |
 | n | Ladder retry: killed at 4 GiB, retried at 16 GiB, completes; the retry is counted at the rung; the learned estimate rises without thrash | counting the retry at the rung |
 | o | Mass-cold event: 1000 unlearned keys queued for an empty 88-thread node: 48 cold leases running after exactly 16 windows, never more than 3 cold admitted per window, uncovered cold `<= n_c`; with `cold_per_window = 12` the node fills in 4 windows and demand stays within the bound with the new `n_c` | the cold cap and its flag |
-| p | Two keys with non-overlapping busy phases on one 88-thread node: A busy (60 cores) in minutes 0 to 2 and quiet after, B quiet for 6 minutes then busy (60 cores) in minutes 6 to 8; both have profiles learned from earlier runs. Under the profile rule B is admitted beside A; under the flat peak rule (`--placement-profile=off`, 60 + 60 > 1.1 C) it is not. Ground-truth node CPU stays within the profile bound at every tick of both runs | the profile rule (B waits without it) |
-| q | A wrong profile: B's busy phase actually falls at minutes 0 to 2 (a shift of 6 minutes, beyond the dilation) so both are busy at once: ground-truth demand at every tick `<= (r k / g)(1 + s_cpu) C + n_c A`; after two such runs the key is demoted to flat and an identical pair is no longer co-admitted; a shift of 1 minute is absorbed by the dilation and never exceeds `(1 + s_cpu) C` | the floor `g`; the shape guard; the dilation |
-| r | Memory curve: a key peaks at minute 3 then falls; a second lease is admitted only after the first passes its peak, never while its current working set exceeds its remaining maximum; a lease whose working set exceeds the curve is charged its current working set | the remaining-maximum rule with the current-working-set floor |
+| p | Two keys with non-overlapping busy phases on one 88-thread node: A busy (60 cores) in minutes 0 to 2 and quiet after, B quiet for 8 minutes then busy (60 cores) in minutes 8 to 10 (an idle gap of 5 minutes, `2 delta + 1`); both have profiles learned from earlier runs. Under the profile rule B is admitted beside A; under the flat peak rule (`--placement-profile=off`, 60 + 60 > 1.1 C) it is not. With B's busy phase at minute 6 (a gap of 3) the dilation makes it refuse, and shadow counts it in `profile_dilation_missed`. Two busy phases at minute 40 (beyond `H`) are refused by the `H+` check. Ground-truth node CPU stays within the bound at every tick | the profile rule (B waits without it); the dilation; the `H+` check |
+| q | A wrong profile: B's busy phase actually falls at minutes 0 to 2 (a shift of 6 minutes, beyond the dilation) so both are busy at once: ground-truth demand at every tick `<=` the wrong-profile limit `(r_b k / g)(1 + s_cpu) C + n_c A` with `r_b` the key's own peak ratio; after two such runs the key is demoted to flat and an identical pair is no longer co-admitted; a shift of 1 minute is absorbed by the dilation and never exceeds `(1 + s_cpu) C` | the floor `g`; the shape guard; the dilation |
+| r | Memory curve (profile memory `on`): a key peaks at minute 3 then falls, then allocates again past its remaining maximum: the misfit is counted, the key's memory curve is demoted after two runs, and the lease is bounded by its flat-cost cgroup limit; a key peaks at minute 3 then falls; a second lease is admitted only after the first passes its peak, never while its current working set exceeds its remaining maximum; a lease whose working set exceeds the curve is charged its current working set | the remaining-maximum rule with the current-working-set floor |
 
 ## Out
 Pinning, cpusets, NUMA placement, QoS tiers, per-action reservations, a CPU limit on the actions cgroup (for `on` pools), and any client environment
