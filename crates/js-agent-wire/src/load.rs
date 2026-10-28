@@ -191,7 +191,6 @@ impl NodeLoad {
                 if !lease_ok(&m.lease_id)
                     || m.minute > limits::TAIL_MINUTE
                     || m.ws_max_bytes > max
-                    || m.cpu_mean_millis > m.cpu_peak_window_millis
                 {
                     Verdict::Invalid
                 } else if !seen.insert((m.lease_id.clone(), m.minute)) {
