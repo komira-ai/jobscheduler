@@ -158,6 +158,24 @@ fn a_request_id_holds_one_host_while_ready() {
     assert_eq!(provider.booked().get(&host("b")), Some(&lease(3)));
 }
 
+/// Asserts that a repeat start with the same request id and the same lease id of a ready
+/// lease is answered `Started` on the host it holds: it is neither refused nor given a
+/// second host.
+#[test]
+fn a_repeat_start_of_a_ready_lease_answers_started() {
+    let (fx, mut provider, epoch) = busy();
+    fx.join("b", "t");
+    let mut message = fx.heartbeat("a", epoch);
+    message.exclusive_ready = Some(lease(1).to_string());
+    fx.registry.heartbeat(&message, &cred("t")).unwrap();
+    assert_eq!(
+        provider.start(named(1, "holder")),
+        StartAck::Started { host: host("a") }
+    );
+    assert_eq!(provider.booked().len(), 1);
+    assert_eq!(provider.booked().get(&host("a")), Some(&lease(1)));
+}
+
 /// Asserts that a start without an id is not held to one host: two equal anonymous
 /// requests are two consumers and both book.
 #[test]
