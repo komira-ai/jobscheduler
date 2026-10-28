@@ -23,7 +23,7 @@ pub use snapshot::{
     platform_label,
 };
 pub use state::OpState;
-pub use whole::WholeMark;
+pub use whole::{WholeMark, WholeWait};
 pub(crate) use worker::Worker;
 
 use std::cmp::Reverse;
@@ -338,6 +338,19 @@ impl Scheduler {
     /// worker barred to the request for `reserve_backoff`, and another held if there is
     /// one. Nothing running is stopped. The marks, counts and back-offs are in memory
     /// only; a recovered scheduler has none, so every count restarts at zero.
+    ///
+    /// A new mark is made only while the caps allow it: whole workers (marks and held
+    /// whole-machine leases, never a head's hold) below `max_whole_node` and below the
+    /// capable workers less `keep_for_ordinary`, marks on busy workers below
+    /// `max_draining`, and the worker not the last one an older ordinary request that
+    /// waits could run on, unless `allow_last_capable` (then the next worker by drain cost
+    /// is tried). A request a cap stops holds nothing and [`Scheduler::whole_wait`] says
+    /// which. The pool is every worker that serves whole-machine leases: all but a
+    /// quarantined or draining one counts as capable, a lost one too. When the ceiling falls
+    /// below the whole workers, the newest marks beyond it are dropped (no give-up
+    /// counted), never a held lease. A worker that fits is still taken at once, whatever
+    /// the caps. `max_whole_node_per_consumer` is not enforced: no request, waiter or qos
+    /// names a consumer here, so the setting is ignored.
     #[must_use]
     pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
         self.whole_node = Some(config);
@@ -561,10 +574,10 @@ impl Scheduler {
         let mut stuck = Vec::new();
         let mut reserved = BTreeSet::new();
         let mut reservations = BTreeMap::new();
-        let mut marks = BTreeMap::new();
+        let mut whole = self.whole_round();
         let mut head_holds = BTreeMap::new();
         let mut held_pools = BTreeSet::new();
-        for &(_, id) in &self.queue {
+        for (position, &(_, id)) in (0u64..).zip(&self.queue) {
             let op = &self.ops[&id];
             let request = &op.request;
             // A memory a key floor gave it never owns a worker whole while another could
@@ -603,6 +616,16 @@ impl Scheduler {
             } else {
                 servable.verdict(&self.workers, request)
             };
+            // A whole-machine request that is placed, or cannot be served, has no hold to
+            // count; one that fits ahead of the rest counts as a whole worker.
+            if request.kind == LeaseKind::WholeMachine && (fitted || verdict != Verdict::Servable) {
+                self.drain.marks.remove(&id);
+                if fitted {
+                    whole.placed_whole();
+                }
+            } else if !fitted && request.kind != LeaseKind::WholeMachine {
+                whole.waiting_ordinary(position, id);
+            }
             if !fitted && request.kind == LeaseKind::WholeMachine && verdict == Verdict::Servable {
                 let held = match &self.whole_node {
                     None => servable.reserve(
@@ -616,21 +639,23 @@ impl Scheduler {
                     Some(cfg) => {
                         let turn = self.drain.turn(id, op.queued_at, now, cfg);
                         turn.and_then(|turn| {
-                            let out: BTreeSet<WorkerId> =
-                                reserved.union(&turn.barred).cloned().collect();
-                            let avoid = whole::Drain::avoiding(&op.avoid, &turn.barred);
-                            let name = servable.reserve(
-                                &self.workers,
-                                request,
-                                &out,
-                                &avoid,
-                                turn.kept.as_ref().map(|m| &m.worker),
-                                self.drain_order(&placed).as_deref(),
-                            )?;
-                            let max_wall = self.max_walls.get(&id).copied();
-                            let mark = self.drain.mark(id, &name, turn.kept, now, cfg, max_wall);
-                            marks.insert(id, mark);
-                            Some(name)
+                            match self.hold_whole(
+                                &mut servable,
+                                &whole,
+                                (id, position),
+                                &reserved,
+                                &placed,
+                                turn,
+                            ) {
+                                Ok(held) => held.map(|(name, mark)| {
+                                    whole.marks.insert(id, mark);
+                                    name
+                                }),
+                                Err(wait) => {
+                                    whole.waits.insert(id, wait);
+                                    None
+                                }
+                            }
                         })
                     }
                 };
@@ -685,7 +710,8 @@ impl Scheduler {
             self.undo_key_raise(id);
         }
         self.reservations = reservations;
-        self.drain.marks = marks;
+        self.drain.marks = whole.marks;
+        self.drain.waits = whole.waits;
         self.head_holds = head_holds;
         for (id, verdict) in verdicts {
             // A size a key floor gave it and no live worker can hold is lowered, not

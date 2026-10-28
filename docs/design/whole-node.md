@@ -205,6 +205,11 @@ fairness, so a stream of newer ordinary requests that all need H cannot hold the
 (`allow_last_capable = true`), for instance when the operator accepts that a performance run is worth stalling one ordinary request. In a
 dedicated pool there is no ordinary work and neither rule applies.
 
+*Today's scheduler (`js-sched`) applies these caps to a hold's mark, not to a host that is already quiet, and counts one pool: every worker
+that serves whole-machine leases. It has no notion of a consumer, so `max_whole_node_per_consumer` is not enforced there; the setting is read
+and ignored until a request names its consumer. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
+rule does not read it as taking a host from the request that holds it.*
+
 **Validation at load.** A mixed pool that sets `max_whole_node` needs `max_whole_node + keep_for_ordinary <= max_machines`, and every
 limit is at least 1 where it is a maximum; a file that breaks this is refused (D20). A dedicated pool may set `max_whole_node` below
 `max_machines`; the surplus hosts then serve nothing, which validation reports.

@@ -527,6 +527,25 @@ impl Servable {
             .cloned()
     }
 
+    /// The live workers placement may use that could run `request` once their bookings
+    /// end and that are not in `reserved`: where an ordinary request that waits could go.
+    pub(crate) fn capable(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+    ) -> Vec<&WorkerId> {
+        let at = self.matching(workers, request);
+        self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| {
+                !reserved.contains(*name) && workers[*name].capacity.fits(&request.resources)
+            })
+            .collect()
+    }
+
     /// The workers of `avoid` that placement skips for `request`, whose matching live
     /// workers are `memo[at]`: all of them while a matching worker outside `avoid`
     /// could run the request once its bookings end, else none.

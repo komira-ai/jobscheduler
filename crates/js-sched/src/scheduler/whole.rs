@@ -1,17 +1,40 @@
 //! The drain cost of a worker, for the worker a blocked whole-machine request holds, and
 //! the wait before it holds one, the deadline of the hold and its give-up
-//! ([`Scheduler::with_whole_node`]).
+//! ([`Scheduler::with_whole_node`]); and the caps that keep whole-machine requests from
+//! taking a pool (`max_whole_node`, `max_draining`, `keep_for_ordinary`, the last
+//! capable worker of an older ordinary request), with the ceiling that falls when
+//! workers do.
+//!
+//! The pool the caps count is every registered worker that serves whole-machine leases:
+//! the scheduler has no pools of its own, so one ceiling covers them all.
+//! `max_whole_node_per_consumer` is not enforced: no request, waiter or qos here names
+//! a consumer, so there is nothing to count ([`Scheduler::with_whole_node`]).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use js_types::sched::{FarmTime, OperationId, WorkerId};
+use js_types::sched::{FarmTime, LeaseKind, NodePhase, OperationId, WorkerId};
 use js_whole::WholeNodeConfig;
+use js_whole::caps::{
+    Blocked, Capability, Counts, Limits, Mark, OrdinaryRequest, capable_hosts, ceiling,
+    ceiling_excess, last_capable_blocks, may_reserve,
+};
 use js_whole::cost::{DrainCost, HostLoad, drain_cost, reserve_deadline};
 
-use crate::scheduler::Scheduler;
-use crate::servable::Placed;
+use super::{Scheduler, Worker};
+use crate::servable::{Placed, Servable, serves};
+
+/// Why a whole-machine request that fits nowhere holds no worker though it has waited
+/// out `drain_after` ([`Scheduler::whole_wait`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeWait {
+    /// A cap of the pool stops a new mark.
+    Cap(Blocked),
+    /// Every worker it could hold is the last one an older ordinary request could run on,
+    /// and `allow_last_capable` is off.
+    LastCapable,
+}
 
 /// The mark a queued whole-machine request has on the worker it holds while that worker
 /// drains ([`Scheduler::whole_mark`]).
@@ -35,6 +58,8 @@ pub(super) struct Drain {
     give_ups: BTreeMap<OperationId, u32>,
     /// The workers each request avoids, and until when (exclusive).
     backoff: BTreeMap<OperationId, BTreeMap<WorkerId, FarmTime>>,
+    /// Why each request without a mark waits, as of the last placement round.
+    pub(super) waits: BTreeMap<OperationId, WholeWait>,
 }
 
 /// What a request may do in one placement round, from [`Drain::turn`].
@@ -136,6 +161,54 @@ impl Drain {
         self.marks.remove(&operation);
         self.give_ups.remove(&operation);
         self.backoff.remove(&operation);
+        self.waits.remove(&operation);
+    }
+}
+
+/// What one placement round knows for the caps: the limits, the whole leases it counts,
+/// the ordinary requests ahead that wait, and the marks and waits it makes.
+pub(super) struct Round {
+    /// Whether whole-node settings are on.
+    on: bool,
+    /// The limits of the caps.
+    limits: Limits,
+    /// Workers held by a whole-machine lease at the start of the round, and the
+    /// whole-machine requests placed since.
+    held: usize,
+    /// The queued ordinary requests not placed so far, with their queue positions.
+    ordinary: Vec<(u64, OperationId)>,
+    /// The marks of this round, new and kept.
+    pub(super) marks: BTreeMap<OperationId, WholeMark>,
+    /// The waits of this round.
+    pub(super) waits: BTreeMap<OperationId, WholeWait>,
+}
+
+impl Round {
+    /// Counts a whole-machine request placed this round as a whole worker.
+    pub(super) fn placed_whole(&mut self) {
+        self.held += 1;
+    }
+
+    /// Notes an ordinary request that fits nowhere and waits at queue `position`.
+    pub(super) fn waiting_ordinary(&mut self, position: u64, operation: OperationId) {
+        if self.on {
+            self.ordinary.push((position, operation));
+        }
+    }
+}
+
+/// How a worker counts toward the capable hosts of the pool.
+fn capability(worker: &Worker, now: FarmTime) -> Capability {
+    if !worker.alive(now) {
+        Capability::Lost
+    } else {
+        match worker.phase {
+            // Needs an operator, as a tainted host does.
+            NodePhase::Quarantined(_) => Capability::Tainted,
+            // Leaving the pool.
+            NodePhase::Draining => Capability::Releasing,
+            _ => Capability::Capable,
+        }
     }
 }
 
@@ -155,6 +228,16 @@ impl Scheduler {
     #[must_use]
     pub fn whole_give_ups(&self, operation: OperationId) -> u32 {
         self.drain.give_ups.get(&operation).copied().unwrap_or(0)
+    }
+
+    /// Why queued whole-machine `operation` holds no worker although it has waited out
+    /// `drain_after`, with whole-node settings on: the cap that stops it, or that every
+    /// worker it could hold is the last one of an older ordinary request. `None` when it
+    /// holds a worker, is placed, or has not yet reached its turn; as of the last
+    /// placement round.
+    #[must_use]
+    pub fn whole_wait(&self, operation: OperationId) -> Option<WholeWait> {
+        self.drain.waits.get(&operation).copied()
     }
 
     /// Names the longest `operation` may run once leased, which the caller knows from the
@@ -200,5 +283,202 @@ impl Scheduler {
             })
             .collect();
         Some(drain_cost(&loads, self.now.as_millis()))
+    }
+}
+
+impl Scheduler {
+    /// The workers a whole-machine lease holds, with the time it was granted.
+    fn whole_held(&self) -> BTreeMap<&WorkerId, FarmTime> {
+        self.held
+            .values()
+            .filter(|h| self.ops[&h.operation].request.kind == LeaseKind::WholeMachine)
+            .filter_map(|h| {
+                let (_, worker) = self.ops[&h.operation].state.holding()?;
+                Some((worker, h.granted_at))
+            })
+            .collect()
+    }
+
+    /// The limits of the caps now, from the settings and the workers.
+    fn whole_limits(&self, cfg: &WholeNodeConfig) -> Limits {
+        let hosts: Vec<Capability> = self
+            .workers
+            .values()
+            .filter(|w| serves(&w.caps, LeaseKind::WholeMachine))
+            .map(|w| capability(w, self.now))
+            .collect();
+        Limits {
+            max_whole_node: cfg.max_whole_node,
+            capable_hosts: capable_hosts(&hosts),
+            keep_for_ordinary: cfg.keep_for_ordinary,
+            max_draining: cfg.max_draining,
+            per_consumer: None,
+        }
+    }
+
+    /// The start of a placement round: if the ceiling has fallen below the whole workers
+    /// (a worker taken out of the pool, a cap lowered), drops the newest marks beyond it,
+    /// never a held lease. A dropped mark counts no give-up and bars no worker. The
+    /// round's state for the caps.
+    pub(super) fn whole_round(&mut self) -> Round {
+        let Some(cfg) = self.whole_node.clone() else {
+            return Round {
+                on: false,
+                // Unread: no caps are checked without settings.
+                limits: Limits {
+                    max_whole_node: 0,
+                    capable_hosts: 0,
+                    keep_for_ordinary: 0,
+                    max_draining: 0,
+                    per_consumer: None,
+                },
+                held: 0,
+                ordinary: Vec::new(),
+                marks: BTreeMap::new(),
+                waits: BTreeMap::new(),
+            };
+        };
+        let limits = self.whole_limits(&cfg);
+        let mut marks: Vec<Mark> = self
+            .whole_held()
+            .iter()
+            .map(|(worker, at)| Mark::Held {
+                host: worker.as_str().to_owned(),
+                at: at.as_millis(),
+            })
+            .collect();
+        let held = marks.len();
+        // Zero-padded, so that the order of the names is the order of the ids.
+        let names: BTreeMap<String, OperationId> = self
+            .drain
+            .marks
+            .keys()
+            .map(|id| (format!("{:020}", id.0), *id))
+            .collect();
+        marks.extend(self.drain.marks.iter().map(|(id, m)| Mark::Reserved {
+            request: format!("{:020}", id.0),
+            at: m.made.as_millis(),
+        }));
+        let bound = ceiling(
+            limits.max_whole_node,
+            limits.capable_hosts,
+            limits.keep_for_ordinary,
+        );
+        for name in ceiling_excess(&marks, bound) {
+            self.drain.marks.remove(&names[&name]);
+        }
+        Round {
+            on: true,
+            limits,
+            held,
+            ordinary: Vec::new(),
+            marks: BTreeMap::new(),
+            waits: BTreeMap::new(),
+        }
+    }
+
+    /// The worker whole-machine `id`, at queue `position`, holds this round and its mark,
+    /// when it holds one: `kept` stays on its worker without a check (that mark is
+    /// already counted); a new mark is made only if the caps allow it ([`may_reserve`])
+    /// and the worker is not the last capable one of an older ordinary request, in which
+    /// case the next worker by drain cost is tried. `Err` is the reason it holds none.
+    /// `Ok(None)` is no worker that could.
+    ///
+    /// Head holds are not marks: `reserved` keeps a request off a worker a head holds, and
+    /// no cap counts it.
+    pub(super) fn hold_whole(
+        &self,
+        servable: &mut Servable,
+        round: &Round,
+        (id, position): (OperationId, u64),
+        reserved: &BTreeSet<WorkerId>,
+        placed: &[(OperationId, Placed)],
+        turn: Turn,
+    ) -> Result<Option<(WorkerId, WholeMark)>, WholeWait> {
+        let cfg = self
+            .whole_node
+            .as_ref()
+            .expect("whole-node settings are on");
+        let op = &self.ops[&id];
+        let mut out: BTreeSet<WorkerId> = reserved.union(&turn.barred).cloned().collect();
+        let avoid = Drain::avoiding(&op.avoid, &turn.barred);
+        let kept = turn.kept.as_ref().map(|m| &m.worker);
+        let drain = self.drain_order(placed);
+        let max_wall = self.max_walls.get(&id).copied();
+        let mut wait = None;
+        loop {
+            let Some(name) = servable.reserve(
+                &self.workers,
+                &op.request,
+                &out,
+                &avoid,
+                kept,
+                drain.as_deref(),
+            ) else {
+                return wait.map_or(Ok(None), Err);
+            };
+            if kept != Some(&name) {
+                may_reserve(self.whole_counts(round), round.limits).map_err(WholeWait::Cap)?;
+                if self.last_capable(servable, round, &name, position, cfg) {
+                    wait = Some(WholeWait::LastCapable);
+                    out.insert(name);
+                    continue;
+                }
+            }
+            let mark = self
+                .drain
+                .mark(id, &name, turn.kept, self.now, cfg, max_wall);
+            return Ok(Some((name, mark)));
+        }
+    }
+
+    /// What the caps count now: whole workers (held leases, marks not yet reached this
+    /// round, marks made or kept), and those marks that are on a busy worker.
+    fn whole_counts(&self, round: &Round) -> Counts {
+        let marks = || self.drain.marks.values().chain(round.marks.values());
+        Counts {
+            whole: round.held + marks().count(),
+            reserved: marks()
+                .filter(|m| self.workers.get(&m.worker).is_some_and(|w| w.leases > 0))
+                .count(),
+            consumer_whole: 0,
+        }
+    }
+
+    /// Whether a mark on `host` for the request at `position` would take the last
+    /// capable worker no whole mark holds of an older ordinary request that waits.
+    fn last_capable(
+        &self,
+        servable: &mut Servable,
+        round: &Round,
+        host: &WorkerId,
+        position: u64,
+        cfg: &WholeNodeConfig,
+    ) -> bool {
+        if cfg.allow_last_capable {
+            return false;
+        }
+        // Only a whole mark takes a worker from an ordinary request: a head's hold is its
+        // own, and a worker it holds is one it can still run on.
+        let marked: BTreeSet<WorkerId> = self
+            .drain
+            .marks
+            .values()
+            .chain(round.marks.values())
+            .map(|m| m.worker.clone())
+            .collect();
+        let ordinary: Vec<OrdinaryRequest> = round
+            .ordinary
+            .iter()
+            .map(|(position, id)| OrdinaryRequest {
+                position: *position,
+                unreserved_capable: servable
+                    .capable(&self.workers, &self.ops[id].request, &marked)
+                    .into_iter()
+                    .map(|name| name.as_str().to_owned())
+                    .collect(),
+            })
+            .collect();
+        last_capable_blocks(host.as_str(), position, &ordinary, false)
     }
 }

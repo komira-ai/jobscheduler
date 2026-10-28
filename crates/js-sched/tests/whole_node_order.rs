@@ -17,7 +17,11 @@ use js_types::sched::{LeaseId, LeaseKind, OperationId, WaiterId};
 use js_whole::WholeNodeConfig;
 
 fn whole_node() -> WholeNodeConfig {
-    WholeNodeConfig::dedicated(4)
+    // Room to drain every worker at once: the caps are tested in `whole_node_caps`.
+    WholeNodeConfig {
+        max_draining: 4,
+        ..WholeNodeConfig::dedicated(4)
+    }
 }
 
 /// `a` holds two leases that may run a minute each, `b` one that may run an hour.
