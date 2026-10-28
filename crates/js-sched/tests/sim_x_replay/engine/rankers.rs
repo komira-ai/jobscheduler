@@ -191,10 +191,11 @@ pub fn stream_seed(seed: u64, lease: usize) -> u64 {
 }
 
 /// A random feasible host. Each lease has a stream of its own, `SimRng::from_seed` of
-/// [`stream_seed`]. Every time the lease is looked at the stream gives one draw per
-/// host of the pool, in host order, and the candidate with the smallest draw is
+/// [`stream_seed`]. Each time the ranker is asked about the lease the stream gives one
+/// draw per host of the pool, in host order, and the candidate with the smallest draw is
 /// chosen, so the choice depends on which hosts passed and not on the order they were
-/// handed in.
+/// handed in. The engine places a lease as soon as it has a candidate, so it asks once
+/// per lease; the stream is dropped when the lease is placed.
 #[derive(Debug)]
 pub struct Random {
     seed: u64,

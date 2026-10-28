@@ -54,6 +54,149 @@ fn memory_kills_take_the_largest_then_the_newest_and_the_books_balance() {
     let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
     assert!(r.kills.is_empty());
     assert_eq!(r.metrics.counters.completed, 3);
+
+    // Exactly at the memory (500 + 500 on 1000 MiB): a working set equal to the host's
+    // memory does not exceed it, so nobody is killed.
+    let (rows, beliefs) = kill_world([500, 500, 0], [0, 0, 0]);
+    let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
+    assert!(r.kills.is_empty(), "{:?}", r.kills);
+    assert_eq!(r.metrics.counters.completed, 3);
+    // One MiB more is over.
+    let (rows, beliefs) = kill_world([500, 501, 0], [0, 0, 0]);
+    let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
+    assert_eq!(r.kills, vec![(1, 4)]);
+}
+
+/// Catches: the working set read at the wrong age (age 0, or the absolute tick instead of
+/// the ticks since the lease started). A lease started at tick 10 holds 100 MiB for each
+/// second of its life on a host of 1000 MiB; windows end at ticks 14, 19, 24, when it is 4,
+/// 9 and 14 s old and holds 400, 900 and 1400 MiB. It is killed at 24 and not before: read
+/// at age 0 it is never killed, read at the absolute tick it is killed at 14.
+#[test]
+fn the_working_set_is_read_at_the_age_of_the_lease() {
+    let cfg = small_config(1, 4, 1_000);
+    let rows = vec![row(10_000, 100_000, 100_000, 0)];
+    let beliefs = TableBeliefs::uniform(1, &flat(500, 10));
+    let mut truth = EvenTruth::new(&rows);
+    truth.ramp_mib_per_tick = 100;
+    let r = replay(&cfg, &rows, &truth, &beliefs, &mut LeastLoaded);
+    assert_eq!(r.placements[0].tick, 10);
+    assert_eq!(r.kills, vec![(0, 24)]);
+    assert_eq!(r.metrics.counters.killed, 1);
+    assert_eq!(r.metrics.check_books(), Ok(()));
+}
+
+/// A lease that ends with the sentinel row that closes a one-minute metric window.
+fn waits_world(
+    lease_wall_ms: u64,
+    second_start_ms: u64,
+) -> (crate::engine::replay::Config, Vec<Row>, TableBeliefs) {
+    let cfg = small_config(1, 4, 16_384);
+    let rows = vec![
+        row(1, lease_wall_ms, 100, 100),
+        row(second_start_ms, 5_000, 100, 100),
+        row(60_000, 1_000, 100, 100),
+    ];
+    let beliefs = TableBeliefs(vec![flat(4_000, 100), flat(4_000, 100), flat(100, 100)]);
+    (cfg, rows, beliefs)
+}
+
+/// Catches: a queue wait off by a round (or in the wrong unit), a wait that ignores the
+/// time to the next round, and completions per 1000 minutes that are only positive. One
+/// host of 4 cores; a lease arrives 1 ms into a round and takes all of it for 5 s, a
+/// second arrives at 4999 ms and must wait for the first to go. Rounds are 5 s apart: the
+/// first is placed at 5000 (waited 4999 ms, all of it the wait to the next round), the
+/// second at 10 000 (waited 5001 ms, of which 1 ms was to the next round, so 5000 ms is
+/// the queue's own). Both complete in the one metric minute: 2000 per 1000 minutes. The
+/// sentinel at 60 000 ms closes the window and is not in it.
+#[test]
+fn queue_waits_are_exact() {
+    let (cfg, rows, beliefs) = waits_world(5_000, 4_999);
+    let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
+    let m = &r.metrics;
+    assert_eq!(m.metric_minutes, 1);
+    assert_eq!(m.wait_ms, vec![4_999, 5_001]);
+    assert_eq!(m.wait_excess_ms, vec![0, 5_000]);
+    assert_eq!(m.wait_pct(95, 100), Some(5_001));
+    assert_eq!(m.completed_in_window, 2);
+    assert_eq!(m.completed_per_1000_min(), 2_000);
+    assert_eq!(m.check_books(), Ok(()));
+}
+
+/// Catches: the wait of a lease still queued at the end being dropped or counted to the
+/// wrong tick. The first lease holds the host for the whole run, the drain ends at tick
+/// 71 (10 s after the last arrival at 60 s, plus the tick that stops it) and the second
+/// has waited since 4999 ms: 66 001 ms, of which 1 ms was to the next round.
+#[test]
+fn the_wait_of_a_lease_still_queued_is_counted_to_the_end() {
+    let (mut cfg, rows, beliefs) = waits_world(1_000_000, 4_999);
+    cfg.drain_ticks = 10;
+    let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
+    let m = &r.metrics;
+    assert_eq!(r.end_tick, 71);
+    assert_eq!(m.counters.queued_at_end, 1);
+    assert_eq!(
+        m.counters.running_at_end, 1,
+        "the first; the sentinel finished"
+    );
+    assert_eq!(m.wait_ms, vec![4_999, 66_001]);
+    assert_eq!(m.wait_excess_ms, vec![0, 66_000]);
+    assert_eq!(m.check_books(), Ok(()));
+}
+
+/// Catches: a round that counts its refusals as consecutive (a placement starting the
+/// count again) and not in total. In one round: a lease is placed, 20 are refused, one is
+/// placed, 12 more are refused (32 in all), and 5 that would fit follow. The round stops at
+/// the 32nd refusal, so only the two placements happen at tick 0 and the 5 are never
+/// looked at; counted as consecutive the second placement would reset the count and the
+/// 5 would be placed too.
+#[test]
+fn a_round_stops_at_32_refusals_in_total_not_in_a_row() {
+    let cfg = small_config(1, 4, 16_384);
+    let mut rows = vec![row(0, 20_000, 20_000, 100)];
+    let mut beliefs = vec![flat(1_000, 100)];
+    let mut add = |n: usize, cpu: u64| {
+        for _ in 0..n {
+            rows.push(row(0, 1_000, 1_000, 100));
+            beliefs.push(flat(cpu, 100));
+        }
+    };
+    add(20, 4_000);
+    add(1, 100);
+    add(12, 4_000);
+    add(5, 100);
+    let r = run(&cfg, &rows, &TableBeliefs(beliefs), &mut LeastLoaded);
+    let first_round: Vec<usize> = r
+        .placements
+        .iter()
+        .filter(|p| p.tick == 0)
+        .map(|p| p.lease)
+        .collect();
+    assert_eq!(first_round, vec![0, 21]);
+    let c = &r.metrics.counters;
+    assert_eq!(c.worst_round_excess, 32);
+    assert!(c.unexamined_max >= 5, "{}", c.unexamined_max);
+    assert_eq!(c.check_a9(1, true), Ok(()));
+}
+
+/// Catches: the previous rule ranking by what the scheduler believes and not by what the
+/// predicate charges the host, which includes the CPU measured over the last windows. Two
+/// hosts of 4 cores: the first holds a lease believed at 0.5 core that burns 3, the second
+/// one believed at 1 core that burns 0.1. By belief the first is the less loaded (500 m to
+/// 1000 m); charged as the predicate does (measured 3000 m, against the floor of 750 m on
+/// the second) it is the more loaded, and the third lease goes to the second host.
+#[test]
+fn least_loaded_ranks_by_the_cpu_the_hosts_were_measured_at() {
+    let cfg = small_config(2, 4, 16_384);
+    let rows = vec![
+        row(0, 100_000, 300_000, 10),
+        row(0, 100_000, 10_000, 10),
+        row(10_000, 10_000, 1_000, 10),
+    ];
+    let beliefs = TableBeliefs(vec![flat(500, 10), flat(1_000, 10), flat(100, 10)]);
+    let r = run(&cfg, &rows, &beliefs, &mut LeastLoaded);
+    let hosts: Vec<(usize, usize)> = r.placements.iter().map(|p| (p.lease, p.host)).collect();
+    assert_eq!(hosts, vec![(0, 0), (1, 1), (2, 1)]);
 }
 
 /// Catches: leases that vanish when a run stops early. A lease still running when the

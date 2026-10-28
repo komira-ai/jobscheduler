@@ -317,7 +317,7 @@ fn round<'w>(
         let c = rec.counters();
         c.scored_candidates += pick.scored_candidates;
         c.evaluations += pick.evaluations;
-        c.scored_placements += u64::from(pick.scored_candidates > 0);
+        c.scored_placements += u64::from(pick.scored_candidates >= 2);
         c.scored_beyond_candidates += pick
             .scored_candidates
             .saturating_sub(candidates.len() as u64);

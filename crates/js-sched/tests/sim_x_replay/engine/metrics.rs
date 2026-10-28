@@ -140,7 +140,8 @@ pub struct Counters {
     pub rounds_with_unexamined: u64,
 }
 
-/// Which bound of the engine a run broke.
+/// Which bound of the engine's loop a run broke ("A9": the counted bounds on what the
+/// loop and a scorer do, checked by [`Counters::check_a9`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum A9 {
     /// Evaluations are not `64 x` the candidates scored.
@@ -285,7 +286,9 @@ pub struct Metrics {
     /// The same on host-minutes with no refusal.
     pub headroom_b_ppm_sum: u64,
     /// Host-minutes with the queue non-empty after a round and no refusal on the host: the
-    /// retired definition of stranding. A FIFO scan leaves it empty.
+    /// retired definition of stranding. A FIFO scan leaves it empty when every host is
+    /// asked about every waiting lease; a marked host is never asked, records no refusal,
+    /// and so counts here (and as headroom) whenever the queue is non-empty.
     pub retired_host_minutes: u64,
     /// Minutes in which consolidating onto one host fewer was possible.
     pub consolidation_minutes: u64,
@@ -496,7 +499,9 @@ impl Metrics {
     }
 }
 
-/// The registered limits of the guards every assertion carries (G0 of the design).
+/// The registered limits of the guards every assertion of the sims carries ("G0"): a run
+/// that fails one of them measured too little, or a pool that was not serving, and says
+/// nothing either way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct G0 {
     /// Host-windows in the metric window.

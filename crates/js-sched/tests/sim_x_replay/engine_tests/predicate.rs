@@ -347,3 +347,43 @@ fn incremental_sums_equal_the_rebuilt_ones() {
         "residents grew old enough to be re-charged"
     );
 }
+
+/// Catches: a curve that charges nothing after its last point. The design holds the last
+/// point for the rest of the lease's life (the held tail), so a curve of 10 minutes whose
+/// last point is high is high at slot 30 and at `H+`, in the sums, and still refuses a
+/// lease 10 minutes on, long after the curve has ended.
+#[test]
+fn the_last_point_of_a_curve_is_held_to_the_horizon_and_after() {
+    let p = Params::default();
+    let cap = Pool::ci().cap; // 16 000 m, limit 17 600
+    let low = Charge::new(1_000, 100);
+    let high = Charge::new(14_000, 100);
+    let mut curve = vec![low; 9];
+    curve.push(high);
+    let short = Belief::new(false, 10, low, curve);
+    assert_eq!(short.at(9), high);
+    assert_eq!(short.at(10), high);
+    assert_eq!(short.at(1_000), high, "held, not dropped");
+    assert_eq!(short.at_slot(0, 30), high);
+    assert_eq!(short.at_slot(0, H_PLUS), high);
+    assert_eq!(short.at_slot(0, 0), low, "slot 0 is the flat charge");
+
+    let mut h = HostState::new(cap);
+    h.place(0, 0, &short);
+    assert_eq!(h.sums().slots[30], high);
+    assert_eq!(h.sums().slots[H_PLUS], high);
+    assert_eq!(
+        admit(&p, &h, &flat(4_000, 100)),
+        Err(Refusal::Cpu { slot: 9 }),
+        "the rise is nine minutes ahead"
+    );
+
+    // Ten minutes on the curve is behind the resident: every slot is the held point.
+    h.tick(600);
+    assert_eq!(h.sums().slots[1], high);
+    assert_eq!(
+        admit(&p, &h, &flat(4_000, 100)),
+        Err(Refusal::Cpu { slot: 1 })
+    );
+    assert_eq!(*h.sums(), h.rebuild(600));
+}

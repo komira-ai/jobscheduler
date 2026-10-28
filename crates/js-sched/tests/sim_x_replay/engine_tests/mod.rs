@@ -35,6 +35,9 @@ pub struct EvenTruth {
     rows: Vec<Row>,
     /// The extra core-ms burnt in the first second of every lease (0 for an honest truth).
     pub extra_first_tick: u64,
+    /// MiB the working set grows by every second of a lease's life, on top of its peak
+    /// (0: the working set is the peak from the first second).
+    pub ramp_mib_per_tick: u64,
 }
 
 impl EvenTruth {
@@ -43,6 +46,7 @@ impl EvenTruth {
         Self {
             rows: rows.to_vec(),
             extra_first_tick: 0,
+            ramp_mib_per_tick: 0,
         }
     }
 }
@@ -59,8 +63,8 @@ impl Truth for EvenTruth {
         r.cpu_ms / n + u64::from(age_tick < r.cpu_ms % n) + extra
     }
 
-    fn working_set_mib(&self, lease: usize, _age_tick: u64) -> u64 {
-        self.rows[lease].peak_mem_mib
+    fn working_set_mib(&self, lease: usize, age_tick: u64) -> u64 {
+        self.rows[lease].peak_mem_mib + self.ramp_mib_per_tick * age_tick
     }
 }
 

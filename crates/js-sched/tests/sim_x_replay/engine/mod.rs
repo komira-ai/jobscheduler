@@ -12,8 +12,10 @@
 //! | `truth` | what really happens to a run, from a row and keyed draws | planned |
 //! | `predictor` | what the scheduler believes about a key | planned |
 //! | `permute` | the control's permutation of belief minutes | planned |
-//! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
-//! | `rankers`, `report`, `control` | the compared placement rules, the report and the control | planned |
+//! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | present |
+//! | `rankers` | the compared placement rules (the previous rule and a random one) | present |
+//! | `replay` | the loop: arrivals, rounds, truth, kills and the metrics | present |
+//! | `report`, `control` | the report and the control | planned |
 //!
 //! A module takes its input as `fixture::Row` values (or a `fixture::Fixture`), never as
 //! bytes, so a hand-made trace in a test and the committed one go through the same code.
@@ -22,9 +24,13 @@
 // and modules arrive in separate pull requests ahead of their callers.
 #![allow(dead_code, reason = "each compile unit uses a subset of the engine")]
 
-pub mod fixture;
+// This series' modules are declared above `fixture`, in a group of their own: a pull
+// request that adds its module beside `fixture` then merges with this one without a
+// conflict.
 pub mod metrics;
 pub mod model;
 pub mod predicate;
 pub mod rankers;
 pub mod replay;
+
+pub mod fixture;

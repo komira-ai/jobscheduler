@@ -2,6 +2,7 @@
 //! counted bounds.
 
 use super::{TableBeliefs, busy, flat, row, run, small_config};
+use crate::engine::metrics::Metrics;
 use crate::engine::metrics::{
     A9, Counters, Fnv, G0, Unbalanced, Uninformative, cpu_ppm, long_run_share_ppm, nearest_rank,
     oversize_rows,
@@ -477,4 +478,81 @@ fn the_books_catch_a_truth_that_adds_cpu() {
         bad.metrics.check_books(),
         Err(Unbalanced::Completed { mismatched }) if mismatched == bad.metrics.counters.completed
     ));
+}
+
+/// Catches: window percentiles reported from too few samples. With 19 999 host-windows
+/// the median, the 99th and the 99.9th are unreported; with 20 000 they are the nearest
+/// ranks (the 10 000th, 19 800th and 19 980th smallest).
+#[test]
+fn window_percentiles_need_20_000_samples() {
+    let below = Metrics {
+        window_ppm: (1..=19_999).collect(),
+        ..Metrics::default()
+    };
+    assert_eq!(below.window_p50(), None);
+    assert_eq!(below.window_p99(), None);
+    assert_eq!(below.window_p999(), None);
+    assert!(below.render().contains("p50 - p99 - p99.9 -"));
+
+    let at = Metrics {
+        window_ppm: (1..=20_000).collect(),
+        ..Metrics::default()
+    };
+    assert_eq!(at.window_p50(), Some(10_000));
+    assert_eq!(at.window_p99(), Some(19_800));
+    assert_eq!(at.window_p999(), Some(19_980));
+}
+
+/// Catches: the stability guard's edge: the queue must be under 1% of the submitted
+/// leases at the end. Exactly 1% (10 000 ppm) is uninformative; one lease fewer is not.
+#[test]
+fn the_queued_at_end_guard_is_strictly_under_one_percent() {
+    let relaxed = G0 {
+        min_window_samples: 0,
+        min_minute_samples: 0,
+        min_span_minutes: 0,
+        cold_share_ppm: (0, 1_000_000),
+        ..G0::default()
+    };
+    let with = |submitted: u64, queued_at_end: u64| Metrics {
+        counters: Counters {
+            submitted,
+            queued_at_end,
+            ..Counters::default()
+        },
+        ..Metrics::default()
+    };
+    assert_eq!(
+        relaxed.check(&with(100, 1)),
+        Err(vec![Uninformative::QueuedAtEnd {
+            queued: 1,
+            ppm: 10_000
+        }])
+    );
+    assert_eq!(relaxed.check(&with(101, 1)), Ok(()), "9 900 ppm");
+    assert_eq!(relaxed.check(&with(100, 0)), Ok(()));
+}
+
+/// A scorer that reports it scored one candidate.
+struct ScoresOne;
+
+impl Ranker for ScoresOne {
+    fn choose(&mut self, c: &Choose<'_, '_>) -> Pick {
+        Pick {
+            host: c.candidates[0],
+            decided: crate::engine::metrics::Decided::Only,
+            scored_candidates: 1,
+            evaluations: 64,
+        }
+    }
+}
+
+/// Catches: a placement counted as scored when a scorer ran on one candidate. A choice
+/// between two hosts or more is a scored placement; the only host that passed is not.
+#[test]
+fn a_placement_is_scored_from_two_candidates() {
+    let w = busy();
+    let r = run(&w.cfg, &w.rows[..100], &w.beliefs, &mut ScoresOne);
+    assert!(r.metrics.counters.placed > 0);
+    assert_eq!(r.metrics.counters.scored_placements, 0);
 }
