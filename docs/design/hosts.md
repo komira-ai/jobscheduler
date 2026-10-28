@@ -330,8 +330,10 @@ its booking and whose declared facts meet its constraints (section 7's order bre
 (The design had no per-minute pool history: the usage record of 12.2 is per lease and the request history of section 7 is per class of
 request. The sample is soft state in memory; a restart empties it, so the windows start again, and the effect is only that a swap comes
 later.) The trigger is judged once per *observation window*, `swap_window` (default 10 minutes): at every sample of the window the pool was
-at `max_machines`, and the queued demand was above zero, and at the last sample it was not below its value at the first (the queue has not
-eased). Then, in one tick:
+at or above `max_machines` (the gate is `>= max_machines`, so the swap's own extra machine still counts as at the cap), and the queued
+demand was above zero, and the **first** swap of an episode needs the queue to have grown strictly over the window (the last sample above
+the first); a **repeat** after an action needs only that the queue has not eased (the last sample not below the first of the new window).
+No second swap starts while a victim has not read back Absent (Unknown included). Then, in one tick:
 
 1. *Choose the victim.* The **smallest** elastic machine of the first elastic entry that can launch a larger option: smallest by
    `cpu_millis`, then memory, then fewest bookings, then lowest host id. A registered `default` host is never chosen (the scheduler did not
@@ -343,12 +345,17 @@ eased). Then, in one tick:
    take the first that has capacity, meets the pool's constraints and is not cooling down. A type with no capacity (spot or on-demand) is
    skipped, so the walk falls through the catalog; the lifecycle is whatever the option declares, and a change from spot to on-demand is
    the operator's order in the hierarchy (section 8), not made here. If the biggest option obtainable is not larger than the victim, the
-   pool stays as it is.
+   pool stays as it is. **Thrash guard:** the swap fires only if the chosen option would hold at least one queued, unplaced request that no
+   current host can take (its booking, constraints and class limits fit the option, and quota and the whole-node caps allow it). If the
+   queue is blocked by something a bigger machine does not fix (a whole-node cap, a per-class limit, quota, a constraint only the current
+   type meets), nothing is terminated and nothing is launched.
 3. *Launch first, then terminate.* The launch is recorded and called (with the booking of the victim still counted); only when the
    provider answers `Accepted` is the victim terminated. A refused launch cools down that option by the existing per-option `cooldown`
    (section 7, 5.8) and the walk of item 2 continues in the same tick; if every option is refused nothing is terminated and nothing is
    lost. Because of this order the count may be `max_machines + 1` until the victim reads back Absent. That is the one launch the swap is
    allowed over the cap; it is bounded by one swap per window, and launches stay refused at or above the cap otherwise.
+   **Structural bound:** each swap replaces a machine with a strictly larger type or does nothing, so the swaps of one episode are finite
+   (at most `max_machines` times the depth of the catalog). `max_evictions` is an extra bound on one request, not the only one.
 4. *Wait one window.* The window restarts at the action. At its end the same test runs on the new samples; if the queue has eased, nothing
    more is done, and if it has not, the swap repeats with the next smallest victim and the biggest option again. Overshoot is accepted:
    the pool may end with bigger machines than the load needed. There is no logic to consolidate machines or to undo an overshoot except
@@ -369,6 +376,11 @@ elsewhere. Jobs are retryable, so this costs the work done so far and nothing el
   outcome `evicted` and **charged to no budget**: not the platform-fault budget, not the loss count that refuses a poison operation after
   three losses (absence.md), not a task failure (8.1). The consumer is told the reason, so kbf, whose budgets are its own, can also not
   charge it. A request evicted `max_evictions` times has its host passed over as a victim, which bounds how often one request can be hit.
+  The count is kept per request id, as an additive field of the run record for a scheduler-placed run (an attempt ends `evicted`), and as
+  an additive counter in the lease file for a lease a consumer holds (kbf): when the host of a lease is evicted, the counter of the
+  lease's request id goes up, and a consumer that presents the same request id when it asks for a replacement lease (as it does for a
+  whole-node request, whole-node.md section 3) carries the count with it; the record is dropped when the request ends. A consumer that
+  presents no stable request id has no count across leases, and then only the structural bound above applies.
 - *The cap.* An evicted host leaves the count when its terminate reads back Absent (5.11); until then it counts, and the swap's launch is
   the one extra of item 3.
 
@@ -408,16 +420,17 @@ the cost of the rule, stated in K47.
 - A request no catalog option could ever hold is refused `no-capable-host` at submit, as now.
 
 **Spot hosts during the window.** Section 6 is unchanged and independent of the window. If the new biggest host receives a reclaim notice
-or is lost before the window ends, it is handled as any reclaimed host (taint `reclaim`, drain, rerun); the window carries on, and if
-the queue has not eased at its end the swap repeats, with the capacity signal of section 7 steering the provider away from the option
-just interrupted. A victim that has a reclaim notice is not chosen (item 1). If a retiring (scale-down) host receives a notice, `reclaim`
+or is lost before the window ends, it is handled as any reclaimed host (taint `reclaim`, drain, rerun). The pool is then below its cap, so
+ordinary scale-out refills it by the demand rule, with the capacity signal of section 7 steering the provider away from the option just
+interrupted; a swap happens again only if the pool is back at the cap and the trigger holds. A victim that has a reclaim notice is not chosen (item 1). If a retiring (scale-down) host receives a notice, `reclaim`
 takes precedence over `retire`: the reason becomes `reclaim` (both kept), the notice's deadline applies, and its work follows section 6.
 A `reclaim` mark on an `evict` host changes nothing: it is already terminating.
 
 Invariants (continuing H1 to H8):
 
 - H9. **A swap happens only at the cap with a window that did not ease**: no victim is chosen unless at every sample of the last window the
-  pool was at `max_machines` with demand above zero and the queue not smaller than at the window's start.
+  pool was at or above `max_machines` with demand above zero, and the queue grew strictly (first swap) or did not shrink (repeat), and the
+  chosen option would hold a queued request no current host can take.
 - H10. **One swap per window**, and the count never exceeds `max_machines + 1`, and exceeds `max_machines` only between an accepted swap
   launch and the victim's read-back Absent.
 - H11. **The victim is never protected**: never a registered `default` host, never a host with a whole-node lease or reservation, never a
@@ -436,8 +449,11 @@ smallest; the biggest type without capacity is skipped and the next one taken, a
 the refused options cool down; the smallest host holds a whole-node lease (the next smallest is taken) and a reservation (the same); a
 removal that would push the ceiling below reserved plus held is skipped; a running job on the victim is requeued, ends `evicted`, spends
 no platform-fault or loss count, and a request evicted `max_evictions` times protects its host; a terminate that reads back Unknown
-frees nothing; the new biggest host receives a reclaim notice mid-window and the swap repeats at the window's end with the capacity
-signal steering away; the victim receives a notice before the choice and is skipped; a restart mid-window (the `evict` taint read back,
+frees nothing and starts no second swap; the new biggest host receives a reclaim notice mid-window, the pool is below its cap and
+ordinary scale-out refills it with the capacity signal steering away; a queue blocked by a whole-node cap, a per-class limit, quota or a
+constraint only the current type meets starts no swap and terminates nothing; a first swap needs a strictly growing queue and a repeat
+only a queue that has not eased; the eviction count of a consumer lease with a stable request id protects its host after
+`max_evictions`; the victim receives a notice before the choice and is skipped; a restart mid-window (the `evict` taint read back,
 the windows restarted, no second swap in the restarted window); scale-down with the queue empty and low utilization marks one machine per
 window, releases it when empty, kills nothing and clears the mark when a request arrives; a queue that is empty but utilization high does
 not scale down. All on the injected clock (R2).

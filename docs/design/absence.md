@@ -32,7 +32,8 @@ Rules:
 - **Cordon and drain.** Operator `Cordon` and `Drain` apply to a host and are scheduler state, lost on a server restart. A wait caused
   only by a cordon is never refused as unservable, and a cordoned host is not released on idle. Agent-announced draining is a phase (5.3).
 - **Poison and duplicates.** A lease lost `LOSS_REQUEUES` (3) times refuses the operation (4.1); the value becomes a per-class retry policy
-  value (8.1). A second result for an accepted request is answered DUPLICATE and ignored; a result for a lease that is not the committed
+  value (8.1). A loss the scheduler caused on purpose, the eviction of a machine at the pool's cap (hosts.md section 11, D63), takes the
+  same lost-host path but is recorded `evicted` and does not count toward it. A second result for an accepted request is answered DUPLICATE and ignored; a result for a lease that is not the committed
   lease is STALE.
 - **A VM that disappears under a run** (the hypervisor process exits, the clone is gone) is a failed run, not an absent lease: the agent
   still heartbeats, the run is reported `failed`, and the consumer reruns it against the platform-fault budget (8.1). A VM is never
