@@ -23,3 +23,4 @@
 #![allow(dead_code, reason = "each compile unit uses a subset of the engine")]
 
 pub mod fixture;
+pub mod predictor;

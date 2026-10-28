@@ -8,3 +8,4 @@
 
 mod engine;
 mod fixture_tests;
+mod predictor_tests;
