@@ -117,8 +117,48 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
             "--state-root: required with --container-bin",
         ),
         (
+            with(&containers, &["--state-root", &state_s]),
+            "--scratch-root: required with --container-bin",
+        ),
+        (
             vec!["--watch-dir", &watched],
             "--watch-dir: needs --container-bin",
+        ),
+        (
+            vec!["--stop-grace", "5"],
+            "--stop-grace and --drain-wait: need --container-bin",
+        ),
+        (
+            vec!["--drain-wait", "5"],
+            "--stop-grace and --drain-wait: need --container-bin",
+        ),
+        (
+            with(
+                &containers,
+                &[
+                    "--state-root",
+                    &state_s,
+                    "--scratch-root",
+                    &scratch_s,
+                    "--stop-grace",
+                    "3601",
+                ],
+            ),
+            "--stop-grace: at most 3600 seconds",
+        ),
+        (
+            with(
+                &containers,
+                &[
+                    "--state-root",
+                    &state_s,
+                    "--scratch-root",
+                    &scratch_s,
+                    "--drain-wait",
+                    "3601",
+                ],
+            ),
+            "--drain-wait: at most 3600 seconds",
         ),
         (
             vec!["--state-root", &open_s],
@@ -205,6 +245,8 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
         &[
             "--state-root",
             &state_s,
+            "--scratch-root",
+            &scratch_s,
             "--watch-dir",
             &watched,
             "--watch-dir",
@@ -272,11 +314,15 @@ fn container_jobs_are_refused_on_a_mac() {
     let state = dir.path("state");
     fs::create_dir(&state).unwrap();
     fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    let scratch = dir.path("scratch");
+    fs::create_dir(&scratch).unwrap();
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
-    let (state, exec, user) = (
+    let (state, exec, user, scratch) = (
         state.display().to_string(),
         exec.display().to_string(),
         container_user(),
+        scratch.display().to_string(),
     );
     let args = [
         "--container-bin",
@@ -285,6 +331,8 @@ fn container_jobs_are_refused_on_a_mac() {
         &user,
         "--state-root",
         &state,
+        "--scratch-root",
+        &scratch,
     ];
     let (status, err, sent) = start_on(&crate::support::mac_host(), &args);
     assert_eq!(status, code(2), "{err}");

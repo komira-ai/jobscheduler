@@ -69,6 +69,7 @@ pub fn note(step: &Step) -> Option<Note> {
     match step {
         Step::Wait { note, .. } => note.clone(),
         Step::Fatal(fatal) => panic!("fatal: {fatal}"),
+        Step::Failed(why) => panic!("failed: {why}"),
     }
 }
 
