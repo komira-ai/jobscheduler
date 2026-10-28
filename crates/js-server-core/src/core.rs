@@ -4,6 +4,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, Request, UNSERVABLE_WAIT};
+use js_store::{EpochBump, Progress, StateError};
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
 
 use crate::adapter::{Adapter, Delivery, View};
@@ -12,6 +13,7 @@ use crate::engine::Engine;
 use crate::host::{Beat, Reported, Stream};
 use crate::observer::Observer;
 use crate::report::{Report, Standing, Taken, log_refusal};
+use crate::store::Storage;
 use crate::write::Writer;
 
 /// How a core is built.
@@ -54,6 +56,19 @@ impl Config {
     }
 }
 
+/// Where an admitted request is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    /// By this core's scheduler: the request is a caller of an operation it holds.
+    Here,
+    /// By another frontend of the state store: the request joined this operation, which
+    /// holds a lease on a node that frontend owns. This core takes up nothing of it, not
+    /// even the lease (that would end in the scheduler giving up a lease it does not own):
+    /// the request follows the operation through the store until its result is there
+    /// ([`Core::progress`]).
+    Elsewhere(OperationId),
+}
+
 /// The caller, and the operation, a submit became.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Admitted {
@@ -63,17 +78,51 @@ pub struct Admitted {
     pub operation: OperationId,
     /// The request joined an operation already in flight.
     pub joined: bool,
+    /// Where the request is held.
+    pub held: Held,
 }
 
-/// A request refused because the core is handing its work to a successor.
+/// A request that was not queued.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("this frontend is handing its work to its successor")]
-pub struct Fenced;
+pub enum NotQueued {
+    /// The core is handing its work to a successor.
+    #[error("this frontend is handing its work to its successor")]
+    Fenced,
+    /// The state store did not take the request: nothing is queued, and the client, who is
+    /// told so, asks again.
+    #[error("the scheduler's state store did not take the request")]
+    Unavailable,
+    /// The store holds the work's previous run, whose finish is written but not yet taken
+    /// out of the rows: the request asks again, and queues afresh once it is.
+    #[error("the work's previous run is finishing; the request is not queued")]
+    Finishing,
+}
 
 /// An operator action named a node that never registered.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("no node {0} has registered")]
 pub struct UnknownNode(pub String);
+
+/// A node another frontend of the state store holds could not be looked at, because the
+/// store could not be read.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("the state store could not be read for node {0}, which another frontend holds")]
+pub struct NodeUnread(pub String);
+
+/// An operator action on a node that was not applied.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PlaceError {
+    /// No frontend of the state store has held the node.
+    #[error(transparent)]
+    Unknown(#[from] UnknownNode),
+    /// The store could not say whether another frontend holds the node.
+    #[error(transparent)]
+    Unread(#[from] NodeUnread),
+    /// The store did not take the node's `cordon/` row: the action was not applied here
+    /// either, and the other frontend that holds the node never sees it.
+    #[error("the state store could not be written for node {0}; the action was not applied")]
+    Unwritten(String),
+}
 
 /// What an operator does to a node's placement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +175,34 @@ impl<A: Adapter> Core<A> {
         }
     }
 
+    /// A core over the state store `storage`, which takes up what the store holds
+    /// ([`Adapter::adopted`] is told of each operation). Every change of the scheduler is
+    /// written to the store before it is acted on: a request before it is queued, a grant
+    /// before its `Start` leaves, a result before its callers are answered. The scheduler's
+    /// term is the store's epoch, which [`Storage::with_epoch`] decides; `config.term` names
+    /// this frontend in the store, and is the epoch of a store that has none. `now` is the
+    /// farm time of the start: the lease grace of a lease the store holds runs from it.
+    ///
+    /// The start takes up every unfinished operation the store holds, leased ones too, and
+    /// assumes no other frontend of the store is live: a lease another running frontend
+    /// holds would be given up here once the grace has passed, and its operation run twice.
+    /// (The queued-only start of several frontends is not in this core yet.)
+    ///
+    /// # Errors
+    /// The store cannot be read or written, or holds a row that is not one the scheduler
+    /// wrote.
+    pub fn open(
+        config: &Config,
+        adapter: A,
+        storage: Storage,
+        now: FarmTime,
+    ) -> Result<Self, StateError> {
+        let mut core = Self::new(config, adapter);
+        let Locked { engine, adapter } = core.state_mut();
+        engine.keep_in(adapter, config.term, storage, now)?;
+        Ok(core)
+    }
+
     /// This core, hearing the hosts `admission` allows.
     #[must_use]
     pub fn with_admission(mut self, admission: impl Admission + 'static) -> Self {
@@ -172,25 +249,35 @@ impl<A: Adapter> Core<A> {
     /// finds it. The time a submit waited for the lock goes to the [`Observer`]; no other
     /// method reports one.
     ///
+    /// A core over a store writes the request first, with `parcel` (what the process that
+    /// takes the operation up after a restart is told of it, [`Adapter::adopted`]): it is
+    /// queued only once the store has it, and a request for work the store holds an
+    /// operation for joins that operation. An operation that holds a lease on a node
+    /// another frontend owns is not taken up ([`Held::Elsewhere`]): the scheduler hears
+    /// nothing of the request. A core with no store ignores `parcel`.
+    ///
     /// # Errors
-    /// The core is fenced: nothing is queued.
+    /// The core is fenced, or the store did not take the request: nothing is queued.
     pub fn submit(
         &self,
         now: FarmTime,
         request: Request,
+        parcel: &[u8],
         enrol: impl FnOnce(&mut A, &Admitted),
-    ) -> Result<Admitted, Fenced> {
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(&request)?;
+        let admitted = engine.admit(adapter, &request, parcel, now)?;
         enrol(adapter, &admitted);
-        let event = Event::Submit {
-            waiter: admitted.waiter,
-            request,
-        };
-        engine.feed_quiet(adapter, now, event);
+        if admitted.held == Held::Here {
+            let event = Event::Submit {
+                waiter: admitted.waiter,
+                request,
+            };
+            engine.feed_quiet(adapter, now, event);
+        }
         Ok(admitted)
     }
 
@@ -270,19 +357,25 @@ impl<A: Adapter> Core<A> {
         beat: Beat,
     ) -> Result<bool, Denied> {
         self.admission.allow_beat(worker, &beat)?;
-        let settled = {
+        let (settled, acknowledged) = {
             let mut locked = self.lock();
             let Locked { engine, adapter } = &mut *locked;
             let Some(answers) = engine.take_heartbeat(adapter, now, worker, stream, beat) else {
                 return Ok(false);
             };
-            answers
+            // A node this core does not own is not kept alive in the store by it, and is
+            // not acknowledged (though the scheduler hears it) while the core has not
+            // written its session row lately, so a daemon that the other frontends cannot
+            // see alive, or that has moved, fences on time.
+            let acknowledged = engine.acknowledge(now, worker);
+            let settled = answers
                 .iter()
                 .map(|answer| engine.settle(adapter, answer))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (settled, acknowledged)
         };
         deliver(settled).await;
-        Ok(true)
+        Ok(acknowledged)
     }
 
     /// What `lease` stands for as `worker`'s `Result` names it: the operation, if `worker`
@@ -352,16 +445,21 @@ impl<A: Adapter> Core<A> {
     }
 
     /// Cordons, drains or uncordons `worker` (see `js_sched::Cordon`). A drain's deadline
-    /// counts from `now`.
+    /// counts from `now`. A core over a store writes the node's `cordon/` row first, and a
+    /// node connected to another frontend of the store is placed too: that frontend applies
+    /// the row.
     ///
     /// # Errors
-    /// `worker` has never registered.
+    /// `worker` has never registered with this core, and no frontend of the store has
+    /// claimed it; the store cannot say whether one has, and `worker` is not connected
+    /// here; or the store did not take the node's row. In the last two the action is not
+    /// applied here either.
     pub fn place(
         &self,
         now: FarmTime,
         worker: &WorkerId,
         action: NodeAction,
-    ) -> Result<(), UnknownNode> {
+    ) -> Result<(), PlaceError> {
         let mut locked = self.lock();
         let Locked { engine, adapter } = &mut *locked;
         engine.place(adapter, now, worker, action)
@@ -408,6 +506,77 @@ impl<A: Adapter> Core<A> {
     #[must_use]
     pub fn sessions(&self) -> usize {
         self.lock().engine.links.len()
+    }
+
+    /// The effects of committed records the state store has not taken yet, and so are not
+    /// carried out.
+    #[must_use]
+    pub fn write_behind(&self) -> usize {
+        let locked = self.lock();
+        locked
+            .engine
+            .unwritten
+            .iter()
+            .map(|b| b.effects.len())
+            .sum()
+    }
+
+    /// Whether the scheduler has been told the state store is unavailable: nothing is
+    /// granted or given up until a write takes again.
+    #[must_use]
+    pub fn store_down(&self) -> bool {
+        self.lock().engine.store_down
+    }
+
+    /// The epoch the state store was opened under, if the core has a store.
+    #[must_use]
+    pub fn epoch(&self) -> Option<u64> {
+        self.lock().engine.epoch
+    }
+
+    /// Where `operation` stands in the state store, as a process that did not run it sees
+    /// it; `None` if the core has no store.
+    ///
+    /// # Errors
+    /// The store cannot be read.
+    pub fn progress(&self, operation: OperationId) -> Result<Option<Progress>, StateError> {
+        let locked = self.lock();
+        let rows = locked.engine.rows.as_ref();
+        rows.map(|rows| rows.progress(operation)).transpose()
+    }
+
+    /// The value of the `done/` row of `operation`, if the core has a store and the row is
+    /// still there: the answer a process that did not finish the operation gives the
+    /// callers it kept waiting.
+    ///
+    /// # Errors
+    /// The store cannot be read.
+    pub fn ended(&self, operation: OperationId) -> Result<Option<Vec<u8>>, StateError> {
+        let locked = self.lock();
+        let rows = locked.engine.rows.as_ref();
+        rows.map_or(Ok(None), |rows| rows.ended(operation))
+    }
+
+    /// Raises the epoch the store holds by one, and returns the epoch before and the one
+    /// stored now; `None` if the core has no store. This core keeps the epoch it started
+    /// under: the stored one is read by a core when it starts, so the daemons drop the leases
+    /// of the older epoch when they reach a core started after the bump.
+    ///
+    /// # Errors
+    /// The store cannot be read or written, or holds no epoch.
+    pub fn bump_epoch(&self) -> Result<Option<EpochBump>, StateError> {
+        let locked = self.lock();
+        let rows = locked.engine.rows.as_ref();
+        rows.map(|rows| rows.bump_epoch()).transpose()
+    }
+
+    /// Reads the daemons of the other frontends from the store's session rows, and shows
+    /// again the stage of the operations that wait for a worker, now that it is known
+    /// whether one of them could run each. Cheap when no operation waits.
+    pub fn refresh_remote(&self) {
+        let mut locked = self.lock();
+        let Locked { engine, adapter } = &mut *locked;
+        engine.look_at_remote_sessions(adapter);
     }
 
     /// Runs `read` under the lock with the scheduler and the newest stream of each worker

@@ -69,9 +69,11 @@ pub(super) fn refused_write_is_retried<H: CoreHarness>(harness: &mut H, notes: &
     // place and is not given up however often the store says no.
     for depth in 1..=6u8 {
         let started = harness.observed().released.len();
+        // Before the submits: a core that places work as it is submitted writes the grants
+        // then, and must find the store refusing.
+        harness.refuse_writes(u32::from(depth));
         let first = harness.submit(u64::from(2 * depth - 1), 2 * depth - 1);
         let second = harness.submit(u64::from(2 * depth), 2 * depth);
-        harness.refuse_writes(u32::from(depth));
         for _ in 0..depth + 2 {
             harness.advance(SECOND);
         }
