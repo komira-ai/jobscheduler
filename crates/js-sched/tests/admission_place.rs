@@ -169,6 +169,8 @@ impl Blocked {
         let mut r = Rig::on();
         r.up("a", node());
         r.up("b", node());
+        r.baseline("a");
+        r.baseline("b");
         for _ in 0..8 {
             r.action(1_000, 4 * GIB, Some(warm(1_000, 0)));
         }
@@ -368,11 +370,13 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     let mut r = Rig::on();
     let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
     r.up_with("b", node(), whole.clone());
+    r.baseline("b");
     for _ in 0..4 {
         r.action(1_000, 4 * GIB, Some(warm(250, 0)));
     }
     r.tick();
     r.up_with("a", node(), whole);
+    r.baseline("a");
     r.action(250, 4 * GIB, Some(warm(250, 0)));
     let light = r.tick();
     assert_eq!(on(&light), ["a"]);
@@ -531,7 +535,8 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
     assert_eq!(after.predicted_cpu_millis, 2_500);
     assert_eq!(after.predicted_memory_bytes, 10 * GIB);
     assert!(after.fallback);
-    // The same room: 32 GiB of 2 GiB leases is sixteen, eleven more beside five.
+    // The same room. Neither worker has sent a reading, so each lease is charged at least
+    // 1000 m: five leases and three more fill 8800 m.
     let more = |s: &mut Scheduler, seq: u64| {
         let t = FarmTime::from_millis(2_000);
         for i in 0..20 {
@@ -558,8 +563,8 @@ fn a_restart_keeps_the_admitted_costs_and_sums() {
             .filter(|e| matches!(e, Effect::Start(_)))
             .count()
     };
-    assert_eq!(more(&mut a, 5), 11);
-    assert_eq!(more(&mut b, 5), 11);
+    assert_eq!(more(&mut a, 5), 3);
+    assert_eq!(more(&mut b, 5), 3);
 }
 
 /// Catches: a row written before costs were kept charged nothing (it would not count) or

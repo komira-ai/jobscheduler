@@ -346,7 +346,7 @@ impl Servable {
                 let left = w.load_state.left(now, &w.capacity, &adm.cfg);
                 let ratio = binding(
                     (
-                        left.cpu.saturating_add(cost.cpu_millis),
+                        left.cpu.saturating_add(left.charged_cpu(&cost)),
                         w.capacity.cpu_millis,
                     ),
                     (

@@ -42,15 +42,17 @@ fn measured(busy: u64, working_set: u64) -> (Rig, Vec<LeaseId>) {
     (r, held)
 }
 
-/// Catches: a worker with no reading admitted by the booked rule (8 one-core leases) or by
+/// Catches: a worker with no window admitted by the booked rule (8 one-core leases) or by
 /// no rule at all: it is admitted by the sum of its leases' predicted costs against
 /// capacity plus the CPU slack, 17 leases of 500 m on 8 cores (8500 of 8800), and the
 /// 18th waits (and holds the worker for the head of the queue, so the two behind it are
-/// not counted as blocked).
+/// not counted as blocked). Its one reading, the baseline, makes it a worker that
+/// measures: no floor on its leases.
 #[test]
-fn a_worker_without_a_reading_is_admitted_by_the_sum_of_predicted_costs() {
+fn a_worker_without_a_window_is_admitted_by_the_sum_of_predicted_costs() {
     let mut r = Rig::on();
     r.up("a", node());
+    r.baseline("a");
     let placed = fill(&mut r, 20, warm(500, 0));
     assert_eq!(placed.len(), 17);
     let v = view(&r, "a");
@@ -69,6 +71,55 @@ fn a_worker_without_a_reading_is_admitted_by_the_sum_of_predicted_costs() {
         "the 18th is blocked and holds the worker: the two behind it are not tried there"
     );
     assert_eq!(c.cold_deferred, 0);
+}
+
+/// Catches: a worker nothing has measured (no reading ever: a Mac, a native or VM node)
+/// charged the estimates of a light population as they are: it charges every lease at
+/// least 1000 m, so 0.3-core keys (estimated at 500 m) fill it at 8 leases, 8000 of 8800,
+/// where a worker that has measured takes 17. The lease is recorded at its estimate; the
+/// floor is the worker's.
+#[test]
+fn a_worker_never_measured_charges_each_lease_at_least_a_core() {
+    let mut r = Rig::on();
+    r.up("a", node());
+    let placed = fill(&mut r, 20, warm(500, 0));
+    assert_eq!(placed.len(), 8);
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_cpu_millis, 8_000);
+    assert_eq!(v.predicted_cpu_millis, 4_000, "the sums hold the estimates");
+    assert_eq!(r.s.lease_cost(placed[0]).unwrap().cpu_millis, 500);
+    // A lease above the floor is charged what it is.
+    let mut big = Rig::on();
+    big.up("a", node());
+    big.action(2_500, 8 * GIB, Some(warm(2_500, 0)));
+    assert_eq!(leases(&big.tick()).len(), 1);
+    assert_eq!(view(&big, "a").left_cpu_millis, 2_500);
+}
+
+/// Catches: the floor kept after the worker has measured, or applied to the sub-core
+/// charge of a measured worker. A worker whose signal went stale was measured once, so
+/// its leases keep their estimates (500 m: 9 more fit beside 4000); and at the least
+/// estimate, 250 m, 35 leases fill 8750 of 8800.
+#[test]
+fn a_worker_that_has_measured_keeps_the_sub_core_charge_when_stale() {
+    let (mut r, _) = measured(1_000, GIB);
+    r.ms += 3 * W_MS + 1;
+    r.tick();
+    let v = view(&r, "a");
+    assert!(v.fallback);
+    assert_eq!(v.left_cpu_millis, 4_000);
+    assert_eq!(
+        fill(&mut r, 20, warm(500, 0)).len(),
+        9,
+        "4000 + 9 * 500 of 8800"
+    );
+
+    let mut light = Rig::on();
+    light.up("a", node());
+    light.baseline("a");
+    assert_eq!(fill(&mut light, 40, warm(250, 0)).len(), 35);
+    assert_eq!(view(&light, "a").left_cpu_millis, 8_750);
 }
 
 /// Catches: the measurement ignored, or believed below the floor. Eight leases predicted at
@@ -252,6 +303,7 @@ fn the_memory_slack_is_the_configured_one() {
         ..LoadConfig::default()
     });
     r.up("a", node());
+    r.baseline("a");
     assert_eq!(fill(&mut r, 12, warm(250, 4 * GIB)).len(), 10);
 }
 
@@ -467,6 +519,7 @@ fn a_vm_is_added_to_every_sum() {
         node().with_vms(2),
         load_rig::caps("container").with_drivers(["container", "vm"]),
     );
+    r.baseline("a");
     let mut vm = r.request(LeaseKind::Vm, 4_000, 16 * GIB);
     vm.resources = vm.resources.with_vms(1);
     r.submit(vm);

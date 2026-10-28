@@ -212,6 +212,31 @@ impl World {
         );
     }
 
+    /// The node's first reading, sent now with nothing busy or covered: it gives no
+    /// window, but a node that has reported once is not charged the least a lease costs
+    /// on a node nothing measures. Without it the node reports first at the end of the
+    /// first window.
+    pub fn baseline(&mut self, name: &str) {
+        let node = self.nodes.get_mut(name).expect("node");
+        node.seq += 1;
+        let baseline = NodeLoad {
+            seq: node.seq,
+            mono_usec: self.tick * 1_000_000,
+            cpu_usage_usec: node.cpu_usec,
+            ..NodeLoad::default()
+        };
+        let held = self.s.leases_on(&w(name));
+        feed(
+            &mut self.s,
+            now(self.tick),
+            Event::Heartbeat {
+                worker: w(name),
+                running: held,
+                load: Some(baseline),
+            },
+        );
+    }
+
     /// A Linux container node of `cores` cores and `gib` GiB.
     pub fn linux(&mut self, name: &str, cores: u64, gib: u64) {
         let caps = NodeCaps::from_report([("arch", "x86_64"), ("os", "linux")])

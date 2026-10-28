@@ -21,7 +21,9 @@
 //! - `V` is the booked cost of the worker's VM leases, which run outside the measured
 //!   cgroup.
 //! - A worker with no usable measurement is admitted by the same predicate on the sum of
-//!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule.
+//!   its leases' predicted costs ([`Left::fallback`]); never by the booked rule. Each lease
+//!   on a worker that never sent an accepted reading (a Mac, a native or VM node) is
+//!   charged at least 1000 m there; a worker that measured and went stale is not.
 //! - At most [`LoadConfig::cold_cap`] cold leases are admitted per worker per window.
 //! - A blocked head of the queue holds the worker with the most headroom, so a stream
 //!   of small work cannot keep a large action out for good (`head.rs`).
