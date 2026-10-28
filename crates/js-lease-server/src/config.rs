@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Settings};
+use js_lease::{Boot, Clock, Settings};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
@@ -296,6 +296,9 @@ pub(crate) struct UsageSetup {
     pub(crate) keys: Arc<dyn KeySource>,
 }
 
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: u64 = 86_400_000;
+
 impl UsageSetup {
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
     /// A usage file that will not open is a refused start naming `--usage-db`.
@@ -309,10 +312,13 @@ impl UsageSetup {
         };
         let sink = match self.sink {
             Some(sink) => sink,
-            None => usage_js::open(&StoreSetup {
-                db,
-                profile_store_bytes: self.profile_store_bytes,
-            })?,
+            None => {
+                let setup = StoreSetup {
+                    db,
+                    profile_store_bytes: self.profile_store_bytes,
+                };
+                usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
+            }
         };
         let usage = Usage::new(sink, self.keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))

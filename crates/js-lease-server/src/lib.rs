@@ -384,8 +384,8 @@ pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{
     BadKey, ClockIn, DropReason, HostLimits, KeySource, LoadIn, MAX_KEY_LEN, MinuteIn, NoKeys,
-    NoUsage, NodeRow, Observation, Observed, ProfileKey, RunEnd, RunSeries, SinkCounters,
-    UsageFault, UsageSink,
+    NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute,
+    RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 pub use usage_hub::UsageCounters;
 

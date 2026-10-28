@@ -7,9 +7,10 @@
 //! [`NodeSeries`]; a minute leaves the buffer only when its write succeeded. A prune
 //! removes hours past [`js_usage::NODE_RETENTION_MINUTES`].
 //!
-//! The profile side (learning a cost curve from a run that ended cleanly) is not here
-//! yet: [`UsageSink::run_ended`] takes the run and keeps nothing. Reading a stored
-//! series back is the read routes' part, in `usage_api`.
+//! The profile side: a run that ended cleanly goes into the [`ProfileStore`] under its
+//! key, which refits the key's curve; the daily prune tells the curves what day it is and
+//! writes the days keys were last used. Reading a stored series or profile back is the
+//! read routes' part, in `usage_api`.
 //!
 //! One mutex guards the recorder and the buffer, and is held across the store's write in
 //! a flush: readings wait for it, which is cheap (a write of at most a day of minutes
@@ -22,7 +23,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
-use js_usage::{NodeBuffer, NodeSeries, Recorder};
+use js_types::sched::WorkKey;
+use js_types::sched::usage::profile_key;
+use js_usage::{
+    NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder,
+    RunSeries,
+};
 use tracing::info;
 
 use crate::error::StartupError;
@@ -40,26 +46,39 @@ pub(crate) struct StoreSetup {
 /// The sink over the SQLite file `setup` names. A file that cannot be opened (another
 /// process holds it, a network filesystem, not a state store) is a refused start naming
 /// `--usage-db`.
-pub(crate) fn open(setup: &StoreSetup) -> Result<Arc<dyn UsageSink>, StartupError> {
+pub(crate) fn open(setup: &StoreSetup, today: u64) -> Result<Arc<dyn UsageSink>, StartupError> {
     let clock = Arc::new(SystemClock::default());
     let store = SqliteStore::open(&setup.db, clock, Options::default())
+        .map_err(|err| StartupError::new("--usage-db", err))?;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let usage = NodeUsage::over(store, setup.profile_store_bytes, today)
         .map_err(|err| StartupError::new("--usage-db", err))?;
     info!(
         db = %setup.db.display(),
         profile_store_bytes = setup.profile_store_bytes,
         "usage is recorded"
     );
-    Ok(Arc::new(NodeUsage::over(Box::new(store))))
+    Ok(Arc::new(usage))
 }
 
 struct Inner {
     recorder: Recorder,
     buffer: NodeBuffer,
+    profiles: ProfileStore,
 }
+
+/// The profile name of an action key (see [`profile_key`]), for admission's curves.
+pub(crate) fn key_map(key: &WorkKey) -> Option<ProfileKey> {
+    ProfileKey::parse(&profile_key(key)).ok()
+}
+
+/// Minutes in a day.
+const MINUTES_PER_DAY: u64 = 1440;
 
 /// The node series over `store`.
 pub(crate) struct NodeUsage {
-    store: Box<dyn Store>,
+    store: Arc<dyn Store>,
+    curves: Arc<ProfileCurves>,
     inner: Mutex<Inner>,
 }
 
@@ -68,15 +87,24 @@ fn fault(err: impl std::fmt::Display) -> UsageFault {
 }
 
 impl NodeUsage {
-    /// The sink over `store`.
-    pub(crate) fn over(store: Box<dyn Store>) -> Self {
-        Self {
+    /// The sink over `store`, keeping at most `budget_bytes` of profiles; `today` is the
+    /// day (days since the epoch) the curves start from.
+    pub(crate) fn over(
+        store: Arc<dyn Store>,
+        budget_bytes: u64,
+        today: u64,
+    ) -> Result<Self, ProfileError> {
+        let curves = Arc::new(ProfileCurves::new(Box::new(key_map)));
+        let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
+        Ok(Self {
             store,
+            curves,
             inner: Mutex::new(Inner {
                 recorder: Recorder::new(),
                 buffer: NodeBuffer::new(),
+                profiles,
             }),
-        }
+        })
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -109,8 +137,15 @@ impl UsageSink for NodeUsage {
         Observation { observed, fresh }
     }
 
-    fn run_ended(&self, _: &RunEnd, _: u64) -> Result<(), UsageFault> {
-        Ok(())
+    fn run_ended(&self, end: &RunEnd, now_minute: u64) -> Result<(), UsageFault> {
+        let mut inner = self.inner();
+        let day = now_minute / MINUTES_PER_DAY;
+        let series: &RunSeries = &end.series;
+        inner
+            .profiles
+            .run_ended(&end.key, series, day)
+            .map(drop)
+            .map_err(fault)
     }
 
     fn flush(&self, now_minute: u64) -> Result<Vec<(HostId, NodeRow)>, UsageFault> {
@@ -126,7 +161,17 @@ impl UsageSink for NodeUsage {
 
     fn prune(&self, now_minute: u64) -> Result<(), UsageFault> {
         let series = NodeSeries::new(&*self.store);
-        series.prune(now_minute).map(drop).map_err(fault)
+        series.prune(now_minute).map_err(fault)?;
+        let mut inner = self.inner();
+        inner
+            .profiles
+            .curves()
+            .set_today(now_minute / MINUTES_PER_DAY);
+        inner.profiles.persist_touches().map(drop).map_err(fault)
+    }
+
+    fn curves(&self) -> Option<Arc<ProfileCurves>> {
+        Some(self.curves.clone())
     }
 
     fn counters(&self) -> SinkCounters {

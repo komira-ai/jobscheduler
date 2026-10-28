@@ -23,6 +23,7 @@ use crate::agents::Agents;
 use crate::config::Token;
 use crate::hosts::HostList;
 use crate::run_api;
+use crate::usage::ProfileCurves;
 use crate::usage_hub::{Usage, UsageCounters};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
@@ -76,6 +77,11 @@ impl Shared {
         self.agents
             .as_ref()
             .and_then(|agents| agents.usage.as_ref())
+    }
+
+    /// The learned curves; `None` without a usage side or with a sink that learns none.
+    pub(crate) fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.usage().and_then(|usage| usage.curves())
     }
 
     /// What the usage side has counted; all zero without one.

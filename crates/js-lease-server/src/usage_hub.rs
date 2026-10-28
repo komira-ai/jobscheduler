@@ -37,8 +37,8 @@ use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
 use crate::usage::{
-    DropReason, HostLimits, KeySource, MinuteIn, NodeRow, Observed, ProfileKey, RunEnd, RunSeries,
-    SinkCounters, UsageFault, UsageSink,
+    DropReason, HostLimits, KeySource, MinuteIn, NodeRow, Observed, ProfileCurves, ProfileKey,
+    RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use crate::usage_map::{host_of, lease_of, load_in};
 use crate::util::blocking;
@@ -243,11 +243,14 @@ impl Hub {
 
 /// The series of a lease as the sink takes it.
 fn series_of(minutes: &Minutes) -> RunSeries {
+    let minute = |(minute, (cores, ws)): (&u16, &(u32, u64))| RunMinute {
+        minute: u32::from(*minute),
+        cores_milli: *cores,
+        ws_bytes: *ws,
+    };
     RunSeries {
-        minutes: minutes
-            .iter()
-            .map(|(minute, (cores, ws))| (*minute, *cores, *ws))
-            .collect(),
+        minutes: minutes.iter().map(minute).collect(),
+        flags: 0,
     }
 }
 
@@ -294,6 +297,11 @@ impl Usage {
     /// The server's clock in wall minutes since the epoch.
     pub(crate) fn now_minute(&self) -> u64 {
         self.clock.now().millis() / 60_000
+    }
+
+    /// The sink's learned curves, for admission.
+    pub(crate) fn curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.sink.curves()
     }
 
     /// What has been counted so far, with the sink's own counts.
