@@ -18,6 +18,8 @@ thiserror.workspace = true
 # The in-memory fake store, with its deliberately broken variants: the tests run the
 # series over it.
 js-state = { path = "../js-state", features = ["test-support"] }
+# A scratch directory for the SQLite store the series are also run over.
+js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true

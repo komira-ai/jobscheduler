@@ -1298,6 +1298,7 @@ name = "js-usage"
 version = "0.1.0"
 dependencies = [
  "js-state",
+ "js-testkit",
  "js-types",
  "thiserror",
 ]
