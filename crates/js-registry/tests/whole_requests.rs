@@ -53,6 +53,10 @@ fn no_capacity() -> StartAck {
     StartAck::Refused(RefusalCode::NoCapacity)
 }
 
+fn exclusive_not_ready() -> StartAck {
+    StartAck::Refused(RefusalCode::ExclusiveNotReady)
+}
+
 fn pool(names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
     let fx = fixture_of(config());
     let hosts = names
@@ -115,7 +119,7 @@ fn a_later_identical_request_after_the_terminal_refusal_is_placed() {
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::NotQuiet);
     restore(&fx, &hosts);
-    assert_eq!(provider.start(spec_of(3, 600)), no_capacity());
+    assert_eq!(provider.start(spec_of(3, 600)), exclusive_not_ready());
     assert!(!recorded(&fx, 600));
     assert_eq!(fx.registry.not_ready(&request_of(600)), None);
     assert_eq!(provider.start(spec_of(4, 600)), StartAck::Unknown);
@@ -130,7 +134,7 @@ fn a_for_life_exclusion_dies_with_the_record() {
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::Unsupported);
     restore(&fx, &hosts);
-    assert_eq!(provider.start(spec_of(3, 600)), no_capacity());
+    assert_eq!(provider.start(spec_of(3, 600)), exclusive_not_ready());
     assert_eq!(provider.start(spec_of(4, 600)), StartAck::Unknown);
     assert_eq!(provider.booked().get(&host("a")), Some(&lease(4)));
 }
@@ -143,8 +147,8 @@ fn only_one_start_gets_the_terminal_refusal() {
     let mut provider = fx.provider.clone();
     use_up_the_tries(&fx, &hosts, RefusalReason::NotQuiet);
     restore(&fx, &hosts);
-    assert_eq!(provider.start(spec_of(3, 600)), no_capacity());
-    assert_ne!(provider.start(spec_of(4, 600)), no_capacity());
+    assert_eq!(provider.start(spec_of(3, 600)), exclusive_not_ready());
+    assert_eq!(provider.start(spec_of(4, 600)), StartAck::Unknown);
     assert!(fx.registry.not_ready(&request_of(600)).is_none());
 }
 

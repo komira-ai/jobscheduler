@@ -60,6 +60,10 @@ fn no_capacity() -> StartAck {
     StartAck::Refused(RefusalCode::NoCapacity)
 }
 
+fn exclusive_not_ready() -> StartAck {
+    StartAck::Refused(RefusalCode::ExclusiveNotReady)
+}
+
 /// A pool of `config` with every host in `names` joined, and the epochs they got.
 fn pool(config: PoolConfig, names: &[&'static str]) -> (Fixture, Vec<(&'static str, u64)>) {
     let fx = fixture_of(config);
@@ -369,7 +373,7 @@ fn the_request_fails_not_ready_after_max_replace_failures() {
     let kept = record(&fx);
     assert_eq!((kept.prepare_failures, kept.give_ups), (2, 0));
     assert!(kept.terminal);
-    assert_eq!(provider.start(whole_spec(3)), no_capacity());
+    assert_eq!(provider.start(whole_spec(3)), exclusive_not_ready());
     assert!(provider.booked().is_empty());
 }
 
