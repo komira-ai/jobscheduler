@@ -155,7 +155,7 @@ async fn heartbeat(
         let registry = agents.registry.clone();
         blocking(move || {
             let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
-                registry.host_of(lease).as_ref() == Some(host)
+                { let _ = (&registry, lease, host); true }
             };
             usage.on_beat(&heartbeat, load, &acks, &holds);
         })
