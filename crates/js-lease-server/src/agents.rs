@@ -15,7 +15,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
-use crate::join_tokens::{JoinRefusal, JoinTokens};
+use crate::join_tokens::{Admission, JoinRefusal, JoinTokens};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
 use crate::util::blocking;
@@ -139,9 +139,28 @@ impl Agents {
         who: Credential,
         host: String,
         instance: Option<InstanceIdentity>,
-    ) -> Result<(), JoinRefusal> {
+    ) -> Result<Admission, JoinRefusal> {
         let this = Arc::clone(self);
         blocking(move || this.joins.admit(&who, &host, instance.as_ref())).await
+    }
+
+    /// Gives back the use that [`Agents::admit_join`] made for `host`, after the registry
+    /// refused its hello.
+    pub(crate) async fn release_join(self: &Arc<Self>, who: Credential, host: String) {
+        let this = Arc::clone(self);
+        blocking(move || this.joins.release(&who, &host)).await;
+    }
+
+    /// Whether the one-time token `who` may heartbeat for `host`; a heartbeat it serves
+    /// renews the token's credential. Runs on the pool for blocking calls, since a renewal
+    /// writes the file.
+    pub(crate) async fn serve_join(
+        self: &Arc<Self>,
+        who: Credential,
+        host: String,
+    ) -> Result<(), JoinRefusal> {
+        let this = Arc::clone(self);
+        blocking(move || this.joins.serves(&who, &host)).await
     }
 
     /// A run id no earlier run has had, in this boot or any before it: the lease table's

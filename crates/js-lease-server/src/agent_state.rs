@@ -206,7 +206,7 @@ fn render(bindings: &BTreeMap<HostId, Binding>) -> io::Result<String> {
 }
 
 /// Replaces the file at `path` with `bytes`, readable by its owner only: written and
-/// fsynced beside it, renamed over it, and the directory fsynced, so a reader sees the
+/// fsynced beside it (in a file made new, whatever an earlier crash left under that name), renamed over it, and the directory fsynced, so a reader sees the
 /// old file or the new one.
 pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -214,10 +214,16 @@ pub(crate) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let temp = path.with_file_name(name);
     let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let dir = dir.unwrap_or(Path::new("."));
+    // A file left by a crash keeps the mode it was made with, which `mode` below would not
+    // change: remove it, so that the new file is made here, owner-only.
+    match fs::remove_file(&temp) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&temp)?;
     file.write_all(bytes)?;
@@ -375,5 +381,33 @@ mod tests {
             "instance_provider = \"aws\"\ninstance_id = \"i\"\n",
         );
         assert!(parse(&both).is_ok());
+    }
+
+    /// A temporary file left beside the target by a crash, with a wider mode and other
+    /// bytes, does not decide the mode of what is written: the result is owner-only and
+    /// holds the new bytes. A temporary name that cannot be removed (a directory) is an
+    /// error and the target is untouched. It catches a rename of a world-readable stale file
+    /// into place.
+    #[test]
+    fn a_stale_temporary_file_does_not_decide_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/agent_state_unit");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.state");
+        let temp = dir.join("stale.state.tmp");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir_all(&temp);
+        fs::write(&temp, "left by a crash").unwrap();
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o644)).unwrap();
+        replace(&path, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!temp.exists());
+
+        fs::create_dir(&temp).unwrap();
+        assert!(replace(&path, b"newer").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        fs::remove_dir(&temp).unwrap();
     }
 }

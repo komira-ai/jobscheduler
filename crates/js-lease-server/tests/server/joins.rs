@@ -7,10 +7,13 @@ use std::time::Duration;
 use js_lease::Clock;
 use serde_json::{Value, json};
 
+use js_lease_server::{SharedClock, channel_ticker, start};
+
 use crate::agents_support::{
-    JOIN, Session, hello_body, hosts, listed, post, restarted, session, start_agents,
+    JOIN, Session, agent_args, hello_body, hello_with, hosts, listed, post, restarted, session,
+    start_agents,
 };
-use crate::support::{Harness, LogCapture, Reply, TOKEN, request};
+use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -329,4 +332,85 @@ async fn of_two_concurrent_uses_one_wins() {
     assert_eq!(statuses, [200, 403], "{} / {}", one.body, two.body);
     let refused = if one.status == 403 { &one } else { &two };
     assert_eq!(code(refused), "join-token-used");
+}
+
+/// Asserts that a hello the registry refuses leaves the one-time token unused: the host
+/// id is bound to the pool's join token, so the hello with the one-time token is a 403
+/// `host-bound`, and the same token then registers another host id. It catches a token that
+/// is spent by a hello that registered nobody, which would leave the launched instance
+/// without a way in.
+#[tokio::test]
+async fn a_hello_the_registry_refuses_does_not_spend_the_token() {
+    let h = start_agents("joins_rollback", false).await;
+    assert_eq!(hello_with(&h, JOIN, "burst-1").await.status, 200);
+    let token = minted(&h, "i-1").await;
+    let refused = hello(&h, &token, "burst-1", "i-1").await;
+    assert_eq!((refused.status, code(&refused)), (403, "host-bound".into()));
+    let mut joins = h.scratch.state().into_os_string();
+    joins.push(".joins");
+    let text = fs::read_to_string(&joins).unwrap();
+    assert!(!text.contains("used_by"), "{text}");
+    let later = hello(&h, &token, "burst-2", "i-1").await;
+    assert_eq!(later.status, 200, "{}", later.body);
+}
+
+/// Asserts that a used token stops being a credential once its host has been silent for a
+/// day: the hello and the heartbeat are 403 `join-token-expired`, the next mint drops the
+/// entry from the file, and the digest is then unknown (401). It catches a used token that
+/// stays a way to register its host id for ever.
+#[tokio::test]
+async fn a_used_token_ends_after_a_day_of_silence() {
+    let h = start_agents("joins_credential_bound", false).await;
+    let token = minted(&h, "i-1").await;
+    let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
+    h.clock.advance(secs(86_400));
+    for refused in [
+        hello(&h, &token, "burst-1", "i-1").await,
+        beat_with(&h, &token, &held).await,
+    ] {
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (403, "join-token-expired".into())
+        );
+    }
+    minted(&h, "i-2").await;
+    let mut joins = h.scratch.state().into_os_string();
+    joins.push(".joins");
+    let text = fs::read_to_string(&joins).unwrap();
+    assert!(!text.contains("burst-1"), "{text}");
+    assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 401);
+}
+
+/// Asserts that a heartbeat just before the day is up renews it: a token whose host
+/// beats at 23h59m59s, and again just before the renewed day is up, is still not refused as
+/// expired, which it would be on the first day's bound. It catches a bound that is not
+/// renewed by use.
+#[tokio::test]
+async fn a_heartbeat_renews_the_credential() {
+    let h = start_agents("joins_credential_renewed", false).await;
+    let token = minted(&h, "i-1").await;
+    let held = session(&hello(&h, &token, "burst-1", "i-1").await, "burst-1");
+    h.clock.advance(secs(86_399));
+    let first = beat_with(&h, &token, &held).await;
+    assert!(!first.body.contains("join-token"), "{}", first.body);
+    h.clock.advance(secs(86_399));
+    let second = beat_with(&h, &token, &held).await;
+    assert!(!second.body.contains("join-token"), "{}", second.body);
+}
+
+/// Asserts that a second server over the state file of a running one is refused at start,
+/// naming `--state-file`, and so cannot hand a used token back. It catches a start that
+/// reads the file of tokens and serves while another process owns it.
+#[tokio::test]
+async fn a_second_server_over_the_same_state_is_refused() {
+    let h = start_agents("joins_second_server", false).await;
+    let token = minted(&h, "i-1").await;
+    assert_eq!(hello(&h, &token, "burst-1", "i-1").await.status, 200);
+    let args = replace(agent_args(&h.scratch, false), "--boot", "resume");
+    let (_, ticker) = channel_ticker();
+    let clock = SharedClock::new(js_lease::ManualClock::default());
+    let started = start(config(args).unwrap(), clock, ticker).await;
+    let refusal = started.err().expect("the second start should be refused");
+    assert_eq!(refusal.flag(), "--state-file");
+    assert!(refusal.reason().contains("lock"), "{}", refusal.reason());
 }

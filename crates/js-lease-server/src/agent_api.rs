@@ -26,7 +26,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
-use crate::join_tokens::JoinRefusal;
+use crate::join_tokens::{Admission, JoinRefusal};
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -120,23 +120,32 @@ async fn hello(
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
     // A one-time token registers the host that names its instance, and only that host
-    // thereafter. The token is consumed before the registry is asked: a hello the registry
-    // then refuses (the pool is full) leaves the token tied to this host, which says hello
-    // again with the same token.
+    // thereafter. The token is consumed before the registry is asked, so that two hellos
+    // cannot both pass; a hello the registry then refuses (the pool is full, the host id
+    // is bound to another credential) gives the use back, and the token stays unused for
+    // its instance.
+    let mut fresh = false;
     if one_time.is_some() {
         let instance = hello.instance.clone();
         let admitted = agents
             .admit_join(who.clone(), hello.host_id.clone(), instance)
             .await;
-        admitted.map_err(|refusal| {
+        let admission = admitted.map_err(|refusal| {
             warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
             Refused::join(refusal)
         })?;
+        fresh = admission == Admission::Fresh;
     }
-    let welcome = agents.registry.hello(&hello, &who).map_err(|refusal| {
-        warn!(code = refusal.code(), "agent hello refused");
-        Refused::of(&refusal)
-    })?;
+    let welcome = match agents.registry.hello(&hello, &who) {
+        Ok(welcome) => welcome,
+        Err(refusal) => {
+            if fresh {
+                agents.release_join(who, hello.host_id.clone()).await;
+            }
+            warn!(code = refusal.code(), "agent hello refused");
+            return Err(Refused::of(&refusal));
+        }
+    };
     agents.save_bindings().await;
     info!(host = %hello.host_id, epoch = welcome.epoch, "agent admitted");
     Ok(Json(welcome))
@@ -156,10 +165,10 @@ async fn heartbeat(
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
     if one_time.is_some() {
-        agents
-            .joins
-            .serves(&who, &heartbeat.host_id)
-            .map_err(Refused::join)?;
+        let served = agents
+            .serve_join(who.clone(), heartbeat.host_id.clone())
+            .await;
+        served.map_err(Refused::join)?;
     }
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
