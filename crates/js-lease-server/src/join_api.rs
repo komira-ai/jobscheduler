@@ -14,7 +14,28 @@
 //!
 //! `ttl_seconds` is optional (30 minutes) and at most a day. The token is in this answer
 //! and nowhere else: the server keeps its digest, and its log lines name the instance and
-//! the expiry, never the token. What the token admits is in [`crate::join_tokens`].
+//! the expiry, never the token. The 201 carries `Cache-Control: no-store`, so no cache on
+//! the way keeps the token. What the token admits is in [`crate::join_tokens`].
+//!
+//! The scheduler's terminate path revokes the tokens of an instance it terminates, which
+//! closes the window in which a used token would otherwise stay good for its host id
+//! until a day of silence. The route is gated exactly like the mint (client token only; a
+//! pool join token gets 401):
+//!
+//! ```text
+//! DELETE /v1/agent/join-tokens
+//! {"provider": "lambdalabs", "instance_id": "i-0abc"}
+//!
+//! 204
+//! ```
+//!
+//! Every token bound to that provider and instance is dropped, used or unused, and the
+//! drop is written like a use (owner-only file, whole-file replace, fsync, under the
+//! same lock). The token is unknown from then on: its hello and heartbeat get the 401 of
+//! a token that never existed. Revoking is idempotent: an instance with no token (never
+//! minted, already revoked, or expired and dropped) is also a 204, so a terminate that
+//! is retried needs no care. A file that cannot be written is a 503 `state-write-failed`
+//! and the tokens stay as they were. The body is validated like the mint's (400).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +44,7 @@ use axum::Json;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -33,14 +54,14 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, Shared, authenticate};
-use crate::join_tokens::{DEFAULT_TTL, MAX_TTL, MintError};
+use crate::join_tokens::{DEFAULT_TTL, MAX_TTL, MintError, RevokeError};
 use crate::util::blocking;
 use crate::wire::{ApiError, parse};
 
 /// The route, behind the client token and the body cap of every other route.
 pub(crate) fn router(shared: Arc<Shared>, agents: Arc<Agents>) -> Router {
     Router::new()
-        .route("/v1/agent/join-tokens", post(mint))
+        .route("/v1/agent/join-tokens", post(mint).delete(revoke))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(from_fn_with_state(shared, authenticate))
         .with_state(agents)
@@ -54,6 +75,14 @@ struct MintBody {
     instance_id: String,
     #[serde(default)]
     ttl_seconds: Option<u64>,
+}
+
+/// The body of a revoke request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeBody {
+    provider: String,
+    instance_id: String,
 }
 
 /// The 201 body: the only place the token is ever shown.
@@ -88,16 +117,22 @@ fn refusal(err: MintError) -> ApiError {
     }
 }
 
-async fn mint(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response, ApiError> {
-    let body: MintBody = parse(&body)?;
-    let ttl = lifetime(body.ttl_seconds)?;
+/// The instance a request names, or a 400 when the ids are not valid.
+fn instance_of(provider: String, instance_id: String) -> Result<InstanceIdentity, ApiError> {
     let instance = InstanceIdentity {
-        provider: body.provider,
-        instance_id: body.instance_id,
+        provider,
+        instance_id,
     };
     instance.validate().map_err(|_| {
         ApiError::bad_request("provider or instance_id is not a valid provider id or instance id")
     })?;
+    Ok(instance)
+}
+
+async fn mint(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response, ApiError> {
+    let body: MintBody = parse(&body)?;
+    let ttl = lifetime(body.ttl_seconds)?;
+    let instance = instance_of(body.provider, body.instance_id)?;
     let named = (instance.provider.clone(), instance.instance_id.clone());
     let made = blocking(move || agents.joins.mint(instance, ttl)).await;
     let minted = made.map_err(|err| {
@@ -115,7 +150,21 @@ async fn mint(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response
         token: minted.token,
         expires_at_ms: minted.expires_at_ms,
     };
-    Ok((StatusCode::CREATED, Json(reply)).into_response())
+    let no_store = [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))];
+    Ok((StatusCode::CREATED, no_store, Json(reply)).into_response())
+}
+
+async fn revoke(State(agents): State<Arc<Agents>>, body: Bytes) -> Result<Response, ApiError> {
+    let body: RevokeBody = parse(&body)?;
+    let instance = instance_of(body.provider, body.instance_id)?;
+    let named = (instance.provider.clone(), instance.instance_id.clone());
+    let revoked = blocking(move || agents.joins.revoke(&instance)).await;
+    let dropped = revoked.map_err(|RevokeError::Unsaved| {
+        warn!("join tokens not revoked");
+        ApiError::coded(StatusCode::SERVICE_UNAVAILABLE, "state-write-failed")
+    })?;
+    info!(provider = %named.0, instance = %named.1, dropped, "join tokens revoked");
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[cfg(test)]

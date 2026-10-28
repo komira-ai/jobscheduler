@@ -39,7 +39,13 @@ hello in message metadata, never in a log line.
   only while its host keeps using it: its first use sets a bound 24 hours out (the registry's default retention of a lost host), every
   hello and heartbeat it serves moves the bound to 24 hours from then (written to the file when it gains an hour), and past the bound hello
   and heartbeat are refused `join-token-expired` and the next mint drops the entry. A host silent for longer than the bound needs a new
-  token. The server is not told when the registry forgets a host, so the bound is what ends the token of a host that is gone. A hello the
+  token. The server is not told when the registry forgets a host, so the bound is what ends the token of a host that is gone, except for
+  an instance the scheduler terminates itself: its terminate path revokes the instance's tokens with `DELETE /v1/agent/join-tokens`
+  (client token only, body `{provider, instance_id}`), which drops every token bound to that instance, used or not, in one write of the
+  file. A revoked token is unknown, so its hello and heartbeat get the 401 of a token that never existed. The call answers 204 also for an
+  instance with no token, so a retried terminate needs no care; a file that cannot be written is a 503 `state-write-failed` and the tokens
+  stay. This closes the window of a used token for the instances the scheduler terminates; an instance that dies without that call falls
+  back to the bound. The 201 of the mint carries `Cache-Control: no-store`. A hello the
   registry refuses (the host id is bound to another credential, the pool is full, the shape is not accepted) gives the use back: the token
   stays unused for its instance. If the file cannot be written for that, the token stays tied to the host that named it and the operator
   mints another. The instance a hello names is the hello's own claim: the binding guards against mix-ups (a token delivered to the wrong
