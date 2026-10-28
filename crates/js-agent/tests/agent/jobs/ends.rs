@@ -288,5 +288,6 @@ fn a_refusal_logs_what_it_could_not_stop() {
     let mut log = Capped::new();
     let exit = drive(&mut session, &mut sleeper, &mut log);
     assert!(matches!(exit, Exit::Fatal(_)), "{exit:?}");
-    assert!(log.text().contains("rescue: cannot list"), "{}", log.text());
+    let text = log.text();
+    assert!(text.contains("rescue: cannot list"), "{text}");
 }
