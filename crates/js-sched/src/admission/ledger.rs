@@ -725,7 +725,11 @@ mod tests {
                 Some(p.clone()),
             );
         }
-        let cfg = LoadConfig::default();
+        // A floor below 1, so that the sum of the flat covered leases shows the floor.
+        let cfg = LoadConfig {
+            cpu_floor_permille: 750,
+            ..LoadConfig::default()
+        };
         let capacity = Resources::new(100_000, 64 * GIB);
         let mut counters = LoadCounters::default();
         let read = |seq: u64, covered: Vec<LeaseId>, clocks: Vec<LeaseClock>| NodeLoad {

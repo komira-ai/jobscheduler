@@ -3,7 +3,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, Request, UNSERVABLE_WAIT};
+use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, LoadConfig, Request, UNSERVABLE_WAIT};
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
@@ -29,6 +29,10 @@ pub struct Config {
     /// How long a finished operation is kept, which a late request for its result still
     /// finds.
     pub finished_retention: Duration,
+    /// How the scheduler admits actions; `None` is the scheduler's default, placement by
+    /// load. `Some` with `PlacementLoad::Off` is the rollback switch to the booked rule,
+    /// for nodes that do not send load readings yet.
+    pub load: Option<LoadConfig>,
     /// How long a lease whose node has no session row anywhere is left before the intake
     /// poll requeues it ([`Core::intake`]).
     pub orphan_wait: Duration,
@@ -42,6 +46,7 @@ impl Config {
             term,
             unservable_wait: UNSERVABLE_WAIT,
             finished_retention: FINISHED_RETENTION,
+            load: None,
             orphan_wait: ORPHAN_WAIT,
         }
     }
@@ -50,6 +55,14 @@ impl Config {
     #[must_use]
     pub const fn with_unservable_wait(mut self, wait: Duration) -> Self {
         self.unservable_wait = wait;
+        self
+    }
+
+    /// This configuration, admitting actions as `load` says instead of by the scheduler's
+    /// default. `PlacementLoad::Off` in it places by the booked rule.
+    #[must_use]
+    pub const fn with_load_config(mut self, load: LoadConfig) -> Self {
+        self.load = Some(load);
         self
     }
 

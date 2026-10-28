@@ -468,7 +468,7 @@ fn the_idle_prelude_bound_of_sim_h_holds_for_any_order_and_hash() {
         world.run(30);
         assert_eq!(world.stats["sleeper"].started, admitted, "seed {seed}");
         assert!(admitted <= 48, "seed {seed}: {admitted}");
-        let bound = cpu_bound((16, 3), 16, 2, 4);
+        let bound = cpu_bound((4, 1), 16, 2, 4);
         for name in &order {
             let peak = world.nodes[name].peak_demand;
             assert!(peak <= bound, "seed {seed}: {name} at {peak}");
@@ -497,7 +497,7 @@ fn the_rise_bound_of_sim_h_holds_for_any_order_and_hash() {
         let late = Spec::flat("late", 2_000, 300, light_warm(2_000, 0));
         world.submit_many(20, &late);
         world.run(60);
-        let bound = cpu_bound((8, 3), 16, 2, 4);
+        let bound = cpu_bound((2, 1), 16, 2, 4);
         for name in &order {
             let peak = world.nodes[name].peak_demand;
             assert!(peak <= bound, "seed {seed}: {name} at {peak}");

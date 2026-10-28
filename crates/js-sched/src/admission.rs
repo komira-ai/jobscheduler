@@ -60,15 +60,15 @@ mod horizon;
 mod ledger;
 mod profile;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use js_sizing::{COLD_CPU_MILLIS, Estimate};
 use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, RunEnd, key_hash};
-use js_types::sched::{FarmTime, LeaseId, LeaseKind, OperationId, Resources, WorkKey, WorkerId};
+use js_types::sched::{FarmTime, LeaseKind, OperationId, Resources, WorkKey};
 
-pub use config::{FlagError, LoadConfig, PlacementLoad};
+pub use config::{FlagError, LoadConfig, MAX_CPU_SLACK_PERMILLE, PlacementLoad};
 pub(crate) use config::{scale, scale_up};
 pub(crate) use head::{Ratio, binding, pick};
 pub(crate) use horizon::new_charge;
@@ -114,10 +114,6 @@ pub struct LoadCounters {
     pub cold_deferred: u64,
     /// Head reservations taken or moved.
     pub reservations: u64,
-    /// Shadow: placements the predicate would have admitted on the worker chosen.
-    pub would_admit: u64,
-    /// Shadow: placements the predicate would have refused on the worker chosen.
-    pub would_block: u64,
     /// Readings accepted.
     pub readings_accepted: u64,
     /// Readings dropped: out of order, a counter or the clock going back, or implausible.
@@ -143,11 +139,6 @@ pub struct LoadCounters {
     /// Of those, placements where the best two were equal in keys 1 to 5 and a tie-break
     /// decided.
     pub chose_by_tie_break: u64,
-    /// Shadow: placements where the score and the previous least-loaded rule chose alike
-    /// among the workers the predicate admitted.
-    pub shadow_same_choice: u64,
-    /// Shadow: placements where they differed.
-    pub shadow_other_choice: u64,
     /// Not a running total: the live workers, as of the call that returned this, that
     /// are charged by prediction because their newest reading says the actions cgroup
     /// has a CPU limit, while the load rule is on. Part of
@@ -155,22 +146,6 @@ pub struct LoadCounters {
     /// limit and pool do not match.
     pub fallback_cpu_limited: u64,
 }
-
-/// What `Shadow` mode logs for a placement: the worker the previous least-loaded rule
-/// would have chosen beside the worker the score would have chosen, among the workers the
-/// predicate admitted. The lease itself is placed by the booked rule.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShadowChoice {
-    /// The lease placed.
-    pub lease: LeaseId,
-    /// The previous rule's choice; `None` when the predicate admitted no worker.
-    pub previous: Option<WorkerId>,
-    /// The score's choice; `None` when the predicate admitted no worker.
-    pub scored: Option<WorkerId>,
-}
-
-/// The most shadow choices kept; the oldest go first.
-const SHADOW_LOG: usize = 4096;
 
 /// A prediction of what an action costs, from the estimator, fed for an operation with
 /// [`crate::Scheduler::set_cost`]. An operation with none is charged its request's cores
@@ -263,25 +238,17 @@ pub(crate) struct Admission {
     hints: BTreeMap<OperationId, Prediction>,
     curves: Curves,
     guard: ShapeGuard,
-    shadow: VecDeque<ShadowChoice>,
 }
 
 impl Default for Admission {
-    /// A scheduler is built admitting by the booked rule, whatever [`LoadConfig::default`]
-    /// says: the caller turns the load predicate on with
-    /// [`crate::Scheduler::with_load_config`], so that a scheduler built as before places
-    /// as before.
+    /// A scheduler is built admitting by load, as [`LoadConfig::default`] says.
     fn default() -> Self {
         Self {
-            cfg: LoadConfig {
-                mode: PlacementLoad::Off,
-                ..LoadConfig::default()
-            },
+            cfg: LoadConfig::default(),
             counters: LoadCounters::default(),
             hints: BTreeMap::new(),
             curves: Curves(Arc::new(NoCurves)),
             guard: ShapeGuard::default(),
-            shadow: VecDeque::new(),
         }
     }
 }
@@ -385,8 +352,7 @@ impl Admission {
         cost: &LeaseCost,
         guard_key: u64,
     ) -> Option<Arc<Profile>> {
-        // A scheduler that places by the booked rule reads no curve; shadow counts what
-        // the predicate would have said, curves included.
+        // A scheduler that places by the booked rule reads no curve.
         if request.kind != LeaseKind::Action || cost.retry || self.cfg.mode == PlacementLoad::Off {
             return None;
         }
@@ -500,15 +466,6 @@ impl Admission {
         c.curve_flat += u64::from(!cpu && !memory && self.curves.0.curve(key).is_some());
     }
 
-    /// Counts what the predicate said about the worker `Shadow` placed on.
-    pub(crate) fn count_shadow(&mut self, admitted: bool) {
-        if admitted {
-            self.counters.would_admit += 1;
-        } else {
-            self.counters.would_block += 1;
-        }
-    }
-
     /// The scorer for the current settings.
     pub(crate) fn scorer(&self) -> Scorer {
         Scorer::new(ScoreConfig::of(&self.cfg))
@@ -525,24 +482,6 @@ impl Admission {
             c.chose_concentrated += u64::from(choice.concentrated);
             c.chose_by_tie_break += u64::from(choice.tie_break);
         }
-    }
-
-    /// Logs what `Shadow` would have chosen two ways.
-    pub(crate) fn log_shadow(&mut self, entry: ShadowChoice) {
-        if entry.previous == entry.scored {
-            self.counters.shadow_same_choice += 1;
-        } else {
-            self.counters.shadow_other_choice += 1;
-        }
-        if self.shadow.len() >= SHADOW_LOG {
-            self.shadow.pop_front();
-        }
-        self.shadow.push_back(entry);
-    }
-
-    /// The shadow choices logged since the last call, oldest first.
-    pub(crate) fn take_shadow(&mut self) -> Vec<ShadowChoice> {
-        self.shadow.drain(..).collect()
     }
 
     pub(crate) fn count_blocked(&mut self, why: Blocked) {
@@ -609,6 +548,8 @@ impl LoadView {
 
 #[cfg(test)]
 mod tests {
+    use js_types::sched::WorkerId;
+
     use super::*;
 
     /// Catches: a key's life read by the fit of a lease charged flat (a flat lease looks at

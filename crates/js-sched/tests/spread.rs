@@ -8,6 +8,8 @@
 //! cores and a mean of about 26 concurrent leases, the node named first held most of
 //! them and ran at several times its cores while the others were lightly used.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -75,7 +77,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            s: Scheduler::new(1),
+            s: Scheduler::new(1).with_load_config(booked::booked()),
             submitted: 0,
             names: Vec::new(),
         }

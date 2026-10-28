@@ -94,7 +94,8 @@ const P_BAR: u64 = 49_000;
 /// 0 to 2, B in minutes 7 to 9, a gap of 4 minutes (twice the dilation), each learned and
 /// predicted at 49 cores. B is admitted beside A at once and the node's true demand stays
 /// within the 110% line at every tick. Under the flat rule (the operator's off switch),
-/// 49 + 49 is over the line and B waits until A's busy phase is behind it.
+/// 49 + 49 is over the line, and since a covered lease is charged all of its prediction
+/// (`f` 1) however quiet it reads, B waits until A has finished (12 minutes).
 #[test]
 fn p_non_overlapping_busy_phases_are_admitted_together_under_profiles() {
     let a = shape(12, 0..3, BUSY, QUIET);
@@ -125,9 +126,9 @@ fn p_non_overlapping_busy_phases_are_admitted_together_under_profiles() {
     w.submit(&acting("pb", "pb", &b, P_BAR));
     w.run(100);
     assert_eq!(w.running_of("pb"), 0, "49 + 49 > 96.8 while A is busy");
-    drain(&mut w, 1_200);
+    drain(&mut w, 2_500);
     let started = first_start(&w, "pb").expect("B runs");
-    assert!(started >= 190, "after A's busy phase: tick {started}");
+    assert!(started >= 730, "after A has finished: tick {started}");
 }
 
 /// Sim p (the dilation). Catches: a busy phase that starts a little early not covered by
@@ -335,8 +336,9 @@ fn stream(config: LoadConfig) -> Stream {
     }
 }
 
-/// Sim af. Catches: the cost of charging a new lease for the whole horizon (the known gap),
-/// and the setting that ends the charge at the expected life not removing it. The long
+/// Sim af. Catches: the cost of charging a new lease for the whole horizon (the known gap,
+/// seen with the setting off), and the setting that ends the charge at the expected life
+/// (on by default) not removing it. The long
 /// action asks 94 cores at minutes 10 to 18 (dilated); a short action charged a core for
 /// 30 minutes is refused by that busy phase however soon it ends, so the shorts queue (45 of
 /// 600 started, the rest refused by the load); charged for their life (1 minute at the P90
@@ -350,14 +352,14 @@ fn af_short_actions_are_refused_by_the_tail_charge_unless_it_ends_at_their_life(
         ..LoadConfig::default()
     });
     assert_eq!((flat.started, flat.p95, flat.blocked), (600, 0, 0));
-    let tail = stream(LoadConfig::default());
+    let tail = stream(LoadConfig {
+        expected_life_delta_minutes: None,
+        ..LoadConfig::default()
+    });
     assert!(tail.blocked > 0, "the refusals the tail charge causes");
     assert!(tail.started * 4 < flat.started, "{} started", tail.started);
     assert!(tail.p95 * 10 > flat.p95 * 11, "p95 wait {}", tail.p95);
-    let life = stream(LoadConfig {
-        expected_life_delta_minutes: Some(2),
-        ..LoadConfig::default()
-    });
+    let life = stream(LoadConfig::default());
     assert_eq!(life.started, flat.started);
     assert_eq!(life.blocked, 0);
     assert!(life.p95 * 10 <= flat.p95 * 11, "p95 wait {}", life.p95);

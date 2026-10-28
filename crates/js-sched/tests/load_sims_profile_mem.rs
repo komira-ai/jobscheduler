@@ -68,6 +68,16 @@ fn drain(w: &mut World, max: u64) {
     panic!("not drained in {max} ticks: {:?}", w.stats);
 }
 
+/// The default settings without the node guard on flat memory, which would refuse by the
+/// leases' flat costs (two of 8 GiB on 15 GiB; twenty of more than 2 GiB on 40) before the
+/// curves are asked: these sims show the curve rule and the limits alone.
+fn curves_alone() -> LoadConfig {
+    LoadConfig {
+        flat_memory_slack_permille: None,
+        ..LoadConfig::default()
+    }
+}
+
 /// Sim r (the peak is behind it). Catches: memory charged as the point of the curve (a
 /// second lease admitted while the first one's peak is still ahead of the minute the
 /// second one asks for it) and as the flat peak held to the end (a second lease waiting
@@ -76,7 +86,7 @@ fn drain(w: &mut World, max: u64) {
 /// minutes after its start, at the reading that says so), not before and not at its end.
 #[test]
 fn r_a_second_lease_is_admitted_once_the_first_is_past_its_peak() {
-    let (mut w, curves) = node(LoadConfig::default(), 8, 15);
+    let (mut w, curves) = node(curves_alone(), 8, 15);
     let per_minute: Vec<(u32, u64)> = [2, 8, 8, 1].iter().map(|&g| (1_000, g * GIB)).collect();
     for key in ["m1", "m2"] {
         curves.set(key, &per_minute, 5);
@@ -240,7 +250,7 @@ fn misfitting(w: &mut World, curves: &Curves) {
 /// its own limit (twenty kills, no more), and each runs again one rung up charged flat.
 #[test]
 fn u_a_misfit_shared_by_twenty_keys_is_bounded_by_the_limits() {
-    let (mut w, curves) = node(LoadConfig::default(), 88, 40);
+    let (mut w, curves) = node(curves_alone(), 88, 40);
     misfitting(&mut w, &curves);
     w.step();
     assert_eq!(w.running_of("u00"), 1);

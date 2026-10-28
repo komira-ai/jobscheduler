@@ -4,6 +4,8 @@
 //! request the caps stop stays queued and [`Scheduler::whole_wait`] says why. Also how workers of every
 //! platform count toward one pool. Every time is farm time fed to the scheduler.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -31,7 +33,11 @@ fn cfg(edit: impl FnOnce(&mut WholeNodeConfig)) -> WholeNodeConfig {
 
 /// A farm of quiet workers `names` (no lease on any).
 fn quiet(config: WholeNodeConfig, names: &[&str]) -> Farm {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(config));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(config),
+    );
     for name in names {
         f.worker(name);
     }
@@ -118,7 +124,11 @@ fn a_refused_quiet_take_is_granted_when_a_whole_lease_ends() {
 /// it takes `b` (its mark becomes a lease, still one whole worker).
 #[test]
 fn a_marked_request_takes_a_quiet_worker_at_the_ceiling() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.max_whole_node = 1)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.max_whole_node = 1)),
+    );
     f.worker("a");
     f.lease(secs(600));
     let op = f.submit_whole(Some(secs(600)));
@@ -146,7 +156,11 @@ fn nothing_is_placed_or_marked_when_the_floor_leaves_no_ceiling() {
         );
         assert_eq!((f.held_for(op), f.s.whole_mark(op)), (None, None));
     }
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.keep_for_ordinary = 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.keep_for_ordinary = 2)),
+    );
     for name in ["a", "b"] {
         f.worker(name);
         f.lease(secs(600));
@@ -167,7 +181,11 @@ fn nothing_is_placed_or_marked_when_the_floor_leaves_no_ceiling() {
 /// stopped by the ceiling, not by the floor.
 #[test]
 fn a_falling_capable_count_does_not_lower_a_ceiling_the_cap_binds() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.max_whole_node = 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.max_whole_node = 2)),
+    );
     for name in ["a", "b", "c", "d", "e"] {
         f.worker(name);
         f.lease(secs(600));
@@ -242,7 +260,11 @@ fn workers_of_every_platform_count_toward_one_ceiling() {
 /// `max_draining`.
 #[test]
 fn workers_of_every_platform_count_toward_max_draining() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.max_draining = 1)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.max_draining = 1)),
+    );
     f.worker("linux");
     f.lease(secs(600));
     mac(&mut f, "mac");
@@ -275,7 +297,11 @@ fn workers_of_every_platform_count_toward_max_draining() {
 /// is still granted the quiet mac worker.
 #[test]
 fn max_draining_does_not_stop_a_quiet_take() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.max_draining = 1)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.max_draining = 1)),
+    );
     f.worker("linux");
     f.lease(secs(600));
     let draining = f.submit_whole(Some(secs(600)));

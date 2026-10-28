@@ -13,8 +13,8 @@
 //! slot, so [`FlatLoad`] answers every slot with the same figures; a rule that charges by
 //! a curve answers by slot and the scorer does not change.
 //!
-//! The previous ranking ([`Load`], [`least_loaded`]) is kept as a pure function for the
-//! shadow log and for leases that bypass scoring.
+//! The previous ranking ([`Load`], [`least_loaded`]) is kept as a pure function for
+//! leases that bypass scoring.
 //!
 //! # How this implementation reads the design
 //!
@@ -36,8 +36,8 @@ use js_types::sched::usage::LeaseCost;
 use js_types::sched::{LeaseId, Resources, WorkerId};
 
 /// A worker's load; the smaller is the less loaded. This is the previous ranking: placement
-/// by load chooses by the score ([`Scorer`]) and keeps this only for the shadow log
-/// ([`least_loaded`]) and for a lease that bypasses scoring.
+/// by load chooses by the score ([`Scorer`]) and keeps this only for a lease that
+/// bypasses scoring ([`least_loaded`]).
 ///
 /// The load is the largest of its CPU share, its
 /// memory share and its lease share (its leases of its lease cap, if it reports one) of
@@ -685,7 +685,7 @@ fn fnv1a(parts: &[&[u8]]) -> u64 {
 }
 
 /// The least loaded of `admitted` by the previous ranking, the first of equals. Kept for
-/// the shadow log and for a lease that bypasses scoring.
+/// a lease that bypasses scoring.
 #[must_use]
 pub fn least_loaded<'a>(admitted: &[(&'a WorkerId, Load)]) -> Option<&'a WorkerId> {
     admitted

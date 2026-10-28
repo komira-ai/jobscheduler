@@ -3,6 +3,8 @@
 //! operation of the key picks up at the next placement round, strictly below the memory
 //! of the largest live node, and which a successor books the same way.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -71,7 +73,7 @@ struct Farm {
 
 impl Farm {
     fn new() -> Self {
-        Self::over(Scheduler::new(1))
+        Self::over(Scheduler::new(1).with_load_config(booked::booked()))
     }
 
     fn over(s: Scheduler) -> Self {
@@ -542,7 +544,7 @@ fn a_recovered_lease_books_what_the_store_holds_and_its_kill_is_no_new_event() {
 
     // What the state store holds: the submitted requests, the lease of the second, the
     // key floor; the third is queued.
-    let mut successor = Scheduler::new(2);
+    let mut successor = Scheduler::new(2).with_load_config(booked::booked());
     successor.restore_key_floors(vec![KeyFloor {
         key: KEY,
         ask: 16 * GIB,
@@ -610,7 +612,11 @@ fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     assert_ne!(f.s.memory_state(), same.s.memory_state());
 
     // The change of the first kill of a farm with room for one key floor.
-    let mut g = Farm::over(Scheduler::new(1).with_memory_floors(1));
+    let mut g = Farm::over(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_memory_floors(1),
+    );
     g.node("big", 8, 64);
     let mut ops = Vec::new();
     for n in 1..=2u8 {
@@ -634,7 +640,7 @@ fn key_floors_are_in_the_memory_state_and_the_floor_change() {
     );
     assert_eq!(second.key_evicted, Vec::<u64>::new());
     // Given back, it floors a fresh request.
-    let mut successor = Scheduler::new(2);
+    let mut successor = Scheduler::new(2).with_load_config(booked::booked());
     successor.restore_key_floors(vec![second.key_raised.expect("raised")]);
     assert_eq!(successor.key_floor(KEY + 2), Some(16 * GIB));
     assert_eq!(successor.key_floor(KEY + 1), None);

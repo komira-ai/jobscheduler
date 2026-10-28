@@ -319,8 +319,10 @@ impl Scheduler {
     }
 
     /// This scheduler, admitting actions as `config` says. A scheduler built with
-    /// [`Scheduler::new`] places by the booked rule until this is called; the defaults of
-    /// [`LoadConfig`] are `On`, 5 s windows, `f` 0.75, `s_cpu` 0.10, `s_mem` 0.
+    /// [`Scheduler::new`] places by load with the defaults of [`LoadConfig`]: `On`, 5 s
+    /// windows, `f` 1.0, `s_cpu` 0.10, `s_mem` 0, the flat-memory guard at `d` 0 and charges
+    /// ending at the expected life plus 2 minutes. `PlacementLoad::Off` here is the
+    /// rollback switch to the booked rule.
     #[must_use]
     pub fn with_load_config(mut self, config: LoadConfig) -> Self {
         self.admission.configure(config);
@@ -552,7 +554,7 @@ impl Scheduler {
     /// A round places no more leases than the block of sequences the scheduler was given
     /// has left ([`Scheduler::use_seq_block`]); the rest wait for the next round.
     ///
-    /// Under admission by load ([`Scheduler::with_load_config`]) an action has room where
+    /// Under admission by load (the default; [`Scheduler::with_load_config`]) an action has room where
     /// the load predicate admits it (see [`crate::LoadConfig`]), and workers are ranked by
     /// what they are charged, measured and predicted, instead of by what is booked. An
     /// action that has a worker with room but for the predicate is blocked; the first

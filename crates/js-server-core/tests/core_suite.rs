@@ -30,7 +30,7 @@ use js_caps::NodeCaps;
 use js_conformance::Verdict;
 use js_conformance::core::{
     self, Answered, CoreHarness, Observed, Released, Scenario, Stream as HarnessStream,
-    UNPLACEABLE_JOB,
+    UNPLACEABLE_JOB, WIDE_JOB,
 };
 use js_sched::DaemonInstance;
 use js_server_core::{
@@ -346,10 +346,13 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 /// The request a job number stands for: one core, one GiB, a container; different numbers
-/// are different work, and the unplaceable job asks for more cores than any worker has.
+/// are different work, the unplaceable job asks for more cores than any worker has and the
+/// wide job for all of a worker's (4).
 fn request(job: u8) -> js_sched::Request {
     let cores = if job == UNPLACEABLE_JOB {
         1_000_000
+    } else if job == WIDE_JOB {
+        4_000
     } else {
         1_000
     };

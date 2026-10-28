@@ -4,6 +4,8 @@
 //! request a cap stops holds no worker and says why ([`Scheduler::whole_wait`]). Every time
 //! is farm time fed to the scheduler; nothing waits.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -38,8 +40,12 @@ fn cfg(edit: impl FnOnce(&mut WholeNodeConfig)) -> WholeNodeConfig {
 /// least loaded worker, so each worker has exactly one.
 fn busy(config: Option<WholeNodeConfig>, names: &[&str]) -> (Farm, Vec<LeaseGrant>) {
     let s = config.map_or_else(
-        || Scheduler::new(1),
-        |c| Scheduler::new(1).with_whole_node(c),
+        || Scheduler::new(1).with_load_config(booked::booked()),
+        |c| {
+            Scheduler::new(1)
+                .with_load_config(booked::booked())
+                .with_whole_node(c)
+        },
     );
     let mut f = Farm::new(s);
     let mut grants = Vec::new();
@@ -223,7 +229,11 @@ fn with_nothing_kept_every_capable_worker_may_be_held() {
 /// the container driver, so with one kept two capable workers give one whole.
 #[test]
 fn a_worker_that_cannot_be_held_whole_is_not_capable() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|c| c.keep_for_ordinary = 1)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|c| c.keep_for_ordinary = 1)),
+    );
     f.worker("a");
     f.worker("b");
     f.feed(Event::WorkerUp {
@@ -250,7 +260,11 @@ fn a_worker_that_cannot_be_held_whole_is_not_capable() {
 /// ordinary action of 16 cores, which only `a` can ever run, waits ahead of the request
 /// the caller asks next.
 fn last_capable_farm(config: WholeNodeConfig, with_b: bool) -> (Farm, OperationId) {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(config));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(config),
+    );
     let big = Event::WorkerUp {
         worker: w("a"),
         instance: DaemonInstance::new("a"),
@@ -314,7 +328,11 @@ fn a_protected_worker_is_passed_over_for_the_next() {
 /// holds `a`.
 #[test]
 fn a_younger_ordinary_request_does_not_protect_its_worker() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(|_| {})));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(|_| {})),
+    );
     f.feed(Event::WorkerUp {
         worker: w("a"),
         instance: DaemonInstance::new("a"),
@@ -339,7 +357,11 @@ fn a_younger_ordinary_request_does_not_protect_its_worker() {
 /// worker's cores that can run on either and waits ahead of the whole-machine requests the
 /// caller asks next.
 fn two_workers_one_ordinary(config: WholeNodeConfig) -> Farm {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(config));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(config),
+    );
     f.worker("a");
     f.lease(secs(60));
     f.worker("b");

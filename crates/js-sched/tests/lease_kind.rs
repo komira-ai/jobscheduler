@@ -3,6 +3,8 @@
 //! fits nowhere holds a worker in queue (QoS) order, so less urgent work stops landing
 //! there until it has emptied.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -52,7 +54,7 @@ struct Harness(Scheduler);
 
 impl Harness {
     fn new() -> Self {
-        Self(Scheduler::new(1))
+        Self(Scheduler::new(1).with_load_config(booked::booked()))
     }
 
     fn feed(&mut self, event: Event) -> Vec<Effect> {
