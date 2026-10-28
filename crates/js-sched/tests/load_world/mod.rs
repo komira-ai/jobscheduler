@@ -13,13 +13,14 @@
 #![allow(dead_code, reason = "each test binary uses some of the world")]
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use js_caps::NodeCaps;
 use js_sched::harness::feed;
 use js_sched::{
     DaemonInstance, Event, LoadConfig, Prediction, Recovered, RecoveredLease, Request, Scheduler,
 };
-use js_types::sched::usage::NodeLoad;
+use js_types::sched::usage::{CurveSource, LeaseClock, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, Failure, FarmTime, LeaseId, LeaseKind, OperationId, Outcome, Qos, Resources, ResultRef,
     StartLease, WaiterId, WorkKey, WorkerId,
@@ -50,6 +51,9 @@ pub struct Spec {
     /// Its demand is the whole node it runs on (a pool-sized action), whatever
     /// `demand` says; `demand` still gives its length.
     pub wide: bool,
+    /// The dedup key of the request, so that the curves of a `CurveSource` and the shape
+    /// guard see the runs of one key; `None` is a key of its own.
+    pub key: Option<&'static str>,
 }
 
 impl Spec {
@@ -65,6 +69,7 @@ impl Spec {
             mem: vec![(ticks, 0)],
             needs: None,
             wide: false,
+            key: None,
         }
     }
 
@@ -117,6 +122,8 @@ pub struct Node {
     pub peak_demand: u64,
     pub peak_memory: u64,
     pub peak_running: usize,
+    /// Closed minutes of its leases the agent has not sent yet.
+    pending_minutes: Vec<LeaseMinute>,
 }
 
 struct Running {
@@ -126,6 +133,13 @@ struct Running {
     /// Progress, in thousandths of a tick.
     pos: u64,
     cpu_milli_ticks: u64,
+    /// The minute being counted: its number, the ticks, millicore-ticks, busiest tick and
+    /// largest working set so far.
+    minute: u32,
+    minute_ticks: u64,
+    minute_cpu: u64,
+    minute_peak: u64,
+    minute_ws: u64,
 }
 
 /// Per class statistics.
@@ -152,6 +166,7 @@ pub struct World {
     /// Every start, in order: tick, class, node, operation, lease.
     pub starts: Vec<(u64, &'static str, String, OperationId, LeaseId)>,
     next_waiter: u64,
+    curves: Option<Arc<dyn CurveSource + Send + Sync>>,
 }
 
 fn w(name: &str) -> WorkerId {
@@ -176,7 +191,18 @@ impl World {
             stats: BTreeMap::new(),
             starts: Vec::new(),
             next_waiter: 0,
+            curves: None,
         }
+    }
+
+    /// A world whose scheduler is given `curves`.
+    pub fn with_curves(config: LoadConfig, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
+        let mut world = Self::new(config);
+        world.s = Scheduler::new(1)
+            .with_load_config(config)
+            .with_curves(curves.clone());
+        world.curves = Some(curves);
+        world
     }
 
     pub fn add_node(&mut self, name: &str, capacity: Resources, caps: NodeCaps) {
@@ -192,6 +218,7 @@ impl World {
                 peak_demand: 0,
                 peak_memory: 0,
                 peak_running: 0,
+                pending_minutes: Vec::new(),
             },
         );
         self.register(name, caps);
@@ -252,7 +279,10 @@ impl World {
         let n = self.next_waiter;
         self.next_waiter += 1;
         let request = Request {
-            key: WorkKey::new("sim", format!("k{n}")),
+            key: WorkKey::new(
+                "sim",
+                spec.key.map_or_else(|| format!("k{n}"), str::to_owned),
+            ),
             qos: Qos::Ci,
             kind: spec.kind,
             resources: Resources::new(spec.request_cpu, spec.limit),
@@ -260,7 +290,7 @@ impl World {
             hermetic: true,
             do_not_cache: false,
         };
-        let op = OperationId(self.s.operations() as u64);
+        let op = self.s.next_operation();
         feed(
             &mut self.s,
             now(self.tick),
@@ -316,7 +346,11 @@ impl World {
     /// predicted as before). A scheduler that charged a recovered lease by asking the
     /// estimator again would charge it that.
     pub fn restart(&mut self, predict_after: Prediction) {
-        let old = std::mem::replace(&mut self.s, Scheduler::new(2).with_load_config(self.config));
+        let mut next = Scheduler::new(2).with_load_config(self.config);
+        if let Some(curves) = &self.curves {
+            next = next.with_curves(curves.clone());
+        }
+        let old = std::mem::replace(&mut self.s, next);
         let leases: BTreeMap<OperationId, LeaseId> = self
             .running
             .keys()
@@ -411,6 +445,11 @@ impl World {
                 start: t,
                 pos: 0,
                 cpu_milli_ticks: 0,
+                minute: 0,
+                minute_ticks: 0,
+                minute_cpu: 0,
+                minute_peak: 0,
+                minute_ws: 0,
             },
         );
     }
@@ -432,13 +471,19 @@ impl World {
                     demand_of(&self.specs[r.spec_index], r.pos, node_millis)
                 })
                 .collect();
-            let memory: u64 = here
+            // A lease cannot hold more than the limit its cgroup enforces: it is killed
+            // when it asks for more (`finish_and_kill`).
+            let used: Vec<u64> = here
                 .iter()
                 .map(|l| {
                     let r = &self.running[l];
-                    at(&self.specs[r.spec_index].mem, r.pos)
+                    let spec = &self.specs[r.spec_index];
+                    let limit = self.s.lease_cost(*l).map_or(spec.limit, |c| c.limit_bytes);
+                    let ws = at(&spec.mem, r.pos);
+                    if limit > 0 { ws.min(limit) } else { ws }
                 })
-                .sum();
+                .collect();
+            let memory: u64 = used.iter().sum();
             let node = self.nodes.get_mut(&name).expect("node");
             let total: u64 = demands.iter().sum();
             node.peak_demand = node.peak_demand.max(total);
@@ -446,9 +491,27 @@ impl World {
             node.peak_running = node.peak_running.max(here.len());
             let grants = fair(&demands, node.capacity.cpu_millis);
             node.cpu_usec += grants.iter().sum::<u64>() * 1000;
-            for ((lease, demand), grant) in here.iter().zip(&demands).zip(grants) {
+            for (((lease, demand), grant), ws) in here.iter().zip(&demands).zip(grants).zip(used) {
                 let r = self.running.get_mut(lease).expect("running");
                 r.cpu_milli_ticks += grant;
+                r.minute_cpu += grant;
+                r.minute_peak = r.minute_peak.max(grant);
+                r.minute_ws = r.minute_ws.max(ws);
+                r.minute_ticks += 1;
+                if r.minute_ticks == 60 {
+                    node.pending_minutes.push(LeaseMinute {
+                        lease: *lease,
+                        minute: r.minute,
+                        cpu_mean_millis: u32::try_from(r.minute_cpu / 60).unwrap_or(u32::MAX),
+                        cpu_peak_window_millis: u32::try_from(r.minute_peak).unwrap_or(u32::MAX),
+                        ws_max_bytes: r.minute_ws,
+                    });
+                    r.minute += 1;
+                    r.minute_ticks = 0;
+                    r.minute_cpu = 0;
+                    r.minute_peak = 0;
+                    r.minute_ws = 0;
+                }
                 // An idle phase passes at full speed; a starved one slows by what it got
                 // over what it asked for.
                 r.pos += if *demand == 0 {
@@ -474,6 +537,28 @@ impl World {
             } else if r.pos >= spec.total_ticks() * 1000 {
                 ended.push((*lease, true));
             }
+        }
+        // A lease that is killed at its limit has held the limit for the moment: the node
+        // holds that, with what the others use, before it frees it.
+        for name in ended
+            .iter()
+            .filter(|(_, done)| !done)
+            .map(|(l, _)| self.running[l].node.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            let held: u64 = self
+                .running
+                .iter()
+                .filter(|(_, r)| r.node == name)
+                .map(|(l, r)| {
+                    let spec = &self.specs[r.spec_index];
+                    let limit = self.s.lease_cost(*l).map_or(spec.limit, |c| c.limit_bytes);
+                    let ws = at(&spec.mem, r.pos);
+                    if limit > 0 { ws.min(limit) } else { ws }
+                })
+                .sum();
+            let node = self.nodes.get_mut(&name).expect("node");
+            node.peak_memory = node.peak_memory.max(held);
         }
         for (lease, done) in ended {
             let r = self.running.remove(&lease).expect("running");
@@ -541,6 +626,12 @@ impl World {
                     .sum();
                 load.memory_working_set_bytes = anon + self.nodes[&name].cache;
                 load.memory_active_file_bytes = self.nodes[&name].cache;
+                // The agent's own start of each lease it runs, and the minutes closed since
+                // the last reading (at most 64, oldest first).
+                load.lease_clocks = mine_clocks(&self.running, &name, &held);
+                let node = self.nodes.get_mut(&name).expect("node");
+                let take = node.pending_minutes.len().min(64);
+                load.minutes = node.pending_minutes.drain(..take).collect();
                 if self.nodes[&name].reporting != Reporting::NoCovered {
                     // Ran the whole window: started before the previous reading.
                     load.covered = self
@@ -563,6 +654,22 @@ impl World {
             );
         }
     }
+}
+
+/// The start of each lease in `held` that runs on `node`, on the node's clock.
+fn mine_clocks(
+    running: &BTreeMap<LeaseId, Running>,
+    node: &str,
+    held: &[LeaseId],
+) -> Vec<LeaseClock> {
+    running
+        .iter()
+        .filter(|(l, r)| r.node == node && held.contains(l))
+        .map(|(l, r)| LeaseClock {
+            lease: *l,
+            started_mono_usec: r.start * 1_000_000,
+        })
+        .collect()
 }
 
 /// Max-min fair shares of `capacity` among `demands`.

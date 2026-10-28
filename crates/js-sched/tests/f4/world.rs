@@ -376,6 +376,7 @@ impl World {
         let retention = std::time::Duration::from_secs(RETENTION_S);
         let check = Checker::new(
             Scheduler::new(TERM)
+                .with_load_config(crate::booked::booked())
                 .with_unservable_wait(wait)
                 .with_finished_retention(retention),
             WAIT_S * 1_000,

@@ -2,6 +2,8 @@
 //! satisfies its platform; work no live worker can run waits with a reason and is
 //! refused after the unservable wait, the refusal committed before it is answered.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -73,7 +75,9 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            s: Scheduler::new(1).with_unservable_wait(WAIT),
+            s: Scheduler::new(1)
+                .with_load_config(booked::booked())
+                .with_unservable_wait(WAIT),
             now: FarmTime::default(),
         }
     }
@@ -488,7 +492,7 @@ fn work_behind_a_full_round_still_starts_its_wait() {
 #[test]
 fn the_default_wait_is_minutes() {
     assert_eq!(UNSERVABLE_WAIT, Duration::from_secs(300));
-    let mut s = Scheduler::new(1);
+    let mut s = Scheduler::new(1).with_load_config(booked::booked());
     let at = |secs: u64| FarmTime::from_millis(secs * 1_000);
     let submit = Event::Submit {
         waiter: WaiterId(1),

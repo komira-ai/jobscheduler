@@ -29,6 +29,12 @@ const GIB: u64 = 1 << 30;
 /// scheduler waits and then refuses it. Lets the model's own tests reach the refusal path.
 pub const UNPLACEABLE_JOB: u8 = u8::MAX;
 
+/// A job that asks for all the cores of a worker (4), so no other job fits beside it
+/// whatever the placement rule or its slack, and the next job goes to another worker. Lets
+/// a scenario put one job on each of two workers without relying on how the scheduler
+/// spreads or packs.
+pub const WIDE_JOB: u8 = u8::MAX - 1;
+
 /// The one rule a broken [`ReferenceCore`] breaks. Each is the cause of exactly one
 /// scenario failing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,10 +390,13 @@ fn finished(record: &ControlRecord) -> Option<OperationId> {
 }
 
 /// The request a job number stands for: one core, one GiB, a container; different numbers
-/// are different work.
+/// are different work. The unplaceable job asks for more cores than any worker has and the
+/// wide job for all of a worker's.
 fn request(job: u8) -> Request {
     let cores = if job == UNPLACEABLE_JOB {
         1_000_000
+    } else if job == WIDE_JOB {
+        4_000
     } else {
         1_000
     };

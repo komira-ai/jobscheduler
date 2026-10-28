@@ -13,16 +13,24 @@
 //! any of its methods counts toward one instantiation of it.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
+use std::time::Duration;
 
-use js_sched::{Cordon, Event, FARM_RERUNS, Input, LOSS_REQUEUES, Request, Requeue, Scheduler};
+use js_caps::NodeCaps;
+use js_sched::{
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, LOSS_REQUEUES, Request, Requeue, Scheduler,
+};
+use js_store::Rows;
 use js_types::sched::{
-    Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Outcome, Refusal, StartLease,
-    StateMachine, WaiterId, Waiting, WorkerId,
+    Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Outcome, Refusal, Resources,
+    StartLease, StateMachine, WaiterId, Waiting, WorkerId,
 };
 
 use crate::adapter::{Adapter, Link, Stage, View};
-use crate::core::{Admitted, Config, Fenced, NodeAction, UnknownNode};
-use crate::write::{Attempt, Writer};
+use crate::core::{Admitted, Config, Held, NotQueued};
+use crate::intake::Intake;
+use crate::store::Unsettled;
+use crate::write::{Attempt, Batch, Settles, Writer};
 
 /// How many committed records the core holds for a writer that refuses them.
 pub const HELD_CAP: usize = 4096;
@@ -42,7 +50,7 @@ pub(crate) struct Engine {
     /// The operations a `Start` was sent for, marked before the `Start` leaves and never
     /// cleared while the scheduler holds the operation: a drain ends the streams of an
     /// operation that waits for a worker only if it is not in here.
-    ever_started: BTreeSet<OperationId>,
+    pub(crate) ever_started: BTreeSet<OperationId>,
     /// The nodes the drain cordoned itself when it closed this core's intake, as opposed
     /// to an operator's cordon: an operation that waits only for these is queued, not
     /// stuck, since the other frontends take it.
@@ -61,7 +69,7 @@ pub(crate) struct Engine {
     /// record, oldest first. Nothing is carried out (no `Start`, no answer) before its row
     /// is written, so a writer that refuses holds the later effects behind the earliest
     /// refused one.
-    pub(crate) unwritten: VecDeque<VecDeque<Effect>>,
+    pub(crate) unwritten: VecDeque<Batch>,
     /// Writes given up on for good: refused for a reason a later try cannot overcome, or
     /// over the cap.
     pub(crate) write_drops: u64,
@@ -73,19 +81,63 @@ pub(crate) struct Engine {
     /// A drain closed this core's intake: it places no work on its nodes, and goes on with
     /// what it holds.
     pub(crate) closed: bool,
+    /// The state store's rows, if the core has a store ([`Core::open`](crate::Core::open)).
+    pub(crate) rows: Option<Arc<Rows>>,
+    /// The epoch the store was opened under, if the core has one.
+    pub(crate) epoch: Option<u64>,
+    /// How long the scheduler keeps a finished operation; the store keeps its `done/` row at
+    /// least as long.
+    pub(crate) finished_retention: Duration,
+    /// The scheduler was told the state store is unavailable ([`Engine::watch_store`]).
+    pub(crate) store_down: bool,
+    /// A write failed because the store could not be reached, and none has been taken since.
+    pub(crate) unreachable: bool,
+    /// Leases given up that the store has not yet been told of, oldest first. Until it has,
+    /// it still holds the lease and no queue row for the operation, so every one is written
+    /// again before anything that follows it is ([`Engine::settle_requeues`]).
+    pub(crate) unsettled: Vec<Unsettled>,
+    /// When each node's session row in the store was last written, or renewed: the next
+    /// renewal falls due a renewal interval later.
+    pub(crate) renewed: BTreeMap<WorkerId, FarmTime>,
+    /// When each node's session row was last written successfully, at its registration or
+    /// a renewal. Its heartbeats are acknowledged only while that was lately.
+    pub(crate) session_ok: BTreeMap<WorkerId, FarmTime>,
+    /// The nodes whose `Hello` found the store unreachable, so this core has not claimed
+    /// them, with the daemon process that said it ([`Engine::claim_pending`]).
+    pub(crate) unclaimed: BTreeMap<WorkerId, DaemonInstance>,
+    /// The operations the scheduler says no live worker can run now, with its reason: the
+    /// ones whose stage [`Engine::stage_for`] decides again when what it depends on changes.
+    pub(crate) stuck: BTreeMap<OperationId, String>,
+    /// What the daemons of the other frontends offer, as the last look at the store's
+    /// session rows read it ([`Engine::look_at_remote_sessions`]).
+    pub(crate) remote: Vec<(NodeCaps, Resources)>,
+    /// A write was refused because a newer writer holds the state store: nothing this core
+    /// writes can succeed any more. Never cleared; unlike an outage, nothing ends it.
+    pub(crate) superseded: bool,
+    /// For each operation this core's callers wait on ([`Core::follow`](crate::Core::follow))
+    /// that the last looks found neither unfinished nor ended, how many looks in a row. Only
+    /// logged: no look count ends a caller's wait.
+    pub(crate) untraced_kept: BTreeMap<OperationId, u32>,
+    /// What the intake poll keeps between two looks at the state store
+    /// ([`Core::intake`](crate::Core::intake)).
+    pub(crate) intake: Intake,
 }
 
 impl Engine {
     /// An engine over a new scheduler, whose writer takes everything.
     pub(crate) fn new(config: &Config) -> Self {
-        let sched = Scheduler::new(config.term)
+        let mut sched = Scheduler::new(config.term);
+        if let Some(load) = config.load {
+            sched = sched.with_load_config(load);
+        }
+        let sched = sched
             .with_unservable_wait(config.unservable_wait)
             .with_finished_retention(config.finished_retention)
             .with_loss_requeues(LOSS_REQUEUES)
             .recording_requeues();
         Self {
             sched,
-            writer: Box::new(|_: &Effect| Attempt::Taken),
+            writer: Box::new(|_: &Effect, _: &Settles<'_>| Attempt::Taken),
             links: BTreeMap::new(),
             next_stream: 0,
             next_waiter: 0,
@@ -100,6 +152,20 @@ impl Engine {
             held_cap: HELD_CAP,
             fenced: false,
             closed: false,
+            rows: None,
+            epoch: None,
+            finished_retention: config.finished_retention,
+            store_down: false,
+            unreachable: false,
+            unsettled: Vec::new(),
+            renewed: BTreeMap::new(),
+            session_ok: BTreeMap::new(),
+            unclaimed: BTreeMap::new(),
+            stuck: BTreeMap::new(),
+            remote: Vec::new(),
+            superseded: false,
+            untraced_kept: BTreeMap::new(),
+            intake: Intake::new(config.orphan_wait),
         }
     }
 
@@ -134,6 +200,9 @@ impl Engine {
     /// answers, for the caller to deliver once the lock is released.
     fn carry_out(&mut self, a: &mut dyn Adapter, now: FarmTime, event: Event) -> Vec<Answer> {
         self.hold_placements(now);
+        self.watch_store(now);
+        self.claim_pending(a, now);
+        self.reserve_seqs();
         // Only the inputs whose callers deliver answers ([`Engine::feed_quiet`]) release
         // effects an earlier refusal held back: one of them may be an answer.
         let answering = matches!(
@@ -154,9 +223,18 @@ impl Engine {
         while let Some(effect) = effects.pop_front() {
             match effect {
                 Effect::Commit(record) => {
-                    if let ControlRecord::Lease(grant) = &record {
-                        a.offer(&self.view(), grant);
+                    // A refusal for want of a daemon waits on if another frontend's could
+                    // run the operation: it is not committed, and is proposed again after
+                    // another unservable wait.
+                    if self.held_for_other_frontends(&record) {
+                        continue;
                     }
+                    let grant = if let ControlRecord::Lease(grant) = &record {
+                        a.offer(&self.view(), grant);
+                        Some(grant.clone())
+                    } else {
+                        None
+                    };
                     // Appended is committed; the effects of the commit (the `Start`, the
                     // answer) are carried out only once the writer has taken what they
                     // settle. What it refuses is kept and written again, in order, until
@@ -167,7 +245,10 @@ impl Engine {
                         tracing::error!(cap = self.held_cap, "records over the cap: one dropped");
                         continue;
                     }
-                    self.unwritten.push_back(next.into());
+                    self.unwritten.push_back(Batch {
+                        effects: next.into(),
+                        grant,
+                    });
                     // Written at once when this input can deliver an answer, or when
                     // nothing older waits; else behind the records already held.
                     let released = if answering || self.unwritten.len() == 1 {
@@ -200,11 +281,15 @@ impl Engine {
     ///
     /// A grant the writer has not taken for a lease the scheduler has given up is never
     /// written: it would put the lease back, held by no one.
-    fn log_requeues(&mut self, a: &mut dyn Adapter) {
-        for requeue in self.sched.take_requeues() {
-            for batch in &mut self.unwritten {
-                batch.retain(|effect| started(effect) != Some(requeue.lease));
-            }
+    pub(crate) fn log_requeues(&mut self, a: &mut dyn Adapter) {
+        let given_up = self.sched.take_requeues();
+        self.settle_requeues(&given_up);
+        // The queue row a give-up writes is this core's own: the intake poll finds the
+        // operation queued as it left it, not queued again by another frontend.
+        for requeue in &given_up {
+            self.intake.rewrote(requeue.operation);
+        }
+        for requeue in given_up {
             a.requeued(&requeue);
             let Requeue {
                 operation,
@@ -223,8 +308,9 @@ impl Engine {
     /// Forgets the callers, and their channels, of every finished operation the
     /// scheduler has dropped. Every input ends here.
     pub(crate) fn forget_dropped(&mut self, a: &mut dyn Adapter) {
-        let sched = &self.sched;
-        a.forget_dropped(&|operation| sched.state(operation).is_some());
+        let (sched, intake) = (&self.sched, &self.intake);
+        let held = |operation| sched.state(operation).is_some() || intake.keeps(operation);
+        a.forget_dropped(&held);
         self.answered
             .retain(|_, operation| sched.state(*operation).is_some());
         self.ever_started
@@ -258,37 +344,73 @@ impl Engine {
         let operation = waiting.operation;
         let stage = match &waiting.reason {
             Some(why) => {
-                tracing::warn!(%operation, reason = %why, "no live worker can run the operation");
+                if self.runnable_elsewhere(operation) {
+                    tracing::info!(
+                        %operation,
+                        reason = %why,
+                        "no worker of this frontend can run the operation; another frontend can"
+                    );
+                } else {
+                    tracing::warn!(%operation, reason = %why, "no live worker can run the operation");
+                }
+                self.stuck.insert(operation, why.clone());
                 self.stage_for(operation, why)
             }
             None => {
                 tracing::info!(%operation, "a live worker can run the operation again");
+                self.stuck.remove(&operation);
                 Stage::Queued
             }
         };
         a.show(&self.view(), operation, &stage);
     }
 
-    /// The stage of `operation`, which no live worker can run now (`why`). What each stage
-    /// means to a caller:
+    /// Whether a daemon session of another frontend, as the last look at the store read
+    /// them, could run `operation`. Its work is taken by that frontend, which takes the
+    /// queued operations it did not enqueue.
+    fn runnable_elsewhere(&self, operation: OperationId) -> bool {
+        self.sched.request(operation).is_some_and(|request| {
+            self.remote
+                .iter()
+                .any(|(caps, capacity)| request.runnable_on(caps, capacity))
+        })
+    }
+
+    /// The stage of `operation`, which no live worker of this frontend can run now (`why`).
+    /// A worker of another frontend can run it when that frontend takes the queued
+    /// operation; this frontend follows the state store until then. What each stage means
+    /// to a caller:
     ///
-    /// - `WaitingKept`: a drain keeps its streams. The operation has started before.
+    /// - `WaitingKept`: a drain keeps its streams. The operation has started before, or a
+    ///   daemon session of another frontend could run it.
     /// - `Queued`: the only thing between it and a worker is this drain's own cordon, with
     ///   the intake closed, so it is queued for the other frontends like any queued work.
-    /// - `Waiting`: a drain ends its streams. It never started and is held by an operator's
-    ///   cordon (alone, or beside the drain's) or by no worker at all.
+    /// - `Waiting`: a drain ends its streams. It never started, no daemon session of
+    ///   another frontend could run it, and it is held by an operator's cordon (alone, or
+    ///   beside the drain's) or by no worker at all.
     fn stage_for(&self, operation: OperationId, why: &str) -> Stage {
         let cordoned = self.sched.cordoned_could(operation);
         let only_drain = !cordoned.is_empty()
             && cordoned
                 .iter()
                 .all(|worker| self.drain_held.contains(worker));
-        if self.ever_started.contains(&operation) {
+        if self.ever_started.contains(&operation) || self.runnable_elsewhere(operation) {
             Stage::WaitingKept(why.to_owned())
         } else if only_drain {
             Stage::Queued
         } else {
             Stage::Waiting(why.to_owned())
+        }
+    }
+
+    /// Decides again the stage of every operation that waits for a worker, after the
+    /// daemons of the other frontends were read.
+    pub(crate) fn republish_stuck(&mut self, a: &mut dyn Adapter) {
+        let alive: BTreeSet<OperationId> = self.sched.queued().collect();
+        self.stuck.retain(|operation, _| alive.contains(operation));
+        for (operation, why) in self.stuck.clone() {
+            let stage = self.stage_for(operation, &why);
+            a.show(&self.view(), operation, &stage);
         }
     }
 
@@ -336,51 +458,35 @@ impl Engine {
         }
     }
 
-    /// Where a request about to be queued goes: the twin the scheduler holds, if it has
-    /// one, or the next operation it numbers; and the caller's number.
+    /// Where a request about to be queued goes: written to the store first, if the core has
+    /// one ([`Engine::queue`]); then the twin the scheduler holds, if it has one, or the
+    /// next operation it numbers; and the caller's number.
     ///
     /// # Errors
-    /// The core is fenced.
-    pub(crate) fn admit(&mut self, request: &Request) -> Result<Admitted, Fenced> {
+    /// The core is fenced, or the store did not take the request.
+    pub(crate) fn admit(
+        &mut self,
+        a: &mut dyn Adapter,
+        request: &Request,
+        parcel: &[u8],
+        now: FarmTime,
+    ) -> Result<Admitted, NotQueued> {
         if self.fenced {
-            return Err(Fenced);
+            return Err(NotQueued::Fenced);
         }
-        let twin = self.sched.twin(request);
         let waiter = WaiterId(self.next_waiter);
         self.next_waiter += 1;
+        let held = self.queue(a, request, parcel, now)?;
+        let twin = match held {
+            Held::Here => self.sched.twin(request),
+            Held::Elsewhere(operation) => Some(operation),
+        };
         Ok(Admitted {
             waiter,
             operation: twin.unwrap_or_else(|| self.sched.next_operation()),
             joined: twin.is_some(),
+            held,
         })
-    }
-
-    /// Cordons, drains or uncordons `worker` (see `js_sched::Cordon`).
-    ///
-    /// # Errors
-    /// `worker` has never registered.
-    pub(crate) fn place(
-        &mut self,
-        a: &mut dyn Adapter,
-        now: FarmTime,
-        worker: &WorkerId,
-        action: NodeAction,
-    ) -> Result<(), UnknownNode> {
-        if !self.links.contains_key(worker) {
-            return Err(UnknownNode(worker.as_str().to_owned()));
-        }
-        let name = worker.clone();
-        let event = match action {
-            NodeAction::Cordon => Event::Cordon { worker: name },
-            NodeAction::Drain(within) => Event::Drain {
-                worker: name,
-                deadline: now.saturating_add(within),
-            },
-            NodeAction::Uncordon => Event::Uncordon { worker: name },
-        };
-        tracing::info!(%worker, ?action, "operator action");
-        self.feed_quiet(a, now, event);
-        Ok(())
     }
 
     /// Expires leases of silent workers and places queued work. A silent lease lost past
@@ -404,7 +510,7 @@ impl Engine {
 }
 
 /// The lease an effect starts, if it is a `Start`.
-fn started(effect: &Effect) -> Option<LeaseId> {
+pub(crate) fn started(effect: &Effect) -> Option<LeaseId> {
     match effect {
         Effect::Start(start) => Some(start.lease),
         _ => None,

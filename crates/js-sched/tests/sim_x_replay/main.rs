@@ -16,3 +16,4 @@ mod fixture_tests;
 mod load_rig;
 mod predictor_tests;
 mod rankers_tests;
+mod truth_tests;
