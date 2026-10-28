@@ -37,6 +37,17 @@
 //! the registry at once ([`Marks::retain_waiting`]). A mark on a host that is tainted or
 //! gone is dropped here without counting a give-up.
 //!
+//! # Restart
+//!
+//! The marks, the wait list and the give-up counts are held in memory only. A restart
+//! loses them: a waiting request presents itself again, waits again and is set a host
+//! again, and a request that had given up hosts starts counting from none. The design
+//! says reservations survive a restart; persisting them is a later change. The lease
+//! file already records the whole-node reservation of a lease it holds
+//! (`js-lease`), so what remains is to write the marks beside it and read them back.
+//! Until then a restart costs a waiting request its place and its progress, and
+//! touches no lease and no run.
+//!
 //! The pass reads the table as [`HostFacts`], which the registry builds under its lock, so
 //! it holds no clock and no lock of its own.
 
@@ -48,7 +59,7 @@ use js_types::{HostId, Request, RequestId};
 
 use crate::whole_config::WholeNodeConfig;
 
-use super::caps::{self, Capability, Counts, Limits, MarkKind};
+use super::caps::{self, Capability, Counts, Limits};
 use super::cost::{self, HostLoad};
 use super::queue::WaitList;
 use super::requests::{RequestKey, Requests};
@@ -249,19 +260,18 @@ impl Ctx<'_> {
             capable_hosts(&self.pass),
             settings.keep_for_ordinary,
         );
-        let reserved = self.marks.0.values().map(|mark| caps::Mark {
+        let reserved = self.marks.0.values().map(|mark| caps::Mark::Reserved {
             request: mark.request.to_string(),
-            kind: MarkKind::Reserved,
             at: mark.at.millis(),
         });
         let held = self.pass.hosts.iter().filter_map(|fact| {
-            Some(caps::Mark {
-                request: fact.id.to_string(),
-                kind: MarkKind::Held,
+            Some(caps::Mark::Held {
+                host: fact.id.to_string(),
                 at: fact.held?.millis(),
             })
         });
         let all: Vec<caps::Mark> = reserved.chain(held).collect();
+        // Only reservations come back, so the ids are request ids.
         let excess = caps::ceiling_excess(&all, ceiling);
         self.marks
             .0
