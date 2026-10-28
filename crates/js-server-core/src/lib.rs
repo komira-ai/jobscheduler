@@ -14,7 +14,15 @@
 //! - a `Result` is taken from the node that holds its operation's current lease, and each
 //!   operation is answered once ([`Standing`], [`Taken`]);
 //! - a core that is handed over takes nothing more ([`Core::fence`]), and one that is
-//!   draining places nothing ([`Core::close_intake`]).
+//!   draining places nothing and takes in nothing ([`Core::close_intake`]);
+//! - several frontends may share one store: each looks at it every [`INTAKE_POLL`]
+//!   ([`Core::intake`]) for the operations the others queued, took or finished, the
+//!   cordons they set and the floors they raised, and shows its callers what the store says
+//!   of an operation another frontend runs; a start takes up no operation that holds a
+//!   lease, since its node may be connected to another frontend ([`Core::open`]);
+//! - a handover writes the requeues the store refused ([`Core::flush_unsettled`]) and
+//!   answers the callers the core still holds from the store ([`Core::follow`]); a store that
+//!   says a newer writer holds it supersedes the core for good ([`Core::superseded`]).
 //!
 //! [`Core`] is that loop behind one lock. What reaches outside it, the messages to a host,
 //! the callers waiting on an operation, the result's bytes, is an [`Adapter`] call, made
@@ -39,7 +47,9 @@ mod adapter;
 mod admission;
 mod core;
 mod engine;
+mod handover;
 mod host;
+mod intake;
 mod observer;
 mod owner;
 mod report;
@@ -52,7 +62,9 @@ pub use self::core::{
 pub use adapter::{Adapter, Delivery, Link, Stage, View};
 pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
+pub use handover::{FLUSH_LOOK, FOLLOW_EVERY};
 pub use host::{Beat, Reported, Stream};
+pub use intake::INTAKE_POLL;
 pub use observer::Observer;
 pub use report::{Reason, Report, Standing, Taken};
 pub use store::Storage;

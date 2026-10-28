@@ -1,7 +1,7 @@
 //! Several frontends over one state store: a write that finds another frontend's work in its
 //! way, a request that joins an operation another frontend holds, the daemons of the other
 //! frontends, and an operator's action on a node another frontend holds (the farm halves of the
-//! farm core's results and placement tests; the poll of the store is not in this core yet).
+//! farm core's results and placement tests; the poll of the store is in `intake.rs`).
 
 use std::time::Duration;
 
@@ -14,8 +14,8 @@ use js_types::sched::usage::LeaseCost;
 use js_types::sched::{LeaseGrant, OperationId, Resources};
 
 use crate::common::{
-    Call, GIB, Rig, at, block_on, calls, lease, reported, request, started, submit, submit_request,
-    up, up_after, worker,
+    Call, GIB, Rig, at, block_on, calls, lease, reported, request, shown_to, started, submit,
+    submit_request, up, up_after, worker,
 };
 use crate::recover::finish;
 use crate::stored::Setup;
@@ -32,9 +32,10 @@ fn shown(core: &js_server_core::Core<Rig>) -> Vec<Stage> {
 }
 
 /// Asserts that a grant which finds the operation taken by another frontend is dropped and
-/// undone: the scheduler forgets the operation, its callers are left to the store, and the
-/// frontend that won runs it. Catches: two frontends that run one operation, and a scheduler
-/// that keeps a lease the store does not hold.
+/// undone: the scheduler forgets the operation, its callers are shown what the store says of
+/// it (the result the frontend that won wrote), and the frontend that won runs it. Catches:
+/// two frontends that run one operation, a scheduler that keeps a lease the store does not
+/// hold, and callers left waiting for a core that will never answer them.
 #[test]
 fn a_grant_that_loses_to_another_frontend_is_undone_and_its_callers_followed() {
     let setup = Setup::new();
@@ -50,8 +51,60 @@ fn a_grant_that_loses_to_another_frontend_is_undone_and_its_callers_followed() {
     assert_eq!(started(&a), []);
     assert_eq!(a.queued_operations(), 0, "forgotten");
     assert_eq!(a.dropped_writes(), 1);
-    let followed = Call::Followed(queued.operation, vec![queued.waiter]);
+    assert_eq!(shown_to(&a, queued.waiter), None, "nothing is known yet");
+
+    a.intake(at(5));
+    assert_eq!(
+        shown_to(&a, queued.waiter),
+        Some(Stage::Executing),
+        "the other frontend runs it"
+    );
+    finish(&b, 6, "node-b", joined.operation, lease(1, 1024));
+    a.intake(at(7));
+    let ended = Stage::Done(b"done 1.1024".to_vec());
+    assert_eq!(shown_to(&a, queued.waiter), Some(ended));
+    let followed = Call::Followed(queued.operation, b"done 1.1024".to_vec());
     assert!(calls(&a).contains(&followed), "{:?}", calls(&a));
+}
+
+/// Asserts that a grant lost to another frontend is judged by the queue row read after the
+/// loss: another frontend took the operation and queued it again meanwhile, so the operation
+/// stays queued here with its caller, and is not handed off as if it were gone. Catches: a
+/// caller moved to the store's follower while this core still holds the operation.
+#[test]
+fn a_lost_grant_whose_operation_is_queued_again_keeps_its_caller() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    let queued = submit(&core, 1, 1);
+    let key = js_store::keys::queue(queued.operation);
+    let other = setup.rows(7);
+    let store = setup.store.clone();
+    let taken = LeaseGrant {
+        lease: lease(5, 0),
+        operation: queued.operation,
+        worker: worker("node-b"),
+        cost: LeaseCost::default(),
+    };
+    // The other frontend takes the operation before this core's grant reads its queue row,
+    // and queues it again before the look that follows the loss.
+    setup.store.before_read("queue/", move || {
+        other.granted(&taken).expect("granted by another frontend");
+        let again = store.clone();
+        store.before_read("queue/", move || again.put(&key, Vec::new()));
+    });
+
+    up(&core, 2, "node-a", "d1");
+
+    assert_eq!(core.dropped_writes(), 1, "the grant was not refused");
+    assert_eq!(core.queued_operations(), 1);
+    let waiters = core.with(|view, _| view.sched().waiters(queued.operation).map(<[_]>::to_vec));
+    assert_eq!(waiters, Some(vec![queued.waiter]));
+    assert!(
+        !calls(&core)
+            .iter()
+            .any(|call| matches!(call, Call::KeptFinished(..) | Call::Followed(..))),
+        "handed off"
+    );
 }
 
 /// Asserts that a grant for a node the daemon has left for another frontend is dropped, and
@@ -73,7 +126,8 @@ fn a_grant_for_a_node_that_moved_is_dropped() {
 }
 
 /// Asserts that a result for a node the daemon has left is dropped, not acknowledged, and its
-/// callers are left to the store. Catches: a result written over the new owner's lease.
+/// callers are shown the result the node's new frontend writes. Catches: a result written over
+/// the new owner's lease, and callers left waiting for it.
 #[test]
 fn a_result_for_a_node_that_moved_is_dropped_and_followed() {
     let setup = Setup::new();
@@ -86,9 +140,14 @@ fn a_result_for_a_node_that_moved_is_dropped_and_followed() {
 
     assert_eq!(taken, Taken::Dropped);
     assert_eq!(a.dropped_writes(), 1);
-    let followed = Call::Followed(admitted.operation, vec![admitted.waiter]);
-    assert!(calls(&a).contains(&followed));
     assert_eq!(setup.store.rows_of("lease/").len(), 1, "the lease stands");
+
+    finish(&b, 4, "node-a", admitted.operation, lease(1, 0));
+    a.intake(at(5));
+    let ended = Stage::Done(b"done 1.0".to_vec());
+    assert_eq!(shown_to(&a, admitted.waiter), Some(ended));
+    let followed = Call::Followed(admitted.operation, b"done 1.0".to_vec());
+    assert!(calls(&a).contains(&followed));
 }
 
 /// Asserts that a request that joins an operation another frontend leased on its node follows

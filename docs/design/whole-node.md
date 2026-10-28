@@ -121,6 +121,10 @@ touched, the request returns to the queue with that host excluded for it for `re
 the rule above. If no other host is available the request waits unreserved until the back-off ends. Give-ups are counted per request:
 after `max_reserve_attempts` of them (default 2) the deadline of its next reservation is the pool's max wall time whatever
 `drain_deadline` says, and that reservation cannot be given up for a non-quiet host, since by then every lease on the host has ended.
+Once the count has reached the cap the scheduler does not give the reservation up at that deadline either: the deadline is the request's own
+wall time, which may be shorter than the max wall of a lease that was on the host, and the reservation stays until the host is quiet or the
+request is cancelled. The bound assumes the pool's max wall time: a request submitted with no wall time has no deadline of its own (its reservation after the cap
+never ends before the host is quiet or the request is cancelled), so a consumer that wants the bound gives every request a wall time.
 Load validation refuses nothing here; the counter alone makes the bound hold for every setting. Stopping other tenants' work was
 considered and rejected (D48): a deadline that kills is a silent loss for a tenant who did nothing wrong, and it would let one consumer's
 request destroy another's results; re-queueing wastes only the drain already spent, which the caps bound.
@@ -204,6 +208,16 @@ of some ordinary request that is **queued ahead of this whole-node request**. On
 fairness, so a stream of newer ordinary requests that all need H cannot hold the whole-node request off. The pool may switch the rule off
 (`allow_last_capable = true`), for instance when the operator accepts that a performance run is worth stalling one ordinary request. In a
 dedicated pool there is no ordinary work and neither rule applies.
+
+*Today's scheduler (`js-sched`) applies these caps to a whole-machine request that takes a quiet host at once and to a hold's mark, and
+counts one pool: every worker that serves whole-machine leases, of every platform (a Mac host counts toward the same ceiling and the same
+`max_draining` as a Linux one). A quiet take adds one whole host and drains none, so the ceiling and `keep_for_ordinary` apply to it and
+`max_draining` does not; a request that already holds a mark takes a quiet host whatever the caps, since its mark is already counted. The
+last-capable rule is applied to marks only: an ordinary request queued ahead that a quiet host could run is placed on it before the
+whole-node request is reached (narrow caveat: an older ordinary request that is capable by facts but blocked by admission, or left over by the round's placement limit, is not placed first, so a quiet take can take its last capable host). A request a cap stops stays queued and `whole_wait` names the cap. `js-sched` has no notion of a consumer,
+so `max_whole_node_per_consumer` is not enforced there; the setting is read and ignored. It is enforced where the caller's identity exists
+(K7): the lease server or the registry. A head hold of placement by load is not a reservation: no cap counts it, and the last-capable
+rule does not read it as taking a host from the request that holds it.*
 
 **Validation at load.** A mixed pool that sets `max_whole_node` needs `max_whole_node + keep_for_ordinary <= max_machines`, and every
 limit is at least 1 where it is a maximum; a file that breaks this is refused (D20). A dedicated pool may set `max_whole_node` below

@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use js_caps::NodeCaps;
 use js_types::sched::{FarmTime, LeaseKind, NodePhase, Resources, WorkerId};
+use js_whole::cost::DrainCost;
 
 use std::sync::Arc;
 
@@ -513,7 +514,8 @@ impl Servable {
 
     /// The worker to hold for a whole-machine `request` that fits nowhere now: `kept`
     /// if it still could run it, else the one that could which holds the fewest leases,
-    /// then has the least booked, then comes first by name. Never one in `reserved`,
+    /// then has the least booked, then comes first by name; with `drain` (the workers by
+    /// drain cost, cheapest first), the first of those that could. Never one in `reserved`,
     /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease
     /// holds a worker (the caller asks only for one); an action at a worker's whole
     /// memory waits until some worker has no lease, and nothing reserves one for it.
@@ -524,6 +526,7 @@ impl Servable {
         reserved: &BTreeSet<WorkerId>,
         avoid: &BTreeSet<WorkerId>,
         kept: Option<&WorkerId>,
+        drain: Option<&[DrainCost]>,
     ) -> Option<WorkerId> {
         let at = self.matching(workers, request);
         let skip = self.avoided(at, workers, request, avoid);
@@ -540,6 +543,12 @@ impl Servable {
         if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
             return Some(kept.clone());
         }
+        if let Some(drain) = drain {
+            return drain
+                .iter()
+                .find_map(|cost| candidates.iter().find(|name| name.as_str() == cost.id))
+                .map(|name| (*name).clone());
+        }
         candidates
             .into_iter()
             .min_by_key(|name| {
@@ -547,6 +556,25 @@ impl Servable {
                 (w.leases, w.booked)
             })
             .cloned()
+    }
+
+    /// The live workers placement may use that could run `request` once their bookings
+    /// end and that are not in `reserved`: where an ordinary request that waits could go.
+    pub(crate) fn capable(
+        &mut self,
+        workers: &BTreeMap<WorkerId, Worker>,
+        request: &Request,
+        reserved: &BTreeSet<WorkerId>,
+    ) -> Vec<&WorkerId> {
+        let at = self.matching(workers, request);
+        self.memo[at]
+            .1
+            .iter()
+            .map(|&i| &self.live[i])
+            .filter(|name| {
+                !reserved.contains(*name) && workers[*name].capacity.fits(&request.resources)
+            })
+            .collect()
     }
 
     /// The workers of `avoid` that placement skips for `request`, whose matching live
