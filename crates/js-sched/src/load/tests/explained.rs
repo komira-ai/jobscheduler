@@ -298,10 +298,54 @@ fn choose_and_choose_explained_choose_the_same_worker() {
                 .choose_explained(&fake, &candidates)
                 .unzip();
             assert_eq!(chosen, explained, "round {round} {fit:?}");
+            // The rule is the first difference from the best of the others, computed
+            // here from the sorted keys and not from the scorer's own ranking.
+            if count > 1 {
+                let mut scorer = Scorer::new(config);
+                let mut keys: Vec<ScoreKey> =
+                    candidates.iter().map(|w| scorer.key(&fake, w)).collect();
+                keys.sort();
+                assert_eq!(
+                    by,
+                    Some(keys[0].decided_by(&keys[1])),
+                    "round {round} {fit:?}"
+                );
+            }
             kinds.extend(by);
         }
     }
     let keys = |n| kinds.contains(&DecidedBy::Key(n));
     assert!(kinds.contains(&DecidedBy::Only));
     assert!(keys(1) && keys(5), "{kinds:?}");
+}
+
+#[test]
+fn choose_explained_compares_the_winner_with_the_best_of_the_others() {
+    let twin = || Host::empty(100_000, BIG_MEMORY).cpu_load(|_| 20_000);
+    // `a` is best; `b` is far worse on key 1; `c` differs from `a` only at tie-break 3.
+    // The runner-up is `c`, so the answer is tie-break 3 whatever the order, including
+    // orders where the best changes part-way and where the worst comes before the rest.
+    let fake = Fake::new(vec![
+        ("a", twin()),
+        ("b", twin().cpu_load(|_| 120_000)),
+        (
+            "c",
+            twin().cpu_load(|s| if s == 3 { 30_000 } else { 20_000 }),
+        ),
+    ]);
+    let orders = [
+        ["a", "b", "c"],
+        ["a", "c", "b"],
+        ["b", "a", "c"],
+        ["b", "c", "a"],
+        ["c", "a", "b"],
+        ["c", "b", "a"],
+    ];
+    for order in orders {
+        assert_eq!(
+            pick_with(&fake, FitShape::Squared, &order),
+            ("a".to_owned(), DecidedBy::TieBreak(3)),
+            "{order:?}"
+        );
+    }
 }
