@@ -262,6 +262,7 @@ impl Worker {
     /// (the agent must not say hello with a held list it does not know), or the thread
     /// died while it built them. The text says why.
     pub fn start(plan: Plan) -> Result<Self, String> {
+        let _ = crate::facts::FileReader::read(&plan.machine.cgroup_files(), "/sys/fs/cgroup/x");
         let (orders, inbox) = sync_channel(QUEUE);
         let (ready, built) = sync_channel(1);
         let shared = Arc::new(Shared::default());
