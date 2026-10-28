@@ -17,6 +17,7 @@
 //! per node) and never happens on an async worker, since the server calls the sink on the
 //! pool for blocking calls.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -25,15 +26,17 @@ use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::profile_key::profile_key;
 use js_types::sched::WorkKey;
+use js_types::sched::usage::MinutePoint;
 use js_usage::{
-    NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder,
-    RunSeries,
+    Fit, KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore,
+    Recorder, RunSeries,
 };
 use tracing::info;
 
 use crate::error::StartupError;
 use crate::usage::{
-    HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
+    CurvePoint, HostLimits, KeyView, LoadIn, NodeRow, Observation, RunEnd, SinkCounters,
+    UsageFault, UsageSink,
 };
 
 /// Where the usage store is and how large the profile part of it may grow.
@@ -70,6 +73,16 @@ struct Inner {
 /// The profile name of an action key (see [`profile_key`]), for admission's curves.
 pub(crate) fn key_map(key: &WorkKey) -> Option<ProfileKey> {
     ProfileKey::parse(&profile_key(key)).ok()
+}
+
+/// The points of a fitted curve, minute by minute.
+fn curve_points(fit: &Fit) -> Vec<CurvePoint> {
+    let point = |(minute, p): (usize, &MinutePoint)| CurvePoint {
+        minute: u16::try_from(minute).unwrap_or(u16::MAX),
+        cores_milli: p.cores_milli,
+        ws_bytes: p.working_set_bytes,
+    };
+    fit.points.iter().enumerate().map(point).collect()
 }
 
 /// Minutes in a day.
@@ -109,15 +122,6 @@ impl NodeUsage {
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// The stored rows of `host` from minute `from` to `to`, at most `limit`.
-    #[cfg(test)]
-    fn range(&self, host: &HostId, from: u64, to: u64) -> Vec<NodeRow> {
-        let limit = std::num::NonZeroUsize::new(100).unwrap();
-        NodeSeries::new(&*self.store)
-            .range(host, from, to, limit)
-            .unwrap()
     }
 }
 
@@ -168,6 +172,35 @@ impl UsageSink for NodeUsage {
             .curves()
             .set_today(now_minute / MINUTES_PER_DAY);
         inner.profiles.persist_touches().map(drop).map_err(fault)
+    }
+
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: usize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        let limit = NonZeroUsize::new(limit).unwrap_or(NonZeroUsize::MIN);
+        NodeSeries::new(&*self.store)
+            .range(host, from, to, limit)
+            .map_err(fault)
+    }
+
+    fn key_profile(
+        &self,
+        key: &ProfileKey,
+        now_minute: u64,
+    ) -> Result<Option<KeyView>, UsageFault> {
+        let day = now_minute / MINUTES_PER_DAY;
+        let view = |profile: KeyProfile| KeyView {
+            runs: profile.runs,
+            stale: profile.is_stale(day),
+            last_used_day: profile.last_used_day,
+            curve: profile.fit.map(|fit| curve_points(&fit)),
+        };
+        let found = self.inner().profiles.profile(key);
+        found.map_err(fault).map(|found| found.map(view))
     }
 
     fn curves(&self) -> Option<Arc<ProfileCurves>> {

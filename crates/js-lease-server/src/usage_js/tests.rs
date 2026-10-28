@@ -210,3 +210,42 @@ fn the_prune_moves_the_curves_to_the_day() {
     sink.prune(1440 * (js_usage::STALE_DAYS + 5)).unwrap();
     assert!(curves.curve(&work()).is_none());
 }
+
+impl NodeUsage {
+    /// The stored rows of `host` from minute `from` to `to`.
+    fn range(&self, host: &HostId, from: u64, to: u64) -> Vec<NodeRow> {
+        self.node_rows(host, from, to, 100).unwrap()
+    }
+}
+
+/// Asserts the reads of the sink: a key never seen is unknown; after two runs it has a
+/// count and no curve, after three a curve whose first point is the fit's; it is stale
+/// once idle past the limit; and a limit of zero still returns one row at most. It
+/// catches a curve offered early, a stale flag that is never set, and a zero limit that
+/// panics or returns everything.
+#[test]
+fn the_sink_reads_back_rows_and_profiles() {
+    let (sink, _) = sink();
+    let key = key_map(&work()).unwrap();
+    assert_eq!(sink.key_profile(&key, 0), Ok(None));
+    finished(&sink, &key, 10);
+    finished(&sink, &key, 11);
+    let two = sink.key_profile(&key, 12).unwrap().unwrap();
+    assert_eq!((two.runs, two.curve.is_none(), two.stale), (2, true, false));
+    finished(&sink, &key, 12);
+    let three = sink.key_profile(&key, 12).unwrap().unwrap();
+    let curve = three.curve.unwrap();
+    assert_eq!((three.runs, curve[0].minute), (3, 0));
+    assert_eq!(curve[0].cores_milli, 1500);
+    let idle = sink
+        .key_profile(&key, 1440 * (js_usage::STALE_DAYS + 5))
+        .unwrap();
+    assert!(idle.unwrap().stale);
+
+    sink.observe(&host(), 1, &reading(1, 10, 10), limits(), 100);
+    sink.observe(&host(), 1, &reading(2, 20, 15), limits(), 100);
+    sink.observe(&host(), 1, &reading(3, 30, 20), limits(), 101);
+    sink.flush(102).unwrap();
+    assert_eq!(sink.node_rows(&host(), 0, 200, 100).unwrap().len(), 2);
+    assert_eq!(sink.node_rows(&host(), 0, 200, 0).unwrap().len(), 1);
+}
