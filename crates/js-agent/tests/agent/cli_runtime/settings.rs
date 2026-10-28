@@ -279,6 +279,10 @@ fn network_and_user_need_the_runtime() {
             tmp_size: Some("1g"),
             ..Flags::default()
         },
+        Flags {
+            actions_cgroup: Some(Path::new("/sys/fs/cgroup/jobs.slice")),
+            ..Flags::default()
+        },
     ];
     for flags in alone {
         let said = Settings::from_flags(&flags, AGENT);
@@ -292,6 +296,7 @@ fn network_and_user_need_the_runtime() {
             host: Some("unix:///run/engine.sock"),
             pull: Some("missing"),
             tmp_size: Some("128m"),
+            actions_cgroup: None,
         },
         AGENT,
     )
@@ -356,6 +361,7 @@ fn errors_name_their_flag() {
     starts(SettingsError::Host, "--container-host");
     starts(SettingsError::Pull, "--container-pull");
     starts(SettingsError::TmpSize, "--container-tmp-size");
+    starts(SettingsError::ActionsCgroup, "--actions-cgroup");
     assert!(
         SettingsError::NoBin
             .to_string()
@@ -430,7 +436,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert_eq!(sent, 0);
     }
 
-    let cases: [(&[&str], &str); 10] = [
+    let cases: [(&[&str], &str); 12] = [
         (
             &["--container-bin", "docker"],
             "--container-bin: not an absolute",
@@ -478,6 +484,14 @@ fn container_flags_are_checked_when_the_agent_starts() {
             "--container-tmp-size: not a size",
         ),
         (&["--container-network", "jobs"], "need --container-bin"),
+        (
+            &["--container-bin", exec, "--actions-cgroup", "/etc"],
+            "--actions-cgroup: not an absolute path",
+        ),
+        (
+            &["--actions-cgroup", "/sys/fs/cgroup/jobs.slice"],
+            "need --container-bin",
+        ),
     ];
     for (extra, text) in cases {
         let (status, err, sent) = start(extra);
@@ -485,4 +499,65 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert!(err.contains(text), "{extra:?}: {err}");
         assert_eq!(sent, 0, "{extra:?}");
     }
+}
+
+/// Asserts which control group directories `--actions-cgroup` takes and what
+/// `--cgroup-parent` each becomes: one slice directly below `/sys/fs/cgroup` is named by
+/// the slice (the systemd driver), any other directory below it by its path with a leading
+/// `/` (the cgroupfs driver); and that the mount point itself, a path outside it, a
+/// relative one, one with `..`, an empty or `.` component, a trailing `/`, a character
+/// that is not a plain one, text that is not UTF-8 and a path past the length bound are
+/// refused. It catches a path that reaches `--cgroup-parent` as another flag or list, or
+/// that names a directory outside the control group file system.
+#[test]
+fn the_actions_cgroup_is_a_plain_path_below_the_cgroup_mount() {
+    let accepted = [
+        ("/sys/fs/cgroup/jobscheduler.slice", "jobscheduler.slice"),
+        ("/sys/fs/cgroup/jobs", "/jobs"),
+        (
+            "/sys/fs/cgroup/system.slice/js-actions.slice",
+            "/system.slice/js-actions.slice",
+        ),
+        (
+            "/sys/fs/cgroup/user@1000.service/a_b-c.d",
+            "/user@1000.service/a_b-c.d",
+        ),
+    ];
+    for (path, parent) in accepted {
+        let set = with_cgroup(Some(Path::new(path))).unwrap();
+        assert_eq!(set.actions_cgroup(), Some(path));
+        assert_eq!(set.cgroup_parent(), Some(parent), "{path}");
+    }
+    let long = format!("/sys/fs/cgroup/{}", "a".repeat(256));
+    let non_utf8 = Path::new(OsStr::from_bytes(b"/sys/fs/cgroup/\xff"));
+    let refused = [
+        Path::new("/sys/fs/cgroup"),
+        Path::new("/sys/fs/cgroup/"),
+        Path::new("/sys/fs/cgroupx/a"),
+        Path::new("/sys/fs/other/a"),
+        Path::new("/proc/self"),
+        Path::new("cgroup/a"),
+        Path::new("/sys/fs/cgroup/../etc"),
+        Path::new("/sys/fs/cgroup/a/../b"),
+        Path::new("/sys/fs/cgroup/a//b"),
+        Path::new("/sys/fs/cgroup/./a"),
+        Path::new("/sys/fs/cgroup/a/"),
+        Path::new("/sys/fs/cgroup/a b"),
+        Path::new("/sys/fs/cgroup/a,b"),
+        Path::new("/sys/fs/cgroup/-x"),
+        non_utf8,
+        Path::new(&long),
+    ];
+    for path in refused {
+        let said = with_cgroup(Some(path));
+        assert_eq!(said, Err(SettingsError::ActionsCgroup), "{path:?}");
+    }
+    let none = with_cgroup(None).unwrap();
+    assert_eq!((none.actions_cgroup(), none.cgroup_parent()), (None, None));
+}
+
+fn with_cgroup(dir: Option<&Path>) -> Result<Settings, SettingsError> {
+    Settings::new(bin(), None, None)
+        .unwrap()
+        .with_actions_cgroup(dir)
 }

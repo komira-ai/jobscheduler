@@ -91,6 +91,7 @@ impl Lifecycle {
             let now = this.clock.now_ms();
             match this.adoptable(&container, now) {
                 Ok(mut job) => {
+                    job.cgroup = this.runtime.cgroup(&container.id);
                     // A host job that outlived the agent changed the host, and a marker
                     // written when it started may be all that was lost.
                     if job.host {

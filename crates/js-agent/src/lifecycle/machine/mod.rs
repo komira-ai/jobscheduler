@@ -10,6 +10,7 @@ mod exclusive;
 mod job;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use js_agent_wire::{
     Ack, Command, HeartbeatReply, HeldRun, HeldState, Isolation, JobSpec, Outcome, ResultAck,
@@ -31,6 +32,21 @@ pub const RETIRED_CAP: usize = limits::MAX_HELD;
 /// carries at most one result, so the results stay within the wire limit as well.
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
+
+/// A run that is running, as far as its usage is concerned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningLease {
+    /// The lease the run belongs to.
+    pub lease_id: String,
+    /// The container's control group directory, when the runtime could say.
+    pub cgroup: Option<PathBuf>,
+    /// When the container started, on the agent's monotonic clock in microseconds, to the
+    /// millisecond. `None` for an adopted run that started before the clock began.
+    pub started_usec: Option<u64>,
+    /// The run was taken over from an earlier process of the agent, so the minutes before
+    /// the takeover were never seen.
+    pub adopted: bool,
+}
 
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
@@ -145,6 +161,25 @@ impl Lifecycle {
                     Stage::Running(_) => HeldState::Running,
                     _ => HeldState::ExitedUnacked,
                 },
+            })
+            .collect()
+    }
+
+    /// The runs that are running, one for each lease (a second run of a lease already named
+    /// is left out), in the order of [`Lifecycle::held`].
+    pub fn running(&self) -> Vec<RunningLease> {
+        let mut named = BTreeSet::new();
+        let running = self
+            .jobs
+            .iter()
+            .filter(|job| matches!(job.stage, Stage::Running(_)));
+        running
+            .filter(|job| named.insert(job.lease_id.as_str()))
+            .map(|job| RunningLease {
+                lease_id: job.lease_id.clone(),
+                cgroup: job.cgroup.clone(),
+                started_usec: job.started_usec,
+                adopted: job.adopted,
             })
             .collect()
     }
@@ -353,8 +388,13 @@ impl Lifecycle {
         });
         match started {
             Ok(id) => {
-                let deadline = self.clock.now_ms().saturating_add(spec.limits.wall_ms);
-                self.jobs.push(Job::of(spec, Stage::Running(id), deadline));
+                let now = self.clock.now_ms();
+                let deadline = now.saturating_add(spec.limits.wall_ms);
+                let cgroup = self.runtime.cgroup(&id);
+                let mut job = Job::of(spec, Stage::Running(id), deadline);
+                job.started_at(now);
+                job.cgroup = cgroup;
+                self.jobs.push(job);
                 events.push(Event::Started {
                     run_id: run_id.clone(),
                 });

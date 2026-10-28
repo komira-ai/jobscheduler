@@ -144,7 +144,9 @@ fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<S
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
 /// files, and limited in size: Podman does not default to `noexec`), no core dumps, a
 /// private IPC namespace against a daemon whose default is to share it, the pull policy
-/// the agent was configured with (never by default), and a user that is not root. For
+/// the agent was configured with (never by default), a user that is not root, and, when
+/// `--actions-cgroup` is given, `--cgroup-parent` naming it so the container's usage is
+/// counted in it. For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
@@ -179,6 +181,9 @@ pub fn hardening_args(settings: &Settings, engine: Engine) -> Vec<String> {
         ]
         .map(str::to_owned),
     );
+    if let Some(parent) = settings.cgroup_parent() {
+        args.extend(["--cgroup-parent", parent].map(str::to_owned));
+    }
     args
 }
 

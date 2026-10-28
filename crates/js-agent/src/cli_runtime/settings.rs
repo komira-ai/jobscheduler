@@ -14,6 +14,12 @@ pub const DEFAULT_NETWORK: &str = "none";
 /// The size of a container's `/tmp` when `--container-tmp-size` is not given.
 pub const DEFAULT_TMP_SIZE: &str = "64m";
 
+/// Where the cgroup version 2 file system is mounted. `--actions-cgroup` lies below it.
+pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The longest `--actions-cgroup` accepted.
+const CGROUP_MAX: usize = 256;
+
 /// The longest network name accepted.
 const NETWORK_NAME_MAX: usize = 64;
 
@@ -65,6 +71,11 @@ pub enum SettingsError {
     /// `--container-tmp-size` is not a number followed by `k`, `m` or `g`.
     #[error("--container-tmp-size: not a size such as 64m")]
     TmpSize,
+    /// `--actions-cgroup` is not a path of plain components strictly below `/sys/fs/cgroup`.
+    #[error(
+        "--actions-cgroup: not an absolute path of letters, digits, '.', '_', '-' and '@' components below /sys/fs/cgroup"
+    )]
+    ActionsCgroup,
     /// A container flag without `--container-bin`: they configure containers, which the
     /// agent runs only with a runtime.
     #[error("the container flags need --container-bin")]
@@ -114,6 +125,8 @@ pub struct Flags<'a> {
     pub pull: Option<&'a str>,
     /// `--container-tmp-size`.
     pub tmp_size: Option<&'a str>,
+    /// `--actions-cgroup`.
+    pub actions_cgroup: Option<&'a Path>,
 }
 
 /// The checked container flags: where the runtime is, which network jobs get, which user
@@ -128,7 +141,16 @@ pub struct Settings {
     host: Option<String>,
     pull: Pull,
     tmp_size: String,
+    actions: Option<ActionsCgroup>,
     chown: Option<(u32, u32)>,
+}
+
+/// The checked `--actions-cgroup`: the directory, and the `--cgroup-parent` that puts a
+/// container in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActionsCgroup {
+    dir: String,
+    parent: String,
 }
 
 impl Settings {
@@ -148,7 +170,8 @@ impl Settings {
                 flags.pull,
                 flags.tmp_size,
             ];
-            return match others.iter().any(Option::is_some) {
+            let alone = others.iter().any(Option::is_some) || flags.actions_cgroup.is_some();
+            return match alone {
                 true => Err(SettingsError::NoBin),
                 false => Ok(None),
             };
@@ -157,6 +180,7 @@ impl Settings {
             .with_host(flags.host)?
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
+            .with_actions_cgroup(flags.actions_cgroup)?
             .with_agent(agent.0, agent.1)
             .map(Some)
     }
@@ -192,6 +216,7 @@ impl Settings {
             host: None,
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
+            actions: None,
             chown: None,
         })
     }
@@ -224,6 +249,17 @@ impl Settings {
     pub fn with_tmp_size(self, size: Option<&str>) -> Result<Self, SettingsError> {
         let tmp_size = size.map_or(Ok(self.tmp_size.clone()), tmp_size)?;
         Ok(Self { tmp_size, ..self })
+    }
+
+    /// The control group that holds the containers, when one is given. It is checked as
+    /// text only: that the directory exists and is readable shows when the agent samples it.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::ActionsCgroup`].
+    pub fn with_actions_cgroup(self, dir: Option<&Path>) -> Result<Self, SettingsError> {
+        let actions = dir.map(actions_cgroup).transpose()?;
+        Ok(Self { actions, ..self })
     }
 
     /// Settles who owns the run's scratch directory. It is private to the agent (`0700`),
@@ -286,6 +322,20 @@ impl Settings {
     /// The size limit of the containers' `/tmp`, as the tmpfs option takes it.
     pub fn tmp_size(&self) -> &str {
         &self.tmp_size
+    }
+
+    /// The control group directory that holds the containers (`--actions-cgroup`), when one
+    /// is given.
+    pub fn actions_cgroup(&self) -> Option<&str> {
+        self.actions.as_ref().map(|actions| actions.dir.as_str())
+    }
+
+    /// The value of `--cgroup-parent` that puts a container in the actions control group:
+    /// the slice name when the path is one slice directly below `/sys/fs/cgroup` (the
+    /// systemd cgroup driver), the path below it with a leading `/` otherwise (the cgroupfs
+    /// driver). None without `--actions-cgroup`.
+    pub fn cgroup_parent(&self) -> Option<&str> {
+        self.actions.as_ref().map(|actions| actions.parent.as_str())
     }
 
     /// The `(uid, gid)` to give the scratch directory of a run before its container is
@@ -351,4 +401,33 @@ fn tmp_size(text: &str) -> Result<String, SettingsError> {
     shaped
         .then(|| text.to_owned())
         .ok_or(SettingsError::TmpSize)
+}
+
+/// `path` when it is a control group directory the agent will use: UTF-8, strictly below
+/// [`CGROUP_ROOT`], with components of letters, digits and `. _ - @` only (no `..`, no
+/// empty component, none that starts with `-`: nothing a runtime would read as another
+/// flag or a list).
+fn actions_cgroup(path: &Path) -> Result<ActionsCgroup, SettingsError> {
+    let text = path.to_str().filter(|text| text.len() <= CGROUP_MAX);
+    let below = text
+        .and_then(|text| text.strip_prefix(CGROUP_ROOT))
+        .and_then(|rest| rest.strip_prefix('/'));
+    let word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '@');
+    let plain = |part: &str| {
+        !matches!(part, "" | "." | "..") && !part.starts_with('-') && part.chars().all(word)
+    };
+    match (text, below) {
+        (Some(dir), Some(below)) if below.split('/').all(plain) => {
+            let slice = !below.contains('/') && below.ends_with(".slice");
+            let parent = match slice {
+                true => below.to_owned(),
+                false => format!("/{below}"),
+            };
+            Ok(ActionsCgroup {
+                dir: dir.to_owned(),
+                parent,
+            })
+        }
+        _ => Err(SettingsError::ActionsCgroup),
+    }
 }
