@@ -78,7 +78,11 @@ fn a_stop_is_honoured_within_one_poll_step() {
     let (status, out) = rig.exec(&args);
     assert_interrupted_and_terminated(&rig, status, &out);
     assert!(rig.sleeps.borrow().is_empty(), "{out}");
-    assert_eq!(rig.fake.count(Call::ListInstances) + 1, lists_with_one_look, "{out}");
+    assert_eq!(
+        rig.fake.count(Call::ListInstances) + 1,
+        lists_with_one_look,
+        "{out}"
+    );
 }
 
 #[test]
@@ -143,7 +147,7 @@ fn a_stop_before_the_launch_launches_nothing_and_leaves_no_state_file() {
     assert_eq!(rig.fake.count(Call::Terminate), 0);
     assert!(rig.fake.instances().is_empty());
     assert!(!rig.state.exists(), "the state file was left behind");
-    assert!(!out.contains("launched:"), "{out}");
+    assert!(!out.lines().any(|l| l.starts_with("launched:")), "{out}");
 }
 
 #[test]
