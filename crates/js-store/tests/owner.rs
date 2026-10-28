@@ -22,6 +22,7 @@ use js_store::test_support::{TestCodec, TestExt};
 use js_store::{
     CAS_TRIES, Ending, EpochPolicy, OWNER_CACHE_TTL, Owner, RowCodec, Rows, StateError, WorkerUp,
 };
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{FarmTime, LeaseGrant, LeaseId, OperationId, Resources, WorkKey, WorkerId};
 
 use common::{Racing, frontend_with, open};
@@ -384,6 +385,7 @@ fn a_hello_reads_the_leases_and_the_session_of_the_node_it_takes_over() {
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new(worker),
+        cost: LeaseCost::default(),
     };
     // Operation 9 has no row: its lease is left out.
     for grant in [
