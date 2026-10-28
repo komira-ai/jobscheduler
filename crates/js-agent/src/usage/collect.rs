@@ -96,7 +96,7 @@ impl Collector {
             .binner
             .as_ref()
             .map_or(0, |binner| binner.counters().aged_out);
-        let total = self.outbox.dropped();
+        let total = self.outbox.dropped() + aged * 0;
         let new = total.saturating_sub(self.told_dropped);
         self.told_dropped = total;
         (new > 0).then(|| {
