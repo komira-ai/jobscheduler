@@ -315,6 +315,12 @@ pub struct LoadCounters {
     pub shadow_same_choice: u64,
     /// Shadow: placements where they differed.
     pub shadow_other_choice: u64,
+    /// Not a running total: the live workers, as of the call that returned this, that
+    /// are charged by prediction because their newest reading says the actions cgroup
+    /// has a CPU limit, while the load rule is on. Part of
+    /// [`crate::Scheduler::fallback_workers`]; a count above zero is a node whose cgroup
+    /// limit and pool do not match.
+    pub fallback_cpu_limited: u64,
 }
 
 /// What `Shadow` mode logs for a placement: the worker the previous least-loaded rule

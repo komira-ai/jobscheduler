@@ -10,6 +10,7 @@ use js_sched::Request;
 use js_state::{Cond, Store, Txn};
 use js_store::test_support::TestCodec;
 use js_store::{RowCodec, Rows, StateError, Submitted, keys};
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     LeaseGrant, LeaseId, LeaseKind, OperationId, Qos, Resources, WorkKey, WorkerId,
 };
@@ -92,6 +93,7 @@ fn grant() -> LeaseGrant {
         lease: LeaseId::new(5, 0),
         operation: OperationId(1),
         worker: WorkerId::new("node-a"),
+        cost: LeaseCost::default(),
     }
 }
 
