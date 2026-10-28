@@ -349,10 +349,11 @@ mod tests {
         entered: Arc<tokio::sync::Notify>,
     }
 
-    /// A handler that is entered and never answers.
-    async fn hold(State(held): State<Arc<Held>>) {
+    /// A handler that is entered and never answers. It is not an `async fn`, whose
+    /// closing line after the pending future could never run.
+    fn hold(State(held): State<Arc<Held>>) -> impl Future<Output = ()> {
         held.entered.notify_one();
-        std::future::pending::<()>().await
+        std::future::pending()
     }
 
     /// Asserts that `serve` returns only after the connections it cut have been dropped:
