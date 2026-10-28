@@ -183,7 +183,8 @@ pub enum Released {
     Terminating(Status),
     /// The instance is not entirely ours; nothing was sent.
     Refused(Claim),
-    /// No answer: nothing observed shows the instance gone or going.
+    /// No answer: nothing observed shows the instance gone or going. Callers must treat
+    /// this as "retry", never as "gone".
     Unknown,
 }
 
