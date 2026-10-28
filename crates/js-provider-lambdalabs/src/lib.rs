@@ -11,9 +11,10 @@
 //!   [`LambdaProvider`], which implements it over a [`LambdaApi`]: ownership marks on
 //!   everything it launches (tags and a name prefix; both are needed to terminate, either
 //!   counts toward `max_machines`), an acquire that launches once per acquire id, a release that
-//!   reads back, and the cost guard (disabled and dry-run by default, `max_machines`
-//!   checked against a fresh list before each launch, a launch rate limit on an injected
-//!   [`Clock`], a report-only [`Sweep`]);
+//!   reads back, and the cost guard (disabled and dry-run by default, a launch rate limit
+//!   on an injected [`Clock`], a report-only [`Sweep`], and `max_machines`: a hard cap on
+//!   the instances carrying our markers, counted from a fresh list before each launch;
+//!   it is this provider's own backstop, not a pool-level cost policy);
 //! - the typed answers ([`InstanceTypeOffer`], [`Instance`], [`Status`]) and the errors
 //!   ([`ApiError`], [`ErrorCode`]), which are matched on Lambda's `code`, never on its
 //!   message text;
