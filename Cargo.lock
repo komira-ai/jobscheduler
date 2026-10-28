@@ -881,6 +881,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-store"
+version = "0.1.0"
+dependencies = [
+ "js-state",
+ "js-types",
+ "thiserror",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
