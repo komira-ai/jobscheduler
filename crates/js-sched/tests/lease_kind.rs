@@ -3,6 +3,7 @@
 //! fits nowhere holds a worker in queue (QoS) order, so less urgent work stops landing
 //! there until it has emptied.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -54,7 +55,7 @@ struct Harness(Scheduler);
 
 impl Harness {
     fn new() -> Self {
-        Self(Scheduler::new(1).with_load_config(booked::booked()))
+        Self(Scheduler::new(1).with_load_config(booked::current()))
     }
 
     fn feed(&mut self, event: Event) -> Vec<Effect> {
@@ -137,12 +138,12 @@ impl Harness {
     }
 }
 
+both_rules! {
 /// Catches: the lease kind ignored in placement. `a` runs only the whole-machine
 /// driver and sorts first, so placement that ignores the kind gives it the action (and
 /// the daemon refuses the `Start`), and may give the whole-machine lease to `b`, whose
 /// container driver cannot run it. Also: a `Start` that drops the kind, or books a
 /// whole-machine lease's request (one core) instead of the whole worker.
-#[test]
 fn each_kind_goes_only_to_a_worker_whose_driver_serves_it() {
     let mut h = Harness::new();
     h.worker("a", &["native-whole-machine"]);
@@ -170,12 +171,13 @@ fn each_kind_goes_only_to_a_worker_whose_driver_serves_it() {
     );
     assert_eq!(h.0.booked(&w("a")), Some(CAPACITY));
 }
+}
 
+both_rules! {
 /// Catches: a whole-machine lease offered to workers that do not serve it (the daemon
 /// refuses its `Start`, as every daemon on `main` does), and one waiting without
 /// saying why, or said to wait for a cordoned worker that does not serve it either. A
 /// worker that reports no driver at all serves nothing.
-#[test]
 fn a_whole_machine_lease_waits_while_no_live_worker_serves_it() {
     let mut h = Harness::new();
     h.worker("a", &["container"]);
@@ -198,10 +200,11 @@ fn a_whole_machine_lease_waits_while_no_live_worker_serves_it() {
     let [grant] = h.grants().try_into().unwrap();
     assert_eq!(grant.worker, w("b"), "an action on a worker with no driver");
 }
+}
 
+both_rules! {
 /// Catches: the platform checked against workers that do not serve the kind, so the
 /// reason names a closest worker that could never run the lease.
-#[test]
 fn a_platform_miss_is_explained_among_the_workers_that_serve_the_kind() {
     let mut h = Harness::new();
     h.worker("a", &["container"]);
@@ -225,11 +228,12 @@ fn a_platform_miss_is_explained_among_the_workers_that_serve_the_kind() {
          action's platform; the closest, b, lacks os=macos"
     );
 }
+}
 
+both_rules! {
 /// Catches: two waiting whole-machine leases holding the same worker (the second then
 /// holds nothing back and is passed by every younger action), and a hold on a worker
 /// too small to ever run the lease. A third, with no worker left to hold, holds none.
-#[test]
 fn waiting_whole_machine_leases_hold_different_workers() {
     let mut h = Harness::new();
     let both = ["container", "native-whole-machine"];
@@ -239,10 +243,13 @@ fn waiting_whole_machine_leases_hold_different_workers() {
     for n in 1..=9 {
         h.submit(u64::from(n), action(n));
     }
-    // `a` is too small for an action; the rest spread over `b` and `c`: five on `b`, four
-    // on `c`, the emptier.
+    // `a` is too small for an action; the rest go to `b` and `c`, one of which ends with
+    // fewer leases (nine is odd): the emptier.
     let grants = h.grants();
-    assert_eq!(grants.iter().filter(|g| g.worker == w("c")).count(), 4);
+    let on = |name: &str| grants.iter().filter(|g| g.worker == w(name)).count();
+    assert_eq!((grants.len(), on("a")), (9, 0));
+    let (emptier, fuller) = if on("c") < on("b") { ("c", "b") } else { ("b", "c") };
+    assert!(on(emptier) < on(fuller), "{} {}", on("b"), on("c"));
 
     for n in 10..=12 {
         h.submit(u64::from(n), whole(n));
@@ -250,16 +257,17 @@ fn waiting_whole_machine_leases_hold_different_workers() {
     assert!(h.grants().is_empty());
     let queued: Vec<_> = h.0.queued().collect();
     let held: Vec<_> = queued.iter().map(|op| h.0.reservation(*op)).collect();
-    assert_eq!(held, [Some(&w("c")), Some(&w("b")), None]);
+    assert_eq!(held, [Some(&w(emptier)), Some(&w(fuller)), None]);
+}
 }
 
+both_rules! {
 /// Catches: a whole-machine lease placed beside an action (a worker that is not empty
 /// taken as one with room), an action placed beside a whole-machine lease (its booking
 /// read as a share, or a capacity that grew while it ran read as room), and a
 /// whole-machine booking not given back in full when it ends. Also: younger work of
 /// the same QoS placed on the worker a waiting whole-machine lease holds, which keeps
 /// it from ever emptying.
-#[test]
 fn a_whole_machine_lease_runs_alone_on_its_worker() {
     let mut h = Harness::new();
     h.worker("a", &["container", "native-whole-machine"]);
@@ -306,11 +314,12 @@ fn a_whole_machine_lease_runs_alone_on_its_worker() {
     assert_eq!(h.0.booked(&w("a")), Some(Resources::default()));
     assert_eq!(h.grants().len(), 2, "the actions run once it ends");
 }
+}
 
+both_rules! {
 /// Catches: a reservation held against every QoS level, so a batch whole-machine lease
 /// waiting for a worker delays CI work there; and a reservation that does not hold
 /// back less urgent work.
-#[test]
 fn a_reservation_holds_back_only_less_urgent_work() {
     let mut h = Harness::new();
     h.worker("a", &["container", "native-whole-machine"]);
@@ -330,12 +339,13 @@ fn a_reservation_holds_back_only_less_urgent_work() {
         "CI work held back by a batch reservation"
     );
 }
+}
 
+both_rules! {
 /// Catches: a reservation that does not follow the worker that could run it. A
-/// whole-machine lease holds the emptier of two workers, keeps holding it while it
-/// empties, and moves when that worker is cordoned; the other worker takes new work
-/// meanwhile.
-#[test]
+/// whole-machine lease holds the emptier of two workers (the one with fewer leases),
+/// keeps holding it while it empties, and moves when that worker is cordoned; the other
+/// worker takes new work meanwhile.
 fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
     let mut h = Harness::new();
     let both = ["container", "native-whole-machine"];
@@ -344,26 +354,29 @@ fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
     for n in 1..=9 {
         h.submit(u64::from(n), action(n));
     }
-    // Spread: five on `a`, four on `b`, the emptier.
+    // One worker ends with fewer leases (nine is odd): the emptier.
     let grants = h.grants();
-    assert_eq!(grants.iter().filter(|g| g.worker == w("b")).count(), 4);
+    assert_eq!(grants.len(), 9);
+    let on = |name: &str| grants.iter().filter(|g| g.worker == w(name)).count();
+    let (emptier, fuller) = if on("a") < on("b") { ("a", "b") } else { ("b", "a") };
+    assert!(on(emptier) < on(fuller), "{} {}", on("a"), on("b"));
 
     h.submit(10, whole(10));
     assert!(h.grants().is_empty());
     let waiting = h.0.queued().next().expect("queued");
     assert_eq!(
         h.0.reservation(waiting),
-        Some(&w("b")),
+        Some(&w(emptier)),
         "the emptier worker"
     );
 
-    let a_done = grants.iter().find(|g| g.worker == w("a")).unwrap().clone();
+    let a_done = grants.iter().find(|g| g.worker == w(fuller)).unwrap().clone();
     h.start(&a_done);
     h.finish(&a_done);
     assert!(h.grants().is_empty());
     assert_eq!(
         h.0.reservation(waiting),
-        Some(&w("b")),
+        Some(&w(emptier)),
         "kept while it empties"
     );
 
@@ -371,15 +384,18 @@ fn a_reservation_holds_one_worker_and_moves_when_it_cannot_run_there() {
     let [next] = h.grants().try_into().unwrap();
     assert_eq!(
         next.worker,
-        w("a"),
+        w(fuller),
         "work past a reservation goes elsewhere"
     );
 
-    h.feed(Event::Cordon { worker: w("b") });
+    h.feed(Event::Cordon {
+        worker: w(emptier),
+    });
     assert!(h.grants().is_empty());
     assert_eq!(
         h.0.reservation(waiting),
-        Some(&w("a")),
+        Some(&w(fuller)),
         "moved off a cordon"
     );
+}
 }

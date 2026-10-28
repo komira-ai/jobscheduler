@@ -374,6 +374,11 @@ impl World {
         );
         let wait = std::time::Duration::from_secs(WAIT_S);
         let retention = std::time::Duration::from_secs(RETENTION_S);
+        // The booked rule, on purpose: this world's reference placement (I11) and its capacity
+        // invariant (I6) are the booked rule's, the least booked worker with room and no booking
+        // past capacity. Placement by load admits CPU up to its slack above capacity and ranks by
+        // score, so a run under it fails I6 and I11 at the first round, by design; running this
+        // family under it needs a reference placement for load.
         let check = Checker::new(
             Scheduler::new(TERM)
                 .with_load_config(crate::booked::booked())

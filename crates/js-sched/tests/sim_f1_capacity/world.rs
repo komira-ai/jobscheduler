@@ -154,6 +154,11 @@ pub struct World {
 
 impl World {
     fn new(name: &str, seed: u64, fleet: Vec<Spec>, wait_secs: u64) -> Self {
+        // The booked rule, on purpose: this world's reference placement (I11) and its capacity
+        // invariant (I6) are the booked rule's, the least booked worker with room and no booking
+        // past capacity. Placement by load admits CPU up to its slack above capacity and ranks by
+        // score, so a run under it fails I6 and I11 at the first round, by design; running this
+        // family under it needs a reference placement for load.
         let sched = Scheduler::new(1)
             .with_load_config(crate::booked::booked())
             .with_unservable_wait(Duration::from_secs(wait_secs));

@@ -329,3 +329,61 @@ fn w_the_flat_memory_guard_refuses_at_the_flat_sum_and_bounds_the_node() {
     w.run(2);
     assert_eq!(w.running_of("whole"), 1);
 }
+
+/// A key that peaks at 10 GiB where its curve says 1 and its limit is 4, beside `o`, which
+/// books 20 GiB and holds 1 for 600 ticks, on a 32 GiB node; `o` has a curve (1 GiB) when
+/// `o_curve` is set. `k` starts, is killed at its limit and its retry (the 16 GiB rung,
+/// charged flat) is placed or refused. Returns the world after `k` is killed.
+fn retry_beside_a_big_booking(config: LoadConfig, o_curve: bool) -> World {
+    let (mut w, curves) = node(config, 8, 32);
+    if o_curve {
+        curves.set("o", &[(1_000, GIB)], 5);
+    }
+    curves.set("k", &[(1_000, GIB)], 5);
+    w.submit(&holding("o", 600, vec![(600, GIB)], 20 * GIB, 20 * GIB));
+    w.run(5);
+    let mem = vec![(30, GIB), (120, 10 * GIB)];
+    w.submit(&holding("k", 150, mem, 4 * GIB, 2 * GIB));
+    // The first run fits (2 + 20 <= 32) and the kill at 4 GiB comes within a minute.
+    w.run(120);
+    assert_eq!(w.stats["k"].killed, 1, "{:?}", w.stats);
+    w
+}
+
+/// Sim x (the retry and the flat-memory guard at d = 0). Catches: a retry, charged flat
+/// at the 16 GiB rung, that is refused with no end, or that is not refused while the flat
+/// charges say it does not fit. `o` books 20 GiB on a 32 GiB node. Without a curve for
+/// `o` the flat sum is 36: the retry waits for `o` to end, then runs and finishes. With a
+/// curve for `o` (charged 1 GiB) the retry fits at once: the guard applies to a lease
+/// charged by a curve, not to the flat-charged retry, and the sim documents that.
+#[test]
+fn x_a_retry_waits_for_the_flat_booking_that_blocks_it_and_then_runs() {
+    let mut w = retry_beside_a_big_booking(LoadConfig::default(), false);
+    assert_eq!(w.running_of("k"), 0, "refused beside o by the flat sum");
+    assert_eq!(w.running_of("o"), 1);
+    assert_eq!(w.stats["k"].started, 1);
+    drain(&mut w, 2_000);
+    assert_eq!(w.stats["o"].finished, 1);
+    assert_eq!(w.stats["k"].finished, 1);
+    assert_eq!(w.stats["k"].started, 2, "one kill, one retry");
+    let o_started = w.starts.iter().find(|s| s.1 == "o").map(|s| s.0).unwrap();
+    let retry = w.starts.iter().filter(|s| s.1 == "k").nth(1).map(|s| s.0);
+    assert!(
+        retry.unwrap() >= o_started + 600,
+        "the retry started at {retry:?} while o (from {o_started}) still ran"
+    );
+}
+
+/// Sim x (the retry beside a lease charged by a curve). See the sim above.
+#[test]
+fn x_a_retry_runs_beside_a_lease_charged_by_its_curve() {
+    let mut w = retry_beside_a_big_booking(LoadConfig::default(), true);
+    assert_eq!(
+        w.running_of("k"),
+        1,
+        "20 GiB booked, charged 1 by its curve"
+    );
+    drain(&mut w, 2_000);
+    assert_eq!(w.stats["k"].finished, 1);
+    assert_eq!(w.stats["k"].started, 2);
+}

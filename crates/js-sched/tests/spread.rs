@@ -7,6 +7,10 @@
 //! First fit gave the first worker every lease the farm's demand left over: with 305
 //! cores and a mean of about 26 concurrent leases, the node named first held most of
 //! them and ran at several times its cores while the others were lightly used.
+//!
+//! This suite asserts the booked rule's layout itself, so it stays on the booked rule
+//! (the rollback switch) and does not run under placement by load; the layout under load
+//! is asserted by the `load_*` and score suites.
 
 #[path = "booked/mod.rs"]
 mod booked;

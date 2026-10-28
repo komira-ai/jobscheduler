@@ -3,6 +3,7 @@
 //! largest node that could run it, the floor its action key keeps, and a busy node's
 //! kill, which reruns at the same booking and counts against the node.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -86,7 +87,7 @@ impl Farm {
     fn new() -> Self {
         Self {
             s: Scheduler::new(1)
-                .with_load_config(booked::booked())
+                .with_load_config(booked::current())
                 .recording_requeues(),
             now: FarmTime::default(),
         }
@@ -228,12 +229,12 @@ fn oom(booked_gib: u64, raised_gib: u64) -> RequeueReason {
     }
 }
 
+both_rules! {
 /// Catches: a ladder that does not start from the booking (4 GiB, the front's first
 /// rung); a ladder that doubles (4 -> 8), skips a rung or stops at 32 GiB instead of booking a whole host;
 /// a whole host that is not the largest node's memory; a ladder that never stops (a
 /// kill at the whole host run again); a rung that is not committed as a requeue, or is
 /// answered; and runs not recorded for the answer's text.
-#[test]
 fn an_unsized_action_climbs_4_16_32_gib_then_a_whole_host() {
     let mut f = Farm::new();
     f.node("a-small", 8, linux());
@@ -277,12 +278,13 @@ fn an_unsized_action_climbs_4_16_32_gib_then_a_whole_host() {
     );
     assert_eq!(f.s.memory_floor(&key(1)), Some(64 * GIB));
 }
+}
 
+both_rules! {
 /// Catches: a size the platform names that is replaced by the first rung (the explicit
 /// ask must book as asked), one that does not climb from where it is (a 6 GiB ask
 /// killed must book 16, not 4), and one asking more than every rung that does not go
 /// straight to the whole host.
-#[test]
 fn an_explicit_ask_books_as_asked_and_climbs_from_there() {
     let mut f = Farm::new();
     f.node("large", 64, linux());
@@ -306,10 +308,11 @@ fn an_explicit_ask_books_as_asked_and_climbs_from_there() {
     assert_eq!(forty.resources.memory_bytes, 40 * GIB);
     assert_eq!(f.killed(&forty, OOM).resources.memory_bytes, 64 * GIB);
 }
+}
 
+both_rules! {
 /// Catches a ladder that ignores the scheduler's own rungs (`--memory-ladder-gib`):
 /// with rungs 2 and 8, a kill at 2 GiB books 8, not 4 or 16.
-#[test]
 fn the_scheduler_climbs_the_rungs_it_is_given() {
     let mut f = Farm::new();
     f.s.set_memory_ladder(MemoryLadder::from_gib(&[2, 8]).unwrap());
@@ -325,13 +328,14 @@ fn the_scheduler_climbs_the_rungs_it_is_given() {
         "after the last rung"
     );
 }
+}
 
+both_rules! {
 /// Catches a cap taken from the wrong nodes: one that ignores a cordoned node (the
 /// action would be told it needs more memory than any node has while the 16 GiB node
 /// is only cordoned), one that counts a node that does not satisfy the platform or a
 /// silent one (the rung would wait for a node that cannot or will not run it), and a
 /// cap that is not the node's exact memory when that is not whole GiB.
-#[test]
 fn the_cap_is_the_largest_live_node_that_fits_cordoned_or_not() {
     let mut f = Farm::new();
     f.node("small", 4, linux());
@@ -384,12 +388,13 @@ fn the_cap_is_the_largest_live_node_that_fits_cordoned_or_not() {
     assert_eq!(second.resources.memory_bytes, 6 * GIB + 4096);
     f.finishes(&second, OOM);
 }
+}
 
+both_rules! {
 /// Catches a cap that counts a node that could never run the action: one with no
 /// driver for its lease kind, too few CPUs or too few GPUs for its request. Each is
 /// larger than the node that ran it, so counting any of them would rerun the action
 /// for a node it cannot use instead of telling the client at once.
-#[test]
 fn the_cap_counts_only_nodes_that_hold_the_whole_request() {
     let mut f = Farm::new();
     let up = |f: &mut Farm, name: &str, capacity: Resources, caps: NodeCaps| {
@@ -422,12 +427,13 @@ fn the_cap_counts_only_nodes_that_hold_the_whole_request() {
         [own("fits", 4, 4)]
     );
 }
+}
 
+both_rules! {
 /// Catches: a remembered ask ignored (a later submission of the key starts at the
 /// first rung and climbs again), a floor kept per operation rather than per action key
 /// (another key would start raised), and a floor that lowers a request that already
 /// asks for more.
-#[test]
 fn a_later_submission_of_the_key_starts_at_the_remembered_ask() {
     let mut f = Farm::new();
     f.node("large", 64, linux());
@@ -457,11 +463,12 @@ fn a_later_submission_of_the_key_starts_at_the_remembered_ask() {
         "lowered to the floor"
     );
 }
+}
 
+both_rules! {
 /// Catches a floor kept by action digest alone rather than by instance and digest:
 /// the same action under another instance name would start at the first instance's
 /// raised ask instead of its own, and its floor would be shared.
-#[test]
 fn two_instances_with_the_same_action_keep_separate_floors() {
     let mut f = Farm::new();
     f.node("large", 16, linux());
@@ -498,54 +505,68 @@ fn two_instances_with_the_same_action_keep_separate_floors() {
         "raised by another instance"
     );
 }
+}
 
+both_rules! {
 /// Catches: a busy node's kill that raises the booking or the floor (the defect: it
 /// is the node's fault, not the action's), one that is answered at once or rerun
 /// without end, a node whose pressure is not counted (or counted against another
 /// node), a rerun on the node that killed it while another can run it, and runs not
 /// recorded. With both nodes avoided, the third run goes to the first that fits.
-#[test]
 fn a_busy_node_kill_reruns_with_the_same_ask_and_records_node_pressure() {
     let mut f = Farm::new();
     f.node("busy", 16, linux());
     f.node("other", 16, linux());
     f.submit(1, request(1, 2 * GIB));
     let mut start = f.start();
-    assert_eq!(start.worker, w("busy"));
+    // Which node the first run lands on is placement's choice; the test follows it.
+    let first = start.worker.clone();
+    let second = if first == w("busy") { w("other") } else { w("busy") };
     let mut pressure = Vec::new();
+    let mut runs = vec![first.clone()];
     for n in 1..=FARM_RERUNS {
         let next = f.killed(&start, PRESSURE);
+        runs.push(next.worker.clone());
         assert_eq!(
             next.resources, start.resources,
             "rerun {n} changed the booking"
         );
-        pressure.push((
-            f.s.memory_pressure(&w("busy")),
-            f.s.memory_pressure(&w("other")),
-        ));
+        pressure.push((f.s.memory_pressure(&first), f.s.memory_pressure(&second)));
         start = next;
     }
     assert_eq!(pressure, [(1, 0), (1, 1)]);
-    assert_eq!(start.worker, w("busy"));
+    // The rerun avoids the node that killed the run; with both avoided the third run
+    // goes to one that fits, which of the two is placement's choice.
+    assert_eq!(runs[..2], [first.clone(), second.clone()]);
+    let third = start.worker.clone();
+    assert!(third == first || third == second, "{third}");
+    let mut all = runs[..2].to_vec();
+    all.push(third.clone());
+    let count = |worker: &WorkerId| u64::try_from(all.iter().filter(|r| *r == worker).count()).unwrap();
     assert_eq!(f.requeues(), vec![RequeueReason::NodeMemoryPressure; 2]);
     assert_eq!(f.s.memory_floor(&key(1)), None, "a floor from a busy node");
 
     f.finishes(&start, PRESSURE);
-    assert_eq!(f.s.memory_pressure(&w("busy")), 2);
-    assert_eq!(f.s.memory_pressure(&w("other")), 1);
+    assert_eq!(f.s.memory_pressure(&first), count(&first));
+    assert_eq!(f.s.memory_pressure(&second), count(&second));
     assert_eq!(f.s.memory_pressure(&w("unknown")), 0);
     assert_eq!(
         f.s.memory_runs(start.operation).unwrap(),
-        [busy("busy", 2), busy("other", 2), busy("busy", 2)]
+        [
+            busy(first.as_str(), 2),
+            busy(second.as_str(), 2),
+            busy(third.as_str(), 2)
+        ]
     );
     assert!(f.s.memory_runs(OperationId(99)).is_none());
 }
+}
 
+both_rules! {
 /// Catches either budget spending the other: busy-node kills that shorten the ladder
 /// (the action told it needs more memory below the largest node), and a ladder that
 /// uses up the busy-node reruns (a busy node's kill at the cap answered as the
 /// action's error, or as the farm's at once).
-#[test]
 fn neither_budget_starves_the_other() {
     let mut f = Farm::new();
     f.node("large", 16, linux());
@@ -580,11 +601,12 @@ fn neither_budget_starves_the_other() {
         ]
     );
 }
+}
 
+both_rules! {
 /// Catches a whole-machine lease's kill that raises its least worker size from the
 /// request rather than from what it booked (the whole node it ran on), which would
 /// place it on the same node again.
-#[test]
 fn a_whole_machine_kill_asks_for_a_larger_node() {
     let mut f = Farm::new();
     f.node("a-small", 4, whole());
@@ -600,13 +622,14 @@ fn a_whole_machine_kill_asks_for_a_larger_node() {
     assert_eq!(f.requeues(), vec![oom(4, 8)]);
     f.finishes(&second, OOM);
 }
+}
 
+both_rules! {
 /// Catches a memory kill committed for a lease the operation no longer holds (it was
 /// given up, and the result raced the log) that still raises the booking or a floor,
 /// records a run, or counts against the node; and a lost run committed so that is
 /// charged to the farm budget again: the silence charged one run, and the
 /// three results committed after it add none.
-#[test]
 fn a_memory_kill_of_a_lease_given_up_changes_nothing() {
     let mut f = Farm::new();
     f.node("a", 16, linux());
@@ -648,14 +671,15 @@ fn a_memory_kill_of_a_lease_given_up_changes_nothing() {
     assert_eq!(again.resources.memory_bytes, GIB);
     assert_eq!(again.worker, w("a"));
 }
+}
 
+both_rules! {
 /// Catches floors kept without bound: past the bound the one raised longest ago is
 /// forgotten, and a later submission of its key starts at its own ask again.
-#[test]
 fn floors_are_bounded() {
     let mut f = Farm::new();
     f.s = Scheduler::new(1)
-        .with_load_config(booked::booked())
+        .with_load_config(booked::current())
         .with_memory_floors(1);
     f.node("a", 16, linux());
     for n in 1..=2 {
@@ -669,16 +693,17 @@ fn floors_are_bounded() {
     f.submit(3, request(1, GIB));
     assert_eq!(f.start().resources.memory_bytes, GIB);
 }
+}
 
+both_rules! {
 /// Catches a floor change that names the wrong floor or the wrong stamp, forgotten keys
 /// not handed over once (a key deleted from the store twice, or never), a change for an
 /// operation the scheduler no longer holds that loses the forgotten keys, and floors
 /// given back to a scheduler that do not floor a fresh submission.
-#[test]
 fn a_floor_change_names_the_raise_and_the_forgotten_keys_once() {
     let mut f = Farm::new();
     f.s = Scheduler::new(1)
-        .with_load_config(booked::booked())
+        .with_load_config(booked::current())
         .with_memory_floors(1);
     f.node("a", 16, linux());
     let mut ops = Vec::new();
@@ -710,7 +735,7 @@ fn a_floor_change_names_the_raise_and_the_forgotten_keys_once() {
     );
 
     let mut successor = Scheduler::new(2)
-        .with_load_config(booked::booked())
+        .with_load_config(booked::current())
         .with_memory_floors(1);
     successor.restore_floors(vec![
         Floor {
@@ -726,11 +751,12 @@ fn a_floor_change_names_the_raise_and_the_forgotten_keys_once() {
     assert_eq!(forgotten.evicted, vec![key(1)]);
     assert_eq!(forgotten.raised, None);
 }
+}
 
+both_rules! {
 /// Catches: a list of memory runs by operation that leaves out an operation that was
 /// killed, lists one that was not, or lists runs other than the ones the operation's own
 /// record holds (a successor that took over would book the wrong rung).
-#[test]
 fn the_runs_by_operation_list_the_killed_operations_runs_and_no_other() {
     let mut f = Farm::new();
     f.node("a", 64, linux());
@@ -749,4 +775,5 @@ fn the_runs_by_operation_list_the_killed_operations_runs_and_no_other() {
         Some(by_operation[&first.operation].as_slice()),
         f.s.memory_runs(first.operation)
     );
+}
 }
