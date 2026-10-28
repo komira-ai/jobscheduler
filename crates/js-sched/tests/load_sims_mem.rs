@@ -80,10 +80,11 @@ fn c_retained_page_cache_on_an_idle_node_still_admits() {
     assert_eq!(w.running_on("n"), 5);
 }
 
-/// Sim c (busy node). Catches: the cap on the working set missing while leases run: with
-/// 110% of RAM in retained file pages the node still takes leases up to what the
-/// predictions and a quarter of its memory (16 GiB) allow: twelve leases of 4 GiB, where
-/// sixteen fit without it.
+/// Sim c (busy node). Catches: the cap on the file pages missing while leases run: with hot
+/// file pages at 110% of RAM in the working set, counted whole they leave no room for any
+/// lease; capped at a quarter of the node's memory they cost 16 GiB of the 64, and the node
+/// still takes sixteen leases of 4 GiB (each with the 1 GiB it holds before it allocates
+/// the rest) while the working set stays under their predictions.
 #[test]
 fn c_retained_page_cache_beside_leases_costs_a_bounded_share() {
     let mut w = World::new(LoadConfig::default());
@@ -93,7 +94,7 @@ fn c_retained_page_cache_beside_leases_costs_a_bounded_share() {
     w.run(12);
     w.submit_many(40, &late_ramp("ramp", 4 * GIB));
     w.run(30);
-    assert_eq!(w.nodes["n"].peak_running, 12);
+    assert_eq!(w.nodes["n"].peak_running, 16);
 }
 
 /// `(1 / f) (1 + s_cpu) C` for `cores` cores, in millicores: what constant-duty actions

@@ -212,7 +212,8 @@ impl WorkerLoad {
                 && u64::from(cores) > capacity.cpu_millis.saturating_mul(IMPLAUSIBLE_FACTOR)
         });
         let too_much_memory = capacity.memory_bytes > 0
-            && load.working_set_bytes > capacity.memory_bytes.saturating_mul(IMPLAUSIBLE_FACTOR);
+            && load.memory_working_set_bytes
+                > capacity.memory_bytes.saturating_mul(IMPLAUSIBLE_FACTOR);
         if too_many_cores || too_much_memory {
             return self.drop_readings(counters);
         }
@@ -245,50 +246,56 @@ impl WorkerLoad {
         r.windows.iter().flatten().copied().max()
     }
 
-    /// Whether the worker is charged by measurement: it has a window, the reading is not
-    /// older than [`js_types::sched::usage::STALE_WINDOWS`] windows at `now` and the
-    /// actions cgroup has no CPU limit.
-    pub(crate) fn fresh(&self, now: FarmTime, cfg: &LoadConfig) -> bool {
-        let Some(r) = &self.readings else {
-            return false;
-        };
+    /// The newest reading when the worker is charged by measurement: it has a window, the
+    /// reading is not older than [`js_types::sched::usage::STALE_WINDOWS`] windows at `now`
+    /// and the actions cgroup has no CPU limit.
+    fn fresh_reading(&self, now: FarmTime, cfg: &LoadConfig) -> Option<&NodeLoad> {
+        let r = self.readings.as_ref()?;
         if r.windows[0].is_none() || r.last.actions_cpu_limited {
-            return false;
+            return None;
         }
         // The age is read on the scheduler's clock and carried over to the agent's, so
         // the one staleness rule is `NodeLoad::is_stale`.
         let age =
             u64::try_from(now.saturating_duration_since(r.arrived).as_micros()).unwrap_or(u64::MAX);
-        !r.last
-            .is_stale(cfg.window_usec(), r.last.mono_usec.saturating_add(age))
+        let stale = r
+            .last
+            .is_stale(cfg.window_usec(), r.last.mono_usec.saturating_add(age));
+        (!stale).then_some(&r.last)
+    }
+
+    /// Whether the worker is charged by measurement ([`WorkerLoad::fresh_reading`]).
+    pub(crate) fn fresh(&self, now: FarmTime, cfg: &LoadConfig) -> bool {
+        self.fresh_reading(now, cfg).is_some()
     }
 
     /// The newest reading's working set, if there is one.
     pub(crate) fn working_set(&self) -> Option<u64> {
-        self.readings.as_ref().map(|r| r.last.working_set_bytes)
+        self.readings
+            .as_ref()
+            .map(|r| r.last.memory_working_set_bytes)
     }
 
-    /// The working set that counts against memory.
+    /// The working set that counts against memory, of the fresh `reading`.
     ///
-    /// `memory.current` minus the inactive file pages still holds the hot file pages of
-    /// leases that have ended, and the kernel reclaims them only under pressure, which a
-    /// node that admits nothing never feels. Counted whole they could fill the node's
-    /// memory on an idle node and refuse every lease for good. So the part of the
-    /// working set beyond what the running leases predicted counts for at most a bounded
-    /// share of the node's memory ([`LoadConfig::cache_share_percent`], a quarter by
-    /// default), and a node with no action lease counts none of it. A producer that
-    /// reports the active file pages separately lets this cap be exact: anon plus kernel
-    /// plus a bounded share of the active file pages.
-    fn working_set_counted(&self, capacity: &Resources, cfg: &LoadConfig) -> u64 {
+    /// `memory.current` minus the inactive file pages still holds the hot (active) file
+    /// pages of leases that have ended, and the kernel reclaims them only under pressure,
+    /// which a node that admits nothing never feels. Counted whole they could fill the
+    /// node's memory on an idle node and refuse every lease for good. So the active file
+    /// pages count for at most [`LoadConfig::file_share_permille`] of the node's memory
+    /// ([`NodeLoad::admission_working_set`]: anon and kernel memory in full plus a bounded
+    /// share of the file pages), and a node with no action lease counts none of the
+    /// working set: it is all residue, and an idle node admits anything that fits it.
+    fn working_set_counted(
+        &self,
+        reading: &NodeLoad,
+        capacity: &Resources,
+        cfg: &LoadConfig,
+    ) -> u64 {
         if self.totals.actions == 0 {
             return 0;
         }
-        let share = u128::from(capacity.memory_bytes) * u128::from(cfg.cache_share_percent) / 100;
-        let allowance = self
-            .totals
-            .mem_all()
-            .saturating_add(u64::try_from(share).unwrap_or(u64::MAX));
-        self.working_set().unwrap_or(0).min(allowance)
+        reading.admission_working_set(capacity.memory_bytes, cfg.file_share_permille)
     }
 
     /// The left side of the predicate: what the worker is charged before the new lease.
@@ -304,10 +311,10 @@ impl WorkerLoad {
     /// the working set is not read.
     pub(crate) fn left(&self, now: FarmTime, capacity: &Resources, cfg: &LoadConfig) -> Left {
         let t = &self.totals;
-        if self.fresh(now, cfg) {
+        if let Some(reading) = self.fresh_reading(now, cfg) {
             let measured = u64::from(self.measured().unwrap_or(0));
             let cpu = measured.max(cfg.floor_of(t.cpu_covered));
-            let ws = self.working_set_counted(capacity, cfg);
+            let ws = self.working_set_counted(reading, capacity, cfg);
             Left {
                 cpu: cpu.saturating_add(t.cpu_uncovered).saturating_add(t.vm_cpu),
                 mem: t

@@ -498,7 +498,7 @@ impl World {
                     seq: node.seq,
                     mono_usec: (t + 1) * 1_000_000,
                     cpu_usage_usec: node.cpu_usec,
-                    working_set_bytes: 0,
+                    memory_working_set_bytes: 0,
                     covered: Vec::new(),
                     ..NodeLoad::default()
                 }
@@ -514,7 +514,8 @@ impl World {
                     .iter()
                     .map(|r| at(&self.specs[r.spec_index].mem, r.pos))
                     .sum();
-                load.working_set_bytes = anon + self.nodes[&name].cache;
+                load.memory_working_set_bytes = anon + self.nodes[&name].cache;
+                load.memory_active_file_bytes = self.nodes[&name].cache;
                 if self.nodes[&name].reporting != Reporting::NoCovered {
                     // Ran the whole window: started before the previous reading.
                     load.covered = self

@@ -155,6 +155,19 @@ impl Rig {
         working_set: u64,
         covered: Vec<LeaseId>,
     ) -> NodeLoad {
+        self.reading_file(name, busy_milli, working_set, 0, covered)
+    }
+
+    /// As [`Rig::reading`], with `active_file` bytes of the working set being hot file
+    /// pages.
+    pub fn reading_file(
+        &mut self,
+        name: &str,
+        busy_milli: u64,
+        working_set: u64,
+        active_file: u64,
+        covered: Vec<LeaseId>,
+    ) -> NodeLoad {
         let g = self.gauges.get_mut(name).expect("registered worker");
         g.seq += 1;
         g.mono_usec += W_MS * 1000;
@@ -163,7 +176,8 @@ impl Rig {
             seq: g.seq,
             mono_usec: g.mono_usec,
             cpu_usage_usec: g.cpu_usec,
-            working_set_bytes: working_set,
+            memory_working_set_bytes: working_set,
+            memory_active_file_bytes: active_file,
             covered,
             ..NodeLoad::default()
         }
@@ -183,8 +197,21 @@ impl Rig {
     /// One window passes on `name`: the farm time moves by `W`, and it sends a reading
     /// of `busy_milli` cores, `working_set` bytes, `covered` leases.
     pub fn window(&mut self, name: &str, busy_milli: u64, working_set: u64, covered: &[LeaseId]) {
+        self.window_file(name, busy_milli, working_set, 0, covered);
+    }
+
+    /// As [`Rig::window`], with `active_file` bytes of the working set being hot file
+    /// pages.
+    pub fn window_file(
+        &mut self,
+        name: &str,
+        busy_milli: u64,
+        working_set: u64,
+        active_file: u64,
+        covered: &[LeaseId],
+    ) {
         self.ms += W_MS;
-        let load = self.reading(name, busy_milli, working_set, covered.to_vec());
+        let load = self.reading_file(name, busy_milli, working_set, active_file, covered.to_vec());
         self.beat(name, Some(load));
     }
 

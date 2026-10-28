@@ -165,18 +165,25 @@ fn predicted_memory_is_held_to_the_end() {
 
 /// Catches: a working set that cannot raise the memory figure above the predictions (a
 /// key whose real peak is higher than predicted): four leases predicted at 2 GiB with a
-/// working set of 12 GiB are charged 12; and the working set counts for at most the
-/// predictions plus a quarter of the node's memory (8 GiB): 30 GiB is charged 16.
+/// working set of 12 GiB are charged 12; and hot file pages in the working set count for at
+/// most a quarter of the node's memory (8 GiB), the rest being cache: a working set of
+/// 30 GiB of which 20 are active file pages is charged 10 + 8 = 18, and one of which 6 are
+/// (under the share) is charged whole.
 #[test]
-fn a_working_set_above_the_predictions_raises_memory_up_to_the_cap() {
-    let mut r = Rig::on();
-    r.up("a", node());
-    let held = fill(&mut r, 4, warm(250, 2 * GIB));
-    r.window("a", 0, 12 * GIB, &held);
-    r.window("a", 0, 12 * GIB, &held);
-    assert_eq!(view(&r, "a").left_memory_bytes, 12 * GIB);
-    r.window("a", 0, 30 * GIB, &held);
-    assert_eq!(view(&r, "a").left_memory_bytes, 16 * GIB);
+fn a_working_set_above_the_predictions_raises_memory_with_its_file_pages_capped() {
+    let at = |working_set: u64, file: u64| {
+        let mut r = Rig::on();
+        r.up("a", node());
+        let held = fill(&mut r, 4, warm(250, 2 * GIB));
+        r.window_file("a", 0, working_set, file, &held);
+        r.window_file("a", 0, working_set, file, &held);
+        view(&r, "a").left_memory_bytes
+    };
+    assert_eq!(at(12 * GIB, 0), 12 * GIB);
+    assert_eq!(at(30 * GIB, 20 * GIB), 18 * GIB);
+    assert_eq!(at(30 * GIB, 6 * GIB), 30 * GIB);
+    assert_eq!(at(30 * GIB, 8 * GIB), 30 * GIB, "exactly the share");
+    assert_eq!(at(30 * GIB, 8 * GIB + 1), 30 * GIB - 1);
 }
 
 /// Catches: the working set not added to what no reading covers yet: with 12 GiB measured
@@ -203,8 +210,8 @@ fn an_uncovered_lease_adds_to_the_working_set() {
 fn retained_page_cache_does_not_stop_an_idle_node_from_admitting() {
     let mut r = Rig::on();
     r.up("a", node());
-    r.window("a", 0, 35 * GIB, &[]);
-    r.window("a", 0, 35 * GIB, &[]);
+    r.window_file("a", 0, 35 * GIB, 35 * GIB, &[]);
+    r.window_file("a", 0, 35 * GIB, 35 * GIB, &[]);
     let v = view(&r, "a");
     assert!(!v.fallback);
     assert_eq!(v.working_set_bytes, Some(35 * GIB));
@@ -216,23 +223,24 @@ fn retained_page_cache_does_not_stop_an_idle_node_from_admitting() {
     );
 }
 
-/// Catches: the cap on the working set missing when a lease runs: one 1 GiB lease beside a
-/// page cache of 110% of the node's memory is charged 1 + 8 GiB, so a 20 GiB lease
-/// fits beside it and a 24 GiB one does not.
+/// Catches: the cap on the file pages missing when a lease runs: one 1 GiB lease beside
+/// hot file pages of 110% of the node's memory is charged 8 GiB (the share of the node's
+/// memory the file pages may count for), so a 24 GiB lease fits beside it and a 25 GiB one
+/// does not.
 #[test]
-fn page_cache_beside_a_small_lease_counts_for_a_bounded_share() {
+fn file_pages_beside_a_small_lease_count_for_a_bounded_share() {
     let beside = |memory: u64| {
         let mut r = Rig::on();
         r.up("a", node());
         let held = fill(&mut r, 1, warm(250, GIB));
-        r.window("a", 0, 35 * GIB, &held);
-        r.window("a", 0, 35 * GIB, &held);
-        assert_eq!(view(&r, "a").left_memory_bytes, 9 * GIB);
+        r.window_file("a", 0, 35 * GIB, 35 * GIB, &held);
+        r.window_file("a", 0, 35 * GIB, 35 * GIB, &held);
+        assert_eq!(view(&r, "a").left_memory_bytes, 8 * GIB);
         r.action(1_000, 8 * GIB, Some(warm(250, memory)));
         r.tick().len()
     };
-    assert_eq!(beside(20 * GIB), 1);
-    assert_eq!(beside(24 * GIB), 0);
+    assert_eq!(beside(24 * GIB), 1);
+    assert_eq!(beside(25 * GIB), 0);
 }
 
 /// Catches: a configurable memory slack ignored (`s_mem`): with a quarter more allowed,

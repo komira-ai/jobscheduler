@@ -87,10 +87,10 @@ pub struct LoadConfig {
     /// The most cold leases admitted per worker per window; `None` is one per 32 cores
     /// of the worker, rounded up. At least 1.
     pub cold_per_window: Option<u32>,
-    /// How much of a worker's memory, in percent, the working set beyond the running
-    /// leases' predicted memory may count for (see `WorkerLoad::working_set_counted`).
-    /// Default 25; at most 100.
-    pub cache_share_percent: u32,
+    /// How much of a worker's memory, in thousandths, its active file pages may count for
+    /// in the working set (see `WorkerLoad::working_set_counted`). Default 250; at most
+    /// 1000.
+    pub file_share_permille: u32,
 }
 
 impl Default for LoadConfig {
@@ -102,7 +102,7 @@ impl Default for LoadConfig {
             s_cpu_permille: 100,
             s_mem_permille: 0,
             cold_per_window: None,
-            cache_share_percent: 25,
+            file_share_permille: 250,
         }
     }
 }
@@ -115,7 +115,7 @@ impl LoadConfig {
             window: self.window.max(Duration::from_millis(1)),
             cpu_floor_permille: self.cpu_floor_permille.clamp(500, 1000),
             cold_per_window: self.cold_per_window.map(|n| n.max(1)),
-            cache_share_percent: self.cache_share_percent.min(100),
+            file_share_permille: self.file_share_permille.min(1000),
             ..self
         }
     }
@@ -471,21 +471,21 @@ mod tests {
 
     /// Catches: settings out of range reaching the predicate: a floor below a half or above
     /// one, a zero window (every window the same index, a zero staleness limit), a
-    /// cold cap of 0 (no cold key ever runs) and a cache share above the whole node.
+    /// cold cap of 0 (no cold key ever runs) and a file share above the whole node.
     #[test]
     fn settings_are_brought_into_range() {
         let wild = LoadConfig {
             window: Duration::ZERO,
             cpu_floor_permille: 10,
             cold_per_window: Some(0),
-            cache_share_percent: 900,
+            file_share_permille: 9_000,
             ..LoadConfig::default()
         }
         .normalised();
         assert_eq!(wild.window, Duration::from_millis(1));
         assert_eq!(wild.cpu_floor_permille, 500);
         assert_eq!(wild.cold_per_window, Some(1));
-        assert_eq!(wild.cache_share_percent, 100);
+        assert_eq!(wild.file_share_permille, 1000);
         let high = LoadConfig {
             cpu_floor_permille: 5_000,
             ..LoadConfig::default()
