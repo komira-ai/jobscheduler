@@ -1,13 +1,5 @@
 //! Admission by per-minute profiles through the scheduler's public inputs, one rule each:
 //! how a lease with a learned curve is charged over the next minutes, what the predicate
-//! checks at each of them and at the horizon, which leases stay flat, and what the shape
-//! guard and the two owner-decision settings do.
-//!
-//! The rig feeds readings as a worker's heartbeats; a window is 5 s of farm time, and a
-//! reading can carry the start of each lease and its closed minutes.
-
-//! Admission by per-minute profiles through the scheduler's public inputs, one rule each:
-//! how a lease with a learned curve is charged over the next minutes, what the predicate
 //! checks at each of them and at the horizon, and which leases stay flat. The shape guard
 //! and the settings left to the owner are in `admission_profile_guard.rs`.
 //!
