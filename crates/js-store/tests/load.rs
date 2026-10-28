@@ -15,6 +15,7 @@ use js_store::{
     EpochPolicy, ID_BLOCK, RowCodec, Rows, StateError, Stored, StoredCordon, StoredOperation,
     Submitted, keys,
 };
+use js_types::sched::usage::LeaseCost;
 use js_types::sched::{
     FarmFault, FarmTime, LeaseGrant, LeaseId, LeaseKind, LostWhy, MemoryKill, MemoryRun,
     OperationId, Qos, Resources, WaiterId, WorkKey, WorkerId,
@@ -64,6 +65,7 @@ fn lease(store: &Racing, codec: &TestCodec, operation: u64, seq: u64, worker: &s
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: WorkerId::new(worker),
+        cost: LeaseCost::default(),
     };
     let row = codec.lease(&grant).expect("encode");
     let mut txn = Txn::new()
@@ -81,6 +83,7 @@ fn grant_of(operation: u64, seq: u64) -> LeaseGrant {
         lease: LeaseId::new(5, seq),
         operation: OperationId(operation),
         worker: node(),
+        cost: LeaseCost::default(),
     }
 }
 
