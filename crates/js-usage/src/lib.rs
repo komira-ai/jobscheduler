@@ -4,18 +4,50 @@
 //! A node reports a reading of its actions cgroup (`js_types::sched::usage::NodeLoad`) on its heartbeat (the server turns the
 //! wire form into this crate's own plain input types, so this crate depends on no wire
 //! crate). This crate turns readings into minute series, stores them through
-//! [`js_state::Store`], prunes them, and (in later changes) fits a per-action cost curve.
+//! [`js_state::Store`], prunes them, and fits a per-action cost curve from the runs of each action key.
 //!
 //! Every public item is documented (the workspace lint fails the build otherwise). The
 //! state machines are pure: they take time as an argument, read no clock and use ordered
 //! collections only. The crate is not held to the pure layer's lints because it
 //! persists, but it keeps to the same conventions.
 //!
+//! # Profiles
+//!
+//! [`ProfileStore`] keeps, per action key ([`ProfileKey`]), a ring of the last
+//! [`RING_RUNS`] runs that ended on their own, one state-store row per key, bounded in
+//! bytes by evicting the least recently used key. [`fit()`] turns a ring into the curve
+//! admission charges: per minute since the lease's start, the P90 of the cores and the
+//! maximum of the working set over the runs, widened by [`DILATE_MINUTES`] minutes each
+//! way; a key with fewer than [`MIN_RUNS_FOR_CURVE`] runs has none. [`ProfileCurves`]
+//! holds the fitted curves in memory and is a `js_types::sched::usage::CurveSource`, so a
+//! key that is cold, idle for over [`STALE_DAYS`] days or unnamed is charged flat.
+//!
+//! The fit lives here and not in `js-sizing` because that crate is pure and has no
+//! dependencies; its P90 is the same nearest-rank definition, so a flat and a curve charge
+//! agree. Values are raw: the memory margin and rounding are admission's.
+//!
 //! # Time
 //!
 //! Three bases never mix: a node's monotonic microseconds (windows and lease minutes,
 //! never compared across nodes), wall minutes since the Unix epoch (the rows of a node
 //! series; the caller supplies them), and the store's own clock (expiry, not used here).
+
+mod codec;
+mod convert;
+mod curves;
+mod fit;
+mod key;
+mod profile_store;
+mod ring;
+#[cfg(test)]
+mod testkit;
+
+pub use codec::{CodecError, ROW_VERSION};
+pub use curves::{KeyMap, ProfileCurves, STALE_DAYS};
+pub use fit::{DILATE_MINUTES, Fit, MIN_RUNS_FOR_CURVE, fit, p90};
+pub use key::{BadKey, MAX_KEY_LEN, ProfileKey};
+pub use profile_store::{KEY_PREFIX, KeyProfile, ProfileError, ProfileStore};
+pub use ring::{Admitted, BUCKETS, Bucket, RING_RUNS, Ring, Run, RunMinute, RunSeries};
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).
 pub const MINUTES_PER_HOUR: u64 = 60;
