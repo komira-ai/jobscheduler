@@ -18,5 +18,6 @@ mod placement;
 mod recover;
 mod report;
 mod session;
+mod settings;
 mod shared;
 mod stored;
