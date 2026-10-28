@@ -92,9 +92,9 @@ fn size_key_row(key: &str, row: &Versioned) -> Result<u64, StateError> {
 impl Rows {
     /// Whether the `opkey/` rows are read. A store that never had the learned sizes on
     /// holds none, and with them off a row an earlier run left is neither loaded nor
-    /// allowed to fail a start. The transaction that ends an operation deletes its
-    /// `opkey/` row whatever this says, so rows an earlier run left are cleaned up as
-    /// their operations end. Reading is on until this says otherwise.
+    /// allowed to fail a start. The transaction that ends an operation (it comes with the
+    /// grant and finish rows) will delete its `opkey/` row whatever this says, so rows an
+    /// earlier run left are cleaned up as their operations end. Reading is on until this says otherwise.
     pub fn set_read_size_keys(&self, read: bool) {
         self.size_keys.store(read, Ordering::SeqCst);
     }

@@ -14,24 +14,6 @@ use js_types::sched::OperationId;
 
 use common::Racing;
 
-/// The prefixes of the rows this crate owns, which an `Ext` never touches.
-const OWNED: [&str; 14] = [
-    keys::OPERATION,
-    keys::QUEUE,
-    keys::LEASE,
-    keys::LEASE_BY_OP,
-    keys::SESSION,
-    keys::OWNER,
-    keys::CORDON,
-    keys::DONE,
-    keys::LOSS,
-    keys::FATE,
-    keys::FLOOR,
-    keys::KEY_FLOOR,
-    keys::OPKEY,
-    keys::INFLIGHT,
-];
-
 fn put(store: &Racing, txn: Txn) {
     store.txn(txn).expect("store").expect("applied");
 }
@@ -45,7 +27,7 @@ fn named(txn: &Txn) -> Vec<String> {
 
 fn assert_not_owned(txn: &Txn) {
     for key in named(txn) {
-        let owned = OWNED.iter().any(|prefix| key.starts_with(prefix));
+        let owned = keys::ALL.iter().any(|prefix| key.starts_with(prefix));
         assert!(!owned, "the rows of the embedder include {key}");
     }
 }

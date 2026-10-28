@@ -53,6 +53,29 @@ pub const NEXT_OP: &str = "meta/next_op";
 pub const NEXT_SEQ: &str = "meta/next_seq";
 // `meta/generation` is `js_state::GENERATION`: the state store's own row.
 
+/// Every prefix of a row this crate owns, and every `meta/` key: what an embedder's rows
+/// ([`crate::Ext`]) must stay out of. A kind of row added above is added here too.
+pub const ALL: [&str; 18] = [
+    OPERATION,
+    QUEUE,
+    LEASE,
+    LEASE_BY_OP,
+    SESSION,
+    OWNER,
+    CORDON,
+    DONE,
+    LOSS,
+    FATE,
+    FLOOR,
+    KEY_FLOOR,
+    OPKEY,
+    INFLIGHT,
+    EPOCH,
+    ALIVE,
+    NEXT_OP,
+    NEXT_SEQ,
+];
+
 /// `prefix` and the operation's id as sixteen hexadecimal digits.
 fn of_operation(prefix: &str, operation: OperationId) -> String {
     format!("{prefix}{:016x}", operation.0)

@@ -438,6 +438,23 @@ fn a_submit_takes_three_conflicts_and_is_refused_at_the_fourth() {
     }
 }
 
+/// Asserts that a submit whose id is the largest there is, with a row in its way, looks again
+/// at the same id instead of overflowing, and is refused with the conflict.
+#[test]
+fn the_id_after_the_largest_saturates() {
+    let (store, _, [handle]) = frontends([1]);
+    let key = keys::operation(OperationId(u64::MAX));
+    overwrite(&store, &key, b"later".to_vec());
+
+    let submitted = handle.submit(OperationId(u64::MAX), &request(1), &[], None);
+
+    assert!(
+        matches!(submitted, Err(StateError::Conflict(_))),
+        "{submitted:?}"
+    );
+    assert_eq!(rows(&store, "inflight/"), 0);
+}
+
 /// Catches: an unpin of an operation whose rows are already gone failing the finish, or
 /// putting a delete in its transaction.
 #[test]
