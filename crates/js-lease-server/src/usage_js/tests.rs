@@ -11,6 +11,8 @@ use js_types::LeaseId;
 
 use super::*;
 use crate::usage::{DropReason, Observed};
+use js_types::sched::usage::CurveSource;
+use js_usage::RunMinute;
 
 /// A store that forwards to the fake and fails every write while `fail` is set.
 struct Flaky {
@@ -63,7 +65,7 @@ fn sink() -> (NodeUsage, Arc<AtomicBool>) {
         inner,
         fail: fail.clone(),
     };
-    (NodeUsage::over(Box::new(store)), fail)
+    (NodeUsage::over(Arc::new(store), 1 << 20, 0).unwrap(), fail)
 }
 
 fn limits() -> HostLimits {
@@ -140,15 +142,71 @@ fn prune_reports_a_failed_store_and_a_run_is_taken() {
     sink.flush(101).unwrap();
     assert_eq!(sink.prune(101), Ok(()));
     assert_eq!(sink.range(&host(), 0, 200).len(), 1);
-    sink.prune(100 + js_usage::NODE_RETENTION_MINUTES + 120)
-        .unwrap();
-    assert!(sink.range(&host(), 0, 200).is_empty());
+    let late = 100 + js_usage::NODE_RETENTION_MINUTES + 120;
     fail.store(true, Ordering::SeqCst);
-    assert!(sink.prune(5).is_err());
+    assert!(sink.prune(late).is_err());
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(sink.range(&host(), 0, 200).len(), 1);
+    sink.prune(late).unwrap();
+    assert!(sink.range(&host(), 0, 200).is_empty());
     let end = RunEnd {
         key: crate::usage::ProfileKey::parse("k").unwrap(),
         lease: LeaseId::new(1, 1),
         series: Default::default(),
     };
     assert_eq!(sink.run_ended(&end, 0), Ok(()));
+}
+
+fn work() -> WorkKey {
+    WorkKey::new("Build/Pool-1", "ab12/34")
+}
+
+fn finished(sink: &NodeUsage, key: &ProfileKey, minute: u64) {
+    let series = RunSeries {
+        minutes: vec![RunMinute {
+            minute: 0,
+            cores_milli: 1500,
+            ws_bytes: 1 << 20,
+        }],
+        flags: 0,
+    };
+    let end = RunEnd {
+        key: key.clone(),
+        lease: LeaseId::new(1, 1),
+        series,
+    };
+    sink.run_ended(&end, minute).unwrap();
+}
+
+/// Asserts that the profile name admission looks a curve up by is the pinned name of the
+/// action key, and that three clean runs of a key give it a curve admission can read
+/// while two do not. It catches a mapping that differs between the writer and the reader
+/// of curves, and a curve offered too early.
+#[test]
+fn three_clean_runs_give_the_action_key_a_curve() {
+    let (sink, _) = sink();
+    let key = key_map(&work()).unwrap();
+    assert_eq!(key.as_str(), profile_key(&work()));
+    let curves = sink.curves().unwrap();
+    finished(&sink, &key, 10);
+    finished(&sink, &key, 11);
+    assert!(curves.curve(&work()).is_none());
+    finished(&sink, &key, 12);
+    assert!(curves.curve(&work()).is_some());
+}
+
+/// Asserts that the daily prune tells the curves the day: a key idle for more than the
+/// staleness limit has no curve afterwards. It catches curves that never learn the day
+/// and so never go stale.
+#[test]
+fn the_prune_moves_the_curves_to_the_day() {
+    let (sink, _) = sink();
+    let key = key_map(&work()).unwrap();
+    for minute in 0..3 {
+        finished(&sink, &key, minute);
+    }
+    let curves = sink.curves().unwrap();
+    assert!(curves.curve(&work()).is_some());
+    sink.prune(1440 * (js_usage::STALE_DAYS + 5)).unwrap();
+    assert!(curves.curve(&work()).is_none());
 }

@@ -237,8 +237,14 @@ fn a_clean_run_is_handed_over_after_its_grace_beats_with_its_late_minute() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].key.as_str(), "act.build");
     assert_eq!(ended[0].lease, LeaseId::new(1, 1));
-    let series = vec![(0, 1000, 100), (1, 2500, 300), (2, 500, 50)];
+    let at = |minute, cores_milli, ws_bytes| RunMinute {
+        minute,
+        cores_milli,
+        ws_bytes,
+    };
+    let series = vec![at(0, 1000, 100), at(1, 2500, 300), at(2, 500, 50)];
     assert_eq!(ended[0].series.minutes, series);
+    assert_eq!(ended[0].series.flags, 0);
     quiet_beats(&usage, "h1", 3);
     assert_eq!(fake.ended().len(), 1);
     assert_eq!(usage.counters().runs_learned, 1);

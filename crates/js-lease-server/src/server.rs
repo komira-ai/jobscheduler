@@ -21,6 +21,7 @@ use crate::error::StartupError;
 use crate::listener::{Slots, serve};
 use crate::ticker::Ticker;
 use crate::tls;
+use crate::usage::ProfileCurves;
 use crate::usage_hub::UsageCounters;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
@@ -157,6 +158,14 @@ impl Running {
     /// the file of bindings that could not be written. Always 0 without agent flags.
     pub fn agent_errors(&self) -> u64 {
         self.shared.agent_errors()
+    }
+
+    /// The curves learned from runs that ended cleanly, for admission to read as its
+    /// `CurveSource` (they implement it, keyed by `js_types::sched::usage::profile_key`).
+    /// `None` without agent registration, with `--usage-off`, or with a sink that learns
+    /// none.
+    pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.shared.usage_curves()
     }
 
     /// What the usage side has counted since the server started: loads rejected, records

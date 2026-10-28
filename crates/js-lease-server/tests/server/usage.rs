@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use js_lease_server::{Cli, DropReason, NodeRow, UsageCounters};
+use js_lease_server::{Cli, DropReason, NodeRow, RunMinute, UsageCounters};
 use js_types::LeaseId;
 use serde_json::json;
 
@@ -288,6 +288,7 @@ async fn with_usage_off_there_are_no_routes_and_nothing_is_recorded() {
     assert!(fake.seen().is_empty());
     assert_eq!((fake.flushes(), fake.prunes()), (vec![], vec![]));
     assert_eq!(h.running.usage_counters(), UsageCounters::default());
+    assert!(h.running.usage_curves().is_none());
 }
 
 /// Asserts that the minutes of heartbeats are written only by a flush, and as rows of the
@@ -331,7 +332,12 @@ async fn a_clean_run_reaches_the_sink_after_its_grace_with_its_minutes() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].key.as_str(), "act.build");
     assert_eq!(ended[0].lease, LeaseId::new(1, 1));
-    assert_eq!(ended[0].series.minutes, vec![(0, 1500, 4096)]);
+    let minute = RunMinute {
+        minute: 0,
+        cores_milli: 1500,
+        ws_bytes: 4096,
+    };
+    assert_eq!(ended[0].series.minutes, vec![minute]);
     assert_eq!(h.running.usage_counters().runs_learned, 1);
 }
 
@@ -560,7 +566,12 @@ async fn a_key_has_a_curve_at_three_runs_the_third_being_a_real_run() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].key.as_str(), "act.build");
     assert_eq!(ended[0].lease, LeaseId::new(1, 1));
-    assert_eq!(ended[0].series.minutes, vec![(0, 1500, 4096)]);
+    let minute = RunMinute {
+        minute: 0,
+        cores_milli: 1500,
+        ws_bytes: 4096,
+    };
+    assert_eq!(ended[0].series.minutes, vec![minute]);
     assert_eq!(h.running.usage_counters().runs_learned, 1);
 }
 
@@ -589,4 +600,21 @@ async fn a_failing_store_is_a_503_and_is_counted() {
     h.ticks.step().await;
     assert_eq!(h.running.usage_counters().faults, 3);
     assert_eq!(get(&h, "/healthz").await.status, 200);
+}
+
+/// Asserts that the server as started by its flags records into a file and offers admission
+/// the curves: the file `usage.db` appears beside the lease file, `usage_curves` is there,
+/// and a sink supplied by a test that learns none offers none. It catches a server that
+/// starts with the sink that records nothing, and curves that admission cannot reach.
+#[tokio::test]
+async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
+    let scratch = Scratch::new("usage_file");
+    let db = scratch.path("usage.db");
+    let args = agent_args(&scratch, false);
+    let h = Harness::over(scratch, config(args).unwrap()).await;
+    assert!(db.exists());
+    assert!(h.running.usage_curves().is_some());
+    let fake = Arc::new(Fake::default());
+    let other = start_usage("usage_no_curves", &fake, &[]).await;
+    assert!(other.running.usage_curves().is_none());
 }

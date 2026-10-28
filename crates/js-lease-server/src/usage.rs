@@ -14,7 +14,7 @@
 //! [`NoKeys`] the key source that knows no run's key.
 
 use std::collections::BTreeMap;
-use std::fmt;
+use std::sync::Arc;
 
 use js_types::{HostId, LeaseId};
 
@@ -23,7 +23,10 @@ use js_types::{HostId, LeaseId};
 pub use js_usage::Limits as HostLimits;
 /// One closed wall minute of one node.
 pub use js_usage::NodeMinute as NodeRow;
-pub use js_usage::{ClockIn, DropReason, LoadIn, MinuteIn, Observed};
+pub use js_usage::{
+    BadKey, ClockIn, DropReason, LoadIn, MAX_KEY_LEN, MinuteIn, Observed, ProfileCurves,
+    ProfileKey, RunMinute, RunSeries,
+};
 
 /// A short fixed name for a drop reason, for logs.
 pub fn drop_name(reason: DropReason) -> &'static str {
@@ -48,14 +51,6 @@ pub struct Observation {
     pub fresh: Vec<MinuteIn>,
 }
 
-/// A run's measured series: `(minute, mean cores in thousandths, working set maximum in
-/// bytes)` for each minute since the run's start, in minute order.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RunSeries {
-    /// The minutes.
-    pub minutes: Vec<(u16, u32, u64)>,
-}
-
 /// A run that ended cleanly, with the key of the work it did and what it measured.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEnd {
@@ -65,48 +60,6 @@ pub struct RunEnd {
     pub lease: LeaseId,
     /// What it measured.
     pub series: RunSeries,
-}
-
-/// The key a work profile is kept under: 1 to 128 characters of `[0-9a-z._-]`, the
-/// first not a dot, so that it is one path segment that names nothing but itself.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProfileKey(String);
-
-/// Text that is not a [`ProfileKey`]. It does not keep the text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("not a valid key")]
-pub struct BadKey;
-
-/// The longest [`ProfileKey`], in bytes.
-pub const MAX_KEY_LEN: usize = 128;
-
-impl ProfileKey {
-    /// The key `text` spells, if it is one.
-    pub fn parse(text: &str) -> Result<Self, BadKey> {
-        let sound = (1..=MAX_KEY_LEN).contains(&text.len())
-            && text.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
-            && text.chars().all(is_key_char);
-        match sound {
-            true => Ok(Self(text.to_string())),
-            false => Err(BadKey),
-        }
-    }
-
-    /// The key as text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Whether `c` may appear in a key.
-fn is_key_char(c: char) -> bool {
-    matches!(c, 'a'..='z' | '0'..='9' | '.' | '_' | '-')
-}
-
-impl fmt::Display for ProfileKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
 }
 
 /// One point of a cost curve: what a run of this key uses at a minute of its life.
@@ -190,6 +143,12 @@ pub trait UsageSink: Send + Sync {
     fn key_profile(&self, key: &ProfileKey, now_minute: u64)
     -> Result<Option<KeyView>, UsageFault>;
 
+    /// The learned curves, for admission to read as its `CurveSource`; `None` for a sink
+    /// that learns none.
+    fn curves(&self) -> Option<Arc<ProfileCurves>> {
+        None
+    }
+
     /// What the sink has counted.
     fn counters(&self) -> SinkCounters;
 }
@@ -254,42 +213,8 @@ impl KeySource for NoKeys {
 mod tests {
     use super::*;
 
-    /// Asserts the grammar of a key: 1 to 128 characters of lowercase letters, digits,
-    /// dot, underscore and dash, the first not a dot or a separator. It catches a key
-    /// that could be a path trick (`.`, `..`, `%2e`, a slash), an uppercase one that
-    /// names the same thing twice, a key one character over the cap, and the empty key.
-    #[test]
-    fn a_key_is_one_plain_segment() {
-        let longest = "a".repeat(MAX_KEY_LEN);
-        let over = "a".repeat(MAX_KEY_LEN + 1);
-        for good in ["a", "0", "a.b_c-d", "x86-64.v3", longest.as_str()] {
-            assert_eq!(ProfileKey::parse(good).unwrap().as_str(), good);
-            assert_eq!(ProfileKey::parse(good).unwrap().to_string(), good);
-        }
-        for bad in [
-            "",
-            ".",
-            "..",
-            ".a",
-            "-a",
-            "_a",
-            "A",
-            "aB",
-            "a/b",
-            "/a",
-            "a b",
-            "%2e",
-            "a%2e",
-            "é",
-            over.as_str(),
-        ] {
-            assert_eq!(ProfileKey::parse(bad), Err(BadKey), "{bad:?}");
-        }
-        assert_eq!(BadKey.to_string(), "not a valid key");
-    }
-
-    /// Asserts that the sink that records nothing takes every reading, returns no rows
-    /// and no profile, and the key source that knows nothing names no key. It catches a
+    /// Asserts that the sink that records nothing takes every reading, returns no closed
+    /// rows, and the key source that knows nothing names no key. It catches a
     /// default sink that errors (and so counts a fault on every beat) or invents rows.
     #[test]
     fn the_empty_sink_and_the_empty_key_source_do_nothing() {
@@ -322,6 +247,7 @@ mod tests {
         assert_eq!(sink.prune(0), Ok(()));
         assert_eq!(sink.node_rows(&host, 0, 9, 5), Ok(Vec::new()));
         assert_eq!(sink.key_profile(&end.key, 0), Ok(None));
+        assert!(sink.curves().is_none());
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);
     }

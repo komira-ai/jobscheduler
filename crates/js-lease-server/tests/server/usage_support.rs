@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use js_lease_server::{
     CurvePoint, DropReason, HostLimits, KeySource, KeyView, LoadIn, NodeRow, Observation, Observed,
-    ProfileKey, RunEnd, RunSeries, SinkCounters, UsageFault, UsageSink,
+    ProfileKey, RunEnd, RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
 };
 use js_types::{HostId, LeaseId};
 use serde_json::{Value, json};
@@ -99,7 +99,12 @@ impl Fake {
     /// `runs` runs already learned under `key`.
     pub fn learn(&self, key: &str, runs: usize) {
         let series = RunSeries {
-            minutes: vec![(0, 1500, 4096)],
+            minutes: vec![RunMinute {
+                minute: 0,
+                cores_milli: 1500,
+                ws_bytes: 4096,
+            }],
+            flags: 0,
         };
         let mut state = self.state();
         let kept = state.profiles.entry(key.to_string()).or_default();
@@ -229,10 +234,10 @@ impl UsageSink for Fake {
             return Ok(None);
         };
         let curve = (runs.len() >= 3).then(|| {
-            let point = |&(minute, cores_milli, ws_bytes): &(u16, u32, u64)| CurvePoint {
-                minute,
-                cores_milli,
-                ws_bytes,
+            let point = |m: &RunMinute| CurvePoint {
+                minute: u16::try_from(m.minute).unwrap(),
+                cores_milli: m.cores_milli,
+                ws_bytes: m.ws_bytes,
             };
             runs[0].minutes.iter().map(point).collect()
         });

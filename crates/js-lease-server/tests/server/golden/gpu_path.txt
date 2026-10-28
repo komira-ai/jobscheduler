@@ -501,10 +501,10 @@ without agent flags
   after shutdown: pool.toml state/ state/leases.toml state/leases.toml.lock token
 with agent flags
   before start: agent-pool.toml agent-tokens pool.toml state/ token
-  after start: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock token
-  after acquire: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock token
-  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock token
-  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock token
+  after start: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after acquire: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after an agent joins: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db-shm state/usage.db-wal state/usage.db.lock token
+  after shutdown: agent-pool.toml agent-tokens pool.toml state/ state/leases.toml state/leases.toml.agents state/leases.toml.lock state/usage.db state/usage.db.lock token
 
 == lease-file ==
 after start
