@@ -44,7 +44,7 @@ use crate::requeue::{Requeue, RequeueReason};
 use crate::servable::{Attempt, Placed, Servable, Verdict};
 use memory::{MemoryLadder, MemoryState};
 
-/// At most this many leases are granted per [`Event::Tick`] (one log flush per round).
+/// At most this many leases are granted per [`crate::Event::Tick`] (one log flush per round).
 pub const PLACEMENT_ROUND: usize = 256;
 
 /// How long a queued operation may wait while no live worker can run it (none
