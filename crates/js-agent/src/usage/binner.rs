@@ -77,7 +77,7 @@ pub fn window_parts(started: u64, from: u64, to: u64, cpu_usec: u64) -> Vec<Wind
     let mut at = from;
     let mut given = 0;
     while at < to {
-        let minute = at.saturating_sub(started) / MINUTE_USEC;
+        let minute = to.saturating_sub(started) / MINUTE_USEC;
         let boundary = started.saturating_add(minute.saturating_add(1).saturating_mul(MINUTE_USEC));
         let end = to.min(boundary);
         let share = if end == to {
