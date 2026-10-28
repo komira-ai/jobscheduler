@@ -12,6 +12,8 @@
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
+//! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
+//!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
 //! Exit status: 0 when the verb passed, 1 when it failed (one reason on stderr), 2 on a
 //! usage error.
@@ -24,6 +26,7 @@ use clap::{Parser, Subcommand};
 
 pub mod deploy;
 pub mod fetch;
+pub mod layering;
 pub mod release;
 
 /// Why a verb failed.

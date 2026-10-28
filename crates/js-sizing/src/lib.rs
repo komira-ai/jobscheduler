@@ -43,8 +43,12 @@
 //!   strictly below it, and an estimate (with the client's hint) that would reach it is
 //!   [`Fallback::OverCap`]: the caller books cold and the ladder and digest floors
 //!   decide.
-//! * **CPU.** `round_up_250m(P90(cpu_usage / wall))`, clamped to `[1000 m, node cpus]`;
-//!   1000 m with no CPU sample. It never goes below one core in this phase.
+//! * **CPU.** `round_up_250m(P90(cpu_usage / wall))`, clamped to `[250 m, node cpus]`
+//!   (a 0.3-core action costs 500 m); [`COLD_CPU_MILLIS`] with no CPU sample. A sample taken at or
+//!   above [`CPU_PRESSURE_MAX_PERMILLE`] node pressure, or with no pressure reading, is
+//!   kept only when it exceeds the key's current estimate ([`COLD_CPU_MILLIS`] for a key
+//!   with no sample), so under load an estimate can only rise. [`Observed::cpu`] says
+//!   which happened and [`Summaries::cpu_counts`] counts it.
 //! * **Hints.** The final memory and CPU are the larger of the estimate and the client's
 //!   hint: an estimate never gives less than the client asked for.
 //! * **Safety.** An own-limit kill sets `oom_floor` to at least the next rung the caller
@@ -114,14 +118,15 @@ mod summary;
 mod tests;
 
 pub use key::{Basis, Cfg, Day, Instance, Key, Level, PlatformClass, Shape};
-pub use run::{Bounds, Discard, Hint, Observed, Outcome, Run, memory_max};
+pub use run::{Bounds, CpuSample, Discard, Hint, Observed, Outcome, Run, memory_max};
 pub use store::{
-    Estimate, Fallback, MAX_KEYS, MAX_KEYS_PER_INSTANCE, MAX_PINNED, STALE_DAYS, Summaries,
+    CpuCounts, Estimate, Fallback, MAX_KEYS, MAX_KEYS_PER_INSTANCE, MAX_PINNED, STALE_DAYS,
+    Summaries,
 };
 pub use summary::{
-    CPU_MIN_MILLIS, CPU_PRESSURE_MAX_PERMILLE, DECAY_DAYS, DECAY_RUNS, KILL_WINDOW_RUNS, KillFloor,
-    MAX_DAY, MIN_MEMORY, MIN_SAMPLES, MIN_WALL_US, MIXED_RATIO, N_MIN, RAISE_ONLY_DAYS, Summary,
-    floor_ceiling, kill_floor,
+    COLD_CPU_MILLIS, CPU_MIN_MILLIS, CPU_PRESSURE_MAX_PERMILLE, DECAY_DAYS, DECAY_RUNS,
+    KILL_WINDOW_RUNS, KillFloor, MAX_DAY, MIN_MEMORY, MIN_SAMPLES, MIN_WALL_US, MIXED_RATIO, N_MIN,
+    RAISE_ONLY_DAYS, Summary, floor_ceiling, kill_floor,
 };
 
 /// One mebibyte.

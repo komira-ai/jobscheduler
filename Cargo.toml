@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
@@ -29,6 +29,8 @@ libc = "0.2.190"
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
 # no TLS (an `sslmode=require` URL is refused rather than downgraded).
 postgres = "0.19.10"
+# The simulation kernel's seeded random stream (js-sim).
+rand_chacha = "0.10.0"
 # Test certificates only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
@@ -55,6 +57,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-pro
 # so a missing one fails the build.
 [workspace.lints.rust]
 missing_docs = "warn"
+# `coverage` is set by cargo-llvm-cov (the coverage job compiles with it).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 disallowed_methods = "allow"

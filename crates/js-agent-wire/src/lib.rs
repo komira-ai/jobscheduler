@@ -90,6 +90,8 @@
 //! carries [`RunResult`]s up until each is acknowledged. [`refusal`] holds the codes a
 //! refusal carries.
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 mod check;
 mod command;
 mod error;
@@ -103,8 +105,8 @@ pub mod refusal;
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use error::{Rule, ValidationError};
 pub use heartbeat::{
-    Ack, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusedCommand, ReplyCheck,
-    ResultAck, RunResult, Taint,
+    Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusalReason,
+    RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
 };
 pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,

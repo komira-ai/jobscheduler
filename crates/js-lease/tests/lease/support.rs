@@ -9,7 +9,9 @@ use std::time::Duration;
 use js_lease::{Boot, LeaseState, LeaseTable, ManualClock, OpenError, Settings, Timestamp};
 use js_provider::Provider;
 use js_provider_fake::FakeProvider;
-use js_types::{ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass, Resources, Shape,
+};
 
 pub const T0: u64 = 1_000_000;
 
@@ -79,11 +81,12 @@ fn shape() -> Shape {
 pub fn fake() -> FakeProvider {
     let hosts = vec![(host("h1"), shape()), (host("h2"), shape())];
     FakeProvider::new(ProviderId::new("fake").unwrap(), hosts)
+        .with_class(ResourceClass::whole_node())
 }
 
 pub fn request(max_wall_secs: u64) -> Request {
     Request {
-        class: ClassId::new("gpu-host").unwrap(),
+        class: ClassId::new("whole-node").unwrap(),
         resources: Resources::new(1000, 1, 1, Some("g".into())).unwrap(),
         capabilities: BTreeMap::new(),
         max_wall: secs(max_wall_secs),
@@ -120,7 +123,7 @@ pub fn states<P: Provider>(table: &LeaseTable<P, ManualClock>) -> Vec<(LeaseId, 
 }
 
 pub fn provider_classes() -> Vec<ResourceClass> {
-    vec![ResourceClass::gpu_host()]
+    vec![ResourceClass::whole_node()]
 }
 
 pub fn open_err(path: &Path) -> OpenError {
@@ -134,4 +137,32 @@ pub fn open_err(path: &Path) -> OpenError {
 pub fn break_dir(scratch: &Scratch) {
     scratch.clear();
     fs::remove_dir(&scratch.dir).unwrap();
+}
+
+/// A class that is not whole-node: it books the host's every dimension but has none of
+/// the whole-node waiting rules.
+pub fn plain_class() -> ResourceClass {
+    let id = ClassId::new("plain").unwrap();
+    ResourceClass::new(id, Admission::BookAll, 0)
+}
+
+/// A fake that also serves [`plain_class`].
+pub fn fake_with_plain() -> FakeProvider {
+    fake().with_class(plain_class())
+}
+
+/// A request of the `gpu-host` class, which is admitted `BookAll`, not whole-node.
+pub fn gpu_host_request(max_wall_secs: u64) -> Request {
+    Request {
+        class: ClassId::new("gpu-host").unwrap(),
+        ..request(max_wall_secs)
+    }
+}
+
+/// A request of the `plain` class.
+pub fn plain_request(max_wall_secs: u64) -> Request {
+    Request {
+        class: plain_class().id().clone(),
+        ..request(max_wall_secs)
+    }
 }

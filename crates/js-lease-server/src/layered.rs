@@ -17,12 +17,18 @@ use crate::error::StartupError;
 /// - **Start** asks the child that already holds the lease, if there is one, so a
 ///   repeated start never books a second host. Otherwise it asks the children in order,
 ///   the static pool first, and moves on to the next only when a child has no room for
-///   the request ([`RefusalCode::NoCapacity`], [`RefusalCode::NoFit`]) or does not serve
-///   its class ([`RefusalCode::UnsupportedClass`]). Any other answer is final: a refusal
-///   of the start contract would be the same on every child, an ended lease is ended
-///   everywhere, and an unanswered start must not be repeated on another child. When
-///   every child declines, the answer is the most hopeful of the declines: no capacity
-///   (a host could free up), else no fit, else unsupported class.
+///   the request ([`RefusalCode::NoCapacity`], [`RefusalCode::NoFit`]), could never
+///   serve it ([`RefusalCode::NoCapableHost`], a registry with no host that could be
+///   given a whole-node request) or does not serve its class
+///   ([`RefusalCode::UnsupportedClass`]). Any other answer is final: a refusal of the
+///   start contract would be the same on every child, an ended lease is ended
+///   everywhere, an unanswered start must not be repeated on another child, and
+///   [`RefusalCode::ExclusiveNotReady`] is about this request alone (it used up its
+///   tries to get a host ready and is not placed again), so another child must not
+///   place it. When every child declines, the answer is the most hopeful of the
+///   declines: no capacity (a host could free up), else no capable host, else no fit,
+///   else unsupported class. So the answer is no capable host only when every child
+///   says it can never serve the request, and no capacity while any child could later.
 /// - **Stop** goes to every child, since each remembers the ended lease.
 /// - **Observe** and the read-back of a stop are `Present` if any child says so, else
 ///   `Unknown` if any does, else `Absent`.
@@ -47,7 +53,8 @@ impl LayeredProvider {
 /// How hopeful a decline is; the layered answer is the highest of the children's.
 fn hope(code: RefusalCode) -> u8 {
     match code {
-        RefusalCode::NoCapacity => 2,
+        RefusalCode::NoCapacity => 3,
+        RefusalCode::NoCapableHost => 2,
         RefusalCode::NoFit => 1,
         _ => 0,
     }
@@ -101,6 +108,7 @@ impl Provider for LayeredProvider {
             match child.start(spec.clone()) {
                 StartAck::Refused(
                     code @ (RefusalCode::NoCapacity
+                    | RefusalCode::NoCapableHost
                     | RefusalCode::NoFit
                     | RefusalCode::UnsupportedClass),
                 ) => {
@@ -295,6 +303,119 @@ mod tests {
     /// The answer of a start that booked `name`.
     fn on(name: &str) -> StartAck {
         StartAck::Started { host: host(name) }
+    }
+
+    /// A child that answers every start with `code` and is a fake in every other call.
+    struct Refuses {
+        inner: FakeProvider,
+        code: RefusalCode,
+    }
+
+    impl Provider for Refuses {
+        fn id(&self) -> ProviderId {
+            self.inner.id()
+        }
+        fn flavour(&self) -> Flavour {
+            self.inner.flavour()
+        }
+        fn classes(&self) -> Vec<ResourceClass> {
+            self.inner.classes()
+        }
+        fn start(&mut self, _: StartSpec) -> StartAck {
+            StartAck::Refused(self.code)
+        }
+        fn stop(&mut self, lease: &LeaseId) -> StopAck {
+            self.inner.stop(lease)
+        }
+        fn observe(&mut self, lease: &LeaseId) -> Observed {
+            self.inner.observe(lease)
+        }
+        fn capacity(&self) -> Vec<HostCapacity> {
+            self.inner.capacity()
+        }
+    }
+
+    fn refusing(name: &str, code: RefusalCode) -> Box<dyn Provider + Send> {
+        let inner = fake(name, &[(name, 1000, 1)]);
+        Box::new(Refuses { inner, code })
+    }
+
+    fn layer_of(children: Vec<Box<dyn Provider + Send>>) -> LayeredProvider {
+        LayeredProvider::new(ProviderId::new("layered").unwrap(), children)
+    }
+
+    /// A registry that could never serve the request does not end the search, and does
+    /// not hide a busy static pool: the answer is no capacity, in either order. It
+    /// catches a layer that takes the registry's no-capable-host as final.
+    #[test]
+    fn no_capable_host_does_not_beat_no_capacity() {
+        for flip in [false, true] {
+            let mut busy = fake("s", &[("s-1", 1000, 1)]);
+            busy.start(spec(9, 1, 1));
+            let mut children: Vec<Box<dyn Provider + Send>> =
+                vec![Box::new(busy), refusing("r", RefusalCode::NoCapableHost)];
+            if flip {
+                children.reverse();
+            }
+            let mut provider = layer_of(children);
+            let ack = provider.start(spec(1, 1, 1));
+            assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapacity));
+        }
+    }
+
+    /// A free static host still books when the registry earlier in the layer could never
+    /// serve the request: the decline moves on to the next child.
+    #[test]
+    fn no_capable_host_moves_on_to_the_next_child() {
+        let mut provider = layer_of(vec![
+            refusing("r", RefusalCode::NoCapableHost),
+            Box::new(fake("s", &[("s-1", 1000, 1)])),
+        ]);
+        assert_eq!(provider.start(spec(1, 1, 1)), on("s-1"));
+    }
+
+    /// When every child says it could never serve the request, so does the layer; that
+    /// outranks no fit and an unsupported class. It catches a layer that reports a
+    /// decline of lower hope, or none.
+    #[test]
+    fn no_capable_host_when_every_child_says_so() {
+        let mut provider = layer_of(vec![
+            refusing("a", RefusalCode::NoCapableHost),
+            refusing("b", RefusalCode::NoCapableHost),
+        ]);
+        let ack = provider.start(spec(1, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapableHost));
+        let mut provider = layer_of(vec![
+            refusing("a", RefusalCode::NoFit),
+            refusing("b", RefusalCode::NoCapableHost),
+        ]);
+        let ack = provider.start(spec(2, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::NoCapableHost));
+    }
+
+    /// A request that used up its tries is refused as such and no other child is asked,
+    /// where a free static host would place it. It catches a layer that retries it.
+    #[test]
+    fn exclusive_not_ready_is_final() {
+        let child = refusing("r", RefusalCode::ExclusiveNotReady);
+        assert_eq!(child.id().as_str(), "r");
+        assert_eq!(child.flavour(), fake("r", &[]).flavour());
+        let mut provider = layer_of(vec![child, Box::new(fake("s", &[("s-1", 1000, 1)]))]);
+        let ack = provider.start(spec(1, 1, 1));
+        assert_eq!(ack, StartAck::Refused(RefusalCode::ExclusiveNotReady));
+        assert_eq!(leased(&provider, "s-1"), None);
+        let ids: Vec<_> = provider.capacity().into_iter().map(|h| h.host).collect();
+        assert_eq!(ids, vec![host("r"), host("s-1")]);
+        let lease = LeaseId::new(1, 1);
+        assert_eq!(provider.observe(&lease), Observed::Absent);
+        assert_eq!(provider.classes(), vec![ResourceClass::gpu_host()]);
+        let stopped = provider.stop(&lease);
+        assert_eq!(
+            stopped,
+            StopAck::Stopped {
+                read_back: Observed::Absent
+            }
+        );
     }
 
     fn leased(provider: &LayeredProvider, name: &str) -> Option<LeaseId> {

@@ -143,6 +143,22 @@ pub async fn beat(h: &Harness, session: &Session) -> Reply {
     post(h, "/v1/agent/heartbeat", Some(JOIN), &session.beat()).await
 }
 
+/// One round of a test agent that does what a real one does about an exclusive lease: it
+/// sends a heartbeat, and when the reply names a lease in `exclusive` it sends a second
+/// one reporting that lease `exclusive_ready`. Returns the first reply, so a test can
+/// read what the server told the agent. A host with no exclusive lease gets one
+/// heartbeat and no report.
+pub async fn beat_preparing(h: &Harness, session: &Session) -> Reply {
+    let reply = beat(h, session).await;
+    if let Some(lease) = reply.json()["exclusive"].as_str() {
+        let mut ready = session.beat();
+        ready["exclusive_ready"] = json!(lease);
+        let sent = post(h, "/v1/agent/heartbeat", Some(JOIN), &ready).await;
+        assert_eq!(sent.status, 200, "{}", sent.body);
+    }
+    reply
+}
+
 /// `GET /v1/hosts` with the client token.
 pub async fn hosts(h: &Harness) -> Value {
     let reply = h.call("GET", "/v1/hosts", None).await;

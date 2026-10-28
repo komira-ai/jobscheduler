@@ -28,6 +28,11 @@
 //! only when a rule is dropped from `StartSpec::new` or a provider lists the wrong
 //! classes. The rules themselves are unit-tested in `js-provider`.
 //!
+//! The host-agent suite, which is wire-neutral and takes a harness per transport instead
+//! of a [`Subject`], is the [`agent`] module. It sits here, beside the provider suite,
+//! because both are conformance suites that a defect is shown red against, and it needs
+//! nothing the crate does not already have.
+//!
 //! # Follow-ups
 //!
 //! - Labels on created resources (design 13.2: labels are present on every created
@@ -35,12 +40,14 @@
 //!   rule has no resource to read; the check belongs with the first provider that
 //!   creates resources.
 
+pub mod agent;
 mod checks;
+pub mod core;
 
 use std::collections::BTreeMap;
 
 use js_provider::{Call, Provider};
-use js_types::{Capabilities, ClassId, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
+use js_types::{Capabilities, HostId, LeaseId, Request, ResourceClass, Resources, Shape};
 
 pub use checks::Check;
 
@@ -56,6 +63,14 @@ pub trait Subject {
     /// `landed` is set. Returns `false` when the provider cannot be made to answer
     /// Unknown, as a provider that owns its state and always knows.
     fn script_unknown(&mut self, call: Call, landed: bool) -> bool;
+
+    /// The class the checks lease. Defaults to the shipped `gpu-host`; a provider that
+    /// serves another class names it here, and the checks that assume an immediate
+    /// `Started` and Present report [`Verdict::NotApplicable`] for a class whose leases
+    /// wait to be observed ready.
+    fn class(&self) -> ResourceClass {
+        ResourceClass::gpu_host()
+    }
 
     /// Makes the provider list `class` among its classes while it cannot lease it, as a
     /// whole-host provider cannot lease a class that books by the GPU. Returns `false`
@@ -125,9 +140,14 @@ pub fn standard_hosts() -> Vec<(HostId, Shape)> {
 /// A request that fits one standard host: class `gpu-host`, one conformance GPU, a
 /// ten minute wall time cap and no labels.
 pub fn standard_request() -> Request {
+    request_of(&ResourceClass::gpu_host())
+}
+
+/// [`standard_request`] for `class`.
+pub fn request_of(class: &ResourceClass) -> Request {
     let wanted = Resources::new(1000, 1, 1, Some("conformance-gpu".to_string()));
     Request {
-        class: ClassId::new("gpu-host").expect("constant id is valid"),
+        class: class.id().clone(),
         resources: wanted.expect("constant resources are valid"),
         capabilities: Capabilities::new(),
         max_wall: std::time::Duration::from_secs(600),

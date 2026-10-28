@@ -20,6 +20,8 @@
 //! answers, [`Observed::Unknown`] is the lack of one. Only `Absent` frees a booking
 //! ([`Observed::frees_booking`]).
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 mod ack;
 mod spec;
 

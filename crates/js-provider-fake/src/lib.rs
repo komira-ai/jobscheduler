@@ -11,6 +11,8 @@
 //! high-water mark.
 //! [`FakeProvider::booked`] reads the host table directly, for conformance hooks.
 
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use js_provider::{
@@ -70,6 +72,7 @@ pub struct FakeProvider {
     ended: BTreeSet<LeaseId>,
     rank: Rank,
     unleasable: Vec<ResourceClass>,
+    extra_classes: Vec<ResourceClass>,
     defect: Option<Defect>,
 }
 
@@ -87,6 +90,7 @@ impl FakeProvider {
             ended: BTreeSet::new(),
             rank: Rank::default(),
             unleasable: Vec::new(),
+            extra_classes: Vec::new(),
             defect: None,
         }
     }
@@ -107,6 +111,13 @@ impl FakeProvider {
     /// with `UnsupportedClass` and books nothing.
     pub fn with_unleasable_class(mut self, class: ResourceClass) -> Self {
         self.unleasable.push(class);
+        self
+    }
+
+    /// The same fake also serving `class`, which it leases like `gpu-host`: a start of it
+    /// books a fitting host. For a test that needs a class of another admission mode.
+    pub fn with_class(mut self, class: ResourceClass) -> Self {
+        self.extra_classes.push(class);
         self
     }
 
@@ -233,6 +244,7 @@ impl Provider for FakeProvider {
 
     fn classes(&self) -> Vec<ResourceClass> {
         let mut listed = vec![ResourceClass::gpu_host()];
+        listed.extend(self.extra_classes.iter().cloned());
         listed.extend(self.unleasable.iter().cloned());
         listed
     }

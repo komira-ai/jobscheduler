@@ -85,14 +85,27 @@ impl Reference {
             }
             _ => {}
         }
-        if run.outcome == Outcome::Success
-            && trusted
-            && run.cpu_usage_us > 0
-            && run.node_cpu_pressure_permille.is_some_and(|p| p < 100)
-        {
+        if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
             let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
-            self.cpu.push(millis.min(u128::from(u32::MAX)) as u32);
+            let millis = millis.min(u128::from(u32::MAX)) as u32;
+            let quiet = run.node_cpu_pressure_permille.is_some_and(|p| p < 100);
+            if quiet || millis > self.cpu_estimate(b) {
+                self.cpu.push(millis);
+            }
         }
+    }
+
+    /// The CPU estimate by scanning the last 32 samples; 2000 m while there are none.
+    fn cpu_estimate(&self, b: &Bounds) -> u32 {
+        if self.cpu.is_empty() {
+            return 2000.min(b.node_cpu_millis);
+        }
+        let mut last: Vec<u32> = self.cpu.iter().rev().take(32).copied().collect();
+        last.sort_unstable();
+        let p90 = last[(last.len() * 9).div_ceil(10) - 1];
+        p90.div_ceil(250)
+            .saturating_mul(250)
+            .clamp(250.min(b.node_cpu_millis), b.node_cpu_millis)
     }
 
     fn kill(&mut self, run: &Run, now: u32, b: &Bounds) {
@@ -170,15 +183,7 @@ impl Reference {
         if memory >= b.host_memory {
             return Err(Fallback::OverCap);
         }
-        let mut last: Vec<u32> = self.cpu.iter().rev().take(32).copied().collect();
-        last.sort_unstable();
-        let rank = (last.len() * 9).div_ceil(10);
-        let p90 = if rank == 0 { 0 } else { last[rank - 1] };
-        let low = 1000.min(b.node_cpu_millis);
-        let cpu = p90
-            .div_ceil(250)
-            .saturating_mul(250)
-            .clamp(low, b.node_cpu_millis);
+        let cpu = self.cpu_estimate(b);
         Ok((memory, cpu.max(hint.cpu_millis.unwrap_or(0))))
     }
 }
