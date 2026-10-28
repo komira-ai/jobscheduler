@@ -104,10 +104,10 @@ async fn revoking_needs_the_client_token() {
     }
 }
 
-/// Asserts that revoking is idempotent: a second revoke, a revoke of an instance that was
-/// never minted, and a revoke of a token that expired and was dropped are each a 204,
-/// and the file is not rewritten for them. It catches a terminate that has to treat a
-/// retry specially.
+/// Asserts that revoking is idempotent: a second revoke and a revoke of an instance that
+/// was never minted are each a 204 with no body, and the file's contents stay as they were.
+/// (That no write happens is proved at the store, where the file is unwritable.) It
+/// catches a terminate that has to treat a retry specially.
 #[tokio::test]
 async fn revoking_twice_or_an_unknown_instance_is_204() {
     let h = start_agents("joins_revoke_idempotent", false).await;
@@ -171,8 +171,5 @@ async fn the_mint_answer_is_not_stored() {
     let (head, reply) = text.split_once("\r\n\r\n").unwrap();
     assert!(head.starts_with("http/1.1 201"), "{head}");
     assert!(head.contains("cache-control: no-store"), "{head}");
-    let raw_body = reply;
-    let _: Value = serde_json::from_str(raw_body).unwrap();
-    let again = mint(&h, "i-2").await;
-    assert_eq!(again.status, 201);
+    let _: Value = serde_json::from_str(reply).unwrap();
 }

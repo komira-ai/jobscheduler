@@ -33,8 +33,11 @@
 //! drop is written like a use (owner-only file, whole-file replace, fsync, under the
 //! same lock). The token is unknown from then on: its hello and heartbeat get the 401 of
 //! a token that never existed. Revoking is idempotent: an instance with no token (never
-//! minted, already revoked, or expired and dropped) is also a 204, so a terminate that
-//! is retried needs no care. A file that cannot be written is a 503 `state-write-failed`
+//! minted, or already revoked) is also a 204 and writes nothing, so a terminate that
+//! is retried needs no care. An unused token past its expiry stays in memory until the
+//! next mint drops it, so revoking it is a write, and also a 204. A host id the registry
+//! bound to a revoked token stays bound to it (a hello for it with a new token is refused
+//! `host-bound`), so a fresh launch uses a fresh instance and host id. A file that cannot be written is a 503 `state-write-failed`
 //! and the tokens stay as they were. The body is validated like the mint's (400).
 
 use std::sync::Arc;

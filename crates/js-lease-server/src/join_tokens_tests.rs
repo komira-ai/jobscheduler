@@ -645,3 +645,17 @@ fn a_revoke_the_file_refuses_changes_nothing() {
     assert_eq!(joins.serves(&who, "host-a"), Ok(()));
     assert_eq!(joins.lock().len(), 1);
 }
+
+/// A revoke that drops nothing writes nothing: with the file made unwritable, a revoke of
+/// an instance with no token (or one already revoked) is still `Ok(0)`, where a write
+/// would be `Unsaved`. It catches a revoke that rewrites the file when nothing changed.
+#[test]
+fn a_revoke_that_drops_nothing_writes_nothing() {
+    let path = scratch("revoke_no_write");
+    let (joins, _) = tokens(&path);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(joins.revoke(&instance("never-minted")), Ok(0));
+    assert!(joins.identify(&minted.token).is_some());
+}

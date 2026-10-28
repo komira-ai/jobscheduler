@@ -43,7 +43,9 @@ hello in message metadata, never in a log line.
   an instance the scheduler terminates itself: its terminate path revokes the instance's tokens with `DELETE /v1/agent/join-tokens`
   (client token only, body `{provider, instance_id}`), which drops every token bound to that instance, used or not, in one write of the
   file. A revoked token is unknown, so its hello and heartbeat get the 401 of a token that never existed. The call answers 204 also for an
-  instance with no token, so a retried terminate needs no care; a file that cannot be written is a 503 `state-write-failed` and the tokens
+  instance with no token (nothing is written then), so a retried terminate needs no care; an unused token past its expiry stays until the next
+  mint drops it, so revoking one is a write, and also a 204. The registry's binding of the host id to the revoked token's digest persists, so
+  a hello for that host id with a new token is refused `host-bound`: a fresh launch uses a fresh instance and host id; a file that cannot be written is a 503 `state-write-failed` and the tokens
   stay. This closes the window of a used token for the instances the scheduler terminates; an instance that dies without that call falls
   back to the bound. The 201 of the mint carries `Cache-Control: no-store`. A hello the
   registry refuses (the host id is bound to another credential, the pool is full, the shape is not accepted) gives the use back: the token

@@ -84,3 +84,27 @@ async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered()
     let other = agents.joins.admit(&who, "host-b", Some(&instance()));
     assert_eq!(other, Err(JoinRefusal::Used));
 }
+
+/// A revoke that lands between the admit and the registry call: the registry still accepts
+/// the hello (the host is registered), but the token is gone, so it is unknown afterwards
+/// (the route answers its heartbeats 401) and serves no host. It catches a hello that
+/// puts a revoked token back, for example by releasing the use as a rewrite of the entry.
+#[tokio::test]
+async fn a_revoke_between_admit_and_registry_leaves_the_token_gone() {
+    let agents = agents("revoke_between");
+    let minted = agents
+        .joins
+        .mint(instance(), Duration::from_secs(600))
+        .unwrap();
+    let who = Credential::of_token(&minted.token);
+    let revoke = || {
+        assert_eq!(agents.joins.revoke(&instance()), Ok(1));
+    };
+    let first = serve_hello(&agents, who.clone(), true, Ok(body("host-a")), &revoke).await;
+    assert!(first.is_ok());
+    assert!(agents.joins.identify(&minted.token).is_none());
+    assert_eq!(
+        agents.joins.serves(&who, "host-a"),
+        Err(JoinRefusal::NotAdmitted)
+    );
+}
