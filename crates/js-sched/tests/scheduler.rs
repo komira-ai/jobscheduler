@@ -1,5 +1,6 @@
 //! The scheduler's rules, one scenario each, driven through its public inputs.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -64,7 +65,7 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        Self::with(Scheduler::new(1).with_load_config(booked::booked()))
+        Self::with(Scheduler::new(1).with_load_config(booked::current()))
     }
 
     fn with(s: Scheduler) -> Self {
@@ -194,10 +195,10 @@ impl Harness {
     }
 }
 
+both_rules! {
 /// Catches: a `Start` emitted when the operation is placed, before its grant is
 /// committed; a second `Start` for a grant committed twice; and a `Start` for a grant
 /// that expired before its commit arrived (the worker went silent meanwhile).
-#[test]
 fn start_is_emitted_only_once_the_grant_is_committed() {
     let mut h = Harness::new();
     h.worker("a", 8_000, 8 * GIB);
@@ -225,11 +226,12 @@ fn start_is_emitted_only_once_the_grant_is_committed() {
     assert_eq!(h.s.state(late.operation), Some(&OpState::Queued));
     assert!(h.commit(ControlRecord::Lease(late)).is_empty());
 }
+}
 
+both_rules! {
 /// Catches: a `Start` for whatever lease the operation holds now when an older grant's
 /// commit arrives. Lease 1.0's grant commits only after the operation was re-granted as
 /// 1.1 to another live worker; 1.1 is not committed yet, so nothing may start until it is.
-#[test]
 fn a_superseded_grant_commit_does_not_start_the_newer_uncommitted_lease() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -262,11 +264,12 @@ fn a_superseded_grant_commit_does_not_start_the_newer_uncommitted_lease() {
     let start = h.commit_and_start(&new);
     assert_eq!((start.worker, start.lease), (w("b"), new.lease));
 }
+}
 
+both_rules! {
 /// Catches: an operation whose result commits while it waits in the queue (its lease
 /// expired with no room elsewhere) left in the queue, so the next tick grants it again,
 /// overwrites the finished state and leads to a second Start and a second Answer.
-#[test]
 fn an_operation_finished_while_queued_is_not_placed_again() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -290,11 +293,12 @@ fn an_operation_finished_while_queued_is_not_placed_again() {
     assert!(h.tick().is_empty(), "a finished operation was placed again");
     assert!(h.s.state(grant.operation).is_some_and(OpState::is_done));
 }
+}
 
+both_rules! {
 /// Catches: a result proposed from a lease that expired and was re-dispatched (a late
 /// result), and a duplicate report proposed twice. Then the new lease's result is
 /// the one answered.
-#[test]
 fn late_and_duplicate_reports_are_not_proposed() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -318,11 +322,12 @@ fn late_and_duplicate_reports_are_not_proposed() {
     assert_eq!(h.report(&second, ok(2)).len(), 1);
     assert!(h.report(&second, ok(2)).is_empty(), "duplicate proposed");
 }
+}
 
+both_rules! {
 /// Catches: a committed result accepted from a lease the log had already superseded
 /// (what a replica replaying the log must reject), a result committed twice answered
 /// twice, and a superseding grant still started after the operation finished.
-#[test]
 fn the_log_order_decides_which_result_wins() {
     // Order 1: the result of lease 1 is proposed, then lease 2 is granted and committed
     // before the result commits. Lease 1's result loses.
@@ -366,10 +371,11 @@ fn the_log_order_decides_which_result_wins() {
     assert!(h.commit(ControlRecord::Lease(second)).is_empty());
     assert_eq!(h.s.booked(&w("b")), Some(Resources::default()));
 }
+}
 
+both_rules! {
 /// Catches: a failure that is retried or dropped instead of answered, and a state
 /// that does not record which lease failed.
-#[test]
 fn a_reported_failure_fails_the_operation() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -394,10 +400,11 @@ fn a_reported_failure_fails_the_operation() {
     );
     assert!(h.tick().is_empty(), "a failed operation was placed again");
 }
+}
 
+both_rules! {
 /// Catches: placement that checks CPU but not memory (or the reverse), bookings that
 /// are not added up, and a worker silent for G still offered new work.
-#[test]
 fn placement_books_cpu_and_memory_on_live_workers() {
     let mut h = Harness::new();
     // `a` has CPU to spare but too little memory; `b` has both.
@@ -422,6 +429,7 @@ fn placement_books_cpu_and_memory_on_live_workers() {
     let [g3] = h.tick().try_into().unwrap();
     assert_eq!(g3.worker, w("c"));
 }
+}
 
 /// A request for one core and `memory` bytes, number `n`.
 fn sized(n: u8, memory: u64) -> Request {
@@ -431,11 +439,11 @@ fn sized(n: u8, memory: u64) -> Request {
     }
 }
 
+both_rules! {
 /// Catches: an action's memory booked against the node's memory, so that a node whose
 /// cores and lease count allow 80 actions runs only floor(175 / 4) = 43 when each is
 /// first run under a 4 GiB limit. The limit is not a booking: the node takes work up to
 /// its CPUs whatever the limits add up to, and the sum is only recorded.
-#[test]
 fn memory_limits_summing_past_the_node_do_not_keep_actions_out() {
     let mut h = Harness::new();
     h.worker("a", 80_000, 175 * GIB);
@@ -443,23 +451,31 @@ fn memory_limits_summing_past_the_node_do_not_keep_actions_out() {
         h.submit(u64::from(n), sized(n, 4 * GIB));
     }
     let grants = h.tick();
-    assert_eq!(grants.len(), 80, "one per core, not one per 4 GiB of 175");
+    // The booked rule takes one per core; placement by load plans the cores to a tenth over
+    // them (88 of 80), and memory not at all.
+    let placed: u64 = if booked::is_booked() { 80 } else { 88 };
+    assert_eq!(
+        grants.len() as u64,
+        placed,
+        "one per core (and the slack under load), not one per 4 GiB of 175"
+    );
     assert_eq!(
         h.s.booked(&w("a")),
-        Some(Resources::new(80_000, 320 * GIB)),
+        Some(Resources::new(placed * 1_000, placed * 4 * GIB)),
         "the limits sum to more than the node's memory"
     );
-    assert_eq!(h.s.queued().count(), 20);
+    assert_eq!(h.s.queued().count() as u64, 100 - placed);
     // A lease that ends opens its core, and only its core.
     h.commit_and_start(&grants[0]);
     h.finish(&grants[0], ok(0));
     assert_eq!(h.tick().len(), 1);
 }
+}
 
+both_rules! {
 /// Catches: a limit larger than the node's memory placed on it (an action that asks for
 /// more than the node has would run under a limit it can never reach), and a node
 /// skipped for a limit it has the memory for.
-#[test]
 fn an_action_goes_only_to_a_node_with_the_memory_of_its_limit() {
     let mut h = Harness::new();
     h.worker("a", 8_000, 8 * GIB);
@@ -467,16 +483,29 @@ fn an_action_goes_only_to_a_node_with_the_memory_of_its_limit() {
     h.submit(1, sized(1, 16 * GIB));
     let [g1] = h.tick().try_into().unwrap();
     assert_eq!(g1.worker, w("b"), "a has 8 GiB, the limit is 16");
+    // The whole of `a`'s memory: `a` takes it while it is the one that can, and `b` does not
+    // hold it back by being cordoned.
+    h.feed(Event::Cordon { worker: w("b") });
     h.submit(2, sized(2, 8 * GIB));
     let [g2] = h.tick().try_into().unwrap();
     assert_eq!(g2.worker, w("a"), "8 GiB is the whole of a, and a is empty");
+    h.commit_and_start(&g2);
+    h.finish(&g2, ok(2));
+    h.feed(Event::Uncordon { worker: w("b") });
+    // With both open the booked rule takes `a` (the first it fits); placement by load scores
+    // only the workers the request would share, so it goes to `b`.
+    h.submit(3, sized(3, 8 * GIB));
+    let [g3] = h.tick().try_into().unwrap();
+    let want = if booked::is_booked() { "a" } else { "b" };
+    assert_eq!(g3.worker, w(want));
+}
 }
 
+both_rules! {
 /// Catches: the last step of the memory ladder (a limit of the node's whole memory) run
 /// beside other leases, which the booking of all its memory used to prevent and which
 /// must hold now that memory is not booked: it waits for a node with no lease, nothing
 /// else is placed on the node while it runs, and the node is open again when it ends.
-#[test]
 fn an_action_at_the_whole_node_memory_runs_alone() {
     let mut h = Harness::new();
     h.worker("a", 8_000, 16 * GIB);
@@ -495,10 +524,11 @@ fn an_action_at_the_whole_node_memory_runs_alone() {
     let [after] = h.tick().try_into().unwrap();
     assert_eq!(after.operation, OperationId(2));
 }
+}
 
+both_rules! {
 /// Catches: a request for no memory read as the whole of a node that reports none, which
 /// would run it alone.
-#[test]
 fn a_request_for_no_memory_is_not_the_whole_node() {
     let mut h = Harness::new();
     h.worker("a", 2_000, 0);
@@ -506,11 +536,12 @@ fn a_request_for_no_memory_is_not_the_whole_node() {
     h.submit(2, sized(2, 0));
     assert_eq!(h.tick().len(), 2);
 }
+}
 
+both_rules! {
 /// Catches: dedup that joins across instance names (another namespace's work answered
 /// with this one's result), joins networked or `do_not_cache` work, misses a twin, or
 /// joins a finished operation.
-#[test]
 fn in_flight_dedup_joins_only_the_same_instance_and_digest() {
     let mut h = Harness::new();
     h.worker("a", 64_000, 64 * GIB);
@@ -553,12 +584,13 @@ fn in_flight_dedup_joins_only_the_same_instance_and_digest() {
     h.submit(6, request(1));
     assert_eq!(h.s.queued().collect::<Vec<_>>(), [OperationId(4)]);
 }
+}
 
+both_rules! {
 /// Catches `Scheduler::twin` or `Scheduler::next_operation` naming another operation
 /// than the one a submission joins or gets (the invocation recorder files the call's
 /// lease events under it): a twin offered to networked or `do_not_cache` work, or to
 /// another instance; a finished operation offered as a twin; a next id off by one.
-#[test]
 fn twin_and_next_operation_name_the_operation_a_submission_gets() {
     let mut h = Harness::new();
     h.worker("a", 64_000, 64 * GIB);
@@ -595,11 +627,12 @@ fn twin_and_next_operation_name_the_operation_a_submission_gets() {
     h.finish(&grants[0], ok(1));
     expect(&mut h, 6, request(1), false);
 }
+}
 
+both_rules! {
 /// Catches: a queue ordered by arrival or by the enum's declaration order instead of
 /// QoS urgency, an unstable order within a level, and a more urgent caller who joins a
 /// queued twin but stays behind less urgent work.
-#[test]
 fn qos_orders_the_queue_and_a_join_promotes() {
     let mut h = Harness::new();
     let at = |n: u8, qos: Qos| Request { qos, ..request(n) };
@@ -619,13 +652,14 @@ fn qos_orders_the_queue_and_a_join_promotes() {
     let [g] = h.tick().try_into().unwrap();
     assert_eq!(g.operation, OperationId(2));
 }
+}
 
+both_rules! {
 /// Catches: a committed lease that a worker the scheduler still hears from leaves out of
 /// its running set kept for good (the booking leaks and the waiters wait forever), or
 /// given up before its `Start` has been out for the Start grace, while that `Start` may
 /// still be on its way (one millisecond early is too early). Once it is given up, the
 /// old lease's late report is not proposed and the new lease answers.
-#[test]
 fn a_lease_left_out_of_the_running_set_is_requeued_after_the_start_grace() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -651,11 +685,12 @@ fn a_lease_left_out_of_the_running_set_is_requeued_after_the_start_grace() {
     let answer = h.finish(&second, ok(2));
     assert_eq!(answer.lease, second.lease);
 }
+}
 
+both_rules! {
 /// Catches: a lease requeued because the running set leaves it out while its reported
 /// result is on its way to the log (a worker stops listing a lease once its result is
 /// acknowledged), which would run the action again for nothing.
-#[test]
 fn a_lease_whose_result_was_reported_is_kept_when_left_out() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -675,14 +710,15 @@ fn a_lease_whose_result_was_reported_is_kept_when_left_out() {
     assert!(matches!(answered.as_slice(), [Effect::Answer(a)] if a.lease == grant.lease));
     assert_eq!(h.s.booked(&w("a")), Some(Resources::default()));
 }
+}
 
+both_rules! {
 /// Catches: a daemon that registers again on a new stream keeping, until a grace or G, a
 /// committed lease its heartbeats leave out (its `Start` went to the old session, so its
 /// run is gone or never began); a registration that requeues by itself, though `Hello`
 /// carries no running set (the leases the daemon still runs would run twice); one that
 /// drops a lease the daemon lists; and one that gives up, before the Start grace, a
 /// grant whose `Start` went to the new session (it may still be on its way).
-#[test]
 fn a_heartbeat_after_registering_again_requeues_at_once_only_what_the_worker_lost() {
     let mut h = Harness::new();
     h.worker("a", 3_000, 3 * GIB);
@@ -722,7 +758,9 @@ fn a_heartbeat_after_registering_again_requeues_at_once_only_what_the_worker_los
     h.commit_and_start(&again);
     assert!(h.report(&lost, ok(2)).is_empty(), "late result proposed");
 }
+}
 
+both_rules! {
 /// Catches: a lease whose `Start` went to a replaced daemon process requeued
 /// on the first heartbeat of another process registered as the same node (the replaced
 /// one, when two daemons hold one certificate, runs it until it fences: twice at once),
@@ -730,7 +768,6 @@ fn a_heartbeat_after_registering_again_requeues_at_once_only_what_the_worker_los
 /// of from when the node was last heard before it, or restarted by a reconnect of the
 /// same process; a process that comes back after another taken for the one its earlier
 /// leases went to; and registrations without an instance id taken for one process.
-#[test]
 fn a_lease_of_a_replaced_daemon_process_is_kept_until_that_process_has_fenced() {
     let mut h = Harness::new();
     h.worker_by("a", "one", 4_000, 4 * GIB);
@@ -789,13 +826,14 @@ fn a_lease_of_a_replaced_daemon_process_is_kept_until_that_process_has_fenced() 
     h.at_secs(143).heartbeat_running("a", &[third.lease]);
     assert!(h.running(&fourth), "two unnamed processes taken for one");
 }
+}
 
+both_rules! {
 /// Catches: a resent `Hello` treated as a registration, which would count
 /// every `Start` already sent as sent to an earlier session and requeue it on the next
 /// heartbeat that has not listed it yet (an unfenced second run for self-fenced work);
 /// a capacity change that placement does not see; a resend that does not count as
 /// hearing from the worker; and a capacity change that registers an unknown worker.
-#[test]
 fn a_capacity_change_resizes_the_worker_and_opens_no_session() {
     let mut h = Harness::new();
     h.worker("a", 1_000, 4 * GIB);
@@ -833,11 +871,12 @@ fn a_capacity_change_resizes_the_worker_and_opens_no_session() {
         "a capacity change registered a worker"
     );
 }
+}
 
+both_rules! {
 /// Catches: a capacity change that does not count as hearing from the worker, so a
 /// worker whose daemon resends `Hello` but whose heartbeats are delayed is taken for
 /// silent and gets no work.
-#[test]
 fn a_capacity_change_counts_as_hearing_from_the_worker() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
@@ -851,21 +890,27 @@ fn a_capacity_change_counts_as_hearing_from_the_worker() {
     let [grant] = h.at_secs(100).tick().try_into().unwrap();
     assert_eq!(grant.worker, w("a"), "a resend did not count as hearing");
 }
+}
 
+both_rules! {
 /// Catches: a lease the worker lists that the scheduler gave up, granted
 /// to another worker, or finished, not named for cancelling (its run goes on beside
 /// the retry); a lease the worker holds named (its only run would be killed), even
 /// while its retry's grant is not committed yet; and a lease this scheduler never
 /// granted named, whether a later sequence number of its term or another term's (a
 /// newer leader's grant is not this scheduler's to cancel).
-#[test]
 fn not_held_names_the_listed_leases_given_up_on_the_worker() {
     let mut h = Harness::new();
     h.worker("a", 1_000, GIB);
     h.worker("b", 2_000, 2 * GIB);
+    // One lease on each worker: the first goes to `a` (`b` is held out for its round), the
+    // second does not fit `a` beside it and goes to `b`.
+    h.feed(Event::Cordon { worker: w("b") });
     h.submit(1, request(1));
+    let [on_a] = h.tick().try_into().unwrap();
+    h.feed(Event::Uncordon { worker: w("b") });
     h.submit(2, request(2));
-    let [on_a, on_b] = h.tick().try_into().unwrap();
+    let [on_b] = h.tick().try_into().unwrap();
     assert_eq!((&on_a.worker, &on_b.worker), (&w("a"), &w("b")));
     h.at_secs(1).commit_and_start(&on_a);
     h.commit_and_start(&on_b);
@@ -896,6 +941,7 @@ fn not_held_names_the_listed_leases_given_up_on_the_worker() {
     // A finished operation's lease is held nowhere.
     h.finish(&on_b, ok(2));
     assert_eq!(not_held(&h, "b", &[on_b.lease]), [on_b.lease]);
+}
 }
 
 #[path = "scheduler/retention.rs"]

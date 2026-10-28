@@ -51,7 +51,9 @@ pub const HORIZON: u128 = 30;
 const PPM: u128 = 1_000_000;
 
 /// The weights of the slots the safety keys read: `w(tau) = H + 1 - tau` for `tau` in
-/// `0..=H` (31 down to 1) and 1 for the `H+` slot.
+/// `0..=H` (31 down to 1) and 1 for the `H+` slot. For a flat charge every slot reads the
+/// same figure, so a weight total only scales a key: it cannot change how two workers
+/// compare, and is here to say what the document's sum is.
 pub const SLOT_WEIGHTS: u128 = (HORIZON + 1) * (HORIZON + 2) / 2 + 1;
 /// The weights of the slots the fit reads: a flat lease has `L = 1`, so only `tau = 0`, of
 /// weight `H + 1`.
@@ -288,11 +290,6 @@ impl Placer {
     /// The workers the heads hold now.
     pub fn holds(&self) -> &BTreeMap<OperationId, WorkerId> {
         &self.holds
-    }
-
-    /// The hosts as the round has left them.
-    pub fn hosts(&self) -> &[Host] {
-        &self.hosts
     }
 
     /// The candidates of `ask` that no head holds and that have room for it but for the
