@@ -214,6 +214,12 @@ pub struct LoadCounters {
     pub floor_windows: u64,
     /// Of those, windows in which `f * sum p(covered)` was above the measurement.
     pub floor_binds: u64,
+    /// Not a running total: the live workers, as of the call that returned this, that
+    /// are charged by prediction because their newest reading says the actions cgroup
+    /// has a CPU limit, while the load rule is on. Part of
+    /// [`crate::Scheduler::fallback_workers`]; a count above zero is a node whose cgroup
+    /// limit and pool do not match.
+    pub fallback_cpu_limited: u64,
 }
 
 /// A prediction of what an action costs, from the estimator, fed for an operation with

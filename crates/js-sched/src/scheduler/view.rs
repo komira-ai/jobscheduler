@@ -195,8 +195,17 @@ impl Scheduler {
 
     /// What admission has done since the scheduler was built.
     #[must_use]
-    pub const fn load_counters(&self) -> LoadCounters {
-        self.admission.counters
+    pub fn load_counters(&self) -> LoadCounters {
+        let mut counters = self.admission.counters;
+        if self.admission.by_load() {
+            let limited = self
+                .workers
+                .values()
+                .filter(|w| w.alive(self.now) && w.load_state.cpu_limited())
+                .count();
+            counters.fallback_cpu_limited = u64::try_from(limited).unwrap_or(u64::MAX);
+        }
+        counters
     }
 
     /// How `worker` is charged as of the newest input, if it is registered.

@@ -573,9 +573,13 @@ impl Scheduler {
             }
             // A blocked head holds the worker with the most headroom, one per pool:
             // requests after it in queue order are not placed there, so the worker
-            // empties as its leases end instead of being refilled by small work.
-            if blocked == Some(Blocked::Load)
-                && held_pools.insert(servable.pool(&self.workers, request))
+            // empties as its leases end instead of being refilled by small work. The
+            // pool's slot is taken only by a request that holds a worker: one that
+            // cannot (an exclusive action, say) leaves it to the next blocked request.
+            let pool =
+                (blocked == Some(Blocked::Load)).then(|| servable.pool(&self.workers, request));
+            if let Some(pool) = pool
+                && !held_pools.contains(&pool)
             {
                 let attempt = Attempt {
                     request,
@@ -592,6 +596,7 @@ impl Scheduler {
                     self.admission.counters.reservations += u64::from(kept != Some(&name));
                     reserved.insert(name.clone());
                     head_holds.insert(id, name);
+                    held_pools.insert(pool);
                 }
             }
             if !fitted
