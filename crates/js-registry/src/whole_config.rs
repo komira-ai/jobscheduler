@@ -3,11 +3,12 @@
 //! Nothing here reads a clock or a file; [`crate::PoolConfig::with_whole_node`] checks a
 //! value against its pool.
 //!
-//! The registry reads the pool's value for the caps, `drain_after`, `drain_deadline`,
-//! `reserve_backoff`, `max_reserve_attempts` of its reservations (`whole::reserve`) and
-//! `prepare_timeout` and `max_replace` (the prepare failure handling), and the dedicated
-//! defaults for a pool that has none; the lease server also hands `prepare_timeout` to
-//! its lease table. The other keys are loaded into this type and not consumed yet.
+//! A pool file's values are loaded into this type and put on the registry's pool. The
+//! registry reads the caps, `drain_after`, `drain_deadline`, `reserve_backoff` and
+//! `max_reserve_attempts` of its reservations (`whole::reserve`), `prepare_timeout` and
+//! `max_replace` (the prepare failure handling, and how long a request's record is
+//! kept) and the dedicated defaults for a pool that has none; the lease server also
+//! hands `prepare_timeout` to its lease table.
 
 /// How long a host stays excluded for a request after a give-up or a failed prepare:
 /// five minutes.

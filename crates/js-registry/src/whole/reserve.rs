@@ -348,7 +348,8 @@ impl Ctx<'_> {
         if due {
             let backoff = Duration::from_millis(self.pass.settings.reserve_backoff_ms);
             let end = self.pass.now.plus(backoff);
-            self.requests.give_up(RequestKey::from(id), host, end);
+            self.requests
+                .give_up(RequestKey::from(id), host, (self.pass.now, end));
             self.marks.drop_request(id);
         }
         !due

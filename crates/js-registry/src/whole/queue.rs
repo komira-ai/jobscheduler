@@ -6,9 +6,28 @@
 //! consumer presents the same request id again after a restart, as it presents it on
 //! every poll. A poll is how the list knows the consumer is alive, so an entry that is
 //! not presented again within `regain_grace` is dropped, and a cancel removes it at once.
+//!
+//! # The order is advisory
+//!
+//! The list records the order requests were first seen in and reports a request's place
+//! ([`WaitList::position`]), but nothing yet makes placement follow it: a start places on
+//! any eligible host without asking whether other requests wait, so a later waiter, or a
+//! request not yet on the list, can take a host that freed before the request at the
+//! front presents itself again. Giving a freed host to the front request is a later
+//! change; until then a place on the list is not a promise of a host.
+//!
+//! # The size is capped
+//!
+//! The list holds at most [`MAX_WAITING_REQUESTS`] requests, because a new id is looked up by a
+//! scan of the list. A new request past the cap is not entered (it is [`Verdict::Full`])
+//! and the start is answered `NoCapacity`, as a start without an id is; a request on the
+//! list keeps its place and is never put out by a newcomer.
 
 use js_lease::Timestamp;
 use js_types::{Request, RequestId};
+
+/// The most requests the list holds at once.
+pub const MAX_WAITING_REQUESTS: usize = 1024;
 
 /// One waiting request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +50,9 @@ struct Entry {
 pub(crate) enum Verdict {
     /// The request waits, at this place from the front (zero is next).
     Waiting(usize),
+    /// The list holds [`MAX_WAITING_REQUESTS`] requests and this one is not among them: it is not
+    /// entered.
+    Full,
     /// The request has no host that could ever serve it and has waited out the grace
     /// since it was last seen to have one, or never had a place: it is refused and not
     /// kept.
@@ -53,8 +75,10 @@ impl WaitList {
     /// The consumer presents request `id` at `now`. `capable` says whether some host
     /// could ever be given whole to it.
     ///
-    /// A request not on the list enters at the back if `capable`, keeping `request` for
-    /// the reservation, and is `Unservable` at once if not. A request already on the list keeps its place, whatever the
+    /// A request not on the list enters at the back, keeping `request` for the reservation,
+    /// if `capable` and the list holds fewer than [`MAX_WAITING_REQUESTS`] (else it is
+    /// `Full`), and is `Unservable` at once if not `capable`. A request already on the
+    /// list keeps its place, whatever the
     /// number of presentations, and is seen again at `now`; while no host is capable it
     /// keeps waiting until `grace_ms` have passed since the first presentation that saw
     /// none, then it is `Unservable` and leaves the list.
@@ -68,8 +92,9 @@ impl WaitList {
     ) -> Verdict {
         let at = self.entries.iter().position(|entry| entry.id == *id);
         let Some(at) = at else {
-            return match capable {
-                true => {
+            return match (capable, self.entries.len() < MAX_WAITING_REQUESTS) {
+                (true, false) => Verdict::Full,
+                (true, true) => {
                     self.entries.push(Entry {
                         id: id.clone(),
                         request: request.clone(),
@@ -79,7 +104,7 @@ impl WaitList {
                     });
                     Verdict::Waiting(self.entries.len() - 1)
                 }
-                false => Verdict::Unservable,
+                (false, _) => Verdict::Unservable,
             };
         };
         let entry = &mut self.entries[at];

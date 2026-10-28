@@ -503,10 +503,9 @@ impl<'a> Taken<'a> {
     }
 }
 
-/// Decodes the commands one by one. A command that does not decode (a kind this version
-/// does not know, or a start whose isolation it cannot classify) reads as
-/// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
-/// the one it cannot classify.
+/// Decodes a refusal detail, cutting it to the longest prefix within
+/// [`limits::MAX_REFUSAL_DETAIL`] bytes that ends on a character boundary, so a long
+/// detail is shortened instead of failing the heartbeat.
 fn cut_detail<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -522,6 +521,10 @@ where
     Ok(text)
 }
 
+/// Decodes the commands one by one. A command that does not decode (a kind this version
+/// does not know, or a start whose isolation it cannot classify) reads as
+/// [`Command::Unknown`], so the commands around it still arrive and the agent never runs
+/// the one it cannot classify.
 fn commands_or_unknown<'de, D>(deserializer: D) -> Result<Vec<Command>, D::Error>
 where
     D: Deserializer<'de>,

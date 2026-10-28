@@ -28,6 +28,11 @@
 //! only when a rule is dropped from `StartSpec::new` or a provider lists the wrong
 //! classes. The rules themselves are unit-tested in `js-provider`.
 //!
+//! The host-agent suite, which is wire-neutral and takes a harness per transport instead
+//! of a [`Subject`], is the [`agent`] module. It sits here, beside the provider suite,
+//! because both are conformance suites that a defect is shown red against, and it needs
+//! nothing the crate does not already have.
+//!
 //! # Follow-ups
 //!
 //! - Labels on created resources (design 13.2: labels are present on every created
@@ -35,6 +40,7 @@
 //!   rule has no resource to read; the check belongs with the first provider that
 //!   creates resources.
 
+pub mod agent;
 mod checks;
 
 use std::collections::BTreeMap;
