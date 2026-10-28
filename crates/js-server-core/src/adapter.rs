@@ -102,7 +102,7 @@ impl<'a> View<'a> {
 }
 
 /// A key floor the adapter's estimator has decided to lower ([`Adapter::lowered`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Lowered {
     /// The size key whose floor is lowered.

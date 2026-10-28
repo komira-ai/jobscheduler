@@ -555,6 +555,19 @@ fn size_keys_off_core_is_byte_identical() {
     );
 }
 
+/// Asserts that a lowered floor names its key, the floor the estimator saw and the floor
+/// asked, and compares and prints by them. Catches: fields swapped in the constructor (a
+/// decay would then be judged against the wrong floor).
+#[test]
+fn a_lowered_floor_names_its_key_what_was_seen_and_what_is_asked() {
+    let lowered = Lowered::new(K, 8 * GIB, 2 * GIB);
+    assert_eq!(lowered.clone(), lowered);
+    assert_ne!(lowered, Lowered::new(K, 2 * GIB, 8 * GIB));
+    let shown = format!("{lowered:?}");
+    assert!(shown.contains(&format!("before: {}", 8 * GIB)), "{shown}");
+    assert!(shown.contains(&format!("ask: {}", 2 * GIB)), "{shown}");
+}
+
 /// An adapter that does nothing and takes the default of every hook that has one.
 struct Bare;
 
