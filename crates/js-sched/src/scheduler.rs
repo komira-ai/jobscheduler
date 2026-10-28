@@ -343,7 +343,12 @@ impl Scheduler {
     /// it may run ([`Scheduler::set_max_wall`]). Without this a scheduler holds by leases
     /// and booking alone.
     ///
-    /// A worker that fits (one with no lease) is taken at once. A request that fits
+    /// A worker that fits (one with no lease) is taken at once while the ceiling and the
+    /// floor kept for ordinary work allow one more whole worker (`max_draining` does not
+    /// apply: the take drains nothing, and the last-capable rule is not read: an older
+    /// ordinary request a quiet worker could run is placed on it first). A request that
+    /// holds a mark takes it whatever the caps, as its mark is already counted; any other
+    /// that a cap stops stays queued and [`Scheduler::whole_wait`] says which. A request that fits
     /// nowhere holds a worker only after it has waited `drain_after` since it was queued,
     /// and marks it ([`Scheduler::whole_mark`]) with a deadline from
     /// [`js_whole::cost::reserve_deadline`] (the longest it may run is the one given with
@@ -362,9 +367,10 @@ impl Scheduler {
     /// which. The pool is every worker that serves whole-machine leases: all but a
     /// quarantined or draining one counts as capable, a lost one too. When the ceiling falls
     /// below the whole workers, the newest marks beyond it are dropped (no give-up
-    /// counted), never a held lease. A worker that fits is still taken at once, whatever
-    /// the caps. `max_whole_node_per_consumer` is not enforced: no request, waiter or qos
-    /// names a consumer here, so the setting is ignored.
+    /// counted), never a held lease. `max_whole_node_per_consumer` is not enforced
+    /// here: no request, waiter or qos names a consumer, so the setting is ignored. The
+    /// lease server or the registry, where the caller's identity exists, enforces it.
+    /// Workers of every platform count toward one ceiling and one `max_draining`.
     #[must_use]
     pub fn with_whole_node(mut self, config: WholeNodeConfig) -> Self {
         self.whole_node = Some(config);
@@ -636,11 +642,15 @@ impl Scheduler {
                 fit_minutes,
             };
             let mut blocked = None;
-            let fitted = placed.len() < round && {
-                let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
-                blocked = fit.blocked;
-                fit.placed.map(|p| placed.push((id, p))).is_some()
-            };
+            // A whole-machine request over a cap takes no quiet worker; it waits as any
+            // request that cannot be placed does.
+            let fitted = placed.len() < round
+                && (request.kind != LeaseKind::WholeMachine || self.quiet_take(&whole, id))
+                && {
+                    let fit = servable.fit(&mut self.workers, &mut self.admission, &attempt);
+                    blocked = fit.blocked;
+                    fit.placed.map(|p| placed.push((id, p))).is_some()
+                };
             let verdict = if fitted {
                 Verdict::Servable
             } else {

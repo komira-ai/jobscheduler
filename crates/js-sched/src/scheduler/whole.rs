@@ -7,8 +7,10 @@
 //!
 //! The pool the caps count is every registered worker that serves whole-machine leases:
 //! the scheduler has no pools of its own, so one ceiling covers them all.
+//! Workers of every platform count toward that one ceiling and one `max_draining`.
 //! `max_whole_node_per_consumer` is not enforced: no request, waiter or qos here names
-//! a consumer, so there is nothing to count ([`Scheduler::with_whole_node`]).
+//! a consumer, so there is nothing to count; the lease server or the registry, where the
+//! caller's identity exists, enforces it ([`Scheduler::with_whole_node`]).
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -435,6 +437,26 @@ impl Scheduler {
                 .mark(id, &name, turn.kept, self.now, cfg, max_wall);
             return Ok(Some((name, mark)));
         }
+    }
+
+    /// Whether whole-machine `id` may take a worker that has no lease at once this round.
+    /// The take adds one whole worker and drains none: it is checked against the ceiling
+    /// and the floor kept for ordinary work ([`may_reserve`] with no draining worker
+    /// counted), and `max_draining` does not apply. A request that already holds a mark
+    /// is not checked: its mark is counted, and the take only turns it into a lease.
+    /// The last-capable rule is not read here: an older ordinary request that a quiet
+    /// worker could run is placed on it before this request is reached.
+    pub(super) fn quiet_take(&self, round: &Round, id: OperationId) -> bool {
+        self.whole_node.is_none()
+            || self.drain.marks.contains_key(&id)
+            || may_reserve(
+                Counts {
+                    reserved: 0,
+                    ..self.whole_counts(round)
+                },
+                round.limits,
+            )
+            .is_ok()
     }
 
     /// What the caps count now: whole workers (held leases, marks not yet reached this
