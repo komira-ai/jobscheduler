@@ -33,6 +33,7 @@
 //! refused so a typo does not pass as a default, and a syntax or type error names the
 //! line. This is the example file shipped with the crate:
 //!
+#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 #![doc = concat!("```toml\n", include_str!("../example.toml"), "```")]
 
 mod book;
