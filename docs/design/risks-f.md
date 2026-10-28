@@ -86,10 +86,11 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
 - **K46. A tier member that launches and never registers.** A cloud whose machines boot but cannot reach the scheduler would take the
   demand of its tier every time it sorted first. Mitigated by the boot timeout and the failure brake of its entry (5.8, providers.md), so after
   `max_boot_failures` in a row that member is passed over (a brake, not a cost limit), and by the alert it raises.
-- **K47. A swap strands capacity or oscillates.** Retiring small hosts before the large one carries their load would dip capacity; a
-  swap up followed by a swap down would churn instances. Mitigated by retiring only as far as registered larger capacity replaces them, by
-  windows that must hold at every minute, a longer down window, a down fit below full and `swap_cooldown` (D62, D63). Residual: a load that
-  changes shape on the scale of the windows pays one extra boot per swap.
-- **K48. The headroom for a swap crosses or idles the cap.** Option B lets the count reach `max_machines + 1` during a swap; option A
-  idles one slot. Bounded by exactly one swap at a time (H11), and the owner chooses (D62). Retiring hosts count toward the cap until read
-  back Absent (5.11), so a slow-draining small host can hold a slot for as long as its longest job.
+- **K47. A swap throws away work and overshoots.** The victim's running jobs lose their progress and are rerun (D63), and the biggest type
+  may be more than the load needed (D62). Accepted by the owner: jobs are retryable, and the swap acts only at the cap with a queue that has
+  not eased for a window. Bounded by one swap per window, by the protected hosts (D64), by `max_evictions` per request, and by launching
+  before killing (a refused launch loses nothing). Residual: a pool whose queue is long because jobs are long loses their progress, and a
+  lasting overshoot is undone only by the scale-down of D65.
+- **K48. The cap is crossed by one machine during a swap.** The swap's launch is counted with the victim until the victim reads back Absent,
+  so the count is `max_machines + 1` for that time (D62). Bounded by one swap per window (H10); a terminate that reads back Unknown holds
+  the extra machine until it is resolved (5.6), and the reaper's release retry applies (12.1).

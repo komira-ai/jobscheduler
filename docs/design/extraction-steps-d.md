@@ -1,4 +1,4 @@
-# Extraction steps 23 to 58
+# Extraction steps 23 to 64
 
 Companion to [docs/design.md](../design.md), section 14. Phases D and E moved here from design.md unchanged, and Phase F (capabilities as
 data and the VM backend) and Phase G (one service in Kubernetes) follow them. Phases 0, A, B and C (steps 0 to 22) are in [extraction-steps.md](extraction-steps.md). Section
@@ -209,8 +209,8 @@ need the hierarchy (steps 30c and 31c).
 63. Tiers and further kinds. The nested `providers` entry, the price-unit check, per-tier fall-through, and the `gcp`, `azure` and on-prem
     kinds behind the trait, each with a fake. *Proves:* H8; a flat file is unchanged; the layering test still finds no cloud name in the
     core; two kinds of one tier choose by price and fall through on refusal and on outage.
-64. Swapping instance sizes ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first instance; the
-    per-minute pool sample; the swap trigger and the pool keys `swap_up_after`, `swap_down_after`, `swap_down_fit` and `swap_cooldown`;
-    the `retire` taint, the capacity-neutral retire and release; the headroom of D62 (A or B, as the owner decides); the no-capacity
-    fallback; the whole-node rules. *Proves:* H9 to H14 on the fake aws and the fake agent, including a restart mid-swap and a swap with a
-    whole-node request held and queued. D65 is not built until answered.
+64. The cap-time swap and scale-down ([hosts.md](hosts.md), section 11; needs steps 59, 61 and 62). The first request sizes the first
+    instance; the per-minute pool sample; the swap trigger and the pool keys `swap_window`, `scale_down_window`, `scale_down_util` and
+    `max_evictions`; the victim choice and its protected hosts; launch before kill; the `evict` taint, the `evicted` attempt outcome that
+    charges no budget; the walk down the catalog on no capacity; the `retire` scale-down. *Proves:* H9 to H14 on the fake aws and the fake
+    agent, including a restart mid-window, a reclaim notice on the new host mid-window, and a swap with a whole-node request held and queued.

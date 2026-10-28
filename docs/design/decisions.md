@@ -2,7 +2,7 @@
 
 Moved from design.md section 15 to keep that file under its size limit; design.md holds one line for each decision and D35 in full.
 Section numbers refer to design.md. Each decision has options and a recommendation. None is final until the owner answers, except where
-marked settled. The ids run D1 to D65 with no gaps. D26 and D65 are open. Superseded decisions are marked and say by which decision.
+marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded decisions are marked and say by which decision.
 
 - **D1. Home of the code.** Settled: the code lives in this repository, where the merged crates already are. Crates extracted from kbf
   move in at step 22; until then they build in the kbf workspace, and kbf pins this repository by revision.
@@ -273,32 +273,32 @@ marked settled. The ids run D1 to D65 with no gaps. D26 and D65 are open. Supers
   back first. Options: (a) order the whole list by price (rejected: the order is the operator's statement, and the market would reorder
   own hardware behind a cloud); (b) one pool per cloud and a consumer that chooses (rejected: every consumer would rebuild the
   fall-through); (c) the tier. Recommend (c).
-- **D62. An elastic pool scales out first, then swaps up to a larger instance type at its cap. Direction settled by the project owner; the
-  rules are chosen here.** The first request sizes the first instance (the smallest option that holds it); more demand adds instances of
-  that rung up to `max_machines` (5.8, 5.11); at the cap, with the queue building at every minute of `swap_up_after`, the scaler launches
-  one larger option, steers new work to it, marks the smaller hosts tainted with the reason `retire` as far as the larger capacity replaces
-  them, and releases each as it empties; no job is killed (the taint, drain and release paths of 5.12 and whole-node.md section 4). The
-  swap needs one slot of headroom. (A) Reserved: scale-out stops at `max_machines - 1` while a larger option exists; the cap is never
-  crossed, but a slot idles and a one-machine pool cannot scale out. (B) One extra during a swap: the count may be `max_machines + 1` while
-  exactly one swap is in flight. Recommend (B): the cap is overload protection (5.11) and a counted bound of one host for a short, rare
-  event protects as well as an idle slot, without wasting capacity every day. (A) is the choice if the owner wants the cap never crossed.
-  Text in [hosts.md](hosts.md), section 11.
-- **D63. Step down the same way, with hysteresis in both directions.** After `swap_down_after` (default 60 minutes) in which, at every
-  minute, the queue was empty and the packed bookings fit the next smaller option at no more than `swap_down_fit` (default 50 percent),
-  the pool swaps down by the steps of D62. The up window is shorter than the down window and the down fit is below full, so one burst cannot
-  cause an up followed by a down; no swap follows another within `swap_cooldown`. The judgement is on a per-minute pool sample on the
-  injected clock, which the design did not have and this adds (in memory; a restart restarts the windows, so swaps come later, never
-  sooner). Options: judge on the instant (rejected: oscillates), on the per-minute history (adopted). All four parameters are pool keys, and
-  absent means no swaps (R3).
-- **D64. The catalog is provider data; a larger type without spot capacity is skipped; whole-node requests constrain swaps.** The instance
-  types of a provider (cores, memory, GPUs, spot availability) are its launch options (D60). A swap whose next option has no capacity or is
-  refused tries the option above it, and if none is available the pool stays at its size; it never changes from spot to on-demand by
-  itself, which is the operator's order in the hierarchy (D61). A host that holds a whole-node lease or a reservation is never retired; a
-  step down never starts while a queued or held whole-node request needs the larger size; a whole-node request no live host can hold but a
-  catalog option can is accepted and launched for (D35, D50).
-- **D65. OPEN: consolidate several small instances into fewer large ones when below the cap?** Today a swap happens only at the cap (up)
-  or when quiet (down). Options: (a) no: swaps only as in D62 and D63; (b) yes: also replace many small hosts by fewer larger ones when the
-  packed bookings would fit, with the same windows. Recommend (b), consolidate: the cap counts machines, so fewer larger hosts leave more
-  of it free; larger hosts waste less to fragmentation; each host has a fixed cost; and without it a pool that once grew wide keeps its
-  small hosts while any job runs on them. Against: a larger blast radius (K43), a larger spot instance is interrupted as one, and some
-  catalogs price larger types worse per core. The rest of D62 to D64 does not depend on the answer.
+- **D62. At its machine cap with a growing queue, an elastic pool terminates its smallest instance and launches the biggest type it can
+  get. Settled by the project owner; the details are chosen here.** The first request sizes the first instance (the smallest option that
+  holds it) and more demand adds instances up to `max_machines` (5.8, 5.11). Only when the pool has been at the cap, with queued demand
+  that has not eased, at every sample of one observation window (`swap_window`, default 10 minutes), the scaler picks the smallest elastic
+  machine and the biggest option the provider can get, launches it, terminates the victim once the launch is accepted, then waits one
+  window and repeats if the queue has not eased. Overshoot is accepted. There is no consolidation logic and no drain at the cap: the earlier
+  draft (a drain with headroom for one extra host, reserved or over the cap, and open consolidation below the cap) is replaced, because jobs
+  are retryable and the drain needed bounds for long jobs and a taint precedence rule. Launch before kill, so a refused launch loses no
+  machine; the count may be `max_machines + 1` between the accepted launch and the victim's read-back Absent. Text in
+  [hosts.md](hosts.md), section 11.
+- **D63. "Kill" is terminate now and requeue; an eviction charges no budget.** The victim is recorded tainted `evict`, terminated, and
+  read back; its work goes through the lost-host path of 5.6 (leases given up and the consumer told, scheduler-placed runs requeued as a new
+  attempt). The attempt ends `evicted` and counts against no budget: not the platform-fault budget, not the loss count that refuses a
+  poison operation, not a task failure. Options: (a) charge it as a platform fault or a loss (rejected: it is the scheduler's choice, and a
+  busy pool would exhaust a job's retries for nothing); (b) charge nothing (adopted), with `max_evictions` (default 3) per request, after
+  which its host is passed over as a victim, so one request cannot be hit for ever. A terminate that reads back Unknown frees nothing (5.6).
+- **D64. What is never the victim, and the catalog.** Never chosen: a registered `default` host, a host with a whole-node lease or a
+  reservation (the next smallest is taken), a host with a `reclaim` notice, a host holding a request evicted `max_evictions` times, and a
+  host whose removal would push the whole-node ceiling (counted by hosts) below reserved plus held. The biggest option is found by walking
+  the provider's catalog downward and skipping a type with no capacity, spot or on-demand, or one cooling down (provider data, D60); a
+  refused launch uses the existing per-option `cooldown`; the pool stays as it is if the biggest obtainable type is not larger than the
+  victim. The lifecycle never changes by itself (the operator's order in the hierarchy, D61).
+- **D65. Scale down has one signal: the queue has drained and utilization is low.** At every sample of `scale_down_window` (default 60
+  minutes) the queue is empty and the booked share (the tighter of CPU and memory) is below `scale_down_util` (default 30 percent); then one
+  elastic machine per window, the least booked, is marked tainted `retire` and released when empty. Nothing is killed; the mark is cleared
+  if the queue becomes non-empty. Hysteresis is the longer window and the utilization floor against the 10-minute window and the growing
+  queue of D62; all four keys (`swap_window`, `scale_down_window`, `scale_down_util`, `max_evictions`) are pool keys, absent means the pool
+  never swaps or scales down by this rule (R3). The judgement is on a per-minute pool sample, which the design did not have; it is in
+  memory and a restart restarts the windows (swaps come later, never sooner).

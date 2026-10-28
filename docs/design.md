@@ -96,12 +96,7 @@ The decisions, in one place:
 The history of the earlier amendments (the first, capabilities, the refinement, the owner's review, rollout, whole-node) is in
 [design/amendments.md](design/amendments.md).
 
-Added by the hosts amendment, text in [design/hosts.md](design/hosts.md): a provider brings **hosts that run many jobs**, not one machine
-or VM per job (5.18, D56, D57); capacity is booked as a request vector and packed by the placement rule (6.6); VM support is a
-provider-declared, agent-checked host capability per instance type (D58); spot hosts, where a reclaim notice taints, drains and reschedules
-(D59); price and capacity as provider data used for choosing, never limits (D60); several clouds as providers of the ordered hierarchy,
-with tiers (D61); an elastic pool scales out first, then swaps to a larger or smaller instance type with hysteresis (D62 to D64; D65 open); steps 59 to 64; K42 to K48. Changed in place: the ucdk Job classes book their declared size and share a host (they were
-`BookAll`, D7), the scaler's demand is hosts after packing (5.8), and the sentences that read as one job per machine or VM.
+Added by the hosts amendment ([design/hosts.md](design/hosts.md); 5.18, D56 to D65; steps 59 to 64; K42 to K48): hosts that run many jobs, spot hosts, price data, several clouds, the swap at the machine cap. Changed in place: ucdk Job classes book their declared size (were `BookAll`, D7), and the sentences that read as one job per machine or VM.
 
 ## 2. Goals and non-goals
 
@@ -144,8 +139,7 @@ Non-goals:
   anything is told to start (commit before start, `Scheduler::lease_committed` in `crates/kbf-sched/src/scheduler.rs`).
 - **Agent.** The process on a machine that runs work: `js-agent`. It dials out, says hello, heartbeats, and runs and stops containers
   (5.2, 5.4). The kbf daemon is the model.
-- **Host.** A machine with an agent, belonging to one pool. Many jobs (containers, and VM runs where the host can run VMs) run on it at once,
-  each booked against its capacity (5.18).
+- **Host.** A machine with an agent, belonging to one pool. Many jobs (containers, VM runs) run on it at once, each booked against its capacity (5.18).
 - **Capacity provider.** A driver that supplies a pool's hosts. Kinds: `default` (hosts that registered themselves; creates nothing),
   the elastic kinds that launch and terminate machines (`aws`, later `gcp`, `azure`, `k8s`, `vsphere`, `proxmox`), and `static` (listed hosts, for
   tests only) (5.5). It never runs work. Plain "provider" in this document means a capacity provider.
@@ -406,7 +400,7 @@ A full example (shapes, a `default` provider, an aws provider, pools with a hier
 kbf's own file that maps its classes to pool selectors are in [design/configuration.md](design/configuration.md). A consumer picks pools
 in its own configuration, never the scheduler's. A pool is `name`, `providers` (the ordered hierarchy; `provider` is shorthand, 5.8),
 `shape`, `class`, `labels`, `max_machines`, `provider_max_machines`, `max_step`, `idle_timeout`, `cooldown`, `boot_timeout`,
-`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_up_after`, `swap_down_after`, `swap_down_fit`, `swap_cooldown` (instance-size swaps, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
+`max_boot_failures`, `max_taints_in_a_row`, `regain_grace`, `swap_window`, `scale_down_window`, `scale_down_util`, `max_evictions` (the swap at the cap and scale-down, 5.18), `allow_host_jobs` (default false) and, to admit registering hosts, `join_token_file`.
 
 Rules, enforced when the file loads and refused with the key and the line:
 
@@ -523,7 +517,7 @@ runs as a `Deployment` of one replica under `Recreate`, with the lease file and 
 outage, leases survive in the file, agents re-hello, and a boot grace keeps leases from expiring unrenewed (D34). Servers upgrade first.
 
 ### 5.17 The whole-node lease
-Text in [design/whole-node.md](design/whole-node.md) (D46 to D52). **Giving a whole node is a lease class of its own, `whole-node`, admitted
+Text in [design/whole-node.md](design/whole-node.md) (D46 to D55). **Giving a whole node is a lease class of its own, `whole-node`, admitted
 `Whole`; it is not a large resource request.** It books every dimension of one host; nothing else is placed on the host until it is
 released back; the host is quiet (no run, no VM, checks clean, not tainted) before the lease token is minted (D30). The merged `gpu-host`
 and kbf's `whole_machine` are this class, so GPU testing on the Mac Studio machines and the performance run are one mechanism. A node
@@ -539,17 +533,8 @@ lease that books a host's shape under `Book` is a share, not this class.
   a whole-node lease (D51). kbf requests the class for performance runs and GPU testing, two-level (9.1).
 
 ### 5.18 Hosts that run many jobs, spot hosts and several clouds
-Text in [design/hosts.md](design/hosts.md) (D56 to D61). **A provider brings hosts, each sized to hold many jobs at once; it never
-brings a machine, or a VM, for each job.** A container books its CPU and memory, a VM its CPUs, memory and one `vms` slot in full (each VM
-run still gets a fresh VM, D29), a share lease the vector it names, a whole-node lease the whole host; the placement rule packs them
-(6.6) and a machine is launched only for the hosts the packed bookings need. Whether a host can run VMs is a fact about its launch option (an
-instance type: `virt` is `none`, `nested` or `bare-metal`; `vms` the slots), declared by the provider and bounded by the agent's probe
-(D58). A **spot** host's interruption notice taints it as `reclaim`, tells consumers to leave (`host_leaving`), lets work finish to the
-deadline, then reruns what is left elsewhere, through the taint, drain and host-lost paths that exist (D59). Price and capacity are provider
-data used only to choose among launch options and equal providers, never to refuse or cap (D60, N4). `aws`, `gcp`, `azure` and on-prem
-sources are providers in the one ordered hierarchy; clouds are values, an entry may be a tier of equals, and the walk falls through as in
-D39 (D61). An elastic pool sizes its first instance to the first request, adds instances up to `max_machines`, then swaps up to a larger
-type (and later down) with hysteresis, draining the old hosts with the taint path and killing nothing (D62 to D64; hosts.md, section 11).
+Text in [design/hosts.md](design/hosts.md) (D56 to D65). **A provider brings hosts, each sized to hold many jobs at once; it never
+brings a machine, or a VM, for each job.** The placement rule packs bookings onto hosts (6.6); the rest is in hosts.md.
 
 ## 6. Placement
 
@@ -588,7 +573,7 @@ The class separates dimensions that *gate* admission from dimensions that are *c
 `Book({cpu_millis, gpus, vms})` as the gate set, bounded by the pool's separate lease-count cap (section 3); memory is gated only
 against the pool's total (a request above it does not fit; a request equal to it is exclusive), and the grant still counts the whole
 request, memory included, in the pool's booked total, on which `Rank` (`Load`) reads the memory share. This is today's behaviour (4.1),
-and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `Book({cpu_millis, memory_bytes, vms})` at the sizes the VM is created with (D26, open): a VM books its configured CPUs and memory in full, no overcommit, and shares a host with containers (5.15); the earlier intent to admit `Vm` as `BookAll` is superseded by 5.15. `WholeMachine` maps to `Whole` (class `whole-node`), the only class that takes the whole host with a promise of exclusivity. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the admission is `Book` at the Job's declared size (D7, D56): many Jobs share a host and are packed by 6.5 and 6.6. `BookAll` stays for a class that must have a free host to itself, and no ucdk class names it; this is booking, not reservation, and per class, so it does not conflict with R1.
+and a model that excluded memory from the counted set would not reproduce kbf's rank order. kbf maps `Vm` to `Book({cpu_millis, memory_bytes, vms})` at the sizes the VM is created with (D26, open): a VM books its configured CPUs and memory in full, no overcommit, and shares a host with containers (5.15); the earlier intent to admit `Vm` as `BookAll` is superseded by 5.15. `WholeMachine` maps to `Whole` (class `whole-node`), the only class that takes the whole host with a promise of exclusivity. `Vm` is unshipped, so this mapping is a design intent. For ucdk Job classes the admission is `Book` at the Job's declared size (D7, D56; until step 59 the code differs, hosts.md section 2): many Jobs share a host and are packed by 6.5 and 6.6. `BookAll` stays for a class that must have a free host to itself, and no ucdk class names it; this is booking, not reservation, and per class, so it does not conflict with R1.
 
 **Selecting pools.** A class says how a lease is admitted; it does not say where. A level-1 lease request (9.1) carries a class and label
 selectors, and the scheduler offers it the pools whose `class` is that class and whose labels satisfy every selector (equality on
@@ -899,7 +884,7 @@ and the VM backend)**: `js-caps` (36), the `facts` wire (37), agent probes
 (38), needs and matching (39), kbf's table (40), the `Sandbox` seam (41), `VmRuntime` and its fake (42), the VM lifecycle (43), mixed-host
 accounting (44), several runs per lease (45), whole-node admission and readiness (46), the first real driver (47); the size fields of step 43 wait for D26.
 **Phase J, steps 56 to 58 (the whole-node class completed)**: reservation and drain (56), caps and the host-job rule (57), elastic machines (58).
-**Phase K, steps 59 to 64 (hosts that run many jobs)**: packing and demand (59), host facts for VMs (60), launch options with price and capacity data (61), spot hosts (62), tiers and further kinds (63), swapping instance sizes (64); in [design/extraction-steps-d.md](design/extraction-steps-d.md).
+**Phase K, steps 59 to 64 (hosts that run many jobs)**: packing, VM host facts, price and capacity data, spot hosts, tiers, the swap at the cap; in [design/extraction-steps-d.md](design/extraction-steps-d.md).
 **Phase G, steps 48 to 53 (one service in Kubernetes)**: readiness (48), the boot grace (49), the state check (50), manifests and image
 (51), the client side (52), the move from the single host (53). Step 54 (the GPU machines register through `js-agent`, retiring the operator-listed
 pool) closes the stepping stone. Step 55 (the rollout checks: the server's refusal of an agent major it does not speak, and the
@@ -909,7 +894,7 @@ version-pair check) follows. All are in [design/extraction-steps-d.md](design/ex
 
 The full text of every decision, D1 to D65, is in [design/decisions.md](design/decisions.md); this section holds one line each and, in full,
 D35. Each has options and a recommendation. None is final until the owner answers, except where marked settled. The ids run D1 to
-D65 with no gaps; D26 (no recommendation yet) and D65 are open. A superseded decision says by which.
+D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision says by which.
 
 - D1 home of the code (settled: this repository). D2 wire strategy (a new package with negotiation). D3 durable leases across an agent
   restart (not in v1). D4 sizing rule and ladder. D5 ucdk role. D6 fence. D7 memory booking for non-kbf classes. D8 validation run id and
@@ -946,15 +931,7 @@ D65 with no gaps; D26 (no recommendation yet) and D65 are open. A superseded dec
   it). D47 admission and reservation (queue under D35, one host per request, least drain). D48 the drain bound re-queues and never kills.
   D49 caps (`max_whole_node`, `max_draining`, per consumer, a floor for ordinary work). D50 elastic providers acquire before draining.
   D51 host jobs only in a whole-node lease. D52 the lease clock starts at the token. D53 measurement is the consumer's. D54 typed readiness refusals, own cap. D55 reservations persist. Text in [design/whole-node.md](design/whole-node.md).
-- D56 a provider brings hosts that run many jobs; capacity is booked as a request vector and packed by the placement rule (direction
-  settled; amends D7: ucdk Job classes book their declared size and share a host). D57 many fresh VMs on one host. D58 VM support is a
-  provider-declared, agent-checked host capability per launch option. D59 a spot reclaim notice taints, drains and reschedules with the
-  existing machinery. D60 price and capacity are provider data for choosing, never limits. D61 several clouds are providers in the one
-  ordered hierarchy, with tiers of equals. D62 an elastic pool scales out first and, at its cap with the queue building, swaps to a larger
-  instance type (headroom: reserved or one extra, recommend one extra). D63 step down the same way, hysteresis in both directions on a
-  per-minute pool sample. D64 the instance-type catalog is provider data, no spot capacity means try the next type or stay, whole-node
-  requests constrain swaps. D65 (**open**) consolidate several small instances into fewer large ones below the cap (recommend yes). Text in
-  [design/hosts.md](design/hosts.md).
+- D56 to D61 hosts that run many jobs, spot hosts, price and capacity data, several clouds (D56 amends D7). D62 to D65 the swap at the machine cap (kill the smallest, launch the biggest; evictions charge no budget) and scale-down. Text in [design/hosts.md](design/hosts.md).
 
 ## 16. Risks
 
@@ -1006,8 +983,7 @@ D65 with no gaps; D26 (no recommendation yet) and D65 are open. A superseded dec
   for providers a refusal that a flapping host turns into an error (K32), a booting machine kept after its demand went (K33) and the test
   provider reaching production (K34), and for rollouts the agent fixes held behind the kbf package (K35) and the host updater's one signer
   (K36), and for the whole-node class a host job burning a registered host (K37), idle capacity while draining (K38) and quiet being the
-  agent's claim (K39), and for hosts that run many jobs a flapping spot market (K42), a larger blast radius per host (K43), a wrong VM
-  capability (K44), stale price or capacity data (K45), a tier member that never registers (K46), a swap that strands capacity or oscillates (K47) and the headroom of a swap (K48).
+  agent's claim (K39), and for hosts that run many jobs K42 to K48.
 
 ## 17. Rolling out two services
 
