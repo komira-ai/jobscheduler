@@ -22,14 +22,14 @@ crates = ["js-types"]
 [[layer]]
 name = "pure"
 pure = true
-crates = ["js-agent-wire", "js-guest-wire", "js-pool-static", "js-provider", "js-provider-fake"]
-planned = ["js-caps", "js-sim", "js-sizing", "js-sched"]
+crates = ["js-agent-wire", "js-caps", "js-guest-wire", "js-pool-static", "js-provider", "js-provider-fake", "js-sizing"]
+planned = ["js-sim", "js-sched"]
 
 # Code that keeps state, reads a clock or does I/O, and is used by servers and nodes.
 [[layer]]
 name = "runtime"
-crates = ["js-client", "js-contain", "js-lease", "js-registry"]
-planned = ["js-state", "js-store", "js-testkit"]
+crates = ["js-client", "js-contain", "js-lease", "js-registry", "js-state", "js-testkit"]
+planned = ["js-store"]
 
 # Servers: what answers hosts and clients.
 [[layer]]
@@ -40,5 +40,5 @@ planned = ["js-coordinator", "js-server-core"]
 # Programs, their libraries and the repository's tools.
 [[layer]]
 name = "app"
-crates = ["js-agent", "js-cli", "js-conformance", "js-coverage", "js-guest", "xtask"]
+crates = ["js-agent", "js-cli", "js-conformance", "js-coverage", "js-guest", "js-mac-session", "xtask"]
 planned = ["js-host", "js-host-install", "js-installer", "js-node", "js-node-bin", "js-updater"]
