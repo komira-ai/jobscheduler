@@ -105,9 +105,6 @@ impl ShapeGuard {
 
     /// A run of `key` charged flat because `what` was demoted ended: one run less to go.
     pub(crate) fn flat_run(&mut self, key: u64, what: Resource) {
-        if !self.keys.contains_key(&key) {
-            return;
-        }
         let k = self.entry(key);
         match what {
             Resource::Cpu => k.cpu.flat_run(),
@@ -202,7 +199,11 @@ mod tests {
             "clean history: one misfit is not enough"
         );
         g.flat_run(99, Resource::Memory);
-        assert_eq!(g.runs_left(99), (0, 0), "a key never seen is not made");
+        assert_eq!(
+            g.runs_left(99),
+            (0, 0),
+            "a key never seen has nothing to count off"
+        );
     }
 
     /// Catches: the key table growing without bound, and forgetting the keys touched

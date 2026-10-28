@@ -259,6 +259,38 @@ fn a_run_that_ends_after_the_demotion_is_not_judged() {
     );
 }
 
+/// Catches: a lease with an expected life and no curve, alone on its worker, not charged
+/// to its life (the worker holds nothing charged over time before it), and a lease with a
+/// profile that charges nothing over time (its key demoted in CPU, the memory switch off)
+/// treated as one that does: it is charged flat at every minute.
+#[test]
+fn a_lone_lease_is_charged_to_its_life_or_flat_when_its_profile_charges_nothing() {
+    let ending = LoadConfig {
+        expected_life_delta_minutes: Some(2),
+        ..LoadConfig::default()
+    };
+    let (mut r, curves) = cluster(ending);
+    curves.set_life("short", 3);
+    place(&mut r, "short", warm(30_000, GIB));
+    assert_eq!(ahead(&r, 4).0, 30_000);
+    assert_eq!(ahead(&r, 5).0, 0, "3 minutes and the 2 of delta");
+
+    let no_memory = LoadConfig {
+        profile_memory: false,
+        ..LoadConfig::default()
+    };
+    let (mut r, curves) = cluster(no_memory);
+    curves.set("g", &flat_ws(&[10_000, 10_000, 70_000], GIB), 5);
+    let g = shape_key("g");
+    run(&mut r, "g", 40_000, None);
+    run(&mut r, "g", 40_000, None);
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0));
+    place(&mut r, "g", warm(20_000, 2 * GIB));
+    // Flat in both: 20 cores, and 2 GiB beside the 1 GiB working set the last reading saw.
+    assert_eq!(ahead(&r, 2), (20_000, 3 * GIB));
+    assert_eq!(ahead(&r, 31), (20_000, 3 * GIB));
+}
+
 /// Catches: a run that was lost for good (the farm's reruns used up) judged as a run of the
 /// curve: after one misfit that counted, three lost runs of one operation with misfit
 /// minutes do not demote the key, and the next one that ends on its own does.
