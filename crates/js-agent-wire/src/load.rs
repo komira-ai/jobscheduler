@@ -120,7 +120,7 @@ pub fn lease_parts(text: &str) -> Option<(u64, u64)> {
     let (term, seq) = text.split_once('-')?;
     let term = term.parse::<u64>().ok()?;
     let seq = seq.parse::<u64>().ok()?;
-    (format!("{term}-{seq}") == text).then_some((term, seq))
+    Some((term, seq))
 }
 
 /// What to do with one record of a list.
