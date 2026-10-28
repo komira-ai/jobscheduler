@@ -12,7 +12,8 @@ use js_sched::{LoadConfig, PlacementLoad};
 use js_types::sched::usage::key_hash;
 use js_types::sched::{Failure, LeaseId, Outcome, StartLease, WorkKey};
 
-use profile_rig::load_rig::{self, Curves, GIB, Rig, cold, minute, w, warm};
+use profile_rig::load_curves::Curves;
+use profile_rig::load_rig::{self, GIB, Rig, cold, minute, w, warm};
 use profile_rig::{HOUR, ahead, busy_at, busy_pair, cluster, flat_ws, node, place};
 
 /// One run of `key` (predicted at 20 cores, so the curve is floored at 15): placed, and
@@ -477,7 +478,7 @@ fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
     assert_eq!(flat_30(&mut r, "p2"), 0);
     // The same for a VM that books 40 GiB: 40 + 30 fits, 40 + 30 + 30 does not.
     let curves = Curves::new("load");
-    let mut r = Rig::with_curves(on, &curves);
+    let mut r = Rig::with_curves(on, curves.clone());
     r.up_with(
         "a",
         node().with_vms(2),
@@ -624,7 +625,7 @@ fn a_blocked_head_holds_the_worker_by_its_charge_now() {
             ..LoadConfig::default()
         };
         let curves = Curves::new("load");
-        let mut r = Rig::with_curves(config, &curves);
+        let mut r = Rig::with_curves(config, curves.clone());
         for name in ["a", "b"] {
             r.up(name, node());
             r.set_clock(name, HOUR);

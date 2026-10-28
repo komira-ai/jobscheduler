@@ -558,9 +558,8 @@ impl Scheduler {
             // The shape guard judges a key's runs together: the caller's size key, which
             // the curves are learned under, else the request's own key.
             let guard_key = self.size_keys.get(&id).copied().unwrap_or(cost.key_hash);
-            let profile = self
-                .admission
-                .profile_of(id, request, &cost, retried, guard_key);
+            let profile = self.admission.profile_of(id, request, &cost, guard_key);
+            let fit_minutes = self.admission.fit_minutes(id, profile.as_deref());
             let attempt = Attempt {
                 request,
                 reserved: &reserved,
@@ -569,6 +568,7 @@ impl Scheduler {
                 cost,
                 profile: profile.clone(),
                 lease,
+                fit_minutes,
             };
             let mut blocked = None;
             let fitted = placed.len() < round && {
@@ -613,6 +613,7 @@ impl Scheduler {
                     cost,
                     profile,
                     lease,
+                    fit_minutes,
                 };
                 let kept = self.head_holds.get(&id);
                 if let Some(name) =

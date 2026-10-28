@@ -20,15 +20,11 @@ use js_sched::harness::feed;
 use js_sched::{
     DaemonInstance, Event, LoadConfig, Prediction, Recovered, RecoveredLease, Request, Scheduler,
 };
-use js_types::sched::usage::{LeaseClock, LeaseMinute, NodeLoad};
+use js_types::sched::usage::{CurveSource, LeaseClock, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, Failure, FarmTime, LeaseId, LeaseKind, OperationId, Outcome, Qos, Resources, ResultRef,
     StartLease, WaiterId, WorkKey, WorkerId,
 };
-
-#[path = "../load_curves/mod.rs"]
-pub mod curves;
-pub use curves::Curves;
 
 pub const GIB: u64 = 1 << 30;
 /// The window `W`, in ticks.
@@ -55,7 +51,7 @@ pub struct Spec {
     /// Its demand is the whole node it runs on (a pool-sized action), whatever
     /// `demand` says; `demand` still gives its length.
     pub wide: bool,
-    /// The dedup key of the request, so that the curves of [`Curves`] and the shape
+    /// The dedup key of the request, so that the curves of a `CurveSource` and the shape
     /// guard see the runs of one key; `None` is a key of its own.
     pub key: Option<&'static str>,
 }
@@ -170,7 +166,7 @@ pub struct World {
     /// Every start, in order: tick, class, node, operation, lease.
     pub starts: Vec<(u64, &'static str, String, OperationId, LeaseId)>,
     next_waiter: u64,
-    curves: Option<Arc<Curves>>,
+    curves: Option<Arc<dyn CurveSource + Send + Sync>>,
 }
 
 fn w(name: &str) -> WorkerId {
@@ -200,12 +196,12 @@ impl World {
     }
 
     /// A world whose scheduler is given `curves`.
-    pub fn with_curves(config: LoadConfig, curves: &Arc<Curves>) -> Self {
+    pub fn with_curves(config: LoadConfig, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
         let mut world = Self::new(config);
         world.s = Scheduler::new(1)
             .with_load_config(config)
             .with_curves(curves.clone());
-        world.curves = Some(curves.clone());
+        world.curves = Some(curves);
         world
     }
 

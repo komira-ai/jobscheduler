@@ -33,6 +33,10 @@ pub struct LeaseCost {
     /// The key had no usable estimate: the cold costs were charged, and the lease counted
     /// against the worker's cold cap.
     pub cold: bool,
+    /// The lease is a rerun up the memory ladder, charged at its rung (at least the
+    /// limit) rather than at the learned peak. Apart from `cold`, which marks an
+    /// unlearned key and drives the cold cap.
+    pub retry: bool,
     /// [`key_hash`] of the action key the lease runs: the identity the scoring counts
     /// same-key leases by. 0 when unknown (a cost built by hand).
     pub key_hash: u64,
@@ -571,6 +575,7 @@ mod tests {
             memory_bytes: 2,
             limit_bytes: 3,
             cold: false,
+            retry: false,
             key_hash: 4,
         };
         assert_eq!(c, LeaseCost { ..c });
@@ -590,7 +595,9 @@ mod tests {
             }
         );
         assert_ne!(c, LeaseCost { cold: true, ..c });
+        assert_ne!(c, LeaseCost { retry: true, ..c });
         assert_ne!(c, LeaseCost { key_hash: 9, ..c });
+        assert!(!LeaseCost::default().retry);
         assert_eq!(LeaseCost::default().cpu_millis, 0);
     }
 

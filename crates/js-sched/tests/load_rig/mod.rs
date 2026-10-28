@@ -11,15 +11,11 @@ use std::sync::Arc;
 use js_caps::NodeCaps;
 use js_sched::harness::feed;
 use js_sched::{DaemonInstance, Event, LoadConfig, Prediction, Request, Scheduler};
-use js_types::sched::usage::{LeaseClock, LeaseMinute, NodeLoad};
+use js_types::sched::usage::{CurveSource, LeaseClock, LeaseMinute, NodeLoad};
 use js_types::sched::{
     Effect, FarmTime, LeaseId, LeaseKind, OperationId, Outcome, Qos, Resources, ResultRef,
     StartLease, WaiterId, WorkKey, WorkerId,
 };
-
-#[path = "../load_curves/mod.rs"]
-mod curves;
-pub use curves::Curves;
 
 pub const GIB: u64 = 1 << 30;
 pub const MIB: u64 = 1 << 20;
@@ -63,11 +59,11 @@ impl Rig {
     }
 
     /// A scheduler configured with `config` and given `curves`, at time 0.
-    pub fn with_curves(config: LoadConfig, curves: &Arc<Curves>) -> Self {
+    pub fn with_curves(config: LoadConfig, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
         let mut rig = Self::new(config);
         rig.s = Scheduler::new(1)
             .with_load_config(config)
-            .with_curves(curves.clone());
+            .with_curves(curves);
         rig
     }
 
@@ -334,6 +330,7 @@ pub fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
@@ -343,6 +340,7 @@ pub fn cold(cpu_millis: u64, memory_bytes: u64) -> Prediction {
         cpu_millis,
         memory_bytes,
         cold: true,
+        life_minutes: 1,
     }
 }
 

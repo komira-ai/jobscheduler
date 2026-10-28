@@ -20,7 +20,8 @@ mod profile_rig;
 use js_sched::{HORIZON_MINUTES, LoadConfig};
 use js_types::sched::{Failure, LeaseId, Outcome, Resources, WorkKey};
 
-use profile_rig::load_rig::{self, Curves, GIB, Rig, cold, minute, w, warm};
+use profile_rig::load_curves::Curves;
+use profile_rig::load_rig::{self, GIB, Rig, cold, minute, w, warm};
 use profile_rig::{
     HOUR, ahead, busy_at, busy_pair, cluster, cluster_on, flat_ws, holding_busy_at, node, place,
 };
@@ -470,7 +471,7 @@ fn cold_young_empty_retried_and_unpredicted_leases_are_charged_flat() {
 #[test]
 fn a_worker_charged_by_prediction_alone_charges_flat() {
     let curves = Curves::new("load");
-    let mut r = Rig::with_curves(LoadConfig::default(), &curves);
+    let mut r = Rig::with_curves(LoadConfig::default(), curves.clone());
     r.up("a", node());
     curves.set("p", &flat_ws(&[10_000, 90_000], GIB), 5);
     place(&mut r, "p", warm(20_000, 2 * GIB));
@@ -491,7 +492,7 @@ fn a_worker_charged_by_prediction_alone_charges_flat() {
 fn a_vm_is_charged_what_it_books_whatever_curve_its_key_has() {
     use js_types::sched::LeaseKind;
     let curves = Curves::new("load");
-    let mut r = Rig::with_curves(LoadConfig::default(), &curves);
+    let mut r = Rig::with_curves(LoadConfig::default(), curves.clone());
     r.up_with(
         "a",
         node().with_vms(2),
@@ -535,7 +536,7 @@ fn a_recovered_lease_is_charged_flat() {
     let operation = start.operation;
     let request = r.s.request(operation).expect("held").clone();
     let cost = r.s.lease_cost(start.lease);
-    let mut again = Rig::with_curves(LoadConfig::default(), &curves);
+    let mut again = Rig::with_curves(LoadConfig::default(), curves.clone());
     again.s = js_sched::Scheduler::new(2)
         .with_load_config(LoadConfig::default())
         .with_curves(curves.clone());

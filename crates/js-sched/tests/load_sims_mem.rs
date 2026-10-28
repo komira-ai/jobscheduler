@@ -1,18 +1,22 @@
 //! Simulations of admission by memory, of the fallback and of the cost a lease keeps,
 //! over the fluid model of `load_world`.
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
 use js_sched::{LoadConfig, PlacementLoad, Prediction};
 
-use load_world::{Curves, GIB, Reporting, Spec, World};
+use load_curves::Curves;
+use load_world::{GIB, Reporting, Spec, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
     Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
@@ -28,7 +32,7 @@ fn world(profiles: bool, hint: Prediction) -> World {
         &[(u32::try_from(hint.cpu_millis).unwrap(), hint.memory_bytes)],
         5,
     );
-    World::with_curves(LoadConfig::default(), &curves)
+    World::with_curves(LoadConfig::default(), curves)
 }
 
 /// An action that holds 1 GiB and allocates up to `peak` at 60% of its 50 ticks, predicted

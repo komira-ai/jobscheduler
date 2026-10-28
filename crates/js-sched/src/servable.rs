@@ -24,11 +24,12 @@ use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
 
 use crate::admission::{
-    Admission, Blocked, Left, PlacementLoad, Profile, Ratio, Refusal, binding, clamped, pick,
+    Admission, Blocked, Left, PlacementLoad, Profile, Ratio, Refusal, ShadowChoice, binding,
+    clamped, pick,
 };
 use crate::cordon::Cordons;
 use crate::input::Request;
-use crate::load::Load;
+use crate::load::{Charge, FlatLoad, HostFacts, LeaseFacts, Load, least_loaded};
 use crate::scheduler::Worker;
 
 /// Whether some live worker could run a request, ignoring what is booked.
@@ -58,6 +59,20 @@ pub(crate) struct Attempt<'a> {
     pub(crate) profile: Option<Arc<Profile>>,
     /// The lease it gets if placed now.
     pub(crate) lease: LeaseId,
+    /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
+    /// score's fit looks at.
+    pub(crate) fit_minutes: u8,
+}
+
+/// A candidate the predicate admitted, with what it computed for it.
+struct Passed<'a> {
+    name: &'a WorkerId,
+    /// The previous ranking's load of the worker.
+    load: Load,
+    /// What the worker is charged before the new lease.
+    left: Left,
+    /// What the new lease is charged on it (clamped to its capacity).
+    cost: LeaseCost,
 }
 
 /// Where a request was placed.
@@ -199,11 +214,20 @@ impl Servable {
         let chosen = if by_load {
             let (admitted, why) = Self::admitted(adm, workers, &candidates, attempt, now);
             blocked = why;
-            admitted
-                .into_iter()
-                .min_by_key(|(_, load)| *load)
-                .map(|(name, _)| name)
+            Self::scored(adm, workers, &admitted, attempt)
         } else {
+            // Shadow: log what the score and the previous rule would choose among the
+            // workers the predicate admits, then place by the booked rule as `Off` does.
+            if adm.cfg.mode == PlacementLoad::Shadow && request.kind == LeaseKind::Action {
+                let (admitted, _) = Self::admitted(adm, workers, &candidates, attempt, now);
+                let previous = least_loaded(&Self::loads(&admitted)).cloned();
+                let scored = Self::scored(adm, workers, &admitted, attempt).cloned();
+                adm.log_shadow(ShadowChoice {
+                    lease: attempt.lease,
+                    previous,
+                    scored,
+                });
+            }
             // The first of the least loaded: `live` is in name order.
             candidates
                 .iter()
@@ -281,7 +305,7 @@ impl Servable {
         candidates: &[&'a WorkerId],
         attempt: &Attempt<'_>,
         now: FarmTime,
-    ) -> (Vec<(&'a WorkerId, Load)>, Option<Blocked>) {
+    ) -> (Vec<Passed<'a>>, Option<Blocked>) {
         let mut admitted = Vec::new();
         let (mut load, mut cold) = (false, false);
         for &name in candidates {
@@ -296,7 +320,12 @@ impl Servable {
                 now,
                 &adm.cfg,
             ) {
-                Ok(()) => admitted.push((name, w.load_charged(&left))),
+                Ok(()) => admitted.push(Passed {
+                    name,
+                    load: w.load_charged(&left),
+                    left,
+                    cost,
+                }),
                 Err(Refusal::ColdCap) => cold = true,
                 Err(_) => load = true,
             }
@@ -320,6 +349,73 @@ impl Servable {
             .profile
             .as_ref()
             .filter(|_| !worker.exclusive(attempt.request))
+    }
+
+    fn loads<'a>(admitted: &[Passed<'a>]) -> Vec<(&'a WorkerId, Load)> {
+        admitted.iter().map(|p| (p.name, p.load)).collect()
+    }
+
+    /// The worker among `admitted`, the workers that passed everything including the
+    /// predicate, that the score chooses. A worker the request would own whole
+    /// ([`Worker::exclusive`], decided per worker) keeps the previous rule and is not
+    /// scored: the score ranks the workers that stay shared, so a mixed pool where the
+    /// request fills a small worker but not a large one scores the large ones. When every
+    /// admitted worker would be owned whole, the least loaded is taken. Nothing is scored
+    /// for a single candidate. Only an action reaches here: its callers place by load,
+    /// or log the shadow choice, for actions only.
+    fn scored<'a>(
+        adm: &mut Admission,
+        workers: &BTreeMap<WorkerId, Worker>,
+        admitted: &[Passed<'a>],
+        attempt: &Attempt<'_>,
+    ) -> Option<&'a WorkerId> {
+        let request = attempt.request;
+        let shared: Vec<&Passed<'a>> = admitted
+            .iter()
+            .filter(|p| !workers[p.name].exclusive(request))
+            .collect();
+        match shared.as_slice() {
+            [] => return least_loaded(&Self::loads(admitted)),
+            [only] => return Some(only.name),
+            _ => {}
+        }
+        let hosts = shared
+            .iter()
+            .map(|p| {
+                let w = &workers[p.name];
+                let facts = HostFacts {
+                    cpu_capacity_millis: 0,
+                    memory_capacity_bytes: 0,
+                    fit_minutes: attempt.fit_minutes,
+                    fallback: p.left.fallback,
+                    measured_above_predicted: w.load_state.measured_above_covered(),
+                    same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),
+                    new_key_millis: 0,
+                    uncovered_leases: w.load_state.uncovered_leases(),
+                };
+                let left = Charge {
+                    cpu_millis: p.left.cpu,
+                    memory_bytes: p.left.mem,
+                };
+                (
+                    p.name.clone(),
+                    FlatLoad::host(&w.capacity, left, &p.cost, facts),
+                )
+            })
+            .collect();
+        let model = FlatLoad {
+            lease: LeaseFacts {
+                lease: attempt.lease,
+                cold: attempt.cost.cold,
+                retry: attempt.cost.retry,
+            },
+            hosts,
+        };
+        let names: Vec<&'a WorkerId> = shared.iter().map(|p| p.name).collect();
+        let mut scorer = adm.scorer();
+        let choice = scorer.choose_among(&model, &names)?;
+        adm.count_scored(scorer.evaluations(), &choice);
+        Some(choice.worker)
     }
 
     /// The cost `attempt` is charged on `worker`, and what the worker is charged before it.

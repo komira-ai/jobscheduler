@@ -3,6 +3,8 @@
 
 #![allow(dead_code, reason = "each test binary uses some of the rig")]
 
+#[path = "../load_curves/mod.rs"]
+pub mod load_curves;
 #[path = "../load_rig/mod.rs"]
 pub mod load_rig;
 
@@ -11,7 +13,8 @@ use std::sync::Arc;
 use js_sched::LoadConfig;
 use js_types::sched::{Resources, StartLease};
 
-use load_rig::{Curves, GIB, Rig, w, warm};
+use load_curves::Curves;
+use load_rig::{GIB, Rig, w, warm};
 
 /// One hour on the agent's clock: leases can be given an age before the baseline.
 pub const HOUR: u64 = 3_600_000_000;
@@ -29,7 +32,7 @@ pub fn cluster(config: LoadConfig) -> (Rig, Arc<Curves>) {
 /// As [`cluster`], with a worker of `capacity`.
 pub fn cluster_on(config: LoadConfig, capacity: Resources) -> (Rig, Arc<Curves>) {
     let curves = Curves::new("load");
-    let mut r = Rig::with_curves(config, &curves);
+    let mut r = Rig::with_curves(config, curves.clone());
     r.up("a", capacity);
     r.set_clock("a", HOUR);
     r.baseline("a");

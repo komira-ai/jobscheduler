@@ -7,6 +7,8 @@
 //! A tick is a second; a profile minute is 60 ticks. Every curve is the dilated fit a
 //! `CurveSource` would give (two minutes either side).
 
+#[path = "load_curves/mod.rs"]
+mod load_curves;
 #[path = "load_world/mod.rs"]
 mod load_world;
 
@@ -16,21 +18,22 @@ use js_sched::{LoadConfig, Prediction};
 use js_types::sched::WorkKey;
 use js_types::sched::usage::key_hash;
 
-use load_world::curves::dilated;
-use load_world::{Curves, GIB, Spec, World};
+use load_curves::{Curves, dilated};
+use load_world::{GIB, Spec, World};
 
 fn warm(cpu_millis: u64, memory_bytes: u64) -> Prediction {
     Prediction {
         cpu_millis,
         memory_bytes,
         cold: false,
+        life_minutes: 1,
     }
 }
 
 /// An 88-thread node that has measured (two readings in), and the curves it is given.
 fn node(config: LoadConfig) -> (World, Arc<Curves>) {
     let curves = Curves::new("sim");
-    let mut w = World::with_curves(config, &curves);
+    let mut w = World::with_curves(config, curves.clone());
     w.linux("n", 88, 512);
     w.run(10);
     (w, curves)

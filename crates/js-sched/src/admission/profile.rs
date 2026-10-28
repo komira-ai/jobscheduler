@@ -236,6 +236,11 @@ impl Profile {
         self.mem && self.curve.is_some()
     }
 
+    /// Whether the lease is charged by its key's curve in CPU or in memory.
+    pub(crate) fn by_curve(&self) -> bool {
+        self.cpu_by_curve() || self.mem_by_curve()
+    }
+
     /// Whether the lease's charge is a lane over time, not a constant, in some resource.
     pub(crate) fn timed(&self) -> bool {
         self.cpu_by_curve() || self.mem_by_curve() || self.life.is_some()
@@ -380,6 +385,7 @@ mod tests {
             memory_bytes: mem,
             limit_bytes: mem,
             cold: false,
+            retry: false,
             key_hash: 7,
         }
     }

@@ -424,6 +424,31 @@ impl WorkerLoad {
         r.windows.iter().flatten().copied().max()
     }
 
+    /// Whether the measured CPU is above the predicted sum of the covered leases
+    /// (`M > P_c`): the predictions are known to be too low here. Plain, before the floor.
+    pub(crate) fn measured_above_covered(&self) -> bool {
+        self.measured()
+            .is_some_and(|m| u64::from(m) > self.totals.cpu_covered)
+    }
+
+    /// The predicted cores of the action leases, covered or not, whose key hash is
+    /// `hash`. A hash of 0 (no key known) matches none.
+    pub(crate) fn same_key_millis(&self, hash: u64) -> u64 {
+        if hash == 0 {
+            return 0;
+        }
+        self.ledger
+            .values()
+            .filter(|e| !e.vm && e.cost.key_hash == hash)
+            .fold(0, |sum, e| sum.saturating_add(charge(&e.cost).cpu_millis))
+    }
+
+    /// How many action leases no reading has covered yet.
+    pub(crate) fn uncovered_leases(&self) -> u32 {
+        let n = self.ledger.values().filter(|e| !e.vm && !e.covered).count();
+        u32::try_from(n).unwrap_or(u32::MAX)
+    }
+
     /// The newest reading when the worker is charged by measurement: it has a window, the
     /// reading is not older than [`js_types::sched::usage::STALE_WINDOWS`] windows at `now`
     /// and the actions cgroup has no CPU limit.
@@ -616,6 +641,7 @@ mod tests {
             memory_bytes: mem,
             limit_bytes: mem,
             cold: false,
+            retry: false,
             key_hash: 0,
         }
     }
@@ -754,5 +780,66 @@ mod tests {
             load.remove(lease(i));
         }
         assert_eq!(*load.totals(), Totals::default());
+    }
+
+    fn keyed(cpu: u64, hash: u64) -> LeaseCost {
+        LeaseCost {
+            key_hash: hash,
+            ..cost(cpu, 0)
+        }
+    }
+
+    /// Catches: the same-key sum counting a lease of another key, a VM, or leases with no
+    /// key known (hash 0 matches nothing, not each other), or not counting covered and
+    /// uncovered leases alike.
+    #[test]
+    fn the_same_key_sum_counts_only_that_key_covered_or_not() {
+        let mut load = WorkerLoad::default();
+        load.insert(lease(1), keyed(1_000, 7), false, None);
+        load.insert(lease(2), keyed(2_000, 7), false, None);
+        load.insert(lease(3), keyed(4_000, 8), false, None);
+        load.insert(lease(4), keyed(8_000, 7), true, None);
+        load.insert(lease(5), keyed(16_000, 0), false, None);
+        load.cover(&BTreeSet::from([lease(1)]));
+        assert_eq!(load.same_key_millis(7), 3_000);
+        assert_eq!(load.same_key_millis(8), 4_000);
+        assert_eq!(load.same_key_millis(9), 0);
+        assert_eq!(load.same_key_millis(0), 0);
+    }
+
+    /// Catches: the uncovered count taking covered leases or VMs in, or not following a
+    /// reading that covers a lease.
+    #[test]
+    fn uncovered_leases_are_the_actions_no_reading_lists() {
+        let mut load = WorkerLoad::default();
+        load.insert(lease(1), cost(1_000, 0), false, None);
+        load.insert(lease(2), cost(1_000, 0), false, None);
+        load.insert(lease(3), cost(1_000, 0), true, None);
+        assert_eq!(load.uncovered_leases(), 2);
+        load.cover(&BTreeSet::from([lease(2), lease(3)]));
+        assert_eq!(load.uncovered_leases(), 1);
+    }
+
+    /// Catches: `M > P_c` compared with the floor or with all leases instead of the covered
+    /// ones, and true before any window: the measurement must be strictly above the sum of
+    /// the covered leases' predictions.
+    #[test]
+    fn measured_above_predicted_compares_with_the_covered_sum_only() {
+        let readings = |windows: [Option<u32>; 2]| Readings {
+            last: NodeLoad::default(),
+            arrived: FarmTime::from_millis(0),
+            windows,
+        };
+        let mut load = WorkerLoad::default();
+        load.insert(lease(1), cost(1_000, 0), false, None);
+        load.insert(lease(2), cost(5_000, 0), false, None);
+        load.cover(&BTreeSet::from([lease(1)]));
+        assert!(!load.measured_above_covered(), "no window yet");
+        load.readings = Some(readings([Some(1_000), None]));
+        assert!(!load.measured_above_covered(), "equal is not above");
+        load.readings = Some(readings([Some(1_001), None]));
+        assert!(load.measured_above_covered());
+        load.readings = Some(readings([Some(900), Some(1_001)]));
+        assert!(load.measured_above_covered(), "the larger of two windows");
     }
 }
