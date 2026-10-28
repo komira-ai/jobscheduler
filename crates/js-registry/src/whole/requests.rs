@@ -1,19 +1,17 @@
 //! What the registry remembers of a whole-node request between its placements: how many
 //! prepares failed, the hosts it must not be placed on, and the last failure.
 //!
-//! The registry has no request id yet, so a request is told apart by its content (the
-//! whole [`Request`]): two equal requests share one record. A request id replaces the key
-//! and nothing else in this module changes.
+//! A request is told apart by its id when its start carried one
+//! ([`js_provider::StartSpec::with_request_id`]). A start without an id falls back to the
+//! content (the whole [`Request`]): two equal requests share one record.
 //!
 //! # How long a record lives
 //!
 //! - It is removed when the agent reports a lease of the request ready (`granted`).
 //! - A request that used up `max_replace` is *terminal*: its next start is refused
-//!   `NoCapacity`, and that refusal removes the record, so the start after it is a fresh
-//!   request. `NoCapacity` is what a caller waits on, so until a later change adds the
-//!   `exclusive-not-ready` refusal code a consumer sees a terminal request as capacity
-//!   that does not come, not as the typed refusal; [`Registry::not_ready`] holds the
-//!   reason until the refusal has been delivered.
+//!   `ExclusiveNotReady` (wire `exclusive-not-ready`), and that refusal removes the
+//!   record and its exclusions, so the start after it is a fresh request.
+//!   [`Registry::not_ready`] holds the reason until the refusal has been delivered.
 //! - A record with no committed lease whose request has not been started for
 //!   `Rules::idle_horizon_ms` is dropped, terminal or not, with its exclusions
 //!   (`ForLife` ones included): the consumer is gone, and the records stay bounded by the
@@ -27,12 +25,45 @@
 use std::collections::BTreeMap;
 
 use js_lease::Timestamp;
-use js_types::{HostId, LeaseId, Request};
+use js_provider::StartSpec;
+use js_types::{HostId, LeaseId, Request, RequestId};
 
 use crate::config::PoolConfig;
 use crate::whole_config::WholeNodeConfig;
 
 use super::reasons::{Cause, HostEffect, RequestEffect};
+
+/// What a request's record is kept under: the consumer's request id when the start
+/// carried one, else the content of the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestKey {
+    /// The id the consumer gave the request.
+    Id(RequestId),
+    /// No id was given: two equal requests are one.
+    Content(Request),
+}
+
+impl RequestKey {
+    /// The key of the request `spec` starts.
+    pub(crate) fn of(spec: &StartSpec) -> Self {
+        match spec.request_id() {
+            Some(id) => Self::Id(id.clone()),
+            None => Self::Content(spec.request().clone()),
+        }
+    }
+}
+
+impl From<&Request> for RequestKey {
+    fn from(request: &Request) -> Self {
+        Self::Content(request.clone())
+    }
+}
+
+impl From<&RequestId> for RequestKey {
+    fn from(id: &RequestId) -> Self {
+        Self::Id(id.clone())
+    }
+}
 
 /// Until when a host is left out of a request's placements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,22 +97,32 @@ pub struct NotReady {
 pub struct RequestRecord {
     /// Prepares that failed, by a refusal or a timeout.
     pub prepare_failures: u32,
-    /// Drain give-ups. Nothing in the registry counts them; the reservation change does.
+    /// Drain give-ups: reservations of the request that passed their deadline with the
+    /// host not quiet.
     pub give_ups: u32,
     /// The hosts left out of the request's placements, and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
     /// The last prepare failure, if there was one.
     pub last: Option<NotReady>,
     /// Whether the request has used up `max_replace`. Its next start is refused
-    /// `NoCapacity` (see the module documentation) and removes the record.
+    /// `ExclusiveNotReady` (see the module documentation) and removes the record.
     pub terminal: bool,
+}
+
+impl RequestRecord {
+    /// Leaves `host` out of the request's placements for as long as the longer of the
+    /// exclusion held already and `exclusion`.
+    fn exclude(&mut self, host: &HostId, exclusion: Exclusion) {
+        let kept = self.exclusions.entry(host.clone()).or_insert(exclusion);
+        *kept = (*kept).max(exclusion);
+    }
 }
 
 /// The records of the requests that have failed a prepare, and which request holds each
 /// whole-node lease that is committed.
 #[derive(Debug, Default)]
 pub(crate) struct Requests {
-    placed: BTreeMap<LeaseId, Request>,
+    placed: BTreeMap<LeaseId, RequestKey>,
     records: Vec<Entry>,
 }
 
@@ -89,15 +130,22 @@ pub(crate) struct Requests {
 /// failed one.
 #[derive(Debug)]
 struct Entry {
-    request: Request,
+    key: RequestKey,
     record: RequestRecord,
     touched: Timestamp,
 }
 
 impl Requests {
     /// `lease` was committed for `request`.
-    pub(crate) fn commit(&mut self, lease: LeaseId, request: &Request) {
-        self.placed.insert(lease, request.clone());
+    pub(crate) fn commit(&mut self, lease: LeaseId, key: RequestKey) {
+        self.placed.insert(lease, key);
+    }
+
+    /// Whether a lease other than `lease` is committed for the request under `key`.
+    pub(crate) fn held_by_other(&self, key: &RequestKey, lease: &LeaseId) -> bool {
+        self.placed
+            .iter()
+            .any(|(held, kept)| (kept == key) & (held != lease))
     }
 
     /// The lease ended; it no longer stands for its request.
@@ -108,20 +156,17 @@ impl Requests {
     /// The agent reported `lease` ready: its request is placed, and the record of its
     /// failed tries is no longer needed.
     pub(crate) fn granted(&mut self, lease: &LeaseId) {
-        let request = self.placed.get(lease);
-        request.into_iter().for_each(|request| {
-            self.records.retain(|entry| entry.request != *request);
+        let key = self.placed.get(lease);
+        key.into_iter().for_each(|key| {
+            self.records.retain(|entry| entry.key != *key);
         });
     }
 
-    /// A start of `request` at `now`. A terminal request's record is removed and `true`
-    /// is returned, so the start is refused and the next start of the request is a fresh
-    /// one; any other record is marked as in use.
-    pub(crate) fn start(&mut self, request: &Request, now: Timestamp) -> bool {
-        let at = self
-            .records
-            .iter()
-            .position(|entry| entry.request == *request);
+    /// A start of the request under `key` at `now`. A terminal request's record is
+    /// removed and `true` is returned, so the start is refused and the next start of the
+    /// request is a fresh one; any other record is marked as in use.
+    pub(crate) fn start(&mut self, key: &RequestKey, now: Timestamp) -> bool {
+        let at = self.records.iter().position(|entry| entry.key == *key);
         let Some(at) = at else {
             return false;
         };
@@ -141,45 +186,73 @@ impl Requests {
         let placed = &self.placed;
         self.records.retain(|entry| {
             let idle = now.millis().saturating_sub(entry.touched.millis());
-            let committed = placed.values().any(|request| *request == entry.request);
+            let committed = placed.values().any(|key| *key == entry.key);
             committed || idle < horizon_ms
         });
     }
 
-    /// The record of `request`, if a prepare of it failed.
-    pub(crate) fn record(&self, request: &Request) -> Option<&RequestRecord> {
-        let found = self.records.iter().find(|entry| entry.request == *request);
+    /// The record of the request under `key`, if a prepare of it failed.
+    pub(crate) fn record(&self, key: &RequestKey) -> Option<&RequestRecord> {
+        let found = self.records.iter().find(|entry| entry.key == *key);
         found.map(|entry| &entry.record)
     }
 
-    /// Whether `host` is left out of `request`'s placements at `now`.
-    pub(crate) fn excluded(&self, request: &Request, host: &HostId, now: Timestamp) -> bool {
-        let record = self.record(request);
+    /// Whether `host` is left out of the placements of the request under `key` at `now`.
+    pub(crate) fn excluded(&self, key: &RequestKey, host: &HostId, now: Timestamp) -> bool {
+        let record = self.record(key);
         let exclusion = record.and_then(|record| record.exclusions.get(host));
         exclusion.is_some_and(|exclusion| exclusion.holds(now))
+    }
+
+    /// Whether `host` is left out of the placements of the request under `key` for the
+    /// rest of its life: no wait makes it eligible.
+    pub(crate) fn barred_for_life(&self, key: &RequestKey, host: &HostId) -> bool {
+        let record = self.record(key);
+        let exclusion = record.and_then(|record| record.exclusions.get(host));
+        exclusion == Some(&Exclusion::ForLife)
+    }
+
+    /// The record under `key`, made empty when there is none, marked as in use at `now`.
+    fn entry(&mut self, key: RequestKey, now: Timestamp) -> &mut RequestRecord {
+        let at = self.records.iter().position(|entry| entry.key == key);
+        let at = at.unwrap_or_else(|| {
+            self.records.push(Entry {
+                key,
+                record: RequestRecord::default(),
+                touched: now,
+            });
+            self.records.len() - 1
+        });
+        self.records[at].touched = now;
+        &mut self.records[at].record
+    }
+
+    /// Counts one drain give-up of the request under `key` on `host` at `now`; the host is
+    /// left out of its placements until `backoff_end`.
+    pub(crate) fn give_up(
+        &mut self,
+        key: RequestKey,
+        host: &HostId,
+        (now, backoff_end): (Timestamp, Timestamp),
+    ) {
+        let record = self.entry(key, now);
+        record.give_ups = record.give_ups.saturating_add(1);
+        record.exclude(host, Exclusion::Until(backoff_end));
+    }
+
+    /// The drain give-ups counted for the request under `key`.
+    pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
+        self.record(key).map_or(0, |record| record.give_ups)
     }
 
     /// Counts one prepare failure of the request `lease` was committed for, as the row
     /// of `cause` says, and releases the lease. A lease with no request (one put back
     /// after a restart) counts nowhere.
     pub(crate) fn fail(&mut self, lease: &LeaseId, cause: Cause, detail: &str, ctx: Failure<'_>) {
-        let Some(request) = self.placed.remove(lease) else {
+        let Some(key) = self.placed.remove(lease) else {
             return;
         };
-        let at = self
-            .records
-            .iter()
-            .position(|entry| entry.request == request);
-        let at = at.unwrap_or_else(|| {
-            self.records.push(Entry {
-                request,
-                record: RequestRecord::default(),
-                touched: ctx.now,
-            });
-            self.records.len() - 1
-        });
-        self.records[at].touched = ctx.now;
-        let record = &mut self.records[at].record;
+        let record = self.entry(key, ctx.now);
         let row = cause.row();
         match row.request {
             RequestEffect::Requeue => {
@@ -191,13 +264,9 @@ impl Requests {
             HostEffect::ExcludeForLife => Some(Exclusion::ForLife),
             HostEffect::Taint => None,
         };
-        barred.into_iter().for_each(|exclusion| {
-            let kept = record
-                .exclusions
-                .entry(ctx.host.clone())
-                .or_insert(exclusion);
-            *kept = (*kept).max(exclusion);
-        });
+        barred
+            .into_iter()
+            .for_each(|exclusion| record.exclude(ctx.host, exclusion));
         record.terminal = record.prepare_failures >= ctx.max_replace;
         record.last = Some(NotReady {
             code: cause.code(),
@@ -219,9 +288,17 @@ pub(crate) struct Failure<'a> {
 /// pool without any, the defaults of a dedicated pool.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Rules {
+    pub(crate) regain_grace_ms: u64,
     pub(crate) prepare_timeout_ms: u64,
     pub(crate) reserve_backoff_ms: u64,
     pub(crate) max_replace: u32,
+}
+
+/// The whole-node settings of `config`, or the defaults of a dedicated pool for a pool
+/// without any.
+pub(crate) fn whole_settings(config: &PoolConfig) -> WholeNodeConfig {
+    let whole = config.whole_node().cloned();
+    whole.unwrap_or_else(|| WholeNodeConfig::dedicated(config.max_machines()))
 }
 
 impl Rules {
@@ -237,9 +314,9 @@ impl Rules {
     }
 
     pub(crate) fn of(config: &PoolConfig) -> Self {
-        let whole = config.whole_node().cloned();
-        let whole = whole.unwrap_or_else(|| WholeNodeConfig::dedicated(config.max_machines()));
+        let whole = whole_settings(config);
         Self {
+            regain_grace_ms: whole.regain_grace_ms,
             prepare_timeout_ms: whole.prepare_timeout_ms,
             reserve_backoff_ms: whole.reserve_backoff_ms,
             max_replace: whole.max_replace,

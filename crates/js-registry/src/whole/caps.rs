@@ -98,24 +98,25 @@ pub fn may_reserve(counts: Counts, limits: Limits) -> Result<(), Blocked> {
     }
 }
 
-/// Whether a mark is a reservation or a held lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarkKind {
-    /// Reserved, not yet held.
-    Reserved,
-    /// Held: a lease is committed.
-    Held,
-}
-
-/// A host mark, as [`ceiling_excess`] reads it.
+/// A whole-host mark, as [`ceiling_excess`] reads it. A reservation is keyed by the
+/// request it is set aside for and a held lease by its host, so the two can never be
+/// taken for one another, whatever the ids are.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mark {
-    /// The request id the mark belongs to.
-    pub request: String,
-    /// Reserved or held.
-    pub kind: MarkKind,
-    /// When the mark was made, on the scheduler's clock.
-    pub at: u64,
+pub enum Mark {
+    /// A host set aside for a request, not yet held.
+    Reserved {
+        /// The request id.
+        request: String,
+        /// When the mark was made, on the scheduler's clock.
+        at: u64,
+    },
+    /// A host held by a committed lease.
+    Held {
+        /// The host id.
+        host: String,
+        /// When the lease was committed, on the scheduler's clock.
+        at: u64,
+    },
 }
 
 /// The requests whose reservations to drop now, newest first (a later `at`, then the
@@ -128,15 +129,18 @@ pub struct Mark {
 /// list undercounts it and drops too few.
 pub fn ceiling_excess(marks: &[Mark], ceiling: usize) -> Vec<String> {
     let whole = marks.len();
-    let mut reserved: Vec<&Mark> = marks
+    let mut reserved: Vec<(u64, &String)> = marks
         .iter()
-        .filter(|m| m.kind == MarkKind::Reserved)
+        .filter_map(|mark| match mark {
+            Mark::Reserved { request, at } => Some((*at, request)),
+            Mark::Held { .. } => None,
+        })
         .collect();
-    reserved.sort_by(|a, b| (b.at, &b.request).cmp(&(a.at, &a.request)));
+    reserved.sort_by(|a, b| b.cmp(a));
     reserved
         .into_iter()
         .take(whole.saturating_sub(ceiling))
-        .map(|m| m.request.clone())
+        .map(|(_, request)| request.clone())
         .collect()
 }
 
@@ -314,10 +318,16 @@ mod tests {
         assert_eq!(may_reserve(counts(2, 0, 1_000), l), Ok(()));
     }
 
-    fn mark(request: &str, kind: MarkKind, at: u64) -> Mark {
-        Mark {
+    fn reserved(request: &str, at: u64) -> Mark {
+        Mark::Reserved {
             request: request.to_string(),
-            kind,
+            at,
+        }
+    }
+
+    fn held(host: &str, at: u64) -> Mark {
+        Mark::Held {
+            host: host.to_string(),
             at,
         }
     }
@@ -325,12 +335,11 @@ mod tests {
     #[test]
     fn excess_drops_newest_reservations_first() {
         // Kills: oldest first, and dropping more than the excess.
-        use MarkKind::*;
         let marks = [
-            mark("r1", Reserved, 10),
-            mark("r3", Reserved, 30),
-            mark("r2", Reserved, 20),
-            mark("h", Held, 1),
+            reserved("r1", 10),
+            reserved("r3", 30),
+            reserved("r2", 20),
+            held("h", 1),
         ];
         assert_eq!(ceiling_excess(&marks, 2), ["r3", "r2"]);
         assert_eq!(ceiling_excess(&marks, 3), ["r3"]);
@@ -338,8 +347,7 @@ mod tests {
 
     #[test]
     fn no_excess_drops_nothing() {
-        use MarkKind::*;
-        let marks = [mark("r1", Reserved, 10), mark("h", Held, 1)];
+        let marks = [reserved("r1", 10), held("h", 1)];
         assert!(ceiling_excess(&marks, 2).is_empty());
         assert!(ceiling_excess(&marks, 5).is_empty());
         assert!(ceiling_excess(&[], 0).is_empty());
@@ -349,25 +357,33 @@ mod tests {
     fn excess_never_returns_a_held_mark_when_held_alone_exceed_the_ceiling() {
         // W5, both forms: the ceiling under the held leases drops every reservation
         // and revokes nothing.
-        use MarkKind::*;
         let marks = [
-            mark("h1", Held, 1),
-            mark("h2", Held, 2),
-            mark("h3", Held, 3),
-            mark("r", Reserved, 9),
+            held("h1", 1),
+            held("h2", 2),
+            held("h3", 3),
+            reserved("r", 9),
         ];
         assert_eq!(ceiling_excess(&marks, 1), ["r"]);
         assert_eq!(ceiling_excess(&marks, 0), ["r"]);
-        let held_only = [mark("h1", Held, 1), mark("h2", Held, 2)];
+        let held_only = [held("h1", 1), held("h2", 2)];
         assert!(ceiling_excess(&held_only, 0).is_empty());
     }
 
     #[test]
     fn equal_times_drop_the_greater_request_id_first() {
         // Kills: an unstable order on a tie.
-        use MarkKind::*;
-        let marks = [mark("a", Reserved, 5), mark("b", Reserved, 5)];
+        let marks = [reserved("a", 5), reserved("b", 5)];
         assert_eq!(ceiling_excess(&marks, 1), ["b"]);
+    }
+
+    #[test]
+    fn a_host_id_equal_to_a_request_id_is_not_the_same_mark() {
+        // Kills: reading the held host "x" and the reservation "x" as one mark, so that
+        // a reservation survives or a held lease is counted away.
+        let marks = [held("x", 1), reserved("x", 2)];
+        assert_eq!(ceiling_excess(&marks, 1), ["x"]);
+        assert!(ceiling_excess(&marks, 2).is_empty());
+        assert!(ceiling_excess(&[held("x", 1), held("y", 2)], 0).is_empty());
     }
 
     fn ord(position: u64, hosts: &[&str]) -> OrdinaryRequest {
