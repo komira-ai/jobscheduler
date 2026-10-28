@@ -211,6 +211,8 @@ pub(crate) fn refusal_status(code: RefusalCode) -> StatusCode {
             | RefusalCode::NoFit
             | RefusalCode::UnsupportedClass
             | RefusalCode::LeaseEnded
+            | RefusalCode::NoCapableHost
+            | RefusalCode::ExclusiveNotReady
     );
     match conflict {
         true => StatusCode::CONFLICT,
@@ -301,6 +303,8 @@ mod tests {
             RefusalCode::NoFit,
             RefusalCode::UnsupportedClass,
             RefusalCode::LeaseEnded,
+            RefusalCode::NoCapableHost,
+            RefusalCode::ExclusiveNotReady,
         ];
         let unprocessable = [
             RefusalCode::WallTimeNotPositive,

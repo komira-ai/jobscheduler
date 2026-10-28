@@ -13,6 +13,7 @@
 //! - [`caps`]: the effective ceiling, the cap that blocks a reservation, the
 //!   reservations to drop when the ceiling falls, and the last-capable-host rule.
 
+pub(crate) mod ending;
 // The scheduler step that calls these rules has not landed; until it does nothing outside
 // their tests uses them, and they are not public API.
 #[allow(dead_code, reason = "called by the scheduler in a later step")]
@@ -20,6 +21,8 @@ pub(crate) mod caps;
 #[allow(dead_code, reason = "called by the scheduler in a later step")]
 pub(crate) mod cost;
 pub(crate) mod exclusive;
+pub(crate) mod placement;
+pub(crate) mod queue;
 pub(crate) mod reasons;
 pub(crate) mod requests;
 
