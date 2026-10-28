@@ -185,8 +185,12 @@ fn an_operation_another_frontend_took_leaves_the_scheduler_and_its_callers_follo
         "forgotten at once"
     );
 
-    let late = 3 + u64::try_from(RETENTION.as_millis()).expect("small") + 1;
-    core.intake(at(late));
+    // Kept until the retention has run from the poll that saw the result, forgotten at the
+    // poll that is that long after it.
+    let until = 3 + u64::try_from(RETENTION.as_millis()).expect("small");
+    core.intake(at(until - 1));
+    assert!(!calls(&core).contains(&Call::Forgot(queued.operation)));
+    core.intake(at(until));
     assert!(calls(&core).contains(&Call::Forgot(queued.operation)));
 }
 
