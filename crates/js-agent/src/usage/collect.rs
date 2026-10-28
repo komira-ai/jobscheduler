@@ -83,7 +83,6 @@ impl Collector {
         binner.requeue(self.outbox.reclaim(now));
         let alive: BTreeSet<&str> = running
             .iter()
-            .filter(|lease| !lease.adopted)
             .map(|lease| lease.lease_id.as_str())
             .collect();
         for ended in self
@@ -96,7 +95,6 @@ impl Collector {
         self.tracked = alive.iter().map(|id| (*id).to_owned()).collect();
         let watched: Vec<LeaseCgroup> = running
             .iter()
-            .filter(|lease| !lease.adopted)
             .filter_map(|lease| {
                 Some(LeaseCgroup {
                     lease_id: lease.lease_id.clone(),
