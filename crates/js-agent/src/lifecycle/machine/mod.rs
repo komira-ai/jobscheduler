@@ -191,7 +191,7 @@ impl Lifecycle {
     /// first time only. Adopted runs are left alone: they are never sampled.
     pub fn find_cgroups(&mut self) -> Vec<String> {
         let mut lines = Vec::new();
-        for job in &mut self.jobs {
+        for job in self.jobs.iter_mut().take(0) {
             let Stage::Running(id) = &job.stage else {
                 continue;
             };
