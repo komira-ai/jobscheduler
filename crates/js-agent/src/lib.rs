@@ -191,6 +191,7 @@ pub use facts::{
 };
 pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
+use jobs::Seams;
 use lifecycle::{Local, StateRoot};
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
@@ -381,9 +382,12 @@ fn execute(
             SUGGESTED_WATCH_DIRS.join(", ")
         );
     }
-    let (machine, hook) = (&services.machine, services.worker_hook);
-    let bound = services.rescue_bound;
-    let started = jobs::start(local, &offer.hello, platform, (machine, hook, bound), err);
+    let seams = Seams {
+        machine: &services.machine,
+        hook: services.worker_hook,
+        rescue_bound: services.rescue_bound,
+    };
+    let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain)) = &jobs {

@@ -334,7 +334,10 @@ fn a_refusal_during_the_drain_stops_the_runs_and_keeps_its_status() {
     assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
     assert!(worker.handle().settle());
     let replies = vec![welcome(1), beat_ok(), refused(401, "unauthorised")];
-    let (exit, _, sent) = drained(&worker, LONG, replies, |_| Wake::Stop);
+    let (exit, _, sent) = drained(&worker, LONG, replies, |n| match n {
+        0 => Wake::Stop,
+        _ => Wake::Elapsed,
+    });
     assert!(matches!(exit, Exit::Fatal(_)), "{exit:?}");
     assert!(
         phases(&sent).contains(&"draining".to_owned()),
