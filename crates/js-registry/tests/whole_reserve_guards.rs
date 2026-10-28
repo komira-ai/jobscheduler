@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, Dims, ProviderId, ResourceClass};
+use js_types::{Admission, ClassId, Dims, ProviderId, Request, ResourceClass, Resources, Shape};
 use support::world::*;
 use support::*;
 
@@ -166,4 +166,69 @@ fn keep_for_ordinary_lowers_the_ceiling_that_drops_reservations() {
     w.step(POLL_MS);
     assert_eq!(w.reserved_host("r1"), Some("a".to_string()));
     assert_eq!(w.reserved_host("r2"), None);
+}
+
+/// A pool of one-GPU hosts, serving `gpu-host` next to the whole-node class.
+fn gpu_world() -> World {
+    let floor = Resources::new(4000, 8 << 30, 1, Some("a100".into())).unwrap();
+    let shape = Shape::new(floor, map(&[("os", "macos")]));
+    let name = ProviderId::new("builders").unwrap();
+    let config = PoolConfig::new(name, whole(), shape, 4);
+    let config = config
+        .with_whole_node(WholeNodeConfig::dedicated(4))
+        .unwrap();
+    let mut w = World::of(config, &[]);
+    w.provider =
+        w.fx.registry
+            .provider()
+            .with_classes(vec![ResourceClass::gpu_host(), whole()]);
+    w
+}
+
+fn join_gpu(w: &mut World, name: &str) {
+    let mut message = hello(name);
+    message.shape.gpus = 1;
+    message.shape.gpu_class = Some("a100".into());
+    let epoch = w.fx.hello(&message, &cred("t")).unwrap().epoch;
+    w.epochs.insert(name.to_string(), epoch);
+    w.check();
+}
+
+fn gpu_host_start(w: &mut World, sequence: u64) -> StartAck {
+    let request = Request {
+        class: ResourceClass::gpu_host().id().clone(),
+        resources: Resources::new(1000, 1, 1, Some("a100".into())).unwrap(),
+        ..request()
+    };
+    let spec = StartSpec::new(lease(sequence), request, &[ResourceClass::gpu_host()]).unwrap();
+    let ack = w.provider.start(spec);
+    w.check();
+    ack
+}
+
+/// Asserts that a `gpu-host` start is affected only by a host a waiting whole-node request
+/// marked. Host `a` is busy with a `gpu-host` lease and request `r1` waits; host `c` joins
+/// and is assigned to `r1`. A `gpu-host` start finds only the marked `c` free and is turned
+/// away; once an unmarked `d` joins, the same kind of start lands on `d`, and `c` stays
+/// marked for `r1`.
+#[test]
+fn a_gpu_host_start_is_refused_only_on_a_marked_host() {
+    let mut w = gpu_world();
+    join_gpu(&mut w, "a");
+    assert_eq!(
+        gpu_host_start(&mut w, 1),
+        StartAck::Started { host: host("a") }
+    );
+    assert_eq!(w.ask(2, "r1"), StartAck::Unknown);
+    join_gpu(&mut w, "c");
+    w.fx.registry.advance();
+    assert_eq!(w.reserved_host("r1"), Some("c".to_string()));
+    assert_eq!(gpu_host_start(&mut w, 3), no_capacity());
+    assert_eq!(w.lease_on("c"), None);
+    join_gpu(&mut w, "d");
+    assert_eq!(
+        gpu_host_start(&mut w, 4),
+        StartAck::Started { host: host("d") }
+    );
+    assert_eq!(w.reserved_host("r1"), Some("c".to_string()));
 }
