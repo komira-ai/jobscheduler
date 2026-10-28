@@ -29,12 +29,21 @@
 //! heartbeat is answered as usual: the report is a claim of the agent, and a claim that
 //! does not match what the registry holds is not an error.
 //!
-//! A committed lease has no deadline here and no check that the agent is able to
-//! prepare: both come later (a per-lease prepare timeout that ends the lease and
-//! excludes the host, and a refusal when no capable host exists).
+//! A committed lease that is not reported ready within `prepare_timeout` of its commit
+//! is overdue ([`Exclusive::overdue`]); the registry then ends it as a failed prepare,
+//! excluding or tainting the host as the cause says. Only `Committed` is overdue: a
+//! lease seated `Ready` (a restored booking with live runs, see [`Exclusive::seated`])
+//! has been prepared and never times out.
 //!
 //! A host that says hello again lost its session, so its preparation is void: `Ready`
-//! falls back to `Committed` (the same lease and commit time) until it reports again.
+//! falls back to `Committed` until it reports again, and the commit time becomes the
+//! hello: the agent gets a whole `prepare_timeout` from its hello, however long the lease
+//! was in use or the agent was gone. A `Committed` host that says hello keeps its commit
+//! time, so an agent that keeps restarting cannot postpone the deadline.
+//!
+//! A ready report that arrives within one tick of the deadline can lose to the expiry,
+//! which is checked first. That is benign: the lease ends as a failed prepare and the
+//! host restores.
 
 use js_lease::Timestamp;
 use js_types::LeaseId;
@@ -72,6 +81,32 @@ impl Exclusive {
     /// lease id is compared here.
     pub(crate) fn awaits_ready(&self) -> bool {
         matches!(self, Self::Committed { .. })
+    }
+
+    /// The lease committed to the host and not yet reported ready.
+    pub(crate) fn committed(&self) -> Option<LeaseId> {
+        match self {
+            Self::Committed { lease, .. } => Some(*lease),
+            Self::Free | Self::Ready { .. } | Self::Restoring { .. } => None,
+        }
+    }
+
+    /// The lease the agent reported ready.
+    pub(crate) fn ready_lease(&self) -> Option<LeaseId> {
+        match self {
+            Self::Ready { lease, .. } => Some(*lease),
+            Self::Free | Self::Committed { .. } | Self::Restoring { .. } => None,
+        }
+    }
+
+    /// The committed lease that has waited `timeout_ms` or more since its commit: the
+    /// deadline is the same for a slow agent, a silent one and a host that went lost.
+    pub(crate) fn overdue(&self, now: Timestamp, timeout_ms: u64) -> Option<LeaseId> {
+        let waited = |at: &Timestamp| now.millis().saturating_sub(at.millis());
+        match self {
+            Self::Committed { lease, at } if waited(at) >= timeout_ms => Some(*lease),
+            _ => None,
+        }
     }
 
     /// The state after the agent reported `reported` ready, on a host that is `clean`
@@ -117,10 +152,10 @@ impl Exclusive {
         }
     }
 
-    /// The state after the host said hello again.
-    pub(crate) fn after_hello(self) -> Self {
+    /// The state after the host said hello at `now`.
+    pub(crate) fn after_hello(self, now: Timestamp) -> Self {
         match self {
-            Self::Ready { lease, at } => Self::Committed { lease, at },
+            Self::Ready { lease, .. } => Self::Committed { lease, at: now },
             Self::Restoring { .. } => Self::Restoring { told: false },
             other => other,
         }

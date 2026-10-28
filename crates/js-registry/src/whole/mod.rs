@@ -20,6 +20,8 @@ pub(crate) mod caps;
 #[allow(dead_code, reason = "called by the scheduler in a later step")]
 pub(crate) mod cost;
 pub(crate) mod exclusive;
+pub(crate) mod reasons;
+pub(crate) mod requests;
 
 #[allow(
     unused_imports,

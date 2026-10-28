@@ -113,6 +113,7 @@ pub use refusal::Refusal;
 pub use registry::{HostState, HostView, Registry};
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
+pub use whole::requests::{Exclusion, NotReady, RequestRecord};
 pub use whole_config::{
     DEFAULT_PREPARE_TIMEOUT_MS, DEFAULT_REGAIN_GRACE_MS, DEFAULT_RESERVE_BACKOFF_MS,
     WholeNodeConfig,
