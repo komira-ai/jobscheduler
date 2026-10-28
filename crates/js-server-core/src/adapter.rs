@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use js_sched::{DaemonInstance, NodePhase, Requeue, Scheduler};
+use js_sched::{DaemonInstance, NodePhase, Request, Requeue, Scheduler};
 use js_store::Ending;
 use js_types::sched::{
     Answer, Effect, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId, WorkerId,
@@ -161,8 +161,20 @@ pub trait Adapter: Send {
     /// The operation `operation`, which the state store holds, was taken up for the caller
     /// `waiter` the core numbered, who no client waits on: a request for the same work
     /// joins it. `parcel` is what the process that queued it kept with it
-    /// ([`Core::submit`](crate::Core::submit)), if it kept any.
-    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>);
+    /// ([`Core::submit`](crate::Core::submit)), if it kept any. `request`, `lease` and
+    /// `size_key` are what the store holds of the operation, which the core has already
+    /// decoded: what it runs, the lease it holds (none for one that waits for a lease) and
+    /// its size key (none when it has none, or when size keys are not read). An adapter
+    /// needs no read of the store for them.
+    fn adopted(
+        &mut self,
+        operation: OperationId,
+        waiter: WaiterId,
+        parcel: Option<&[u8]>,
+        request: &Request,
+        lease: Option<&LeaseGrant>,
+        size_key: Option<u64>,
+    );
 
     /// The callers among `callers` still waiting: not answered, and still listening (a caller
     /// that gave up is not).
