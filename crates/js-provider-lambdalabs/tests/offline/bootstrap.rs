@@ -521,7 +521,10 @@ fn every_refusal_has_a_message_that_names_the_input() {
 fn the_scratch_size_defaults_to_200_gib_and_is_bounded() {
     assert_eq!(DEFAULT_SCRATCH_GIB, 200);
     assert!(GOLDEN.contains("SCRATCH_GIB=200\n"));
-    let size = |gib| Bootstrap { scratch_gib: Some(gib), ..good() };
+    let size = |gib| Bootstrap {
+        scratch_gib: Some(gib),
+        ..good()
+    };
     // The default is the same document as asking for 200.
     assert_eq!(size(200).render(), good().render());
     assert!(render(&size(64)).contains("SCRATCH_GIB=64\n"));
@@ -550,7 +553,10 @@ fn the_scratch_root_is_a_loop_file_system_made_once_and_mounted_at_every_boot() 
     assert!(at("fallocate -l") < at("mkfs.ext4 -q"));
     assert!(at("mkfs.ext4 -q") < at("mv -f \"$SCRATCH_IMAGE.partial\" \"$SCRATCH_IMAGE\""));
     // mkfs runs only inside the guard on a missing image: nothing else formats.
-    assert_eq!(text.matches("mkfs.").count() - text.matches("mkfs.ext4 -q").count(), 1);
+    assert_eq!(
+        text.matches("mkfs.").count() - text.matches("mkfs.ext4 -q").count(),
+        1
+    );
     assert_eq!(text.matches("mkfs.ext4 -q").count(), 1);
     // Free space is checked before the image is made.
     assert!(at("FREE_RESERVE_GIB))") < at("fallocate -l"));
