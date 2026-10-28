@@ -8,8 +8,8 @@
 //! | module | holds | state |
 //! |---|---|---|
 //! | `fixture` | the trace row, the key and outcome types every other module shares, the loader and the encoder | present |
-//! | `tables` | integer quantile tables | planned |
-//! | `truth` | what really happens to a run, from a row and keyed draws | planned |
+//! | `tables` | integer quantile tables | present |
+//! | `truth` | what really happens to a run, from a row and keyed draws | present |
 //! | `predictor` | what the scheduler believes about a key | planned |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
@@ -27,3 +27,5 @@
 pub mod adapter;
 pub mod fixture;
 pub mod rankers;
+pub mod tables;
+pub mod truth;

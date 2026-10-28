@@ -15,3 +15,4 @@ mod fixture_tests;
 #[path = "../load_rig/mod.rs"]
 mod load_rig;
 mod rankers_tests;
+mod truth_tests;
