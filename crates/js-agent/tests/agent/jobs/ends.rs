@@ -9,16 +9,16 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::{Delivery, Handle, Snapshot, Sleeper, Wake, Worker};
+use js_agent::{Delivery, Drain, Exit, Handle, Session, Sleeper, Snapshot, Wake, Worker, drive};
 use js_agent_wire::{HeldRun, HeldState};
 
 use super::drain::container_flags;
 use super::fake::{Build, FakeMachine, World};
 use super::{rescue, start, start_answer, starts};
-use crate::bounds::WakeBudget;
+use crate::bounds::{Capped, WakeBudget};
 use crate::support::{
-    Lowest, Ran, Scratch, Script, ScriptConnector, beat_ok, code, flags, linux_host, refused,
-    reply, welcome,
+    CountingSleeper, Lowest, Ran, Scratch, Script, ScriptConnector, beat_ok, code, flags, hello,
+    linux_host, lowest, refused, reply, welcome,
 };
 
 /// What a [`Settler`] does at its `n`th wait (counting from 0), before it settles the worker
@@ -266,4 +266,27 @@ fn a_worker_that_does_not_answer_a_refusal_is_bypassed() {
     assert!(lines.is_empty(), "{lines:?}");
     let log = world.log();
     assert!(log.contains(&"stop r1".to_owned()), "{log:?}");
+}
+
+/// Asserts that what a refusal's rescue could not stop is written to the log before the
+/// agent ends with the refusal. It catches a refusal path that hides a container it left
+/// running.
+#[test]
+fn a_refusal_logs_what_it_could_not_stop() {
+    let (world, _held, dir) = world_with_r1("jobs-ends-w4");
+    let machine = FakeMachine::of(&world);
+    let limited = rescue(&dir, &machine).limited(4, Duration::from_millis(50));
+    let stuck = Worker::orphaned(machine.clock.clone(), running("r1"), limited);
+    world.fail("list", 1);
+    let drain = Drain {
+        wait: Duration::from_secs(10),
+        settle: Duration::from_secs(30),
+    };
+    let (mut script, _) = Script::new(vec![refused(401, "unauthorised")]);
+    let mut session = Session::new(hello("h1"), &mut script, lowest()).with_jobs(&stuck, drain);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let mut log = Capped::new();
+    let exit = drive(&mut session, &mut sleeper, &mut log);
+    assert!(matches!(exit, Exit::Fatal(_)), "{exit:?}");
+    assert!(log.text().contains("rescue: cannot list"), "{}", log.text());
 }

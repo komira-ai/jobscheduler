@@ -5,8 +5,8 @@
 //! (an order done, a call begun) with a hang guard, never for a time.
 
 mod drain;
-mod ends;
 mod e2e;
+mod ends;
 mod exclusive;
 pub mod fake;
 mod session;
