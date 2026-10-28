@@ -7,7 +7,7 @@
 //! effects out: when an effect is released relative to the store write it depends on, what
 //! survives a crash, which ids may be handed out twice, which heartbeats are fed. The
 //! scheduler's own simulations have no store, so none of this is checked there. This
-//! module states it as six scenarios against [`CoreHarness`], a narrow set of operations
+//! module states it as seven scenarios against [`CoreHarness`], a narrow set of operations
 //! (submit a job, register a worker's stream, send a heartbeat, report a result, advance
 //! an injected clock, refuse the store's next writes, crash and restart, read what left the
 //! core). The scenarios do not name a transport.
@@ -39,16 +39,36 @@
 //!   list what left the core, in the order it left. `Observed::stored_leases` is read from
 //!   the store, in the order the store took the rows.
 //! - **A refused write is the store failing, not a conflict.** `refuse_writes(n)` makes the
-//!   next `n` writes of control records fail; the core must keep the effects behind them
-//!   and write again. An adapter over a real store wraps it to fail on request.
+//!   next `n` writes of control records fail (lease, result and refusal records); the core
+//!   must keep the effects behind them and write again. It does not count the write that
+//!   persists a submission: the model writes that outside the count, and a core that
+//!   persists submissions through the same path has to keep them out of `n` too, or its
+//!   counts shift. `refuse_writes(0)` ends an outage. An adapter over a real store wraps
+//!   it to fail on request.
 //! - **A restart keeps the term.** `crash_and_restart` drops everything in memory and
 //!   rebuilds from the store at the same leader term; workers register again. Lease ids
-//!   `(term, seq)` must still never repeat, which is what the sequence blocks are for.
+//!   `(term, seq)` must still never repeat, which is what the sequence blocks are for. A
+//!   core that takes a new term on every start makes `LeaseIdsNeverRepeat` vacuous (ids
+//!   differ by term alone), so an adapter needs a way to pin the term across a restart.
+//! - **A join returns the joined operation.** Submitting work already in flight returns
+//!   that operation's id, adds no operation, and persists nothing: a restart keeps the one
+//!   caller the store holds for the operation.
+//!
+//! # Where the model differs from a real core, on purpose
+//!
+//! - The model feeds `Committed` to the scheduler after the write lands and carries out
+//!   the resulting effects then. A core that feeds it at once and holds the `Start` and
+//!   `Answer` effects back until the write lands releases in the same order and satisfies
+//!   the same scenarios; the suite reads only what leaves the core.
+//! - Nothing carries the scheduler's loss counts or fate (memory kills, farm runs, avoided
+//!   workers) across a restart: recovered operations start with none. A core that persists
+//!   them is not checked on that here.
 //! - **A stream is one registration.** `worker_up` returns the stream of a new session and
 //!   replaces the worker's earlier one; `heartbeat` names the stream it arrived on.
 
 mod model;
 mod scenarios;
+mod write_path;
 
 use std::time::Duration;
 
@@ -104,7 +124,9 @@ pub struct Observed {
 /// the store allows.
 pub trait CoreHarness {
     /// Submits `job` for the caller `waiter` and returns the operation it became. Two
-    /// jobs with different numbers are different work; the same number joins.
+    /// jobs with different numbers are different work; the same number, while the first is
+    /// still in flight, joins it: the joined operation's id comes back and no operation is
+    /// added.
     fn submit(&mut self, waiter: u64, job: u8) -> OperationId;
 
     /// Registers `worker` on a new stream, replacing its earlier one, and returns it. The
@@ -120,11 +142,13 @@ pub trait CoreHarness {
     /// Moves the injected clock forward by `by` and ticks the core.
     fn advance(&mut self, by: Duration);
 
-    /// Makes the store refuse the next `count` writes of control records.
+    /// Makes the store refuse the next `count` writes of control records (not the write
+    /// that persists a submission); a count of 0 ends an outage.
     fn refuse_writes(&mut self, count: u32);
 
-    /// The server process dies and a new one starts on the same store. Workers must
-    /// register again.
+    /// The server process dies and a new one starts on the same store, under the same
+    /// leader term (the adapter must pin it, or `LeaseIdsNeverRepeat` proves nothing).
+    /// Workers must register again.
     fn crash_and_restart(&mut self);
 
     /// What the core has done so far.

@@ -4,64 +4,78 @@ use std::time::Duration;
 use js_sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseId, OperationId};
 
-use super::{CoreHarness, Released};
+use super::write_path;
+use super::{CoreHarness, Released, Stream};
 use crate::Verdict;
 
-const NODE_A: &str = "node-a";
-const NODE_B: &str = "node-b";
+pub(super) const NODE_A: &str = "node-a";
+pub(super) const NODE_B: &str = "node-b";
 
 /// The step of the injected clock in the scenarios that wait out a grace.
-const STEP: Duration = Duration::from_secs(5);
+pub(super) const STEP: Duration = Duration::from_secs(5);
 
 /// One thing the loop around the scheduler must do, named in the suite's output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Scenario {
-    /// A `Start` and an `Answer` leave the core only after the record they depend on is
-    /// in the store: while the store refuses a write, nothing that depends on it is
-    /// released, and every `Start` released has its lease in the store.
+    /// A `Start`, an `Answer` and a refusal leave the core only after the record they
+    /// depend on is in the store, for the first lease and for later ones: while the store
+    /// refuses a write, nothing that depends on it is released, and every `Start` released
+    /// has its lease in the store.
     StartWaitsForCommit,
-    /// An operation is answered exactly once across a crash and restart: one finished
-    /// before the crash is not run or answered again, and one queued at the crash runs
-    /// and is answered once afterwards.
+    /// An operation is answered exactly once across two crashes and restarts: one
+    /// finished before a crash is not run or answered again, one queued at a crash runs
+    /// and is answered once afterwards, and work submitted twice while in flight is one
+    /// operation.
     AnsweredOnceAcrossRestart,
     /// A lease id `(term, seq)` is never handed out twice, across restarts, though the
-    /// earlier leases have finished and left the store.
+    /// earlier leases have finished and left the store, and though only the lower of two
+    /// leases in flight is left in it.
     LeaseIdsNeverRepeat,
     /// A heartbeat that arrives on a replaced stream is not fed, so it cannot requeue a
     /// lease the newest stream is about to list; and a `Start` goes to the stream that is
     /// the worker's newest when it leaves.
     StaleHeartbeatIsNotFed,
-    /// A write the store refused is not lost: the held records are written again, in the
-    /// order the scheduler asked, and each `Start` is released once.
+    /// A write the store refused is not lost, however many times it is refused: the held
+    /// records are written again, in the order the scheduler asked, and each `Start` is
+    /// released once.
     RefusedWriteIsRetriedInOrder,
     /// After a restart a lease whose worker has not registered is kept until the lease
     /// grace has passed and then given up, and one whose worker registers and lists it is
     /// kept.
     RecoveredLeaseWaitsForItsWorker,
+    /// While the store is down nothing is given up for silence, and for the grace after it
+    /// returns a silent worker's lease is kept; once the grace has passed it is given up.
+    StoreOutageIsWaitedOut,
 }
 
 impl Scenario {
     /// Every scenario, in the order [`super::run`] runs them.
-    pub const ALL: [Scenario; 6] = [
+    pub const ALL: [Scenario; 7] = [
         Scenario::StartWaitsForCommit,
         Scenario::AnsweredOnceAcrossRestart,
         Scenario::LeaseIdsNeverRepeat,
         Scenario::StaleHeartbeatIsNotFed,
         Scenario::RefusedWriteIsRetriedInOrder,
         Scenario::RecoveredLeaseWaitsForItsWorker,
+        Scenario::StoreOutageIsWaitedOut,
     ];
 
     /// Runs this scenario on a fresh harness.
     pub(crate) fn run<H: CoreHarness>(&self, harness: &mut H) -> Verdict {
         let mut notes = Notes(Vec::new());
         match self {
-            Self::StartWaitsForCommit => start_waits_for_commit(harness, &mut notes),
+            Self::StartWaitsForCommit => write_path::start_waits_for_commit(harness, &mut notes),
             Self::AnsweredOnceAcrossRestart => answered_once_across_restart(harness, &mut notes),
             Self::LeaseIdsNeverRepeat => lease_ids_never_repeat(harness, &mut notes),
             Self::StaleHeartbeatIsNotFed => stale_heartbeat_is_not_fed(harness, &mut notes),
-            Self::RefusedWriteIsRetriedInOrder => refused_write_is_retried(harness, &mut notes),
+            Self::RefusedWriteIsRetriedInOrder => {
+                write_path::refused_write_is_retried(harness, &mut notes);
+            }
             Self::RecoveredLeaseWaitsForItsWorker => {
                 recovered_lease_waits(harness, &mut notes);
+            }
+            Self::StoreOutageIsWaitedOut => {
+                write_path::store_outage_is_waited_out(harness, &mut notes);
             }
         }
         notes.verdict()
@@ -70,10 +84,10 @@ impl Scenario {
 
 /// The observations that did not hold, in the order they were made. A scenario makes
 /// every observation, so the verdict names everything that was wrong, not the first.
-struct Notes(Vec<String>);
+pub(super) struct Notes(Vec<String>);
 
 impl Notes {
-    fn expect(&mut self, held: bool, what: &str) {
+    pub(super) fn expect(&mut self, held: bool, what: &str) {
         if !held {
             self.0.push(what.to_string());
         }
@@ -87,16 +101,16 @@ impl Notes {
     }
 }
 
-const SECOND: Duration = Duration::from_secs(1);
+pub(super) const SECOND: Duration = Duration::from_secs(1);
 
 /// The operation and lease of the `index`th start, or a pair no core knows if there is none.
-fn nth(released: &[Released], index: usize) -> (OperationId, LeaseId) {
+pub(super) fn nth(released: &[Released], index: usize) -> (OperationId, LeaseId) {
     let none = (OperationId(u64::MAX), LeaseId::new(0, u64::MAX));
     released.get(index).map_or(none, |s| (s.operation, s.lease))
 }
 
 /// The operations of `released`, in order.
-fn operations(released: &[Released]) -> Vec<OperationId> {
+pub(super) fn operations(released: &[Released]) -> Vec<OperationId> {
     released.iter().map(|s| s.operation).collect()
 }
 
@@ -109,42 +123,40 @@ fn placements(released: &[Released]) -> Vec<(OperationId, &str)> {
 }
 
 /// The starts released since `seen` of them were.
-fn since<H: CoreHarness>(harness: &H, seen: usize) -> Vec<Released> {
+pub(super) fn since<H: CoreHarness>(harness: &H, seen: usize) -> Vec<Released> {
     harness.observed().released.split_off(seen)
 }
 
 /// How many times `operation` was answered.
-fn answers_of<H: CoreHarness>(harness: &H, operation: OperationId) -> usize {
+pub(super) fn answers_of<H: CoreHarness>(harness: &H, operation: OperationId) -> usize {
     let answered = harness.observed().answered;
     answered.iter().filter(|a| a.operation == operation).count()
 }
 
-fn start_waits_for_commit<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.worker_up(NODE_A);
-    harness.refuse_writes(1);
-    harness.submit(1, 1);
-    harness.advance(SECOND);
-    notes.expect(
-        harness.observed().released.is_empty(),
-        "no Start is released while the store refuses its lease record",
-    );
-    harness.advance(SECOND);
-    let seen = harness.observed();
-    let stored: BTreeSet<LeaseId> = seen.stored_leases.iter().copied().collect();
-    notes.expect(
-        seen.released
-            .iter()
-            .all(|start| stored.contains(&start.lease)),
-        "every Start released has its lease in the store",
-    );
-    // With nothing started the report names ids the core does not know, and is ignored.
-    let (operation, lease) = nth(&seen.released, 0);
-    harness.refuse_writes(1);
-    harness.report(operation, lease);
-    notes.expect(
-        harness.observed().answered.is_empty(),
-        "no answer is released while the store refuses its result record",
-    );
+/// The leases the core has released to `worker`, in order.
+pub(super) fn leases_on<H: CoreHarness>(harness: &H, worker: &str) -> Vec<LeaseId> {
+    let released = harness.observed().released;
+    let there = released.iter().filter(|s| s.worker == worker);
+    there.map(|s| s.lease).collect()
+}
+
+/// Advances the clock by `total` in steps, `worker` heartbeating on `stream` at each step
+/// with the leases it has been sent.
+pub(super) fn soak<H: CoreHarness>(harness: &mut H, worker: &str, stream: Stream, total: Duration) {
+    let mut spent = Duration::ZERO;
+    while spent < total {
+        harness.advance(STEP);
+        let running = leases_on(harness, worker);
+        harness.heartbeat(worker, stream, &running);
+        spent += STEP;
+    }
+}
+
+/// Reports every start released since `seen` of them were.
+fn report_since<H: CoreHarness>(harness: &mut H, seen: usize) {
+    for start in since(harness, seen) {
+        harness.report(start.operation, start.lease);
+    }
 }
 
 fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
@@ -153,30 +165,37 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     harness.advance(SECOND);
     let started = harness.observed().released;
     harness.report(first, nth(&started, 0).1);
-    // Queued when the process dies: no tick has placed it.
-    let queued = harness.submit(2, 2);
+    // Queued when the process dies: no tick has placed it. Its twin joins it.
+    let second = harness.submit(2, 2);
+    let joined = harness.submit(3, 2);
+    notes.expect(
+        joined == second,
+        "work already in flight is joined, not added",
+    );
 
     harness.crash_and_restart();
     harness.worker_up(NODE_A);
     harness.advance(SECOND);
-    let again = since(harness, started.len());
-    for start in &again {
-        harness.report(start.operation, start.lease);
-    }
+    report_since(harness, started.len());
+    let third = harness.submit(4, 3);
+    let second_boot = harness.observed().released.len();
+
+    harness.crash_and_restart();
+    harness.worker_up(NODE_A);
+    harness.advance(SECOND);
+    report_since(harness, second_boot);
     harness.advance(SECOND);
 
     notes.expect(
-        operations(&again) == [queued],
-        "after the restart only the operation that was still queued is started",
+        operations(&harness.observed().released) == [first, second, third],
+        "each operation is started once across both restarts, a joined one once",
     );
-    notes.expect(
-        answers_of(harness, first) == 1,
-        "an operation finished before the crash is answered once, not again",
-    );
-    notes.expect(
-        answers_of(harness, queued) == 1,
-        "an operation queued at the crash is answered once",
-    );
+    for operation in [first, second, third] {
+        notes.expect(
+            answers_of(harness, operation) == 1,
+            "each operation is answered once across both restarts",
+        );
+    }
 }
 
 fn lease_ids_never_repeat<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
@@ -191,6 +210,20 @@ fn lease_ids_never_repeat<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
         );
         harness.crash_and_restart();
     }
+    // Two leases in flight, the higher one finishes, the process dies: the lower one is
+    // all the store holds of them, and the next lease must still not take the higher id.
+    harness.worker_up(NODE_A);
+    harness.submit(4, 4);
+    harness.submit(5, 5);
+    harness.advance(SECOND);
+    let released = harness.observed().released;
+    let (operation, lease) = nth(&released, released.len().saturating_sub(1));
+    harness.report(operation, lease);
+    harness.crash_and_restart();
+    harness.worker_up(NODE_A);
+    harness.submit(6, 6);
+    harness.advance(SECOND);
+
     let leases: Vec<LeaseId> = harness
         .observed()
         .released
@@ -226,28 +259,6 @@ fn stale_heartbeat_is_not_fed<H: CoreHarness>(harness: &mut H, notes: &mut Notes
     notes.expect(
         all.iter().map(|s| s.stream).collect::<Vec<_>>() == [old, new],
         "each Start went to the worker's newest stream when it left",
-    );
-}
-
-fn refused_write_is_retried<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
-    harness.worker_up(NODE_A);
-    let first = harness.submit(1, 1);
-    let second = harness.submit(2, 2);
-    // Refused twice: the retry at the next input is refused too, and the third succeeds.
-    harness.refuse_writes(2);
-    for _ in 0..4 {
-        harness.advance(SECOND);
-    }
-
-    let seen = harness.observed();
-    notes.expect(
-        operations(&seen.released) == [first, second],
-        "each operation is started once, in the order the scheduler placed them",
-    );
-    let leases: Vec<LeaseId> = seen.released.iter().map(|s| s.lease).collect();
-    notes.expect(
-        seen.stored_leases == leases,
-        "the store took the lease records in the order the scheduler asked",
     );
 }
 

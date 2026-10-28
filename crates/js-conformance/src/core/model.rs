@@ -280,13 +280,17 @@ impl ReferenceCore {
 
 impl CoreHarness for ReferenceCore {
     fn submit(&mut self, waiter: u64, job: u8) -> OperationId {
-        let operation = self.sched.next_operation();
-        let row = format!("{},{waiter},{job}", operation.0);
-        let txn = Txn::new()
-            .put(format!("op/{:016}", operation.0), row, Cond::Any)
-            .put("meta/next_op", (operation.0 + 1).to_string(), Cond::Any);
-        self.put(txn);
         let request = request(job);
+        // A request for work already in flight joins that operation: no new id, no new row.
+        let twin = self.sched.twin(&request);
+        let operation = twin.unwrap_or(self.sched.next_operation());
+        if twin.is_none() {
+            let row = format!("{},{waiter},{job}", operation.0);
+            let txn = Txn::new()
+                .put(format!("op/{:016}", operation.0), row, Cond::Any)
+                .put("meta/next_op", (operation.0 + 1).to_string(), Cond::Any);
+            self.put(txn);
+        }
         self.feed(Event::Submit {
             waiter: WaiterId(waiter),
             request,
