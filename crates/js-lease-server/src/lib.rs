@@ -63,7 +63,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start; 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`; 422 for a start-contract refusal (`wall-time-not-positive`, `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`) |
+//! | `POST /v1/leases` | 201 `{id, host, expires_at_ms}`; 202 `{id, state: "pending"}` when the provider has not confirmed the start; 409 for `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`; 422 for a start-contract refusal (`wall-time-not-positive`, `reserved-label`, `invalid-label`, `unknown-class`, `below-class-minimum`) |
 //! | `POST /v1/leases/{id}/renew` | 200 `{expires_at_ms}`; 404 `unknown-lease`; 409 `not-held` or `expired` |
 //! | `DELETE /v1/leases/{id}` | 200 `{state: "freed"}`; 202 `{state: "releasing"}`; 404 |
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
@@ -97,6 +97,12 @@
 //! idempotency key, so that a repeated acquire returns the lease it made, is a
 //! follow-up and not built here. Renew and release name their lease and are safe to
 //! repeat.
+//!
+//! A whole-node request whose tries on hosts all failed is answered `exclusive-not-ready`
+//! once, and the server then forgets the request. A client that lost that 409 and
+//! retries is placed afresh, on a fresh host choice, as a new request; it does not get
+//! the refusal again. `no-capable-host` says no host of the pool could ever serve the
+//! request, as the pool stands.
 //!
 //! The table sits behind one async mutex, taken for the table call alone and never held
 //! across an await. A table call is synchronous: it writes and syncs the lease file and
