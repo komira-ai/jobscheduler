@@ -14,8 +14,6 @@
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
-#![deny(clippy::disallowed_methods, clippy::disallowed_types)]
-
 mod class;
 mod ids;
 mod labels;
