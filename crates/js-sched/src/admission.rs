@@ -828,5 +828,97 @@ mod tests {
             Err(FlagError::Unknown("--placement-s-cpu".to_owned()))
         );
         assert_eq!(cfg, before);
+        assert_eq!(
+            FlagError::Unknown("--placement-s-cpu".to_owned()).to_string(),
+            "unknown placement flag --placement-s-cpu"
+        );
+        assert_eq!(
+            FlagError::Invalid {
+                flag: "--placement-key-share".to_owned(),
+                value: "101".to_owned()
+            }
+            .to_string(),
+            "--placement-key-share: invalid value \"101\""
+        );
+    }
+
+    fn request(kind: LeaseKind) -> Request {
+        Request {
+            key: WorkKey::new("load", "k"),
+            qos: js_types::sched::Qos::Ci,
+            kind,
+            resources: Resources::new(1_000, 1 << 30),
+            needs: js_caps::Request::default(),
+            hermetic: true,
+            do_not_cache: false,
+        }
+    }
+
+    /// Catches: a recovered action whose cost record has no key hash left at 0 (every
+    /// such lease would share one key's 25% share), and a hash written over a cost that
+    /// has one, or onto a lease that is not an action.
+    #[test]
+    fn a_cost_with_no_key_hash_takes_the_requests() {
+        let action = request(LeaseKind::Action);
+        let cost = Admission::booked_cost(&action);
+        let unhashed = LeaseCost {
+            key_hash: 0,
+            ..cost
+        };
+        assert_eq!(Admission::with_key_hash(unhashed, &action), cost);
+        let other = LeaseCost {
+            key_hash: 7,
+            ..cost
+        };
+        assert_eq!(Admission::with_key_hash(other, &action), other);
+        let whole = request(LeaseKind::WholeMachine);
+        assert_eq!(Admission::with_key_hash(unhashed, &whole), unhashed);
+    }
+
+    /// Catches: a choice that was not scored (the only candidate) counted as scored or
+    /// by its keys, and the evaluations of a scored choice not added.
+    #[test]
+    fn only_a_scored_choice_counts_how_it_was_decided() {
+        let worker = WorkerId::new("a");
+        let choice = crate::load::Choice {
+            worker: &worker,
+            scored: false,
+            slack_used: true,
+            distrusted: true,
+            concentrated: true,
+            tie_break: true,
+        };
+        let mut adm = Admission::default();
+        adm.count_scored(0, &choice);
+        assert_eq!(adm.counters, LoadCounters::default());
+        adm.count_scored(
+            128,
+            &crate::load::Choice {
+                scored: true,
+                ..choice
+            },
+        );
+        let c = &adm.counters;
+        assert_eq!(
+            (
+                c.score_evaluations,
+                c.scored,
+                c.chose_slack,
+                c.chose_distrusted,
+                c.chose_concentrated,
+                c.chose_by_tie_break
+            ),
+            (128, 1, 1, 1, 1, 1)
+        );
+    }
+
+    /// Catches: the fit shape a config is built with not being the one it reports.
+    #[test]
+    fn a_config_reports_its_fit_shape() {
+        use crate::load::FitShape;
+        assert_eq!(ScoreConfig::default().fit(), FitShape::Squared);
+        for fit in [FitShape::Squared, FitShape::Linear, FitShape::Flat] {
+            assert_eq!(ScoreConfig::default().with_fit(fit).fit(), fit);
+        }
     }
 }

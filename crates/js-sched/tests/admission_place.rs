@@ -414,6 +414,46 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     assert_eq!(starts[0].operation, head);
 }
 
+/// Catches: a whole-machine lease being scored or logged as a shadow choice (the score
+/// ranks shared action work only), and one not placed on the empty worker under `on` or
+/// `shadow`: `b` holds a light lease, so the lease starts on `a`, and placing it scores
+/// nothing and logs no shadow choice.
+#[test]
+fn a_whole_machine_lease_is_not_scored_under_on_or_shadow() {
+    for mode in [PlacementLoad::On, PlacementLoad::Shadow] {
+        let mut r = Rig::new(config(mode));
+        let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
+        r.up_with("a", node(), whole.clone());
+        r.up_with("b", node(), whole);
+        r.feed(Event::Cordon { worker: w("a") });
+        r.action(250, 4 * GIB, Some(warm(250, 0)));
+        assert_eq!(on(&r.tick()), ["b"], "{mode:?}");
+        r.feed(Event::Uncordon { worker: w("a") });
+        let counts = |c: js_sched::LoadCounters| {
+            (
+                c.scored,
+                c.score_evaluations,
+                c.shadow_same_choice,
+                c.shadow_other_choice,
+            )
+        };
+        let before = counts(r.s.load_counters());
+        let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
+        q.resources = node();
+        let head = r.submit(q);
+        let starts = r.round(1_000);
+        assert_eq!(
+            starts
+                .iter()
+                .map(|s| (s.operation, s.worker.as_str()))
+                .collect::<Vec<_>>(),
+            [(head, "a")],
+            "{mode:?}"
+        );
+        assert_eq!(counts(r.s.load_counters()), before, "{mode:?}");
+    }
+}
+
 /// Catches: a draining worker taking small work because its charged load falls as its
 /// leases end: placement skips it before the predicate, so the drain completes.
 #[test]
