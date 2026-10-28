@@ -59,6 +59,9 @@ const SSH_OUTPUT: usize = 4000;
 const STOP_DONE: &str = "paste back everything printed above, from the plan line to here.";
 /// What to paste back after a run whose check failed but whose instance is gone.
 const STOP_CHECK_FAILED: &str = "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
+/// Why a run stopped because the operator or the system asked it to (a signal, in the
+/// example).
+const INTERRUPTED: &str = "interrupted: a stop was requested (SIGINT, SIGTERM or SIGHUP)";
 /// The class every row of the generated table carries: the runner asks for any GPU.
 const ANY_GPU: &str = "any";
 
@@ -71,7 +74,8 @@ pub trait Sleeper {
 /// Running a command on the instance.
 pub trait Remote {
     /// Runs `command` as `user` at `host`, with the private key in `identity`, and
-    /// gives up after `limit`. The output, or why it failed.
+    /// gives up after `limit` or as soon as `stop` answers true. The output, or why it
+    /// failed.
     ///
     /// # Errors
     ///
@@ -83,6 +87,7 @@ pub trait Remote {
         identity: &Path,
         command: &str,
         limit: Duration,
+        stop: &dyn Fn() -> bool,
     ) -> Result<String, String>;
 }
 
@@ -102,6 +107,10 @@ pub struct Seams<'a> {
     pub wall_unix: &'a dyn Fn() -> u64,
     /// Builds the API client.
     pub connect: &'a Connect<'a>,
+    /// True once a stop was requested (the example sets it from a signal handler). Read
+    /// before the launch, on every wait iteration and around the ssh step; once a launch
+    /// has happened it sends the run straight to teardown.
+    pub stop: &'a dyn Fn() -> bool,
 }
 
 fn say(out: &mut dyn Write, line: impl Display) {
@@ -110,7 +119,8 @@ fn say(out: &mut dyn Write, line: impl Display) {
 
 /// Runs the program with `args` (the command line without the program name), writing
 /// everything it has to say to `out`. Returns the exit status: 0 when the run did what
-/// was asked, 2 for a usage error, 1 otherwise.
+/// was asked, 2 for a usage error, 1 otherwise (a stop request after the launch is a
+/// teardown, then 1).
 pub fn run(args: &[String], seams: &Seams<'_>, out: &mut dyn Write) -> i32 {
     let args = match args::parse(args) {
         Ok(args) => args,
@@ -203,6 +213,10 @@ struct Runner<'a, 'o> {
 impl Runner<'_, '_> {
     fn say(&mut self, line: impl Display) {
         say(self.out, line);
+    }
+
+    fn stop_requested(&self) -> bool {
+        (self.seams.stop)()
     }
 
     fn fail(&mut self, line: impl Display, stop: &str) -> i32 {
@@ -385,6 +399,26 @@ impl Runner<'_, '_> {
                 "remove or move the state file only if you know no instance runs, then paste back this output.",
             );
         }
+        // Printed before anything can take long, so that the operator holds it even if
+        // this process is killed beyond catching.
+        let ca = self
+            .args
+            .ca_bundle
+            .as_ref()
+            .map_or_else(String::new, |p| format!(" --ca-bundle {}", p.display()));
+        self.say(format_args!(
+            "teardown command (run it if this process dies): first_launch --base-url {} --key-file {}{ca} --teardown-only {}",
+            self.args.base_url,
+            self.args.key_file.display(),
+            plan.state_file.display(),
+        ));
+        if self.stop_requested() {
+            let _ = std::fs::remove_file(&plan.state_file);
+            return self.fail(
+                format_args!("{INTERRUPTED}; nothing was launched"),
+                "nothing was launched; paste back this output.",
+            );
+        }
         let launched_at = self.seams.clock.now();
         let request = AcquireRequest {
             acquire: acquire.clone(),
@@ -483,6 +517,9 @@ impl Runner<'_, '_> {
         let clock = self.seams.clock.clone();
         let mut shown: Option<Status> = None;
         loop {
+            if self.stop_requested() {
+                return Some(INTERRUPTED.to_owned());
+            }
             let elapsed = clock.now().saturating_sub(launched_at);
             match provider.list() {
                 Ok(all) => {
@@ -513,14 +550,24 @@ impl Runner<'_, '_> {
             if elapsed >= self.args.boot_deadline {
                 return Some("the boot deadline passed before the instance was active".to_owned());
             }
+            // A stop that came during the list is honoured before the pause, not after.
+            if self.stop_requested() {
+                return Some(INTERRUPTED.to_owned());
+            }
             self.seams.sleeper.sleep(POLL);
         }
         let elapsed = clock.now().saturating_sub(launched_at);
         if let Some(cap) = caps.hit(elapsed) {
             return Some(cap.to_owned());
         }
+        if self.stop_requested() {
+            return Some(INTERRUPTED.to_owned());
+        }
         if let Some(ssh) = &self.args.ssh {
             *ok = self.ask(ssh, &ids[0], caps.left(elapsed));
+            if self.stop_requested() {
+                return Some(INTERRUPTED.to_owned());
+            }
         }
         None
     }
@@ -532,11 +579,14 @@ impl Runner<'_, '_> {
             return false;
         };
         let limit = left.min(SSH_LIMIT);
-        match self
-            .seams
-            .remote
-            .run(&host, &ssh.user, &ssh.identity, &ssh.command, limit)
-        {
+        match self.seams.remote.run(
+            &host,
+            &ssh.user,
+            &ssh.identity,
+            &ssh.command,
+            limit,
+            self.seams.stop,
+        ) {
             Ok(output) => {
                 let shown: String = output.chars().take(SSH_OUTPUT).collect();
                 self.say(format_args!(

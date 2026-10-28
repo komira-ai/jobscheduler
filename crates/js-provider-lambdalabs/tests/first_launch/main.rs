@@ -5,4 +5,5 @@ mod args;
 mod go;
 mod limits;
 mod rig;
+mod stop;
 mod teardown;

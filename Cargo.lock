@@ -1160,6 +1160,7 @@ dependencies = [
 name = "js-provider-lambdalabs"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "rcgen",
  "rustix",

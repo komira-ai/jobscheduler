@@ -108,6 +108,7 @@ impl Remote for TestRemote {
         identity: &Path,
         command: &str,
         limit: Duration,
+        _stop: &dyn Fn() -> bool,
     ) -> Result<String, String> {
         self.asked.borrow_mut().push((
             host.to_owned(),
@@ -147,6 +148,13 @@ pub struct Rig {
     pub connected: RefCell<Vec<String>>,
     pub bundles: RefCell<Vec<Option<PathBuf>>>,
     pub connect_error: RefCell<Option<SetupError>>,
+    /// A stop request, as the example's signal handler would set it.
+    pub stop: Cell<bool>,
+    /// How many times the runner has read the stop request.
+    pub stop_reads: Cell<u32>,
+    /// The read (1-based) from which the request counts as made; 0 for never. Lets a
+    /// test place the request between two of the runner's own reads.
+    pub stop_from_read: Cell<u32>,
 }
 
 impl Drop for Rig {
@@ -178,6 +186,9 @@ impl Rig {
             connected: RefCell::new(Vec::new()),
             bundles: RefCell::new(Vec::new()),
             connect_error: RefCell::new(None),
+            stop: Cell::new(false),
+            stop_reads: Cell::new(0),
+            stop_from_read: Cell::new(0),
         }
     }
 
@@ -222,12 +233,19 @@ impl Rig {
             }
         };
         let wall = || 1_000;
+        let stop = || {
+            self.stop_reads.set(self.stop_reads.get() + 1);
+            self.stop.get()
+                || (self.stop_from_read.get() != 0
+                    && self.stop_reads.get() >= self.stop_from_read.get())
+        };
         let seams = Seams {
             clock: self.clock.clone(),
             sleeper: &sleeper,
             remote,
             wall_unix: &wall,
             connect: &connect,
+            stop: &stop,
         };
         let mut out = Vec::new();
         let status = run(args, &seams, &mut out);
