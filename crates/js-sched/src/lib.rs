@@ -30,8 +30,10 @@
 //!   predicted cost of the leases no reading covers yet, plus the cost of the new lease,
 //!   stays within its CPU and its memory, each charged at a cost the lease keeps from its
 //!   grant to its result; a worker with no usable reading is charged by predicted cost
-//!   alone. A scheduler built with [`Scheduler::new`] still places by the booked rule
-//!   until [`Scheduler::with_load_config`] turns this on (the default of [`LoadConfig`]).
+//!   alone. A scheduler built with [`Scheduler::new`] places this way, by the defaults of
+//!   [`LoadConfig`]: planned to 1.1x of the worker's CPU (`--placement-cpu-slack`) and 1.0x of its memory.
+//!   [`PlacementLoad::Off`], set through [`Scheduler::with_load_config`], is the rollback
+//!   switch to the booked rule; it is not a supported mode.
 //!   The rule, its settings and its counters are described in the `admission` module's
 //!   source;
 //! - iOS device leases ([`DEVICE_LEASES_PER_WORKER`]): a request with `ios.device=1`
@@ -110,8 +112,8 @@ mod scheduler;
 mod servable;
 
 pub use admission::{
-    FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction,
-    ShadowChoice,
+    FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, MAX_CPU_SLACK_PERMILLE,
+    PlacementLoad, Prediction,
 };
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;

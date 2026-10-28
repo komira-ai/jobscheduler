@@ -160,7 +160,9 @@ fn worker(name: &'static str) -> WorkerId {
 impl World {
     pub fn new(scenario: &'static str, seed: u64, script: Vec<(u64, Act)>, swarm: Swarm) -> Self {
         let mut world = Self {
-            sched: Scheduler::new(1).with_unservable_wait(Duration::from_secs(WAIT)),
+            sched: Scheduler::new(1)
+                .with_load_config(crate::booked::booked())
+                .with_unservable_wait(Duration::from_secs(WAIT)),
             check: Check::new(scenario, seed, Duration::from_secs(WAIT)),
             rng: SimRng::from_seed(seed),
             t: 0,

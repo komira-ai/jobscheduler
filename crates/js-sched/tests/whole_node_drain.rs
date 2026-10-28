@@ -4,6 +4,8 @@
 //! request's max wall time as the deadline once it has given up `max_reserve_attempts`
 //! times. Every time is farm time fed to the scheduler; nothing waits.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -38,8 +40,12 @@ fn cfg(drain_after_ms: u64, attempts: u32) -> WholeNodeConfig {
 /// One worker `a` with a lease that may run ten minutes, from farm time zero.
 fn busy(config: Option<WholeNodeConfig>) -> Farm {
     let s = config.map_or_else(
-        || Scheduler::new(1),
-        |c| Scheduler::new(1).with_whole_node(c),
+        || Scheduler::new(1).with_load_config(booked::booked()),
+        |c| {
+            Scheduler::new(1)
+                .with_load_config(booked::booked())
+                .with_whole_node(c)
+        },
     );
     let mut f = Farm::new(s);
     f.worker("a");
@@ -213,7 +219,11 @@ fn a_request_with_no_wall_time_and_no_drain_deadline_is_never_given_up() {
 /// it and the mark is gone.
 #[test]
 fn placement_clears_the_mark() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
     f.worker("a");
     let lease = f.lease(secs(MAX_WALL));
     let op = ask(&mut f);
@@ -269,7 +279,11 @@ fn a_worker_that_goes_away_moves_the_mark_without_a_give_up() {
 /// finishes as a result as before.
 #[test]
 fn a_give_up_stops_nothing() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
     f.worker("a");
     let lease = f.lease(secs(MAX_WALL));
     let op = ask(&mut f);
@@ -289,7 +303,11 @@ fn a_give_up_stops_nothing() {
 /// the moment the back-off ends.
 #[test]
 fn a_given_up_worker_that_empties_is_taken_only_after_the_backoff() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
     f.worker("a");
     let short = f.lease(secs(MAX_WALL));
     f.worker("b");
@@ -333,7 +351,11 @@ fn a_hold_at_the_attempt_cap_is_not_given_up_at_the_request_wall_time() {
 /// request holds nothing stale and is placed on the worker at the next round.
 #[test]
 fn the_only_worker_is_taken_when_it_empties_during_the_backoff() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
     f.worker("a");
     let lease = f.lease(secs(MAX_WALL));
     let op = ask(&mut f);
@@ -352,7 +374,11 @@ fn the_only_worker_is_taken_when_it_empties_during_the_backoff() {
 /// longer has its count.
 #[test]
 fn a_finished_operations_give_up_count_is_dropped_with_it() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(cfg(0, 2)));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(cfg(0, 2)),
+    );
     f.worker("a");
     let lease = f.lease(secs(MAX_WALL));
     let op = ask(&mut f);

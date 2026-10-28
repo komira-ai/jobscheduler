@@ -1,7 +1,7 @@
 //! The shape guard and the settings left to the owner, through the scheduler's public
 //! inputs: when a key's curve is charged flat for eight runs, which ends of a run count,
 //! the node guard on flat memory, the end of a new lease's charge at its expected life, the
-//! shadow verdicts and the hold for a blocked head.
+//! the hold for a blocked head.
 //!
 //! The rig feeds readings as a worker's heartbeats; a window is 5 s of farm time.
 
@@ -14,7 +14,7 @@ use js_types::sched::{Failure, LeaseId, Outcome, StartLease, WorkKey};
 
 use profile_rig::load_curves::Curves;
 use profile_rig::load_rig::{self, GIB, Rig, cold, minute, w, warm};
-use profile_rig::{HOUR, ahead, busy_at, busy_pair, cluster, flat_ws, node, place};
+use profile_rig::{HOUR, ahead, busy_at, cluster, flat_ws, node, place};
 
 /// One run of `key` (predicted at 20 cores, so the curve is floored at 15): placed, and
 /// the agent sends its minute 0 as having used `mean` millicores, then it ends as `end`.
@@ -456,8 +456,12 @@ fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
     assert_eq!(flat_30(&mut r, "p1"), 1);
     assert_eq!(flat_30(&mut r, "p2"), 1);
     assert_eq!(flat_30(&mut r, "p3"), 0, "30 + 30 + 30 > 80");
-    // Off (the default): the curves alone decide.
-    let (mut r, curves) = cluster(LoadConfig::default());
+    // Off: the curves alone decide.
+    let off = LoadConfig {
+        flat_memory_slack_permille: None,
+        ..LoadConfig::default()
+    };
+    let (mut r, curves) = cluster(off);
     curves.set_all(&flat_ws(&[1_000], GIB), 5);
     assert_eq!(
         [
@@ -496,6 +500,33 @@ fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
     assert_eq!(flat_30(&mut r, "p2"), 0);
 }
 
+/// Catches: the flat-memory guard off by default, or reading its limit as exclusive or
+/// with a slack: with `d` 0 on 64 GiB, a lease charged by a memory curve of 1 GiB is
+/// admitted beside a flat 30 GiB when its own flat cost is 34 GiB (64 GiB of flat costs
+/// in all) and refused when it is one byte more; with the guard off the same lease runs.
+#[test]
+fn the_flat_memory_guard_is_on_at_zero_slack_by_default() {
+    let second = |config: LoadConfig, flat: u64| {
+        let (mut r, curves) = cluster(config);
+        curves.set_all(&flat_ws(&[1_000], GIB), 5);
+        r.keyed("p1", 1_000, 8 * GIB, warm(1_000, 30 * GIB));
+        assert_eq!(r.tick().len(), 1);
+        r.keyed("p2", 1_000, 8 * GIB, warm(1_000, flat));
+        r.tick().len()
+    };
+    assert_eq!(second(LoadConfig::default(), 34 * GIB), 1, "exactly C_mem");
+    assert_eq!(
+        second(LoadConfig::default(), 34 * GIB + 1),
+        0,
+        "a byte over"
+    );
+    let off = LoadConfig {
+        flat_memory_slack_permille: None,
+        ..LoadConfig::default()
+    };
+    assert_eq!(second(off, 34 * GIB + 1), 1, "the guard alone refused it");
+}
+
 /// Catches: the ending of a new lease's charge at its expected life missing or applied
 /// when off or when the key's life is not known: a 30-core lease of life 3 + 2 minutes is
 /// admitted beside a lease that is busy at 90 cores at minute 10, and refused with the
@@ -503,8 +534,10 @@ fn the_flat_memory_guard_bounds_the_sum_of_flat_costs() {
 /// already on the worker stops being charged at its own life.
 #[test]
 fn a_charge_can_end_at_the_expected_life() {
-    let ending = LoadConfig {
-        expected_life_delta_minutes: Some(2),
+    // The default: 2 minutes past the key's P90 life.
+    let ending = LoadConfig::default();
+    let off = LoadConfig {
+        expected_life_delta_minutes: None,
         ..LoadConfig::default()
     };
     let try_it = |config: LoadConfig, life: Option<u32>| {
@@ -530,11 +563,7 @@ fn a_charge_can_end_at_the_expected_life() {
     assert_eq!(ahead(&r, 31).0, 15_000, "the H+ slot");
     assert_eq!(ahead(&r, 4).1, 2 * GIB);
     assert_eq!(ahead(&r, 5).1, GIB, "its memory ends with it");
-    assert_eq!(
-        try_it(LoadConfig::default(), Some(3)).0,
-        0,
-        "off: 90 + 30 > 110"
-    );
+    assert_eq!(try_it(off, Some(3)).0, 0, "off: 90 + 30 > 110");
     assert_eq!(
         try_it(ending, None).0,
         0,
@@ -546,8 +575,8 @@ fn a_charge_can_end_at_the_expected_life() {
     let ages: Vec<(LeaseId, u32)> = leases.iter().map(|&l| (l, 6)).collect();
     r.window_clocked("a", 5_000, GIB, &leases, &ages, &[]);
     // The first lease is at minute 6 of its curve (quiet, floored); the short one is
-    // over its life: 22.5 cores (the covered floor of 30) now, none after.
-    assert_eq!(ahead(&r, 0).0, 15_000 + 22_500);
+    // over its life: 30 cores (the covered floor of 30) now, none after.
+    assert_eq!(ahead(&r, 0).0, 15_000 + 30_000);
     assert_eq!(ahead(&r, 1).0, 15_000);
     assert_eq!(ahead(&r, 4).0, 90_000, "minute 10 of the first lease");
 }
@@ -571,31 +600,6 @@ fn an_expected_life_ends_a_curve_too() {
     r.keyed("early", 1_000, 8 * GIB, warm(20_000, GIB));
     assert_eq!(r.tick().len(), 1, "90 + 90 at minute 10 but one has ended");
     assert_eq!(ahead(&r, 10).0, 90_000);
-}
-
-/// Catches: the shadow count ignoring the profile: shadow places by the booked rule and
-/// counts what the predicate would have said about the worker chosen, curves included.
-#[test]
-fn shadow_counts_the_verdicts_of_the_profile_predicate() {
-    let shadow = |profile: bool| {
-        let config = LoadConfig {
-            mode: PlacementLoad::Shadow,
-            profile,
-            profile_memory: profile,
-            ..LoadConfig::default()
-        };
-        let (r, placed) = busy_pair(config, 56_000);
-        assert_eq!(placed, 2, "the booked rule admits both");
-        r.s.load_counters()
-    };
-    let on = shadow(true);
-    assert_eq!((on.would_admit, on.would_block), (2, 0));
-    let off = shadow(false);
-    assert_eq!(
-        (off.would_admit, off.would_block),
-        (1, 1),
-        "flat: 56 + 56 > 110"
-    );
 }
 
 /// Catches: a scheduler on the booked rule reading curves: with the load rule off the

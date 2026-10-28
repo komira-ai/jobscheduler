@@ -24,6 +24,8 @@
 //! `KBF_SIM_SCENARIO=<name> KBF_SIM_SEED=<n> cargo test -p js-sched --test f3_fleet -- --ignored --exact replay`.
 //! The long sweep: `cargo test -p js-sched --release --test f3_fleet -- --ignored --exact swarm_long`.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;

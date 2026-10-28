@@ -5,7 +5,7 @@ use js_sched::fence::LEASE_GRACE;
 use js_types::sched::{LeaseId, OperationId, WaiterId};
 
 use super::write_path;
-use super::{CoreHarness, Released, Stream};
+use super::{CoreHarness, Released, Stream, WIDE_JOB};
 use crate::Verdict;
 
 pub(super) const NODE_A: &str = "node-a";
@@ -40,8 +40,8 @@ pub enum Scenario {
     /// released once.
     RefusedWriteIsRetriedInOrder,
     /// After a restart a lease whose worker has not registered is kept until the lease
-    /// grace has passed and then given up, and one whose worker registers and lists it is
-    /// kept.
+    /// grace has passed and then given up (its operation runs again once a worker has the
+    /// cores), and one whose worker registers and lists it is kept.
     RecoveredLeaseWaitsForItsWorker,
     /// While the store is down nothing is given up for silence, and for the grace after it
     /// returns a silent worker's lease is kept; once the grace has passed it is given up.
@@ -303,7 +303,9 @@ fn stale_heartbeat_is_not_fed<H: CoreHarness>(harness: &mut H, notes: &mut Notes
 
 fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
     harness.worker_up(NODE_A);
-    let kept = harness.submit(1, 1);
+    // The first job takes all of A's cores, so the second goes to B whatever the placement
+    // rule is.
+    let kept = harness.submit(1, WIDE_JOB);
     harness.advance(SECOND);
     harness.worker_up(NODE_B);
     let lost = harness.submit(2, 2);
@@ -335,16 +337,24 @@ fn recovered_lease_waits<H: CoreHarness>(harness: &mut H, notes: &mut Notes) {
         "a lease whose worker has not registered is kept until the grace has passed",
     );
     wait(harness, STEP * 3);
+    // The returned worker's cores are all held by the lease it listed, so the operation of
+    // the unclaimed lease has nowhere to run until that lease ends.
+    notes.expect(
+        since(harness, before.len()).is_empty(),
+        "the operation of the unclaimed lease waits while the kept lease holds the cores",
+    );
+    harness.report(kept, kept_lease);
+    harness.advance(STEP);
+    harness.heartbeat(NODE_A, stream, &[]);
     let after = since(harness, before.len());
     notes.expect(
         operations(&after) == [lost],
-        "after the grace the unclaimed lease is given up and its operation runs again",
+        "once the kept lease ends the unclaimed lease's operation runs again",
     );
     notes.expect(
         after.iter().all(|s| s.lease != lost_lease),
         "the operation runs again under a new lease",
     );
-    harness.report(kept, kept_lease);
     notes.expect(
         answers_of(harness, kept) == 1,
         "the lease its worker listed is kept: its result is accepted",

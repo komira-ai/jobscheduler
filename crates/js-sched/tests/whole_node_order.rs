@@ -3,6 +3,8 @@
 //! whole-node settings ([`Scheduler::with_whole_node`]). Every time here is farm time fed
 //! to the scheduler; the longest a lease may run is a value handed to it, never waited for.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -37,7 +39,7 @@ fn one_long_two_short(s: Scheduler) -> Farm {
 /// leases are still to run.
 #[test]
 fn without_settings_the_worker_with_fewest_leases_is_held() {
-    let mut f = one_long_two_short(Scheduler::new(1));
+    let mut f = one_long_two_short(Scheduler::new(1).with_load_config(booked::booked()));
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("b")));
 }
@@ -47,7 +49,11 @@ fn without_settings_the_worker_with_fewest_leases_is_held() {
 /// holds `a`.
 #[test]
 fn with_settings_the_worker_cheapest_to_drain_is_held() {
-    let mut f = one_long_two_short(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = one_long_two_short(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     let whole = f.whole();
     assert_eq!(f.held_for(whole), Some(&w("a")));
 }
@@ -57,7 +63,11 @@ fn with_settings_the_worker_cheapest_to_drain_is_held() {
 /// every wall unknown the order falls back to the fewest leases.
 #[test]
 fn a_lease_with_no_wall_time_drains_last() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("a");
     f.lease(secs(60));
     f.worker("b");
@@ -75,7 +85,11 @@ fn a_lease_with_no_wall_time_drains_last() {
 /// (60 s), and the hold stays on `a`.
 #[test]
 fn the_held_worker_is_kept_while_another_becomes_cheaper() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("a");
     f.lease(secs(60));
     f.lease(secs(60));
@@ -94,7 +108,11 @@ fn the_held_worker_is_kept_while_another_becomes_cheaper() {
 /// holds the next worker in drain order.
 #[test]
 fn a_second_request_holds_the_next_cheapest_worker() {
-    let mut f = one_long_two_short(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = one_long_two_short(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     let first = f.whole();
     let second = f.whole();
     assert_eq!(f.held_for(first), Some(&w("a")));
@@ -107,7 +125,11 @@ fn a_second_request_holds_the_next_cheapest_worker() {
 /// hold `a`.
 #[test]
 fn the_end_bound_is_the_start_plus_the_wall_time() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("b");
     f.lease(secs(100));
     f.at(4_000);
@@ -123,7 +145,11 @@ fn the_end_bound_is_the_start_plus_the_wall_time() {
 /// 103 s, after `a`'s at 102 s; counted from its grant it would end first.
 #[test]
 fn the_bound_counts_from_the_start_report_not_the_grant() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("b");
     f.lease_after(secs(100), 3_000);
     f.at(4_000);
@@ -138,7 +164,11 @@ fn the_bound_counts_from_the_start_report_not_the_grant() {
 /// holds two leases and `b` one, all ending at 60 s, and the one with fewer is held.
 #[test]
 fn equal_bounds_hold_the_worker_with_fewer_leases() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("a");
     f.lease(secs(60));
     f.lease(secs(60));
@@ -153,7 +183,11 @@ fn equal_bounds_hold_the_worker_with_fewer_leases() {
 /// kept `a` would cost an hour and `b` would be held.
 #[test]
 fn an_ended_lease_no_longer_counts() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("a");
     f.lease(secs(60));
     let long = f.lease(secs(3_600));
@@ -172,7 +206,11 @@ fn an_ended_lease_no_longer_counts() {
 /// `b` is the dearer and `a` is held.
 #[test]
 fn a_lease_placed_in_the_round_counts() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.worker("a");
     f.lease(secs(90));
     f.lease(secs(90));
@@ -212,7 +250,9 @@ fn recovered(operation: u64, worker: &str, seq: u64) -> Recovered {
 /// is cheaper to drain than `b` (one of an hour), where the fewest-leases rule holds `b`.
 #[test]
 fn recovered_leases_end_a_wall_time_after_the_recovery() {
-    let mut s = Scheduler::new(1).with_whole_node(whole_node());
+    let mut s = Scheduler::new(1)
+        .with_load_config(booked::booked())
+        .with_whole_node(whole_node());
     s.recover(
         7,
         OperationId(10),
@@ -240,7 +280,11 @@ fn recovered_leases_end_a_wall_time_after_the_recovery() {
 /// is, so the worker holding it drains last, and no sum wraps or panics.
 #[test]
 fn an_unrepresentable_wall_time_saturates_to_the_latest_end() {
-    let mut f = Farm::new(Scheduler::new(1).with_whole_node(whole_node()));
+    let mut f = Farm::new(
+        Scheduler::new(1)
+            .with_load_config(booked::booked())
+            .with_whole_node(whole_node()),
+    );
     f.at(5_000);
     f.worker("a");
     f.lease(std::time::Duration::MAX);

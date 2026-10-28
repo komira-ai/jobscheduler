@@ -1,5 +1,5 @@
 //! Admission by load where it meets placement: ranking by what a worker is charged, the
-//! shadow and off settings, the hold a blocked head of the queue keeps, the workers a
+//! off setting, the hold a blocked head of the queue keeps, the workers a
 //! whole-machine lease or a drain is emptying, and the cost a lease keeps across a
 //! restart.
 
@@ -84,7 +84,6 @@ fn where_one_more_goes(mode: PlacementLoad) -> String {
 fn workers_are_ranked_by_what_they_are_charged() {
     assert_eq!(where_one_more_goes(PlacementLoad::On), "b");
     assert_eq!(where_one_more_goes(PlacementLoad::Off), "a");
-    assert_eq!(where_one_more_goes(PlacementLoad::Shadow), "a");
 }
 
 /// What nine actions, each booking a quarter core and predicted at 4 GiB, do on one
@@ -103,37 +102,43 @@ fn nine_big(mode: PlacementLoad) -> (Vec<(OperationId, LeaseId, String)>, js_sch
     (placed, r.s.load_counters())
 }
 
-/// Catches: `shadow` changing a placement (it places as `off` does), `off` reading the
-/// load, and shadow's verdicts not being the ones `on` gives in its first round: of nine
-/// leases of 4 GiB on 32 GiB, `off` and `shadow` start all nine, `on` starts eight and
-/// blocks the ninth, and shadow counts eight that would be admitted and one blocked.
+/// Catches: `off` reading the load, and `on` not applying the sum of predicted memory: of
+/// nine leases of 4 GiB on 32 GiB, `off` starts all nine and counts nothing, `on` starts
+/// eight and blocks the ninth.
 #[test]
-fn shadow_places_as_off_does_and_counts_what_on_would_do() {
+fn off_places_by_the_booked_rule_and_on_sums_predicted_memory() {
     let (off, off_counts) = nine_big(PlacementLoad::Off);
-    let (shadow, shadow_counts) = nine_big(PlacementLoad::Shadow);
     let (on, on_counts) = nine_big(PlacementLoad::On);
     assert_eq!(off.len(), 9);
-    assert_eq!(shadow, off, "the same starts, leases and workers");
     assert_eq!(on.len(), 8);
     assert_eq!(on, off[..8]);
-
     assert_eq!(off_counts, js_sched::LoadCounters::default());
-    assert_eq!(
-        (shadow_counts.would_admit, shadow_counts.would_block),
-        (8, 1)
-    );
-    assert_eq!(shadow_counts.admitted, 0);
-    assert_eq!(shadow_counts.blocked, 0);
     assert_eq!((on_counts.admitted, on_counts.blocked), (8, 1));
-    assert_eq!((on_counts.would_admit, on_counts.would_block), (0, 0));
 }
 
-/// Catches: a scheduler built with `new` not placing as before (the load predicate is
-/// opted into with `with_load_config`): the eight one-core leases the booked rule allows
-/// on eight cores, whatever the predictions say.
+/// Catches: `Scheduler::new` keeping the booked rule (the switch to load placement being
+/// left to `with_load_config`): twelve actions that book a core each and are predicted at
+/// a quarter core, on one measured 8-core worker. By load all twelve start (3 cores
+/// charged); by the booked rule only eight would.
 #[test]
-fn a_scheduler_built_with_new_places_by_the_booked_rule() {
-    let mut s = Scheduler::new(1);
+fn a_scheduler_built_with_new_places_by_load() {
+    let mut r = Rig::on();
+    r.s = Scheduler::new(1);
+    r.up("a", node());
+    r.baseline("a");
+    for _ in 0..12 {
+        r.action(1_000, GIB, Some(warm(250, 0)));
+    }
+    assert_eq!(r.tick().len(), 12);
+    assert_eq!(r.s.load_counters().admitted, 12);
+}
+
+/// Catches: the rollback switch not restoring the booked rule: with `Off` through
+/// `with_load_config`, the twelve one-core leases of the same shape start eight at a time
+/// on eight cores, whatever the predictions say, and no counter moves.
+#[test]
+fn the_off_switch_places_by_the_booked_rule() {
+    let mut s = Scheduler::new(1).with_load_config(config(PlacementLoad::Off));
     let caps = caps("container");
     s.apply(Input::new(
         FarmTime::from_millis(0),
@@ -331,30 +336,35 @@ fn a_blocked_head_does_not_delay_another_pool() {
 }
 
 /// Catches: a hold that wanders (moving at every wobble of the loads) or one that never
-/// moves: both workers measured at 4000 m, the head holds `a`; `b` falling to 3500 m
-/// (within a tenth of the head's ratio) leaves the hold, and falling to 3000 m moves it
+/// moves: both workers measured at 6000 m, the head holds `a`; `b` falling to 5500 m
+/// (within a tenth of the head's ratio; the four leases' predicted 4000 m is the
+/// floor, so the readings are above it) leaves the hold, and falling to 4500 m moves it
 /// to `b`.
 #[test]
 fn the_hold_moves_only_when_the_kept_worker_is_a_tenth_worse() {
     let mut f = Blocked::new();
     let (held_a, held_b) = (f.held_a.clone(), f.held_b.clone());
     for (name, held) in [("a", &held_a), ("b", &held_b)] {
-        f.r.window(name, 4_000, 0, held);
-        f.r.window(name, 4_000, 0, held);
+        f.r.window(name, 6_000, 0, held);
+        f.r.window(name, 6_000, 0, held);
     }
     let head = f.head();
     f.r.round(0);
     assert_eq!(f.r.s.head_hold(head), Some(&w("a")));
     for _ in 0..2 {
-        f.r.window("b", 3_500, 0, &held_b);
+        // `a` keeps reporting, or its reading goes stale and it is charged its prediction.
+        f.r.window("a", 6_000, 0, &held_a);
+        f.r.window("b", 5_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("a")), "0.0625 worse is kept");
+    assert_eq!(f.r.s.head_hold(head), Some(&w("a")), "4% worse is kept");
     for _ in 0..2 {
-        f.r.window("b", 3_000, 0, &held_b);
+        // `a` keeps reporting, or its reading goes stale and it is charged its prediction.
+        f.r.window("a", 6_000, 0, &held_a);
+        f.r.window("b", 4_500, 0, &held_b);
     }
     f.r.round(0);
-    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "0.125 worse moves");
+    assert_eq!(f.r.s.head_hold(head), Some(&w("b")), "14% worse moves");
     assert_eq!(f.r.s.load_counters().reservations, 2);
 }
 
@@ -414,44 +424,34 @@ fn a_worker_reserved_for_a_whole_machine_lease_takes_no_small_work() {
     assert_eq!(starts[0].operation, head);
 }
 
-/// Catches: a whole-machine lease being scored or logged as a shadow choice (the score
-/// ranks shared action work only), and one not placed on the empty worker under `on` or
-/// `shadow`: `b` holds a light lease, so the lease starts on `a`, and placing it scores
-/// nothing and logs no shadow choice.
+/// Catches: a whole-machine lease being scored (the score ranks shared action work
+/// only), and one not placed on the empty worker under `on`: `b` holds a light lease, so
+/// the lease starts on `a`, and placing it scores nothing.
 #[test]
-fn a_whole_machine_lease_is_not_scored_under_on_or_shadow() {
-    for mode in [PlacementLoad::On, PlacementLoad::Shadow] {
-        let mut r = Rig::new(config(mode));
-        let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
-        r.up_with("a", node(), whole.clone());
-        r.up_with("b", node(), whole);
-        r.feed(Event::Cordon { worker: w("a") });
-        r.action(250, 4 * GIB, Some(warm(250, 0)));
-        assert_eq!(on(&r.tick()), ["b"], "{mode:?}");
-        r.feed(Event::Uncordon { worker: w("a") });
-        let counts = |c: js_sched::LoadCounters| {
-            (
-                c.scored,
-                c.score_evaluations,
-                c.shadow_same_choice,
-                c.shadow_other_choice,
-            )
-        };
-        let before = counts(r.s.load_counters());
-        let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
-        q.resources = node();
-        let head = r.submit(q);
-        let starts = r.round(1_000);
-        assert_eq!(
-            starts
-                .iter()
-                .map(|s| (s.operation, s.worker.as_str()))
-                .collect::<Vec<_>>(),
-            [(head, "a")],
-            "{mode:?}"
-        );
-        assert_eq!(counts(r.s.load_counters()), before, "{mode:?}");
-    }
+fn a_whole_machine_lease_is_not_scored_under_on() {
+    let mut r = Rig::new(config(PlacementLoad::On));
+    let whole = caps("container").with_drivers(["container", "native-whole-machine"]);
+    r.up_with("a", node(), whole.clone());
+    r.up_with("b", node(), whole);
+    r.feed(Event::Cordon { worker: w("a") });
+    r.action(250, 4 * GIB, Some(warm(250, 0)));
+    assert_eq!(on(&r.tick()), ["b"]);
+    r.feed(Event::Uncordon { worker: w("a") });
+    let counts = |c: js_sched::LoadCounters| (c.scored, c.score_evaluations);
+    let before = counts(r.s.load_counters());
+    let mut q = r.request(LeaseKind::WholeMachine, 8_000, 32 * GIB);
+    q.resources = node();
+    let head = r.submit(q);
+    let starts = r.round(1_000);
+    assert_eq!(
+        starts
+            .iter()
+            .map(|s| (s.operation, s.worker.as_str()))
+            .collect::<Vec<_>>(),
+        [(head, "a")],
+        "on"
+    );
+    assert_eq!(counts(r.s.load_counters()), before, "on");
 }
 
 /// Catches: a draining worker taking small work because its charged load falls as its

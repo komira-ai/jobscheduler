@@ -168,19 +168,19 @@ fn the_fallback_memory_sum_leaves_the_working_set_out() {
 }
 
 /// Catches: the measurement ignored, or believed below the floor. Eight leases predicted at
-/// 500 m (4000) with 1000 m measured are charged `f` of 4000 = 3000, so 11 more of 500 m
-/// fit under 8800, and the floor binds in that window.
+/// 500 m (4000) with 1000 m measured are charged `f` of 4000 = 4000 (`f` is 1), so 9 more
+/// of 500 m fit under 8800, and the floor binds in that window.
 #[test]
 fn a_reading_replaces_the_sum_but_not_below_the_floor() {
     let (mut r, _) = measured(1_000, GIB);
     let v = view(&r, "a");
     assert!(!v.fallback);
     assert_eq!(v.measured_cpu_millis, Some(1_000));
-    assert_eq!(v.left_cpu_millis, 3_000);
+    assert_eq!(v.left_cpu_millis, 4_000);
     assert_eq!(v.predicted_cpu_millis, 4_000);
     assert_eq!(v.uncovered_cpu_millis, 0);
     assert_eq!(r.s.fallback_workers(), 0);
-    assert_eq!(fill(&mut r, 20, warm(500, 0)).len(), 11);
+    assert_eq!(fill(&mut r, 20, warm(500, 0)).len(), 9);
     let c = r.s.load_counters();
     assert_eq!((c.readings_accepted, c.readings_dropped), (2, 0));
     assert_eq!(
@@ -191,11 +191,14 @@ fn a_reading_replaces_the_sum_but_not_below_the_floor() {
 }
 
 /// Catches: a floor rounded down (an under-charge by a millicore), and `f` applied to the
-/// measured term instead of the predicted: three covered leases of 250 m, 750 m, are
-/// charged 563 (`ceil(0.75 * 750)`) when nothing is measured.
+/// measured term instead of the predicted: with `f` 750, three covered leases of 250 m,
+/// 750 m, are charged 563 (`ceil(0.75 * 750)`) when nothing is measured.
 #[test]
 fn the_floor_is_rounded_up() {
-    let mut r = Rig::on();
+    let mut r = Rig::new(LoadConfig {
+        cpu_floor_permille: 750,
+        ..LoadConfig::default()
+    });
     r.up("a", node());
     let held = fill(&mut r, 3, warm(250, 0));
     r.window("a", 0, 0, &held);
@@ -203,9 +206,10 @@ fn the_floor_is_rounded_up() {
     assert_eq!(view(&r, "a").left_cpu_millis, 563);
 }
 
-/// Catches: a rise not believed at once, or a fall believed at once: with 3000 m as the
-/// floor, a window of 6000 m is charged 6000; the next window of 1000 m still is (the
-/// larger of the last two); the one after is back at the floor.
+/// Catches: a rise not believed at once, or a fall believed at once: with 4000 m as the
+/// floor, a window of 6000 m is charged 6000; the next
+/// window of 1000 m still is (the larger of the last two); the one after is back at the
+/// floor.
 #[test]
 fn a_rise_is_believed_at_once_and_a_fall_after_two_windows() {
     let (mut r, held) = measured(6_000, GIB);
@@ -220,7 +224,7 @@ fn a_rise_is_believed_at_once_and_a_fall_after_two_windows() {
     let v = view(&r, "a");
     assert_eq!(
         (v.measured_cpu_millis, v.left_cpu_millis),
-        (Some(1_000), 3_000)
+        (Some(1_000), 4_000)
     );
 }
 
@@ -388,7 +392,7 @@ fn a_cpu_limited_cgroup_is_the_fallback() {
 /// cgroup has a limit looks like any stale or unmeasured worker), or counted for a worker
 /// that is not in the fallback for that reason: `limited` reports a CPU limit and is
 /// counted, `stale` went silent and `fresh` is measured and neither is, `new` never sent
-/// a reading and is not, `gone` reported a limit and was then lost and is not. In shadow
+/// a reading and is not, `gone` reported a limit and was then lost and is not. In `Off`
 /// mode no worker is counted, and the limit's end takes the count back to zero.
 #[test]
 fn a_cpu_limited_worker_is_counted_apart_from_the_other_fallbacks() {
@@ -425,9 +429,9 @@ fn a_cpu_limited_worker_is_counted_apart_from_the_other_fallbacks() {
     r.window("a", 1_000, GIB, &held);
     assert_eq!(r.s.load_counters().fallback_cpu_limited, 0);
 
-    // Shadow mode charges nobody by measurement, so there is no fallback to count.
+    // The booked rule charges nobody by measurement, so there is no fallback to count.
     let mut shadow = Rig::new(LoadConfig {
-        mode: js_sched::PlacementLoad::Shadow,
+        mode: js_sched::PlacementLoad::Off,
         ..LoadConfig::default()
     });
     shadow.up("a", node());
@@ -770,4 +774,41 @@ fn a_worker_without_capacity_has_nothing_to_be_implausible_against() {
     assert_eq!(v.measured_cpu_millis, Some(50_000));
     let c = r.s.load_counters();
     assert_eq!((c.readings_accepted, c.readings_dropped), (2, 0));
+}
+
+/// Catches: the CPU limit not being the worker's cores when the slack is 0 (`s_cpu` 0 is
+/// 1.0x), read as exclusive, or rounded up: eight cores admit seven leases of a core and
+/// then one of exactly a core (8000 of 8000), and refuse one of 1001 m.
+#[test]
+fn with_no_slack_a_worker_at_exactly_its_cores_admits_and_one_milli_over_does_not() {
+    for (last, admitted) in [(1_000, true), (1_001, false)] {
+        let mut r = Rig::new(LoadConfig {
+            s_cpu_permille: 0,
+            ..LoadConfig::default()
+        });
+        r.up("a", node());
+        r.baseline("a");
+        assert_eq!(fill(&mut r, 7, warm(1_000, 0)).len(), 7);
+        r.action(1_000, GIB, Some(warm(last, 0)));
+        assert_eq!(leases(&r.tick()).len(), usize::from(admitted), "{last} m");
+    }
+}
+
+/// Catches: a covered lease charged below its prediction by default (`f` under 1000): eight
+/// constant-duty leases predicted at a core, covered by a reading of 2000 m, are charged
+/// 8000 m, so one more of 800 m lands exactly on the 8800 limit and one of 801 m does not.
+/// At `f` 750 they would be charged 6000 and 2800 m more would fit.
+#[test]
+fn covered_leases_are_charged_all_of_their_predicted_cores_by_default() {
+    for (last, admitted) in [(800, true), (801, false)] {
+        let mut r = Rig::on();
+        r.up("a", node());
+        let held = fill(&mut r, 8, warm(1_000, 0));
+        assert_eq!(held.len(), 8);
+        r.window("a", 0, 0, &held);
+        r.window("a", 2_000, GIB, &held);
+        assert_eq!(view(&r, "a").left_cpu_millis, 8_000);
+        r.action(1_000, GIB, Some(warm(last, 0)));
+        assert_eq!(leases(&r.tick()).len(), usize::from(admitted), "{last} m");
+    }
 }

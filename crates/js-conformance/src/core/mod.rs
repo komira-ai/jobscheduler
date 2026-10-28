@@ -80,7 +80,7 @@ use std::time::Duration;
 
 use js_types::sched::{LeaseId, OperationId, WaiterId};
 
-pub use model::{Defect, ReferenceCore, UNPLACEABLE_JOB};
+pub use model::{Defect, ReferenceCore, UNPLACEABLE_JOB, WIDE_JOB};
 pub use scenarios::Scenario;
 
 use crate::Verdict;

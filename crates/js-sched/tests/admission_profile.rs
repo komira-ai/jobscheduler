@@ -66,7 +66,7 @@ fn a_covered_lease_without_a_clock_is_charged_flat() {
     r.window("a", 5_000, GIB, &[start.lease]);
     // Covered flat: f * 20 cores at every minute; memory its flat 2 GiB.
     for m in [0, 1, 2, 3, 40] {
-        assert_eq!(ahead(&r, m), (15_000, 2 * GIB), "minute {m}");
+        assert_eq!(ahead(&r, m), (20_000, 2 * GIB), "minute {m}");
     }
     r.window_clocked("a", 5_000, GIB, &[start.lease], &[(start.lease, 0)], &[]);
     assert_eq!(ahead(&r, 2), (60_000, GIB));
@@ -186,7 +186,13 @@ fn a_leases_age_is_whole_minutes_of_the_agents_clock() {
 /// a 15 GiB worker do not fit together until the first has passed its peak (minute 3).
 #[test]
 fn memory_is_held_until_the_peak_is_behind_the_lease() {
-    let (mut r, curves) = cluster_on(LoadConfig::default(), Resources::new(100_000, 15 * GIB));
+    // The node guard on flat memory is off: it would refuse by the flat 8 + 8 > 15, and
+    // this shows the curve alone.
+    let curve_only = LoadConfig {
+        flat_memory_slack_permille: None,
+        ..LoadConfig::default()
+    };
+    let (mut r, curves) = cluster_on(curve_only, Resources::new(100_000, 15 * GIB));
     let points: Vec<(u32, u64)> = [2, 8, 8, 1].iter().map(|&g| (1_000, g * GIB)).collect();
     curves.set("m1", &points, 5);
     curves.set("m2", &points, 5);
@@ -410,8 +416,10 @@ fn the_memory_switch_is_apart_from_the_cpu_one() {
 /// (56 + 56 > 110) and memory is by the curve (1 + 8 <= 15).
 #[test]
 fn the_cpu_switch_is_apart_from_the_memory_one() {
+    // The node guard on flat memory is off: the flat 8 + 8 > 15 would refuse the second.
     let cpu_off = LoadConfig {
         profile: false,
+        flat_memory_slack_permille: None,
         ..LoadConfig::default()
     };
     let (r, placed) = busy_pair(cpu_off, 56_000);
@@ -601,7 +609,7 @@ fn a_recovered_lease_is_charged_flat() {
     for m in [0, 1, 2, 31] {
         assert_eq!(
             again.s.charged_ahead(&w("a"), m),
-            Some((15_000, 2 * GIB)),
+            Some((20_000, 2 * GIB)),
             "minute {m}"
         );
     }
