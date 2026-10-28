@@ -60,6 +60,22 @@ impl Drop for Scratch {
     }
 }
 
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read_to_string(kept).unwrap(), "one");
+}
+
 /// The probes' command lines. Every program is named by its absolute path: the agent never
 /// looks a helper up on the `PATH` it inherited.
 pub const NVIDIA_CMD: &str = "/usr/bin/nvidia-smi --query-gpu=index,uuid,name,memory.total \
