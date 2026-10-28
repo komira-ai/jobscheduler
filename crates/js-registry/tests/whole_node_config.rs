@@ -182,3 +182,13 @@ fn zero_is_refused_per_key() {
     }
     assert!(pool_of(Admission::Whole, 3).with_whole_node(base()).is_ok());
 }
+
+/// The regain-grace default is js-whole's own constant (it cannot depend on the wire
+/// crate); it must stay the wire's heartbeat grace.
+#[test]
+fn regain_grace_default_is_the_wire_grace() {
+    assert_eq!(
+        js_registry::DEFAULT_REGAIN_GRACE_MS,
+        js_agent_wire::DEFAULT_GRACE_MS
+    );
+}

@@ -6,6 +6,8 @@
 //! run the farm could not do ([`Failure::Infra`]) and a lease given up for silence or
 //! replacement.
 
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -94,7 +96,9 @@ struct Farm {
 impl Farm {
     fn new() -> Self {
         Self {
-            s: Scheduler::new(1).recording_requeues(),
+            s: Scheduler::new(1)
+                .with_load_config(booked::booked())
+                .recording_requeues(),
             now: FarmTime::default(),
         }
     }

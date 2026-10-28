@@ -1,8 +1,8 @@
-# Items a pure crate (one that takes time and I/O as inputs) must not use. A pure crate
-# denies `clippy::disallowed_methods` and `clippy::disallowed_types` in its lib.rs;
-# every other crate allows them through `[workspace.lints.clippy]` in the root
-# Cargo.toml. Time enters a pure core as an input, never by reading a clock, so a seed
-# replays exactly.
+# Items a pure crate (one that takes time and I/O as inputs) must not use. The pure
+# layers are listed in layers.toml, and a test requires each of their crates to deny
+# `clippy::disallowed_methods` and `clippy::disallowed_types` in its lib.rs; every other
+# crate allows them through `[workspace.lints.clippy]` in the root Cargo.toml. Time
+# enters a pure core as an input, never by reading a clock, so a seed replays exactly.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "pure crates take time as an input" },
     { path = "std::time::SystemTime::now", reason = "pure crates take time as an input" },

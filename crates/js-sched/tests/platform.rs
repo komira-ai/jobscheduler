@@ -2,6 +2,9 @@
 //! satisfies its platform; work no live worker can run waits with a reason and is
 //! refused after the unservable wait, the refusal committed before it is answered.
 
+#[macro_use]
+#[path = "booked/mod.rs"]
+mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
 #[path = "digest/mod.rs"]
 mod digest;
@@ -73,7 +76,9 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         Self {
-            s: Scheduler::new(1).with_unservable_wait(WAIT),
+            s: Scheduler::new(1)
+                .with_load_config(booked::current())
+                .with_unservable_wait(WAIT),
             now: FarmTime::default(),
         }
     }
@@ -124,9 +129,10 @@ impl Harness {
     }
 }
 
+both_rules! {
 /// Catches: placement that ignores the platform, so a Linux action lands on a Mac
-/// (the first worker by name, with room) and a Mac action on a Linux machine.
-#[test]
+/// (the first worker by name, with room) and a Mac action on a Linux machine; an action
+/// that names no platform may go to either.
 fn an_action_goes_only_to_a_worker_that_satisfies_its_platform() {
     let mut h = Harness::new();
     h.worker("a-mac", mac());
@@ -141,17 +147,26 @@ fn an_action_goes_only_to_a_worker_that_satisfies_its_platform() {
         .iter()
         .map(|g| (g.operation.0, g.worker.as_str()))
         .collect();
+    // The three that name a platform go only where it is served; the one that names
+    // none goes to either worker, which is placement's choice.
     assert_eq!(
-        placed,
-        [(0, "b-linux"), (1, "a-mac"), (2, "b-linux"), (3, "a-mac")]
+        placed[..3],
+        [(0, "b-linux"), (1, "a-mac"), (2, "b-linux")]
     );
+    assert_eq!(placed.len(), 4);
+    if booked::is_booked() {
+        assert_eq!(placed[3], (3, "a-mac"), "the least booked, first by name");
+    }
+    assert_eq!(placed[3].0, 3);
+    assert!(["a-mac", "b-linux"].contains(&placed[3].1), "{placed:?}");
+}
 }
 
+both_rules! {
 /// Catches: an action no live worker satisfies run elsewhere, left queued forever
 /// without a word, refused before the wait is up, or answered before its refusal is
 /// committed. Also: a refused key left in the in-flight table, which would join the
 /// next caller to a dead operation.
-#[test]
 fn work_no_worker_satisfies_waits_with_a_reason_then_is_refused() {
     let mut h = Harness::new();
     h.worker("linux", linux());
@@ -214,11 +229,12 @@ fn work_no_worker_satisfies_waits_with_a_reason_then_is_refused() {
         (OperationId(1), "mac")
     );
 }
+}
 
+both_rules! {
 /// Catches: a wait that never ends once a worker that can run it arrives (no grant,
 /// or callers still told it cannot run), and a wait that does not restart from the
 /// moment it begins again, so work is refused on time spent running.
-#[test]
 fn a_worker_that_can_run_it_ends_the_wait_and_the_wait_restarts() {
     let mut h = Harness::new();
     h.submit(1, request(1, &[("OSFamily", "macos")]));
@@ -280,10 +296,11 @@ fn a_worker_that_can_run_it_ends_the_wait_and_the_wait_restarts() {
         "{refused:?}"
     );
 }
+}
 
+both_rules! {
 /// Catches: work larger than every worker that satisfies its platform (two GPUs, the
 /// nodes have one) left queued forever, as if it only waited for room.
-#[test]
 fn work_larger_than_every_matching_worker_is_unservable() {
     let mut h = Harness::new();
     let event = Event::WorkerUp {
@@ -314,11 +331,12 @@ fn work_larger_than_every_matching_worker_is_unservable() {
     assert_eq!((grants.len(), rest.as_slice()), (1, &[][..]));
     assert_eq!(h.s.waiting(OperationId(2)), None);
 }
+}
 
+both_rules! {
 /// Catches: a VM slot left out of placement's fit (a VM lease placed on a Mac that runs
 /// no VM) or out of the why-not text, which would then read as if the Mac were large
 /// enough.
-#[test]
 fn a_vm_lease_waits_for_a_node_with_a_vm_slot() {
     let mut h = Harness::new();
     h.worker("a-mac", mac());
@@ -342,11 +360,12 @@ fn a_vm_lease_waits_for_a_node_with_a_vm_slot() {
     let placed: Vec<&str> = grants.iter().map(|g| g.worker.as_str()).collect();
     assert_eq!(placed, ["b-mac"]);
 }
+}
 
+both_rules! {
 /// Catches: a `vm.image` request matched on the whole value, or a why-not text that
 /// names the digest alone: a Mac holding the image under another name must take the
 /// action, and one holding another image is named with the image as requested.
-#[test]
 fn a_vm_image_places_on_its_digest_and_names_it_when_missing() {
     let x = format!("sha256:{}", "1".repeat(64));
     let y = format!("sha256:{}", "2".repeat(64));
@@ -377,9 +396,10 @@ fn a_vm_image_places_on_its_digest_and_names_it_when_missing() {
     let placed: Vec<&str> = grants.iter().map(|g| g.worker.as_str()).collect();
     assert_eq!(placed, ["b-mac"]);
 }
+}
 
+both_rules! {
 /// Catches: a caller that joins a waiting twin and is never told why it waits.
-#[test]
 fn a_caller_joining_a_waiting_twin_is_told_why() {
     let mut h = Harness::new();
     h.submit(1, request(1, &[("OSFamily", "macos")]));
@@ -397,10 +417,11 @@ fn a_caller_joining_a_waiting_twin_is_told_why() {
     h.tick();
     assert!(h.submit(3, request(1, &[("OSFamily", "macos")])).is_empty());
 }
+}
 
+both_rules! {
 /// Catches: a refusal applied to an operation that is not queued (granted since, or
 /// unknown), which would answer callers while a lease runs it.
-#[test]
 fn a_stale_refusal_is_dropped() {
     let mut h = Harness::new();
     h.worker("linux", linux());
@@ -434,10 +455,11 @@ fn a_stale_refusal_is_dropped() {
         "{answered:?}"
     );
 }
+}
 
+both_rules! {
 /// Catches: capabilities read only at registration, so a node whose report changes
 /// (an `os_image` added) keeps being matched on its old report.
-#[test]
 fn a_resent_report_changes_what_the_worker_matches() {
     let mut h = Harness::new();
     h.worker("mac", mac());
@@ -456,10 +478,11 @@ fn a_resent_report_changes_what_the_worker_matches() {
     let (grants, rest) = h.grants();
     assert_eq!((grants.len(), rest), (1, vec![waiting(0, None)]));
 }
+}
 
+both_rules! {
 /// Catches: the check for unservable work stopping with the grant limit, so an
 /// action behind a full round never starts its wait and is never refused.
-#[test]
 fn work_behind_a_full_round_still_starts_its_wait() {
     let mut h = Harness::new();
     let event = Event::WorkerUp {
@@ -482,13 +505,14 @@ fn work_behind_a_full_round_still_starts_its_wait() {
         "{rest:?}"
     );
 }
+}
 
+both_rules! {
 /// Catches: a default wait so short that work submitted while daemons reconnect after
 /// a server restart is refused, or one so long a build hangs for an hour.
-#[test]
 fn the_default_wait_is_minutes() {
     assert_eq!(UNSERVABLE_WAIT, Duration::from_secs(300));
-    let mut s = Scheduler::new(1);
+    let mut s = Scheduler::new(1).with_load_config(booked::current());
     let at = |secs: u64| FarmTime::from_millis(secs * 1_000);
     let submit = Event::Submit {
         waiter: WaiterId(1),
@@ -498,6 +522,7 @@ fn the_default_wait_is_minutes() {
     s.apply(Input::new(at(0), Event::Tick));
     assert!(s.apply(Input::new(at(299), Event::Tick)).is_empty());
     assert_eq!(s.apply(Input::new(at(300), Event::Tick)).len(), 1);
+}
 }
 
 /// The scheduler's lease grace G: a worker not heard from for this long is not live.
@@ -544,12 +569,12 @@ fn refusals(effects: &[Effect]) -> Vec<u64> {
         .collect()
 }
 
+both_rules! {
 /// Catches: a refusal late or early against the deadline, in particular a wait that
 /// restarts whenever its reason changes (workers that cannot run it come and go), so
 /// work churned by an unrelated worker is refused late or never. The wait counts from
 /// the first tick at which no live worker could run it, through the reason's change:
 /// still queued at every tick up to W-1 s after it, refused at the tick at W.
-#[test]
 fn the_refusal_comes_at_the_deadline_through_reason_changes() {
     let mut h = Harness::new();
     h.submit(1, request(1, &[("OSFamily", "macos")]));
@@ -569,13 +594,14 @@ fn the_refusal_comes_at_the_deadline_through_reason_changes() {
     assert_eq!(refusals(&refused), [0], "refused at W after the wait began");
     assert_eq!(h.s.queued().count(), 0);
 }
+}
 
+both_rules! {
 /// Catches: a wait that does not restart when a worker that could run the work (but
 /// is busy) arrives and then leaves, so the work is refused at once on time it spent
 /// servable; and one refused late after it restarts. Op 1 waits from t=0, is servable
 /// once the Mac arrives at t=10 (op 0 fills the Mac), and waits again from the tick
 /// at which the Mac stops being live; it is refused exactly W after that, not before.
-#[test]
 fn the_wait_restarts_when_a_worker_that_could_run_it_leaves() {
     let mut h = Harness::new();
     h.worker("linux", linux());
@@ -619,4 +645,5 @@ fn the_wait_restarts_when_a_worker_that_could_run_it_leaves() {
         [0, 1],
         "refused at W after the Mac left"
     );
+}
 }

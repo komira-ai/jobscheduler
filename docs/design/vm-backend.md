@@ -11,8 +11,9 @@ options:
 1. **A fresh VM per run. A VM is never reused.** Every run gets a VM cloned from its base image for that run and destroyed when the run
    ends, whatever its outcome. A lease may hold several runs; each has its own VM and no VM is reused between two of them. A VM that has
    run a job is never handed a second job, never reverted, never "cleaned".
-2. **The machine is reused; the VM is not.** The host serves many leases and runs (VM or container) in a row under the rules of 5.10; what
-   is fresh each time is the guest. A warm pool, to hide the boot, is future work (below) and not designed here.
+2. **The machine is reused; the VM is not.** The host serves many leases and runs (VM or container), in a row and at the same time, under
+   the rules of 5.10 and 5.15; what is fresh each time is the guest. Several fresh VMs exist on one host at once, up to its `vms` slots,
+   each booked in full (D57, 5.18); whether a host can run VMs at all is a fact of its instance type (hosts.md, section 4). A warm pool, to hide the boot, is future work (below) and not designed here.
 
 ### Where it fits: one lifecycle, two backend traits
 
@@ -107,6 +108,8 @@ before the first heartbeat of the new process.
 A VM's only path to the host is one stream per VM that the hypervisor ties to that VM (a socket device; no network is needed). Inside the
 guest a small program, `js-guest`, part of every base image, listens on it from boot. The frame codec is a crate shared by agent and
 guest, `js-guest-wire`, small and dependency-light, versioned like the agent wire (major 1; fields only added).
+
+**What the crates carry today.** `js-guest` and `js-guest-wire` are the guest program and codec lifted from kbf with their bytes unchanged, and they speak kbf's run protocol (`Hello`, `Run`, `Kill`; `Ready`, `Refused`, `Started`, `Exited`; version 1), with inputs and outputs as shared directories and not as frames. The `Put`, `Exec`, `Log` and `Signal` frames in the table below are the earlier design of this channel, and no crate here speaks them.
 
 | Direction | Frame | Meaning |
 |---|---|---|

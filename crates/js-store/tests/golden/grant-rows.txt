@@ -1,0 +1,19 @@
+# The `done/`, `lease-by-op/` and `lease/` rows of a store one frontend opened and used (ids
+# reserved, a node's `Hello` and registration, two cordons, one operation granted and its lease
+# given up, three operations granted and ended, one granted and left holding its lease), as
+# js-store writes them: the key, when the store's clock expires it (nanoseconds, `-` for a row
+# that does not expire) and the value as hex.
+#
+# The `done/` and `lease-by-op/` lines are the lines of the farm server's golden file of
+# scheduler rows for the same calls, copied unchanged: the value of a `done/` row is the
+# farm server's own bytes, kept as given, and every expiry is the 600 seconds of the floor on
+# the retention plus the ticks of the store's clock. The `lease/` line has that file's key and
+# expiry; its value is the test codec's, because the bytes of a `lease/` row belong to the
+# codec the embedding server supplies. A change to this file needs a reason: a store written
+# by an earlier release holds these rows as they are, and the release after this one must
+# read them.
+done/0000000000000005 expires_ns=600026000000 value=011a0908031205656e646564
+done/0000000000000006 expires_ns=600032000000 value=000a052a036f75741a00
+done/0000000000000007 expires_ns=600038000000 value=020a053a036375741a0d0804120974696d6564206f7574
+lease-by-op/0000000000000008 expires_ns=- value=00000000000000050000000000000004
+lease/0000000000000005.0000000000000004 expires_ns=- value=6c65617365203130

@@ -1,0 +1,34 @@
+[package]
+name = "js-server-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The node report a host registers with, and the scheduler the core drives.
+js-caps = { path = "../js-caps" }
+js-sched = { path = "../js-sched" }
+# The state store the rows are written to, and the rows themselves.
+js-state = { path = "../js-state" }
+js-store = { path = "../js-store" }
+js-types = { path = "../js-types" }
+thiserror.workspace = true
+# The lines the farm's operators read: a lease granted or given up, a refused operation.
+tracing.workspace = true
+
+[dev-dependencies]
+# The simulated cell in tests/cell.rs.
+js-sim = { path = "../js-sim" }
+# The in-memory store and the row codec of tests: the durable core's tests run on them.
+js-state = { path = "../js-state", features = ["test-support"] }
+js-store = { path = "../js-store", features = ["test-support"] }
+# The core-driver suite tests/core_suite.rs runs the durable core against.
+js-conformance = { path = "../js-conformance" }
+# The tests install one subscriber, so the fields of every logged line are evaluated.
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
