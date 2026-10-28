@@ -757,3 +757,20 @@ fn a_head_does_not_hold_a_worker_it_avoids() {
         "not the worker it avoids"
     );
 }
+
+/// Catches: a blocked request that takes no hold using up its pool's one hold: the
+/// action at the whole host's memory is blocked by the measurement and holds nothing (it
+/// runs alone), and the ordinary action behind it, blocked in the same pool, still
+/// holds the worker.
+#[test]
+fn a_blocked_request_that_holds_nothing_leaves_the_pool_hold_to_the_next() {
+    let mut r = Rig::on();
+    r.up("a", node());
+    r.window("a", 8_000, 0, &[]);
+    r.window("a", 8_000, 0, &[]);
+    let big = r.action(8_000, 32 * GIB, Some(warm(8_000, 0)));
+    let next = r.action(6_000, 4 * GIB, Some(warm(6_000, 0)));
+    assert!(r.tick().is_empty());
+    assert_eq!(r.s.head_hold(big), None);
+    assert_eq!(r.s.head_hold(next), Some(&w("a")));
+}

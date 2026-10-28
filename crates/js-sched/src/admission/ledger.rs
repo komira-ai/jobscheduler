@@ -291,6 +291,13 @@ impl WorkerLoad {
         self.fresh_reading(now, cfg).is_some()
     }
 
+    /// Whether the newest reading says the actions cgroup has a CPU limit.
+    pub(crate) fn cpu_limited(&self) -> bool {
+        self.readings
+            .as_ref()
+            .is_some_and(|r| r.last.actions_cpu_limited)
+    }
+
     /// The newest reading's working set, if there is one.
     pub(crate) fn working_set(&self) -> Option<u64> {
         self.readings
