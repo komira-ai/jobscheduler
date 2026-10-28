@@ -113,7 +113,6 @@ impl Collector {
         self.last = Some(now);
         let binner = self.binner.get_or_insert_with(|| Binner::new(window));
         // The window is the session's and a later session may have another.
-        binner.set_window(window);
         binner.requeue(self.outbox.reclaim(now));
         let alive: BTreeSet<&str> = running
             .iter()
