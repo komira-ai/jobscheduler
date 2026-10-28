@@ -306,7 +306,7 @@ impl Binner {
         let last = parts.len().saturating_sub(1);
         for (n, part) in parts.into_iter().enumerate() {
             self.roll(id, state, part.minute);
-            if 0 < n && n < last {
+            if n < last {
                 state.open.ws_max = state.open.ws_max.max(bracket);
             }
             state.open.cpu_usec += part.cpu_usec;
