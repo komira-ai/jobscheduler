@@ -650,3 +650,65 @@ fn a_blocked_head_holds_the_worker_by_its_charge_now() {
         "by the charge now: a 1.02 against b 0.88"
     );
 }
+
+/// Catches: the hold for a blocked head ranking workers by the memory its curve charges at
+/// minute 1 and not at the present minute. Worker `a` holds 60 cores and 40 GiB, `b` 20
+/// cores and 55 GiB; the head (a curve of 30 cores and 38 GiB in minute 0, 1 GiB after, and
+/// 100 cores at minute 3, so `a` is refused on CPU and `b` on memory) is predicted at 30
+/// cores and 38 GiB. By its charge now `a` is the emptier (1.22 against 1.45); by its
+/// memory a minute on (1 GiB) `b` would be (0.90 against 0.88).
+#[test]
+fn a_blocked_head_holds_the_worker_by_its_memory_now() {
+    let curves = Curves::new("load");
+    let mut r = Rig::with_curves(LoadConfig::default(), curves.clone());
+    for name in ["a", "b"] {
+        r.up(name, node());
+        r.set_clock(name, HOUR);
+        r.baseline(name);
+        r.window(name, 0, 0, &[]);
+    }
+    r.keyed("ha", 1_000, GIB, warm(60_000, 40 * GIB));
+    r.keyed("hb", 1_000, GIB, warm(20_000, 55 * GIB));
+    assert_eq!(r.tick().len(), 2);
+    assert_eq!(r.held("a").len(), 1);
+    let points = [
+        (30_000, 38 * GIB),
+        (30_000, GIB),
+        (30_000, GIB),
+        (100_000, GIB),
+    ];
+    curves.set("head", &points, 5);
+    let head = r.keyed("head", 1_000, GIB, warm(30_000, 38 * GIB));
+    assert!(r.tick().is_empty());
+    assert_eq!(r.s.head_hold(head).cloned(), Some(w("a")));
+}
+
+/// Catches: the hold for a blocked head ranking workers by the cores its charge asks for a
+/// minute on and not now. The head is charged for one minute only (its key's wall minutes
+/// plus nothing is 1), so at minute 1 it asks for nothing. Worker `a` holds 45 cores and
+/// 29 GiB, `b` 70 cores and 10 GiB (the two do not fit together); the head (60 cores,
+/// 38 GiB) is refused by `a` on memory and by `b` on CPU. Charged now `a` is the emptier
+/// (1.05 against 1.30); charged no cores a minute on, `b` would be (0.75 against 1.05).
+#[test]
+fn a_blocked_head_holds_the_worker_by_its_cores_now() {
+    let config = LoadConfig {
+        expected_life_delta_minutes: Some(0),
+        ..LoadConfig::default()
+    };
+    let curves = Curves::new("load");
+    let mut r = Rig::with_curves(config, curves.clone());
+    for name in ["a", "b"] {
+        r.up(name, node());
+        r.set_clock(name, HOUR);
+        r.baseline(name);
+        r.window(name, 0, 0, &[]);
+    }
+    r.keyed("ha", 1_000, GIB, warm(45_000, 29 * GIB));
+    r.keyed("hb", 1_000, GIB, warm(70_000, 10 * GIB));
+    assert_eq!(r.tick().len(), 2);
+    assert_eq!(r.held("a").len(), 1, "45 + 70 cores is over the limit");
+    curves.set_life("head", 1);
+    let head = r.keyed("head", 1_000, GIB, warm(60_000, 38 * GIB));
+    assert!(r.tick().is_empty());
+    assert_eq!(r.s.head_hold(head).cloned(), Some(w("a")));
+}

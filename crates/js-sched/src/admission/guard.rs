@@ -218,7 +218,12 @@ mod tests {
         g.record(5, Resource::Cpu, false);
         assert_eq!(g.keys.len(), MAX_KEYS, "a key already known makes no room");
         g.record(u64::MAX, Resource::Cpu, true);
-        assert!(g.keys.len() <= MAX_KEYS / 2 + 1, "{}", g.keys.len());
+        // Key `k` was touched at clock `k + 1`, but for key 5, touched again last. Of the
+        // 65 536 clocks the median is that of key 32 769: it and every key older than it
+        // go, so the new key and 32 767 others stay.
+        assert_eq!(g.keys.len(), MAX_KEYS / 2);
+        assert!(!g.keys.contains_key(&32_769), "the median key goes");
+        assert!(g.keys.contains_key(&32_770), "the one after it stays");
         assert!(g.keys.contains_key(&u64::MAX));
         assert!(
             g.keys.contains_key(&(MAX_KEYS as u64 - 1)),

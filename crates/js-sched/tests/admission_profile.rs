@@ -129,19 +129,38 @@ fn the_predicate_is_checked_at_every_minute_of_the_horizon() {
 
 /// Catches: a busy phase beyond the horizon not seen (the `H+` check missing): two leases
 /// busy at minute 40 are not admitted together, while one busy at minute 10 is admitted
-/// beside one busy at minute 40.
+/// beside one busy at minute 40; and minute 30 of the charge read as the `H+` slot.
 #[test]
 fn the_h_plus_check_sees_a_busy_phase_beyond_the_horizon() {
     let (mut r, curves) = holding_busy_at(40, 60);
     curves.set("same", &busy_at(40, 60), 5);
     assert_eq!(ahead(&r, 10).0, 15_000, "nothing busy inside the horizon");
     assert_eq!(ahead(&r, 31).0, 90_000, "the H+ slot holds the later peak");
+    assert_eq!(
+        ahead(&r, HORIZON_MINUTES).0,
+        15_000,
+        "minute 30 is slot 30, not the H+ slot"
+    );
     r.keyed("same", 1_000, 8 * GIB, warm(20_000, GIB));
     assert!(r.tick().is_empty(), "90 + 90 from minute 30 on");
     let (mut r, curves) = holding_busy_at(40, 60);
     curves.set("early", &busy_at(10, 60), 5);
     r.keyed("early", 1_000, 8 * GIB, warm(20_000, GIB));
     assert_eq!(r.tick().len(), 1, "its own tail is quiet: 90 + 15");
+}
+
+/// Catches: a new lease's memory judged at its minute 1 and not its minute 0: a curve that
+/// peaks at 10 GiB in minute 0 alone is refused beside 8 GiB held on a 15 GiB worker (at
+/// minute 1 it would ask for 1 GiB and fit).
+#[test]
+fn the_new_leases_memory_is_judged_at_its_first_minute() {
+    let (mut r, curves) = cluster_on(LoadConfig::default(), Resources::new(100_000, 15 * GIB));
+    r.keyed("held", 1_000, GIB, warm(1_000, 8 * GIB));
+    assert_eq!(r.tick().len(), 1);
+    curves.set("peak", &[(1_000, 10 * GIB), (1_000, GIB), (1_000, GIB)], 5);
+    r.keyed("peak", 1_000, GIB, warm(1_000, 10 * GIB));
+    assert!(r.tick().is_empty(), "8 + 10 > 15 at minute 0");
+    assert_eq!(r.s.load_counters().blocked, 1);
 }
 
 /// Catches: a lease older than the curve charged from minute 0 again, an age that is not
