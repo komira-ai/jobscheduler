@@ -115,6 +115,9 @@ fn a_submitted_operation_is_loaded_queued() {
                 parcel: Some(vec![1, 2]),
                 size_key: None,
             }],
+            floors: Vec::new(),
+            key_floors: Vec::new(),
+            key_names: Vec::new(),
             cordons: Vec::new(),
         }
     );
