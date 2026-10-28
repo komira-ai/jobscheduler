@@ -11,6 +11,7 @@
 
 mod adapter_tests;
 mod engine;
+mod engine_tests;
 mod fixture_tests;
 #[path = "../load_rig/mod.rs"]
 mod load_rig;
