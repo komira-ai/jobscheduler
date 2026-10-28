@@ -19,7 +19,7 @@
 mod args;
 mod state;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io::Write;
 use std::num::NonZeroUsize;
@@ -55,6 +55,11 @@ const TERMINATE_PAUSE: Duration = Duration::from_secs(10);
 const SSH_LIMIT: Duration = Duration::from_secs(120);
 /// The most of the remote command's output printed.
 const SSH_OUTPUT: usize = 4000;
+/// What to paste back after a run that did what was asked.
+const STOP_DONE: &str = "paste back everything printed above, from the plan line to here.";
+/// What to paste back after a run whose check failed but whose instance is gone.
+const STOP_CHECK_FAILED: &str =
+    "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
 /// The class every row of the generated table carries: the runner asks for any GPU.
 const ANY_GPU: &str = "any";
 
@@ -214,20 +219,19 @@ impl Runner<'_, '_> {
         rows: &[(String, u32)],
         key_name: &str,
     ) -> Result<(LambdaProvider, GpuClass), i32> {
-        let mut seen = BTreeSet::new();
-        let mut text = String::new();
+        // One row at a time, so that a type name the table would refuse (the API's
+        // naming is not ours to trust) only drops that type; the later row of a name
+        // seen twice replaces the earlier one.
+        let mut valid = BTreeMap::new();
         for (name, gpus) in rows {
-            let named = !name.is_empty()
-                && name.len() <= 64
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-            if named && *gpus > 0 && seen.insert(name.clone()) {
-                text.push_str(&format!(
-                    "[[option]]\ninstance_type = \"{name}\"\ngpu_class = \"{ANY_GPU}\"\ngpus = {gpus}\n"
-                ));
+            let row = format!(
+                "[[option]]\ninstance_type = {name:?}\ngpu_class = \"{ANY_GPU}\"\ngpus = {gpus}\n"
+            );
+            if OptionTable::parse(&row).is_ok() {
+                valid.insert(name.clone(), row);
             }
         }
+        let text: String = valid.into_values().collect();
         let Ok(table) = OptionTable::parse(&text) else {
             return Err(self.fail(
                 "there is no usable GPU instance type",
@@ -454,14 +458,15 @@ impl Runner<'_, '_> {
     }
 
     fn finish(&mut self, ok: bool, torn: bool, state_file: &Path) -> i32 {
-        match (ok, torn) {
-            (true, _) => self.say("STOP: paste back everything printed above, from the plan line to here."),
-            (false, true) => self.say("STOP: the run did not finish its check; the instance is terminated. Paste back everything printed above."),
-            (false, false) => self.say(format_args!(
-                "STOP: AN INSTANCE MAY STILL BE RUNNING AND BILLING. Run the teardown command with {}, check the provider console, and paste back everything printed above.",
+        let stop = match (ok, torn) {
+            (true, _) => STOP_DONE.to_owned(),
+            (false, true) => STOP_CHECK_FAILED.to_owned(),
+            (false, false) => format!(
+                "AN INSTANCE MAY STILL BE RUNNING AND BILLING. Run the teardown command with {}, check the provider console, and paste back everything printed above.",
                 state_file.display()
-            )),
-        }
+            ),
+        };
+        self.say(format_args!("STOP: {stop}"));
         i32::from(!ok)
     }
 
@@ -476,7 +481,7 @@ impl Runner<'_, '_> {
         caps: &Caps,
         ok: &mut bool,
     ) -> Option<String> {
-        let clock = &self.seams.clock;
+        let clock = self.seams.clock.clone();
         let mut shown: Option<Status> = None;
         loop {
             let elapsed = clock.now().saturating_sub(launched_at);

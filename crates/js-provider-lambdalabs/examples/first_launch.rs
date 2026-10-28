@@ -32,7 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run};
-use js_provider_lambdalabs::{HttpApi, SystemClock};
+use js_provider_lambdalabs::{ApiKey, HttpApi, LambdaApi, SystemClock};
 
 /// Each API call is answered or fails within this long.
 const CALL_LIMIT: Duration = Duration::from_secs(30);
@@ -128,8 +128,8 @@ fn main() {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_secs())
     };
-    let connect = |base: &str, key: &_, ca: Option<&Path>| {
-        HttpApi::connect(base, key, ca, CALL_LIMIT).map(|api| Arc::new(api) as Arc<_>)
+    let connect = |base: &str, key: &ApiKey, ca: Option<&Path>| {
+        HttpApi::connect(base, key, ca, CALL_LIMIT).map(|api| Arc::new(api) as Arc<dyn LambdaApi>)
     };
     let seams = Seams {
         clock: Arc::new(SystemClock::new()),

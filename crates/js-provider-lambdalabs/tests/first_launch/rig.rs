@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run};
 use js_provider_lambdalabs::{
-    Architecture, FakeLambda, InstanceId, InstanceTypeOffer, LambdaApi, ManualClock, Region,
-    SetupError, Status,
+    ApiKey, Architecture, FakeLambda, InstanceId, InstanceTypeOffer, LambdaApi, ManualClock,
+    Region, SetupError, Status,
 };
 
 pub const KEY_BYTES: &str = "secret-key-bytes-4d2f";
@@ -211,7 +211,7 @@ impl Rig {
             log: &self.sleeps,
             hook,
         };
-        let connect = |base: &str, _key: &_, _ca: Option<&Path>| {
+        let connect = |base: &str, _key: &ApiKey, _ca: Option<&Path>| {
             self.connected.borrow_mut().push(base.to_owned());
             match self.connect_error.borrow().clone() {
                 Some(why) => Err(why),
