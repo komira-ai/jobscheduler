@@ -28,6 +28,17 @@
 //! - A blocked head of the queue holds the worker with the most headroom, so a stream
 //!   of small work cannot keep a large action out for good (`head.rs`).
 //!
+//! - Time profiles (`profile.rs`, `horizon.rs`): a key with a learned curve (3 runs or
+//!   more, not demoted) is charged per minute of the lease's life instead of one number, and
+//!   the predicate is checked at every minute of the next 30 and once for what each lease
+//!   asks for from then on. The measurement enters at the first minute only. Cold keys,
+//!   demoted keys, retries and workers charged by prediction alone are charged flat, as
+//!   before. The switches are independent ([`LoadConfig::profile`] for CPU,
+//!   [`LoadConfig::profile_memory`] for memory): a resource whose switch is off is charged
+//!   flat, and both off give the flat rule exactly.
+//! - The shape guard (`guard.rs`) charges a resource of a key flat for 8 runs when its
+//!   curve misfit in 2 of the last 3 runs or 3 of the last 10.
+//!
 //! The cost of a lease ([`LeaseCost`]) is fixed when it is placed, written into its
 //! grant record, and kept by the scheduler and by any scheduler recovered from the
 //! record until the lease's result; it is never computed again from the estimator.
@@ -37,230 +48,39 @@
 //! request's `resources.memory_bytes` (the limit it first runs under) are different
 //! figures and are kept apart.
 //!
-//! Where a lease's charge is computed there is one function, [`charge`]; the rule that
-//! charges a lease by a curve over its lifetime replaces it.
+//! Where a lease's flat charge is computed there is one function, [`charge`]; the charge by
+//! a curve over the lease's minutes is [`profile::Profile`], and the two are summed in the
+//! ledger by one rule ([`horizon`]). The curve of a lease is not part of its cost record:
+//! a lease recovered from the store is charged flat until it ends.
 
+mod config;
+mod guard;
 mod head;
+mod horizon;
 mod ledger;
+mod profile;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use js_sizing::{COLD_CPU_MILLIS, Estimate};
-use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, key_hash};
+use js_types::sched::usage::{CurveSource, LeaseCost, NoCurves, RunEnd, key_hash};
 use js_types::sched::{FarmTime, LeaseId, LeaseKind, OperationId, Resources, WorkKey, WorkerId};
 
+pub use config::{FlagError, LoadConfig, PlacementLoad};
+pub(crate) use config::{scale, scale_up};
 pub(crate) use head::{Ratio, binding, pick};
-pub(crate) use ledger::{Left, Refusal, WorkerLoad, clamped};
+pub(crate) use horizon::new_charge;
+pub(crate) use ledger::{Ended, Left, Refusal, WorkerLoad, clamped};
+pub use profile::HORIZON_MINUTES;
+pub(crate) use profile::{H_PLUS as H_PLUS_SLOT, Profile};
 
 use crate::input::Request;
 use crate::load::{Charge, ScoreConfig, Scorer};
 
-/// Whether placement reads the load.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PlacementLoad {
-    /// Admit and rank by measured and predicted load.
-    #[default]
-    On,
-    /// Place as `Off` does, and count what `On` would have decided
-    /// ([`LoadCounters::would_admit`], [`LoadCounters::would_block`]).
-    Shadow,
-    /// Admit by the booked rule: free booked CPUs, memory never summed.
-    Off,
-}
-
-/// The settings of the load predicate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LoadConfig {
-    /// Whether placement reads the load. Default `On`.
-    pub mode: PlacementLoad,
-    /// The heartbeat interval `W`; readings are stale after three of them and the cold
-    /// cap counts per window. Default 5 s.
-    pub window: Duration,
-    /// `f`, in thousandths: the covered leases are charged at least this share of their
-    /// predicted cores. Default 750; kept within 500 to 1000.
-    pub cpu_floor_permille: u32,
-    /// `s_cpu`, in thousandths: the CPU the predicate lets a worker be charged above its
-    /// capacity. Default 100.
-    pub s_cpu_permille: u32,
-    /// `s_mem`, in thousandths. Default 0.
-    pub s_mem_permille: u32,
-    /// The most cold leases admitted per worker per window; `None` is one per 32 cores
-    /// of the worker, rounded up. At least 1.
-    pub cold_per_window: Option<u32>,
-    /// How much of a worker's memory, in thousandths, its active file pages may count for
-    /// in the working set (see `WorkerLoad::working_set_counted`). Default 250; at most
-    /// 1000.
-    pub file_share_permille: u32,
-    /// `--placement-score-balance`: how much of the other resource's leftover the fit
-    /// counts, as `b/2` of the binding term ([`crate::Scorer`], key 5). Default 1; kept
-    /// within 0 to 4.
-    pub score_balance: u32,
-    /// `--placement-score-slack-tol-ppm`: the overshoot of a worker's capacity, in parts per
-    /// million of it, that key 1 ignores. Default 10,000 (1%).
-    pub score_slack_tol_ppm: u64,
-    /// `--placement-key-share`: the share of a worker's CPU, in percent, that one action
-    /// key may take before key 4 prefers another worker. Default 25; at most 100.
-    pub key_share_percent: u32,
-}
-
-/// Why [`LoadConfig::apply_flag`] refused a flag.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FlagError {
-    /// Not a placement score flag.
-    Unknown(String),
-    /// The value is not a number in the flag's range.
-    Invalid {
-        /// The flag.
-        flag: String,
-        /// The value as given.
-        value: String,
-    },
-}
-
-impl fmt::Display for FlagError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unknown(flag) => write!(f, "unknown placement flag {flag}"),
-            Self::Invalid { flag, value } => write!(f, "{flag}: invalid value {value:?}"),
-        }
-    }
-}
-
-impl std::error::Error for FlagError {}
-
-impl Default for LoadConfig {
-    fn default() -> Self {
-        Self {
-            mode: PlacementLoad::On,
-            window: Duration::from_secs(5),
-            cpu_floor_permille: 750,
-            s_cpu_permille: 100,
-            s_mem_permille: 0,
-            cold_per_window: None,
-            file_share_permille: 250,
-            score_balance: 1,
-            score_slack_tol_ppm: 10_000,
-            key_share_percent: 25,
-        }
-    }
-}
-
-impl LoadConfig {
-    /// These settings with each value brought into its range.
-    #[must_use]
-    pub fn normalised(self) -> Self {
-        Self {
-            window: self.window.max(Duration::from_millis(1)),
-            cpu_floor_permille: self.cpu_floor_permille.clamp(500, 1000),
-            cold_per_window: self.cold_per_window.map(|n| n.max(1)),
-            file_share_permille: self.file_share_permille.min(1000),
-            score_balance: self.score_balance.min(crate::load::MAX_BALANCE),
-            key_share_percent: self.key_share_percent.min(100),
-            ..self
-        }
-    }
-
-    /// Sets the score flag `name` (`--placement-score-balance`, `--placement-score-slack-tol-ppm`
-    /// or `--placement-key-share`, with or without the leading dashes) to `value`. Nothing
-    /// changes on an error. The balance is 0 to 4 and the key share 0 to 100 (a trailing `%`
-    /// is allowed); a value outside is refused rather than clamped, so a typo is not run.
-    ///
-    /// # Errors
-    /// [`FlagError`] for another flag or a value out of range.
-    pub fn apply_flag(&mut self, name: &str, value: &str) -> Result<(), FlagError> {
-        let invalid = || FlagError::Invalid {
-            flag: name.to_owned(),
-            value: value.to_owned(),
-        };
-        match name.trim_start_matches('-') {
-            "placement-score-balance" => {
-                let n: u32 = value.parse().map_err(|_| invalid())?;
-                if n > crate::load::MAX_BALANCE {
-                    return Err(invalid());
-                }
-                self.score_balance = n;
-            }
-            "placement-score-slack-tol-ppm" => {
-                self.score_slack_tol_ppm = value.parse().map_err(|_| invalid())?;
-            }
-            "placement-key-share" => {
-                let n: u32 = value
-                    .strip_suffix('%')
-                    .unwrap_or(value)
-                    .parse()
-                    .map_err(|_| invalid())?;
-                if n > 100 {
-                    return Err(invalid());
-                }
-                self.key_share_percent = n;
-            }
-            _ => return Err(FlagError::Unknown(name.to_owned())),
-        }
-        Ok(())
-    }
-
-    fn window_millis(&self) -> u64 {
-        u64::try_from(self.window.as_millis())
-            .unwrap_or(u64::MAX)
-            .max(1)
-    }
-
-    pub(crate) fn window_usec(&self) -> u64 {
-        self.window_millis().saturating_mul(1000)
-    }
-
-    /// The number of the window `now` falls in.
-    pub(crate) fn window_index(&self, now: FarmTime) -> u64 {
-        now.as_millis() / self.window_millis()
-    }
-
-    /// `f * cores`, rounded up.
-    pub(crate) fn floor_of(&self, cores: u64) -> u64 {
-        scale_up(cores, u64::from(self.cpu_floor_permille), 1000)
-    }
-
-    /// `C_cpu * (1 + s_cpu)`.
-    pub(crate) fn cpu_limit(&self, capacity: &Resources) -> u64 {
-        scale(
-            capacity.cpu_millis,
-            1000 + u64::from(self.s_cpu_permille),
-            1000,
-        )
-    }
-
-    /// `C_mem * (1 + s_mem)`.
-    pub(crate) fn mem_limit(&self, capacity: &Resources) -> u64 {
-        scale(
-            capacity.memory_bytes,
-            1000 + u64::from(self.s_mem_permille),
-            1000,
-        )
-    }
-
-    /// The cold leases a worker of `capacity` admits per window.
-    pub(crate) fn cold_cap(&self, capacity: &Resources) -> u32 {
-        self.cold_per_window.map_or_else(
-            || {
-                u32::try_from(capacity.cpu_millis.div_ceil(32_000))
-                    .unwrap_or(u32::MAX)
-                    .max(1)
-            },
-            |n| n.max(1),
-        )
-    }
-}
-
-fn scale(value: u64, num: u64, den: u64) -> u64 {
-    u64::try_from(u128::from(value) * u128::from(num) / u128::from(den)).unwrap_or(u64::MAX)
-}
-
-fn scale_up(value: u64, num: u64, den: u64) -> u64 {
-    u64::try_from((u128::from(value) * u128::from(num)).div_ceil(u128::from(den)))
-        .unwrap_or(u64::MAX)
-}
+use guard::{Resource, ShapeGuard};
+use profile::{Choice, MIN_RUNS};
 
 /// What admission has done since the scheduler was built. Plain counts for the caller to
 /// export; a count is of a decision, not of a lease, where it says so.
@@ -272,8 +92,21 @@ pub struct LoadCounters {
     pub admitted_fallback: u64,
     /// Of those, cold ones.
     pub admitted_cold: u64,
-    /// Of those, whose key has a curve that the flat rule did not use.
+    /// Of those, whose key has a curve that was not used: charged flat in both CPU and
+    /// memory (the switches are off, the key is demoted, or it is a retry).
     pub curve_flat: u64,
+    /// Of those, charged by curve in CPU.
+    pub profile_cpu: u64,
+    /// Of those, charged by curve in memory.
+    pub profile_memory: u64,
+    /// Lease-minutes whose mean cores were over twice the charge (and 250 m over it).
+    pub misfit_cpu_minutes: u64,
+    /// Lease-minutes whose working set was above the curve's remaining maximum.
+    pub misfit_memory_minutes: u64,
+    /// Times the shape guard charged a key's CPU flat for the next runs.
+    pub demotions_cpu: u64,
+    /// Times the shape guard charged a key's memory flat for the next runs.
+    pub demotions_memory: u64,
     /// Queued requests, one count per request per round, that had a worker with room
     /// apart from the predicate and found none it admitted.
     pub blocked: u64,
@@ -390,12 +223,6 @@ pub(crate) const fn charge(cost: &LeaseCost) -> Charge {
     }
 }
 
-/// Whether [`charge`] charges a lease by a curve over its minutes. It does not: every
-/// lease is charged flat, so every lease's fit looks at one minute (`L = 1`) in production
-/// whatever its key's `life_minutes` is. The rule that charges by a curve sets this and
-/// the fit then reads the key's `L`.
-const CHARGED_BY_CURVE: bool = false;
-
 /// The minutes of the lease's own life the score's fit looks at (`L`): the key's
 /// `life_minutes`, clamped to `1..=HORIZON`, where the lease is charged by a curve; 1 where
 /// it is charged flat.
@@ -435,6 +262,7 @@ pub(crate) struct Admission {
     pub(crate) counters: LoadCounters,
     hints: BTreeMap<OperationId, Prediction>,
     curves: Curves,
+    guard: ShapeGuard,
     shadow: VecDeque<ShadowChoice>,
 }
 
@@ -452,6 +280,7 @@ impl Default for Admission {
             counters: LoadCounters::default(),
             hints: BTreeMap::new(),
             curves: Curves(Arc::new(NoCurves)),
+            guard: ShapeGuard::default(),
             shadow: VecDeque::new(),
         }
     }
@@ -475,10 +304,11 @@ impl Admission {
         self.hints.insert(operation, prediction);
     }
 
-    /// `L` for the fit of `operation`'s lease: 1 while every lease is charged flat.
-    pub(crate) fn fit_minutes(&self, operation: OperationId) -> u8 {
+    /// `L` for the fit of `operation`'s lease: the key's life where the lease is charged by
+    /// a curve (in CPU or in memory), 1 where it is charged flat.
+    pub(crate) fn fit_minutes(&self, operation: OperationId, profile: Option<&Profile>) -> u8 {
         let life = self.hints.get(&operation).map_or(1, |p| p.life_minutes);
-        fit_minutes_of(life, CHARGED_BY_CURVE)
+        fit_minutes_of(life, profile.is_some_and(Profile::by_curve))
     }
 
     pub(crate) fn forget(&mut self, operation: OperationId) {
@@ -538,6 +368,103 @@ impl Admission {
         }
     }
 
+    /// How the lease of `operation`, `request`, charged `cost` if placed now, is charged
+    /// over time: by its key's curve (in CPU, in memory, or both), up to an expected life,
+    /// or flat, which is `None`.
+    ///
+    /// A key is charged by curve in CPU when [`LoadConfig::profile`] is on and in memory
+    /// when [`LoadConfig::profile_memory`] is on, independently: a switch that is off
+    /// charges that resource flat. Either way the key has a prediction that is not
+    /// cold, its curve was fitted from [`MIN_RUNS`] runs or more, the lease is not a
+    /// retry up the memory ladder (charged flat at its rung), and the shape guard has not
+    /// demoted the resource.
+    pub(crate) fn profile_of(
+        &self,
+        operation: OperationId,
+        request: &Request,
+        cost: &LeaseCost,
+        guard_key: u64,
+    ) -> Option<Arc<Profile>> {
+        // A scheduler that places by the booked rule reads no curve; shadow counts what
+        // the predicate would have said, curves included.
+        if request.kind != LeaseKind::Action || cost.retry || self.cfg.mode == PlacementLoad::Off {
+            return None;
+        }
+        let cfg = &self.cfg;
+        self.hints.get(&operation).filter(|p| !p.cold)?;
+        // CPU and memory each follow their own switch: a curve is read when either is on.
+        let curve = (cfg.profile || cfg.profile_memory)
+            .then(|| self.curves.0.curve(&request.key))
+            .flatten()
+            .filter(|c| c.runs() >= MIN_RUNS && !c.points().is_empty());
+        let life = cfg.expected_life_delta_minutes.and_then(|delta| {
+            self.curves
+                .0
+                .wall_minutes_p90(&request.key)
+                .map(|minutes| minutes.saturating_add(delta))
+        });
+        if curve.is_none() && life.is_none() {
+            return None;
+        }
+        let (cpu_left, mem_left) = self.guard.runs_left(guard_key);
+        let charged = curve.is_some();
+        let choice = Choice {
+            curve,
+            cpu: cfg.profile && cpu_left == 0,
+            mem: cfg.profile_memory && mem_left == 0,
+            demoted_cpu: charged && cfg.profile && cpu_left > 0,
+            demoted_mem: charged && cfg.profile_memory && mem_left > 0,
+            life,
+            floor_permille: cfg.profile_floor_permille,
+            guard_key,
+        };
+        Some(Arc::new(Profile::new(choice, cost)))
+    }
+
+    /// The runs left that the shape guard charges `guard_key`'s CPU and memory flat.
+    pub(crate) fn shape_runs_left(&self, guard_key: u64) -> (u32, u32) {
+        self.guard.runs_left(guard_key)
+    }
+
+    /// A lease taken off its worker's ledger ended as `end`: its run is judged by the shape
+    /// guard if it was charged by curve (a run that did not run to its end, or was killed
+    /// by the node, says nothing about the curve), or counted off the flat runs of a
+    /// demoted key.
+    pub(crate) fn run_ended(&mut self, ended: &Ended, end: RunEnd) {
+        let Some(p) = ended.profile.as_deref() else {
+            return;
+        };
+        let key = p.guard_key;
+        let ran = matches!(end, RunEnd::Clean | RunEnd::KilledAtLimit);
+        if p.demoted_cpu {
+            if ran {
+                self.guard.flat_run(key, Resource::Cpu);
+            }
+        } else if p.cpu_by_curve()
+            && end == RunEnd::Clean
+            && self.guard.record(key, Resource::Cpu, ended.cpu_misfit)
+        {
+            self.counters.demotions_cpu += 1;
+        }
+        if p.demoted_mem {
+            if ran {
+                self.guard.flat_run(key, Resource::Memory);
+            }
+        } else if p.mem_by_curve() {
+            let misfit = match end {
+                RunEnd::Clean => Some(ended.mem_misfit),
+                // A kill at the lease's own limit is a misfit by itself.
+                RunEnd::KilledAtLimit => Some(true),
+                _ => None,
+            };
+            if let Some(misfit) = misfit
+                && self.guard.record(key, Resource::Memory, misfit)
+            {
+                self.counters.demotions_memory += 1;
+            }
+        }
+    }
+
     /// `cost` with the key hash of `request`'s key if it has none and the request is an
     /// action: a cost record written before the key hash was kept is rebuilt with it.
     pub(crate) fn with_key_hash(cost: LeaseCost, request: &Request) -> LeaseCost {
@@ -552,13 +479,25 @@ impl Admission {
     }
 
     /// Counts a lease the predicate admitted.
-    pub(crate) fn count_admitted(&mut self, key: &WorkKey, cost: &LeaseCost, fallback: bool) {
+    pub(crate) fn count_admitted(
+        &mut self,
+        key: &WorkKey,
+        cost: &LeaseCost,
+        fallback: bool,
+        profile: Option<&Profile>,
+    ) {
         let c = &mut self.counters;
         c.admitted += 1;
         c.admitted_fallback += u64::from(fallback);
         c.admitted_cold += u64::from(cost.cold);
-        // The flat rule charges a key that has a curve flat: say how often.
-        c.curve_flat += u64::from(self.curves.0.curve(key).is_some());
+        // On a worker charged by prediction alone, a curve is not used either.
+        let by_curve = profile.filter(|_| !fallback);
+        let cpu = by_curve.is_some_and(Profile::cpu_by_curve);
+        let memory = by_curve.is_some_and(Profile::mem_by_curve);
+        c.profile_cpu += u64::from(cpu);
+        c.profile_memory += u64::from(memory);
+        // A key with a curve that was charged flat: say how often.
+        c.curve_flat += u64::from(!cpu && !memory && self.curves.0.curve(key).is_some());
     }
 
     /// Counts what the predicate said about the worker `Shadow` placed on.
@@ -672,58 +611,6 @@ impl LoadView {
 mod tests {
     use super::*;
 
-    /// Catches: settings out of range reaching the predicate: a floor below a half or above
-    /// one, a zero window (every window the same index, a zero staleness limit), a
-    /// cold cap of 0 (no cold key ever runs) and a file share above the whole node.
-    #[test]
-    fn settings_are_brought_into_range() {
-        let wild = LoadConfig {
-            window: Duration::ZERO,
-            cpu_floor_permille: 10,
-            cold_per_window: Some(0),
-            file_share_permille: 9_000,
-            ..LoadConfig::default()
-        }
-        .normalised();
-        assert_eq!(wild.window, Duration::from_millis(1));
-        assert_eq!(wild.cpu_floor_permille, 500);
-        assert_eq!(wild.cold_per_window, Some(1));
-        assert_eq!(wild.file_share_permille, 1000);
-        let high = LoadConfig {
-            cpu_floor_permille: 5_000,
-            ..LoadConfig::default()
-        }
-        .normalised();
-        assert_eq!(high.cpu_floor_permille, 1000);
-        assert_eq!(LoadConfig::default().normalised(), LoadConfig::default());
-        let wild = LoadConfig {
-            score_balance: 9,
-            key_share_percent: 400,
-            ..LoadConfig::default()
-        }
-        .normalised();
-        assert_eq!((wild.score_balance, wild.key_share_percent), (4, 100));
-    }
-
-    /// Catches: the default cold cap not being one per 32 cores rounded up (3 on 88
-    /// threads), a worker of under 32 cores getting none, and an explicit setting being
-    /// ignored.
-    #[test]
-    fn the_cold_cap_is_one_per_32_cores_rounded_up() {
-        let cfg = LoadConfig::default();
-        let cap = |cores: u64| cfg.cold_cap(&Resources::new(cores * 1000, 0));
-        assert_eq!(cap(88), 3);
-        assert_eq!(cap(64), 2);
-        assert_eq!(cap(65), 3);
-        assert_eq!(cap(16), 1);
-        assert_eq!(cap(0), 1);
-        let set = LoadConfig {
-            cold_per_window: Some(12),
-            ..cfg
-        };
-        assert_eq!(set.cold_cap(&Resources::new(88_000, 0)), 12);
-    }
-
     /// Catches: a key's life read by the fit of a lease charged flat (a flat lease looks at
     /// its first minute only), and a curve-charged life outside `1..=HORIZON`.
     #[test]
@@ -732,30 +619,58 @@ mod tests {
         assert_eq!(fit_minutes_of(9, true), 9);
         assert_eq!(fit_minutes_of(0, true), 1);
         assert_eq!(fit_minutes_of(200, true), 30);
-        const { assert!(!CHARGED_BY_CURVE, "production charges every lease flat") };
         assert_eq!(usize::from(js_sizing::LIFE_HORIZON), crate::load::HORIZON);
     }
 
-    /// Catches: limits computed with the slack on the wrong resource, overflowing, or
-    /// the floor rounded down (an under-charge).
+    /// Catches: the score's fit reading the key's life for a lease charged flat (a life
+    /// in minutes it is not charged over), or reading one minute for a lease charged by a
+    /// curve in CPU alone, in memory alone, or in both.
     #[test]
-    fn limits_floor_and_window_arithmetic() {
-        let cfg = LoadConfig::default();
-        let cap = Resources::new(88_000, 1000);
-        assert_eq!(cfg.cpu_limit(&cap), 96_800);
-        assert_eq!(cfg.mem_limit(&cap), 1000);
-        let loose = LoadConfig {
-            s_mem_permille: 500,
-            ..cfg
+    fn the_fit_looks_at_the_keys_life_only_for_a_lease_charged_by_a_curve() {
+        use js_types::sched::usage::{Curve, MinutePoint};
+        let mut adm = Admission::default();
+        let op = OperationId(1);
+        adm.set_prediction(
+            op,
+            Prediction {
+                cpu_millis: 1_000,
+                memory_bytes: 0,
+                cold: false,
+                life_minutes: 9,
+            },
+        );
+        let profile = |by_curve: bool, cpu: bool, mem: bool, life: Option<u32>| {
+            Profile::new(
+                profile::Choice {
+                    curve: by_curve
+                        .then(|| Curve::new(vec![MinutePoint::default()], 5).expect("one point")),
+                    cpu,
+                    mem,
+                    demoted_cpu: false,
+                    demoted_mem: false,
+                    life,
+                    floor_permille: 750,
+                    guard_key: 0,
+                },
+                &LeaseCost::default(),
+            )
         };
-        assert_eq!(loose.mem_limit(&cap), 1500);
-        assert_eq!(cfg.cpu_limit(&Resources::new(u64::MAX, 0)), u64::MAX);
-        assert_eq!(cfg.floor_of(1000), 750);
-        assert_eq!(cfg.floor_of(1), 1, "rounded up");
-        assert_eq!(cfg.floor_of(u64::MAX), 13_835_058_055_282_163_712);
-        assert_eq!(cfg.window_usec(), 5_000_000);
-        assert_eq!(cfg.window_index(FarmTime::from_millis(4_999)), 0);
-        assert_eq!(cfg.window_index(FarmTime::from_millis(5_000)), 1);
+        let fit = |p: Option<&Profile>| adm.fit_minutes(op, p);
+        assert_eq!(fit(Some(&profile(true, true, true, None))), 9);
+        assert_eq!(fit(Some(&profile(true, true, false, None))), 9, "CPU alone");
+        assert_eq!(
+            fit(Some(&profile(true, false, true, None))),
+            9,
+            "memory alone"
+        );
+        assert_eq!(fit(Some(&profile(true, false, false, None))), 1, "demoted");
+        assert_eq!(
+            fit(Some(&profile(false, true, true, Some(3)))),
+            1,
+            "a life only"
+        );
+        assert_eq!(fit(None), 1);
+        assert_eq!(adm.fit_minutes(OperationId(2), None), 1, "no prediction");
     }
 
     /// Catches: a prediction built from the wrong estimator field, or a cold prediction
@@ -785,63 +700,6 @@ mod tests {
                 cold: true,
                 life_minutes: 1,
             }
-        );
-    }
-
-    /// Catches: a score flag parsed into the wrong field, a value out of range clamped
-    /// silently instead of refused (a typo would run), a failed parse changing the
-    /// config, and a `%` suffix on the key share not accepted.
-    #[test]
-    fn the_score_flags_parse_into_their_fields() {
-        let mut cfg = LoadConfig::default();
-        assert_eq!(cfg.apply_flag("--placement-score-balance", "3"), Ok(()));
-        assert_eq!(
-            cfg.apply_flag("--placement-score-slack-tol-ppm", "2500"),
-            Ok(())
-        );
-        assert_eq!(cfg.apply_flag("--placement-key-share", "40%"), Ok(()));
-        assert_eq!(
-            (
-                cfg.score_balance,
-                cfg.score_slack_tol_ppm,
-                cfg.key_share_percent
-            ),
-            (3, 2_500, 40)
-        );
-        assert_eq!(cfg.apply_flag("placement-key-share", "100"), Ok(()));
-        assert_eq!(cfg.key_share_percent, 100);
-        let before = cfg;
-        for (flag, value) in [
-            ("--placement-score-balance", "5"),
-            ("--placement-score-balance", "-1"),
-            ("--placement-score-slack-tol-ppm", "1%"),
-            ("--placement-key-share", "101"),
-            ("--placement-key-share", ""),
-        ] {
-            assert_eq!(
-                cfg.apply_flag(flag, value),
-                Err(FlagError::Invalid {
-                    flag: flag.to_owned(),
-                    value: value.to_owned()
-                })
-            );
-        }
-        assert_eq!(
-            cfg.apply_flag("--placement-s-cpu", "100"),
-            Err(FlagError::Unknown("--placement-s-cpu".to_owned()))
-        );
-        assert_eq!(cfg, before);
-        assert_eq!(
-            FlagError::Unknown("--placement-s-cpu".to_owned()).to_string(),
-            "unknown placement flag --placement-s-cpu"
-        );
-        assert_eq!(
-            FlagError::Invalid {
-                flag: "--placement-key-share".to_owned(),
-                value: "101".to_owned()
-            }
-            .to_string(),
-            "--placement-key-share: invalid value \"101\""
         );
     }
 

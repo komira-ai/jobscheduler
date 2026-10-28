@@ -256,6 +256,14 @@ pub trait CurveSource {
     /// The curve for `key`, or `None` when the key has none (cold, too few runs, or
     /// demoted): the caller charges it flat.
     fn curve(&self, key: &WorkKey) -> Option<Curve>;
+
+    /// The P90 of the wall minutes the runs of `key` lasted, rounded up, or `None` when
+    /// the key's life is not known. Only an operator who has turned on ending a new
+    /// lease's charge at its expected life reads it; a source that does not know it keeps
+    /// the default.
+    fn wall_minutes_p90(&self, _key: &WorkKey) -> Option<u32> {
+        None
+    }
 }
 
 /// A [`CurveSource`] that knows no curve: every key is charged flat.
@@ -522,6 +530,7 @@ mod tests {
             dedup: "d".to_owned(),
         };
         assert_eq!(NoCurves.curve(&key), None);
+        assert_eq!(NoCurves.wall_minutes_p90(&key), None, "no life by default");
     }
 
     #[test]
