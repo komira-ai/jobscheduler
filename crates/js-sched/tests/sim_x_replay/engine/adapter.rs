@@ -183,7 +183,8 @@ impl PredictedLoad for ScoreModel {
         LeaseFacts {
             lease: lease_id(self.lease.lease_ix),
             cold: self.lease.cold,
-            // The replay never reruns a killed lease (submitted = completed + killed + queued), so no replayed lease is a retry.
+            // An action's kill is its final outcome in the fixture; reruns are not
+            // replayed.
             retry: false,
         }
     }
