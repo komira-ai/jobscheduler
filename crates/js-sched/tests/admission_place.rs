@@ -186,6 +186,8 @@ impl Blocked {
         let mut r = Rig::on();
         r.up("a", node());
         r.up("b", node());
+        r.baseline("a");
+        r.baseline("b");
         place_on(&mut r, "a", &["b"], 4, 1_000);
         place_on(&mut r, "b", &["a"], 4, 1_000);
         let held_a = r.held("a");

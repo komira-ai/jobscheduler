@@ -72,6 +72,7 @@ fn fixture(mark: Mark, others: (u64, u64)) -> Fixture {
     let mut r = Rig::on();
     for name in ["a", "b", "c"] {
         r.up_with(name, node(), whole.clone());
+        r.baseline(name);
     }
     let place = |r: &mut Rig, worker: &str, out: &[&str], (count, cpu): (u64, u64), memory: u64| {
         for other in out {
