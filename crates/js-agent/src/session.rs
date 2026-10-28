@@ -66,7 +66,7 @@
 //! - A worker that has ended ends the session with [`Step::Failed`]. So does one that is
 //!   found gone without having said so (a reply that finds nobody to read the queue), and
 //!   one that has been inside a single order or step for longer than its calls can take
-//!   take ([`Worker::stalled`]; it reads the worker's own clock, not a wall clock).
+//!   ([`Worker::stalled`]; it reads the worker's own clock, not a wall clock).
 //!
 //! - The worker does not implement [`Quiesce`]: a session built for jobs is given no
 //!   [`Session::with_quiesce`] host, so it does not follow the `exclusive` lease a reply
