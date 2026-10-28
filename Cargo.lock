@@ -1307,16 +1307,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-usage"
-version = "0.1.0"
-dependencies = [
- "js-state",
- "js-testkit",
- "js-types",
- "thiserror",
-]
-
-[[package]]
 name = "js-vmm"
 version = "0.1.0"
 dependencies = [
