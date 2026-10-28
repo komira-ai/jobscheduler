@@ -26,6 +26,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::util::blocking;
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -118,13 +119,17 @@ async fn heartbeat(
     Extension(who): Extension<Credential>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
-    let heartbeat: Heartbeat = decode(
+    let mut heartbeat: Heartbeat = decode(
         &read(body, refusal::INVALID_HEARTBEAT)?,
         refusal::INVALID_HEARTBEAT,
     )?;
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    // The load is telemetry: it is taken out here and only looked at after the registry
+    // has accepted the beat, so a beat the registry refuses records nothing, and nothing
+    // about the load can change the reply.
+    let load = heartbeat.load.take();
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be in the state file first: when it cannot be
@@ -143,6 +148,11 @@ async fn heartbeat(
         reply.taint_ack = agents.save_bindings().await;
     } else if refused {
         agents.save_bindings().await;
+    }
+    if let Some(usage) = &agents.usage {
+        let usage = Arc::clone(usage);
+        let acks = reply.result_acks.clone();
+        blocking(move || usage.on_beat(&heartbeat, load, &acks)).await;
     }
     Ok(Json(reply))
 }

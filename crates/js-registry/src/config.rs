@@ -161,7 +161,8 @@ impl PoolConfig {
         &self.class
     }
 
-    pub(crate) fn shape(&self) -> &Shape {
+    /// The shape the pool books for every host of it.
+    pub fn shape(&self) -> &Shape {
         &self.shape
     }
 

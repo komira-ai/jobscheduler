@@ -23,6 +23,9 @@ use crate::agents::Agents;
 use crate::config::Token;
 use crate::hosts::HostList;
 use crate::run_api;
+use crate::usage::ProfileCurves;
+use crate::usage_api;
+use crate::usage_hub::{Usage, UsageCounters};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -68,6 +71,24 @@ impl Shared {
     /// A handle on the agent registry; `None` without agent flags.
     pub(crate) fn registry(&self) -> Option<Registry> {
         self.agents.as_ref().map(|agents| agents.registry.clone())
+    }
+
+    /// The usage side; `None` without agents or with `--usage-off`.
+    pub(crate) fn usage(&self) -> Option<&Arc<Usage>> {
+        self.agents
+            .as_ref()
+            .and_then(|agents| agents.usage.as_ref())
+    }
+
+    /// The learned curves; `None` without a usage side or with a sink that learns none.
+    pub(crate) fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.usage().and_then(|usage| usage.curves())
+    }
+
+    /// What the usage side has counted; all zero without one.
+    pub(crate) fn usage_counters(&self) -> UsageCounters {
+        self.usage()
+            .map_or_else(UsageCounters::default, |usage| usage.counters())
     }
 
     /// How many times the agent side could not read or write its files; 0 without agents.
@@ -152,10 +173,14 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .route("/healthz", get(healthz))
         .with_state(shared.clone());
     let app = open.merge(guarded);
-    match &shared.agents {
+    let app = match &shared.agents {
         Some(agents) => app
             .merge(agent_api::router(agents.clone()))
             .merge(run_api::router(shared.clone(), agents.clone())),
+        None => app,
+    };
+    match shared.usage() {
+        Some(usage) => app.merge(usage_api::router(shared.clone(), usage.clone())),
         None => app,
     }
 }

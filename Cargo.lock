@@ -1090,7 +1090,9 @@ dependencies = [
  "js-provider-fake",
  "js-registry",
  "js-sched",
+ "js-state",
  "js-types",
+ "js-usage",
  "rcgen",
  "rustix",
  "rustls",
@@ -1290,6 +1292,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
+name = "js-usage"
+version = "0.1.0"
+dependencies = [
+ "js-state",
+ "js-testkit",
+ "js-types",
  "thiserror",
 ]
 

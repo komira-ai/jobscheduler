@@ -38,6 +38,9 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
+//! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
+//! | `--usage-off` | turns usage recording and its read routes off (for an emergency: the per-minute series is meant to be always collected) |
+//! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2.
 //!
@@ -299,6 +302,36 @@
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
+//! # Usage
+//!
+//! With agents on (and no `--usage-off`) a heartbeat may carry the node's load. After the
+//! registry accepted the beat, the server checks the load, turns it into plain values and
+//! gives it to a [`UsageSink`]; the sink owns the arithmetic and the storage. A load that
+//! is bad costs nothing but its own data: the beat's results, held list and taint are
+//! handled as ever and the reply is unchanged (the load is counted in
+//! [`Running::usage_counters`]). A beat the registry refuses (unknown host, stale epoch,
+//! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
+//! outcome `succeeded` or `failed`) are handed to the sink with their series once the
+//! host has sent two more beats, so the lease's last partial minute is not lost, if a
+//! [`KeySource`] names the work they did; the server has no key of its own, so by default
+//! no run is learned from and `runs_without_key` counts them. The seam types and
+//! [`NoUsage`] are public so that a test or an embedding program can supply its own
+//! ([`Config::with_usage_sink`], [`Config::with_key_source`]); this build links no store,
+//! so the sink it starts with takes every reading and keeps nothing.
+//!
+//! Every tick acts by the wall clock of the server: the sink is flushed every five
+//! minutes and once more at shutdown, and pruned at the first tick and once a day. A
+//! flush logs one `node minute` line for each node minute it closed and a warning for
+//! each node and minute that had readings dropped.
+//!
+//! | request | answers |
+//! |---|---|
+//! | `GET /v1/usage/nodes/{id}?from=<minute>&to=<minute>` | 200 `{host, from, to, rows: [{minute, cpu_millis, ws_bytes, leases}], next}`; minutes are wall minutes since the Unix epoch, default the last 60 minutes up to now, at most 1,440 rows, and `next` is the minute to ask from for the rest (else `null`); a node with no rows is 200 with none, so an unknown node and a quiet one look alike; 400 for an id that is not exactly an id (capitals, escapes, slashes, dot-only segments, over 63 bytes), a query that is not `from` and `to` once each in digits, or `to` before `from`; 503 `usage-unavailable` |
+//! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]`; 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
+//!
+//! Both are behind the client token (a join token is a 401), exist only when usage is on,
+//! and never echo the request in an answer or a log line.
+//!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
@@ -331,6 +364,11 @@ mod sched;
 mod server;
 mod ticker;
 mod tls;
+mod usage;
+mod usage_api;
+mod usage_hub;
+mod usage_js;
+mod usage_map;
 mod util;
 mod wire;
 
@@ -353,6 +391,12 @@ pub use error::StartupError;
 pub use layered::LayeredProvider;
 pub use server::{Running, start};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
+pub use usage::{
+    BadKey, ClockIn, DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN,
+    MinuteIn, NoKeys, NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd,
+    RunMinute, RunSeries, SinkCounters, UsageFault, UsageSink,
+};
+pub use usage_hub::UsageCounters;
 
 use error::Failure;
 

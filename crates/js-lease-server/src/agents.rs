@@ -12,10 +12,12 @@ use crate::adapt::SharedClock;
 use crate::agent_state::{self, BindingStore};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{AgentSetup, Hosts};
+use crate::config::{AgentSetup, Hosts, UsageSetup};
 use crate::error::StartupError;
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
+use crate::usage_hub::Usage;
+use crate::usage_map::limits_of;
 use crate::util::blocking;
 
 /// What the agent routes and the tick share. Agent handlers take the registry's lock and
@@ -31,6 +33,9 @@ pub(crate) struct Agents {
     runs_minted: AtomicU64,
     store: BindingStore,
     errors: AtomicU64,
+    /// The usage side, unless `--usage-off`. Its lock is a leaf, taken after the registry's
+    /// call has returned.
+    pub(crate) usage: Option<Arc<Usage>>,
 }
 
 /// Where the bindings of the lease file at `state_file` are kept: beside it.
@@ -51,6 +56,7 @@ pub(crate) type Assembled = (Box<dyn CapacitySource>, Option<Arc<Agents>>);
 /// with the bindings the previous run persisted.
 pub(crate) fn assemble(
     hosts: Hosts,
+    usage: UsageSetup,
     clock: &SharedClock,
     state_file: &Path,
 ) -> Result<Assembled, StartupError> {
@@ -67,6 +73,9 @@ pub(crate) fn assemble(
             } = *agents;
             let path = state_path(state_file);
             let bindings = agent_state::load(&path)?;
+            let booked = pool.shape().resources();
+            let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
+            let usage = usage.build(clock, limits)?;
             let registry = Registry::new(pool, clock.clone());
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());
@@ -80,6 +89,7 @@ pub(crate) fn assemble(
                 runs_minted: AtomicU64::new(0),
                 store: BindingStore::new(path, bindings),
                 errors: AtomicU64::new(0),
+                usage,
             };
             Ok((Box::new(source), Some(Arc::new(agents))))
         }
@@ -110,6 +120,7 @@ impl Agents {
             runs_minted: AtomicU64::new(0),
             store: BindingStore::new(dir.join("bindings"), Default::default()),
             errors: AtomicU64::new(0),
+            usage: None,
         }
     }
 
@@ -145,7 +156,7 @@ impl Agents {
     /// hello limits of those that left the file, and make the file of bindings current
     /// (a write that failed earlier is tried again here; so is the removal of a host the
     /// registry has forgotten). A token file that cannot be read keeps the tokens in
-    /// force, and their limits.
+    /// force, and their limits. The usage side, when there is one, is ticked last.
     pub(crate) async fn refresh(self: &Arc<Self>) {
         let this = Arc::clone(self);
         match blocking(move || this.tokens.reload()).await {
@@ -156,6 +167,9 @@ impl Agents {
             }
         }
         self.save_bindings().await;
+        if let Some(usage) = &self.usage {
+            usage.tick().await;
+        }
     }
 
     /// Makes the file of bindings hold what the registry has bound, on the pool for

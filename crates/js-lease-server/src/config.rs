@@ -5,21 +5,26 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Settings};
+use js_lease::{Boot, Clock, Settings};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
 use js_registry::{Credential, PoolConfig, WholeNodeConfig};
 
+use crate::adapt::SharedClock;
 use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
+use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
+use crate::usage_hub::Usage;
+use crate::usage_js::{self, StoreSetup};
 
 /// The command line. Configuration is flags only; secrets come from files.
 #[derive(Debug, Parser)]
@@ -119,6 +124,23 @@ pub struct Cli {
     /// How long a stop waits for the requests in flight before it cuts what is left.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub drain_timeout: Duration,
+    /// The file the per-minute usage of the nodes and the learned cost curves are kept
+    /// in. Beside `--state-file`, as `usage.db`, unless given. Only agent registration
+    /// reports usage.
+    #[arg(long, conflicts_with = "usage_off")]
+    pub usage_db: Option<PathBuf>,
+    /// Turns the recording of usage, and its read routes, off. For an emergency: usage
+    /// is on by default and the per-minute series is meant to be always collected.
+    #[arg(long)]
+    pub usage_off: bool,
+    /// The most bytes the learned cost curves may take in the usage file; the keys used
+    /// longest ago are dropped to stay under it. At least 1.
+    #[arg(
+        long,
+        default_value = "268435456",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub profile_store_bytes: u64,
 }
 
 /// What a client may hold open (see the module doc of `listener`). The flags set
@@ -260,6 +282,47 @@ pub struct Config {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
+    pub(crate) usage: UsageSetup,
+}
+
+/// What `--usage-db`, `--usage-off` and `--profile-store-bytes` decided, and the seams a
+/// caller may fill: the sink that measures, and the source of the key of a run.
+pub(crate) struct UsageSetup {
+    /// The usage file; `None` when usage is off.
+    pub(crate) db: Option<PathBuf>,
+    pub(crate) profile_store_bytes: u64,
+    /// The sink to use in place of the one that opens `db`.
+    pub(crate) sink: Option<Arc<dyn UsageSink>>,
+    pub(crate) keys: Arc<dyn KeySource>,
+}
+
+/// Milliseconds in a day.
+const MILLIS_PER_DAY: u64 = 86_400_000;
+
+impl UsageSetup {
+    /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
+    /// A usage file that will not open is a refused start naming `--usage-db`.
+    pub(crate) fn build(
+        self,
+        clock: &SharedClock,
+        limits: HostLimits,
+    ) -> Result<Option<Arc<Usage>>, StartupError> {
+        let Some(db) = self.db else {
+            return Ok(None);
+        };
+        let sink = match self.sink {
+            Some(sink) => sink,
+            None => {
+                let setup = StoreSetup {
+                    db,
+                    profile_store_bytes: self.profile_store_bytes,
+                };
+                usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
+            }
+        };
+        let usage = Usage::new(sink, self.keys, clock.clone(), limits);
+        Ok(Some(Arc::new(usage)))
+    }
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -295,6 +358,12 @@ impl Config {
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
+        let usage = UsageSetup {
+            db: usage_db(&cli),
+            profile_store_bytes: cli.profile_store_bytes,
+            sink: None,
+            keys: Arc::new(NoKeys),
+        };
         Ok(Self {
             listen: cli.listen,
             state_file: cli.state_file,
@@ -305,6 +374,7 @@ impl Config {
             tls,
             limits,
             hosts,
+            usage,
         })
     }
 
@@ -331,6 +401,38 @@ impl Config {
     pub fn tick_period(&self) -> Duration {
         self.tick
     }
+
+    /// The usage file (`--usage-db`, or `usage.db` beside the lease file), or `None`
+    /// when `--usage-off` turned usage off.
+    pub fn usage_db(&self) -> Option<&Path> {
+        self.usage.db.as_deref()
+    }
+
+    /// The most bytes the learned cost curves may take (`--profile-store-bytes`).
+    pub fn profile_store_bytes(&self) -> u64 {
+        self.usage.profile_store_bytes
+    }
+
+    /// The same configuration measuring usage with `sink` instead of the sink that opens
+    /// the usage file. Usage that `--usage-off` turned off stays off.
+    pub fn with_usage_sink(mut self, sink: Arc<dyn UsageSink>) -> Self {
+        self.usage.sink = Some(sink);
+        self
+    }
+
+    /// The same configuration naming the key of a run with `keys` (the server has none of
+    /// its own: with the default, no run's key is known and no cost curve is learned).
+    pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
+        self.usage.keys = keys;
+        self
+    }
+}
+
+/// The usage file the flags name: none for `--usage-off`, else `--usage-db` or `usage.db`
+/// in the directory of the lease file.
+fn usage_db(cli: &Cli) -> Option<PathBuf> {
+    let beside = || cli.state_file.with_file_name("usage.db");
+    (!cli.usage_off).then(|| cli.usage_db.clone().unwrap_or_else(beside))
 }
 
 /// `settings` with what the registered pool's file decides about whole-node leases: the

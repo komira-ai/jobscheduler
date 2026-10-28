@@ -334,6 +334,7 @@ impl KeySource for NoKeys {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn load(cpu: u64, mono: u64) -> NodeLoad {
