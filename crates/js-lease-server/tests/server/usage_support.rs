@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
+use std::thread::{self, ThreadId};
 
 use js_lease_server::{
     DropReason, Fit, HostLimits, KeyProfile, KeySource, LoadIn, NodeRow, Observation, Observed,
@@ -26,8 +28,20 @@ pub struct Seen {
     pub minute: u64,
 }
 
+/// A reading held until the test lets it go: the sink says it has the reading, then
+/// waits for the release.
+struct Gate {
+    entered: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+    /// The thread the test runs the server on. A reading met there would block the server.
+    async_thread: ThreadId,
+}
+
 #[derive(Default)]
 struct State {
+    gate: Option<Arc<Gate>>,
+    read_inline: bool,
+    panic_on_reading: bool,
     seen: Vec<Seen>,
     open: BTreeMap<(String, u64), NodeRow>,
     written: BTreeMap<String, Vec<NodeRow>>,
@@ -76,6 +90,32 @@ impl Fake {
     /// Makes every flush, prune, read and run fail.
     pub fn fail(&self) {
         self.state().fail = true;
+    }
+
+    /// Holds the next reading until the returned sender is used, and says on the returned
+    /// receiver that the reading has arrived. Call it on the thread the test runs on.
+    pub fn park_next_reading(
+        &self,
+    ) -> (tokio::sync::mpsc::UnboundedReceiver<()>, mpsc::Sender<()>) {
+        let (entered, arrived) = tokio::sync::mpsc::unbounded_channel();
+        let (release, released) = mpsc::channel();
+        self.state().gate = Some(Arc::new(Gate {
+            entered,
+            release: Mutex::new(released),
+            async_thread: thread::current().id(),
+        }));
+        (arrived, release)
+    }
+
+    /// Whether a parked reading was met on the thread of the test (the server's async
+    /// thread) and not on the pool for blocking calls.
+    pub fn read_inline(&self) -> bool {
+        self.state().read_inline
+    }
+
+    /// Makes every later reading panic.
+    pub fn panic_on_readings(&self) {
+        self.state().panic_on_reading = true;
     }
 
     /// The rows written for `host`, oldest first.
@@ -127,6 +167,20 @@ impl UsageSink for Fake {
         _: HostLimits,
         now_minute: u64,
     ) -> Observation {
+        let (gate, panics) = {
+            let mut state = self.state();
+            (state.gate.take(), state.panic_on_reading)
+        };
+        assert!(!panics, "the sink is broken");
+        if let Some(gate) = gate {
+            // On the thread of the test the wait would stop the server, so say so and go on.
+            let inline = thread::current().id() == gate.async_thread;
+            self.state().read_inline |= inline;
+            let _ = gate.entered.send(());
+            if !inline {
+                let _ = gate.release.lock().unwrap().recv();
+            }
+        }
         let mut state = self.state();
         state.seen.push(Seen {
             host: host.to_string(),

@@ -316,8 +316,11 @@
 //! [`KeySource`] names the work they did; the server has no key of its own, so by default
 //! no run is learned from and `runs_without_key` counts them. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
-//! ([`Config::with_usage_sink`], [`Config::with_key_source`]); this build links no store,
-//! so the sink it starts with takes every reading and keeps nothing.
+//! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
+//! the server records into the SQLite file `--usage-db` names (beside the lease file by
+//! default): node minutes are written by the flush, and the profiles learned from clean
+//! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
+//! start. `--usage-off` leaves the usage side out altogether.
 //!
 //! Every tick acts by the wall clock of the server: the sink is flushed every five
 //! minutes and once more at shutdown, and pruned at the first tick and once a day. A

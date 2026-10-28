@@ -267,10 +267,10 @@ fn the_sink_reads_back_rows_and_profiles() {
 /// that names another flag.
 #[test]
 fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
-    // A directory is not a usage file. It is made in the temporary directory, because
-    // the lock file of a state file sits beside it under its name, and one beside the
-    // crate's directory would stray into the workspace.
-    let dir = std::env::temp_dir().join("js-lease-server-usage-not-a-file");
+    // A directory is not a usage file. It is made inside a directory of this run, which is
+    // removed afterwards with the lock file the store makes beside it.
+    let scratch = js_testkit::dir::TestDir::under(std::env::temp_dir(), "js-lease-server-usage");
+    let dir = scratch.join("not-a-file");
     std::fs::create_dir_all(&dir).unwrap();
     let setup = StoreSetup {
         db: dir,

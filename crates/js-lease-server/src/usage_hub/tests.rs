@@ -3,6 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use js_agent_wire::limits::MAX_LOAD_MINUTES;
 use js_agent_wire::{LeaseMinute, LoadDrops, Phase, RunResult};
 use js_lease::{ManualClock, Timestamp};
 
@@ -31,6 +32,7 @@ struct Fake {
     flushes: AtomicUsize,
     prunes: AtomicUsize,
     fail: AtomicBool,
+    panic_on_observe: AtomicBool,
     drop_with: Mutex<Option<DropReason>>,
 }
 
@@ -56,6 +58,10 @@ impl UsageSink for Fake {
         _: HostLimits,
         _: u64,
     ) -> Observation {
+        assert!(
+            !self.panic_on_observe.load(Ordering::SeqCst),
+            "the sink is broken"
+        );
         let entry = (host.to_string(), epoch, load.seq);
         self.observed.lock().unwrap().push(entry);
         let dropped = *self.drop_with.lock().unwrap();
@@ -207,10 +213,15 @@ fn load(seq: u64, minutes: &[(&str, u16, u32, u64)]) -> NodeLoad {
     }
 }
 
+/// The registry that holds every lease for every host.
+fn anyone(_: &LeaseId, _: &HostId) -> bool {
+    true
+}
+
 /// Plain beats of `host`, `n` of them, with nothing in them.
 fn quiet_beats(usage: &Usage, host: &str, n: usize) {
     for _ in 0..n {
-        usage.on_beat(&beat(host, Vec::new()), None, &[]);
+        usage.on_beat(&beat(host, Vec::new()), None, &[], &anyone);
     }
 }
 
@@ -226,11 +237,16 @@ fn a_clean_run_is_handed_over_after_its_grace_beats_with_its_late_minute() {
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[("run-1-1", "act.build")]);
     let minutes = [("1-1", 0, 1000, 100), ("1-1", 1, 2000, 300)];
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &minutes)), &[]);
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
     let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
     let late = [("1-1", 2, 500, 50), ("1-1", 1, 2500, 200)];
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &late)), &[]);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &late)), &[], &anyone);
     assert!(fake.ended().is_empty());
     quiet_beats(&usage, "h1", 1);
     let ended = fake.ended();
@@ -261,9 +277,10 @@ fn the_grace_counts_the_beats_of_the_runs_own_host() {
         &beat("h1", Vec::new()),
         Some(load(1, &[("1-1", 0, 1, 1)])),
         &[],
+        &anyone,
     );
     let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
     quiet_beats(&usage, "h2", 5);
     assert!(fake.ended().is_empty());
     quiet_beats(&usage, "h1", 2);
@@ -271,7 +288,8 @@ fn the_grace_counts_the_beats_of_the_runs_own_host() {
 }
 
 /// Asserts which results start a grace: only one the registry accepted (not a duplicate,
-/// and not an acknowledgement that names another run) and whose outcome is `succeeded` or
+/// and not a stale, unknown-lease, mismatched or unknown verdict, nor an
+/// acknowledgement that names another run) and whose outcome is `succeeded` or
 /// `failed`; an accepted `killed` result discards the lease's minutes, and a result that
 /// was not accepted leaves them for the resend. It catches a run learned from a killed
 /// job (a short run would teach admission a too-low cost), from a result that was only
@@ -279,31 +297,60 @@ fn the_grace_counts_the_beats_of_the_runs_own_host() {
 #[test]
 fn only_an_accepted_clean_result_starts_a_grace() {
     let fake = Arc::new(Fake::default());
-    let keys = [("run-a", "ka"), ("run-b", "kb"), ("run-c", "kc")];
+    let keys = [
+        ("run-a", "ka"),
+        ("run-b", "kb"),
+        ("run-c", "kc"),
+        ("run-d", "kd"),
+        ("run-e", "ke"),
+        ("run-f", "kf"),
+        ("run-g", "kg"),
+    ];
     let (usage, _) = usage(&fake, &keys);
-    let minutes = [("1-1", 0, 1, 1), ("1-2", 0, 1, 1), ("1-3", 0, 1, 1)];
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &minutes)), &[]);
+    let minutes = [
+        ("1-1", 0, 1, 1),
+        ("1-2", 0, 1, 1),
+        ("1-3", 0, 1, 1),
+        ("1-4", 0, 1, 1),
+        ("1-5", 0, 1, 1),
+        ("1-6", 0, 1, 1),
+        ("1-7", 0, 1, 1),
+    ];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
     let results = vec![
         result("run-a", "1-1", Outcome::Killed),
         result("run-b", "1-2", Outcome::Succeeded),
         result("run-c", "1-3", Outcome::Failed),
+        result("run-d", "1-4", Outcome::Succeeded),
+        result("run-e", "1-5", Outcome::Succeeded),
+        result("run-f", "1-6", Outcome::Succeeded),
+        result("run-g", "1-7", Outcome::Succeeded),
     ];
     let acks = [
         ack("run-a", Ack::Accepted),
         ack("run-b", Ack::Duplicate),
         ack("run-x", Ack::Accepted),
+        ack("run-d", Ack::Stale),
+        ack("run-e", Ack::UnknownLease),
+        ack("run-f", Ack::Mismatch),
+        ack("run-g", Ack::Unknown),
     ];
-    usage.on_beat(&beat("h1", results), None, &acks);
+    usage.on_beat(&beat("h1", results), None, &acks, &anyone);
     quiet_beats(&usage, "h1", 4);
     assert!(fake.ended().is_empty());
     let again = beat("h1", vec![result("run-b", "1-2", Outcome::Failed)]);
-    usage.on_beat(&again, None, &[ack("run-b", Ack::Accepted)]);
+    usage.on_beat(&again, None, &[ack("run-b", Ack::Accepted)], &anyone);
     quiet_beats(&usage, "h1", 2);
     let ended = fake.ended();
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].lease, LeaseId::new(1, 2));
     let after = beat("h1", vec![result("run-a2", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&after, None, &[ack("run-a2", Ack::Accepted)]);
+    usage.on_beat(&after, None, &[ack("run-a2", Ack::Accepted)], &anyone);
     assert_eq!(usage.counters().runs_without_series, 1);
 }
 
@@ -320,6 +367,7 @@ fn a_run_that_cannot_be_learned_from_is_counted_by_reason() {
         &beat("h1", Vec::new()),
         Some(load(1, &[("1-5", 0, 1, 1)])),
         &[],
+        &anyone,
     );
     let results = vec![
         result("run-1", "1-5", Outcome::Succeeded),
@@ -331,7 +379,7 @@ fn a_run_that_cannot_be_learned_from_is_counted_by_reason() {
         ack("run-2", Ack::Accepted),
         ack("run-3", Ack::Accepted),
     ];
-    usage.on_beat(&beat("h1", results), None, &acks);
+    usage.on_beat(&beat("h1", results), None, &acks, &anyone);
     quiet_beats(&usage, "h1", 3);
     let counts = usage.counters();
     assert_eq!(counts.runs_without_key, 1);
@@ -351,13 +399,13 @@ fn a_bad_load_is_counted_and_a_load_with_dropped_records_is_still_read() {
     let (usage, _) = usage(&fake, &[]);
     let mut bad = load(1, &[("1-1", 0, 1, 1)]);
     bad.working_set_bytes = u64::MAX;
-    usage.on_beat(&beat("h1", Vec::new()), Some(bad), &[]);
+    usage.on_beat(&beat("h1", Vec::new()), Some(bad), &[], &anyone);
     assert!(fake.observed.lock().unwrap().is_empty());
     assert_eq!(usage.counters().loads_rejected, 1);
     let mut partial = load(2, &[]);
     partial.covered = vec!["1-1".to_string(), "junk".to_string()];
     partial.dropped.over_cap = 2;
-    usage.on_beat(&beat("h1", Vec::new()), Some(partial), &[]);
+    usage.on_beat(&beat("h1", Vec::new()), Some(partial), &[], &anyone);
     let observed = fake.observed.lock().unwrap().clone();
     assert_eq!(observed, vec![("h1".to_string(), 3, 2)]);
     let counts = usage.counters();
@@ -372,7 +420,7 @@ fn a_bad_load_is_counted_and_a_load_with_dropped_records_is_still_read() {
 fn a_heartbeat_with_no_valid_host_records_nothing() {
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[]);
-    usage.on_beat(&beat("UPPER", Vec::new()), Some(load(1, &[])), &[]);
+    usage.on_beat(&beat("UPPER", Vec::new()), Some(load(1, &[])), &[], &anyone);
     assert!(fake.observed.lock().unwrap().is_empty());
     assert_eq!(usage.counters().records_dropped, 1);
 }
@@ -387,7 +435,7 @@ fn dropped_readings_are_tallied_by_host_and_minute_until_the_minute_is_over() {
     *fake.drop_with.lock().unwrap() = Some(DropReason::NoBaseline);
     let (usage, _) = usage(&fake, &[]);
     for seq in [1, 2] {
-        usage.on_beat(&beat("h1", Vec::new()), Some(load(seq, &[])), &[]);
+        usage.on_beat(&beat("h1", Vec::new()), Some(load(seq, &[])), &[], &anyone);
     }
     assert_eq!(usage.counters().loads_dropped, 2);
     let mut hub = usage.hub();
@@ -414,14 +462,100 @@ fn minutes_are_kept_for_a_bounded_number_of_leases() {
         peak_window_milli: 1,
         working_set_max_bytes: 1,
     };
+    let h1 = HostId::new("h1").unwrap();
+    let held: BTreeSet<LeaseId> = (0..=MAX_TRACKS as u64)
+        .map(|n| LeaseId::new(1, n))
+        .collect();
     let mut hub = usage.hub();
     for lease in 0..=MAX_TRACKS as u64 {
-        hub.add_minutes(&[minute(lease)], 16);
+        hub.add_minutes(&h1, &[minute(lease)], &held, 16);
     }
     assert_eq!(hub.running.len(), MAX_TRACKS);
     assert_eq!(hub.counts.minutes_refused, 1);
-    hub.add_minutes(&[minute(0)], 16);
+    hub.add_minutes(&h1, &[minute(0)], &held, 16);
     assert_eq!(hub.counts.minutes_refused, 1);
+}
+
+/// Asserts that minutes are filed for the host that has the lease: a lease the registry
+/// does not hold for the beat's host begins no track (and so cannot fill the table with
+/// invented ids), and the minutes of a lease on file from one host are refused when
+/// another host sends them, whether the lease is running or has ended. Both are counted
+/// in `minutes_unheld`. It catches a host that can move another host's series, or crowd
+/// the real leases out of the table with lease ids it made up.
+#[test]
+fn a_host_files_minutes_only_for_leases_the_registry_holds_for_it() {
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
+    let h1_only =
+        |lease: &LeaseId, host: &HostId| *lease == LeaseId::new(1, 1) && host.as_str() == "h1";
+    // More invented leases than the table holds, in loads of the most minutes a load has.
+    let invented: Vec<(String, u16, u32, u64)> = (100..100 + 2 * MAX_TRACKS as u64)
+        .map(|n| (format!("1-{n}"), 0, 1, 1))
+        .collect();
+    for (seq, chunk) in invented.chunks(MAX_LOAD_MINUTES).enumerate() {
+        let minutes: Vec<(&str, u16, u32, u64)> = chunk
+            .iter()
+            .map(|(l, m, c, w)| (l.as_str(), *m, *c, *w))
+            .collect();
+        let load = load(seq as u64 + 1, &minutes);
+        usage.on_beat(&beat("h1", Vec::new()), Some(load), &[], &h1_only);
+    }
+    assert_eq!(usage.hub().running.len(), 0);
+    assert_eq!(usage.counters().minutes_unheld, invented.len() as u64);
+    assert_eq!(usage.counters().minutes_refused, 0);
+
+    let mine = [("1-1", 0, 1000, 100)];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(100, &mine)),
+        &[],
+        &h1_only,
+    );
+    let theirs = [("1-1", 0, 9000, 900), ("1-1", 1, 9000, 900)];
+    usage.on_beat(
+        &beat("h2", Vec::new()),
+        Some(load(1, &theirs)),
+        &[],
+        &anyone,
+    );
+    let before = usage.counters().minutes_unheld;
+    assert_eq!(before, invented.len() as u64 + 2);
+
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &h1_only);
+    usage.on_beat(
+        &beat("h2", Vec::new()),
+        Some(load(2, &theirs)),
+        &[],
+        &anyone,
+    );
+    assert_eq!(usage.counters().minutes_unheld, before + 2);
+    quiet_beats(&usage, "h1", 2);
+    let ended = fake.ended();
+    assert_eq!(ended.len(), 1);
+    let only = RunMinute {
+        minute: 0,
+        cores_milli: 1000,
+        ws_bytes: 100,
+    };
+    assert_eq!(ended[0].series.minutes, vec![only]);
+}
+
+/// Asserts that a panic in the sink during a beat is caught and counted as a fault, that
+/// the call returns, and that the next beat is read as usual. It catches a panic that
+/// unwinds out of the hook, which on the server would fail the heartbeat's reply after
+/// the registry had accepted the beat and lose its acknowledgements.
+#[test]
+fn a_panic_in_the_sink_is_a_fault_and_the_hook_returns() {
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[]);
+    fake.panic_on_observe.store(true, Ordering::SeqCst);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &[])), &[], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    fake.panic_on_observe.store(false, Ordering::SeqCst);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    assert_eq!(fake.observed.lock().unwrap().len(), 1);
 }
 
 /// Asserts that a lease nothing has added to for a day is forgotten, running or ending,
@@ -435,9 +569,10 @@ fn a_lease_untouched_for_a_day_is_forgotten() {
         &beat("h1", Vec::new()),
         Some(load(1, &[("1-1", 0, 1, 1), ("1-2", 0, 1, 1)])),
         &[],
+        &anyone,
     );
     let done = beat("h1", vec![result("run-1", "1-2", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)]);
+    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)], &anyone);
     let mut hub = usage.hub();
     hub.expire(16 + TRACK_IDLE_MINUTES);
     assert_eq!((hub.running.len(), hub.ending.len()), (1, 1));
@@ -520,7 +655,7 @@ async fn the_final_flush_does_not_wait_for_its_schedule_and_clears_the_tally() {
         .push((HostId::new("h1").unwrap(), row(15)));
     let (usage, clock) = usage(&fake, &[]);
     let usage = Arc::new(usage);
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &[])), &[]);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &[])), &[], &anyone);
     clock.set(Timestamp::from_millis(17 * 60_000));
     usage.finish().await;
     assert_eq!(fake.flushes.load(Ordering::SeqCst), 1);
@@ -558,9 +693,10 @@ fn faults_on_learning_and_on_reads_are_counted() {
         &beat("h1", Vec::new()),
         Some(load(1, &[("1-1", 0, 1, 1)])),
         &[],
+        &anyone,
     );
     let done = beat("h1", vec![result("run-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)]);
+    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)], &anyone);
     let host = HostId::new("h1").unwrap();
     let key = ProfileKey::parse("k").unwrap();
     assert_eq!(
