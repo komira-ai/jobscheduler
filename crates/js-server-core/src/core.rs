@@ -138,6 +138,25 @@ pub struct UnknownNode(pub String);
 #[error("the state store could not be read for node {0}, which another frontend holds")]
 pub struct NodeUnread(pub String);
 
+/// Which frontend of the state store holds a node, as one frontend can tell
+/// ([`Core::node_held`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeHeld {
+    /// This frontend owns the node, or the node is connected here and no frontend has
+    /// claimed it yet; a core with no state store holds every node connected to it.
+    Here,
+    /// Another frontend owns the node.
+    Elsewhere {
+        /// The leases the store holds on the node, ascending (none if it holds no
+        /// unfinished work).
+        leases: Vec<LeaseId>,
+    },
+    /// No frontend has held the node and it is not connected here.
+    Unknown,
+    /// The store could not say who holds the node.
+    Unread,
+}
+
 /// An operator action on a node that was not applied.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlaceError {
@@ -500,6 +519,14 @@ impl<A: Adapter> Core<A> {
         let mut locked = self.lock();
         let Locked { engine, adapter } = &mut *locked;
         engine.place(adapter, now, worker, action)
+    }
+
+    /// Which frontend holds `worker` at `now`, for a view of a node that may be connected
+    /// to another frontend of the state store: the look [`Core::place`] makes before it
+    /// accepts a node. Writes nothing.
+    #[must_use]
+    pub fn node_held(&self, now: FarmTime, worker: &WorkerId) -> NodeHeld {
+        self.lock().engine.node_held(now, worker)
     }
 
     /// Takes this core out of service for good, for a successor to take over: from now on

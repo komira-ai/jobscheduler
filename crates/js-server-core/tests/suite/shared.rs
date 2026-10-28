@@ -7,14 +7,14 @@ use std::time::Duration;
 
 use js_sched::Cordon;
 use js_server_core::{
-    Held, NodeAction, NodeUnread, PlaceError, Stage, Standing, Taken, UnknownNode,
+    Held, NodeAction, NodeHeld, NodeUnread, PlaceError, Stage, Standing, Taken, UnknownNode,
 };
 use js_store::Progress;
 use js_types::sched::usage::LeaseCost;
 use js_types::sched::{LeaseGrant, OperationId, Resources};
 
 use crate::common::{
-    Call, GIB, Rig, at, block_on, calls, lease, reported, request, shown_to, started, submit,
+    Call, GIB, Rig, at, block_on, calls, core, lease, reported, request, shown_to, started, submit,
     submit_request, up, up_after, worker,
 };
 use crate::recover::finish;
@@ -416,4 +416,107 @@ fn an_action_on_a_node_connected_here_follows_the_store() {
         .expect("returned");
     assert_eq!(placement(&own, "node-b"), None);
     assert!(setup.store.rows_of("cordon/").is_empty());
+}
+
+/// Two frontends over one store, with the first running request 1 and 2 on `node-a`.
+fn running_on_first() -> (Setup, js_server_core::Core<Rig>, js_server_core::Core<Rig>) {
+    let setup = Setup::new();
+    let (a, b) = (setup.core(1), setup.core(2));
+    submit(&a, 1, 1);
+    submit(&a, 1, 2);
+    up(&a, 2, "node-a", "d1");
+    assert_eq!(started(&a).len(), 2, "both leases are running on node-a");
+    (setup, a, b)
+}
+
+/// Asserts that a frontend asked about a node another frontend owns says so and names the
+/// leases the store holds on it, in order, and that the owner calls it its own. Catches: a
+/// node view that shows a node of another frontend as absent, or as this one's, or without
+/// the work running on it.
+#[test]
+fn a_node_another_frontend_owns_is_elsewhere_with_its_stored_leases() {
+    let (_setup, a, b) = running_on_first();
+    let mut leases = started(&a);
+    leases.sort();
+
+    assert_eq!(
+        b.node_held(at(3), &worker("node-a")),
+        NodeHeld::Elsewhere { leases }
+    );
+    assert_eq!(a.node_held(at(3), &worker("node-a")), NodeHeld::Here);
+}
+
+/// Asserts that a node another frontend owns that holds no unfinished work is elsewhere with
+/// no leases. Catches: a node with nothing running shown as unknown.
+#[test]
+fn an_idle_node_another_frontend_owns_is_elsewhere_without_leases() {
+    let (_setup, through, _own) = pair();
+
+    assert_eq!(
+        through.node_held(at(1), &worker("node-b")),
+        NodeHeld::Elsewhere { leases: Vec::new() }
+    );
+}
+
+/// Asserts that a node connected here is here, and a name no frontend has held is unknown.
+/// Catches: a node of this core looked up as another's, and a store error or a made-up node
+/// for a name nobody has registered.
+#[test]
+fn a_node_connected_here_is_here_and_an_unregistered_one_is_unknown() {
+    let (_setup, through, own) = pair();
+
+    assert_eq!(own.node_held(at(1), &worker("node-b")), NodeHeld::Here);
+    assert_eq!(
+        through.node_held(at(1), &worker("nobody")),
+        NodeHeld::Unknown
+    );
+}
+
+/// Asserts that a node connected here whose claim the store has not taken yet is here, not
+/// unknown. Catches: a node view that loses a daemon between its `Hello` and the store coming
+/// back.
+#[test]
+fn a_connected_node_whose_claim_is_pending_is_here() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    setup.store.fail_writes(Some("owner/"));
+    up(&core, 0, "node-a", "d1");
+
+    assert_eq!(core.node_held(at(1), &worker("node-a")), NodeHeld::Here);
+}
+
+/// Asserts that a store that cannot be read gives `Unread` at each of the three looks (the
+/// owner row of a node this core owns once its cache is old, the owner row of one it does
+/// not, the lease rows), not a guess. Catches: an unreadable store shown as an absent node
+/// or as no leases.
+#[test]
+fn a_store_that_cannot_be_read_gives_unread() {
+    for prefix in ["owner/", "lease/", ""] {
+        let (setup, a, b) = running_on_first();
+        setup.store.fail_reads(Some(prefix));
+        let held = b.node_held(at(3), &worker("node-a"));
+        assert_eq!(held, NodeHeld::Unread, "{prefix:?} from the other frontend");
+        if prefix != "lease/" {
+            let own = a.node_held(at(60_000), &worker("node-a"));
+            assert_eq!(own, NodeHeld::Unread, "{prefix:?} from the owner");
+        }
+        setup.store.fail_reads(None);
+        assert_ne!(b.node_held(at(3), &worker("node-a")), NodeHeld::Unread);
+    }
+}
+
+/// Asserts that a core with no state store, and a fenced one, hold the nodes connected to
+/// them and know no other. Catches: a lone server whose node view reports its own daemons
+/// as unknown.
+#[test]
+fn a_core_without_a_store_holds_what_is_connected_to_it() {
+    let lone = core();
+    up(&lone, 0, "node-a", "d1");
+    assert_eq!(lone.node_held(at(1), &worker("node-a")), NodeHeld::Here);
+    assert_eq!(lone.node_held(at(1), &worker("node-b")), NodeHeld::Unknown);
+
+    let (_setup, a, _b) = running_on_first();
+    a.fence();
+    assert_eq!(a.node_held(at(3), &worker("node-a")), NodeHeld::Here);
+    assert_eq!(a.node_held(at(3), &worker("node-z")), NodeHeld::Unknown);
 }
