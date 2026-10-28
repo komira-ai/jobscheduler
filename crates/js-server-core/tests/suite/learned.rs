@@ -385,6 +385,7 @@ fn lowered_floor_is_applied_and_written_and_retried_at_tick() {
     up(&core, 0, "node-a", "d1");
     let killed = keyed(&core, 1, 1, K);
     let (first, second) = (submit(&core, 2, 2), submit(&core, 3, 3));
+    let third = submit(&core, 4, 4);
     kill(&core, 5, killed.operation);
     let raised = floor(&core, K).expect("raised");
     assert_eq!(floor_rows(&setup), [(K, raised)]);
@@ -398,18 +399,22 @@ fn lowered_floor_is_applied_and_written_and_retried_at_tick() {
         [(K, raised)],
         "the store refused the row"
     );
+    // Lowered again while the first row waits: the newer row replaces it.
+    core.with(|_, rig| rig.to_lower.push(Lowered::new(K, 2 * GIB, GIB)));
+    complete(&core, 7, second.operation);
+    assert_eq!(floor(&core, K), Some(GIB));
 
     setup.store.fail_writes(None);
-    block_on(core.tick(at(7)));
-    assert_eq!(floor_rows(&setup), [(K, 2 * GIB)], "written at the tick");
+    block_on(core.tick(at(8)));
+    assert_eq!(floor_rows(&setup), [(K, GIB)], "written at the tick");
     assert_eq!(
         setup.rows(9).load().expect("loaded").key_names,
         [(K, "est/k".to_owned())],
         "the row keeps its summary name"
     );
 
-    core.with(|_, rig| rig.to_lower.push(Lowered::new(K, 2 * GIB, 0)));
-    complete(&core, 8, second.operation);
+    core.with(|_, rig| rig.to_lower.push(Lowered::new(K, GIB, 0)));
+    complete(&core, 9, third.operation);
     assert_eq!(floor(&core, K), None);
     assert!(floor_names(&setup).is_empty(), "the row is deleted");
 }
