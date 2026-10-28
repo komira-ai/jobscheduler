@@ -2,19 +2,16 @@
 
 use std::collections::BTreeSet;
 
-use js_lease::Timestamp;
 use js_provider::{HostCapacity, RefusalCode, StartAck, StartSpec};
 use js_types::HostId;
 
-use super::queue::{Verdict, WaitList};
+use super::queue::Verdict;
 use super::requests::{RequestKey, Requests};
 
-/// What a declined start is answered from.
-pub(crate) struct Declined<'a> {
+/// What decides whether some host could ever be given whole to a request.
+pub(crate) struct Asking<'a> {
     pub(crate) spec: &'a StartSpec,
     pub(crate) key: &'a RequestKey,
-    pub(crate) now: Timestamp,
-    pub(crate) regain_grace_ms: u64,
     /// Every host the pool lists.
     pub(crate) hosts: &'a [HostCapacity],
     /// The hosts that reported a taint.
@@ -24,33 +21,25 @@ pub(crate) struct Declined<'a> {
 /// Whether some listed host could ever be given whole to the request: it fits the
 /// request's shape, is untainted and is not barred for the request's life. A busy, lost
 /// or reserved host counts as capable.
-fn capable(declined: &Declined<'_>, requests: &Requests) -> bool {
-    let wanted = declined.spec.request();
-    declined.hosts.iter().any(|host| {
+pub(crate) fn capable(asking: &Asking<'_>, requests: &Requests) -> bool {
+    let wanted = asking.spec.request();
+    asking.hosts.iter().any(|host| {
         let fits = host
             .shape
             .satisfies(&wanted.resources, &wanted.capabilities);
-        let clean = !declined.tainted.contains(&host.host);
-        let barred = requests.barred_for_life(declined.key, &host.host);
+        let clean = !asking.tainted.contains(&host.host);
+        let barred = requests.barred_for_life(asking.key, &host.host);
         fits & clean & !barred
     })
 }
 
 /// The answer to a whole-node start of a request that fits the pool but found no free
-/// host: no host could ever be given whole is the one refusal for lack of a host;
-/// otherwise a request with an id waits on the list (`Unknown`, or `NoCapacity` when the
-/// list is full) and one without an id is answered `NoCapacity`.
-pub(crate) fn answer(
-    waiting: &mut WaitList,
-    requests: &Requests,
-    declined: &Declined<'_>,
-) -> StartAck {
-    let capable = capable(declined, requests);
-    let place = declined
-        .spec
-        .request_id()
-        .map(|id| waiting.present(id, capable, declined.now, declined.regain_grace_ms));
-    match (place, capable) {
+/// host. `verdict` is the wait list's answer for a request with an id that may queue,
+/// else `None`. No host that could ever be given whole is the one refusal for lack of a
+/// host; otherwise a request on the list waits (`Unknown`), one the list is full for is
+/// answered `NoCapacity`, and so is one that does not queue.
+pub(crate) fn answer(verdict: Option<Verdict>, capable: bool) -> StartAck {
+    match (verdict, capable) {
         (Some(Verdict::Waiting(_)), _) => StartAck::Unknown,
         (Some(Verdict::Full), _) => StartAck::Refused(RefusalCode::NoCapacity),
         (Some(Verdict::Unservable), _) | (None, false) => {

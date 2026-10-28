@@ -24,7 +24,7 @@
 //! list keeps its place and is never put out by a newcomer.
 
 use js_lease::Timestamp;
-use js_types::RequestId;
+use js_types::{Request, RequestId};
 
 /// The most requests the list holds at once.
 pub const MAX_WAITING_REQUESTS: usize = 1024;
@@ -33,6 +33,11 @@ pub const MAX_WAITING_REQUESTS: usize = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
     id: RequestId,
+    /// What the request asks for, as first presented: the reservation reads its fit and
+    /// its wall time from here.
+    request: Request,
+    /// The first presentation: how long the request has waited counts from here.
+    since: Timestamp,
     /// The last time the consumer presented the request.
     seen: Timestamp,
     /// The first presentation at which no host could ever be given whole; `None` while
@@ -70,15 +75,17 @@ impl WaitList {
     /// The consumer presents request `id` at `now`. `capable` says whether some host
     /// could ever be given whole to it.
     ///
-    /// A request not on the list enters at the back if `capable` and the list holds fewer
-    /// than [`MAX_WAITING_REQUESTS`] (else it is `Full`), and is `Unservable` at once if not
-    /// `capable`. A request already on the list keeps its place, whatever the
+    /// A request not on the list enters at the back, keeping `request` for the reservation,
+    /// if `capable` and the list holds fewer than [`MAX_WAITING_REQUESTS`] (else it is
+    /// `Full`), and is `Unservable` at once if not `capable`. A request already on the
+    /// list keeps its place, whatever the
     /// number of presentations, and is seen again at `now`; while no host is capable it
     /// keeps waiting until `grace_ms` have passed since the first presentation that saw
     /// none, then it is `Unservable` and leaves the list.
     pub(crate) fn present(
         &mut self,
         id: &RequestId,
+        request: &Request,
         capable: bool,
         now: Timestamp,
         grace_ms: u64,
@@ -90,6 +97,8 @@ impl WaitList {
                 (true, true) => {
                     self.entries.push(Entry {
                         id: id.clone(),
+                        request: request.clone(),
+                        since: now,
                         seen: now,
                         unservable_since: None,
                     });
@@ -121,6 +130,23 @@ impl WaitList {
         let before = self.entries.len();
         self.entries.retain(|entry| entry.id != *id);
         self.entries.len() < before
+    }
+
+    /// The waiting requests, front first: the id, what it asks for and when it was first
+    /// presented.
+    pub(crate) fn waiting(&self) -> impl Iterator<Item = (&RequestId, &Request, Timestamp)> {
+        let waiting = self.entries.iter();
+        waiting.map(|entry| (&entry.id, &entry.request, entry.since))
+    }
+
+    /// Whether no request is waiting.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Whether request `id` is waiting.
+    pub(crate) fn holds(&self, id: &RequestId) -> bool {
+        self.position(id).is_some()
     }
 
     /// Where request `id` waits from the front, if it does.

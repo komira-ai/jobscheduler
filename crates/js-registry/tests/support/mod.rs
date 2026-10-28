@@ -1,6 +1,8 @@
 //! Fixtures the registry tests share.
 #![allow(dead_code)]
 
+pub mod world;
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
