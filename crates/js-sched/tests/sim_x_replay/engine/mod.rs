@@ -13,6 +13,7 @@
 //! | `predictor` | what the scheduler believes about a key | planned |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | present |
+//! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
 //! | `rankers` | the compared placement rules (the previous rule and a random one) | present |
 //! | `replay` | the loop: arrivals, rounds, truth, kills and the metrics | present |
 //! | `report`, `control` | the report and the control | planned |
@@ -27,6 +28,7 @@
 // This series' modules are declared above `fixture`, in a group of their own: a pull
 // request that adds its module beside `fixture` then merges with this one without a
 // conflict.
+pub mod adapter;
 pub mod metrics;
 pub mod model;
 pub mod predicate;
