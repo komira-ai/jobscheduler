@@ -54,6 +54,9 @@ pub(crate) struct Attempt<'a> {
     pub(crate) cost: LeaseCost,
     /// The lease it gets if placed now.
     pub(crate) lease: LeaseId,
+    /// `L` of the lease's key where it is charged by a curve, else 1: the minutes the
+    /// score's fit looks at.
+    pub(crate) fit_minutes: u8,
 }
 
 /// A candidate the predicate admitted, with what it computed for it.
@@ -356,7 +359,7 @@ impl Servable {
                 let facts = HostFacts {
                     cpu_capacity_millis: 0,
                     memory_capacity_bytes: 0,
-                    fit_minutes: 1,
+                    fit_minutes: attempt.fit_minutes,
                     fallback: p.left.fallback,
                     measured_above_predicted: w.load_state.measured_above_covered(),
                     same_key_millis: w.load_state.same_key_millis(attempt.cost.key_hash),

@@ -592,6 +592,7 @@ fn submit(s: &mut Scheduler, op: u64, cpu: u64) {
             cpu_millis: cpu,
             memory_bytes: 0,
             cold: false,
+            life_minutes: 1,
         },
     );
 }

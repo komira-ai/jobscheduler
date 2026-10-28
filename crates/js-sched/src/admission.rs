@@ -344,6 +344,9 @@ pub struct Prediction {
     pub memory_bytes: u64,
     /// The key had no usable estimate and these are the cold costs.
     pub cold: bool,
+    /// `L`, the key's life in minutes (`js_sizing::Summary::life_minutes`), 1 for a cold
+    /// key. The score's fit reads it only for a lease charged by a curve.
+    pub life_minutes: u8,
 }
 
 impl Prediction {
@@ -354,6 +357,7 @@ impl Prediction {
             cpu_millis: u64::from(estimate.cpu_millis),
             memory_bytes: estimate.memory_bytes,
             cold: false,
+            life_minutes: estimate.life_minutes,
         }
     }
 
@@ -365,6 +369,7 @@ impl Prediction {
             cpu_millis: u64::from(COLD_CPU_MILLIS),
             memory_bytes: default_memory,
             cold: true,
+            life_minutes: 1,
         }
     }
 }
@@ -376,6 +381,23 @@ pub(crate) const fn charge(cost: &LeaseCost) -> Charge {
     Charge {
         cpu_millis: cost.cpu_millis,
         memory_bytes: cost.memory_bytes,
+    }
+}
+
+/// Whether [`charge`] charges a lease by a curve over its minutes. It does not: every
+/// lease is charged flat, so every lease's fit looks at one minute (`L = 1`) in production
+/// whatever its key's `life_minutes` is. The rule that charges by a curve sets this and
+/// the fit then reads the key's `L`.
+const CHARGED_BY_CURVE: bool = false;
+
+/// The minutes of the lease's own life the score's fit looks at (`L`): the key's
+/// `life_minutes`, clamped to `1..=HORIZON`, where the lease is charged by a curve; 1 where
+/// it is charged flat.
+pub(crate) fn fit_minutes_of(life_minutes: u8, charged_by_curve: bool) -> u8 {
+    if charged_by_curve {
+        life_minutes.clamp(1, u8::try_from(crate::load::HORIZON).unwrap_or(u8::MAX))
+    } else {
+        1
     }
 }
 
@@ -445,6 +467,12 @@ impl Admission {
 
     pub(crate) fn set_prediction(&mut self, operation: OperationId, prediction: Prediction) {
         self.hints.insert(operation, prediction);
+    }
+
+    /// `L` for the fit of `operation`'s lease: 1 while every lease is charged flat.
+    pub(crate) fn fit_minutes(&self, operation: OperationId) -> u8 {
+        let life = self.hints.get(&operation).map_or(1, |p| p.life_minutes);
+        fit_minutes_of(life, CHARGED_BY_CURVE)
     }
 
     pub(crate) fn forget(&mut self, operation: OperationId) {
@@ -687,6 +715,18 @@ mod tests {
         assert_eq!(set.cold_cap(&Resources::new(88_000, 0)), 12);
     }
 
+    /// Catches: a key's life read by the fit of a lease charged flat (a flat lease looks at
+    /// its first minute only), and a curve-charged life outside `1..=HORIZON`.
+    #[test]
+    fn the_fit_reads_the_life_only_where_a_curve_charges() {
+        assert_eq!(fit_minutes_of(9, false), 1);
+        assert_eq!(fit_minutes_of(9, true), 9);
+        assert_eq!(fit_minutes_of(0, true), 1);
+        assert_eq!(fit_minutes_of(200, true), 30);
+        assert!(!CHARGED_BY_CURVE, "production charges every lease flat");
+        assert_eq!(usize::from(js_sizing::LIFE_HORIZON), crate::load::HORIZON);
+    }
+
     /// Catches: limits computed with the slack on the wrong resource, overflowing, or
     /// the floor rounded down (an under-charge).
     #[test]
@@ -717,6 +757,7 @@ mod tests {
             memory_bytes: 3 << 30,
             cpu_millis: 750,
             level: js_sizing::Level::L1,
+            life_minutes: 4,
         };
         assert_eq!(
             Prediction::from_estimate(&estimate),
@@ -724,6 +765,7 @@ mod tests {
                 cpu_millis: 750,
                 memory_bytes: 3 << 30,
                 cold: false,
+                life_minutes: 4,
             }
         );
         assert_eq!(
@@ -732,6 +774,7 @@ mod tests {
                 cpu_millis: 2000,
                 memory_bytes: 4 << 30,
                 cold: true,
+                life_minutes: 1,
             }
         );
     }
