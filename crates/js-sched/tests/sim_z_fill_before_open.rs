@@ -10,7 +10,7 @@ mod load_rig;
 #[path = "support_score_z_ad/mod.rs"]
 mod support_score_z_ad;
 
-use js_sched::{Event, Prediction};
+use js_sched::{Event, LoadConfig, Prediction};
 
 use load_rig::{GIB, Rig, cold, w, warm};
 use support_score_z_ad::{hold, host, on, place};
@@ -22,7 +22,12 @@ fn four_cores() -> Prediction {
 
 /// `A` holds 40 cores flat (one lease), `B` is empty; hosts of 88 threads.
 fn rig_with_forty_on_a() -> Rig {
-    let mut r = Rig::on();
+    rig_with_forty_on_a_at(LoadConfig::default())
+}
+
+/// [`rig_with_forty_on_a`] with the placement settings `cfg`.
+fn rig_with_forty_on_a_at(cfg: LoadConfig) -> Rig {
+    let mut r = Rig::new(cfg);
     r.up("A", host(352));
     r.up("B", host(352));
     hold(&mut r, "A", &["B"], 1, warm(40_000, 0));
@@ -62,6 +67,25 @@ fn the_predicate_admits_the_13th_lease_into_as_slack() {
     r.feed(Event::Cordon { worker: w("B") });
     assert_eq!(place(&mut r, four_cores()), "A");
     assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 92_000);
+}
+
+/// Catches: the 13th lease kept off `A` by something other than key 1: with the slack
+/// tolerance raised to 5%, `A` at 92 of 88 cores (4.5% over) is inside it, so key 1 no
+/// longer separates the hosts and key 5, the tighter fit, takes the 13th to `A`.
+#[test]
+fn with_as_overshoot_inside_the_tolerance_the_13th_goes_to_a() {
+    let mut r = rig_with_forty_on_a_at(LoadConfig {
+        score_slack_tol_ppm: 50_000,
+        ..LoadConfig::default()
+    });
+    hold(&mut r, "A", &["B"], 12, four_cores());
+    assert_eq!(place(&mut r, four_cores()), "A");
+    assert_eq!(r.s.load_view(&w("A")).unwrap().left_cpu_millis, 92_000);
+    assert_eq!(
+        r.s.load_counters().chose_slack,
+        0,
+        "inside the tolerance is no slack"
+    );
 }
 
 /// Hosts of 100 GiB with `A` holding `a_gib` and `B` holding `b_gib` of predicted

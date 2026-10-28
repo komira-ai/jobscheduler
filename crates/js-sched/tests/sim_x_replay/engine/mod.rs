@@ -13,6 +13,7 @@
 //! | `predictor` | what the scheduler believes about a key | planned |
 //! | `permute` | the control's permutation of belief minutes | planned |
 //! | `model`, `predicate`, `metrics` | the pool, the admission stand-in and the integer metrics | planned |
+//! | `adapter` | the scorer's `PredictedLoad` seam over the replay's host figures, and ranker 5 through `Scorer::choose`; imports nothing above it | present |
 //! | `rankers`, `report`, `control` | the compared placement rules, the report and the control | planned |
 //!
 //! A module takes its input as `fixture::Row` values (or a `fixture::Fixture`), never as
@@ -22,6 +23,7 @@
 // and modules arrive in separate pull requests ahead of their callers.
 #![allow(dead_code, reason = "each compile unit uses a subset of the engine")]
 
+pub mod adapter;
 pub mod fixture;
 pub mod tables;
 pub mod truth;
