@@ -110,7 +110,8 @@ mod scheduler;
 mod servable;
 
 pub use admission::{
-    FlagError, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction, ShadowChoice,
+    FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction,
+    ShadowChoice,
 };
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
