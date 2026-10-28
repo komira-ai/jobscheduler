@@ -53,6 +53,7 @@ pub use adapter::{Adapter, Delivery, Link, Stage, View};
 pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
 pub use host::{Beat, Reported, Stream};
+pub use js_sched::{LoadConfig, PlacementLoad};
 pub use observer::Observer;
 pub use report::{Reason, Report, Standing, Taken};
 pub use store::Storage;

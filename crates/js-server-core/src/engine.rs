@@ -115,7 +115,11 @@ pub(crate) struct Engine {
 impl Engine {
     /// An engine over a new scheduler, whose writer takes everything.
     pub(crate) fn new(config: &Config) -> Self {
-        let sched = Scheduler::new(config.term)
+        let mut sched = Scheduler::new(config.term);
+        if let Some(load) = config.load {
+            sched = sched.with_load_config(load);
+        }
+        let sched = sched
             .with_unservable_wait(config.unservable_wait)
             .with_finished_retention(config.finished_retention)
             .with_loss_requeues(LOSS_REQUEUES)
