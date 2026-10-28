@@ -14,6 +14,7 @@ publish = false
 # `name.workspace = true` (members add the features they need). A dependency enters
 # Cargo.lock only when a member first uses it.
 [workspace.dependencies]
+async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false }
 # Grant verification and the lease-user key encodings (js-mac-session).
 base64 = "0.23.1"
@@ -31,6 +32,9 @@ hyper-util = { version = "0.1.21", default-features = false }
 # Calls rustix has no portable form of (js-testkit: mkfifo, and a
 # signal to ignore one).
 libc = "0.2.190"
+# The container runner (js-contain) writes OCI bundles with oci-spec and drives `crun`
+# with the runc client.
+oci-spec = "0.7.1"
 # The state store's Postgres backend (js-state, feature `postgres`): the blocking client,
 # no TLS (an `sslmode=require` URL is refused rather than downgraded).
 postgres = "0.19.10"
@@ -42,6 +46,7 @@ objc2-open-directory = { version = "0.3.2", default-features = false, features =
 rand_chacha = "0.10.0"
 # Test certificates only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+runc = { version = "0.3.0", features = ["async"] }
 # The SQLite state store (js-state): the C library is compiled in (`bundled`), so the file
 # format and WAL behaviour do not depend on the host's libsqlite3. No default features: no
 # statement cache (hashlink) and no wasm shim.
