@@ -7,9 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use js_provider_lambdalabs::{
-    AcquireId, AcquireRequest, Acquired, ApiError, ApiKey, Bootstrap, Candidate, Elastic, ElasticConfig,
-    ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider, LaunchRequest, ManualClock,
-    OptionTable, Reason, Refusal, RefusalCode, Released, SchedulerId, Tag,
+    AcquireId, AcquireRequest, Acquired, ApiError, ApiKey, Bootstrap, Candidate, Elastic,
+    ElasticConfig, ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider, LaunchRequest,
+    ManualClock, OptionTable, Reason, Refusal, RefusalCode, Released, SchedulerId, Tag,
 };
 use serde_json::{Value, json};
 
@@ -99,7 +99,12 @@ fn a_launch_carries_user_data_only_when_it_is_given() {
     rest.remove("user_data");
     assert_eq!(Value::Object(rest), without);
     // The document sent holds no secret: the token file is named, never filled.
-    assert!(given["user_data"].as_str().unwrap().contains("ConditionPathExists=$TOKEN_FILE"));
+    assert!(
+        given["user_data"]
+            .as_str()
+            .unwrap()
+            .contains("ConditionPathExists=$TOKEN_FILE")
+    );
 }
 
 #[test]

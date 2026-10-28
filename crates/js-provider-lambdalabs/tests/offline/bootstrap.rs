@@ -116,17 +116,31 @@ fn nothing_a_shell_or_systemd_reads_as_syntax_is_accepted() {
     for name in ["agent_url", "server_url"] {
         for url in bad {
             let b = with(name, url);
-            assert_eq!(b.render(), Err(field(name, Fault::Character)), "{name} {url:?}");
+            assert_eq!(
+                b.render(),
+                Err(field(name, Fault::Character)),
+                "{name} {url:?}"
+            );
         }
     }
     let bad_paths = [
         "/a b", "/a;b", "/a$b", "/a`b`", "/a'b", "/a\"b", "/a\\b", "/a|b", "/a&b", "/a%b", "/a\nb",
         "/a:b", "/a*b", "/a=b", "/a(b)",
     ];
-    for name in ["ca_cert", "token_file", "state_root", "scratch_root", "container_bin"] {
+    for name in [
+        "ca_cert",
+        "token_file",
+        "state_root",
+        "scratch_root",
+        "container_bin",
+    ] {
         for path in bad_paths {
             let b = with(name, path);
-            assert_eq!(b.render(), Err(field(name, Fault::Character)), "{name} {path:?}");
+            assert_eq!(
+                b.render(),
+                Err(field(name, Fault::Character)),
+                "{name} {path:?}"
+            );
         }
     }
     for pool in ["a/b", "a b", "a;b", "a:b", "a$b"] {
@@ -153,7 +167,13 @@ fn a_path_must_be_absolute_and_plain() {
         ("/..", Fault::Component),
         ("", Fault::Empty),
     ];
-    for name in ["ca_cert", "token_file", "state_root", "scratch_root", "container_bin"] {
+    for name in [
+        "ca_cert",
+        "token_file",
+        "state_root",
+        "scratch_root",
+        "container_bin",
+    ] {
         for (path, fault) in cases {
             let b = with(name, path);
             assert_eq!(b.render(), Err(field(name, fault)), "{name} {path:?}");
@@ -187,7 +207,10 @@ fn a_digest_must_be_64_lowercase_hex_digits() {
 #[test]
 fn a_value_over_256_bytes_is_refused_and_256_is_not() {
     let head = "https://host.example/";
-    let fits = format!("{head}{}", "ab-".repeat(80).get(..256 - head.len()).unwrap());
+    let fits = format!(
+        "{head}{}",
+        "ab-".repeat(80).get(..256 - head.len()).unwrap()
+    );
     assert_eq!(fits.len(), 256);
     assert!(with("agent_url", &fits).render().is_ok());
     let long = format!("{fits}-");
@@ -216,11 +239,23 @@ fn a_token_shaped_input_is_refused_wherever_it_is_put() {
         );
         // Tokens with other characters are refused as characters.
         let query = format!("https://lease.example.org/?token={token}");
-        assert_eq!(with(name, &query).render(), Err(field(name, Fault::Character)));
+        assert_eq!(
+            with(name, &query).render(),
+            Err(field(name, Fault::Character))
+        );
         let user = format!("https://{token}@lease.example.org/");
-        assert_eq!(with(name, &user).render(), Err(field(name, Fault::Character)));
+        assert_eq!(
+            with(name, &user).render(),
+            Err(field(name, Fault::Character))
+        );
     }
-    for name in ["ca_cert", "token_file", "state_root", "scratch_root", "container_bin"] {
+    for name in [
+        "ca_cert",
+        "token_file",
+        "state_root",
+        "scratch_root",
+        "container_bin",
+    ] {
         assert_eq!(
             with(name, &in_path).render(),
             Err(field(name, Fault::TokenShaped)),
@@ -252,11 +287,7 @@ fn a_token_shaped_input_is_refused_wherever_it_is_put() {
     assert!(with("pool", &name31).render().is_ok());
     assert!(with("pool", &name32).render().is_err());
     // Separators break a run: a long name made of short words is a name.
-    assert!(
-        with("pool", &format!("{name31}-{name31}"))
-            .render()
-            .is_ok()
-    );
+    assert!(with("pool", &format!("{name31}-{name31}")).render().is_ok());
 }
 
 #[test]
@@ -277,12 +308,42 @@ fn paths_that_overlap_are_refused() {
     let cases = [
         // (state_root, scratch_root, token_file, first, second)
         ("/data/a", "/data/a", "/etc/t", "state_root", "scratch_root"),
-        ("/data/a/b", "/data/a", "/etc/t", "state_root", "scratch_root"),
-        ("/data/a", "/data/a/b", "/etc/t", "state_root", "scratch_root"),
+        (
+            "/data/a/b",
+            "/data/a",
+            "/etc/t",
+            "state_root",
+            "scratch_root",
+        ),
+        (
+            "/data/a",
+            "/data/a/b",
+            "/etc/t",
+            "state_root",
+            "scratch_root",
+        ),
         ("/data/a", "/data/b", "/data/a", "token_file", "state_root"),
-        ("/data/a", "/data/b", "/data/a/t", "token_file", "state_root"),
-        ("/data/a", "/data/b", "/data/b", "token_file", "scratch_root"),
-        ("/data/a", "/data/b", "/data/b/x/t", "token_file", "scratch_root"),
+        (
+            "/data/a",
+            "/data/b",
+            "/data/a/t",
+            "token_file",
+            "state_root",
+        ),
+        (
+            "/data/a",
+            "/data/b",
+            "/data/b",
+            "token_file",
+            "scratch_root",
+        ),
+        (
+            "/data/a",
+            "/data/b",
+            "/data/b/x/t",
+            "token_file",
+            "scratch_root",
+        ),
     ];
     for (state_root, scratch_root, token_file, first, second) in cases {
         let b = Bootstrap {
@@ -371,7 +432,12 @@ fn the_download_is_checked_before_it_is_installed() {
     assert!(text.contains("AGENT_SHA256='0123456789abcdef"));
     assert!(text.contains("nothing was installed"));
     // The checks of the image come before the download.
-    for check in ["nvidia-smi >/dev/null", "nvidia-ctk", "info 2>&1", "no nvidia runtime"] {
+    for check in [
+        "nvidia-smi >/dev/null",
+        "nvidia-ctk",
+        "info 2>&1",
+        "no nvidia runtime",
+    ] {
         assert!(at(check) < at("curl --fail"), "{check}");
     }
 }
@@ -403,7 +469,12 @@ fn user_data_debug_shows_a_size_and_a_digest_and_never_the_text() {
     assert_eq!(data.digest().len(), 16);
     assert!(data.digest().bytes().all(|b| b.is_ascii_hexdigit()));
     assert!(!shown.contains("nvidia"));
-    let other = Bootstrap { pool: "other", ..good() }.render().unwrap();
+    let other = Bootstrap {
+        pool: "other",
+        ..good()
+    }
+    .render()
+    .unwrap();
     assert_ne!(other.digest(), data.digest());
 }
 

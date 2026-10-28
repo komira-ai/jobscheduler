@@ -75,7 +75,12 @@ impl UserData {
 
 impl fmt::Debug for UserData {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(out, "UserData({} bytes, sha256 {})", self.0.len(), self.digest())
+        write!(
+            out,
+            "UserData({} bytes, sha256 {})",
+            self.0.len(),
+            self.digest()
+        )
     }
 }
 
