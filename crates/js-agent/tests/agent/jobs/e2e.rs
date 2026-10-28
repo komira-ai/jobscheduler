@@ -229,7 +229,7 @@ fn the_agent_sends_its_load_to_a_real_server() {
     let posts = Recorder::default();
     let posted = posts.0.clone();
     let slice = "/sys/fs/cgroup/jobs.slice";
-    let flags = ["--actions-cgroup", slice];
+    let flags = ["--actions-cgroup", slice, "--drain-wait", "0"];
     let rig = rig_over(server, address, "jobs_e2e_load", &flags, move |_| {
         posts.clone()
     });
@@ -258,7 +258,8 @@ fn the_agent_sends_its_load_to_a_real_server() {
     assert_eq!(loads[0]["working_set_bytes"], 4096);
     assert_eq!(loads[0]["clocks"].as_array().map(Vec::len), Some(1));
     assert_eq!(rig.view(&run).0, "running");
-    rig.agent.stop();
+    let ran = rig.drain_now();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
 }
 
 /// Asserts what a server that forgot a run does to the agent's work: after the server

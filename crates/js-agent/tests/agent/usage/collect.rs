@@ -246,6 +246,7 @@ fn a_lease_that_ended_sends_its_partial_minute() {
         rig.lease("a", k * 30 * SECOND, 100);
         rig.run_at(at, &[running("a", 0)]);
         let minutes = rig.load().unwrap().minutes;
+        rig.outbox.delivered();
         match at {
             60 => assert_eq!(names(&minutes), [("a", 0, 1000)]),
             _ => assert!(minutes.is_empty(), "t={at}: {minutes:?}"),
@@ -254,6 +255,7 @@ fn a_lease_that_ended_sends_its_partial_minute() {
     rig.node(4 * 30 * SECOND, 100);
     rig.run_at(120, &[]);
     assert_eq!(names(&rig.load().unwrap().minutes), [("a", 1, 1000)]);
+    rig.outbox.delivered();
     rig.run_at(150, &[]);
     assert!(rig.load().unwrap().minutes.is_empty(), "sent once");
 }

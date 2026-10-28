@@ -124,18 +124,23 @@ fn a_failed_send_requeues_and_the_next_beat_carries_the_minute_once() {
     assert_eq!(loads[2]["cpu_usage_usec"], 30_000_000);
     assert_eq!(loads[2]["covered"], json!(["lease-r1"]));
     assert_eq!(loads[2].get("minutes"), None);
-    let minutes = |n: usize| loads[n]["minutes"].clone();
+    let carried: Vec<(Value, Value, Value)> = loads[3..]
+        .iter()
+        .map(|load| {
+            (
+                load["seq"].clone(),
+                load["mono_usec"].clone(),
+                load["minutes"].clone(),
+            )
+        })
+        .collect();
     assert_eq!(
-        (loads[3]["seq"].clone(), minutes(3)),
-        (json!(3), json!([minute(0)]))
-    );
-    assert_eq!(
-        (loads[4]["seq"].clone(), minutes(4)),
-        (json!(4), json!([minute(0)]))
-    );
-    assert_eq!(
-        (loads[5]["seq"].clone(), minutes(5)),
-        (json!(5), json!([minute(1)]))
+        carried,
+        [
+            (json!(3), json!(60_000_000), json!([minute(0)])),
+            (json!(4), json!(90_000_000), json!([minute(0)])),
+            (json!(5), json!(120_000_000), json!([minute(1)])),
+        ]
     );
 }
 
