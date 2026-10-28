@@ -239,6 +239,10 @@ jobs:
       - run: mkdir -p target/coverage
       # `--profile coverage` (Cargo.toml): unoptimised code, whatever the `test` profile
       # optimises for the test job; its output is under target/llvm-cov-target/coverage.
+      # The coverage profile must stay unoptimised: it inherits `dev`, so a
+      # `[profile.dev.package.*]` override in Cargo.toml would leak into it and inline
+      # away lines the report then counts as missed (crates/xtask/tests/profile_overrides.rs
+      # fails on any package override outside `test`).
       - name: Run the workspace tests under coverage
         env:
           LLVM_COV_FLAGS: -skip-functions
