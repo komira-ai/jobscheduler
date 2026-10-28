@@ -75,7 +75,7 @@ pub(crate) fn assemble(
             let bindings = agent_state::load(&path)?;
             let booked = pool.shape().resources();
             let limits = limits_of(booked.cpu_millis(), booked.memory_bytes());
-            let usage = usage.build(clock, limits);
+            let usage = usage.build(clock, limits)?;
             let registry = Registry::new(pool, clock.clone());
             for (host, binding) in &bindings {
                 registry.restore_tainted(host, binding.clone());

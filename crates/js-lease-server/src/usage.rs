@@ -10,8 +10,7 @@
 //! Time is an argument: every call that needs the time is given the current wall minute
 //! (minutes since the Unix epoch, from the server's [`crate::SharedClock`]).
 //!
-//! The types mirror the fields of the usage crate's inputs, so that crate's types
-//! replace these by a rename. [`NoUsage`] is the sink that records nothing, and
+//! The input types are the usage crate's own. [`NoUsage`] is the sink that records nothing, and
 //! [`NoKeys`] the key source that knows no run's key.
 
 use std::collections::BTreeMap;
@@ -19,104 +18,24 @@ use std::fmt;
 
 use js_types::{HostId, LeaseId};
 
-/// One reading of a node, as plain values: the wire form checked, with lease ids parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadIn {
-    /// The reading's sequence number.
-    pub seq: u64,
-    /// The node's monotonic clock at the reading, in microseconds.
-    pub mono_usec: u64,
-    /// Cumulative CPU time of the node's actions cgroup, in microseconds.
-    pub cpu_usage_usec: u64,
-    /// Memory in use by the actions, in bytes.
-    pub working_set_bytes: u64,
-    /// Whether the actions cgroup has a CPU limit.
-    pub actions_cpu_limited: bool,
-    /// The leases that ran for the whole window since the previous reading.
-    pub covered: Vec<LeaseId>,
-    /// Closed lease-minutes.
-    pub minutes: Vec<MinuteIn>,
-    /// When each lease started, on the node's monotonic clock.
-    pub clocks: Vec<ClockIn>,
-}
-
-/// One closed minute of one lease.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MinuteIn {
-    /// The lease.
-    pub lease: LeaseId,
-    /// The minute since the lease's start; the last index (63) means "or later".
-    pub minute: u16,
-    /// Mean CPU over the observed span, in thousandths of a core.
-    pub mean_cores_milli: u32,
-    /// The highest CPU rate of any window in the minute, in thousandths of a core.
-    pub peak_window_milli: u32,
-    /// The largest working set seen in the minute, in bytes.
-    pub working_set_max_bytes: u64,
-}
-
-/// When one lease started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClockIn {
-    /// The lease.
-    pub lease: LeaseId,
-    /// The start on the node's monotonic clock, in microseconds.
-    pub started_mono_usec: u64,
-}
-
 /// What the server knows of a node's capacity, for the sink's checks on a reading that
 /// claims more than the machine has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostLimits {
-    /// The processor threads the pool books for a host.
-    pub threads: u32,
-    /// The memory the pool books for a host, in bytes.
-    pub memory_bytes: u64,
-}
+pub use js_usage::Limits as HostLimits;
+/// One closed wall minute of one node.
+pub use js_usage::NodeMinute as NodeRow;
+pub use js_usage::{ClockIn, DropReason, LoadIn, MinuteIn, Observed};
 
-/// Why a sink did not take a reading. The node is not at fault for most of these (the
-/// first reading after a restart has nothing to compare with); none of them is an error
-/// to the node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DropReason {
-    /// The first reading of an epoch: there is no earlier one to measure against.
-    NoBaseline,
-    /// The sequence number did not rise above the last accepted one.
-    SeqNotAbove,
-    /// The CPU counter went backwards.
-    CounterBack,
-    /// The monotonic clock went backwards.
-    ClockBack,
-    /// The CPU the reading implies is over the limit the node's threads allow.
-    ImpliedCoresOverLimit,
-    /// The working set is over the limit the node's memory allows.
-    MemoryOverLimit,
-    /// The epoch changed under the reading.
-    EpochChanged,
-}
-
-impl DropReason {
-    /// A short fixed name, for logs.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NoBaseline => "no-baseline",
-            Self::SeqNotAbove => "seq-not-above",
-            Self::CounterBack => "counter-back",
-            Self::ClockBack => "clock-back",
-            Self::ImpliedCoresOverLimit => "implied-cores-over-limit",
-            Self::MemoryOverLimit => "memory-over-limit",
-            Self::EpochChanged => "epoch-changed",
-        }
+/// A short fixed name for a drop reason, for logs.
+pub fn drop_name(reason: DropReason) -> &'static str {
+    match reason {
+        DropReason::NoBaseline => "no-baseline",
+        DropReason::EpochChanged => "epoch-changed",
+        DropReason::SeqNotAbove => "seq-not-above",
+        DropReason::ClockBack => "clock-back",
+        DropReason::CounterBack => "counter-back",
+        DropReason::ImpliedCoresOverFourXThreads => "implied-cores-over-4x-threads",
+        DropReason::MemoryOverFourXCapacity => "memory-over-4x-capacity",
     }
-}
-
-/// What a sink did with a reading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Observed {
-    /// The reading was taken.
-    Accepted,
-    /// The reading was not taken, and why.
-    Dropped(DropReason),
 }
 
 /// A sink's answer to a reading: what it did, and the lease minutes it had not seen
@@ -127,19 +46,6 @@ pub struct Observation {
     pub observed: Observed,
     /// The lease minutes of the reading that are new.
     pub fresh: Vec<MinuteIn>,
-}
-
-/// One closed wall minute of one node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NodeRow {
-    /// The wall minute, in minutes since the Unix epoch.
-    pub minute: u64,
-    /// CPU used over the minute, in thousandths of a core.
-    pub cpu_millis: u32,
-    /// The largest working set in the minute, in bytes.
-    pub ws_max_bytes: u64,
-    /// How many leases ran on the node.
-    pub leases: u32,
 }
 
 /// A run's measured series: `(minute, mean cores in thousandths, working set maximum in
@@ -427,14 +333,14 @@ mod tests {
         use DropReason::*;
         let all = [
             NoBaseline,
-            SeqNotAbove,
-            CounterBack,
-            ClockBack,
-            ImpliedCoresOverLimit,
-            MemoryOverLimit,
             EpochChanged,
+            SeqNotAbove,
+            ClockBack,
+            CounterBack,
+            ImpliedCoresOverFourXThreads,
+            MemoryOverFourXCapacity,
         ];
-        let names: std::collections::BTreeSet<_> = all.iter().map(|r| r.as_str()).collect();
+        let names: std::collections::BTreeSet<_> = all.iter().map(|r| drop_name(*r)).collect();
         assert_eq!(names.len(), all.len());
     }
 }

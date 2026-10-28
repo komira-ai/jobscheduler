@@ -1090,7 +1090,9 @@ dependencies = [
  "js-provider-fake",
  "js-registry",
  "js-sched",
+ "js-state",
  "js-types",
+ "js-usage",
  "rcgen",
  "rustix",
  "rustls",
@@ -1298,6 +1300,7 @@ name = "js-usage"
 version = "0.1.0"
 dependencies = [
  "js-state",
+ "js-testkit",
  "js-types",
  "thiserror",
 ]
