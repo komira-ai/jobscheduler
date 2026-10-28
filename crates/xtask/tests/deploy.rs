@@ -88,6 +88,7 @@ fn read_request(stream: impl Read) -> Option<Req> {
 struct Farm {
     base: String,
     ca: CertificateDer<'static>,
+    ca_pem: String,
     seen: Arc<Mutex<Vec<Req>>>,
 }
 
@@ -132,7 +133,14 @@ impl Farm {
                 let Some(req) = read_request(&mut tls) else {
                     continue;
                 };
-                let answer = if req.path.starts_with("/token") {
+                let answer = if let Some(status) = req.path.strip_prefix("/token-status-") {
+                    let digits = status.split('?').next().unwrap_or("");
+                    response(digits.parse().unwrap_or(500), &json!({}))
+                } else if req.path.starts_with("/token-empty") {
+                    response(200, &json!({"value": ""}))
+                } else if req.path.starts_with("/token-garbage") {
+                    b"HTTP/1.1 200 X\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope".to_vec()
+                } else if req.path.starts_with("/token") {
                     tokens += 1;
                     response(200, &json!({"value": format!("tok-{tokens}")}))
                 } else if let Some(service) = req.path.strip_prefix("/v1/convergence?service=") {
@@ -171,6 +179,7 @@ impl Farm {
         Farm {
             base,
             ca: ca.der().clone(),
+            ca_pem: ca.pem(),
             seen,
         }
     }
@@ -461,7 +470,10 @@ fn a_refusal_is_final_and_a_503_is_retried() {
     let flaky = Farm::start(|call| match call {
         Call::Read { posted: false, .. } => conv("converged", "0.1.0", ("server", 1, 0, 0, 0)),
         Call::Read { .. } => conv("converged", VERSION, ("server", 1, 0, 0, 0)),
-        Call::Post { service: "js-server", attempt } if attempt < 3 => (503, json!({})),
+        Call::Post {
+            service: "js-server",
+            attempt,
+        } if attempt < 3 => (503, json!({})),
         Call::Post { .. } => (200, json!({})),
     });
     let (result, _, slept) = flaky.deploy(&flaky.plan(&["js-server"]));
@@ -629,4 +641,437 @@ fn a_job_without_a_token_service_fails() {
     ]);
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("id-token: write"), "{err}");
+}
+
+/// A token service at `path` of the farm.
+fn token_at(farm: &Farm, path: &str) -> TokenService {
+    TokenService {
+        url: format!("{}{path}", farm.base),
+        key: "runner-key".to_owned(),
+    }
+}
+
+/// Runs the deploy of js-server with `token` as the runner's token service and `roots`.
+fn deploy_with_token(
+    farm: &Farm,
+    token: &TokenService,
+    roots: &Roots<'_>,
+) -> (Result<(), Error>, Vec<Req>) {
+    let clock = Clock {
+        now: Box::new(|| Duration::ZERO),
+        sleep: Box::new(|_| {}),
+    };
+    let result = deploy::deploy_on(
+        &farm.plan(&["js-server"]),
+        token,
+        roots,
+        &clock,
+        &mut Vec::new(),
+    );
+    (result, farm.coordinator_calls())
+}
+
+fn converged_farm() -> Farm {
+    farm_with(|service, _| conv("converged", VERSION, (role_of(service), 1, 0, 0, 0)))
+}
+
+/// Asserts that a token service that answers anything but a token fails the deploy before
+/// the coordinator is called, naming the token request: a status other than 200, an answer
+/// that is not JSON, and an empty token.
+#[test]
+fn a_token_service_that_gives_no_token_fails_the_deploy() {
+    let farm = converged_farm();
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    for (path, says) in [
+        ("/token-status-500", "status 500"),
+        ("/token-garbage", "expected"),
+        ("/token-empty", "the answer has no token"),
+    ] {
+        let (result, calls) = deploy_with_token(&farm, &token_at(&farm, path), &roots);
+        match result {
+            Err(Error::Call { what, why, .. }) => {
+                assert_eq!(what, "ask the runner for an OIDC token", "{path}");
+                assert!(why.contains(says), "{path}: {why}");
+            }
+            other => panic!("{path}: {other:?}"),
+        }
+        assert!(calls.is_empty(), "{path}: {calls:?}");
+    }
+}
+
+/// Asserts that a token service address that already has a query gets the audience added
+/// with `&`, and that a runner whose certificate the roots do not trust fails the deploy.
+#[test]
+fn the_audience_joins_an_existing_query_and_an_untrusted_runner_fails() {
+    let farm = converged_farm();
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    let (result, _) = deploy_with_token(&farm, &token_at(&farm, "/token?api=1"), &roots);
+    result.expect("deploy");
+    let tokens: Vec<String> = farm
+        .seen
+        .lock()
+        .expect("log")
+        .iter()
+        .filter(|r| r.path.starts_with("/token"))
+        .map(|r| r.path.clone())
+        .collect();
+    assert!(
+        tokens
+            .iter()
+            .all(|p| p.starts_with("/token?api=1&audience=https%3A")),
+        "{tokens:?}"
+    );
+
+    let untrusted = Roots {
+        runner: &[],
+        coordinator: ca,
+    };
+    let (result, calls) = deploy_with_token(&farm, &farm.token_service(), &untrusted);
+    assert!(
+        matches!(&result, Err(Error::Call { what, .. }) if *what == "ask the runner for an OIDC token"),
+        "{result:?}"
+    );
+    assert_eq!(calls.len(), 3, "{calls:?}");
+}
+
+/// Asserts that a URL that is not `https://host[:port]` is refused before any call: plain
+/// http, and a path after the host.
+#[test]
+fn a_url_that_is_not_https_host_port_is_refused() {
+    let farm = converged_farm();
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    for url in ["http://127.0.0.1:9".to_owned(), format!("{}/v1", farm.base)] {
+        let mut plan = farm.plan(&["js-server"]);
+        plan.url = url.clone();
+        let clock = Clock {
+            now: Box::new(|| Duration::ZERO),
+            sleep: Box::new(|_| {}),
+        };
+        let result = deploy::deploy_on(
+            &plan,
+            &farm.token_service(),
+            &roots,
+            &clock,
+            &mut Vec::new(),
+        );
+        assert_eq!(result, Err(Error::Url(url)));
+    }
+    assert!(farm.seen.lock().expect("log").is_empty());
+}
+
+/// Asserts that a refusal while polling ends the deploy (it is not read again), while any
+/// other failed read is reported and tried again until the farm converges.
+#[test]
+fn a_refused_poll_is_final_and_a_failed_poll_is_tried_again() {
+    let refused = Farm::start(|call| match call {
+        Call::Read { posted: false, .. } => conv("converged", "0.1.0", ("server", 1, 0, 0, 0)),
+        _ => (401, json!({})),
+    });
+    let (result, _, slept) = refused.deploy(&refused.plan(&["js-server"]));
+    assert_eq!(
+        result,
+        Err(Error::Refused {
+            service: "js-server".to_owned(),
+            what: "set the desired version",
+            status: 401
+        })
+    );
+    assert!(slept.is_empty());
+
+    let refused_poll = Farm::start(|call| match call {
+        Call::Read { posted: true, .. } => (403, json!({})),
+        Call::Read { .. } => conv("converged", "0.1.0", ("server", 1, 0, 0, 0)),
+        Call::Post { .. } => (200, json!({})),
+    });
+    let (result, _, slept) = refused_poll.deploy(&refused_poll.plan(&["js-server"]));
+    assert_eq!(
+        result,
+        Err(Error::Refused {
+            service: "js-server".to_owned(),
+            what: "read the convergence",
+            status: 403
+        })
+    );
+    assert!(slept.is_empty());
+
+    let flaky = farm_with(|service, n| {
+        if n == 0 {
+            (500, json!({}))
+        } else {
+            conv("converged", VERSION, (role_of(service), 1, 0, 0, 0))
+        }
+    });
+    let (result, log, slept) = flaky.deploy(&flaky.plan(&["js-server"]));
+    result.expect("deploy");
+    assert_eq!(slept.len(), 1);
+    assert!(
+        log.contains("the read failed, trying again: js-server: read the convergence: status 500"),
+        "{log}"
+    );
+}
+
+/// Asserts that a 503 on the baseline read or the POST is retried four calls in all and then
+/// fails with the 503.
+#[test]
+fn a_503_that_does_not_pass_fails_after_four_calls() {
+    let posting = Farm::start(|call| match call {
+        Call::Read { .. } => conv("converged", "0.1.0", ("server", 1, 0, 0, 0)),
+        Call::Post { .. } => (503, json!({})),
+    });
+    let (result, _, slept) = posting.deploy(&posting.plan(&["js-server"]));
+    assert_eq!(
+        result,
+        Err(Error::Call {
+            service: "js-server".to_owned(),
+            what: "set the desired version",
+            why: "status 503".to_owned()
+        })
+    );
+    assert_eq!(slept.len(), 3);
+
+    let reading = Farm::start(|_| (503, json!({})));
+    let (result, _, slept) = reading.deploy(&reading.plan(&["js-server"]));
+    assert!(
+        matches!(&result, Err(Error::Call { what, .. }) if *what == "read the service before the deploy"),
+        "{result:?}"
+    );
+    assert_eq!(slept.len(), 3);
+}
+
+/// Asserts that an answer over the size limit fails the call (it is not read whole), naming
+/// the call.
+#[test]
+fn an_answer_over_the_size_limit_fails_the_call() {
+    let farm = Farm::start(|_| (200, json!({"pad": "x".repeat(1_100_000)})));
+    let (result, _, _) = farm.deploy(&farm.plan(&["js-server"]));
+    assert!(
+        matches!(&result, Err(Error::Call { what, .. }) if *what == "read the service before the deploy"),
+        "{result:?}"
+    );
+}
+
+/// Asserts what an answer must hold: an answer with no roles field, no state, or a role row
+/// without its name or a count is one this client cannot read and names the missing part;
+/// a baseline with no live hosts is logged as `none` and the deploy goes on; a coordinator
+/// that has just started says so in the table.
+#[test]
+fn an_answer_missing_a_part_is_refused_and_an_empty_baseline_is_none() {
+    for (answer, missing) in [
+        (
+            json!({"state": "converged", "desired": "0.1.0"}),
+            "no roles",
+        ),
+        (json!({"desired": "0.1.0", "roles": []}), "no state"),
+        (
+            json!({"state": "converged", "roles": [{"at_desired": 1}]}),
+            "no role",
+        ),
+        (
+            json!({"state": "converged", "roles": [{"role": "server"}]}),
+            "no at_desired",
+        ),
+    ] {
+        let farm = Farm::start(move |_| (200, answer.clone()));
+        let (result, _, _) = farm.deploy(&farm.plan(&["js-server"]));
+        assert_eq!(result, Err(Error::Answer(missing.to_owned())));
+    }
+
+    let farm = Farm::start(|call| match call {
+        Call::Read { posted: false, .. } => (
+            200,
+            json!({"state": "converged", "desired": "0.1.0", "roles": []}),
+        ),
+        Call::Read { .. } => (
+            200,
+            json!({"state": "converged", "desired": VERSION, "quiet": true, "roles": []}),
+        ),
+        Call::Post { .. } => (200, json!({})),
+    });
+    let (result, log, _) = farm.deploy(&farm.plan(&["js-server"]));
+    result.expect("deploy");
+    assert!(
+        log.contains("baseline: hosts live before the deploy: none"),
+        "{log}"
+    );
+    assert!(
+        log.contains("farm: converged, desired 0.2.3 (coordinator just started)"),
+        "{log}"
+    );
+}
+
+/// A sink that fails once what it is given contains the text.
+struct FailAt(&'static str);
+
+impl Write for FailAt {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if String::from_utf8_lossy(buf).contains(self.0) {
+            Err(std::io::Error::other("sink closed"))
+        } else {
+            Ok(buf.len())
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Asserts that a log that cannot be written ends the deploy with the write error, whether
+/// it fails on a log line or on the line that masks a token.
+#[test]
+fn a_log_that_cannot_be_written_fails_the_deploy() {
+    let farm = converged_farm();
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    let clock = Clock {
+        now: Box::new(|| Duration::ZERO),
+        sleep: Box::new(|_| {}),
+    };
+    for at in ["service js-server", "::add-mask::"] {
+        let result = deploy::deploy_on(
+            &farm.plan(&["js-server"]),
+            &farm.token_service(),
+            &roots,
+            &clock,
+            &mut FailAt(at),
+        );
+        assert_eq!(result, Err(Error::Output("sink closed".to_owned())), "{at}");
+    }
+}
+
+/// The flags of a deploy of `services` to `farm`.
+fn args_for(farm: &Farm, ca_pem: &str, services: &[&str]) -> deploy::Args {
+    deploy::Args {
+        url: format!("{}/", farm.base),
+        version: VERSION.to_owned(),
+        services: services.iter().map(|s| (*s).to_owned()).collect(),
+        ca_pem: ca_pem.to_owned(),
+        audience: None,
+        deadline_min: 60,
+        stall_min: 20,
+        every_secs: 30,
+    }
+}
+
+/// Asserts the verb end to end in this process: the system roots (here, the farm's CA)
+/// trust the coordinator when `--ca-pem` is empty, `--ca-pem` is used when given, and the
+/// line it returns names the services, version and URL (without the trailing slash).
+/// Service names with digits are names.
+#[test]
+fn the_verb_deploys_and_reports_the_line() {
+    let farm = converged_farm();
+    let host = [farm.ca.clone()];
+    let token = farm.token_service();
+    for ca_pem in ["", farm.ca_pem.as_str(), "  \n"] {
+        let mut out = Vec::new();
+        let line = deploy::run_with(
+            &args_for(&farm, ca_pem, &["js-server", "js-agent2"]),
+            &token,
+            &host,
+            &mut out,
+        )
+        .expect("deploy");
+        assert_eq!(
+            line,
+            format!(
+                "ok: every live host of js-server, js-agent2 runs {VERSION} ({})",
+                farm.base
+            )
+        );
+        assert!(
+            String::from_utf8(out)
+                .expect("utf-8")
+                .contains("service js-agent2: deploy")
+        );
+    }
+}
+
+/// Asserts that `--ca-pem` text with no certificate is refused as such, and that bad
+/// arguments are refused by the verb itself before anything is sent: an empty service name
+/// and a repeated one.
+#[test]
+fn the_verb_refuses_a_bad_ca_and_bad_arguments() {
+    let farm = converged_farm();
+    let host = [farm.ca.clone()];
+    let token = farm.token_service();
+    let run = |args: &deploy::Args| deploy::run_with(args, &token, &host, &mut Vec::new());
+    assert!(matches!(
+        run(&args_for(&farm, "not a certificate", &["js-server"])),
+        Err(xtask::Error::Deploy(Error::Ca))
+    ));
+    assert!(matches!(
+        run(&args_for(&farm, "", &[""])),
+        Err(xtask::Error::Deploy(Error::Service(s))) if s.is_empty()
+    ));
+    assert!(matches!(
+        run(&args_for(&farm, "", &["js-agent", "js-agent"])),
+        Err(xtask::Error::Deploy(Error::Duplicate(_)))
+    ));
+    assert!(farm.seen.lock().expect("log").is_empty());
+}
+
+/// Asserts that `deploy` with a real clock runs the whole deploy (a farm that has converged
+/// needs no wait), and that the binary with a token service in its environment goes on to
+/// call it: the runner's certificate is not in the system store, so it fails naming the
+/// token request.
+#[test]
+fn the_real_clock_deploys_and_the_binary_asks_the_token_service() {
+    let farm = converged_farm();
+    let ca = std::slice::from_ref(&farm.ca);
+    let roots = Roots {
+        runner: ca,
+        coordinator: ca,
+    };
+    deploy::deploy(
+        &farm.plan(&["js-server"]),
+        &farm.token_service(),
+        &roots,
+        &mut Vec::new(),
+    )
+    .expect("deploy");
+
+    let out = Command::new(XTASK)
+        .args(["deploy", "--url", &farm.base, "--version", VERSION])
+        .args(["--service", "js-server"])
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{}/token", farm.base),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "runner-key")
+        .output()
+        .expect("run xtask");
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ask the runner for an OIDC token"), "{err}");
+}
+
+/// Asserts that the flags become a plan: the URL without its trailing slash, the audience
+/// the URL as given unless `--audience` is, and the waits in seconds.
+#[test]
+fn the_plan_of_the_flags() {
+    let farm = converged_farm();
+    let mut args = args_for(&farm, "", &["js-server"]);
+    let plan = Plan::of(&args);
+    assert_eq!(plan.url, farm.base);
+    assert_eq!(plan.audience, format!("{}/", farm.base));
+    assert_eq!(plan.deadline, Duration::from_secs(3600));
+    assert_eq!(plan.stall, Duration::from_secs(1200));
+    assert_eq!(plan.every, Duration::from_secs(30));
+    args.audience = Some("coordinator".to_owned());
+    assert_eq!(Plan::of(&args).audience, "coordinator");
 }
