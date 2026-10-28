@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/invalid-api-key",
+    "message": "API key was invalid, expired, or deleted. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-invalid_api_key"
+  }
+}

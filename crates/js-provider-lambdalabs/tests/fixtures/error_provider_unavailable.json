@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "provider/internal-unavailable",
+    "message": "Upstream is down. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-provider_unavailable"
+  }
+}

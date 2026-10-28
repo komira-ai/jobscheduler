@@ -726,6 +726,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |
+| `js-provider-lambdalabs` | new | the Lambda Cloud API client, read half: instance types with GPU facts and regional capacity, instances, the owner-only key file, a fake, and the `[[option]]` table; no launch or terminate yet (runtime layer) |
 | `js-provider-<kind>` | new | one crate per later kind; the core names none (5.7) |
 | `js-sched` | `crates/kbf-sched` | per-request placement, generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants; scope per D15 |
 | `js-caps` | new at step 36; `crates/kbf-caps/src/matching.rs` joins at step 15 | the typed model, version order, schema and constraint evaluator of 5.13; kbf keeps its key tables and host detection |
