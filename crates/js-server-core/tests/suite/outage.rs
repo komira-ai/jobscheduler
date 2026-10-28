@@ -280,7 +280,33 @@ fn a_result_the_store_refuses_for_good_is_dropped() {
     assert!(calls(&core).contains(&Call::Followed(admitted.operation, vec![waiter])));
 }
 
-/// Asserts that an effect the adapter cannot say the end of is refused as stale and its
+/// Asserts that a result whose rows another writer removed (the operation is neither held
+/// under the lease nor queued, and has no result) is refused as stale, and its callers are
+/// left to the store. Catches: a result written over rows that are not the operation's.
+#[test]
+fn a_result_for_rows_another_writer_removed_is_stale_and_followed() {
+    let setup = Setup::new();
+    let core = setup.core(1);
+    up(&core, 0, "node-a", "d1");
+    let admitted = submit(&core, 1, 1);
+    let gone = [
+        setup.store.rows_of("lease/")[0].0.clone(),
+        setup.store.rows_of("op/")[0].0.clone(),
+    ];
+    let removal = gone.into_iter().fold(js_state::Txn::new(), |txn, key| {
+        txn.delete(key, js_state::Cond::Any)
+    });
+    setup.store.write(removal);
+
+    let taken = finish(&core, 2, "node-a", admitted.operation, lease(1, 0));
+
+    assert_eq!(taken, Taken::Dropped);
+    assert_eq!(core.dropped_writes(), 1);
+    let followed = Call::Followed(admitted.operation, vec![admitted.waiter]);
+    assert!(calls(&core).contains(&followed));
+}
+
+/// Asserts that an effect the adapter cannot say the end of is dropped and its
 /// callers are left to the store: an answer, then a refusal. Catches: a finish written with
 /// no value, and callers left waiting for a core that will never answer them.
 #[test]

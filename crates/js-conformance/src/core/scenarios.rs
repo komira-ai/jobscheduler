@@ -211,8 +211,9 @@ fn answered_once_across_restart<H: CoreHarness>(harness: &mut H, notes: &mut Not
     );
     // Past, not next, across a restart: a core that reserves its ids in blocks begins a new
     // block at one.
+    let ids = [first, second, fourth, third];
     notes.expect(
-        first.0 < second.0 && second.0 < fourth.0 && fourth.0 < third.0,
+        ids.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "operation ids grow across restarts: no id is handed out twice",
     );
     for operation in [first, second, fourth, third] {
