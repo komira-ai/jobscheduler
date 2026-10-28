@@ -12,25 +12,17 @@
 //! - [`cost`]: which host a reservation drains first, and the deadline it gets.
 //! - [`caps`]: the effective ceiling, the cap that blocks a reservation, the
 //!   reservations to drop when the ceiling falls, and the last-capable-host rule.
+//! - [`reserve`]: the state machine that uses them, marking hosts for waiting requests.
 
-// The scheduler step that calls these rules has not landed; until it does nothing outside
-// their tests uses them, and they are not public API.
-#[allow(dead_code, reason = "called by the scheduler in a later step")]
+// The last-capable-host rule and the mixed-pool inputs are modelled for the mixed-pool
+// step; a dedicated pool, the only one that runs the class today, never reads them.
+#[allow(dead_code, reason = "mixed-pool inputs, used by a later step")]
 pub(crate) mod caps;
-#[allow(dead_code, reason = "called by the scheduler in a later step")]
 pub(crate) mod cost;
+pub(crate) mod ending;
 pub(crate) mod exclusive;
-
-#[allow(
-    unused_imports,
-    reason = "re-exported for the scheduler in a later step"
-)]
-pub use caps::{
-    Blocked, Capability, Counts, Limits, Mark, MarkKind, OrdinaryRequest, capable_hosts, ceiling,
-    ceiling_excess, last_capable_blocks, may_reserve,
-};
-#[allow(
-    unused_imports,
-    reason = "re-exported for the scheduler in a later step"
-)]
-pub use cost::{DrainCost, HostLoad, drain_cost, reserve_deadline};
+pub(crate) mod placement;
+pub(crate) mod queue;
+pub(crate) mod reasons;
+pub(crate) mod requests;
+pub(crate) mod reserve;

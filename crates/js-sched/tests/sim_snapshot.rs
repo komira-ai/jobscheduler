@@ -189,7 +189,11 @@ impl World {
                 continue;
             }
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if self.now < END - 150 && self.rng.chance(Chance::percent(60)) {
             let n = self.next;
