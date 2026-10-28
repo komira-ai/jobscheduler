@@ -334,8 +334,9 @@ impl Servable {
     /// ([`Worker::exclusive`], decided per worker) keeps the previous rule and is not
     /// scored: the score ranks the workers that stay shared, so a mixed pool where the
     /// request fills a small worker but not a large one scores the large ones. When every
-    /// admitted worker would be owned whole, or the request is not an action, the least
-    /// loaded is taken. Nothing is scored for a single candidate.
+    /// admitted worker would be owned whole, the least loaded is taken. Nothing is scored
+    /// for a single candidate. Only an action reaches here: its callers place by load,
+    /// or log the shadow choice, for actions only.
     fn scored<'a>(
         adm: &mut Admission,
         workers: &BTreeMap<WorkerId, Worker>,
@@ -345,7 +346,7 @@ impl Servable {
         let request = attempt.request;
         let shared: Vec<&Passed<'a>> = admitted
             .iter()
-            .filter(|p| request.kind == LeaseKind::Action && !workers[p.name].exclusive(request))
+            .filter(|p| !workers[p.name].exclusive(request))
             .collect();
         match shared.as_slice() {
             [] => return least_loaded(&Self::loads(admitted)),
