@@ -435,9 +435,8 @@ impl Registry {
     /// used up `max_replace` prepare failures; `None` before, and after the refusal has
     /// been delivered to a start (the record is then removed, see the `requests` module)
     /// or the record has gone idle. A start of such a request answers
-    /// `Refused(NoCapacity)`, which callers treat as wait: the typed
-    /// `exclusive-not-ready` refusal is added by a later change, so until then no consumer
-    /// sees it. A restart forgets the record and resets `max_replace`. Ask as
+    /// `Refused(ExclusiveNotReady)`, which the consumer sees as the typed
+    /// `exclusive-not-ready` refusal (wire 409). A restart forgets the record and resets `max_replace`. Ask as
     /// [`Registry::request_record`] does.
     pub fn not_ready(&self, key: impl Into<RequestKey>) -> Option<NotReady> {
         let record = self.request_record(key);
@@ -944,8 +943,8 @@ impl Registry {
     /// committed, not granted: the booking is made only on a host that is bookable (live,
     /// serving, clean), quiet (no held run, none live here) and clear of another
     /// whole-node lease or a restore, and the answer is `Unknown` so the lease stays
-    /// pending. A request that used up its tries is answered `Refused(NoCapacity)` once
-    /// (see [`Registry::not_ready`]). One request id holds at most one whole host: a start
+    /// pending. A request that used up its tries is answered
+    /// `Refused(ExclusiveNotReady)` once (see [`Registry::not_ready`]). One request id holds at most one whole host: a start
     /// of an id that another lease of this pool holds, committed or ready, books nothing
     /// and is answered `NoCapacity` (it waits) until that lease ends. Only a `Whole` class
     /// is held to those rules; a `BookAll` start never reads a request's record. It reads `Present` once the agent reports the host ready
@@ -979,7 +978,7 @@ impl Registry {
             }
             // A request that used up its tries is not placed again.
             if state.requests.start(&key, now) {
-                return StartAck::Refused(RefusalCode::NoCapacity);
+                return StartAck::Refused(RefusalCode::ExclusiveNotReady);
             }
         }
         let gate = HostBook::class_gate(classes, spec);

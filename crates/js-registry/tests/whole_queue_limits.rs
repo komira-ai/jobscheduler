@@ -44,6 +44,10 @@ fn no_capacity() -> StartAck {
     StartAck::Refused(RefusalCode::NoCapacity)
 }
 
+fn exclusive_not_ready() -> StartAck {
+    StartAck::Refused(RefusalCode::ExclusiveNotReady)
+}
+
 /// A pool with host `a` joined and lease 1 committed to it for request `holder`.
 fn busy() -> (Fixture, js_registry::RegisteredProvider, u64) {
     let fx = fixture_of(config());
@@ -225,7 +229,7 @@ fn gpu_start(sequence: u64) -> StartSpec {
 /// class: after request id `r1` used up its tries, with the back-off on the host over, a
 /// gpu-host start under the same id is placed (`Started`, no `exclusive`) and is not
 /// refused; and it does not consume the record, so a whole-node start under the id is
-/// still refused `NoCapacity` once.
+/// still refused `ExclusiveNotReady` once.
 #[test]
 fn a_spent_whole_node_record_does_not_refuse_a_gpu_host_start() {
     let (fx, mut provider, epoch) = spent();
@@ -236,7 +240,7 @@ fn a_spent_whole_node_record_does_not_refuse_a_gpu_host_start() {
     assert_eq!(started_on(&ack), Some("a"), "{ack:?}");
     assert!(fx.registry.not_ready(&id("r1")).is_some());
     provider.stop(&lease(2));
-    assert_eq!(provider.start(named(3, "r1")), no_capacity());
+    assert_eq!(provider.start(named(3, "r1")), exclusive_not_ready());
     assert_eq!(fx.registry.not_ready(&id("r1")), None);
 }
 
