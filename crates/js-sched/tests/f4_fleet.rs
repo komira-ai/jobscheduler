@@ -44,13 +44,18 @@
 //! promotion, a lease requeued on a new session, a paused drain, ...), so a check that
 //! never fires is noticed.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement; the golden trace hashes are the booked rule's, and `KBF_SIM_RULE=booked`
+//! selects the rule of a replay or the long sweep (`load` by default).
+//!
 //! CI runs 16 seeds of 2,000 operations: about 5 s of test time in a debug build on
 //! the dev box, under a minute on a CI runner. A failing check prints its seed and a
 //! replay command (`--nocapture` so a replay that passes still prints what it
 //! reached):
 //!
 //! ```text
-//! KBF_SIM_SEED=<n> KBF_SIM_OPS=<ops> cargo test -p js-sched --test f4_fleet -- --ignored --exact replay --nocapture
+//! KBF_SIM_RULE=load KBF_SIM_SEED=<n> KBF_SIM_OPS=<ops> cargo test -p js-sched --test f4_fleet -- --ignored --exact replay --nocapture
 //! ```
 //!
 //! The long sweep, 1,000 seeds of 10,000 operations (run it in a release build):
@@ -63,6 +68,7 @@
 //! `js-sim` kernel, for network faults), which builds on the cell nodes family F2
 //! moves out of `sim_cell`.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -71,6 +77,8 @@ mod digest;
 
 mod f4;
 mod golden_file;
+#[path = "load_reference/mod.rs"]
+mod load_reference;
 mod trace_text;
 
 use f4::check::Reach;
@@ -92,9 +100,11 @@ fn run(seed: u64, ops: u64) -> World {
 /// summed.
 fn sweep(scenario: Scenario) -> Reach {
     let seeds = (0..CI_SEEDS).filter(|s| Scenario::of(*s) == scenario);
+    // The rule of the running test, handed to each thread (the setting is per thread).
+    let rule = booked::current();
     let reaches: Vec<Reach> = std::thread::scope(|s| {
         let runs: Vec<_> = seeds
-            .map(|seed| s.spawn(move || run(seed, CI_OPS).check.reach))
+            .map(|seed| s.spawn(move || booked::under(rule, || run(seed, CI_OPS).check.reach)))
             .collect();
         runs.into_iter()
             .map(|r| r.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
@@ -133,11 +143,11 @@ const EVERY: [&str; 8] = [
     "servable work waits for room",
 ];
 
+both_rules! {
 /// Catches: placement out of queue order or past a free fit (I11), a booking that
 /// overflows a worker or drifts from its leases (I6), a refusal early, late or for
 /// work a worker could run (I10, L2), a lost or doubled answer (I4), a promotion that
 /// does not move the queue (I13, I14), and work left behind at the end (L1).
-#[test]
 fn f4_1_steady_state() {
     let reach = sweep(Scenario::Steady);
     assert_reached(&reach, &EVERY);
@@ -146,7 +156,6 @@ fn f4_1_steady_state() {
 /// Catches, besides F4.1's: expiry that is early or late (I3), a result accepted from
 /// a lease given up to silence (I5), self-fenced work run twice at once (I12), and
 /// refusals checked against the reference verdict as live workers come and go (I10).
-#[test]
 fn f4_2_churn() {
     let reach = sweep(Scenario::Churn);
     assert_reached(&reach, &EVERY);
@@ -165,7 +174,6 @@ fn f4_2_churn() {
 /// Catches, besides F4.1's: a lease lost to a reboot kept until G instead of requeued
 /// on the first heartbeat after the handover grace (L3), a re-adopted lease requeued
 /// (I3, I12), and a lease requeued twice or held twice (I3).
-#[test]
 fn f4_3_mass_reconnect() {
     let reach = sweep(Scenario::MassReconnect);
     assert_reached(&reach, &EVERY);
@@ -183,7 +191,6 @@ fn f4_3_mass_reconnect() {
 /// Catches, besides F4.1's: a grant to a cordoned worker (I8), a drain that gives up a
 /// lease or states a false drain state (I9), and work only cordoned workers could run
 /// refused (I10).
-#[test]
 fn f4_4_operator_storm() {
     let reach = sweep(Scenario::OperatorStorm);
     assert_reached(&reach, &EVERY);
@@ -202,13 +209,15 @@ fn f4_4_operator_storm() {
         ],
     );
 }
+}
 
+both_rules! {
 /// I15. Catches anything that depends on more than the seed.
-#[test]
 fn a_seed_replays() {
     let a = run(5, 300).trace();
     assert_eq!(a, run(5, 300).trace());
     assert_ne!(a, run(9, 300).trace());
+}
 }
 
 /// The trace hash of a small run (300 operations) of each of eight seeds: two of each
@@ -224,19 +233,35 @@ fn golden_runs() -> Vec<(String, js_sim::TraceHash)> {
 /// two of every scenario, are compared with the checked-in hashes.
 #[test]
 fn traces_match_their_golden_hashes() {
-    golden_file::golden("f4").assert_matches(&golden_runs());
+    // The golden hashes are the booked rule's traces.
+    booked::under(booked::booked(), || {
+        golden_file::golden("f4").assert_matches(&golden_runs());
+    });
 }
 
 /// Rewrites the F4 lines of `tests/golden/trace-hashes.txt`.
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
-    golden_file::golden("f4")
-        .regenerate(&golden_runs())
-        .unwrap();
+    booked::under(booked::booked(), || {
+        golden_file::golden("f4")
+            .regenerate(&golden_runs())
+            .unwrap();
+    });
 }
 
-/// Runs the seed in `KBF_SIM_SEED` with `KBF_SIM_OPS` operations (default 2,000).
+/// The rule a replay or the long sweep runs under: `KBF_SIM_RULE` is `load` (the default)
+/// or `booked`.
+fn rule() -> js_sched::LoadConfig {
+    match std::env::var("KBF_SIM_RULE").ok().as_deref() {
+        None | Some("" | "load") => js_sched::LoadConfig::default(),
+        Some("booked") => booked::booked(),
+        Some(other) => panic!("KBF_SIM_RULE is load or booked, not {other:?}"),
+    }
+}
+
+/// Runs the seed in `KBF_SIM_SEED` with `KBF_SIM_OPS` operations (default 2,000), under
+/// `KBF_SIM_RULE`.
 #[test]
 #[ignore = "replays one seed: KBF_SIM_SEED=<n> [KBF_SIM_OPS=<ops>]"]
 fn replay() {
@@ -247,7 +272,7 @@ fn replay() {
     };
     let seed = var("KBF_SIM_SEED").expect("set KBF_SIM_SEED");
     let ops = var("KBF_SIM_OPS").unwrap_or(CI_OPS);
-    let world = run(seed, ops);
+    let world = booked::under(rule(), || run(seed, ops));
     println!(
         "seed {seed} ({:?}): drained in {} s; reached {:#?}",
         world.scenario, world.drained_in, world.check.reach
@@ -260,10 +285,13 @@ fn long_sweep() {
     let threads = std::thread::available_parallelism().map_or(4, usize::from);
     std::thread::scope(|s| {
         for k in 0..threads {
+            let rule = rule();
             s.spawn(move || {
-                for seed in (k as u64..LONG_SEEDS).step_by(threads) {
-                    run(seed, LONG_OPS);
-                }
+                booked::under(rule, || {
+                    for seed in (k as u64..LONG_SEEDS).step_by(threads) {
+                        run(seed, LONG_OPS);
+                    }
+                });
             });
         }
     });

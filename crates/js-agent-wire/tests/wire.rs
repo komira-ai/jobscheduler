@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{heartbeat, hello, job, round_trip, welcome};
+use common::{heartbeat, heartbeat_with_load, hello, job, round_trip, welcome};
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Ack, Command, DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, HeartbeatReply, HeldState,
@@ -157,6 +157,7 @@ fn round_trip_of_every_message() {
     round_trip(&hello());
     round_trip(&job());
     round_trip(&heartbeat());
+    round_trip(&heartbeat_with_load());
     round_trip(&welcome());
     round_trip(&HelloReply::Welcome(welcome()));
     round_trip(&HelloReply::Refused(Refused {

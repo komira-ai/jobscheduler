@@ -6,6 +6,7 @@
 //! run the farm could not do ([`Failure::Infra`]) and a lease given up for silence or
 //! replacement.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -97,7 +98,7 @@ impl Farm {
     fn new() -> Self {
         Self {
             s: Scheduler::new(1)
-                .with_load_config(booked::booked())
+                .with_load_config(booked::current())
                 .recording_requeues(),
             now: FarmTime::default(),
         }
@@ -189,6 +190,21 @@ impl Farm {
         start.clone()
     }
 
+    /// A placement round that starts exactly one lease, on `node`: the other `nodes` are
+    /// cordoned for the round and back after it, so the choice among nodes that are alike
+    /// is the setup's, not the placement rule's.
+    fn start_on(&mut self, node: &str, nodes: &[&str]) -> StartLease {
+        for other in nodes.iter().filter(|n| **n != node) {
+            self.feed(Event::Cordon { worker: w(other) });
+        }
+        let start = self.start();
+        assert_eq!(start.worker, w(node));
+        for other in nodes.iter().filter(|n| **n != node) {
+            self.feed(Event::Uncordon { worker: w(other) });
+        }
+        start
+    }
+
     /// `start`'s lease ends with `outcome`; the effects, and those of a placement round.
     fn end(&mut self, start: &StartLease, outcome: Outcome) -> Vec<Effect> {
         let event = Event::Report {
@@ -236,6 +252,29 @@ impl Farm {
     }
 }
 
+/// The nodes an operation's runs were on, in order, when each rerun avoids the nodes it was
+/// lost on while another can run it: under the booked rule the first by name each time
+/// (`booked_order`), under placement by load each node once, whichever the score takes
+/// first.
+fn each_node_once(nodes: &[WorkerId], booked_order: &[&str]) {
+    if booked::is_booked() {
+        let want: Vec<WorkerId> = booked_order.iter().map(|n| w(n)).collect();
+        assert_eq!(nodes, want, "each rerun on a new node, the first by name");
+    } else {
+        let mut seen = nodes.to_vec();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            nodes.len(),
+            "each rerun on a new node: {nodes:?}"
+        );
+        let mut all: Vec<WorkerId> = booked_order.iter().map(|n| w(n)).collect();
+        all.sort();
+        assert_eq!(seen, all, "{nodes:?}");
+    }
+}
+
 /// The one answer in `effects`, if any.
 fn answer_in(effects: &[Effect]) -> Option<&Answer> {
     let answers: Vec<&Answer> = effects
@@ -255,17 +294,16 @@ fn running_on_a() -> (Farm, StartLease) {
     f.node("a");
     f.node("b");
     f.submit(1, request(1, LeaseKind::Action));
-    let start = f.start();
-    assert_eq!(start.worker, w("a"));
+    let start = f.start_on("a", &["a", "b"]);
     (f, start)
 }
 
+both_rules! {
 /// Catches a proven restart that waits for the handover grace like any other (the
 /// fast path missing: buck2 waits 45 s for the farm), a rerun placed on the node it
 /// was lost on while another can run it (the "avoid ignored" defect), and a give-up
 /// not charged to the farm budget. Process `a2` registers naming its predecessor
 /// stopped; its first heartbeat, which lists nothing, gives the lease up at once.
-#[test]
 fn a_proven_restart_reruns_at_once_on_another_node() {
     let (mut f, start) = running_on_a();
     f.at(Duration::from_secs(1));
@@ -281,12 +319,13 @@ fn a_proven_restart_reruns_at_once_on_another_node() {
         [lost("a", LostWhy::DaemonRestarted)]
     );
 }
+}
 
+both_rules! {
 /// Catches a predecessor claim honoured when the server did not find it stopped (the
 /// claim's other half, the closed stream, is the server's; here it reports
 /// `predecessor_stopped = false`): the lease is kept for the handover grace, then
 /// given up as replaced, and charged to the farm budget as a fenced run.
-#[test]
 fn a_restart_without_proof_waits_for_the_handover_grace() {
     let (mut f, start) = running_on_a();
     f.at(Duration::from_secs(1));
@@ -303,11 +342,12 @@ fn a_restart_without_proof_waits_for_the_handover_grace() {
         "a replacement is a farm run"
     );
 }
+}
 
+both_rules! {
 /// Catches a proof that clears every earlier process at once (the defect "handover
 /// ends now"): process 2 proves process 1 stopped, not process 0, which may still run
 /// on another machine (a cloned disk). Only the lease of process 1 goes at once.
-#[test]
 fn a_proof_covers_the_named_predecessor_only() {
     let (mut f, first) = running_on_a();
     // Process 1, unproven, takes a second lease; `b` is cordoned so it lands on `a`.
@@ -334,13 +374,14 @@ fn a_proof_covers_the_named_predecessor_only() {
     f.beat("a", &[]);
     assert_eq!(f.requeues(), [RequeueReason::Replaced]);
 }
+}
 
+both_rules! {
 /// Catches the requeue done when the restarted daemon registers (the defect "requeue
 /// at `WorkerUp`"): a whole-machine lease whose daemon restarted mid-action is still
 /// held, its phase `Restoring`, and its `Start` goes to the new process, which runs
 /// the restore. Giving it up before the phase is taken would place it again while the
 /// node is still being cleaned.
-#[test]
 fn a_restoring_whole_machine_lease_survives_a_proven_restart() {
     let mut f = Farm::new();
     f.up("mac", "one", false, true);
@@ -367,13 +408,14 @@ fn a_restoring_whole_machine_lease_survives_a_proven_restart() {
         Some(OpState::Running { lease, .. }) if *lease == start.lease
     ));
 }
+}
 
+both_rules! {
 /// Catches lost results not charged to the budget (the defect: they would rerun for
 /// ever), an off-by-one in it (`<` for `<=`: answered after 2 runs, or after 4), and an
 /// answer that does not carry the runs. Three lost runs end the operation with the
 /// third's failure; two lost runs and then an OK one end it completed, the answer
 /// naming the two.
-#[test]
 fn three_lost_runs_use_up_the_budget_and_two_do_not() {
     let mut f = Farm::new();
     for name in ["a", "b", "c"] {
@@ -387,34 +429,47 @@ fn three_lost_runs_use_up_the_budget_and_two_do_not() {
         start = f.rerun(&start, FENCED);
     }
     nodes.push(start.worker.clone());
-    assert_eq!(nodes, [w("a"), w("b"), w("c")], "each rerun on a new node");
+    each_node_once(&nodes, &["a", "b", "c"]);
     let effects = f.end(&start, FENCED);
     let answer = answer_in(&effects).expect("answered once the budget was used");
     assert_eq!(answer.outcome, FENCED);
-    let fenced = |n: &str| lost(n, LostWhy::Fenced);
-    assert_eq!(answer.farm_runs, [fenced("a"), fenced("b"), fenced("c")]);
+    let fenced = |n: &WorkerId| lost(n.as_str(), LostWhy::Fenced);
+    assert_eq!(
+        answer.farm_runs,
+        [fenced(&nodes[0]), fenced(&nodes[1]), fenced(&nodes[2])]
+    );
     assert!(Farm::starts(&effects).is_empty(), "{effects:?}");
     assert_eq!(f.requeues(), [RequeueReason::Lost(LostWhy::Fenced); 2]);
 
     f.submit(2, request(2, LeaseKind::Action));
     let mut start = f.start();
+    let mut nodes = vec![start.worker.clone()];
     for _ in 0..FARM_RERUNS {
         start = f.rerun(&start, RESTARTED);
+        nodes.push(start.worker.clone());
     }
     let effects = f.end(&start, ok());
     let answer = answer_in(&effects).expect("answered");
     assert_eq!(answer.outcome, ok());
-    let restarted = |n: &str| lost(n, LostWhy::DaemonRestarted);
-    assert_eq!(answer.farm_runs, [restarted("a"), restarted("b")]);
+    let restarted = |n: &WorkerId| lost(n.as_str(), LostWhy::DaemonRestarted);
+    assert_eq!(answer.farm_runs, [restarted(&nodes[0]), restarted(&nodes[1])]);
+    assert_ne!(nodes[0], nodes[1], "the rerun avoids the node it was lost on");
+}
 }
 
+both_rules! {
 /// Catches a second counter for lost runs beside the busy-node one (the defect: a
 /// busy node's kill and two lost runs would run 4 times): one budget, shared.
-#[test]
 fn busy_node_kills_and_lost_runs_share_one_budget() {
     let (mut f, start) = running_on_a();
     let start = f.rerun(&start, PRESSURE);
     let start = f.rerun(&start, FENCED);
+    // Both nodes are avoided now: the third run is placed as any is, on the first by name
+    // under the booked rule, on the score's choice under placement by load.
+    let last = start.worker.clone();
+    if booked::is_booked() {
+        assert_eq!(last, w("a"), "both avoided: the first that fits");
+    }
     let effects = f.end(&start, RESTARTED);
     let answer = answer_in(&effects).expect("answered after 3 runs");
     assert_eq!(answer.outcome, RESTARTED);
@@ -423,7 +478,7 @@ fn busy_node_kills_and_lost_runs_share_one_budget() {
         [
             busy("a"),
             lost("b", LostWhy::Fenced),
-            lost("a", LostWhy::DaemonRestarted)
+            lost(last.as_str(), LostWhy::DaemonRestarted)
         ]
     );
     assert_eq!(
@@ -432,11 +487,12 @@ fn busy_node_kills_and_lost_runs_share_one_budget() {
         "the busy node's kill is a memory run too"
     );
 }
+}
 
+both_rules! {
 /// Catches `avoid` as a hard exclusion (the defect: a one-node farm would never run
 /// the operation again) and `avoid` ignored (the rerun on the node it was lost on
 /// while another can run it).
-#[test]
 fn a_rerun_prefers_another_node_and_falls_back_to_the_same() {
     let mut f = Farm::new();
     f.node("a");
@@ -449,12 +505,13 @@ fn a_rerun_prefers_another_node_and_falls_back_to_the_same() {
     let next = f.rerun(&next, FENCED);
     assert_eq!(next.worker, w("b"), "another node can run it");
 }
+}
 
+both_rules! {
 /// Catches a node that cannot take the rerun now taken as reason to run it where it
 /// was lost, and a cordoned one taken as one that can run it: the rerun waits for a
 /// node outside the avoided set while one is live, serving and large enough (here `a`,
 /// full), and goes back to the node it was lost on when the only other is cordoned.
-#[test]
 fn a_rerun_waits_only_for_a_node_that_could_run_it() {
     let mut f = Farm::new();
     f.node("a");
@@ -464,8 +521,7 @@ fn a_rerun_waits_only_for_a_node_that_could_run_it() {
         ..request(9, LeaseKind::Action)
     };
     f.submit(9, full);
-    let full = f.start();
-    assert_eq!(full.worker, w("a"));
+    let full = f.start_on("a", &["a", "b"]);
     f.submit(1, request(1, LeaseKind::Action));
     let start = f.start();
     assert_eq!(start.worker, w("b"));
@@ -486,11 +542,12 @@ fn a_rerun_waits_only_for_a_node_that_could_run_it() {
     let next = g.rerun(&start, FENCED);
     assert_eq!(next.worker, w("a"), "a cordoned node held the rerun back");
 }
+}
 
+both_rules! {
 /// Catches a whole-machine rerun that holds the node it was lost on while another
 /// could run it (the reservation not told of the avoided nodes): it fits nowhere now,
 /// `a` is empty and `b` busy, and it holds `b`, as placement waits for `b`.
-#[test]
 fn a_whole_machine_rerun_holds_a_node_it_was_not_lost_on() {
     let mut f = Farm::new();
     f.up("a", "a", false, true);
@@ -510,44 +567,53 @@ fn a_whole_machine_rerun_holds_a_node_it_was_not_lost_on() {
     };
     assert_eq!((next.operation, &next.worker), (start.operation, &w("b")));
 }
+}
 
+both_rules! {
 /// Catches the give-up path left out of the budget, and a budget used up there that
 /// answers nobody (it must propose the result, so the log ends the operation): the
 /// third run is lost through a proven restart, and the heartbeat that gives it up
 /// answers the operation as lost.
-#[test]
 fn a_restart_past_the_budget_answers_the_operation() {
     let (mut f, start) = running_on_a();
     let start = f.rerun(&start, FENCED);
     let start = f.rerun(&start, FENCED);
-    assert_eq!(start.worker, w("a"), "both avoided: the first that fits");
+    // Both nodes are avoided: the third run is where placement takes it (the first by
+    // name under the booked rule), and that node's daemon restarts.
+    let node = start.worker.as_str().to_owned();
+    if booked::is_booked() {
+        assert_eq!(node, "a", "both avoided: the first that fits");
+    }
     f.at(Duration::from_secs(1));
-    f.up("a", "a2", true, false);
-    let effects = f.beat("a", &[]);
+    f.up(&node, &format!("{node}2"), true, false);
+    let effects = f.beat(&node, &[]);
     let answer = answer_in(&effects).expect("the give-up answered nobody");
     assert_eq!(answer.outcome, RESTARTED);
     assert_eq!(answer.lease, start.lease);
     assert_eq!(answer.farm_runs.len(), 3);
-    assert_eq!(answer.farm_runs[2], lost("a", LostWhy::DaemonRestarted));
+    assert_eq!(answer.farm_runs[2], lost(&node, LostWhy::DaemonRestarted));
     assert!(Farm::starts(&effects).is_empty(), "{effects:?}");
     assert_eq!(f.requeues(), [RequeueReason::Lost(LostWhy::Fenced); 2]);
     assert!(f.s.state(start.operation).is_some_and(OpState::is_done));
 }
+}
 
+both_rules! {
 /// Catches a result proposed twice for one give-up: the committed record of the
 /// give-up past the budget is the operation's result, and its report afterwards
 /// (the restarted daemon has none, but a copy of the record) changes nothing.
-#[test]
 fn the_record_of_a_give_up_is_committed_once() {
     let (mut f, start) = running_on_a();
     let start = f.rerun(&start, FENCED);
     let start = f.rerun(&start, FENCED);
+    // Both nodes are avoided: the third run is where placement takes it.
+    let node = start.worker.as_str().to_owned();
     f.at(Duration::from_secs(1));
-    f.up("a", "a2", true, false);
+    f.up(&node, &format!("{node}2"), true, false);
     let effects = f.s.apply(Input::new(
         f.now,
         Event::Heartbeat {
-            worker: w("a"),
+            worker: w(&node),
             running: Vec::new(),
             load: None,
         },
@@ -558,13 +624,14 @@ fn the_record_of_a_give_up_is_committed_once() {
         outcome: RESTARTED,
     });
     assert_eq!(effects, [Effect::Commit(record.clone())]);
-    assert!(f.beat("a", &[]).is_empty(), "proposed again");
+    assert!(f.beat(&node, &[]).is_empty(), "proposed again");
     let effects = f.feed(Event::Committed(record.clone()));
     assert!(answer_in(&effects).is_some(), "{effects:?}");
     assert!(
         f.feed(Event::Committed(record)).is_empty(),
         "committed twice"
     );
+}
 }
 
 /// One step of a generated sequence: a submission of action `n`, or the end of the
@@ -575,11 +642,11 @@ enum Step {
     End(u64, Outcome),
 }
 
+both_rules! {
 /// Catches farm runs that are not a function of the scheduler's inputs: two
 /// schedulers fed the same generated sequence of lost runs, busy-node kills and
 /// completions over three nodes hold equal farm runs for every operation after every
 /// step, and the sweep reaches operations with more than one.
-#[test]
 fn schedulers_fed_one_sequence_hold_equal_farm_runs() {
     let mut many = false;
     for seed in 0..16 {
@@ -603,6 +670,7 @@ fn schedulers_fed_one_sequence_hold_equal_farm_runs() {
         }
     }
     assert!(many, "no seed lost one operation twice");
+}
 }
 
 /// A farm of three nodes fed generated steps.
@@ -654,13 +722,13 @@ impl Sim {
     }
 }
 
+both_rules! {
 /// Catches a run the farm could not do finishing its operation at once (the defect:
 /// `Failure::Infra` answered on the first run), a budget off by one (`<` for `<=`:
 /// answered after 2 runs, or after 4), a rerun placed on the node it failed on while
 /// others fit, and an answer that does not carry the runs. Three infra results end the
 /// operation with the third's failure, the answer naming all three nodes; two and then
 /// an OK one complete it.
-#[test]
 fn three_infra_results_use_up_the_budget_and_two_do_not() {
     let mut f = Farm::new();
     for name in ["a", "b", "c"] {
@@ -674,30 +742,37 @@ fn three_infra_results_use_up_the_budget_and_two_do_not() {
         start = f.rerun(&start, INFRA);
     }
     nodes.push(start.worker.clone());
-    assert_eq!(nodes, [w("a"), w("b"), w("c")], "each rerun on a new node");
+    each_node_once(&nodes, &["a", "b", "c"]);
     let effects = f.end(&start, INFRA);
     let answer = answer_in(&effects).expect("answered once the budget was used");
     assert_eq!(answer.outcome, INFRA);
-    assert_eq!(answer.farm_runs, [infra("a"), infra("b"), infra("c")]);
+    let infra = |n: &WorkerId| infra(n.as_str());
+    assert_eq!(
+        answer.farm_runs,
+        [infra(&nodes[0]), infra(&nodes[1]), infra(&nodes[2])]
+    );
     assert!(Farm::starts(&effects).is_empty(), "{effects:?}");
     assert_eq!(f.requeues(), [RequeueReason::Infra; 2]);
 
     f.submit(2, request(2, LeaseKind::Action));
     let mut start = f.start();
+    let mut nodes = vec![start.worker.clone()];
     for _ in 0..FARM_RERUNS {
         start = f.rerun(&start, INFRA);
+        nodes.push(start.worker.clone());
     }
     let effects = f.end(&start, ok());
     let answer = answer_in(&effects).expect("answered");
     assert_eq!(answer.outcome, ok());
-    assert_eq!(answer.farm_runs, [infra("a"), infra("b")]);
+    assert_eq!(answer.farm_runs, [infra(&nodes[0]), infra(&nodes[1])]);
+}
 }
 
+both_rules! {
 /// Catches a node that goes silent with the lease every time holding an operation for
 /// ever (the defect: silence requeues without charge), and an answer that does not
 /// carry the runs. Three silent nodes in turn end the operation, answered as lost to a
 /// fence (the node's own fence ended the run within the grace), naming all three.
-#[test]
 fn silent_nodes_use_up_the_budget_and_the_operation_is_answered() {
     let mut f = Farm::new();
     let nodes = ["a", "b", "c"];
@@ -706,7 +781,9 @@ fn silent_nodes_use_up_the_budget_and_the_operation_is_answered() {
     }
     f.submit(1, request(1, LeaseKind::Action));
     let mut start = f.start();
+    let mut ran_on = Vec::new();
     for _ in 0..FARM_RERUNS {
+        ran_on.push(start.worker.clone());
         let effects = f.go_silent(start.worker.as_str(), &nodes);
         assert!(answer_in(&effects).is_none(), "{effects:?}");
         let [next] = &Farm::starts(&effects)[..] else {
@@ -715,31 +792,42 @@ fn silent_nodes_use_up_the_budget_and_the_operation_is_answered() {
         assert_ne!(next.worker, start.worker, "rerun on the silent node");
         start = next.clone();
     }
+    ran_on.push(start.worker.clone());
     let effects = f.go_silent(start.worker.as_str(), &nodes);
     let answer = answer_in(&effects).expect("a silent node held the operation for ever");
     assert_eq!(answer.outcome, FENCED);
     assert_eq!(answer.lease, start.lease);
-    let fenced = |n: &str| lost(n, LostWhy::Fenced);
-    assert_eq!(answer.farm_runs, [fenced("a"), fenced("b"), fenced("c")]);
+    let fenced = |n: &WorkerId| lost(n.as_str(), LostWhy::Fenced);
+    assert_eq!(
+        answer.farm_runs,
+        [fenced(&ran_on[0]), fenced(&ran_on[1]), fenced(&ran_on[2])]
+    );
+    each_node_once(&ran_on, &["a", "b", "c"]);
     assert!(Farm::starts(&effects).is_empty(), "{effects:?}");
     assert_eq!(f.requeues(), [RequeueReason::Silent; 2]);
     assert!(f.s.state(start.operation).is_some_and(OpState::is_done));
 }
+}
 
+both_rules! {
 /// Catches a replacement without proof outside the budget (the defect: `Replaced`
 /// requeues without charge): a daemon process that keeps being replaced would hold the
 /// operation for ever. The third run is given up as replaced and answers the operation
 /// as a fenced run.
-#[test]
 fn a_replacement_past_the_budget_answers_the_operation() {
     let (mut f, start) = running_on_a();
     let start = f.rerun(&start, FENCED);
     let start = f.rerun(&start, INFRA);
-    assert_eq!(start.worker, w("a"), "both avoided: the first that fits");
+    // Both nodes are avoided: the third run is where placement takes it (the first by
+    // name under the booked rule), and that node's daemon is replaced.
+    let node = start.worker.as_str().to_owned();
+    if booked::is_booked() {
+        assert_eq!(node, "a", "both avoided: the first that fits");
+    }
     f.at(Duration::from_secs(1));
-    f.up("a", "a2", false, false);
+    f.up(&node, &format!("{node}2"), false, false);
     f.at(Duration::from_secs(1) + HANDOVER_GRACE);
-    let effects = f.beat("a", &[]);
+    let effects = f.beat(&node, &[]);
     let answer = answer_in(&effects).expect("the replacement answered nobody");
     assert_eq!(answer.outcome, FENCED);
     assert_eq!(answer.lease, start.lease);
@@ -748,16 +836,17 @@ fn a_replacement_past_the_budget_answers_the_operation() {
         [
             lost("a", LostWhy::Fenced),
             infra("b"),
-            lost("a", LostWhy::Fenced)
+            lost(&node, LostWhy::Fenced)
         ]
     );
     assert!(Farm::starts(&effects).is_empty(), "{effects:?}");
 }
+}
 
+both_rules! {
 /// Catches one counter per fault kind (the defect: silence and infra results counted
 /// apart from lost runs would allow 6 runs): a lost run, an infra result and a silence
 /// are one budget, so the third ends the operation, and the answer lists them in order.
-#[test]
 fn lost_infra_and_silence_share_one_budget() {
     let mut f = Farm::new();
     let nodes = ["a", "b", "c"];
@@ -765,32 +854,35 @@ fn lost_infra_and_silence_share_one_budget() {
         f.node(name);
     }
     f.submit(1, request(1, LeaseKind::Action));
-    let start = f.start();
-    let start = f.rerun(&start, FENCED);
-    let start = f.rerun(&start, INFRA);
-    let effects = f.go_silent(start.worker.as_str(), &nodes);
+    let first = f.start();
+    let second = f.rerun(&first, FENCED);
+    let third = f.rerun(&second, INFRA);
+    let effects = f.go_silent(third.worker.as_str(), &nodes);
     let answer = answer_in(&effects).expect("answered after 3 mixed runs");
     assert_eq!(answer.outcome, FENCED);
     assert_eq!(
         answer.farm_runs,
         [
-            lost("a", LostWhy::Fenced),
-            infra("b"),
-            lost("c", LostWhy::Fenced)
+            lost(first.worker.as_str(), LostWhy::Fenced),
+            infra(second.worker.as_str()),
+            lost(third.worker.as_str(), LostWhy::Fenced)
         ]
     );
 }
+}
 
+both_rules! {
 /// Catches a give-up past the budget proposed twice: silence is checked on every
 /// placement round, and the round after the proposal, before its commit, must not
 /// propose the result again. Committing it answers once.
-#[test]
 fn the_record_of_a_silence_is_committed_once() {
     let (mut f, start) = running_on_a();
     let start = f.rerun(&start, FENCED);
     let start = f.rerun(&start, INFRA);
     f.now = f.now.saturating_add(LEASE_GRACE + Duration::from_secs(1));
-    f.beat("b", &[]);
+    // The node the lease is on goes silent; the other keeps heartbeating.
+    let other = if start.worker == w("a") { "b" } else { "a" };
+    f.beat(other, &[]);
     let tick = |f: &mut Farm| f.s.apply(Input::new(f.now, Event::Tick));
     let record = ControlRecord::Result(ResultRecord {
         lease: start.lease,
@@ -801,6 +893,7 @@ fn the_record_of_a_silence_is_committed_once() {
     assert!(tick(&mut f).is_empty(), "proposed again");
     let effects = f.feed(Event::Committed(record));
     assert!(answer_in(&effects).is_some(), "{effects:?}");
+}
 }
 
 /// Whether `failure` is the user's own (or the client's), which the farm never reruns.
@@ -816,12 +909,12 @@ const fn is_the_users(failure: Failure) -> bool {
     }
 }
 
+both_rules! {
 /// Catches the budget widened to failures that are not the farm's (the defect: every
 /// `Failure` charged, or the `Infra` check widened to a user's failure): the user's
 /// action failing (timeout), an action that cannot run as written, and a missing input
 /// are answered by their first run, with no farm run and no requeue. Every [`Failure`]
 /// is classified by [`is_the_users`], so a new variant cannot skip this test.
-#[test]
 fn a_users_failure_is_never_retried() {
     let every = [
         Failure::Timeout,
@@ -844,6 +937,7 @@ fn a_users_failure_is_never_retried() {
         assert!(answer.farm_runs.is_empty(), "{failure:?} charged");
         assert!(f.requeues().is_empty(), "{failure:?} requeued");
     }
+}
 }
 
 #[path = "lost/give_up.rs"]

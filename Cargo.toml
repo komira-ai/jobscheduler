@@ -102,3 +102,29 @@ incremental = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+
+# The replay simulations in these crates run in CI test builds, so the crates (not
+# their dependencies) are optimised there. `cargo test` builds everything it compiles
+# (the unit-test binaries and the libraries the integration tests link) with the
+# `test` profile, so this half alone reaches it; a `dev` override would only slow
+# debug builds. A name that matches no package only draws a cargo warning:
+# crates/xtask/tests/profile_overrides.rs checks the names.
+[profile.test.package.js-sched]
+opt-level = 2
+
+[profile.test.package.js-sim]
+opt-level = 2
+
+[profile.test.package.js-sizing]
+opt-level = 2
+
+[profile.test.package.js-types]
+opt-level = 2
+
+# The coverage job builds with this profile (`cargo llvm-cov --profile coverage`): it
+# is `dev`, so no package is optimised and the instrumentation sees every line. An
+# optimised build inlines small functions and closures away, and their lines then read
+# as missed. cargo-llvm-cov takes no `--config`, and cargo has no environment variable
+# for a per-package override, so the job cannot undo the `test` overrides above.
+[profile.coverage]
+inherits = "dev"

@@ -12,6 +12,7 @@ use crate::command::Command;
 use crate::error::{Rule, ValidationError};
 use crate::hello::Phase;
 use crate::limits;
+use crate::load::NodeLoad;
 use crate::refusal;
 
 /// Where a held run is in its life on the host.
@@ -211,6 +212,15 @@ pub struct Heartbeat {
     /// [`Heartbeat::exclusive_ready`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive_refused: Option<ExclusiveRefusal>,
+    /// What the host measured about itself, when it reports it. Telemetry: a load that is
+    /// present but malformed reads as `None` (the receiver cannot tell the two apart), and
+    /// [`Heartbeat::validate`] never looks at it; see [`NodeLoad::vet`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::load::lenient_load"
+    )]
+    pub load: Option<NodeLoad>,
 }
 
 /// The server's verdict on a [`RunResult`].
@@ -342,6 +352,7 @@ impl fmt::Debug for Heartbeat {
             .field("taint", &self.taint)
             .field("exclusive_ready", &self.exclusive_ready)
             .field("exclusive_refused", &self.exclusive_refused)
+            .field("load", &self.load)
             .finish()
     }
 }

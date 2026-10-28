@@ -12,10 +12,10 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, NodePhase, Request, Requeue};
+use js_sched::{DaemonInstance, NodePhase, OpState, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Reported, Settles,
-    Stage, Stream, View, Writer,
+    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Report, Reported,
+    Settles, Stage, Stream, Taken, View, Writer,
 };
 use js_store::Ending;
 use js_types::sched::{
@@ -64,11 +64,51 @@ pub enum Call {
     ShowWatched(OperationId, Stage),
 }
 
+/// One of the clock and report hooks the core called, or the settle that followed one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Hook {
+    Clock(FarmTime),
+    /// `before_report`: what the view showed of the report's operation.
+    Before {
+        now: FarmTime,
+        worker: WorkerId,
+        report: Report,
+        open: bool,
+        waiters: Vec<WaiterId>,
+    },
+    /// `after_report`.
+    After {
+        now: FarmTime,
+        worker: WorkerId,
+        report: Report,
+        answers: Vec<(OperationId, Vec<WaiterId>)>,
+        taken: Taken,
+        open: bool,
+    },
+    /// `settle`, so the order against the report hooks shows.
+    Settle(LeaseId),
+    /// `stream_open`, which the core asks while it claims a node before a feed.
+    StreamOpen(WorkerId),
+}
+
+/// What `adopted` was told of an operation besides its caller and parcel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Adoption {
+    pub operation: OperationId,
+    pub request: Request,
+    pub lease: Option<LeaseGrant>,
+    pub size_key: Option<u64>,
+}
+
 /// An adapter that keeps what its hooks were told.
 #[derive(Default)]
 pub struct Rig {
+    /// The clock and report hooks, and settles, in the order they were called.
+    pub hooks: Mutex<Vec<Hook>>,
     pub trace: Trace,
     pub calls: Vec<Call>,
+    /// What each `adopted` was told of its operation, in order.
+    pub adoptions: Vec<Adoption>,
     /// The streams whose connection is open.
     pub open: BTreeSet<(WorkerId, Stream)>,
     /// The leases a report was parked for.
@@ -97,10 +137,60 @@ impl Rig {
     fn note(&self, line: String) {
         self.trace.lock().expect("trace").push(line);
     }
+
+    fn hook(&self, hook: Hook) {
+        self.hooks.lock().expect("hooks").push(hook);
+    }
 }
 
 impl Adapter for Rig {
+    fn clock(&mut self, now: FarmTime) {
+        self.hook(Hook::Clock(now));
+    }
+
+    fn before_report(
+        &mut self,
+        view: &View<'_>,
+        now: FarmTime,
+        worker: &WorkerId,
+        report: &Report,
+    ) {
+        let sched = view.sched();
+        self.hook(Hook::Before {
+            now,
+            worker: worker.clone(),
+            report: *report,
+            open: sched.state(report.operation).is_some_and(open),
+            waiters: sched
+                .waiters(report.operation)
+                .map_or_else(Vec::new, <[WaiterId]>::to_vec),
+        });
+    }
+
+    fn after_report(
+        &mut self,
+        view: &View<'_>,
+        now: FarmTime,
+        worker: &WorkerId,
+        report: &Report,
+        answers: &[Answer],
+        taken: Taken,
+    ) {
+        self.hook(Hook::After {
+            now,
+            worker: worker.clone(),
+            report: *report,
+            answers: answers
+                .iter()
+                .map(|answer| (answer.operation, answer.waiters.clone()))
+                .collect(),
+            taken,
+            open: view.sched().state(report.operation).is_some_and(open),
+        });
+    }
+
     fn stream_open(&self, worker: &WorkerId, stream: Stream) -> bool {
+        self.hook(Hook::StreamOpen(worker.clone()));
         self.open.contains(&(worker.clone(), stream))
     }
 
@@ -159,6 +249,7 @@ impl Adapter for Rig {
 
     fn settle(&mut self, _: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery {
         self.note(format!("settle {}", answer.lease));
+        self.hook(Hook::Settle(answer.lease));
         self.parked.remove(&answer.lease);
         self.kept.insert(answer.operation);
         self.calls.push(Call::Settle {
@@ -207,7 +298,21 @@ impl Adapter for Rig {
         (!self.no_ending).then_some(ending)
     }
 
-    fn adopted(&mut self, operation: OperationId, waiter: WaiterId, parcel: Option<&[u8]>) {
+    fn adopted(
+        &mut self,
+        operation: OperationId,
+        waiter: WaiterId,
+        parcel: Option<&[u8]>,
+        request: &Request,
+        lease: Option<&LeaseGrant>,
+        size_key: Option<u64>,
+    ) {
+        self.adoptions.push(Adoption {
+            operation,
+            request: request.clone(),
+            lease: lease.cloned(),
+            size_key,
+        });
         let parcel = parcel.map(<[u8]>::to_vec);
         self.calls.push(Call::Adopted(operation, waiter, parcel));
     }
@@ -488,6 +593,16 @@ pub fn started(core: &Core<Rig>) -> Vec<LeaseId> {
             _ => None,
         })
         .collect()
+}
+
+/// Whether an operation in `state` has a lease that may still report.
+fn open(state: &OpState) -> bool {
+    matches!(state, OpState::Leased { .. } | OpState::Running { .. })
+}
+
+/// The clock and report hooks the rig was called through, and settles, in order.
+pub fn hooks(core: &Core<Rig>) -> Vec<Hook> {
+    core.with(|_, rig| rig.hooks.lock().expect("hooks").clone())
 }
 
 /// The lines of `trace` so far.

@@ -20,10 +20,16 @@
 //! turns every kind of act on or off per seed. F3.5, F3.6 and F3.9 needed the rollout
 //! driver, which is gone.
 //!
+//! Every test runs twice, under the booked rule (`<test>::booked_rule`) and under
+//! placement by load, the default (`<test>::load_rule`), each against its own reference
+//! placement; the golden trace hashes are the booked rule's, and `KBF_SIM_RULE=booked`
+//! selects the rule of a replay or the long sweep (`load` by default).
+//!
 //! A failing check prints its replay command:
-//! `KBF_SIM_SCENARIO=<name> KBF_SIM_SEED=<n> cargo test -p js-sched --test f3_fleet -- --ignored --exact replay`.
+//! `KBF_SIM_RULE=load KBF_SIM_SCENARIO=<name> KBF_SIM_SEED=<n> cargo test -p js-sched --test f3_fleet -- --ignored --exact replay`.
 //! The long sweep: `cargo test -p js-sched --release --test f3_fleet -- --ignored --exact swarm_long`.
 
+#[macro_use]
 #[path = "booked/mod.rs"]
 mod booked;
 #[allow(dead_code, reason = "each test binary uses some of the stand-in")]
@@ -34,6 +40,8 @@ mod digest;
 mod check;
 #[path = "golden_file/mod.rs"]
 mod golden_file;
+#[path = "load_reference/mod.rs"]
+mod load_reference;
 #[path = "trace_text/mod.rs"]
 mod trace_text;
 #[path = "f3_fleet/world.rs"]
@@ -493,9 +501,9 @@ fn reached(worlds: &[World], what: &str) -> u64 {
         .sum()
 }
 
+both_rules! {
 /// Catches: a cordon ignored by placement; a cordon that refuses work; an uncordon
 /// that leaves work for the next tick.
-#[test]
 fn f3_1_last_worker_of_a_platform_cordoned() {
     let worlds = sweep(last_of_class_cordoned, 0..SEEDS);
     assert!(reached(&worlds, "work waits for a cordon") > 0);
@@ -503,7 +511,6 @@ fn f3_1_last_worker_of_a_platform_cordoned() {
 
 /// Catches: a wait that keeps its start across a cordon; a verdict that counts a
 /// silent cordoned worker as one that could run the work.
-#[test]
 fn f3_2_cordoned_then_silent_and_the_reverse() {
     let worlds = sweep(cordoned_then_silent, 0..SEEDS);
     // Both answers occur: refused after the silence, and back (cordoned) in time.
@@ -512,7 +519,6 @@ fn f3_2_cordoned_then_silent_and_the_reverse() {
 }
 
 /// Catches: a drain that requeues its leases; leases kept on a silent worker.
-#[test]
 fn f3_3_a_worker_dies_while_draining() {
     let worlds = sweep(dies_while_draining, 0..SEEDS);
     assert!(
@@ -524,14 +530,12 @@ fn f3_3_a_worker_dies_while_draining() {
 }
 
 /// Catches: a paused drain that moves to drained by itself; a deadline off by one.
-#[test]
 fn f3_4_a_paused_drain_whose_leases_end_later() {
     let worlds = sweep(paused_drain, 0..SEEDS);
     assert!(reached(&worlds, "paused") > 0 && reached(&worlds, "drained") > 0);
 }
 
 /// Catches: a cordon tied to the session, lost when the node registers again.
-#[test]
 fn f3_7_a_node_reboots_while_cordoned() {
     let worlds = sweep(reboot_while_cordoned, 0..SEEDS);
     for what in [
@@ -544,7 +548,6 @@ fn f3_7_a_node_reboots_while_cordoned() {
 
 /// Catches: capabilities a resent `Hello` does not update; a matching memo that
 /// serves one platform's matches to another.
-#[test]
 fn f3_8_capabilities_change_while_cordoned() {
     let worlds = sweep(caps_change_while_cordoned, 0..SEEDS);
     for what in [
@@ -559,7 +562,6 @@ fn f3_8_capabilities_change_while_cordoned() {
 }
 
 /// The swarm reaches every situation the family is for.
-#[test]
 fn f3_swarm() {
     let worlds = sweep(swarm, 0..SEEDS);
     for what in [
@@ -583,21 +585,33 @@ fn f3_swarm() {
         .any(|(_, _, via)| *via);
     assert!(by_uncordon, "no uncordon ever placed work");
 }
+}
 
 #[test]
 #[ignore = "long: run with --ignored --release"]
 fn swarm_long() {
-    sweep(swarm, 0..2_000);
+    booked::under(rule(), || sweep(swarm, 0..2_000));
 }
 
+/// The rule a replay or the long sweep runs under: `KBF_SIM_RULE` is `load` (the default)
+/// or `booked`.
+fn rule() -> js_sched::LoadConfig {
+    match std::env::var("KBF_SIM_RULE").ok().as_deref() {
+        None | Some("" | "load") => js_sched::LoadConfig::default(),
+        Some("booked") => booked::booked(),
+        Some(other) => panic!("KBF_SIM_RULE is load or booked, not {other:?}"),
+    }
+}
+
+both_rules! {
 /// One seed replays to the same trace; another differs. The swarm alone: it turns on
 /// every kind of act the scripted scenarios use, on the same world and checker, and
 /// replaying every scenario twice cost more than the rest of the file.
-#[test]
 fn a_seed_replays() {
     let seven = swarm(7).trace_hash();
     assert_eq!(seven, swarm(7).trace_hash());
     assert_ne!(seven, swarm(8).trace_hash());
+}
 }
 
 /// Replays one scenario and seed: `KBF_SIM_SCENARIO` and `KBF_SIM_SEED`.
@@ -613,7 +627,7 @@ fn replay() {
         .iter()
         .find(|(n, _)| *n == name)
         .expect("a scenario name: f3_1, f3_2, f3_3, f3_4, f3_7, f3_8 or swarm");
-    let w = scenario(seed);
+    let w = booked::under(rule(), || scenario(seed));
     println!("{name} seed {seed}: trace hash {}", w.trace_hash());
 }
 
@@ -633,14 +647,19 @@ fn golden_runs() -> Vec<(String, js_sim::TraceHash)> {
 /// scenario's trace under three seeds is compared with the checked-in hash.
 #[test]
 fn traces_match_their_golden_hashes() {
-    golden_file::golden("f3").assert_matches(&golden_runs());
+    // The golden hashes are the booked rule's traces.
+    booked::under(booked::booked(), || {
+        golden_file::golden("f3").assert_matches(&golden_runs());
+    });
 }
 
 /// Rewrites the F3 lines of `tests/golden/trace-hashes.txt`.
 #[test]
 #[ignore = "regenerates the golden trace hashes; run it only on purpose"]
 fn regenerate_golden_hashes() {
-    golden_file::golden("f3")
-        .regenerate(&golden_runs())
-        .unwrap();
+    booked::under(booked::booked(), || {
+        golden_file::golden("f3")
+            .regenerate(&golden_runs())
+            .unwrap();
+    });
 }

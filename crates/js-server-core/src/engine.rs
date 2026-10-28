@@ -17,9 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, LOSS_REQUEUES, Request, Requeue, Scheduler,
-};
+use js_sched::{Cordon, DaemonInstance, Event, FARM_RERUNS, Input, Request, Requeue, Scheduler};
 use js_store::Rows;
 use js_types::sched::{
     Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Outcome, Refusal, Resources,
@@ -130,10 +128,19 @@ impl Engine {
         if let Some(load) = config.load {
             sched = sched.with_load_config(load);
         }
+        if let Some(whole) = &config.whole_node {
+            sched = sched.with_whole_node(whole.clone());
+        }
+        if let Some(bound) = config.memory_floors {
+            sched = sched.with_memory_floors(bound);
+        }
+        if let Some(ladder) = &config.memory_ladder {
+            sched.set_memory_ladder(ladder.clone());
+        }
         let sched = sched
             .with_unservable_wait(config.unservable_wait)
             .with_finished_retention(config.finished_retention)
-            .with_loss_requeues(LOSS_REQUEUES)
+            .with_loss_requeues(config.loss_requeues)
             .recording_requeues();
         Self {
             sched,
@@ -199,6 +206,7 @@ impl Engine {
     /// placement follows at once), and carries out the effects in order. Returns the
     /// answers, for the caller to deliver once the lock is released.
     fn carry_out(&mut self, a: &mut dyn Adapter, now: FarmTime, event: Event) -> Vec<Answer> {
+        a.clock(now);
         self.hold_placements(now);
         self.watch_store(now);
         self.claim_pending(a, now);

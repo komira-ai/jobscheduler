@@ -182,7 +182,16 @@ impl Adapter for Wire {
         None
     }
 
-    fn adopted(&mut self, _: OperationId, _: WaiterId, _: Option<&[u8]>) {}
+    fn adopted(
+        &mut self,
+        _: OperationId,
+        _: WaiterId,
+        _: Option<&[u8]>,
+        _: &Request,
+        _: Option<&LeaseGrant>,
+        _: Option<u64>,
+    ) {
+    }
 
     fn waiting_among(&self, _: &[WaiterId]) -> Vec<WaiterId> {
         Vec::new()

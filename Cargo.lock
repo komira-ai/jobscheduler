@@ -1214,6 +1214,7 @@ dependencies = [
  "js-state",
  "js-store",
  "js-types",
+ "js-whole",
  "thiserror",
  "tracing",
  "tracing-subscriber",

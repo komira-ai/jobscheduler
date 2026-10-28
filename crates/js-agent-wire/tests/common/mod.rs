@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use js_agent_wire::{
-    GpuDevice, Heartbeat, HeldRun, HeldState, Hello, Isolation, JobSpec, Limits, Mount, Outcome,
-    Phase, ProtocolRange, RunResult, Taint, ValidationError, Welcome, WireShape,
+    GpuDevice, Heartbeat, HeldRun, HeldState, Hello, Isolation, JobSpec, LeaseClock, LeaseMinute,
+    Limits, Mount, NodeLoad, Outcome, Phase, ProtocolRange, RunResult, Taint, ValidationError,
+    Welcome, WireShape,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -102,6 +103,41 @@ pub fn heartbeat() -> Heartbeat {
         }),
         exclusive_ready: None,
         exclusive_refused: None,
+        load: None,
+    }
+}
+
+/// A load with a distinct value in every field, so a swapped or renamed field shows.
+/// `heartbeat().load` stays `None`, so the older goldens do not move.
+pub fn load() -> NodeLoad {
+    NodeLoad {
+        seq: 7,
+        mono_usec: 9_000_000,
+        cpu_usage_usec: 4_500_000,
+        working_set_bytes: 3 << 30,
+        active_file_bytes: 1 << 20,
+        actions_cpu_limited: true,
+        covered: vec!["3-4".into()],
+        clocks: vec![LeaseClock {
+            lease_id: "3-4".into(),
+            started_mono_usec: 1_000_000,
+        }],
+        minutes: vec![LeaseMinute {
+            lease_id: "3-4".into(),
+            minute: 2,
+            cpu_mean_millis: 1500,
+            cpu_peak_window_millis: 2500,
+            ws_max_bytes: 2 << 30,
+        }],
+        dropped: js_agent_wire::LoadDrops::default(),
+    }
+}
+
+/// A heartbeat that carries [`load`].
+pub fn heartbeat_with_load() -> Heartbeat {
+    Heartbeat {
+        load: Some(load()),
+        ..heartbeat()
     }
 }
 
