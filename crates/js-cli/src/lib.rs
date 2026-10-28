@@ -112,7 +112,7 @@
 //! | 0 | held, renewed, freed, listed; for `run`, the command's own status |
 //! | 1 | the server or the network failed, or the token was refused (401); a start whose answer was lost (the lease may exist: run `js lease list`) |
 //! | 2 | a flag or a file it names is wrong, including what clap refuses |
-//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
+//! | 3 | refused: `no-capacity`, `no-fit`, `unsupported-class`, `lease-ended`, `no-capable-host`, `exclusive-not-ready`, `unknown-lease`, `not-held`, `expired`, or a pending start that was dropped (`pending-dropped`) |
 //! | 4 | the request itself was refused: a start-contract rule (`unknown-class`, `reserved-label`, `invalid-label`, `below-class-minimum`, `wall-time-not-positive`) or a body the server cannot read |
 //! | 5 | a pending start was not confirmed within `--wait-pending` |
 //! | 6 | `release`: the stop was accepted but is not confirmed; the server retries it |

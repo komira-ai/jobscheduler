@@ -21,7 +21,7 @@ whatever state the host is in, it is never drained for, and it has no cap. A who
 
 **Admission.** The class is admitted as `Admission::Whole` (6.2): the request needs a host with no lease and no run and books all of it.
 `BookAll` stays as it is (book every dimension of a host that is free, no overcommit) and is what ucdk Job classes use (D7); it has no
-reservation, no quiet gate, no drain and no cap. `Whole` is `BookAll` plus those four, and nothing else about it differs.
+reservation, no quiet gate, no drain and no cap. A `BookAll` start is never queued or marked, so it is unaffected unless a whole-node request waits in the same pool: then it is turned away from a host marked for that request, like any start that is not the request's own. `Whole` is `BookAll` plus those four, and nothing else about it differs.
 
 **How the old names relate (D46).**
 

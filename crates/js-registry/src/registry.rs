@@ -8,15 +8,11 @@ use js_pool_static::HostBook;
 use js_provider::Observed;
 use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
 
-mod provider_side;
-
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
-use crate::whole::caps::Capability;
-use crate::whole::cost::HostLoad;
 use crate::whole::ending::Ending;
 use crate::whole::exclusive::Exclusive;
 use crate::whole::queue::WaitList;
@@ -24,8 +20,10 @@ use crate::whole::reasons::Cause;
 use crate::whole::requests::{
     NotReady, RequestKey, RequestRecord, Requests, Rules, whole_settings,
 };
-use crate::whole::reserve::{self, HostFacts, Marks, Pass, Reservation};
-use crate::whole_config::WholeNodeConfig;
+use crate::whole::reserve::{Marks, Reservation};
+
+mod provider_side;
+mod start;
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,59 +366,6 @@ impl Registry {
         let settings = whole_settings(&self.shared.config);
         let hosts = self.host_facts(state, now);
         self.place_waiting(state, &settings, &hosts, now);
-    }
-
-    /// Every host as the reservation pass reads it, in id order. Every host is booked as
-    /// the pool's shape.
-    fn host_facts(&self, state: &State, now: Timestamp) -> Vec<HostFacts> {
-        let booked = state.book.booked();
-        let grace_ms = self.grace_ms();
-        let facts = state.records.iter().map(|(id, record)| {
-            let live = record.state(now, grace_ms) == HostState::Live;
-            let capability = match (record.taint.is_some(), live) {
-                (true, _) => Capability::Tainted,
-                (false, true) => Capability::Capable,
-                (false, false) => Capability::Lost,
-            };
-            let quiet = record.quiet(&state.runs, id);
-            let lease = booked.get(id);
-            let ends = lease.and_then(|lease| record.bound.filter(|(held, _)| held == lease));
-            HostFacts {
-                id: id.clone(),
-                capability,
-                open: record.bookable(now, grace_ms, quiet) & lease.is_none(),
-                held: record.exclusive.held_since(),
-                load: HostLoad {
-                    id: id.to_string(),
-                    leases: usize::from(lease.is_some()),
-                    end_bounds: ends.map(|(_, end)| end.millis()).into_iter().collect(),
-                },
-            }
-        });
-        facts.collect()
-    }
-
-    /// Sets hosts aside for the waiting requests, in queue order (see
-    /// [`crate::whole::reserve`]). Gives up and commits nothing else, and stops nothing.
-    fn place_waiting(
-        &self,
-        state: &mut State,
-        settings: &WholeNodeConfig,
-        hosts: &[HostFacts],
-        now: Timestamp,
-    ) {
-        let State {
-            marks,
-            waiting,
-            requests,
-            ..
-        } = state;
-        let pass = Pass {
-            now,
-            settings,
-            hosts,
-        };
-        reserve::advance(marks, waiting, requests, pass);
     }
 
     /// The record of a whole-node request: its failed prepares, the hosts left out of its
