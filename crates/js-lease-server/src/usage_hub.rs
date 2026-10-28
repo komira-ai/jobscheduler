@@ -34,6 +34,7 @@
 //! `node minute` line for each node minute the flush closed, and one warning for each
 //! node and minute that had readings dropped.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -156,22 +157,24 @@ impl Hub {
                 }
                 continue;
             }
-            match self.running.get_mut(&m.lease) {
-                Some(track) if track.host == *host => {
+            let full = self.running.len() >= MAX_TRACKS;
+            match self.running.entry(m.lease) {
+                Entry::Occupied(mut on_file) if on_file.get().host == *host => {
+                    let track = on_file.get_mut();
                     track.touched = now;
                     merge(&mut track.minutes, m);
                 }
-                Some(_) => self.counts.minutes_unheld += 1,
-                None if !held.contains(&m.lease) => self.counts.minutes_unheld += 1,
-                None if self.running.len() >= MAX_TRACKS => self.counts.minutes_refused += 1,
-                None => {
+                Entry::Occupied(_) => self.counts.minutes_unheld += 1,
+                Entry::Vacant(_) if !held.contains(&m.lease) => self.counts.minutes_unheld += 1,
+                Entry::Vacant(_) if full => self.counts.minutes_refused += 1,
+                Entry::Vacant(free) => {
                     let mut track = Track {
                         host: host.clone(),
                         minutes: Minutes::new(),
                         touched: now,
                     };
                     merge(&mut track.minutes, m);
-                    self.running.insert(m.lease, track);
+                    free.insert(track);
                 }
             }
         }
