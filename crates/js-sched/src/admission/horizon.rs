@@ -11,6 +11,10 @@
 //!                                                                         <= C_mem * (1 + s_mem)
 //! ```
 //!
+//! Memory is checked at `tau = 0` alone: every term of its left side falls (or stays) as
+//! `tau` grows, since a lease is charged the remaining maximum of its curve, which never
+//! rises with the minute, or a flat figure, or nothing after its expected life.
+//!
 //! The measurement enters at `tau = 0` only, and only raises the figure. At every later
 //! slot only the curves count. With no lease charged over time the slot-0 inequalities are
 //! the flat rule's, and every later slot reads the same figures or less, so the result is
@@ -67,22 +71,22 @@ pub(crate) fn refusal(
             .map_or(cost.cpu_millis, |p| p.new_cpu(slot))
             .min(capacity.cpu_millis)
     };
-    let new_mem = |slot: usize| {
-        profile
-            .map_or(cost.memory_bytes, |p| p.new_mem(slot))
-            .min(capacity.memory_bytes)
-    };
+    let new_mem = profile
+        .map_or(cost.memory_bytes, |p| p.new_mem(0))
+        .min(capacity.memory_bytes);
     for slot in 0..SLOTS {
         let at = cpu_left(t, slot, left.measured, cfg);
         if at.saturating_add(new_cpu(slot)) > cpu_limit {
             return Some(Refusal::Cpu);
         }
     }
-    for slot in 0..SLOTS {
-        let at = mem_left(t, slot, left.working_set);
-        if at.saturating_add(new_mem(slot)) > mem_limit {
-            return Some(Refusal::Memory);
-        }
+    // Memory is checked at minute 0 alone: a charge by curve is the remaining maximum
+    // from the minute on, which never rises with the minute, a flat charge is the same at
+    // every minute, and a charge that ends with the lease's life only falls, so the sum at
+    // any later minute is no more than at minute 0 (the measurement enters at 0 too).
+    let at = mem_left(t, 0, left.working_set);
+    if at.saturating_add(new_mem) > mem_limit {
+        return Some(Refusal::Memory);
     }
     if let (Some(d), Some(p)) = (cfg.flat_memory_slack_permille, profile)
         && p.memory_profiled()

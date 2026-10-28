@@ -131,6 +131,145 @@ fn only_runs_that_end_on_their_own_or_at_their_limit_are_judged() {
     assert_eq!(r.s.load_counters().demotions_cpu, 1);
 }
 
+/// Catches: a run of a demoted key counted off its eight flat runs though it did not run
+/// to its end (it was lost, or the node killed it), and a kill at its limit not counted
+/// off: both resources.
+#[test]
+fn a_run_of_a_demoted_key_counts_off_only_if_it_ran() {
+    let mut r = guarded();
+    let g = shape_key("g");
+    run(&mut r, "g", 40_000, None);
+    run(&mut r, "g", 40_000, None);
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0));
+    let lost = Outcome::Failed(Failure::Lost(js_types::sched::LostWhy::Fenced));
+    run(&mut r, "g", 5_000, Some(lost));
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0), "lost");
+    for again in r.tick() {
+        r.finish(&again);
+    }
+    assert_eq!(r.s.shape_demoted_runs(g), (7, 0), "its run again ran");
+
+    let (mut r, curves) = cluster(LoadConfig::default());
+    curves.set("k", &flat_ws(&[10_000, 10_000], 2 * GIB), 5);
+    let k = shape_key("k");
+    for _ in 0..2 {
+        let start = place(&mut r, "k", warm(20_000, 2 * GIB));
+        r.end(&start, Outcome::Failed(Failure::OutOfMemory));
+        for retry in r.tick() {
+            r.finish(&retry);
+        }
+    }
+    assert_eq!(r.s.shape_demoted_runs(k), (0, 8));
+    let start = place(&mut r, "k", warm(20_000, 2 * GIB));
+    r.end(&start, Outcome::Failed(Failure::NodeMemoryPressure));
+    for retry in r.tick() {
+        r.finish(&retry);
+    }
+    assert_eq!(r.s.shape_demoted_runs(k), (0, 8), "killed by the node");
+    let start = place(&mut r, "k", warm(20_000, 2 * GIB));
+    r.end(&start, Outcome::Failed(Failure::OutOfMemory));
+    assert_eq!(r.s.shape_demoted_runs(k), (0, 7), "killed at its own limit");
+}
+
+/// Catches: a run that did not end on its own filling the window of the last runs with
+/// clean ones: a misfit, two runs that timed out, a misfit are two misfits in three runs
+/// that counted, for the CPU curve and for the memory curve.
+#[test]
+fn runs_that_did_not_end_are_left_out_of_the_window() {
+    let timed_out = Outcome::Failed(Failure::Timeout);
+    let mut r = guarded();
+    let g = shape_key("g");
+    run(&mut r, "g", 40_000, None);
+    run(&mut r, "g", 40_000, Some(timed_out));
+    run(&mut r, "g", 5_000, Some(timed_out));
+    run(&mut r, "g", 5_000, Some(timed_out));
+    assert_eq!(r.s.shape_demoted_runs(g), (0, 0));
+    run(&mut r, "g", 40_000, None);
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0), "CPU");
+
+    let (mut r, curves) = cluster(LoadConfig::default());
+    curves.set("w", &flat_ws(&[10_000, 10_000], 2 * GIB), 5);
+    let w_key = shape_key("w");
+    // A run whose minute 0 held `ws`, ended as `end`.
+    let mut mem_run = |ws: u64, end: Option<Outcome>| {
+        let start = place(&mut r, "w", warm(20_000, 2 * GIB));
+        let seen = [minute(start.lease, 0, 1_000, ws)];
+        r.window_clocked("a", 1_000, ws, &[start.lease], &[(start.lease, 1)], &seen);
+        match end {
+            None => r.finish(&start),
+            Some(outcome) => r.end(&start, outcome),
+        }
+        r.s.shape_demoted_runs(w_key)
+    };
+    mem_run(3 * GIB, None);
+    mem_run(3 * GIB, Some(timed_out));
+    mem_run(GIB, Some(timed_out));
+    assert_eq!(mem_run(GIB, Some(timed_out)), (0, 0));
+    assert_eq!(mem_run(3 * GIB, None), (0, 8), "memory");
+}
+
+/// Catches: a run that was lost for good (the farm's reruns used up) judged as a run of the
+/// curve: after one misfit that counted, three lost runs of one operation with misfit
+/// minutes do not demote the key, and the next one that ends on its own does.
+#[test]
+fn a_run_lost_for_good_is_not_judged() {
+    let mut r = guarded();
+    let g = shape_key("g");
+    run(&mut r, "g", 40_000, None);
+    let lost = Outcome::Failed(Failure::Lost(js_types::sched::LostWhy::Fenced));
+    let mut start = place(&mut r, "g", warm(20_000, 2 * GIB));
+    for round in 0..3 {
+        let seen = [minute(start.lease, 0, 40_000, GIB)];
+        r.window_clocked("a", 5_000, GIB, &[start.lease], &[(start.lease, 1)], &seen);
+        r.end(&start, lost);
+        if round < 2 {
+            start = r.tick().remove(0);
+        }
+    }
+    assert!(r.tick().is_empty(), "the operation failed with the third");
+    assert_eq!(r.s.shape_demoted_runs(g), (0, 0));
+    run(&mut r, "g", 40_000, None);
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0));
+}
+
+/// Catches: a lease given back before its run started judged as a run: one misfit, two
+/// leases given back, a misfit are two misfits in three runs.
+#[test]
+fn a_lease_given_back_before_it_started_is_not_a_run() {
+    let mut r = guarded();
+    let g = shape_key("g");
+    run(&mut r, "g", 40_000, None);
+    let first = place(&mut r, "g", warm(20_000, 2 * GIB));
+    assert!(r.s.unplace(first.lease).is_some());
+    let second = r.tick().remove(0);
+    assert!(r.s.unplace(second.lease).is_some());
+    let third = r.tick().remove(0);
+    let seen = [minute(third.lease, 0, 40_000, GIB)];
+    r.window_clocked("a", 5_000, GIB, &[third.lease], &[(third.lease, 1)], &seen);
+    r.finish(&third);
+    assert_eq!(r.s.shape_demoted_runs(g), (8, 0));
+}
+
+/// Catches: the flat-memory guard held on a lease that is not charged by a memory curve:
+/// with the memory switch off and the guard's slack (25%) below the predicate's (50%), the
+/// flat rule alone decides, three leases of 30 GiB (90 of 96) are admitted and the fourth
+/// is not.
+#[test]
+fn the_flat_memory_guard_leaves_a_flat_charged_lease_to_the_flat_rule() {
+    let config = LoadConfig {
+        s_mem_permille: 500,
+        profile_memory: false,
+        flat_memory_slack_permille: Some(250),
+        ..LoadConfig::default()
+    };
+    let (mut r, curves) = cluster(config);
+    curves.set_all(&flat_ws(&[1_000], GIB), 5);
+    for (i, want) in [1, 1, 1, 0].into_iter().enumerate() {
+        r.keyed(&format!("p{i}"), 1_000, 8 * GIB, warm(1_000, 30 * GIB));
+        assert_eq!(r.tick().len(), want, "lease {i}");
+    }
+}
+
 /// Catches: a kill at the lease's own limit not being a misfit of the memory curve, the
 /// retry up the ladder judged as a run of the curve, and the memory demotion not leaving
 /// the CPU curve alone: two kills in a row demote the memory curve, and each retry is

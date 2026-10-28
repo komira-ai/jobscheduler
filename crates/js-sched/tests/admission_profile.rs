@@ -226,12 +226,67 @@ fn a_lease_above_its_curve_is_charged_its_working_set() {
     r.window_clocked("a", 2_000, 10 * GIB, &covered, &ages, &seen);
     assert_eq!(ahead(&r, 5).1, 17 * GIB, "9 held + 8");
     assert_eq!(ahead(&r, 0).1, 17 * GIB);
+    // The next minute is back within the curve: the lease is charged the curve again.
+    let calm = [
+        minute(over.lease, 1, 1_000, 4 * GIB),
+        minute(p.lease, 1, 1_000, GIB),
+    ];
+    r.window_clocked(
+        "a",
+        2_000,
+        5 * GIB,
+        &covered,
+        &[(over.lease, 2), (p.lease, 2)],
+        &calm,
+    );
+    assert_eq!(ahead(&r, 5).1, 12 * GIB, "4 + 8 again");
+    let again = [
+        minute(over.lease, 2, 1_000, 9 * GIB),
+        minute(p.lease, 2, 1_000, GIB),
+    ];
+    r.window_clocked(
+        "a",
+        2_000,
+        10 * GIB,
+        &covered,
+        &[(over.lease, 3), (p.lease, 3)],
+        &again,
+    );
+    assert_eq!(ahead(&r, 5).1, 17 * GIB, "above it again");
     // The same minute again, and an older one, change nothing and are not counted again.
-    let old = [minute(over.lease, 0, 1_000, 9 * GIB)];
-    r.window_clocked("a", 2_000, 10 * GIB, &covered, &ages, &old);
-    assert_eq!(r.s.load_counters().misfit_memory_minutes, 1);
+    let old = [
+        minute(over.lease, 0, 1_000, 9 * GIB),
+        minute(over.lease, 2, 1_000, 9 * GIB),
+    ];
+    r.window_clocked(
+        "a",
+        2_000,
+        10 * GIB,
+        &covered,
+        &[(over.lease, 3), (p.lease, 3)],
+        &old,
+    );
+    assert_eq!(r.s.load_counters().misfit_memory_minutes, 2);
     r.keyed("n", 1_000, 8 * GIB, warm(1_000, 48 * GIB));
     assert!(r.tick().is_empty(), "17 + 48 > 64, where 12 + 48 would fit");
+}
+
+/// Catches: a lease whose curve asks for more than the node has refused for good (an action
+/// of the whole node must run on an otherwise idle one): a curve of 150 cores at minute 3
+/// and 80 GiB on a 100-core worker with 64 GiB is charged what the worker has and placed.
+#[test]
+fn a_curve_larger_than_the_node_is_clamped_to_it() {
+    let (mut r, curves) = cluster(LoadConfig::default());
+    let points = [
+        (10_000, 80 * GIB),
+        (10_000, 80 * GIB),
+        (10_000, 80 * GIB),
+        (150_000, 80 * GIB),
+    ];
+    curves.set("huge", &points, 5);
+    place(&mut r, "huge", warm(20_000, 8 * GIB));
+    r.keyed("other", 1_000, 8 * GIB, warm(20_000, GIB));
+    assert!(r.tick().is_empty(), "nothing fits beside it");
 }
 
 /// Catches: the working set a lease held in the last session still charged in the next
