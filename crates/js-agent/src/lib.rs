@@ -5,7 +5,9 @@
 //! The library is the program: [`run_with`] takes the arguments, the streams to print to
 //! and the [`Services`] (the commands and files it reads the host from, the transport to
 //! the server, the sleeper and the jitter), and `main` calls [`main`], which supplies the
-//! machine's own. No clock is read anywhere: time passes only in the sleeper.
+//! machine's own. The usage sampler reads time only through [`usage::MonotonicClock`], which the
+//! caller hands it; apart from that and the runtime's own timestamps, time passes only
+//! in the sleeper.
 //!
 //! # Flags
 //!
@@ -127,6 +129,7 @@ mod run;
 mod session;
 mod signals;
 mod transport;
+pub mod usage;
 
 use std::ffi::OsString;
 use std::fmt::Display;
