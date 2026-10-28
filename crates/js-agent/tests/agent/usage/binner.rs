@@ -605,6 +605,21 @@ fn a_minute_inside_one_window_takes_the_bracketing_working_set() {
     );
 }
 
+/// Asserts that a window which crosses a boundary and ends exactly on the next one gives
+/// the whole minute it covers the bracketing working set: samples at 50 s (100) and
+/// 120 s (300) leave minute 1 with a maximum of 300. It catches a bracket withheld from
+/// the last part, which opens minute 1 at zero and reports it next to a real CPU mean.
+#[test]
+fn a_window_ending_on_a_boundary_gives_its_last_minute_the_bracketing_working_set() {
+    let mut binner = Binner::new(30 * S);
+    binner.observe(&sample(50 * S, vec![lease("a", 0, 0, 100)]));
+    binner.observe(&sample(120 * S, vec![lease("a", 0, 70 * S, 300)]));
+    assert_eq!(
+        binner.take(10, 120 * S),
+        vec![minute("a", 1, 1000, 1000, 300)]
+    );
+}
+
 /// Asserts that a huge CPU delta over a short span saturates the mean and the peak at
 /// `u32::MAX` and keeps the mean at or under the peak. It catches an `as u32` cast, which
 /// would wrap, and a saturation applied to one field only.
