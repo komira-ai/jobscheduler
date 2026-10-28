@@ -178,7 +178,7 @@ impl Hub {
         for result in &beat.results {
             let accepted = acks
                 .iter()
-                .any(|ack| ack.run_id == result.run_id && ack.ack == Ack::Accepted);
+                .any(|ack| ack.run_id == result.run_id && ack.ack == Ack::Accepted || ack.ack == Ack::Stale);
             if !accepted {
                 continue;
             }
