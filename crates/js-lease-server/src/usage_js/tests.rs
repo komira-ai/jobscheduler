@@ -216,3 +216,31 @@ fn the_prune_moves_the_curves_to_the_day() {
     sink.prune(1440 * (js_usage::STALE_DAYS + 5)).unwrap();
     assert!(curves.curve(&work()).is_none());
 }
+
+/// Asserts that a start whose usage file cannot be opened is refused with the flag that
+/// names the file, and so is one whose stored profiles cannot be read. It catches a
+/// server that starts without usage after the operator asked for it, and a refusal
+/// that names another flag.
+#[test]
+fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
+    let setup = StoreSetup {
+        // A directory under the target directory: the lock file of a state file sits beside
+        // it under its name, and one beside the crate directory would stray into the workspace.
+        db: PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+        profile_store_bytes: 1 << 20,
+    };
+    let err = open(&setup, 0)
+        .err()
+        .expect("a directory is not a usage file");
+    assert_eq!(err.flag(), "--usage-db");
+    let store = Flaky {
+        inner: Fake::with_flaw(Arc::new(ManualClock::default()), Flaw::None),
+        fail: Arc::new(AtomicBool::new(false)),
+        scan_fails: true,
+    };
+    let err = sink_over(Arc::new(store), &setup, 0)
+        .err()
+        .expect("a store that cannot be scanned");
+    assert_eq!(err.flag(), "--usage-db");
+    assert!(err.reason().contains("down"), "{}", err.reason());
+}
