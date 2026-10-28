@@ -207,7 +207,11 @@ impl World {
         for (name, _) in WORKERS {
             let worker = WorkerId::new(name);
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if active && self.rng.chance(Chance::percent(30)) {
             self.submit(LeaseKind::Action, Qos::Ci);

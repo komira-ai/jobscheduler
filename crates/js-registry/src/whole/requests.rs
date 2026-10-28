@@ -97,7 +97,8 @@ pub struct NotReady {
 pub struct RequestRecord {
     /// Prepares that failed, by a refusal or a timeout.
     pub prepare_failures: u32,
-    /// Drain give-ups. Nothing in the registry counts them; the reservation change does.
+    /// Drain give-ups: reservations of the request that passed their deadline with the
+    /// host not quiet.
     pub give_ups: u32,
     /// The hosts left out of the request's placements, and until when.
     pub exclusions: BTreeMap<HostId, Exclusion>,
@@ -106,6 +107,15 @@ pub struct RequestRecord {
     /// Whether the request has used up `max_replace`. Its next start is refused
     /// `ExclusiveNotReady` (see the module documentation) and removes the record.
     pub terminal: bool,
+}
+
+impl RequestRecord {
+    /// Leaves `host` out of the request's placements for as long as the longer of the
+    /// exclusion held already and `exclusion`.
+    fn exclude(&mut self, host: &HostId, exclusion: Exclusion) {
+        let kept = self.exclusions.entry(host.clone()).or_insert(exclusion);
+        *kept = (*kept).max(exclusion);
+    }
 }
 
 /// The records of the requests that have failed a prepare, and which request holds each
@@ -202,6 +212,39 @@ impl Requests {
         exclusion == Some(&Exclusion::ForLife)
     }
 
+    /// The record under `key`, made empty when there is none, marked as in use at `now`.
+    fn entry(&mut self, key: RequestKey, now: Timestamp) -> &mut RequestRecord {
+        let at = self.records.iter().position(|entry| entry.key == key);
+        let at = at.unwrap_or_else(|| {
+            self.records.push(Entry {
+                key,
+                record: RequestRecord::default(),
+                touched: now,
+            });
+            self.records.len() - 1
+        });
+        self.records[at].touched = now;
+        &mut self.records[at].record
+    }
+
+    /// Counts one drain give-up of the request under `key` on `host` at `now`; the host is
+    /// left out of its placements until `backoff_end`.
+    pub(crate) fn give_up(
+        &mut self,
+        key: RequestKey,
+        host: &HostId,
+        (now, backoff_end): (Timestamp, Timestamp),
+    ) {
+        let record = self.entry(key, now);
+        record.give_ups = record.give_ups.saturating_add(1);
+        record.exclude(host, Exclusion::Until(backoff_end));
+    }
+
+    /// The drain give-ups counted for the request under `key`.
+    pub(crate) fn give_ups(&self, key: &RequestKey) -> u32 {
+        self.record(key).map_or(0, |record| record.give_ups)
+    }
+
     /// Counts one prepare failure of the request `lease` was committed for, as the row
     /// of `cause` says, and releases the lease. A lease with no request (one put back
     /// after a restart) counts nowhere.
@@ -209,17 +252,7 @@ impl Requests {
         let Some(key) = self.placed.remove(lease) else {
             return;
         };
-        let at = self.records.iter().position(|entry| entry.key == key);
-        let at = at.unwrap_or_else(|| {
-            self.records.push(Entry {
-                key,
-                record: RequestRecord::default(),
-                touched: ctx.now,
-            });
-            self.records.len() - 1
-        });
-        self.records[at].touched = ctx.now;
-        let record = &mut self.records[at].record;
+        let record = self.entry(key, ctx.now);
         let row = cause.row();
         match row.request {
             RequestEffect::Requeue => {
@@ -231,13 +264,9 @@ impl Requests {
             HostEffect::ExcludeForLife => Some(Exclusion::ForLife),
             HostEffect::Taint => None,
         };
-        barred.into_iter().for_each(|exclusion| {
-            let kept = record
-                .exclusions
-                .entry(ctx.host.clone())
-                .or_insert(exclusion);
-            *kept = (*kept).max(exclusion);
-        });
+        barred
+            .into_iter()
+            .for_each(|exclusion| record.exclude(ctx.host, exclusion));
         record.terminal = record.prepare_failures >= ctx.max_replace;
         record.last = Some(NotReady {
             code: cause.code(),
@@ -265,6 +294,13 @@ pub(crate) struct Rules {
     pub(crate) max_replace: u32,
 }
 
+/// The whole-node settings of `config`, or the defaults of a dedicated pool for a pool
+/// without any.
+pub(crate) fn whole_settings(config: &PoolConfig) -> WholeNodeConfig {
+    let whole = config.whole_node().cloned();
+    whole.unwrap_or_else(|| WholeNodeConfig::dedicated(config.max_machines()))
+}
+
 impl Rules {
     /// How long a request may go without a start before its record is dropped:
     /// `reserve_backoff` for each of the `max_replace + 1` tries, so a record outlives
@@ -278,8 +314,7 @@ impl Rules {
     }
 
     pub(crate) fn of(config: &PoolConfig) -> Self {
-        let whole = config.whole_node().cloned();
-        let whole = whole.unwrap_or_else(|| WholeNodeConfig::dedicated(config.max_machines()));
+        let whole = whole_settings(config);
         Self {
             regain_grace_ms: whole.regain_grace_ms,
             prepare_timeout_ms: whole.prepare_timeout_ms,

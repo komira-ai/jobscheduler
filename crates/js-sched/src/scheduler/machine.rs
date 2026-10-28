@@ -126,7 +126,11 @@ impl StateMachine for Scheduler {
                 }
                 Vec::new()
             }
-            Event::Heartbeat { worker, running } => match self.workers.get_mut(&worker) {
+            Event::Heartbeat {
+                worker,
+                running,
+                load: _,
+            } => match self.workers.get_mut(&worker) {
                 Some(w) => {
                     w.last_heard = w.last_heard.max(self.now);
                     self.reconcile(&worker, &running)

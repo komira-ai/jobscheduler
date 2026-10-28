@@ -104,6 +104,7 @@ impl Farm {
         let event = Event::Heartbeat {
             worker: w(name),
             running: running.iter().map(|s| s.lease).collect(),
+            load: None,
         };
         self.feed(event);
     }

@@ -116,6 +116,7 @@ fn every_event_has_its_fixed_spelling() {
             Event::Heartbeat {
                 worker: worker(),
                 running: vec![lease(), LeaseId { term: 1, seq: 5 }],
+                load: None,
             },
             "heartbeat(worker=w1 running=[1.4; 1.5])".to_owned(),
         ),

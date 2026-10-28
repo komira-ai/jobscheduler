@@ -1,7 +1,7 @@
 //! The per-key summary: what is kept, how a run enters it, what it estimates.
 
 use crate::key::{Basis, Day};
-use crate::run::{Bounds, Discard, Observed, Outcome, Run, memory_max};
+use crate::run::{Bounds, CpuSample, Discard, Observed, Outcome, Run, memory_max};
 use crate::{GIB, MIB};
 
 /// The smallest memory estimate.
@@ -21,10 +21,15 @@ pub const DECAY_DAYS: u32 = 7;
 pub const KILL_WINDOW_RUNS: u64 = 256;
 /// Days a key stays raise-only after its second kill event.
 pub const RAISE_ONLY_DAYS: u32 = 7;
-/// CPU is never booked below this in this phase.
-pub const CPU_MIN_MILLIS: u32 = 1000;
-/// A CPU sample is kept only when the node's CPU pressure was below this (tenths of a
-/// percent) when the run started: under contention wall inflates and the ratio lies.
+/// CPU is never booked below this: one 250 m step, so a 0.3-core action costs 500 m.
+pub const CPU_MIN_MILLIS: u32 = 250;
+/// What a key with no CPU sample is counted at when a pressured sample is compared with
+/// its estimate: two cores, the measured mean parallelism of an unlearned action.
+pub const COLD_CPU_MILLIS: u32 = 2000;
+/// A CPU sample taken below this node CPU pressure (tenths of a percent) when the run
+/// started is always kept. At or above it, or with no reading, wall inflates under
+/// contention and the ratio understates the demand: the sample is kept only when it
+/// exceeds the key's current estimate, so it can only raise it.
 pub const CPU_PRESSURE_MAX_PERMILLE: u16 = 100;
 /// A key is mixed when the largest of its last 32 samples is over this many times their
 /// median.
@@ -46,6 +51,12 @@ const SLACK: u64 = 128 * MIB;
 const CPU_STEP: u32 = 250;
 /// A success this close to its memory limit is treated as having hit it.
 const NEAR_LIMIT_PERCENT: u128 = 95;
+
+/// The run's mean parallelism in millicores, capped to `u32` so the cast cannot truncate.
+fn cpu_millis(run: &Run) -> u32 {
+    let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+    millis.min(u128::from(u32::MAX)) as u32
+}
 
 fn round_up(value: u64, step: u64) -> u64 {
     value.div_ceil(step).saturating_mul(step)
@@ -238,16 +249,35 @@ impl Summary {
                 Err(Discard::NotASample)
             }
         };
-        let cpu = run.outcome == Outcome::Success
-            && trusted
-            && run.cpu_usage_us > 0
-            && run
-                .node_cpu_pressure_permille
-                .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
-        if cpu {
-            self.record_cpu(run);
-        }
+        let cpu = if run.outcome == Outcome::Success && trusted && run.cpu_usage_us > 0 {
+            self.observe_cpu(run, bounds)
+        } else {
+            CpuSample::Skipped
+        };
         Observed { memory, cpu }
+    }
+
+    /// A CPU measurement: kept when the node was quiet, otherwise only when it exceeds
+    /// the current estimate (a starved run never overstates its demand).
+    fn observe_cpu(&mut self, run: &Run, bounds: &Bounds) -> CpuSample {
+        let millis = cpu_millis(run);
+        let quiet = run
+            .node_cpu_pressure_permille
+            .is_some_and(|p| p < CPU_PRESSURE_MAX_PERMILLE);
+        if quiet {
+            self.record_cpu(millis);
+            CpuSample::Kept
+        } else if millis > self.cpu(bounds) {
+            self.record_cpu(millis);
+            CpuSample::Raised
+        } else {
+            CpuSample::Dropped
+        }
+    }
+
+    /// Whether the key has at least one CPU sample.
+    pub fn has_cpu_sample(&self) -> bool {
+        self.cpu_n > 0
     }
 
     /// A success that touched its memory limit says only that the booking was not
@@ -285,11 +315,9 @@ impl Summary {
         self.n_total += 1;
     }
 
-    fn record_cpu(&mut self, run: &Run) {
-        let millis = u128::from(run.cpu_usage_us) * 1000 / u128::from(run.wall_us);
+    fn record_cpu(&mut self, millis: u32) {
         let slot = (self.cpu_n % RING as u64) as usize;
-        // Capped to u32 first, so the cast cannot truncate.
-        self.cpu_ring[slot] = millis.min(u128::from(u32::MAX)) as u32;
+        self.cpu_ring[slot] = millis;
         self.cpu_n += 1;
     }
 
@@ -395,10 +423,15 @@ impl Summary {
         memory.max(MIN_MEMORY)
     }
 
-    /// The CPU estimate in millicores: P90 of the recent parallelism, rounded up to
-    /// 250 m, between 1000 m and the node's CPUs.
+    /// The CPU estimate in millicores: [`COLD_CPU_MILLIS`] while there is no CPU sample,
+    /// else the P90 of the recent parallelism, rounded up to
+    /// 250 m, between [`CPU_MIN_MILLIS`] and the node's CPUs.
     pub(crate) fn cpu(&self, bounds: &Bounds) -> u32 {
         let node = bounds.node_cpu_millis;
+        if !self.has_cpu_sample() {
+            // No measurement: the key is counted at what an unlearned action costs.
+            return COLD_CPU_MILLIS.min(node);
+        }
         let low = CPU_MIN_MILLIS.min(node);
         let kept = self.cpu_n.min(RING as u64) as usize;
         let mut sorted = self.cpu_ring[..kept].to_vec();

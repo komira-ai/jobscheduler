@@ -71,6 +71,7 @@ fn heartbeat(s: &mut Scheduler, secs: u64, name: &str, running: Vec<LeaseId>) {
     let event = Event::Heartbeat {
         worker: node(name),
         running,
+        load: None,
     };
     assert!(feed(s, secs, event).is_empty());
 }

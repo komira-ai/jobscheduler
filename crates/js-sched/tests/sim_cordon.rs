@@ -188,7 +188,11 @@ impl World {
         for name in WORKERS {
             let worker = WorkerId::new(name);
             let running = self.sched.leases_on(&worker);
-            self.feed(Event::Heartbeat { worker, running });
+            self.feed(Event::Heartbeat {
+                worker,
+                running,
+                load: None,
+            });
         }
         if active && self.rng.chance(Chance::percent(20)) {
             let n = self.next;
