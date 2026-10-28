@@ -330,7 +330,7 @@ fn settle(outbox: &Outbox, sent: &Result<Answer, Reason>) {
         return outbox.failed();
     };
     match verdict(answer.status, &code_of(&answer.body)) {
-        Verdict::Done => outbox.delivered(),
+        Verdict::Done => {}
         Verdict::Fatal => outbox.refused(),
         Verdict::Conflict | Verdict::Retry => outbox.failed(),
     }
