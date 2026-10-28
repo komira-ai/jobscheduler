@@ -17,7 +17,7 @@ generic contract differs. Section numbers refer to design.md.
   |---|---|---|
   | registering | launched or listed, no hello yet (scheduler-side only) | no |
   | serving | normal | yes |
-  | preparing, restoring | the node is switching sessions, tied to a whole-machine lease (`SESSION_SWITCH_GRACE`) | no |
+  | preparing, restoring | the node is switching sessions, tied to a whole-node lease (`SESSION_SWITCH_GRACE`; 5.17) | no |
   | memory-pressure | only while the node holds a lease | no |
   | draining | announced by the agent (SIGTERM): leases run to their end, nothing is requeued | no |
   | quarantined | held out | no |
@@ -30,8 +30,8 @@ generic contract differs. Section numbers refer to design.md.
   blob. The kbf adapter interprets digests; the ucdk adapter interprets an image and arguments.
 - **Failure taxonomy.** Keep the classes in `crates/kbf-daemon/src/runtime.rs`: Killed, Failed, Invalid, MissingInput, TimedOut,
   OutOfMemory (own limit), BusyNode (node pressure), Lost (restarted or fenced). Spot or instance reclaim shows as the agent being Lost,
-  or as a capacity-provider `observe` of Absent with a reclaim reason; the work is rerun elsewhere and the platform-fault budget is spent
-  (8.1), as for BusyNode. The single mapping point to the wire stays `result_of` in `crates/kbf-daemon/src/lease.rs`. `MissingInput` is
+  or as a capacity-provider `observe` of Absent with a reclaim reason, announced first by an interruption notice where the provider has one
+  (5.18); the work is rerun elsewhere and the platform-fault budget is spent (8.1), as for BusyNode. The single mapping point to the wire stays `result_of` in `crates/kbf-daemon/src/lease.rs`. `MissingInput` is
   kbf-only; the generic set names it "InputUnavailable" and the kbf adapter maps it.
 - **Usage.** A usage report carries a `basis` and optional blocks, as `ResourceUsage` does, plus the censoring signals the estimator
   needs: limit hit, swap peak, out-of-memory kill count, and node pressure at start. Usage is reported on failure too

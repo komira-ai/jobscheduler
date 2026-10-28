@@ -1,4 +1,4 @@
-# VM runtime backend, sharing and caps, the whole-node class (5.14, 5.15)
+# VM runtime backend, sharing and caps, the VM side of the whole-node class (5.14, 5.15)
 
 Companion to [docs/design.md](../design.md), sections 5.4, 5.10 to 5.12 and 6.2. Section numbers refer to design.md; 5.14 and 5.15 are
 defined here. Capabilities and constraints (what picks a host and an image) are in [capabilities.md](capabilities.md).
@@ -11,8 +11,9 @@ options:
 1. **A fresh VM per run. A VM is never reused.** Every run gets a VM cloned from its base image for that run and destroyed when the run
    ends, whatever its outcome. A lease may hold several runs; each has its own VM and no VM is reused between two of them. A VM that has
    run a job is never handed a second job, never reverted, never "cleaned".
-2. **The machine is reused; the VM is not.** The host serves many leases and runs (VM or container) in a row under the rules of 5.10; what
-   is fresh each time is the guest. A warm pool, to hide the boot, is future work (below) and not designed here.
+2. **The machine is reused; the VM is not.** The host serves many leases and runs (VM or container), in a row and at the same time, under
+   the rules of 5.10 and 5.15; what is fresh each time is the guest. Several fresh VMs exist on one host at once, up to its `vms` slots,
+   each booked in full (D57, 5.18); whether a host can run VMs at all is a fact of its instance type (hosts.md, section 4). A warm pool, to hide the boot, is future work (below) and not designed here.
 
 ### Where it fits: one lifecycle, two backend traits
 
@@ -161,7 +162,7 @@ heartbeat. A `Start` pins the image digest; a mismatch is `image-unavailable`. W
 or its manifest or digest changes, a run already started keeps the VM it was cloned with and later runs of that name are refused until
 the new content verifies.
 
-## 5.15 Sharing a host, caps, and the whole-node class
+## 5.15 Sharing a host, caps, and the whole-node class (the class itself is 5.17)
 
 **One accounting.** A host's capacity vector (`cpu_millis`, `memory_bytes`, `vms`, `gpus`) is shared by containers and VMs. The
 agent offers the scheduler what it is *willing to give* (the existing rule; generalising.md): the host total less what is booked. The
@@ -184,37 +185,22 @@ the offer is now 8, 48, 1. Its first run clones and boots a VM of that size (boo
 the slot free. The lease's second run clones a new VM; the booking is the same. A container job asking 56 GiB is refused on this host
 while a VM exists: its memory is checked against 64 - 16 = 48 GiB.
 
-### Whole-node lease class (exclusive; for performance tests)
+### Whole-node lease class (exclusive; for performance tests and GPU testing)
 
-A whole-node lease is the class `whole_machine` (the design's `Whole` mode of 6.2; it is not in the merged `Admission`, where `BookAll` gives
-the whole host today; step 46 either introduces `Whole` or shows that `BookAll` plus the selection and drain rules below is enough; kbf's
-class of that name): it books every dimension and needs the host to itself. A performance test must see no other job and no booted VM of another run, so the host is made quiet before the lease is usable.
+A whole-node lease is the class `whole-node` (admission `Whole`, 6.2; kbf's `whole_machine`, the merged `gpu-host`): it books every
+dimension and needs the host to itself. Its full account is in [whole-node.md](whole-node.md): the class and how the merged names relate to
+it, eligible hosts and admission, the reservation of exactly one host, the drain and its bound, the caps, elastic providers, the end of the
+lease and host jobs. What belongs to the VM backend and stays here:
 
-1. **Selection and drain.** The scheduler picks a host with no lease and no running job, commits the lease, and places nothing else on the
-   host from that moment (the choice and any placement commit under the table lock, first one wins; 5.10). A busy pool may never have such a
-   host, so a request that has waited `drain_after` (pool configuration, injected clock) makes the scheduler pick one host, mark it
-   **draining**, place nothing new on it, and commit the lease when it empties (running jobs finish; nothing is killed). Bounds: one draining host per pool, or at most `max_draining_fraction` of the pool if the operator sets it, so exclusive
-   requests cannot idle the pool; a drain that outlasts `drain_deadline` is given up (the host returns to `serving`, the request keeps
-   waiting and may start a drain on another host after a back-off). Because the host is empty at the commit, nothing runs during
-   `preparing` and `prepare_timeout` cannot be outrun by a long job. A re-place after `prepare_timeout` is capped at `max_replace` tries per
-   request with a back-off between them, after which the request fails `exclusive-not-ready` to the consumer.
-2. **Preparing.** The scheduler's next heartbeat reply tells the agent an exclusive lease is granted (an additive field, `exclusive`:
-   lease id). The agent announces the phase `preparing` (the merged phase; no new leases), **confirms that no VM is running** (the host was empty at the commit, so
-   none should be; one found is a finding and is destroyed), and runs the post-job checks, including the VM store check.
-3. **Ready.** The agent reports `exclusive_ready: lease id` in the heartbeat (additive) and returns to `serving`. Until the scheduler has
-   that report the lease stays `pending` and **the lease token is not minted**: the consumer cannot reach the agent, so a consumer that
-   knows nothing about readiness (an older client) simply waits. The agent also accepts a `Start` for the lease from nobody but the
-   leasee while the lease lasts. If the agent is not ready within the pool's `prepare_timeout` (an injected clock), the scheduler gives
-   the lease up as not ready (`exclusive-not-ready`), tells the consumer, and the request is placed again; a finding on the way taints
-   the host as usual.
-4. **During.** Nothing else is placed. The leasee may run containers or VMs inside its node (each VM is fresh for its run and counts fully
-   as always).
-5. **End.** On release the agent removes what remains, runs the checks, announces `restoring` and returns to `serving`; only then may the scheduler place other work on the host. A tainted host is replaced instead (5.12).
-
-The agent's heartbeat is how readiness is signalled; there is no side channel. A whole-node request never takes a host that
-`share` leases are using; it waits for one to empty, or drains one by the rule in step 1 (a request that names a node queues for that node,
-and drains it by the same rule). Tests: with a stream of share leases, a queued whole-node request is granted within `drain_after` plus
-`drain_deadline` on the injected clock; with a stream of whole-node requests, share leases keep running on the rest of the pool.
+- **No VM runs when the host is given.** At `preparing` the agent confirms that no VM is running (the host was empty at the commit, so none
+  should be; one found is a finding and is destroyed) and runs the post-job checks, including the VM store check. The host is reported ready
+  only after both, and the lease token is minted only then (D30). The fields are `exclusive` (heartbeat reply) and `exclusive_ready`
+  (heartbeat), both additive.
+- **During the lease** the leasee may run containers or VMs inside its node; each VM is fresh for its run and counts in full as always.
+- **At the end** the agent destroys every VM, removes what remains, runs the checks, announces `restoring` and returns to `serving`; only
+  then may the scheduler place other work on the host.
+- **The tests** of the whole-node sequence on the fake VM runtime are listed below; the reservation, drain and cap tests are in
+  whole-node.md.
 
 ## D26. The macOS VM sizing question (open; another engineer is answering it)
 
@@ -259,7 +245,7 @@ of the steps): a VM is destroyed before the slot is freed, and a failed destroy 
 fake counts VM ids per run id and fails on a repeat, and a lease with two runs sees two VM ids); VMs count in `vms` and in the offer, with
 the order of 5.15 (the offer is never above total less booked at any step of a seeded run); a container job is refused when VM memory
 leaves too little; the whole-node sequence: no VM is running at `preparing`, a VM found there is a finding, the token is not minted before
-`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a drain places nothing new and ends at its deadline; restart
+`exclusive_ready`, a timeout gives the lease up and the re-place is capped, a reserved host places nothing new and its reservation ends at its deadline (whole-node.md); restart
 sweeps every clone; a `host` VM job and a GPU VM job are
 refused; mounts are copied in and out and the guest never holds a writable host path; a hostile frame corpus ends the run and never
 taints. No test asserts elapsed time (R2): boots, ages and timeouts are counted on the injected clock.

@@ -180,3 +180,30 @@ fn the_resurrecting_defect_books_a_stopped_lease() {
     );
     assert_eq!(f.booked().len(), 1);
 }
+
+/// Asserts that a class added with `with_class` is listed after `gpu-host` and is leased
+/// like it: a start of that class books a fitting host, where an unleasable class is
+/// refused. Catches a class that is listed but not served.
+#[test]
+fn an_added_class_is_listed_and_leased() {
+    let plain = ResourceClass::new(
+        ClassId::new("plain").unwrap(),
+        js_types::Admission::BookAll,
+        0,
+    );
+    let mut provider = fake().with_class(plain.clone());
+    assert_eq!(
+        provider.classes(),
+        vec![ResourceClass::gpu_host(), plain.clone()]
+    );
+    let request = Request {
+        class: plain.id().clone(),
+        resources: Resources::new(1000, 1, 1, Some("g".into())).unwrap(),
+        capabilities: BTreeMap::new(),
+        max_wall: Duration::from_secs(60),
+        labels: BTreeMap::new(),
+        validation_run: None,
+    };
+    let spec = StartSpec::new(lease(1), request, &provider.classes()).unwrap();
+    assert_eq!(provider.start(spec), StartAck::Started { host: host("h1") });
+}
