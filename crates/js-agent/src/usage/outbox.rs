@@ -29,7 +29,7 @@
 //! has newer ones.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use js_agent_wire::NodeLoad;
