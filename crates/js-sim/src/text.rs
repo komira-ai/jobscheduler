@@ -494,6 +494,7 @@ mod tests {
                 memory_bytes: 1 << 30,
                 limit_bytes: 2 << 30,
                 cold: true,
+                key_digest: 0,
             },
         });
         let result = ControlRecord::Result(ResultRecord {

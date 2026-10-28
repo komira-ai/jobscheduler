@@ -199,6 +199,12 @@ impl Scheduler {
         self.admission.counters
     }
 
+    /// In `Shadow` mode, the previous least-loaded rule's choice beside the score's for each
+    /// placement since the last call, oldest first (the most recent 4096 are kept).
+    pub fn take_shadow_choices(&mut self) -> Vec<crate::ShadowChoice> {
+        self.admission.take_shadow()
+    }
+
     /// How `worker` is charged as of the newest input, if it is registered.
     #[must_use]
     pub fn load_view(&self, worker: &WorkerId) -> Option<LoadView> {

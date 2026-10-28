@@ -99,11 +99,17 @@ pub mod fence;
 pub mod harness;
 mod input;
 mod load;
+pub use load::{
+    Charge, Choice, EVALUATIONS_PER_WORKER, H_PLUS, HORIZON, HostFacts, LeaseFacts, MAX_BALANCE,
+    PredictedLoad, SLOTS, ScoreConfig, ScoreKey, Scorer, key_digest,
+};
 mod requeue;
 mod scheduler;
 mod servable;
 
-pub use admission::{LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction};
+pub use admission::{
+    FlagError, LoadConfig, LoadCounters, LoadView, PlacementLoad, Prediction, ShadowChoice,
+};
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;

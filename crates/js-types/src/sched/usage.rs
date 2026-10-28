@@ -33,6 +33,10 @@ pub struct LeaseCost {
     /// The key had no usable estimate: the cold costs were charged, and the lease counted
     /// against the worker's cold cap.
     pub cold: bool,
+    /// A 64-bit digest of the lease's action key, for the placement score's same-key
+    /// share; 0 when no key is known (a record written before it was kept, a VM), which
+    /// matches no key.
+    pub key_digest: u64,
 }
 
 /// One reading of the node's action cgroup, taken by the agent.
@@ -460,6 +464,7 @@ mod tests {
             memory_bytes: 2,
             limit_bytes: 3,
             cold: false,
+            key_digest: 0,
         };
         assert_eq!(c, LeaseCost { ..c });
         assert_ne!(c, LeaseCost { cpu_millis: 9, ..c });
