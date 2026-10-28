@@ -5,6 +5,9 @@
 /// a minute index past its limit, so the two must not drift apart.
 #[test]
 fn usage_tail_minute_is_the_wires() {
-    assert_eq!(js_agent_usage::TAIL_MINUTE, js_agent_wire::limits::TAIL_MINUTE);
+    assert_eq!(
+        js_agent_usage::TAIL_MINUTE,
+        js_agent_wire::limits::TAIL_MINUTE
+    );
     assert_eq!(js_agent::usage::TAIL_MINUTE, js_agent_usage::TAIL_MINUTE);
 }
