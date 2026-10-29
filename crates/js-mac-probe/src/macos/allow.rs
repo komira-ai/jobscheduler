@@ -12,7 +12,7 @@ use super::toolchain::case;
 use crate::parse::unlisted_reads;
 use crate::report::{Probe, Report};
 
-const SUBPATHS: [&str; 12] = [
+const SUBPATHS: [&str; 13] = [
     "/System/Library",
     "/System/Cryptexes",
     "/System/Volumes/Preboot/Cryptexes",
@@ -25,14 +25,18 @@ const SUBPATHS: [&str; 12] = [
     "/sbin",
     "/private/var/db/dyld",
     "/private/var/db/timezone",
+    "/private/var/select",
 ];
-const LITERALS: [&str; 6] = [
+const LITERALS: [&str; 9] = [
     "/",
     "/dev/null",
     "/dev/zero",
     "/dev/random",
     "/dev/urandom",
     "/dev/tty",
+    "/dev/dtracehelper",
+    "/var",
+    "/Library/Preferences/com.apple.dt.Xcode.plist",
 ];
 /// Processes whose denials belong to the toolchain steps (the rest of the log is the machine).
 const OURS: [&str; 14] = [
