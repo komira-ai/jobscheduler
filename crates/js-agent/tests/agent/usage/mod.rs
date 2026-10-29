@@ -1,10 +1,10 @@
-//! Usage collection: the cgroup readers, the sampler over fake files, and the binner over
-//! samples built by hand. The clock is a counter that moves when a test moves it, so no
-//! test waits and none asserts a duration.
+//! Usage collection: the cgroup readers and the sampler over fake files. The binner over
+//! samples built by hand is tested in `js-agent-usage`. The clock is a counter that moves
+//! when a test moves it, so no test waits and none asserts a duration.
 
-mod binner;
 mod cgroup;
 mod sampler;
+mod tail;
 
 use std::cell::Cell;
 

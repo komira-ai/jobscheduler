@@ -4,6 +4,7 @@
 
 mod errors;
 mod fixtures;
+mod launch;
 mod proxy;
 mod reads;
 mod setup;

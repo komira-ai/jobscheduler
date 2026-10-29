@@ -18,7 +18,7 @@
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
 //! | `--token-file <path>` | required: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
-//! | `--ca-cert <path>` | required for `https://`: the PEM file with the certificate to trust; the platform's roots are never read |
+//! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
@@ -104,8 +104,11 @@
 //! holds, bounded, and the results it could not send are lost; the same when the job worker
 //! stops, which ends it with status 1, except that the stop does not go through the
 //! worker; a container that could not be stopped is named on stderr, and the agent relies
-//! on its supervisor, for example systemd `Restart=`, and on the next process adopting it;
-//! see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! on its supervisor and on the next process adopting it, so the supervisor must restart
+//! the agent after every exit, status 0 and 2 included: with systemd that is
+//! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
+//! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
+//! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
 //! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
