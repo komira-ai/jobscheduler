@@ -269,3 +269,29 @@ fn a_types_row_the_catalog_drops_is_logged_by_name() {
     assert!(text.contains("a types row is skipped"), "{text}");
     assert!(text.contains("gpu_9x_x is not offered"), "{text}");
 }
+
+/// Asserts that a scheduler id too long to name a key or a ruleset fails both checks with
+/// the words a launch refuses with, and that nothing is made. It catches a check that
+/// builds a name over the API's limit and asks the account about it.
+#[test]
+fn a_scheduler_id_too_long_to_name_a_key_or_a_ruleset_fails_both_checks() {
+    let scheduler = SchedulerId::new(&"s".repeat(62)).unwrap();
+    let config = ElasticConfig::with_account_key(scheduler, NonZeroUsize::new(5).unwrap());
+    let rig = rig(config);
+    let results = rig.provider.checks();
+    assert_eq!(
+        named(&results, "ssh_key"),
+        failed(
+            "ssh_key",
+            "provider.ssh_key: the scheduler id is too long to name a key; name one"
+        )
+    );
+    assert_eq!(
+        named(&results, "firewall"),
+        failed(
+            "firewall",
+            "firewall: the scheduler id is too long for a ruleset name of 64 characters"
+        )
+    );
+    assert_eq!(writes(&rig.fake), (0, 0));
+}
