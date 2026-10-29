@@ -358,12 +358,7 @@ impl Records {
     /// [`RecordsError::Version`] for a file of another version, which is not guessed at,
     /// and [`RecordsError::Format`] for text that is not records.
     pub fn decode(text: &str) -> Result<Self, RecordsError> {
-        let value: serde_json::Value = serde_json::from_str(text)?;
-        let found = value.get("version").and_then(serde_json::Value::as_u64);
-        if found != Some(u64::from(VERSION)) {
-            return Err(RecordsError::Version { found });
-        }
-        let wire: WireIn = serde_json::from_value(value)?;
+        let wire: WireIn = serde_json::from_str(text)?;
         Ok(Self {
             launches: wire.launches,
             instances: wire.instances,
