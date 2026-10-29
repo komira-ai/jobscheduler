@@ -7,15 +7,16 @@
 //!   capacity, the list of instances, one instance, launch, terminate), and its two
 //!   implementations: [`HttpApi`], the real client, and [`FakeLambda`], the same calls
 //!   over memory;
-//! - [`Elastic`], the provider-side contract of a scheduler (acquire, list, release), and
-//!   [`LambdaProvider`], which implements it over a [`LambdaApi`]: ownership marks on
+//! - [`LambdaProvider`], which implements the scheduler's provider-neutral contract
+//!   ([`js_elastic::ElasticProvider`]: catalog, acquire, list, release) over a
+//!   [`LambdaApi`]: ownership marks on
 //!   everything it launches (tags and a name prefix; both are needed to terminate, either
 //!   counts toward `max_machines`), an acquire that launches once per acquire id, a release that
 //!   reads back, and the cost guard (disabled and dry-run by default, a launch rate limit
 //!   on an injected [`Clock`], a report-only [`Sweep`], and `max_machines`: a hard cap on
 //!   the instances carrying our markers, counted from a fresh list before each launch;
 //!   it is this provider's own backstop, not a pool-level cost policy);
-//! - the typed answers ([`InstanceTypeOffer`], [`Instance`], [`Status`]) and the errors
+//! - the typed answers ([`InstanceTypeOffer`], [`Instance`]) and the errors
 //!   ([`ApiError`], [`ErrorCode`]), which are matched on Lambda's `code`, never on its
 //!   message text;
 //! - [`ApiKey`], the key read from an owner-only file and never printed;
@@ -28,8 +29,12 @@
 //! the last launch) is one process's `Mutex`: run one provider instance per scheduler id.
 //! A restart, or a second process, sees only the list, which can lag a write.
 //!
-//! A release that answers [`Released::Unknown`] means "not known": callers must retry it,
-//! never read it as "gone".
+//! A release that answers [`js_elastic::Released::Unknown`] means "not known": callers must
+//! retry it, never read it as "gone".
+//!
+//! The provider carries no boot payload yet: [`js_elastic::ElasticProvider::payload_limit`]
+//! is 0 and an acquire with a payload is refused, so that no machine launches without
+//! the input its payload was meant to give it.
 //!
 //! The provider is not wired to a scheduler. The calls block, each under a time limit, so
 //! they must not run under a lock that other work waits on. It does not implement the
@@ -38,7 +43,6 @@
 mod api;
 mod clock;
 mod config;
-mod elastic;
 mod error;
 mod fake;
 pub mod first_launch;
@@ -54,10 +58,6 @@ mod wire;
 pub use api::LambdaApi;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{ConfigError, ElasticConfig, Mode};
-pub use elastic::{
-    AcquireRequest, Acquired, Candidate, Elastic, Extra, GpuRequest, Held, Reason, Refusal,
-    RefusalCode, Released,
-};
 pub use error::{ApiError, ErrorCode};
 
 pub use fake::{Call, FakeLambda, TerminateEffect};
@@ -65,11 +65,8 @@ pub use http::{HttpApi, SetupError};
 pub use key::{ApiKey, KeyError};
 pub use model::{
     Architecture, Instance, InstanceId, InstanceTypeOffer, InvalidInstanceId, LaunchRequest,
-    Region, Status, Tag,
+    Region, Tag,
 };
-pub use options::{GpuClass, OptionRow, OptionTable, OptionsError};
-pub use own::{
-    ACQUIRE_TAG, AcquireId, Claim, InvalidId, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG,
-    SchedulerId,
-};
+pub use options::{OptionRow, OptionTable, OptionsError};
+pub use own::{ACQUIRE_TAG, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG};
 pub use provider::{LambdaProvider, Sweep};

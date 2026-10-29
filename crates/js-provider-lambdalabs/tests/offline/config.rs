@@ -3,9 +3,8 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    Clock, ConfigError, ElasticConfig, ManualClock, SchedulerId, SystemClock,
-};
+use js_elastic::SchedulerId;
+use js_provider_lambdalabs::{Clock, ConfigError, ElasticConfig, ManualClock, SystemClock};
 
 fn config(key: &str) -> Result<ElasticConfig, ConfigError> {
     ElasticConfig::new(
@@ -48,9 +47,8 @@ fn an_ssh_key_name_is_one_to_sixty_four_printable_characters() {
 
 #[test]
 fn the_default_launch_interval_is_the_apis_twelve_seconds() {
-    use js_provider_lambdalabs::{
-        Acquired, Architecture, Elastic, FakeLambda, LambdaProvider, OptionTable,
-    };
+    use js_elastic::{Acquired, ElasticProvider};
+    use js_provider_lambdalabs::{Architecture, FakeLambda, LambdaProvider, OptionTable};
     use std::sync::Arc;
 
     use crate::rig::{TABLE, ask, offer};

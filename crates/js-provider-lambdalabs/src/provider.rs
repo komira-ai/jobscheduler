@@ -1,22 +1,28 @@
-//! The provider: [`Elastic`] over [`LambdaApi`], with the cost guard.
+//! The provider: [`ElasticProvider`] over [`LambdaApi`], with the cost guard.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootStep, Claim, Demand, ElasticProvider, Extra, Held,
+    HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released,
+};
+
 use crate::api::LambdaApi;
 use crate::clock::Clock;
 use crate::config::{ElasticConfig, Mode};
-use crate::elastic::{
-    AcquireRequest, Acquired, Candidate, Elastic, Extra, GpuRequest, Held, Reason, Refusal,
-    RefusalCode, Released,
-};
 use crate::error::{ApiError, ErrorCode};
-use crate::model::{Instance, InstanceId, LaunchRequest, Status};
+use crate::model::{Instance, InstanceId, LaunchRequest};
 use crate::options::OptionTable;
-use crate::own::{AcquireId, Claim, LabelError, Owner};
+use crate::own::{LabelError, Owner};
 use crate::select;
+
+/// The most bytes of boot payload this provider carries. It does not deliver one yet (the
+/// launch has no field for it), so it carries none, and refuses a payload rather than
+/// launch a machine that never receives it.
+const PAYLOAD_LIMIT: usize = 0;
 
 /// What the launch lock protects: the guard's memory. Holding the lock across the list
 /// and the launch is what lets one launch run at a time.
@@ -43,6 +49,8 @@ struct Launching {
 struct Answered {
     /// What the answer named.
     held: Held,
+    /// The same instance's id, in the form the API takes.
+    id: InstanceId,
     /// Whether this is the instance the launch is answered with on a retry. A launch
     /// asks for one instance; any other id it returns is an extra, counted all the same.
     primary: bool,
@@ -103,15 +111,18 @@ impl LambdaProvider {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Where `request` can launch, best first (see the module docs of the choice): empty
-    /// when no type fits or none has capacity, which is a capacity refusal.
+    /// Where `demand` can launch, best first (see the module docs of the choice): empty
+    /// when no offer fits or none has capacity, which is a capacity refusal.
     ///
     /// # Errors
     ///
     /// [`ApiError`] when the instance types cannot be had.
-    pub fn launch_options(&self, request: &GpuRequest) -> Result<Vec<Candidate>, ApiError> {
-        let offers = self.api.instance_types()?;
-        Ok(select::candidates(&self.options, &offers, request))
+    pub fn launch_options(&self, demand: &Demand) -> Result<Vec<Offer>, ApiError> {
+        let types = self.api.instance_types()?;
+        Ok(select::candidates(
+            &select::offers(&self.options, &types),
+            demand,
+        ))
     }
 
     /// Lists what this scheduler has launched or half-launched and reports it. Report
@@ -123,10 +134,10 @@ impl LambdaProvider {
     pub fn sweep(&self, booked: &[AcquireId]) -> Result<Sweep, ApiError> {
         let mut sweep = Sweep::default();
         for instance in self.api.list_instances()? {
-            if instance.status == Status::Terminated {
+            if instance.status == HostStatus::Terminated {
                 continue;
             }
-            let held = Held::of(&instance);
+            let held = held_of(&instance);
             match self.owner.claim(&instance) {
                 Claim::Foreign => {}
                 Claim::Suspect => {
@@ -134,7 +145,7 @@ impl LambdaProvider {
                     sweep.suspects.push(held);
                 }
                 Claim::Ours => match instance.status {
-                    Status::Terminating | Status::Preempted => sweep.ending.push(held),
+                    HostStatus::Terminating | HostStatus::Preempted => sweep.ending.push(held),
                     _ if booked.iter().any(|b| b.as_str() == held.acquire) => {}
                     _ => sweep.orphans.push(held),
                 },
@@ -147,16 +158,20 @@ impl LambdaProvider {
         Acquired::Refused(Refusal { code, reason })
     }
 
-    /// The launch for `request`, tagged and named.
-    fn launch_request(&self, request: &AcquireRequest) -> Result<LaunchRequest, LabelError> {
+    /// The launch for `request` in `zone`, tagged and named.
+    fn launch_request(
+        &self,
+        request: &AcquireRequest,
+        zone: &str,
+    ) -> Result<LaunchRequest, LabelError> {
         let tags = self
             .owner
             .tags(&request.acquire, &request.pool, &request.labels)?;
         Ok(LaunchRequest {
-            region: request.candidate.region.clone(),
-            instance_type: request.candidate.instance_type.clone(),
+            region: zone.to_owned(),
+            instance_type: request.offer.id.clone(),
             ssh_key: self.config.ssh_key.clone(),
-            name: self.owner.name(&request.acquire),
+            name: request.name.to_string(),
             tags,
         })
     }
@@ -184,16 +199,16 @@ impl LambdaProvider {
     fn still_held(&self, launched: &mut Answered, rows: &[Instance], now: Duration) -> bool {
         let listed_ours = rows
             .iter()
-            .any(|row| row.id == launched.held.id && self.owner.claim(row) == Claim::Ours);
+            .any(|row| row.id == launched.id && self.owner.claim(row) == Claim::Ours);
         if listed_ours {
             return false;
         }
         if now < launched.due {
             return true;
         }
-        let id = &launched.held.id;
+        let id = &launched.id;
         let keep = match self.api.get_instance(id) {
-            Ok(found) => found.status != Status::Terminated,
+            Ok(found) => found.status != HostStatus::Terminated,
             Err(error) if self.trust_absent(&error) => false,
             Err(error) => {
                 tracing::warn!(%error, %id, "the probe of an unlisted instance failed; still counting it");
@@ -268,17 +283,17 @@ impl LambdaProvider {
         let live: Vec<(&Instance, Claim)> = rows
             .iter()
             .map(|row| (row, self.owner.claim(row)))
-            .filter(|(row, claim)| *claim != Claim::Foreign && row.status != Status::Terminated)
+            .filter(|(row, claim)| *claim != Claim::Foreign && row.status != HostStatus::Terminated)
             .collect();
         let wanted = request.acquire.as_str();
         let earlier = live.iter().find(|(row, claim)| {
             *claim == Claim::Ours
                 && Owner::acquire_of(row) == Some(wanted)
-                && !matches!(row.status, Status::Terminating)
+                && !matches!(row.status, HostStatus::Terminating)
         });
         if let Some((row, _)) = earlier {
             return Acquired::Accepted {
-                held: Held::of(row),
+                held: held_of(row),
                 extras: Vec::new(),
             };
         }
@@ -322,7 +337,7 @@ impl LambdaProvider {
         let unlisted = gate
             .answered
             .iter()
-            .filter(|a| !live.iter().any(|(row, _)| row.id == a.held.id))
+            .filter(|a| !live.iter().any(|(row, _)| row.id == a.id))
             .count();
         let held = live.len() + gate.unknown.len() + unlisted;
         let max_machines = self.config.max_machines.get();
@@ -346,7 +361,7 @@ impl LambdaProvider {
             instance_type = %launch.instance_type,
             region = %launch.region,
             name = %launch.name,
-            price_cents_per_hour = request.candidate.price_cents_per_hour,
+            price_cents_per_hour = ?request.offer.price_cents_per_hour,
             "launching one instance"
         );
         let ids = match self.api.launch(launch) {
@@ -366,16 +381,17 @@ impl LambdaProvider {
         };
         gate.unknown.remove(wanted);
         let held = Held {
-            id: first.clone(),
+            id: first.host_ref(),
             acquire: wanted.to_owned(),
             name: Some(launch.name.clone()),
-            instance_type: launch.instance_type.clone(),
-            region: launch.region.clone(),
-            status: Status::Booting,
+            offer: launch.instance_type.clone(),
+            zone: Some(launch.region.clone()),
+            status: HostStatus::Booting,
         };
         let due = now + self.config.unknown_hold;
         gate.answered.push(Answered {
             held: held.clone(),
+            id: first.clone(),
             primary: true,
             due,
         });
@@ -383,9 +399,10 @@ impl LambdaProvider {
         for id in rest {
             gate.answered.push(Answered {
                 held: Held {
-                    id: id.clone(),
+                    id: id.host_ref(),
                     ..held.clone()
                 },
+                id: id.clone(),
                 primary: false,
                 due,
             });
@@ -396,12 +413,12 @@ impl LambdaProvider {
                 tracing::error!(%id, "a launch started more than one instance; releasing the extra");
                 // A 404 right after a launch may be a read that lags the write, so for
                 // an extra it is not evidence of "gone".
-                let released = match self.release(id) {
+                let released = match self.release_instance(id) {
                     Released::Gone => Released::Unknown,
                     other => other,
                 };
                 Extra {
-                    id: id.clone(),
+                    id: id.host_ref(),
                     released,
                 }
             })
@@ -410,17 +427,40 @@ impl LambdaProvider {
     }
 }
 
-impl Elastic for LambdaProvider {
+impl ElasticProvider for LambdaProvider {
+    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+        let types = self.api.instance_types().map_err(provider_error)?;
+        Ok(select::offers(&self.options, &types))
+    }
+
+    fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
+        Vec::new()
+    }
+
+    fn payload_limit(&self) -> usize {
+        PAYLOAD_LIMIT
+    }
+
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);
         }
-        if self.options.get(&request.candidate.instance_type).is_none() {
+        let (Some(zone), Some(_)) = (
+            request.offer.zone.as_deref(),
+            self.options.get(&request.offer.id),
+        ) else {
             return Self::refuse(RefusalCode::Shape, Reason::NotAllowed);
+        };
+        if !self.owner.owns_name(&request.name) {
+            return Self::refuse(RefusalCode::Shape, Reason::Name);
         }
-        let launch = match self.launch_request(request) {
+        let (len, limit) = (request.payload.len(), self.payload_limit());
+        if len > limit {
+            return Self::refuse(RefusalCode::Shape, Reason::PayloadTooLarge { len, limit });
+        }
+        let launch = match self.launch_request(request, zone) {
             Ok(launch) => launch,
-            Err(why) => return Self::refuse(RefusalCode::Shape, Reason::Label(why)),
+            Err(why) => return Self::refuse(RefusalCode::Shape, Reason::Label(why.to_string())),
         };
         if self.config.mode == Mode::DryRun {
             // Once at info level, then quietly: a pool asks again every tick.
@@ -440,17 +480,30 @@ impl Elastic for LambdaProvider {
         self.launch_locked(&mut gate, request, &launch)
     }
 
-    fn list(&self) -> Result<Vec<Held>, ApiError> {
+    fn list(&self) -> Result<Vec<Held>, ProviderError> {
         Ok(self
             .api
-            .list_instances()?
+            .list_instances()
+            .map_err(provider_error)?
             .iter()
             .filter(|row| self.owner.claim(row) == Claim::Ours)
-            .map(Held::of)
+            .map(held_of)
             .collect())
     }
 
-    fn release(&self, id: &InstanceId) -> Released {
+    fn release(&self, id: &HostRef) -> Released {
+        match InstanceId::new(id.as_str()) {
+            Ok(id) => self.release_instance(&id),
+            // Not an id of this API, so not an instance of it: nothing was asked, and
+            // nothing shows it gone.
+            Err(_) => Released::Unknown,
+        }
+    }
+}
+
+impl LambdaProvider {
+    /// Terminates one instance, if it is ours, and reads it back.
+    fn release_instance(&self, id: &InstanceId) -> Released {
         let first = match self.api.get_instance(id) {
             Ok(found) => found,
             Err(error) if self.trust_absent(&error) => return Released::Gone,
@@ -473,11 +526,27 @@ impl Elastic for LambdaProvider {
             Err(error) if self.trust_absent(&error) => Released::Gone,
             Err(_) => Released::Unknown,
             Ok(after) => match (&after.status, confirmed) {
-                (Status::Terminating | Status::Terminated, _) | (_, true) => {
+                (HostStatus::Terminating | HostStatus::Terminated, _) | (_, true) => {
                     Released::Terminating(after.status)
                 }
                 _ => Released::Unknown,
             },
         }
+    }
+}
+
+fn provider_error(error: ApiError) -> ProviderError {
+    ProviderError::new(error.to_string())
+}
+
+/// The scheduler's view of an instance.
+fn held_of(instance: &Instance) -> Held {
+    Held {
+        id: instance.id.host_ref(),
+        acquire: Owner::acquire_of(instance).unwrap_or_default().to_owned(),
+        name: instance.name.clone(),
+        offer: instance.instance_type.clone(),
+        zone: Some(instance.region.clone()),
+        status: instance.status.clone(),
     }
 }

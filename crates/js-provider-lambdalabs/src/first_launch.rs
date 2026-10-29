@@ -31,17 +31,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootPayload, Claim, Demand, ElasticProvider, Held,
+    HostName, HostRef, HostStatus, Offer, Released, SchedulerId,
+};
+use js_types::Resources;
 use sha2::{Digest, Sha256};
 
 use crate::api::LambdaApi;
 use crate::clock::Clock;
 use crate::config::ElasticConfig;
-use crate::elastic::{AcquireRequest, Acquired, Candidate, Elastic, GpuRequest, Held, Released};
 use crate::http::SetupError;
 use crate::key::ApiKey;
-use crate::model::{InstanceId, Status};
-use crate::options::{GpuClass, OptionTable};
-use crate::own::{AcquireId, Claim, Owner, SchedulerId};
+use crate::model::InstanceId;
+use crate::options::OptionTable;
+use crate::own::Owner;
 use crate::provider::LambdaProvider;
 
 use args::{Args, Mode, Ssh};
@@ -178,7 +182,9 @@ pub fn run(args: &[String], seams: &Seams<'_>, out: &mut dyn Write) -> i32 {
 
 /// What a dry run prints and a launch is checked against.
 struct Plan {
-    candidate: Candidate,
+    offer: Offer,
+    /// The offer's price per hour, which is more than zero.
+    price_cents_per_hour: u64,
     key_name: String,
     state_file: std::path::PathBuf,
     text: String,
@@ -238,12 +244,8 @@ impl Runner<'_, '_> {
     }
 
     /// A provider that may use the instance types of `rows` (name and GPU count), with
-    /// room for one machine, and the class its rows carry.
-    fn build(
-        &mut self,
-        rows: &[(String, u32)],
-        key_name: &str,
-    ) -> Result<(LambdaProvider, GpuClass), i32> {
+    /// room for one machine.
+    fn build(&mut self, rows: &[(String, u32)], key_name: &str) -> Result<LambdaProvider, i32> {
         // One row at a time, so that a type name the table would refuse (the API's
         // naming is not ours to trust) only drops that type; the later row of a name
         // seen twice replaces the earlier one.
@@ -263,7 +265,6 @@ impl Runner<'_, '_> {
                 "paste back this output.",
             ));
         };
-        let class = table.rows()[0].gpu_class.clone();
         let config = ElasticConfig::new(SchedulerId::made(OWNER), key_name, NonZeroUsize::MIN);
         let Ok(config) = config else {
             return Err(self.fail(
@@ -277,7 +278,7 @@ impl Runner<'_, '_> {
             table,
             config.enable().live(),
         );
-        Ok((provider, class))
+        Ok(provider)
     }
 
     /// The plan for the flags and the account as the API shows it now.
@@ -299,12 +300,16 @@ impl Runner<'_, '_> {
             }
         };
         let rows: Vec<(String, u32)> = offers.iter().map(|o| (o.name.clone(), o.gpus)).collect();
-        let (provider, any) = self.build(&rows, &key_name)?;
-        let want = GpuRequest {
-            cpu_millis: 0,
-            memory_bytes: 0,
-            gpus: 1,
-            gpu_class: any,
+        let provider = self.build(&rows, &key_name)?;
+        // Every row of the generated table is a GPU type of the one class `any`, so asking
+        // for no resources at all still picks only among GPU types; the agent is released
+        // for x86_64 only.
+        let want = Demand {
+            resources: Resources::default(),
+            disk_bytes: None,
+            os: None,
+            arch: Some("x86_64".to_owned()),
+            exec: None,
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,
@@ -317,24 +322,26 @@ impl Runner<'_, '_> {
         };
         let args = self.args;
         let chosen = options.into_iter().find(|c| {
-            args.instance_type
-                .as_ref()
-                .is_none_or(|t| *t == c.instance_type)
-                && args.region.as_ref().is_none_or(|r| *r == c.region)
+            args.instance_type.as_ref().is_none_or(|t| *t == c.id)
+                && args
+                    .region
+                    .as_ref()
+                    .is_none_or(|r| c.zone.as_deref() == Some(r.as_str()))
         });
-        let Some(candidate) = chosen else {
+        let Some(offer) = chosen else {
             return Err(self.fail(
                 "no x86_64 GPU instance type with capacity fits the flags",
                 "nothing was launched; paste back this output.",
             ));
         };
-        if candidate.price_cents_per_hour == 0 {
+        let Some(price_cents_per_hour) = offer.price_cents_per_hour.filter(|price| *price > 0)
+        else {
             return Err(self.fail(
                 "the API gave no price for the instance type",
                 "nothing was launched; paste back this output.",
             ));
-        }
-        let caps = Caps::new(args, candidate.price_cents_per_hour);
+        };
+        let caps = Caps::new(args, price_cents_per_hour);
         let how = match (&args.instance_type, &args.region) {
             (None, None) => "the cheapest x86_64 GPU type with capacity",
             _ => "named by flag, with capacity",
@@ -346,10 +353,10 @@ impl Runner<'_, '_> {
         let text = format!(
             "first launch plan\n  api: {}\n  choice: {how}\n  instance type: {}\n  region: {}\n  gpus: {}\n  price: {} cents per hour (from the API)\n  ssh key name on the account: {key_name}\n  state file: {}\n  boot deadline: {} s\n  wall-clock cap: {} s\n  spend cap: {} cents, reached {} s after the launch at this price\n  ssh check: {ssh}\n  instances launched: 1\n",
             args.base_url,
-            candidate.instance_type,
-            candidate.region,
-            candidate.gpus,
-            candidate.price_cents_per_hour,
+            offer.id,
+            offer.zone.as_deref().unwrap_or_default(),
+            offer.gpus,
+            price_cents_per_hour,
             state_file.display(),
             args.boot_deadline.as_secs(),
             args.wall_cap.as_secs(),
@@ -360,7 +367,8 @@ impl Runner<'_, '_> {
         let hash: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         Ok((
             Plan {
-                candidate,
+                offer,
+                price_cents_per_hour,
                 key_name,
                 state_file,
                 text,
@@ -386,7 +394,7 @@ impl Runner<'_, '_> {
         };
         let lines: Vec<String> = all
             .iter()
-            .filter(|i| i.status != Status::Terminated)
+            .filter(|i| i.status != HostStatus::Terminated)
             .filter_map(|i| {
                 let marks = match owner.claim(i) {
                     Claim::Ours => "ours",
@@ -454,9 +462,9 @@ impl Runner<'_, '_> {
             acquire: acquire.clone(),
             launched_unix: (self.seams.wall_unix)(),
             key_name: plan.key_name.clone(),
-            instance_type: plan.candidate.instance_type.clone(),
-            region: plan.candidate.region.clone(),
-            price_cents_per_hour: plan.candidate.price_cents_per_hour,
+            instance_type: plan.offer.id.clone(),
+            region: plan.offer.zone.clone().unwrap_or_default(),
+            price_cents_per_hour: plan.price_cents_per_hour,
             instances: Vec::new(),
         };
         if let Err(why) = state.create(&plan.state_file, self.seams.sync_dir) {
@@ -487,10 +495,13 @@ impl Runner<'_, '_> {
         }
         let launched_at = self.seams.clock.now();
         let request = AcquireRequest {
+            name: HostName::derive(&SchedulerId::made(OWNER), &acquire),
             acquire: acquire.clone(),
             pool: OWNER.to_owned(),
+            offer: plan.offer.clone(),
             labels: Vec::new(),
-            candidate: plan.candidate.clone(),
+            // This runner boots nothing of its own: the stock image, no payload.
+            payload: BootPayload::new(String::new()),
         };
         let ids = match provider.acquire(&request) {
             Acquired::Accepted { held, extras } => {
@@ -521,10 +532,10 @@ impl Runner<'_, '_> {
         };
         state.instances.clone_from(&ids);
         let recorded = state.replace(&plan.state_file, self.seams.sync_dir);
-        let names: Vec<&str> = ids.iter().map(InstanceId::as_str).collect();
+        let names: Vec<&str> = ids.iter().map(HostRef::as_str).collect();
         self.say(format_args!("launched: {}", names.join(" ")));
         self.say(format_args!("state file: {}", plan.state_file.display()));
-        let caps = Caps::new(self.args, plan.candidate.price_cents_per_hour);
+        let caps = Caps::new(self.args, plan.price_cents_per_hour);
         let mut ok = true;
         let reason = match recorded {
             Err(why) => Some(format!("the state file could not be updated: {why}")),
@@ -535,7 +546,7 @@ impl Runner<'_, '_> {
             ok = false;
         }
         let torn = self.terminate_all(provider, &ids);
-        let spent = (u128::from(plan.candidate.price_cents_per_hour)
+        let spent = (u128::from(plan.price_cents_per_hour)
             * self
                 .seams
                 .clock
@@ -551,7 +562,7 @@ impl Runner<'_, '_> {
                 "TERMINATION NOT CONFIRMED"
             },
             self.seams.clock.now().saturating_sub(launched_at).as_secs(),
-            plan.candidate.price_cents_per_hour,
+            plan.price_cents_per_hour,
         ));
         self.finish(ok && torn, torn, &plan.state_file)
     }
@@ -575,13 +586,13 @@ impl Runner<'_, '_> {
     fn wait_and_ask(
         &mut self,
         provider: &LambdaProvider,
-        ids: &[InstanceId],
+        ids: &[HostRef],
         launched_at: Duration,
         caps: &Caps,
         ok: &mut bool,
     ) -> Option<String> {
         let clock = self.seams.clock.clone();
-        let mut shown: Option<Status> = None;
+        let mut shown: Option<HostStatus> = None;
         loop {
             if self.stop_requested() {
                 return Some(INTERRUPTED.to_owned());
@@ -598,8 +609,12 @@ impl Runner<'_, '_> {
                         shown.clone_from(&status);
                     }
                     match status {
-                        Some(Status::Active) => break,
-                        Some(Status::Terminating | Status::Terminated | Status::Preempted) => {
+                        Some(HostStatus::Active) => break,
+                        Some(
+                            HostStatus::Terminating
+                            | HostStatus::Terminated
+                            | HostStatus::Preempted,
+                        ) => {
                             return Some("the instance ended on its own".to_owned());
                         }
                         _ => {}
@@ -638,8 +653,11 @@ impl Runner<'_, '_> {
         None
     }
 
-    fn ask(&mut self, ssh: &Ssh, id: &InstanceId, left: Duration) -> bool {
-        let host = self.api.get_instance(id).ok().and_then(|i| i.ip);
+    fn ask(&mut self, ssh: &Ssh, id: &HostRef, left: Duration) -> bool {
+        let host = InstanceId::new(id.as_str())
+            .ok()
+            .and_then(|valid| self.api.get_instance(&valid).ok())
+            .and_then(|i| i.ip);
         let Some(host) = host else {
             self.say("ssh check failed: the instance has no public address");
             return false;
@@ -671,7 +689,7 @@ impl Runner<'_, '_> {
 
     /// Terminates every instance of `ids`, a bounded number of tries each, reading each
     /// back. True when every one is confirmed going or gone.
-    fn terminate_all(&mut self, provider: &LambdaProvider, ids: &[InstanceId]) -> bool {
+    fn terminate_all(&mut self, provider: &LambdaProvider, ids: &[HostRef]) -> bool {
         let mut all = true;
         for id in ids {
             let mut done = false;
@@ -680,7 +698,7 @@ impl Runner<'_, '_> {
                 self.say(format_args!("terminate {id}, try {attempt}: {released:?}"));
                 match released {
                     Released::Gone
-                    | Released::Terminating(Status::Terminating | Status::Terminated) => {
+                    | Released::Terminating(HostStatus::Terminating | HostStatus::Terminated) => {
                         done = true;
                         break;
                     }
@@ -704,7 +722,7 @@ impl Runner<'_, '_> {
             }
         };
         let rows = [(state.instance_type.clone(), 1)];
-        let (provider, _) = match self.build(&rows, &state.key_name) {
+        let provider = match self.build(&rows, &state.key_name) {
             Ok(built) => built,
             Err(status) => return status,
         };
@@ -725,7 +743,7 @@ impl Runner<'_, '_> {
                 "check the provider console, then paste back this output.",
             );
         }
-        let names: Vec<&str> = ids.iter().map(InstanceId::as_str).collect();
+        let names: Vec<&str> = ids.iter().map(HostRef::as_str).collect();
         self.say(format_args!("tearing down: {}", names.join(" ")));
         let torn = self.terminate_all(&provider, &ids);
         self.say(format_args!(
@@ -740,7 +758,7 @@ impl Runner<'_, '_> {
     }
 }
 
-fn matching(held: &[Held], acquire: &AcquireId) -> Vec<InstanceId> {
+fn matching(held: &[Held], acquire: &AcquireId) -> Vec<HostRef> {
     held.iter()
         .filter(|h| h.acquire == acquire.as_str())
         .map(|h| h.id.clone())

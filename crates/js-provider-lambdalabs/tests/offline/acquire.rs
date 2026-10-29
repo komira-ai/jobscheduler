@@ -2,12 +2,12 @@
 
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    Acquired, ApiError, Call, Elastic, ErrorCode, Reason, Refusal, RefusalCode, SCHEDULER_TAG,
-    Status,
+use js_elastic::{
+    Acquired, BootPayload, ElasticProvider, HostStatus, Reason, Refusal, RefusalCode, Released,
 };
+use js_provider_lambdalabs::{ApiError, Call, ErrorCode, SCHEDULER_TAG};
 
-use crate::rig::{INTERVAL, SCHEDULER, ask, candidate, config, id, live, rig, row, tag};
+use crate::rig::{INTERVAL, SCHEDULER, ask, candidate, config, host, id, live, rig, row, tag};
 
 fn refused(code: RefusalCode, reason: Reason) -> Acquired {
     Acquired::Refused(Refusal { code, reason })
@@ -73,11 +73,11 @@ fn the_same_request_that_dry_run_stops_launches_once_when_live() {
     };
     assert!(extras.is_empty());
     assert_eq!(held.acquire, "a");
-    assert_eq!(held.status, Status::Booting);
-    assert_eq!(held.instance_type, "gpu_1x_sample");
-    assert_eq!(held.region, "region-a");
+    assert_eq!(held.status, HostStatus::Booting);
+    assert_eq!(held.offer, "gpu_1x_sample");
+    assert_eq!(held.zone.as_deref(), Some("region-a"));
     let stored = &rig.fake.instances()[0];
-    assert_eq!(stored.id, held.id);
+    assert_eq!(stored.id.host_ref(), held.id);
     assert_eq!(stored.name, held.name);
 }
 
@@ -85,12 +85,45 @@ fn the_same_request_that_dry_run_stops_launches_once_when_live() {
 fn a_type_outside_the_option_table_is_refused_without_a_call() {
     let rig = rig(live(5));
     let mut request = ask("a");
-    request.candidate.instance_type = "gpu_2x_other".to_owned();
+    request.offer.id = "gpu_2x_other".to_owned();
     assert_eq!(
         rig.provider.acquire(&request),
         refused(RefusalCode::Shape, Reason::NotAllowed)
     );
     assert!(rig.fake.calls().is_empty());
+}
+
+#[test]
+fn an_offer_with_no_zone_is_refused_without_a_call() {
+    let rig = rig(live(5));
+    let mut request = ask("a");
+    request.offer.zone = None;
+    assert_eq!(
+        rig.provider.acquire(&request),
+        refused(RefusalCode::Shape, Reason::NotAllowed)
+    );
+    assert!(rig.fake.calls().is_empty());
+}
+
+#[test]
+fn a_payload_is_refused_until_the_provider_can_deliver_one_and_nothing_is_launched() {
+    let rig = rig(live(5));
+    assert_eq!(rig.provider.payload_limit(), 0);
+    let mut request = ask("a");
+    request.payload = BootPayload::new("join-token-MARKER".to_owned());
+    let answer = rig.provider.acquire(&request);
+    assert_eq!(
+        answer,
+        refused(
+            RefusalCode::Shape,
+            Reason::PayloadTooLarge { len: 17, limit: 0 }
+        )
+    );
+    // The refusal says how big the payload was and never what it held.
+    assert!(!format!("{answer:?}").contains("MARKER"));
+    assert!(rig.fake.calls().is_empty());
+    // With no payload the same request launches.
+    assert_eq!(held_id(&rig.provider.acquire(&ask("a"))), "fake0001");
 }
 
 #[test]
@@ -203,7 +236,7 @@ fn definite_refusals_map_to_their_constants() {
         rig.fake.fail_next(Call::Launch, api(status, code.clone()));
         assert_eq!(
             rig.provider.acquire(&ask("a")),
-            refused(want, Reason::Api(code.clone())),
+            refused(want, Reason::Api(code.to_string())),
             "{code:?}"
         );
         assert_eq!(rig.fake.launched(), 0);
@@ -214,12 +247,12 @@ fn definite_refusals_map_to_their_constants() {
 fn a_region_without_capacity_is_a_capacity_refusal_and_holds_no_slot() {
     let rig = rig(live(1));
     let mut request = ask("a");
-    request.candidate = candidate("region-z");
+    request.offer = candidate("region-z");
     assert_eq!(
         rig.provider.acquire(&request),
         refused(
             RefusalCode::Capacity,
-            Reason::Api(ErrorCode::InsufficientCapacity)
+            Reason::Api(ErrorCode::InsufficientCapacity.to_string())
         )
     );
     // The refusal launched nothing, so the single slot is free for the next one.
@@ -326,12 +359,13 @@ fn instances_of_other_owners_do_not_count_but_our_terminating_ones_do() {
     rig.fake.add_instance(row(
         "theirs",
         Some("their-box"),
-        Status::Active,
+        HostStatus::Active,
         vec![tag("team", "x")],
     ));
     held_id(&rig.provider.acquire(&ask("a")));
     rig.clock.advance(INTERVAL);
-    rig.fake.set_status(&id("fake0001"), Status::Terminating);
+    rig.fake
+        .set_status(&id("fake0001"), HostStatus::Terminating);
     // A terminating instance may still bill.
     held_id(&rig.provider.acquire(&ask("b")));
     rig.clock.advance(INTERVAL);
@@ -346,7 +380,7 @@ fn instances_of_other_owners_do_not_count_but_our_terminating_ones_do() {
         )
     );
     // A terminated one does not.
-    rig.fake.set_status(&id("fake0001"), Status::Terminated);
+    rig.fake.set_status(&id("fake0001"), HostStatus::Terminated);
     held_id(&rig.provider.acquire(&ask("c")));
 }
 
@@ -399,7 +433,7 @@ fn an_instance_whose_tags_were_replaced_blocks_launches() {
         refused(RefusalCode::Denied, Reason::HalfMarked { count: 1 })
     );
     // Once it is terminated it is not billing and the block lifts.
-    rig.fake.set_status(&id("fake0001"), Status::Terminated);
+    rig.fake.set_status(&id("fake0001"), HostStatus::Terminated);
     held_id(&rig.provider.acquire(&ask("b")));
 }
 
@@ -411,7 +445,7 @@ fn a_suspect_does_not_stop_the_idempotent_answer_for_an_acquire_already_launched
     rig.fake.add_instance(row(
         "odd",
         Some("someone"),
-        Status::Active,
+        HostStatus::Active,
         vec![tag(SCHEDULER_TAG, SCHEDULER)],
     ));
     assert_eq!(held_id(&rig.provider.acquire(&ask("a"))), "fake0001");
@@ -425,7 +459,11 @@ fn a_suspect_does_not_stop_the_idempotent_answer_for_an_acquire_already_launched
 
 #[test]
 fn an_instance_listed_for_this_acquire_in_a_dead_state_is_returned_as_it_is() {
-    for status in [Status::Unhealthy, Status::Preempted, Status::Active] {
+    for status in [
+        HostStatus::Unhealthy,
+        HostStatus::Preempted,
+        HostStatus::Active,
+    ] {
         let rig = rig(live(5));
         held_id(&rig.provider.acquire(&ask("a")));
         rig.fake.set_status(&id("fake0001"), status.clone());
@@ -441,7 +479,8 @@ fn an_instance_listed_for_this_acquire_in_a_dead_state_is_returned_as_it_is() {
 fn a_terminating_instance_of_this_acquire_is_not_adopted() {
     let rig = rig(live(5));
     held_id(&rig.provider.acquire(&ask("a")));
-    rig.fake.set_status(&id("fake0001"), Status::Terminating);
+    rig.fake
+        .set_status(&id("fake0001"), HostStatus::Terminating);
     rig.clock.advance(INTERVAL);
     assert_eq!(held_id(&rig.provider.acquire(&ask("a"))), "fake0002");
 }
@@ -491,15 +530,15 @@ fn an_answer_naming_two_instances_keeps_the_first_and_releases_the_other() {
     let Acquired::Accepted { held, extras } = rig.provider.acquire(&ask("a")) else {
         panic!("not accepted");
     };
-    assert_eq!(held.id, id("fake0001"));
+    assert_eq!(held.id, host("fake0001"));
     assert_eq!(extras.len(), 1);
-    assert_eq!(extras[0].id, id("fake0002"));
+    assert_eq!(extras[0].id, host("fake0002"));
     assert_eq!(
         extras[0].released,
-        js_provider_lambdalabs::Released::Terminating(Status::Terminating)
+        Released::Terminating(HostStatus::Terminating)
     );
-    let states: Vec<Status> = rig.fake.instances().into_iter().map(|i| i.status).collect();
-    assert_eq!(states, [Status::Booting, Status::Terminating]);
+    let states: Vec<HostStatus> = rig.fake.instances().into_iter().map(|i| i.status).collect();
+    assert_eq!(states, [HostStatus::Booting, HostStatus::Terminating]);
 }
 
 #[test]

@@ -6,11 +6,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    AcquireId, AcquireRequest, Acquired, ApiError, ApiKey, Candidate, Elastic, ElasticConfig,
-    ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider, LaunchRequest, ManualClock,
-    OptionTable, Reason, Refusal, RefusalCode, Released, SchedulerId, Tag,
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootPayload, ElasticProvider, GpuClass, HostName, Offer,
+    PriceUnit, Reason, Refusal, RefusalCode, Released, SchedulerId,
 };
+use js_provider_lambdalabs::{
+    ApiError, ApiKey, ElasticConfig, ErrorCode, HttpApi, InstanceId, LambdaApi, LambdaProvider,
+    LaunchRequest, ManualClock, OptionTable, Tag,
+};
+use js_types::ExecMode;
 use serde_json::{Value, json};
 
 use crate::reads::client;
@@ -164,16 +168,28 @@ fn provider(
 }
 
 fn ask() -> AcquireRequest {
+    let acquire = AcquireId::new("acq-1").unwrap();
     AcquireRequest {
-        acquire: AcquireId::new("acq-1").unwrap(),
+        name: HostName::derive(&SchedulerId::new("sched-one").unwrap(), &acquire),
+        acquire,
         pool: "pool-a".to_owned(),
-        labels: Vec::new(),
-        candidate: Candidate {
-            instance_type: "gpu_1x_sample".to_owned(),
-            region: "region-a".to_owned(),
-            price_cents_per_hour: 75,
+        offer: Offer {
+            id: "gpu_1x_sample".to_owned(),
+            zone: Some("region-a".to_owned()),
+            cpu_millis: 8000,
+            memory_bytes: 64 << 30,
+            disk_bytes: 100 << 30,
             gpus: 1,
+            gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            exec: ExecMode::Container,
+            price_cents_per_hour: Some(75),
+            price_unit: PriceUnit::UsCents,
+            available: true,
         },
+        labels: Vec::new(),
+        payload: BootPayload::new(String::new()),
     }
 }
 
@@ -231,23 +247,32 @@ fn statuses_and_codes_of_a_launch_become_the_provider_answers() {
             "error_insufficient_capacity.json",
             refused(
                 RefusalCode::Capacity,
-                Reason::Api(ErrorCode::InsufficientCapacity),
+                Reason::Api(ErrorCode::InsufficientCapacity.to_string()),
             ),
         ),
         (
             400,
             "error_quota_exceeded.json",
-            refused(RefusalCode::Quota, Reason::Api(ErrorCode::QuotaExceeded)),
+            refused(
+                RefusalCode::Quota,
+                Reason::Api(ErrorCode::QuotaExceeded.to_string()),
+            ),
         ),
         (
             401,
             "error_invalid_api_key.json",
-            refused(RefusalCode::Denied, Reason::Api(ErrorCode::InvalidApiKey)),
+            refused(
+                RefusalCode::Denied,
+                Reason::Api(ErrorCode::InvalidApiKey.to_string()),
+            ),
         ),
         (
             403,
             "error_account_inactive.json",
-            refused(RefusalCode::Denied, Reason::Api(ErrorCode::AccountInactive)),
+            refused(
+                RefusalCode::Denied,
+                Reason::Api(ErrorCode::AccountInactive.to_string()),
+            ),
         ),
         (429, "error_rate_limited.json", Acquired::Unknown),
         (500, "error_internal.json", Acquired::Unknown),
@@ -328,7 +353,7 @@ fn a_release_over_http_reads_terminates_one_id_and_reads_back() {
     server.on(TERMINATE, Reply::json(200, &fixture("terminate.json")));
     assert_eq!(
         provider.release(&held.id),
-        Released::Terminating(js_provider_lambdalabs::Status::Terminating)
+        Released::Terminating(js_elastic::HostStatus::Terminating)
     );
     let seen: Vec<String> = server
         .seen()

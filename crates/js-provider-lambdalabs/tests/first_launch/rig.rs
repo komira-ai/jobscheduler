@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use js_elastic::HostStatus;
 use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run, sync_dir};
 use js_provider_lambdalabs::{
     ApiKey, Architecture, FakeLambda, InstanceId, InstanceTypeOffer, LambdaApi, ManualClock,
-    Region, SetupError, Status,
+    Region, SetupError,
 };
 
 pub const KEY_BYTES: &str = "secret-key-bytes-4d2f";
@@ -75,7 +76,7 @@ pub fn id(text: &str) -> InstanceId {
 /// Makes the first instance active, with a public address.
 pub fn activate(fake: &FakeLambda) {
     fake.update_instance(&id(FIRST), &|i| {
-        i.status = Status::Active;
+        i.status = HostStatus::Active;
         i.ip = Some("203.0.113.7".to_owned());
     });
 }
@@ -312,7 +313,7 @@ impl Rig {
         fs::read_to_string(&self.state).unwrap()
     }
 
-    pub fn status_of(&self, id_text: &str) -> Status {
+    pub fn status_of(&self, id_text: &str) -> HostStatus {
         self.fake
             .instances()
             .into_iter()
