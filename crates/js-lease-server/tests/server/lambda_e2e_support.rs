@@ -261,32 +261,6 @@ impl Rig {
         // go on under the record's name.
         let host = flag("--host-id").map_or(name, |host| host.trim_matches('"'));
         let mut body = hello_body_of(host);
-        body["instance"] = json!({ "provider": "burst", "instance_id": instance });
-        body["accepts_host_credential"] = json!(true);
-        let bytes = body.to_string().into_bytes();
-        let addr = self.h.running.agent_addr().unwrap();
-        request(addr, "POST", "/v1/agent/hello", Some(token), Some(&bytes)).await
-    }
-
-    /// The hello the agent the `n`th launch booted would send, derived from the rendered
-    /// unit and nothing else: the host id is the one the unit's `ExecStart` gives with
-    /// `--host-id`, the capabilities are the ones the agent reports for the flags it is
-    /// given (a runtime and a mode with `--container-bin`, the GPU toolkit only with
-    /// `--gpu-toolkit-hook`).
-    pub fn agent_hello(&self, n: usize, name: &str) -> serde_json::Value {
-        let script = self.script(n);
-        let line = script
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("ExecStart="))
-            .expect("the unit has an ExecStart");
-        let words: Vec<&str> = line.split_whitespace().collect();
-        let flag = |wanted: &str| {
-            let at = words.iter().position(|word| *word == wanted);
-            at.map(|at| words.get(at + 1).copied().unwrap_or_default())
-        };
-        let host = flag("--host-id")
-            .unwrap_or_else(|| panic!("the unit passes no --host-id, so the agent registers under a name of its own, not {name}: {line}"));
-        let mut body = hello_body_of(host);
         body["instance"] = json!({ "provider": "burst", "instance_id": name });
         body["accepts_host_credential"] = json!(true);
         if flag("--container-bin").is_some() {
