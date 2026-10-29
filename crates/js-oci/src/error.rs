@@ -5,7 +5,13 @@ use std::net::IpAddr;
 use crate::policy::AddressClass;
 
 /// Why an artifact could not be pulled.
+///
+/// Text a registry supplied (a realm, a media type, a digest, a redirect target) is
+/// clipped to 128 bytes and, where it is shown unquoted, escaped; a URL carries no
+/// userinfo, query or fragment (a redirect to a CDN has its signature there). Nothing
+/// that can be printed from an error holds a credential.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// A repository name that is not `<registry>/<path>`, or a registry or namespace that
     /// is not well formed.
@@ -22,9 +28,22 @@ pub enum Error {
         /// The repository path.
         repository: String,
     },
-    /// A URL that is not https.
+    /// A URL that is not https (without its query, fragment and userinfo).
     #[error("{0} is not https")]
     Insecure(String),
+    /// A redirect or token endpoint on a port other than 443 or the registry's own: a
+    /// registry cannot send the client to probe other ports of a public host.
+    #[error(
+        "{host}: redirects and token endpoints may use only port 443 or the registry's own port {own}, not {port}"
+    )]
+    Port {
+        /// The host the URL named.
+        host: String,
+        /// The port it named.
+        port: u16,
+        /// The registry's port.
+        own: u16,
+    },
     /// A connection to an address the allow-list does not permit.
     #[error("{host} resolves to {addr}, a {class} address")]
     Address {
@@ -35,13 +54,15 @@ pub enum Error {
         /// Why the address is refused.
         class: AddressClass,
     },
-    /// A token endpoint on a host that is neither the registry's nor an allowed one.
+    /// A token endpoint on a host that is neither the registry's nor an allowed one, or
+    /// that is not an https URL (shown without its query, fragment and userinfo).
     #[error("the token realm {0} is not the registry's host or an allowed host")]
     Realm(String),
-    /// Connecting, the TLS handshake, the request or a body failed.
+    /// Connecting, the TLS handshake, the request or a body failed, or a time limit
+    /// passed.
     #[error("{what}: {why}")]
     Transport {
-        /// The URL, or the thing being done.
+        /// The URL (without query, fragment and userinfo), or the thing being done.
         what: String,
         /// What went wrong.
         why: String,
@@ -49,7 +70,7 @@ pub enum Error {
     /// A request was answered with a status that is not success.
     #[error("{url}: the registry answered {status}")]
     Status {
-        /// The URL asked.
+        /// The URL asked (without query, fragment and userinfo).
         url: String,
         /// The status.
         status: u16,

@@ -3,6 +3,7 @@
 
 use serde::Deserialize;
 
+use crate::text::{clip, escape, shown};
 use crate::{Digest, Error};
 
 /// Media types of the formats this client reads and the artifact types it knows.
@@ -165,28 +166,77 @@ impl Kind {
     }
 }
 
-/// A blob a manifest names.
+/// A blob a manifest names. It cannot be made outside this crate: the only descriptors
+/// there are come out of a [`Manifest`] that passed the checks of its [`Kind`], so the
+/// kind's media types and limits hold for every blob that is fetched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Descriptor {
+    media_type: String,
+    digest: Digest,
+    size: u64,
+}
+
+impl Descriptor {
     /// The blob's media type.
-    pub media_type: String,
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
     /// The blob's digest.
-    pub digest: Digest,
+    #[must_use]
+    pub fn digest(&self) -> &Digest {
+        &self.digest
+    }
+
     /// The blob's length in bytes.
-    pub size: u64,
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
 }
 
 /// A manifest that passed the checks of its [`Kind`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
+    digest: Digest,
+    bytes: Vec<u8>,
+    artifact_type: Option<String>,
+    config: Descriptor,
+    layers: Vec<Descriptor>,
+}
+
+impl Manifest {
     /// The digest the manifest's bytes were pinned by.
-    pub digest: Digest,
+    #[must_use]
+    pub fn digest(&self) -> &Digest {
+        &self.digest
+    }
+
+    /// The manifest exactly as received: it hashes to [`Manifest::digest`], so these
+    /// are the bytes to store.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// The `artifactType` the manifest states, if it does.
-    pub artifact_type: Option<String>,
+    #[must_use]
+    pub fn artifact_type(&self) -> Option<&str> {
+        self.artifact_type.as_deref()
+    }
+
     /// The config blob.
-    pub config: Descriptor,
+    #[must_use]
+    pub fn config(&self) -> &Descriptor {
+        &self.config
+    }
+
     /// The layers, in the manifest's order.
-    pub layers: Vec<Descriptor>,
+    #[must_use]
+    pub fn layers(&self) -> &[Descriptor] {
+        &self.layers
+    }
 }
 
 #[derive(Deserialize)]
@@ -237,8 +287,12 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
             actual: actual.to_string(),
         });
     }
-    let doc: Document = serde_json::from_slice(bytes)
-        .map_err(|e| Error::Malformed(format!("the manifest {pinned} is not a manifest: {e}")))?;
+    let doc: Document = serde_json::from_slice(bytes).map_err(|e| {
+        Error::Malformed(format!(
+            "the manifest {pinned} is not a manifest: {}",
+            escape(&e.to_string())
+        ))
+    })?;
     let media = doc.media_type.as_deref();
     if doc.manifests.is_some() || matches!(media, Some(OCI_INDEX | DOCKER_LIST)) {
         return Err(Error::Index(pinned.to_string()));
@@ -253,7 +307,8 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
         && !kind.manifest_types.contains(&media)
     {
         return Err(Error::Unsupported(format!(
-            "the manifest {pinned} has media type {media}"
+            "the manifest {pinned} has media type {}",
+            shown(media)
         )));
     }
     if let Some(want) = kind.artifact_type
@@ -261,7 +316,7 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
     {
         return Err(Error::ArtifactType {
             want: want.to_owned(),
-            have: doc.artifact_type,
+            have: doc.artifact_type.as_deref().map(clip),
         });
     }
     let missing = |what: &str| Error::Malformed(format!("the manifest {pinned} has no {what}"));
@@ -269,7 +324,7 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
     if !kind.config_types.contains(&config.media_type.as_str()) {
         return Err(Error::Unsupported(format!(
             "the config has media type {}",
-            config.media_type
+            shown(&config.media_type)
         )));
     }
     let layers = doc.layers.ok_or_else(|| missing("layers"))?;
@@ -300,7 +355,8 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
         if foreign || !kind.layer_types.contains(&layer.media_type.as_str()) {
             return Err(Error::Unsupported(format!(
                 "the layer {} has media type {} (or is served from elsewhere than the registry), which is not taken here",
-                layer.digest, layer.media_type
+                shown(&layer.digest),
+                shown(&layer.media_type)
             )));
         }
     }
@@ -310,6 +366,7 @@ pub(crate) fn parse(bytes: &[u8], pinned: &Digest, kind: &Kind) -> Result<Manife
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Manifest {
         digest: pinned.clone(),
+        bytes: bytes.to_vec(),
         artifact_type: doc.artifact_type,
         config: config.descriptor()?,
         layers,
@@ -323,8 +380,12 @@ pub(crate) fn check_platform(kind: &Kind, config: &[u8]) -> Result<(), Error> {
         os: Option<String>,
         architecture: Option<String>,
     }
-    let stated: Stated = serde_json::from_slice(config)
-        .map_err(|e| Error::Malformed(format!("the config is not JSON: {e}")))?;
+    let stated: Stated = serde_json::from_slice(config).map_err(|e| {
+        Error::Malformed(format!(
+            "the config is not JSON: {}",
+            escape(&e.to_string())
+        ))
+    })?;
     let field_ok = |have: &Option<String>, want: &str| match have {
         Some(have) => have == want,
         None => !kind.platform_stated,
@@ -333,7 +394,7 @@ pub(crate) fn check_platform(kind: &Kind, config: &[u8]) -> Result<(), Error> {
     if field_ok(&stated.os, want.os) && field_ok(&stated.architecture, want.architecture) {
         return Ok(());
     }
-    let say = |field: &Option<String>| field.as_deref().unwrap_or("unstated").to_owned();
+    let say = |field: &Option<String>| escape(field.as_deref().unwrap_or("unstated"));
     Err(Error::Platform {
         want: format!("{}/{}", want.os, want.architecture),
         have: format!("{}/{}", say(&stated.os), say(&stated.architecture)),
@@ -470,7 +531,7 @@ mod tests {
                     &good_config,
                     &ok_layer,
                 ),
-                "media type text/plain",
+                "media type \"text/plain\"",
             ),
             (
                 "no config",

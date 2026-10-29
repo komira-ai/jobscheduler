@@ -65,7 +65,7 @@ async fn first_layer(fx: &Fixture, artifact: &Artifact, sink: &mut Recording) ->
     let manifest = repo
         .fetch_manifest(&artifact.digest, &Kind::bundle())
         .await?;
-    repo.fetch_blob(&manifest.layers[0], sink).await
+    repo.fetch_blob(&manifest.layers()[0], sink).await
 }
 
 /// The error of fetching the manifest of `artifact` with `kind`.
@@ -94,20 +94,20 @@ async fn a_bundle_is_pulled_whole_and_each_sink_is_finished() {
         .fetch_manifest(&artifact.digest, &kind)
         .await
         .expect("manifest");
-    assert_eq!(manifest.digest, artifact.digest);
+    assert_eq!(*manifest.digest(), artifact.digest);
     assert_eq!(
-        manifest.artifact_type.as_deref(),
+        manifest.artifact_type(),
         Some("application/vnd.komira.js.bundle.v1")
     );
-    assert_eq!(manifest.layers.len(), 2);
+    assert_eq!(manifest.layers().len(), 2);
     assert_eq!(
         repo.fetch_config(&manifest, &kind).await.expect("config"),
         artifact.config
     );
     let (mut a, mut b) = (Recording::default(), Recording::default());
     let (first, second) = tokio::join!(
-        repo.fetch_blob(&manifest.layers[0], &mut a),
-        repo.fetch_blob(&manifest.layers[1], &mut b)
+        repo.fetch_blob(&manifest.layers()[0], &mut a),
+        repo.fetch_blob(&manifest.layers()[1], &mut b)
     );
     first.expect("first layer");
     second.expect("second layer");
@@ -117,7 +117,7 @@ async fn a_bundle_is_pulled_whole_and_each_sink_is_finished() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "js-oci-file-sink");
     let path = dir.join("layer");
     let mut file = tokio::fs::File::create(&path).await.expect("create");
-    repo.fetch_blob(&manifest.layers[1], &mut file)
+    repo.fetch_blob(&manifest.layers()[1], &mut file)
         .await
         .expect("to a file");
     assert_eq!(std::fs::read(&path).expect("read"), layers()[1]);
@@ -128,7 +128,7 @@ async fn a_bundle_is_pulled_whole_and_each_sink_is_finished() {
         .await
         .expect("chunked");
     let mut c = Recording::default();
-    repo.fetch_blob(&manifest.layers[1], &mut c)
+    repo.fetch_blob(&manifest.layers()[1], &mut c)
         .await
         .expect("chunked blob");
     assert_eq!(c.bytes, layers()[1]);
@@ -446,7 +446,7 @@ async fn a_bearer_challenge_is_answered_once_and_the_token_is_used() {
         ]
     );
     let mut sink = Recording::default();
-    repo.fetch_blob(&manifest.layers[0], &mut sink)
+    repo.fetch_blob(&manifest.layers()[0], &mut sink)
         .await
         .expect("blob");
     assert_eq!(
@@ -646,7 +646,16 @@ async fn redirects_to_refused_addresses_are_not_followed() {
             format!("https://rebind.test:{port}/cdn/{{digest}}"),
             "loopback",
         ),
-        ("https://169.254.169.254/latest".to_owned(), "link-local"),
+        ("https://169.254.1.1/latest".to_owned(), "link-local"),
+        (
+            "https://169.254.169.254/latest".to_owned(),
+            "cloud-metadata",
+        ),
+        ("https://168.63.129.16/x".to_owned(), "cloud-metadata"),
+        ("https://[fd00:ec2::254]/x".to_owned(), "cloud-metadata"),
+        ("https://198.18.0.1/x".to_owned(), "multicast or reserved"),
+        ("https://[2002:7f00:1::1]/x".to_owned(), "loopback"),
+        ("https://[fec0::1]/x".to_owned(), "site-local"),
         ("https://10.0.0.1/x".to_owned(), "private"),
         ("https://192.168.1.1/x".to_owned(), "private"),
         ("https://[::ffff:a00:1]/x".to_owned(), "private"),
@@ -736,7 +745,8 @@ async fn the_token_realm_must_be_the_registry_or_a_listed_host() {
     let public_other = fx.client_with(vec![
         Allow::parse(&format!("{}/team", fx.at(REGISTRY)))
             .expect("entry")
-            .private(),
+            .private()
+            .loopback(),
         Allow::parse(&format!("{}/team", fx.at(OTHER))).expect("entry"),
     ]);
     let repo = public_other
@@ -798,7 +808,7 @@ async fn transport_failures_are_errors_not_hangs() {
     let repo = client.repository(fx.location(REPO)).expect("repository");
     fx.behave(|b| b.stall_body = true);
     let err = repo
-        .fetch_blob(&manifest.layers[0], &mut Recording::default())
+        .fetch_blob(&manifest.layers()[0], &mut Recording::default())
         .await
         .expect_err("stall");
     assert!(err.to_string().contains("stalled"), "{err}");
@@ -807,7 +817,7 @@ async fn transport_failures_are_errors_not_hangs() {
         b.short_body = true;
     });
     let err = repo
-        .fetch_blob(&manifest.layers[0], &mut Recording::default())
+        .fetch_blob(&manifest.layers()[0], &mut Recording::default())
         .await;
     assert!(matches!(err, Err(Error::Transport { .. })), "{err:?}");
 
@@ -838,7 +848,8 @@ async fn names_and_certificates_that_do_not_check_out_are_errors() {
         Policy::new(vec![
             Allow::parse(&format!("{}/team", fx.at(REGISTRY)))
                 .expect("entry")
-                .private(),
+                .private()
+                .loopback(),
         ])
     };
     let other_authority = Fixture::start().await.cert.clone();
@@ -1002,7 +1013,7 @@ async fn hostile_text_is_escaped_and_truncated_in_errors() {
         .await
         .expect("manifest");
     let err = repo
-        .fetch_blob(&manifest.layers[0], &mut Recording::default())
+        .fetch_blob(&manifest.layers()[0], &mut Recording::default())
         .await
         .expect_err("target");
     assert!(
@@ -1090,7 +1101,7 @@ async fn a_location_is_resolved_as_a_uri_reference() {
     ] {
         fx.behave(|b| b.redirect_blobs = Some(to.clone()));
         let mut sink = Recording::default();
-        repo.fetch_blob(&manifest.layers[0], &mut sink)
+        repo.fetch_blob(&manifest.layers()[0], &mut sink)
             .await
             .unwrap_or_else(|e| panic!("{to}: {e}"));
         assert_eq!(sink.bytes, layers()[0], "{to}");
@@ -1123,5 +1134,124 @@ async fn a_fragment_in_the_realm_does_not_swallow_the_scope() {
     assert!(
         request.contains("scope=repository:team/bundle:pull"),
         "{request}"
+    );
+}
+
+/// Proves a fetch is bounded as a whole and not only per wait: with the per-wait limits
+/// at their defaults, a manifest or a blob whose total limit is zero fails with a
+/// time-limit error and not a stall, and the sink is never finished.
+#[tokio::test]
+async fn a_fetch_that_outlasts_its_time_limit_fails() {
+    let artifact = bundle();
+    let kind = Kind::bundle();
+    let fx = started(&artifact).await;
+    let zero = Timeouts {
+        manifest: Duration::ZERO,
+        ..Timeouts::default()
+    };
+    let client = fx.client().with_timeouts(zero);
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let err = repo
+        .fetch_manifest(&artifact.digest, &kind)
+        .await
+        .expect_err("manifest limit");
+    assert!(
+        matches!(&err, Error::Transport { why, .. } if why.contains("time limit")),
+        "{err}"
+    );
+
+    let manifest = {
+        let client = fx.client();
+        let repo = client.repository(fx.location(REPO)).expect("repository");
+        repo.fetch_manifest(&artifact.digest, &kind)
+            .await
+            .expect("manifest")
+    };
+    let zero = Timeouts {
+        blob: Duration::ZERO,
+        ..Timeouts::default()
+    };
+    let client = fx.client().with_timeouts(zero);
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    fx.behave(|b| b.stall_body = true);
+    let mut sink = Recording::default();
+    let err = repo
+        .fetch_blob(&manifest.layers()[0], &mut sink)
+        .await
+        .expect_err("blob limit");
+    assert!(err.to_string().contains("time limit"), "{err}");
+    assert!(!err.to_string().contains("stalled"), "{err}");
+    assert!(!sink.finished);
+    let err = repo
+        .fetch_config(&manifest, &kind)
+        .await
+        .expect_err("config uses the blob limit");
+    assert!(err.to_string().contains("time limit"), "{err}");
+}
+
+/// Proves a manifest hands out what its checks covered: the exact bytes it was pinned by,
+/// its digest and artifact type, and each descriptor's media type, digest and size.
+#[tokio::test]
+async fn a_manifest_exposes_its_verified_bytes_and_descriptors() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    let client = fx.client();
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let manifest = repo
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    assert_eq!(manifest.bytes(), artifact.manifest.as_slice());
+    assert_eq!(Digest::of(manifest.bytes()), *manifest.digest());
+    assert_eq!(*manifest.digest(), artifact.digest);
+    let config = manifest.config();
+    assert_eq!(
+        (config.media_type(), config.size()),
+        (
+            "application/vnd.komira.js.bundle.config.v1+json",
+            artifact.config.len() as u64
+        )
+    );
+    assert_eq!(*config.digest(), Digest::of(&artifact.config));
+    let seen: Vec<(String, u64)> = manifest
+        .layers()
+        .iter()
+        .map(|l| (l.digest().to_string(), l.size()))
+        .collect();
+    let want: Vec<(String, u64)> = layers()
+        .iter()
+        .map(|l| (Digest::of(l).to_string(), l.len() as u64))
+        .collect();
+    assert_eq!(seen, want);
+    assert_eq!(
+        manifest.layers()[0].media_type(),
+        "application/vnd.komira.js.bundle.layer.v1.tar+zstd"
+    );
+}
+
+/// Proves the roots are reported: certificates that cannot be read are counted and left
+/// out, and a client with none that can be read fails every request and says how many
+/// it could not read.
+#[tokio::test]
+async fn unreadable_roots_are_counted_and_no_roots_is_an_error() {
+    let fx = Fixture::start().await;
+    let junk = rustls::pki_types::CertificateDer::from(vec![1u8, 2, 3]);
+    let policy = || Policy::new(vec![]);
+    let mixed = Client::with_roots(policy(), vec![fx.cert.clone(), junk.clone()]);
+    let summary = mixed.roots().expect("roots");
+    assert_eq!((summary.loaded, summary.unreadable), (1, 1));
+    let none = Client::with_roots(policy(), vec![]);
+    let err = none.roots().expect_err("no roots");
+    assert!(
+        err.to_string()
+            .contains("no trusted root certificates (0 could not be read)"),
+        "{err}"
+    );
+    let only_junk = Client::with_roots(policy(), vec![junk.clone(), junk]);
+    let err = only_junk.roots().expect_err("only junk");
+    assert!(
+        err.to_string()
+            .contains("no trusted root certificates (2 could not be read)"),
+        "{err}"
     );
 }

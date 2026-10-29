@@ -26,7 +26,7 @@ impl Digest {
         if ok.into_iter().all(|ok| ok) {
             Ok(Self(text.to_owned()))
         } else {
-            Err(Error::Digest(text.to_owned()))
+            Err(Error::Digest(crate::text::clip(text)))
         }
     }
 

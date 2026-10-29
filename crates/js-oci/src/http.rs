@@ -20,10 +20,21 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use crate::location::Authority;
+use crate::location::{Authority, HTTPS_PORT};
+use crate::text;
 use crate::{Error, Policy};
 
 /// How long each kind of wait may last.
+///
+/// `connect`, `head` and `idle` bound one wait each: a server that answers each in time
+/// but slowly can still hold a pull for as long as it likes, which is what `manifest`
+/// and `blob` are for. Each is a wall-clock limit on a whole fetch, redirects and token
+/// requests included, and the fetch fails with a transport error when it passes.
+///
+/// The defaults: `connect` 30 s, `head` 60 s, `idle` 60 s, `manifest` 5 minutes (a
+/// manifest is at most 4 MiB) and `blob` 2 hours (a bundle or image is at most 16 GiB,
+/// so a link that gives 2.4 MB/s still finishes). A caller with slower links raises
+/// `blob`; one that wants a drip-feeding registry cut off sooner lowers it.
 #[derive(Clone, Copy, Debug)]
 pub struct Timeouts {
     /// Resolving and connecting, including the TLS handshake.
@@ -32,6 +43,11 @@ pub struct Timeouts {
     pub head: Duration,
     /// Between two chunks of a body: a stall, not a total.
     pub idle: Duration,
+    /// The whole of fetching one manifest, from the first request to the last byte.
+    pub manifest: Duration,
+    /// The whole of fetching one blob (a config or a layer), from the first request to
+    /// the sink's `finish`.
+    pub blob: Duration,
 }
 
 impl Default for Timeouts {
@@ -40,8 +56,19 @@ impl Default for Timeouts {
             connect: Duration::from_secs(30),
             head: Duration::from_secs(60),
             idle: Duration::from_secs(60),
+            manifest: Duration::from_secs(5 * 60),
+            blob: Duration::from_secs(2 * 60 * 60),
         }
     }
+}
+
+/// What the client's root store held when it was built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootSummary {
+    /// Certificates trusted.
+    pub loaded: usize,
+    /// Certificates (or files of them) that could not be read, and were left out.
+    pub unreadable: usize,
 }
 
 /// Redirects followed for one request.
@@ -62,7 +89,7 @@ pub(crate) struct Http {
     /// Host names that resolve to a given address without asking the resolver.
     resolve: BTreeMap<String, IpAddr>,
     pub(crate) timeouts: Timeouts,
-    tls: OnceLock<Result<TlsConnector, String>>,
+    tls: OnceLock<Result<(TlsConnector, RootSummary), String>>,
 }
 
 impl std::fmt::Debug for Http {
@@ -90,18 +117,28 @@ impl Http {
         self.resolve.insert(host.to_ascii_lowercase(), ip);
     }
 
-    /// The TLS client, made on first use: loading the system store is not free, and a
-    /// client that fetches nothing never does.
-    fn connector(&self) -> Result<&TlsConnector, Error> {
+    /// The TLS client and what its roots were, made on first use: loading the system
+    /// store is not free, and a client that fetches nothing never does.
+    fn connector(&self) -> Result<&(TlsConnector, RootSummary), Error> {
         let made = self.tls.get_or_init(|| {
-            let certs = match &self.roots {
-                Roots::System => rustls_native_certs::load_native_certs().certs,
-                Roots::Given(certs) => certs.clone(),
+            let (certs, failed) = match &self.roots {
+                Roots::System => {
+                    let found = rustls_native_certs::load_native_certs();
+                    (found.certs, found.errors.len())
+                }
+                Roots::Given(certs) => (certs.clone(), 0),
             };
             let mut store = rustls::RootCertStore::empty();
-            let (added, _ignored) = store.add_parsable_certificates(certs);
+            let (added, ignored) = store.add_parsable_certificates(certs);
+            let summary = RootSummary {
+                loaded: added,
+                unreadable: ignored + failed,
+            };
             if added == 0 {
-                return Err("no trusted root certificates".to_owned());
+                return Err(format!(
+                    "no trusted root certificates ({} could not be read)",
+                    summary.unreadable
+                ));
             }
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let mut config = rustls::ClientConfig::builder_with_provider(provider)
@@ -110,12 +147,17 @@ impl Http {
                 .with_root_certificates(store)
                 .with_no_client_auth();
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Ok(TlsConnector::from(Arc::new(config)))
+            Ok((TlsConnector::from(Arc::new(config)), summary))
         });
         made.as_ref().map_err(|why| Error::Transport {
             what: "TLS".to_owned(),
             why: why.clone(),
         })
+    }
+
+    /// The roots this client trusts, loading them if nothing has yet.
+    pub(crate) fn roots(&self) -> Result<RootSummary, Error> {
+        self.connector().map(|(_, summary)| *summary)
     }
 
     /// The addresses `host` resolves to, each checked against the policy. The caller
@@ -140,16 +182,19 @@ impl Http {
     }
 
     /// GETs `url` with `headers`, following redirects. The headers go to `url` only: a
-    /// redirect target (a blob's CDN) gets the request without `Authorization`.
+    /// redirect target (a blob's CDN) gets the request without `Authorization`. `own`
+    /// is the registry (or token endpoint) the request began at: every hop may use port
+    /// 443 or `own`'s port and no other.
     pub(crate) async fn get(
         &self,
         url: &str,
         headers: &[(HeaderName, String)],
+        own: &Authority,
     ) -> Result<Response<Incoming>, Error> {
         let mut url = url.to_owned();
         let mut headers = headers.to_vec();
         for _ in 0..=MAX_REDIRECTS {
-            let response = self.get_once(&url, &headers).await?;
+            let response = self.get_once(&url, &headers, own).await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -158,14 +203,14 @@ impl Http {
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok())
                 .ok_or_else(|| Error::Transport {
-                    what: url.clone(),
+                    what: text::url(&url),
                     why: "a redirect with no Location".to_owned(),
                 })?;
             url = resolve(&url, to)?;
             headers.retain(|(name, _)| name != AUTHORIZATION);
         }
         Err(Error::Transport {
-            what: url,
+            what: text::url(&url),
             why: format!("more than {MAX_REDIRECTS} redirects"),
         })
     }
@@ -174,16 +219,25 @@ impl Http {
         &self,
         url: &str,
         headers: &[(HeaderName, String)],
+        own: &Authority,
     ) -> Result<Response<Incoming>, Error> {
+        // What an error may say of the URL: no query, fragment or userinfo.
         let transport = |why: String| Error::Transport {
-            what: url.to_owned(),
+            what: text::url(url),
             why,
         };
         let uri: Uri = url.parse().map_err(|e| transport(format!("{e}")))?;
         let authority = Authority::of_uri(&uri).filter(|_| uri.scheme_str() == Some("https"));
         let Some(authority) = authority else {
-            return Err(Error::Insecure(url.to_owned()));
+            return Err(Error::Insecure(text::url(url)));
         };
+        if ![HTTPS_PORT, own.port()].contains(&authority.port()) {
+            return Err(Error::Port {
+                host: authority.host().to_owned(),
+                port: authority.port(),
+                own: own.port(),
+            });
+        }
         // Before connecting: a name that cannot be a server's is no reason to dial.
         let name = ServerName::try_from(authority.host().to_owned())
             .map_err(|e| transport(e.to_string()))?;
@@ -194,6 +248,7 @@ impl Http {
                 .map_err(|e| transport(format!("connect: {e}")))?;
             let stream = self
                 .connector()?
+                .0
                 .connect(name, tcp)
                 .await
                 .map_err(|e| transport(format!("TLS: {e}")))?;
@@ -218,6 +273,24 @@ impl Http {
             .map_err(|e| transport(e.to_string()))
     }
 
+    /// Runs `work` for at most `limit`: a fetch that outlasts it fails with a transport
+    /// error naming `what`. Each wait inside a fetch is bounded by its own timeout; this
+    /// bounds the sum.
+    pub(crate) async fn within<T>(
+        &self,
+        limit: Duration,
+        what: &str,
+        work: impl Future<Output = Result<T, Error>>,
+    ) -> Result<T, Error> {
+        match tokio::time::timeout(limit, work).await {
+            Ok(done) => done,
+            Err(_) => Err(Error::Transport {
+                what: text::url(what),
+                why: "did not finish within its time limit".to_owned(),
+            }),
+        }
+    }
+
     /// The next chunk of `body`, or `None` at its end.
     pub(crate) async fn chunk(
         &self,
@@ -227,13 +300,13 @@ impl Http {
         let frame = tokio::time::timeout(self.timeouts.idle, body.frame())
             .await
             .map_err(|_| Error::Transport {
-                what: what.to_owned(),
+                what: text::url(what),
                 why: "the body stalled".to_owned(),
             })?;
         match frame {
             None => Ok(None),
             Some(Err(e)) => Err(Error::Transport {
-                what: what.to_owned(),
+                what: text::url(what),
                 why: e.to_string(),
             }),
             // Trailers come after all the data: a trailers frame is the body's end.
@@ -253,7 +326,7 @@ impl Http {
         while let Some(data) = self.chunk(what, &mut body).await? {
             if out.len() as u64 + data.len() as u64 > limit {
                 return Err(Error::TooLarge {
-                    what: what.to_owned(),
+                    what: text::url(what),
                     limit,
                 });
             }
@@ -281,31 +354,84 @@ where
     sender
 }
 
-/// The URL `location` names when it is a redirect from `from`: absolute, or a path on
-/// `from`'s own scheme and authority.
+/// The URL `location` names when it is a redirect from `from`, as RFC 3986 section 5
+/// resolves a reference: absolute, a network-path reference (`//host/path`), an
+/// absolute path, a relative path, or a bare query. The fragment is dropped (it is not
+/// sent), and dot segments are removed. Whether the result is https and where it points
+/// is for the caller's checks.
 fn resolve(from: &str, location: &str) -> Result<String, Error> {
-    if location.contains("://") {
-        return Ok(location.to_owned());
-    }
+    let location = location.split('#').next().unwrap_or_default();
     let uri: Uri = from.parse().map_err(|e| Error::Transport {
-        what: from.to_owned(),
+        what: text::url(from),
         why: format!("{e}"),
     })?;
     let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
         return Err(Error::Transport {
-            what: from.to_owned(),
+            what: text::url(from),
             why: "not an absolute URL".to_owned(),
         });
     };
-    let path = if location.starts_with('/') {
-        location.to_owned()
+    if has_scheme(location) {
+        return Ok(location.to_owned());
+    }
+    if location.starts_with("//") {
+        return Ok(format!("{scheme}:{location}"));
+    }
+    let (path, query) = match location.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (location, None),
+    };
+    let merged = if path.is_empty() {
+        uri.path().to_owned()
+    } else if path.starts_with('/') {
+        remove_dot_segments(path)
     } else {
         // Relative to the directory of the request's path.
         let base = uri.path();
         let dir = &base[..=base.rfind('/').unwrap_or(0)];
-        format!("{dir}{location}")
+        remove_dot_segments(&format!("{dir}{path}"))
     };
-    Ok(format!("{scheme}://{authority}{path}"))
+    let query = match (query, path.is_empty()) {
+        (Some(query), _) => Some(query),
+        (None, true) => uri.query(),
+        (None, false) => None,
+    };
+    Ok(match query {
+        Some(query) => format!("{scheme}://{authority}{merged}?{query}"),
+        None => format!("{scheme}://{authority}{merged}"),
+    })
+}
+
+/// Whether `reference` begins with a scheme (`https:`): a letter, then letters, digits,
+/// `+`, `-` and `.`, then a colon. A colon after a `/`, `?` or `#` is not one.
+fn has_scheme(reference: &str) -> bool {
+    let Some((scheme, _)) = reference.split_once(':') else {
+        return false;
+    };
+    let mut bytes = scheme.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic()) && bytes.all(text::scheme_byte)
+}
+
+/// `path` (which begins with `/`) with its `.` and `..` segments removed (RFC 3986
+/// section 5.2.4).
+fn remove_dot_segments(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').skip(1).collect();
+    let last = parts.len() - 1;
+    let mut out: Vec<&str> = Vec::new();
+    for (at, part) in parts.into_iter().enumerate() {
+        match part {
+            "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+        // A path that ends in a dot segment ends in a slash.
+        if at == last && matches!(part, "." | "..") {
+            out.push("");
+        }
+    }
+    format!("/{}", out.join("/"))
 }
 
 #[cfg(test)]
@@ -352,6 +478,11 @@ mod tests {
             ("/a/.", "https://r.example:5000/a/"),
             ("/x#frag", "https://r.example:5000/x"),
             ("https://cdn.test/y#frag", "https://cdn.test/y"),
+            ("HTTP://cdn.test/z", "HTTP://cdn.test/z"),
+            ("a+b-c.d:rest", "a+b-c.d:rest"),
+            (":x", "https://r.example:5000/v2/a/b/blobs/:x"),
+            ("1a:x", "https://r.example:5000/v2/a/b/blobs/1a:x"),
+            ("a b:x", "https://r.example:5000/v2/a/b/blobs/a b:x"),
         ] {
             assert_eq!(resolve(from, location).unwrap(), want, "{location:?}");
         }

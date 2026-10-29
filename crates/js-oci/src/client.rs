@@ -11,9 +11,10 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncWriteExt as _;
 
-use crate::http::{Http, Roots, Timeouts};
+use crate::http::{Http, RootSummary, Roots, Timeouts};
 use crate::location::Authority;
 use crate::manifest::{self, Descriptor, Kind, Manifest};
+use crate::text;
 use crate::{Digest, Error, Location, Policy};
 
 /// Where the bytes of a blob go as they arrive.
@@ -69,6 +70,17 @@ pub struct Client {
 
 impl Client {
     /// A client that trusts the host's system roots.
+    ///
+    /// The roots are read by `rustls-native-certs`, which honours the `SSL_CERT_FILE`
+    /// and `SSL_CERT_DIR` environment variables: when either is set, it names the trust
+    /// store and the platform's own store is not read. A process that must not have
+    /// its trust changed by its environment passes its roots explicitly with
+    /// [`Client::with_roots`]. Certificates that cannot be parsed are left out; if none
+    /// can be loaded every request fails, and [`Client::roots`] says how many were
+    /// loaded and how many were not.
+    ///
+    /// `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are not read and no proxy is used (see
+    /// the crate documentation).
     #[must_use]
     pub fn new(policy: Policy) -> Self {
         Self {
@@ -82,6 +94,20 @@ impl Client {
         Self {
             http: Http::new(policy, Roots::Given(roots)),
         }
+    }
+
+    /// The roots this client trusts: how many certificates it loaded and how many could
+    /// not be read. The system store is read here if nothing has yet; the client reads
+    /// it by itself on its first request otherwise.
+    ///
+    /// A caller logs this once at start-up: a count of unreadable roots that is not
+    /// zero, or a `loaded` that is far from what the machine should have, says the
+    /// trust store is damaged or was changed (see [`Client::new`] on the environment).
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when no root could be loaded, so no registry can be reached.
+    pub fn roots(&self) -> Result<RootSummary, Error> {
+        self.http.roots()
     }
 
     /// Replaces the timeouts.
@@ -114,7 +140,9 @@ impl Client {
 }
 
 /// One repository of a registry, with the token the registry gave for it. Its methods
-/// take `&self`, so blobs can be fetched concurrently.
+/// take `&self`, so blobs can be fetched concurrently. The client does not limit how
+/// many: a caller that fetches layers in parallel bounds them itself (four at a time,
+/// say), since each holds a connection and a sink open.
 #[derive(Debug)]
 pub struct Repository<'c> {
     http: &'c Http,
@@ -139,19 +167,24 @@ impl Repository<'_> {
     }
 
     /// The manifest pinned by `digest`: its bytes hash to `digest`, it is not an index,
-    /// and it is of `kind`.
+    /// and it is of `kind`. The whole fetch is bounded by [`Timeouts::manifest`].
     ///
     /// # Errors
     /// The registry cannot be reached or refuses, or the manifest is not an acceptable
     /// manifest of `kind` with that digest.
     pub async fn fetch_manifest(&self, digest: &Digest, kind: &Kind) -> Result<Manifest, Error> {
         let url = self.url("manifests", digest.as_str());
-        let response = self.get(&url, Some(&kind.accept())).await?;
-        let bytes = self
-            .http
-            .read_limited(&url, response, kind.limits.manifest)
-            .await?;
-        manifest::parse(&bytes, digest, kind)
+        let accept = kind.accept();
+        self.http
+            .within(self.http.timeouts.manifest, &url, async {
+                let response = self.get(&url, Some(&accept)).await?;
+                let bytes = self
+                    .http
+                    .read_limited(&url, response, kind.limits.manifest)
+                    .await?;
+                manifest::parse(&bytes, digest, kind)
+            })
+            .await
     }
 
     /// The config blob of `manifest`, verified, and checked to be for `kind`'s platform.
@@ -160,14 +193,18 @@ impl Repository<'_> {
     /// The blob fails its digest or size, is not JSON, or states another platform.
     pub async fn fetch_config(&self, manifest: &Manifest, kind: &Kind) -> Result<Vec<u8>, Error> {
         let mut bytes = Vec::new();
-        self.fetch_blob(&manifest.config, &mut bytes).await?;
+        self.fetch_blob(manifest.config(), &mut bytes).await?;
         manifest::check_platform(kind, &bytes)?;
         Ok(bytes)
     }
 
     /// The blob `blob` into `sink`, hashed as it arrives. The sink is finished only when
-    /// the blob is exactly `blob.size` bytes and hashes to `blob.digest`; on any error
-    /// the caller discards what the sink received.
+    /// the blob is exactly `blob.size()` bytes and hashes to `blob.digest()`; on any
+    /// error the caller discards what the sink received. The whole fetch is bounded by
+    /// [`Timeouts::blob`].
+    ///
+    /// A [`Descriptor`] can only come from a [`Manifest`] that passed its [`Kind`]'s
+    /// checks, so the kind's media types and size limits hold for `blob`.
     ///
     /// # Errors
     /// The registry cannot be reached or refuses, the blob is longer or shorter than the
@@ -177,35 +214,39 @@ impl Repository<'_> {
         blob: &Descriptor,
         sink: &mut dyn BlobSink,
     ) -> Result<(), Error> {
-        let url = self.url("blobs", blob.digest.as_str());
-        let response = self.get(&url, None).await?;
-        let mut body = response.into_body();
-        let mut hasher = Sha256::new();
-        let mut got = 0u64;
-        let size_error = |got| Error::BlobSize {
-            digest: blob.digest.to_string(),
-            declared: blob.size,
-            got,
-        };
-        while let Some(data) = self.http.chunk(&url, &mut body).await? {
-            got += data.len() as u64;
-            if got > blob.size {
-                return Err(size_error(got));
-            }
-            hasher.update(&data);
-            sink.write(&data).await.map_err(Error::Sink)?;
-        }
-        if got != blob.size {
-            return Err(size_error(got));
-        }
-        let actual = Digest::finish(hasher.finalize());
-        if actual != blob.digest {
-            return Err(Error::BlobDigest {
-                digest: blob.digest.to_string(),
-                actual: actual.to_string(),
-            });
-        }
-        sink.finish().await.map_err(Error::Sink)
+        let url = self.url("blobs", blob.digest().as_str());
+        self.http
+            .within(self.http.timeouts.blob, &url, async {
+                let response = self.get(&url, None).await?;
+                let mut body = response.into_body();
+                let mut hasher = Sha256::new();
+                let mut got = 0u64;
+                let size_error = |got| Error::BlobSize {
+                    digest: blob.digest().to_string(),
+                    declared: blob.size(),
+                    got,
+                };
+                while let Some(data) = self.http.chunk(&url, &mut body).await? {
+                    got += data.len() as u64;
+                    if got > blob.size() {
+                        return Err(size_error(got));
+                    }
+                    hasher.update(&data);
+                    sink.write(&data).await.map_err(Error::Sink)?;
+                }
+                if got != blob.size() {
+                    return Err(size_error(got));
+                }
+                let actual = Digest::finish(hasher.finalize());
+                if actual != *blob.digest() {
+                    return Err(Error::BlobDigest {
+                        digest: blob.digest().to_string(),
+                        actual: actual.to_string(),
+                    });
+                }
+                sink.finish().await.map_err(Error::Sink)
+            })
+            .await
     }
 
     /// GETs `url`, answering a Bearer challenge once, and returns a 2xx response.
@@ -223,20 +264,24 @@ impl Repository<'_> {
             if let Some(token) = self.token() {
                 headers.push((AUTHORIZATION, format!("Bearer {token}")));
             }
-            let response = self.http.get(url, &headers).await?;
+            let response = self
+                .http
+                .get(url, &headers, self.location.endpoint())
+                .await?;
             let status = response.status();
             if status.is_success() {
                 return Ok(response);
             }
+            let what = text::url(url);
             if status != hyper::StatusCode::UNAUTHORIZED {
                 return Err(Error::Status {
-                    url: url.to_owned(),
+                    url: what,
                     status: status.as_u16(),
                 });
             }
             if challenged {
                 return Err(Error::Auth(format!(
-                    "{url}: the registry refused the token it issued"
+                    "{what}: the registry refused the token it issued"
                 )));
             }
             challenged = true;
@@ -244,7 +289,7 @@ impl Repository<'_> {
                 .headers()
                 .get(WWW_AUTHENTICATE)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| Error::Auth(format!("{url}: 401 with no WWW-Authenticate")))?
+                .ok_or_else(|| Error::Auth(format!("{what}: 401 with no WWW-Authenticate")))?
                 .to_owned();
             let token = self.fetch_token(&challenge).await?;
             *self
@@ -258,45 +303,60 @@ impl Repository<'_> {
     /// registry's host or another allow-listed one.
     async fn fetch_token(&self, challenge: &str) -> Result<String, Error> {
         let params = Challenge::parse(challenge)?;
-        let realm = params
-            .realm
-            .parse::<hyper::Uri>()
-            .ok()
-            .filter(|uri| uri.scheme_str() == Some("https"))
-            .and_then(|uri| Authority::of_uri(&uri))
-            .filter(|host| self.http.policy.realm_ok(host, self.location.endpoint()));
-        if realm.is_none() {
-            return Err(Error::Realm(params.realm));
-        }
-        let scope = params
-            .scope
-            .unwrap_or_else(|| format!("repository:{}:pull", self.location.repository()));
-        let mut url = params.realm;
-        url.push(if url.contains('?') { '&' } else { '?' });
-        if let Some(service) = params.service {
-            url.push_str(&format!("service={}&", query_escape(&service)));
-        }
-        url.push_str(&format!("scope={}", query_escape(&scope)));
-        let response = self.http.get(&url, &[]).await?;
+        let (url, realm) = self.token_url(&params)?;
+        let what = text::url(&url);
+        let response = self.http.get(&url, &[], &realm).await?;
         if !response.status().is_success() {
             return Err(Error::Status {
-                url,
+                url: what,
                 status: response.status().as_u16(),
             });
         }
-        let body = self.http.read_limited(&url, response, 64 << 10).await?;
+        let body = self.http.read_limited(&what, response, 64 << 10).await?;
         #[derive(Deserialize)]
         struct Token {
             token: Option<String>,
             access_token: Option<String>,
         }
-        let token: Token = serde_json::from_slice(&body)
-            .map_err(|e| Error::Auth(format!("{url}: the token answer is not JSON: {e}")))?;
+        let token: Token = serde_json::from_slice(&body).map_err(|e| {
+            Error::Auth(format!(
+                "{what}: the token answer is not JSON: {}",
+                text::escape(&e.to_string())
+            ))
+        })?;
         token
             .token
             .or(token.access_token)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| Error::Auth(format!("{url}: the answer holds no token")))
+            .ok_or_else(|| Error::Auth(format!("{what}: the answer holds no token")))
+    }
+
+    /// The URL to ask for a token, and the endpoint it is at. The realm must be an https
+    /// URL on the registry's host or a listed one; its fragment (never sent) is dropped
+    /// before the service and scope are added to its query, so they cannot end up in it.
+    fn token_url(&self, params: &Challenge) -> Result<(String, Authority), Error> {
+        let bad = || Error::Realm(text::url(&params.realm));
+        let base = params.realm.split('#').next().unwrap_or_default();
+        let uri: hyper::Uri = base.parse().map_err(|_| bad())?;
+        let realm = Authority::of_uri(&uri)
+            .filter(|_| uri.scheme_str() == Some("https"))
+            .filter(|host| self.http.policy.realm_ok(host, self.location.endpoint()))
+            .ok_or_else(bad)?;
+        let mut query = String::new();
+        if let Some(existing) = uri.query() {
+            query.push_str(existing);
+            query.push('&');
+        }
+        if let Some(service) = &params.service {
+            query.push_str(&format!("service={}&", query_escape(service)));
+        }
+        let scope = params
+            .scope
+            .clone()
+            .unwrap_or_else(|| format!("repository:{}:pull", self.location.repository()));
+        query.push_str(&format!("scope={}", query_escape(&scope)));
+        let url = format!("https://{}{}?{query}", realm.header(), uri.path());
+        Ok((url, realm))
     }
 }
 
@@ -313,7 +373,8 @@ impl Challenge {
         let (scheme, rest) = header.split_once(' ').unwrap_or((header, ""));
         if !scheme.eq_ignore_ascii_case("bearer") {
             return Err(Error::Auth(format!(
-                "the registry asks for {scheme:?} authentication; only anonymous Bearer tokens are supported"
+                "the registry asks for {} authentication; only anonymous Bearer tokens are supported",
+                text::shown(scheme)
             )));
         }
         let (mut realm, mut service, mut scope) = (None, None, None);

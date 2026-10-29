@@ -239,7 +239,11 @@ impl Fixture {
             .iter()
             .map(|e| {
                 let entry = Allow::parse(e).expect("entry");
-                if private { entry.private() } else { entry }
+                if private {
+                    entry.private().loopback()
+                } else {
+                    entry
+                }
             })
             .collect();
         self.client_with(allow)

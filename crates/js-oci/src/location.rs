@@ -6,7 +6,7 @@ use std::net::Ipv6Addr;
 use crate::Error;
 
 /// The port a registry is reached at when its name gives none.
-const HTTPS_PORT: u16 = 443;
+pub(crate) const HTTPS_PORT: u16 = 443;
 
 /// A host and port, compared as the connection sees them: the host in lower case and
 /// without the brackets of an IPv6 literal.
