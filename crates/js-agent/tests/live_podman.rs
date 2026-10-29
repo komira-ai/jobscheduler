@@ -110,6 +110,7 @@ fn job(image: &str, scratch: &Path) -> ContainerSpec {
         scratch: scratch.to_path_buf(),
         isolation: Isolation::Contained,
         labels,
+        slot: 0,
     }
 }
 
