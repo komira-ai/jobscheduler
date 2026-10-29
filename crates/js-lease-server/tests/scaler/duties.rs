@@ -323,6 +323,16 @@ async fn a_host_the_registry_will_not_remove_is_removed_again_and_said_once() {
     let said = "the registry still holds the host js-remove-alert";
     assert_eq!(times(said), 1);
     assert_eq!(rig.scaler.alerts().len(), 1);
+    // The refusal is a warning once, and a debug line at each retry.
+    let refusals = |level: &str| {
+        let lines = logged();
+        let own = lines.lines().filter(|line| {
+            line.contains("js-remove-alert") && line.contains("remove the host of a machine")
+        });
+        own.filter(|line| line.contains(level)).count()
+    };
+    assert_eq!(refusals(" WARN "), 1);
+    assert_eq!(refusals(" DEBUG "), 2);
 
     rig.world().remove_ok = true;
     for _ in 0..2 {

@@ -16,7 +16,13 @@
 //! - the hosts whose join token it could not revoke. A revoke that failed is tried again
 //!   at the start of every tick, and the host's `Release` is not sent until the revoke has
 //!   gone through, so a machine is never terminated while its token still works;
-//! - the alerts it has raised, so that each is said once while it holds.
+//! - the alerts it has raised, so that each is said once while it holds;
+//! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. This
+//!   set is not on disk: a restart forgets it, and the new registry then holds the host of
+//!   a gone machine only when the lease file seated a lease on it, which nothing removes
+//!   but the registry's own `forget_lost` (24 hours after the host was lost, and only
+//!   when no lease is booked on it). A restart therefore waits on `forget_lost` for such a
+//!   host.
 //!
 //! The pool's health and offers are the pool's checks' (the `checks` module): the shell asks
 //! the provider for no catalog of its own.
@@ -300,15 +306,23 @@ impl Core {
     }
 
     /// Takes the host of a machine that is gone out of the registry; keeps it to try again
-    /// when the registry refuses, and says so.
+    /// when the registry refuses. The refusal is a warning the first time only: the same
+    /// refusal at each later tick (a lease its holder keeps renewing can last a long
+    /// while) is a debug line, and the alert says it once for as long as it holds.
     fn remove(&self, memory: &mut Memory, host: String) {
         match self.effects.remove(&host) {
-            Ok(()) => memory.unremoved.remove(&host),
-            Err(why) => {
-                warn!(%host, %why, "the registry did not remove the host of a machine that is gone; it is tried again");
-                memory.unremoved.insert(host)
+            Ok(()) => {
+                memory.unremoved.remove(&host);
             }
-        };
+            Err(why) => {
+                if memory.unremoved.contains(&host) {
+                    debug!(%host, %why, "the registry still does not remove the host of a machine that is gone");
+                } else {
+                    warn!(%host, %why, "the registry did not remove the host of a machine that is gone; it is tried again");
+                    memory.unremoved.insert(host);
+                }
+            }
+        }
     }
 
     /// Says what the step did that an operator should see: each machine released because
