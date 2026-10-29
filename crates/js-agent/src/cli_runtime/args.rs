@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{Engine, Settings};
+use super::{DEFAULT_NETWORK, Engine, Settings};
 use crate::lifecycle::ContainerSpec;
 
 /// Where the run's scratch directory is mounted, read-write, inside the container.
@@ -269,10 +269,13 @@ fn mount_value(
 /// and `/run` are such tmpfs mounts too), no core dumps, a private IPC namespace against a
 /// daemon whose default is to share it, a private control group namespace (both engines
 /// default to it on cgroup v2, but the integrity checks rely on a job seeing only its own
-/// group, so it is named), and the pull policy the agent was configured with (never by
-/// default). The user is not here: it is the run's slot's (`user_args`). For
+/// group, so it is named), the pull policy the agent was configured with (never by
+/// default), and, when `--actions-cgroup` is given, `--cgroup-parent` naming it so the
+/// container's usage is counted in it. The user is not here: it is the run's slot's
+/// (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
-/// container there, and its default is private. There is no `--rm`: the lifecycle
+/// container there, and its default is private. A `--add-host <name>:<ip>` follows the
+/// network for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = |dir: &str| format!("{dir}:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
@@ -298,6 +301,15 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     ]
     .map(str::to_owned)
     .to_vec();
+    // A job on a named network has no IPv6 at all, not even the link-local address of its
+    // veth (the egress rules drop IPv6 too; this removes it at the source). The network
+    // namespace is the container's own, so the engine takes the sysctl.
+    if settings.network() != DEFAULT_NETWORK {
+        args.extend(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"].map(str::to_owned));
+    }
+    for entry in settings.add_hosts() {
+        args.extend(["--add-host".to_owned(), entry.clone()]);
+    }
     if engine == Engine::Podman {
         // Podman's `--read-only` also mounts writable tmpfs at `/var/tmp` and at the
         // image's run path, with neither `noexec` nor a size (`--read-only-tmpfs` is on
@@ -315,6 +327,9 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         args.extend(["--pid", "private"].map(str::to_owned));
     }
     args.extend(["--pull", settings.pull().as_str()].map(str::to_owned));
+    if let Some(parent) = settings.cgroup_parent() {
+        args.extend(["--cgroup-parent", parent].map(str::to_owned));
+    }
     args
 }
 

@@ -221,6 +221,7 @@ fn releasing(name: &str) -> Records {
             seen_live: false,
         }],
         cooldowns: BTreeMap::new(),
+        ..Default::default()
     }
 }
 
