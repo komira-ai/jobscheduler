@@ -119,6 +119,10 @@ pub const TAIL_MINUTE: u16 = 63;
 /// Longest lease id in a load, in bytes: `u64::MAX-u64::MAX`. A load's lease id is held to
 /// this and to the `term-seq` form, not to [`MAX_ID_LEN`].
 pub const MAX_LEASE_REF_LEN: usize = 41;
+/// The most a [`crate::NodeLoad`] at every cap serialises to, in bytes (a test builds one
+/// and holds it to this). A host that reports a load must leave this much of the heartbeat
+/// body for it.
+pub const MAX_LOAD_BYTES: usize = 28 * 1024;
 /// The body a server reads for a heartbeat, in bytes; the server's own limit must equal
 /// it. A load at every cap here is about 25 KB, and beside 96 held runs and 8 results at
 /// the longest ids a beat stays under three quarters of it; a test fixes those totals.

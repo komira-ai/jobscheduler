@@ -5,15 +5,26 @@
 //! is 8 KiB a stream, but a job that prints control characters serialises six times as
 //! large (`\u00XX`), so the results are measured as they are sent.
 
-use js_agent_wire::{LogTail, limits};
+use js_agent_wire::{HeldRun, LogTail, limits};
 
 use super::Lifecycle;
 use crate::lifecycle::{Event, code};
 
-/// What the results of a heartbeat may weigh together once serialised: three quarters of
-/// the body the server reads (as the wire holds its own totals), less 8 KiB for the rest
-/// of the beat (the held list and the envelope).
-pub(super) const RESULTS_BUDGET: usize = limits::HEARTBEAT_BODY_BUDGET / 4 * 3 - 8 * 1024;
+/// What a heartbeat keeps for its envelope (ids, session, phase, taint, exclusive fields),
+/// in bytes.
+const ENVELOPE_MARGIN: usize = 4 * 1024;
+
+/// What the results of a heartbeat may weigh together once serialised, given the held
+/// list that goes with them: the whole body the server reads
+/// ([`limits::HEARTBEAT_BODY_BUDGET`]; a beat over it is refused and the agent ends) less
+/// the held list as it is, the most a load can weigh ([`limits::MAX_LOAD_BYTES`], reserved
+/// whether or not this agent sends one yet) and the envelope. Measuring the held list, and
+/// not assuming its worst case, leaves the room a host with short ids really has.
+fn results_budget(held: &[HeldRun]) -> usize {
+    let held = serde_json::to_vec(held).map_or(0, |bytes| bytes.len());
+    let rest = held + limits::MAX_LOAD_BYTES + ENVELOPE_MARGIN;
+    limits::HEARTBEAT_BODY_BUDGET.saturating_sub(rest)
+}
 
 /// `text` cut to at most `max` bytes, keeping the end, at a character boundary.
 fn keep_end(text: &mut String, max: usize) {
@@ -39,6 +50,12 @@ fn weight(tail: &LogTail) -> usize {
 }
 
 impl Lifecycle {
+    /// [`Lifecycle::fit_log_tails`] to what the next heartbeat can carry.
+    pub(super) fn fit_log_tails_to_beat(&mut self, events: &mut Vec<Event>) {
+        let budget = results_budget(&self.held());
+        self.fit_log_tails(budget, events);
+    }
+
     /// Cuts the log tails of the held results until their results serialise to at most
     /// `budget` bytes together: the largest tail is halved (the end is kept and
     /// `truncated` is set) again and again. A tail that is empty and still does not fit

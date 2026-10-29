@@ -1,7 +1,12 @@
 //! The log tail of a job that exited: read before the container is removed, carried by
 //! the result, and never able to change the result.
 
-use js_agent_wire::{LogTail, Outcome};
+use js_agent_wire::limits::{
+    HEARTBEAT_BODY_BUDGET, MAX_LOAD_LEASES, MAX_LOAD_MINUTES, MAX_MEMORY_BYTES, TAIL_MINUTE,
+};
+use js_agent_wire::{
+    Heartbeat, LeaseClock, LeaseMinute, LoadDrops, LogTail, NodeLoad, Outcome, Phase,
+};
 
 use super::{Harness, job};
 
@@ -159,4 +164,77 @@ fn halving_cuts_at_a_character_boundary_and_stops_when_it_fits() {
     );
     assert_eq!(cut.stderr, "");
     assert!(cut.truncated);
+}
+
+/// A load with every list at its cap and every id and number at its longest, as the wire's
+/// own size test builds it.
+fn full_load() -> NodeLoad {
+    let id = |i: usize| format!("{}-{}", u64::MAX - i as u64, u64::MAX);
+    NodeLoad {
+        seq: u64::MAX,
+        mono_usec: u64::MAX,
+        cpu_usage_usec: u64::MAX,
+        working_set_bytes: MAX_MEMORY_BYTES,
+        active_file_bytes: MAX_MEMORY_BYTES,
+        actions_cpu_limited: true,
+        covered: (0..MAX_LOAD_LEASES).map(id).collect(),
+        clocks: (0..MAX_LOAD_LEASES)
+            .map(|i| LeaseClock {
+                lease_id: id(i),
+                started_mono_usec: u64::MAX,
+            })
+            .collect(),
+        minutes: (0..MAX_LOAD_MINUTES)
+            .map(|i| LeaseMinute {
+                lease_id: id(i),
+                minute: TAIL_MINUTE,
+                cpu_mean_millis: u32::MAX,
+                cpu_peak_window_millis: u32::MAX,
+                ws_max_bytes: MAX_MEMORY_BYTES,
+            })
+            .collect(),
+        dropped: LoadDrops::default(),
+    }
+}
+
+/// Asserts that a whole heartbeat of a busy host stays within the body the server reads:
+/// 96 held runs with 128-byte ids, a load at every cap, and the 8 finished runs whose
+/// tails are full of control characters (six times as large once serialised), after the
+/// agent has shed what does not fit. A server answers a beat over the body limit with 413,
+/// which ends the agent, so this is the line between a noisy job and a dead agent. It
+/// catches a results budget that leaves too little room for the load and the held list
+/// (the first one, 40 KiB for the results alone, fails it).
+#[test]
+fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
+    let mut h = Harness::new("log-full-beat");
+    let wide = |i: usize| format!("{i:0>128}");
+    for i in 0..MAX_LOAD_LEASES {
+        let mut spec = job(&wide(i));
+        spec.limits.cpu_millis = 40;
+        spec.limits.memory_bytes = 1 << 20;
+        h.start(spec);
+    }
+    for i in 0..8 {
+        h.fake.print(&wide(i), noisy("S", 8190, "E"));
+        h.fake.exit(&wide(i), 1);
+    }
+    h.life.step();
+    let beat = Heartbeat {
+        host_id: wide(0),
+        epoch: u64::MAX,
+        session: wide(1),
+        phase: Phase::Serving,
+        held: h.life.held(),
+        results: h.life.results(),
+        taint: None,
+        exclusive_ready: None,
+        exclusive_refused: None,
+        load: Some(full_load()),
+    };
+    assert_eq!((beat.held.len(), beat.results.len()), (MAX_LOAD_LEASES, 8));
+    assert_eq!(beat.validate(), Ok(()));
+    let size = serde_json::to_vec(&beat).unwrap().len();
+    assert!(size <= HEARTBEAT_BODY_BUDGET, "{size} bytes");
+    let kept = beat.results.iter().filter(|r| r.log_tail.is_some()).count();
+    assert!(kept > 0, "the tails are cut down and not all dropped");
 }

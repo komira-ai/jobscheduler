@@ -130,7 +130,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
-        self.fit_log_tails(tails::RESULTS_BUDGET, &mut events);
+        self.fit_log_tails_to_beat(&mut events);
         self.sweep();
         events
     }

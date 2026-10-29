@@ -371,7 +371,7 @@ fn a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget() {
     assert_eq!(beat.validate(), Ok(()));
     let load_len = serde_json::to_string(&load).unwrap().len();
     let beat_len = serde_json::to_string(&beat).unwrap().len();
-    assert!(load_len <= 28 * 1024, "load {load_len} bytes");
+    assert!(load_len <= MAX_LOAD_BYTES, "load {load_len} bytes");
     assert!(beat_len <= 48 * 1024, "beat {beat_len} bytes");
     assert!(beat_len * 4 <= HEARTBEAT_BODY_BUDGET * 3);
 }
