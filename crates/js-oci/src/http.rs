@@ -13,7 +13,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Empty};
 use hyper::body::Incoming;
-use hyper::header::{AUTHORIZATION, CONNECTION, HOST, HeaderName, LOCATION, USER_AGENT};
+use hyper::header::{CONNECTION, HOST, HeaderName, LOCATION, USER_AGENT};
 use hyper::{Request, Response, Uri};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::{CertificateDer, ServerName};
@@ -147,7 +147,7 @@ impl Http {
         headers: &[(HeaderName, String)],
     ) -> Result<Response<Incoming>, Error> {
         let mut url = url.to_owned();
-        let mut headers = headers.to_vec();
+        let headers = headers.to_vec();
         for _ in 0..=MAX_REDIRECTS {
             let response = self.get_once(&url, &headers).await?;
             if !response.status().is_redirection() {
@@ -162,7 +162,6 @@ impl Http {
                     why: "a redirect with no Location".to_owned(),
                 })?;
             url = resolve(&url, to)?;
-            headers.retain(|(name, _)| name != AUTHORIZATION);
         }
         Err(Error::Transport {
             what: url,
