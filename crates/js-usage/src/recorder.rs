@@ -266,7 +266,11 @@ impl Recorder {
         }
         (
             Observed::Accepted,
-            state.take(load, now_wall_minute, counters),
+            if leases_only {
+                Vec::new()
+            } else {
+                state.take(load, now_wall_minute, counters)
+            },
         )
     }
 
