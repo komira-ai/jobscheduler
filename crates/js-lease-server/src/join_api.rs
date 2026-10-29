@@ -3,7 +3,10 @@
 //! `POST /v1/agent/join-tokens` is behind the client token, like the lease routes and the
 //! run routes: the server has no operator credential of its own, and whoever may take
 //! leases (the scheduler, the tooling that launches the instances) is who may admit the
-//! machines they launch. It exists only when agents register hosts.
+//! machines they launch. It exists only when agents register hosts. The scheduler's own
+//! launch path does the same in process ([`crate::agents::Agents::mint_for`] and
+//! `revoke_for`) and shares the token file with these routes. The `instance_id` is an id
+//! the minting side chose, not necessarily the provider's.
 //!
 //! ```text
 //! POST /v1/agent/join-tokens

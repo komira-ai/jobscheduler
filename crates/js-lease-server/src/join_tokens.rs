@@ -4,8 +4,11 @@
 //! machine that a provider launches for the pool should not hold such a token: it is
 //! delivered after boot, and whoever reads it can register hosts until the operator
 //! rotates it. A one-time token is the narrower credential. The operator's tooling mints
-//! one per launched instance (`POST /v1/agent/join-tokens`, behind the client token),
-//! names the provider's instance id, and delivers the token to that instance only.
+//! one per launched instance (`POST /v1/agent/join-tokens`, behind the client token, or
+//! [`crate::agents::Agents::mint_for`] in process), names an id the minting side chose
+//! for the instance, and delivers the token to that instance only. The id need not be
+//! the provider's own: the scaler chooses the host's name before the launch and binds the
+//! token to `<pool>:<name>`.
 //!
 //! A token is bound to the instance (provider and instance id) and to a time. The first
 //! hello that presents it, names that instance and arrives before the expiry registers the

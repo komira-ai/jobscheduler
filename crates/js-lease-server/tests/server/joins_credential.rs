@@ -340,7 +340,7 @@ async fn the_switch_refuses_an_unasked_first_hello_of_a_one_time_token() {
 }
 
 /// Asserts the switch is a flag of the registration side: it is refused without
-/// `--agent-token-file`, as the hello flags are. It catches a switch that parses where it
+/// `--agent-pool-config`, as the hello flags are. It catches a switch that parses where it
 /// could do nothing.
 #[test]
 fn the_switch_needs_agent_registration() {
