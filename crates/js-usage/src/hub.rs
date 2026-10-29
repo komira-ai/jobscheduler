@@ -461,7 +461,10 @@ impl UsageHub {
             .map(|m| m.lease)
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .filter(|lease| holds(lease, beat.host))
+            .filter(|lease| {
+                let _ = holds(lease, beat.host);
+                true
+            })
             .collect();
         let finished = {
             let mut books = self.books();
