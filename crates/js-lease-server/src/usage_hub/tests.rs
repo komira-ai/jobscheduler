@@ -33,6 +33,7 @@ struct Fake {
     prunes: AtomicUsize,
     fail: AtomicBool,
     panic_on_observe: AtomicBool,
+    panic_on_ended: AtomicBool,
     drop_with: Mutex<Option<DropReason>>,
 }
 
@@ -78,6 +79,10 @@ impl UsageSink for Fake {
     }
 
     fn run_ended(&self, end: &RunEnd, _: u64) -> Result<(), UsageFault> {
+        assert!(
+            !self.panic_on_ended.load(Ordering::SeqCst),
+            "the sink is broken"
+        );
         self.down()?;
         self.ended.lock().unwrap().push(end.clone());
         Ok(())
@@ -108,6 +113,15 @@ struct Keys(BTreeMap<String, ProfileKey>);
 impl KeySource for Keys {
     fn key_of(&self, run_id: &str) -> Option<ProfileKey> {
         self.0.get(run_id).cloned()
+    }
+}
+
+/// A key source that panics when asked.
+struct BrokenKeys;
+
+impl KeySource for BrokenKeys {
+    fn key_of(&self, _: &str) -> Option<ProfileKey> {
+        panic!("the key source is broken");
     }
 }
 
@@ -686,4 +700,132 @@ fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
     assert_eq!((counts.faults, counts.runs_learned), (1, 0));
     assert_eq!(counts.sink.minutes_deduped, 7);
     assert_eq!(usage.now_minute(), 16);
+}
+
+/// Asserts that a panic in the key source, which is asked while the hub is held, is caught
+/// and counted as a fault, that the call returns, and that the next beat is read as usual.
+/// It catches a panic that unwinds out of the hook, and one that leaves the hub unusable.
+#[test]
+fn a_panic_in_the_key_source_is_a_fault_and_the_hub_goes_on() {
+    let fake = Arc::new(Fake::default());
+    let (_, clock) = usage(&fake, &[]);
+    let limits = HostLimits {
+        threads: 8,
+        memory_bytes: 1 << 34,
+    };
+    let usage = Usage::new(
+        fake.clone(),
+        Arc::new(BrokenKeys),
+        SharedClock::new(clock),
+        limits,
+    );
+    let minutes = [("1-1", 0, 1000, 100)];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    assert_eq!(fake.observed.lock().unwrap().len(), 2);
+}
+
+/// Asserts that a panic in the sink while it takes a finished run is caught and counted
+/// as a fault, that the call returns, the run is not counted as learned, and the next beat
+/// is read as usual. It catches a panic that unwinds out of the hook after the run was
+/// taken out of the hub.
+#[test]
+fn a_panic_when_a_run_is_handed_over_is_a_fault_and_the_hook_returns() {
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
+    let minutes = [("1-1", 0, 1000, 100)];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
+    fake.panic_on_ended.store(true, Ordering::SeqCst);
+    quiet_beats(&usage, "h1", 2);
+    assert_eq!(usage.counters().faults, 1);
+    assert_eq!(usage.counters().runs_learned, 0);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
+    assert_eq!(fake.observed.lock().unwrap().len(), 2);
+}
+
+/// A log that is written to a buffer for the thread that made it.
+struct Captured {
+    text: Arc<Mutex<Vec<u8>>>,
+    _scope: tracing::subscriber::DefaultGuard,
+}
+
+struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Buffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Captured {
+    fn start() -> Self {
+        let text = Arc::new(Mutex::new(Vec::new()));
+        let sink = text.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Buffer(sink.clone()))
+            .finish();
+        Self {
+            text,
+            _scope: tracing::subscriber::set_default(subscriber),
+        }
+    }
+
+    fn lines_with(&self, needle: &str) -> usize {
+        let text = String::from_utf8_lossy(&self.text.lock().unwrap()).into_owned();
+        text.lines().filter(|line| line.contains(needle)).count()
+    }
+}
+
+/// Asserts that handling heartbeats logs no node minute, whatever the host or the number
+/// of beats (twelve beats of each of two hosts, with loads and minutes), and that the
+/// flush then logs one for each minute the sink closed. The capture is of this thread
+/// only, so no other test's lines are counted. It catches a line per heartbeat, which
+/// would drown the log, with or without fields.
+#[tokio::test]
+async fn beats_log_no_node_minute_and_a_flush_logs_one_for_each_closed() {
+    let log = Captured::start();
+    let fake = Arc::new(Fake::default());
+    {
+        let mut closed = fake.closed.lock().unwrap();
+        closed.push((HostId::new("h1").unwrap(), row(15)));
+        closed.push((HostId::new("h2").unwrap(), row(15)));
+    }
+    let (usage, _) = usage(&fake, &[]);
+    let usage = Arc::new(usage);
+    for seq in 1..=12u64 {
+        for host in ["h1", "h2"] {
+            let minutes = [("1-1", u16::try_from(seq).unwrap(), 1000, 100)];
+            usage.on_beat(
+                &beat(host, Vec::new()),
+                Some(load(seq, &minutes)),
+                &[],
+                &anyone,
+            );
+        }
+    }
+    assert_eq!(log.lines_with("node minute"), 0);
+    usage.finish().await;
+    assert_eq!(log.lines_with("node minute"), 2);
 }
