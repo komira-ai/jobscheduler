@@ -1,6 +1,7 @@
 //! The log tail of a job that exited: read before the container is removed, carried by
 //! the result, and never able to change the result.
 
+use js_agent::lifecycle::Event;
 use js_agent_wire::limits::{
     HEARTBEAT_BODY_BUDGET, MAX_LOAD_LEASES, MAX_LOAD_MINUTES, MAX_MEMORY_BYTES, TAIL_MINUTE,
 };
@@ -212,7 +213,13 @@ fn a_full_beat_with_noisy_tails_fits_the_body_limit() {
         let mut spec = job(&wide(i));
         spec.limits.cpu_millis = 40;
         spec.limits.memory_bytes = 1 << 20;
-        h.start(spec);
+        // "lease-" and a 128-byte run id would be over the id cap and the start refused.
+        spec.lease_id = format!("l{i}");
+        let events = h.start(spec);
+        assert!(
+            matches!(events.first(), Some(Event::Started { .. })),
+            "run {i} was not started: {events:?}"
+        );
     }
     for i in 0..8 {
         h.fake.print(&wide(i), noisy("S", 8190, "E"));
