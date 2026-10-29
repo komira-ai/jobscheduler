@@ -302,7 +302,7 @@ pub const VERSION: u32 = 2;
 /// The oldest version a reader still reads. A file of an older version is read as if it
 /// had been written by this one with the fields it lacks empty, and the next save writes
 /// it as [`VERSION`].
-pub const OLDEST: u32 = 1;
+pub const OLDEST: u32 = 2;
 
 /// Everything the scaler remembers. The caller writes all of it, as one file, whenever a
 /// step returns [`Action::Save`](crate::Action::Save), before it runs any other action of
@@ -402,7 +402,7 @@ impl Records {
         let found = value.get("version").and_then(serde_json::Value::as_u64);
         // One arm for each version from `OLDEST` to `VERSION`.
         match found {
-            Some(1) => {
+            Some(1) if OLDEST <= 1 => {
                 let wire: WireV1 = serde_json::from_value(value)?;
                 Ok(Self {
                     instances: wire.instances,
