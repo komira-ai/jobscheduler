@@ -26,7 +26,7 @@ use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
+use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, RunFile, limits, validate_files};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
@@ -72,6 +72,9 @@ struct RunBody {
     gpu_indices: Vec<u32>,
     #[serde(default)]
     mounts: Vec<Mount>,
+    /// Secret files the job reads at `/run/js-files/<name>` (see [`RunFile`]).
+    #[serde(default)]
+    files: Vec<RunFile>,
     #[serde(default)]
     isolation: Isolation,
     #[serde(default)]
@@ -164,6 +167,7 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::HostTainted
             | RunRefusal::NotReady
             | RunRefusal::NoCapacity
+            | RunRefusal::FilesUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -207,6 +211,10 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    // A bad file is the body's fault, whatever the lease or the host: answered before any
+    // state is read. The error names the rule and never repeats a name or contents.
+    validate_files(&body.files)
+        .map_err(|err| ApiError::coded(StatusCode::BAD_REQUEST, err.code()))?;
     let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
@@ -232,6 +240,7 @@ async fn start(
         },
         gpu_indices: body.gpu_indices,
         mounts: body.mounts,
+        files: body.files,
         isolation: body.isolation,
         labels: body.labels,
         heartbeat_seq: 0,
