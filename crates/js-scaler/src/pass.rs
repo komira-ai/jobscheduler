@@ -424,11 +424,7 @@ impl<'a> Pass<'a> {
         for i in self.indices(&pool.settings.pool) {
             let record = &self.records.instances[i];
             let host = host_named(input, &record.name);
-            let heard = host.is_some_and(|each| {
-                [each.state == HostState::Live, each.heard_since_hello]
-                    .into_iter()
-                    .all(|ok| ok)
-            });
+            let heard = host.is_some_and(|each| each.state == HostState::Live);
             let phase = record.phase;
             self.records.instances[i].seen_live |= heard;
             match (phase, host) {
