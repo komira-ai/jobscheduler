@@ -182,7 +182,7 @@ impl Recorder {
     #[must_use]
     pub fn leases_only() -> Self {
         Self {
-            leases_only: true,
+            leases_only: false,
             ..Self::default()
         }
     }
