@@ -124,3 +124,24 @@ fn gamma_is_off_by_variable_and_sets_the_server_before_the_agents() {
     );
     assert!(tool.contains("cargo build -p xtask --locked --release"));
 }
+
+/// Asserts that the build matrix has the Apple-silicon leg (a `macos-14` runner building
+/// `js` and `js-agent` only, the lease server being Linux-only) and that the archives are
+/// made with GNU tar, which a Mac has as `gtar`: the archive options are GNU's, and the
+/// reproducibility of the files depends on them.
+#[test]
+fn the_macos_leg_builds_the_client_and_agent_and_packs_with_gnu_tar() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let build = job(&jobs, "build").join("\n");
+    assert!(
+        build.contains(
+            "- target: aarch64-apple-darwin\n            runner: macos-14\n            builds: js-cli:js js-agent:js-agent\n"
+        ),
+        "{build}"
+    );
+    assert!(
+        build.contains("if command -v gtar > /dev/null; then\n            tar=gtar\n          fi")
+    );
+    assert!(build.contains(r#""$tar" -C "stage-$bin" --sort=name"#));
+}

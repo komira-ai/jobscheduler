@@ -78,12 +78,10 @@ generic. Secrets are files mounted at run time and named by path in the config (
 
 Deviations a reviewer should see (each is also under Open questions 20):
 
-- Requirement 1 and 4: a job carries disk and may require an execution mode. In the first slice the
-  lease request carries cpu, memory, gpus and capabilities only (3.1). `os` and `arch` are
-  carried (capability keys that exist) and `Offer::fit` refuses an offer whose os or arch
-  differs from the request's. Disk and `exec` are `None`, so an offer with too little disk
-  still fits. Lambda is the only elastic kind and runs `container`, so this costs nothing
-  until a macOS pool or a disk-sized job exists (PR 11).
+- Requirement 1 and 4 (lifted by PR 11): a job carries disk and may require an execution mode.
+  The lease request carries them as the capabilities `disk-gib` and `exec` (3.1), beside `os`
+  and `arch`, and `Offer::fit` refuses an offer whose os, arch, mode or disk differs from or
+  falls short of the request's, naming the dimension.
 - Requirement 14 says "elastic pools" (plural). The first slice serves one registering pool because
   `Registry::new` takes one `PoolConfig` (`crates/js-registry/src/registry.rs`). `js-scaler`
   takes a list of pools; the registry is the limit (6.5, PR 12).
@@ -132,8 +130,8 @@ pub struct Requirements {
     pub os: Option<String>, pub arch: Option<String>,      // "linux"/"macos", "x86_64"/"aarch64"
     pub exec: Option<ExecMode>,          // Container | SandboxExec; None = either
 }
-impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, arch from the request's
-                                                                       // required caps; disk, exec are None
+impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, arch, disk (disk-gib),
+                                                                       // exec from the required caps
 ```
 
 `js-elastic::Demand` is an alias of `Requirements`, so the scaler and the matcher read one
@@ -143,14 +141,16 @@ refused at run start with `image-digest-required` (422), for every pool: agents 
 lacks, so a tag could change under a fleet. This is unconditional and not the `require_digest` pool
 setting of 14 Q16; the agent refuses a tag-only start as well.
 
-Deferred, plainly: in the first slice the lease request still carries `Resources` plus
-`Capabilities`, so disk and exec are `None` in every `Requirements` built from it. `os` and
-`arch` are read from the request's required `os` and `arch` capabilities in PR 1, and
-`Offer::fit` refuses an offer whose os or arch differs (naming `Dimension::Os` or `Arch`).
-This is a deviation from requirements 1 and 4 (1.1, Open questions 20). PR 11 adds the
-capability keys `disk-gib` and `exec` in `crates/js-caps`, has the agent report them, and makes
-the request carry them; macOS pools and disk-sized launches need it, Lambda does not. A job never
-contains an AMI, a cloud name or an instance type; 4.3 shows where those live.
+A lease request carries `Resources` plus `Capabilities`, and `Requirements::from_request` reads
+the rest from the capabilities it requires. `os` and `arch` are read from `os` and `arch` (PR 1),
+`disk_bytes` from `disk-gib` (whole GiB, at least the amount; `0` asks for nothing) and `exec` from
+`exec` (`container` or `sandbox-exec`); a request that names a key it does not need leaves
+the field `None`, which is "any". A `disk-gib` that is not a whole number of GiB, or an `exec`
+that names no mode, is a 400 on `POST /v1/leases` and is refused by `Request::validate`. `Offer::fit`
+refuses an offer whose os or arch differs, whose mode differs, or whose disk is below the
+request's, naming `Dimension::Os`, `Arch`, `Exec` or `DiskBytes` (PR 11 lifted the earlier
+deviation from requirements 1 and 4). A job never contains an AMI, a cloud name or an instance
+type; 4.3 shows where those live.
 
 ### 3.2 Pools (requirement 2)
 
@@ -251,6 +251,11 @@ agent reports in its hello, as capabilities declared in `crates/js-caps`:
   jobs with was found and ran (`--container-bin` in `crates/js-agent/src/cli.rs`).
 - `gpu-toolkit` (flag): set only if the toolkit hook works, reported only when gpus > 0.
 - `exec` (text): the mode the agent runs jobs in. PR 6 reports it; PR 11 lets a job require it.
+- `disk-gib` (whole number): the free space of the volume that holds `--scratch-root`, where
+  every run gets its directory, in GiB rounded down, read once when the hello is made with
+  `df -P -k` (the same on Linux and macOS). An agent with no `--scratch-root`, or whose volume
+  cannot be read (a warning says why), reports none, and a job that requires disk is not
+  placed on it. Like the others, an operator cannot set it.
 
 A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool floor (4.5)
 requires `runtime` to equal the pool's `exec`, and for a pool with gpus, `gpu-toolkit`.
@@ -258,7 +263,22 @@ Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`
 (`crates/js-agent-wire/src/refusal.rs`): `host-contract` (runtime or toolkit missing) and
 `execution-mismatch` (reported mode differs from the pool's). Both name the field. A job that
 requires a mode (`Requirements.exec`) is matched against the reported value, never against
-the pool's name or the cloud.
+the pool's name or the cloud: admission holds each host to the mode it reports, and a pool that
+declares `exec` books its hosts with that mode among their capabilities, so a job that requires
+`sandbox-exec` is never placed on a container host. A pool that declares no mode books none,
+and a job that requires one finds no host there unless the pool's `[capabilities]` name `exec`
+(the join then compares each host's reported value with it). `disk-gib` is a minimum everywhere
+(`Shape::satisfies`, `js_caps::Request`): a pool that lists `disk-gib` in its `[capabilities]`
+admits only hosts that report at least that much, and serves jobs that require up to it.
+
+Two limits, stated plainly:
+
+- Registry pools place jobs by the pool's booked shape. A host's reported `disk-gib` is only an
+  admission floor against the pool's promise, and never places a job by itself. A job with
+  `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
+- Disk is read once, at hello, so it goes stale afterwards. A host that fills up keeps its
+  booked promise. Re-reading it periodically or per heartbeat is tracked in
+  komira-ai/jobscheduler#328.
 
 ## 4. Configuration (requirement 9, 10)
 
@@ -1289,7 +1309,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 | 8 | scaler | new `js-scaler`, `js-lease-server` | pure `step`, records file, shell on the tick, caps (hour and day), `boot_fail_cooldown`; `launch = "live"` honoured |
 | 9 | Lambda end to end | `js-lease-server` (tests), docs | e2e with `FakeLambda`, fake Tailscale and a hello through the real registry |
 | 10 | one config file; docs | `js-lease-server`, docs | server flags into `[server]`; flags refused beside `--config`; amend `providers.md` K6, `registration.md`, `configuration.md`; the path check of 8.6 (no provider crate names a network type); fix the stale `--ca-cert` comment in `js-agent/src/cli.rs` |
-| 11 | disk and exec on jobs | `js-caps`, `js-agent`, `js-scaler`, `js-lease-server` | `disk-gib` and `exec` carried by the lease request; needed before any macOS pool and before disk-sized launches |
+| 11 | disk and exec on jobs | `js-caps`, `js-types`, `js-agent`, `js-registry`, `js-scaler`, `js-lease-server` | `disk-gib` and `exec` carried by the lease request (a 400 for a bad value), reported by the agent (`disk-gib` from the `--scratch-root` volume), compared by `Shape::satisfies`, `js_caps::Request` and `Offer::fit`; needed before any macOS pool and before disk-sized launches |
 | 12 | more pools | `js-registry`, `js-scaler` | several registering pools; part-host classes; first-fit packing |
 
 PR 7b is required before the go (7.2). Later, each behind its own need and not built first:
@@ -1485,9 +1505,9 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 18. Several elastic pools and part-host classes (6.5). Recommendation: after the live proof.
 19. Modes beyond `default` and `tailscale` are Later (section 12). Recommendation: none until a pool
     needs one.
-20. Deviations from requirements (1.1): disk and `exec` on the job are `None` in the first slice, one
-    registering pool instead of several, gpu class from a `types` row. Recommendation: accept for
-    the first slice; PRs 11 and 12 lift the first two.
+20. Deviations from requirements (1.1): one registering pool instead of several, gpu class from a
+    `types` row (disk and `exec` on the job were deviations too, and PR 11 has landed them).
+    Recommendation: accept for the first slice; PR 12 lifts the first.
 21. A reservation counts as covering however long its `drain_deadline` is (6.2). Alternative: launch
     when the reservation's deadline is further away than `boot_timeout`. Recommendation: covering
     always in the first slice; revisit with live data, since the alternative can buy a second machine.

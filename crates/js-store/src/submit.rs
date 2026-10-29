@@ -1,17 +1,19 @@
 //! Queueing an operation: its `op/` and `queue/` rows, the `inflight/` row that lets a twin
-//! request join it, the `opkey/` row of its size key and the embedder's rows ([`crate::Ext`]),
-//! in one transaction.
+//! request join it, the `opkey/` row of its size key, the `opwall/` row of its longest run
+//! and the embedder's rows ([`crate::Ext`]), in one transaction.
 //!
 //! Submitting is safe to repeat: a commit whose outcome the caller never learned (the
 //! connection died after it) leaves the operation written, and the retry finds it through its
 //! `inflight/` row and joins it instead of queueing the work a second time.
+
+use std::time::Duration;
 
 use js_sched::Request;
 use js_state::{Cond, Txn};
 use js_types::sched::OperationId;
 
 use crate::load::StoredOperation;
-use crate::{Rows, StateError, keys, number, opkey};
+use crate::{Rows, StateError, keys, number, opkey, opwall};
 
 /// How many times a submit looks again after a write finds a row in its way.
 const LOOKS: usize = 3;
@@ -42,13 +44,31 @@ impl Rows {
     /// the way does not go ([`StateError::Conflict`]).
     pub fn submit(
         &self,
-        mut id: OperationId,
+        id: OperationId,
         request: &Request,
         parcel: &[u8],
         size_key: Option<u64>,
     ) -> Result<Submitted, StateError> {
+        self.submit_walled(id, request, parcel, size_key, None)
+    }
+
+    /// [`Rows::submit`] for an operation with a longest run `max_wall`, if it has one: kept in an
+    /// `opwall/` row of the same transaction, which the farm server writes and reads in the same
+    /// bytes. `None` writes the rows [`Rows::submit`] does. A request that joins an operation
+    /// writes nothing: that operation keeps its own wall time.
+    ///
+    /// # Errors
+    /// As [`Rows::submit`].
+    pub fn submit_walled(
+        &self,
+        mut id: OperationId,
+        request: &Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        max_wall: Option<Duration>,
+    ) -> Result<Submitted, StateError> {
         if !request.joinable() {
-            self.commit(self.submission(id, request, parcel, size_key)?)?;
+            self.commit(self.submission(id, request, parcel, size_key, max_wall)?)?;
             return Ok(Submitted::Queued(id));
         }
         let pin = keys::inflight(&request.key);
@@ -69,7 +89,7 @@ impl Rows {
                 // The operation it names is gone: the row is left over, and goes.
                 cond = Cond::Version(row.version);
             }
-            let txn = self.submission(id, request, parcel, size_key)?;
+            let txn = self.submission(id, request, parcel, size_key, max_wall)?;
             match self.commit(txn.put(pin.clone(), id.0.to_be_bytes(), cond)) {
                 Ok(()) => return Ok(Submitted::Queued(id)),
                 // Another writer queued this work since the look, or a row of an earlier
@@ -92,11 +112,15 @@ impl Rows {
         request: &Request,
         parcel: &[u8],
         size_key: Option<u64>,
+        max_wall: Option<Duration>,
     ) -> Result<Txn, StateError> {
         let value = self.codec.submit(request)?;
         let mut txn = Txn::new();
         if let Some(key) = size_key {
             txn = txn.put(keys::opkey(operation), opkey::encode(key), Cond::Absent);
+        }
+        if let Some(wall) = max_wall {
+            txn = txn.put(keys::opwall(operation), opwall::encode(wall), Cond::Absent);
         }
         let txn = txn.put(keys::operation(operation), value, Cond::Absent);
         let txn = self.ext.submitted(txn, operation, parcel);

@@ -122,7 +122,7 @@ impl Registry {
         // `NoFit` when no listed host fits, and every host is booked as the pool's shape,
         // so that happens for a request the pool's shape fits only when no host is listed
         // yet. A host could still join, which is capacity, not fit.
-        let floor = self.shared.config.shape();
+        let floor = self.shared.config.booked();
         let wanted = spec.request();
         let fits_pool = floor.satisfies(&wanted.resources, &wanted.capabilities);
         // A whole-node request that fits the pool is refused for lack of a host only when

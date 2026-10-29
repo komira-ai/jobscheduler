@@ -1,7 +1,7 @@
 //! The host contract: the capabilities an agent reports about what its host can run
 //! jobs with, and the check a pool makes of them at admission.
 //!
-//! An agent reports these three keys in its hello, from what it actually finds, and an
+//! An agent reports these keys in its hello, from what it actually finds, and an
 //! operator cannot set them ([`DETECTED_KEYS`]):
 //!
 //! | Key | Value | Reported when |
@@ -9,6 +9,10 @@
 //! | [`RUNTIME`] | an [`ExecMode`] name: `container` or `sandbox-exec` | the program the agent runs jobs with was found and ran |
 //! | [`GPU_TOOLKIT`] | [`FLAG_SET`] | the host offers GPUs and the toolkit check passed |
 //! | [`EXEC`] | an [`ExecMode`] name | the agent runs jobs, in that mode |
+//! | [`DISK_GIB`] | whole GiB | the agent has a work volume (`--scratch-root`) and could read its free space |
+//!
+//! A job request may require [`EXEC`] (the same mode) and [`DISK_GIB`] (at least that
+//! much free disk); see [`crate::Request`].
 //!
 //! A pool that declares an execution mode makes a [`HostContract`] of it: `runtime` must
 //! equal the mode, and a pool with GPUs also needs `gpu-toolkit`. The check is
@@ -27,13 +31,16 @@ pub const RUNTIME: &str = "runtime";
 pub const GPU_TOOLKIT: &str = "gpu-toolkit";
 
 /// The capability key of the mode the agent runs jobs in.
-pub const EXEC: &str = "exec";
+pub const EXEC: &str = js_types::EXEC_KEY;
+
+/// The capability key of the free disk, in whole GiB, of the volume jobs work on.
+pub const DISK_GIB: &str = js_types::DISK_GIB_KEY;
 
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 3] = [RUNTIME, GPU_TOOLKIT, EXEC];
+pub const DETECTED_KEYS: [&str; 4] = [RUNTIME, GPU_TOOLKIT, EXEC, DISK_GIB];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]

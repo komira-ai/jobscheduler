@@ -66,7 +66,8 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
         "server.status_token_file: unknown field; known: listen, agent_listen, advertise_url, \
          state_file, boot, client_token_file, tls_cert, tls_key, tick, default_ttl, max_ttl, \
          max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
-         max_requests, drain_timeout"
+         max_requests, drain_timeout, agent_hello_burst, agent_hello_interval, \
+         require_host_credential"
     );
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(

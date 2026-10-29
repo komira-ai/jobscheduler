@@ -35,8 +35,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) token_file: Option<PathBuf>,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
-    /// authority that issued it). Required for `https://`: the platform's roots are not
-    /// read, because the places they are found can be redirected by the environment.
+    /// authority that issued it); only those certificates are trusted then. Optional:
+    /// without it an `https://` server is verified against the public roots bundled in the
+    /// binary, never the platform's store, because the places it is found can be redirected
+    /// by the environment.
     #[arg(long, global = true, value_name = "PATH")]
     pub(crate) ca_cert: Option<PathBuf>,
     /// Print machine output (one JSON object per line, or the server's own JSON for
