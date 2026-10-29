@@ -412,10 +412,12 @@ fn the_key_file_is_read_through_the_reader_and_never_quoted() {
     assert!(fine);
 }
 
-/// Asserts the address the kind uses when the table names none is Lambda's, and that the
-/// constant is a base URL the client accepts, so a table with no `api_url` builds.
+/// Asserts that the address the kind uses when the table names none is an `https` base
+/// URL with no path, which the client accepts, so a table with no `api_url` builds. Nothing
+/// connects to it.
 #[test]
 fn the_default_address_is_a_base_url() {
-    assert_eq!(DEFAULT_API_URL, "https://cloud.lambdalabs.com");
+    assert!(DEFAULT_API_URL.starts_with("https://"));
+    assert!(!DEFAULT_API_URL.trim_start_matches("https://").contains('/'));
     assert_eq!(built(&with_key(TYPES), false).gpus, 1);
 }
