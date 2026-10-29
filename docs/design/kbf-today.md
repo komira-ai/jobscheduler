@@ -4,6 +4,27 @@ Companion to [docs/design.md](../design.md), which cites this file as section 4 
 unchanged except that this header is added. Paths refer to the kbf repository (komira-ai/kbf) at commit 45e420656 and the ucdk
 repository (komira-ai/ucdk) at commit f28c240. A statement marked (not found) is a keyword result, not a proof of absence.
 
+## Corrections at kbf 89af8f2ef
+
+The body below is the section as first written at kbf `45e420656` and was not re-derived. These points were checked against kbf `89af8f2ef`
+and correct or add to it. The design that uses them is [kbf-on-js-agent.md](kbf-on-js-agent.md).
+
+- **Two scheduler cores.** `--scheduler-core` selects `legacy` or `js`; only `legacy` is built into a running server (`SchedulerCore::RUNNING`,
+  `crates/kbf-server/src/scheduler_core.rs:26`), and `js` is refused at start unless the test-only `farm-core-js` feature is built. The
+  jobscheduler libraries are git dependencies at one revision (`Cargo.toml:76-90`, `a826aba49`).
+- **Modes are a flag.** `kbf --mode=frontend|storage|daemon|storage-and-daemon`, or `mode =` in `kbf.toml`; the subcommand forms are hidden
+  aliases (`crates/kbf-cli/src/lib.rs:1-10`).
+- **The layering test keeps `js-agent` and `js-client` out of every package of the workspace graph**, and `kbf-daemon` takes only
+  `js-agent-usage` (`crates/kbf-integration-test/tests/layering.rs:608-626`). Nothing in kbf runs `js-agent`, and no lease client of js is on the
+  farm.
+- **Storage and trust today.** A Linux node runs one `storage-and-daemon` process that holds the cold-store credential beside untrusted actions;
+  its unit says it is for a trusted network only until a test proves an action cannot read the key
+  (`packaging/linux/units/kbf-storage-and-daemon.service`; `docs/deploy/kbf-units.md:383-388`). Action-cache writes are accepted only from the
+  daemon role (`crates/kbf-front/src/cache.rs:672-684`).
+- **tierstore** (`crates/tierstore`) is a stateless S3 proxy over two S3 backends with a reconciler; it is deployed nowhere and no kbf crate
+  depends on it. It refuses presigned (query-string) requests today; the build-output write path needs them (kbf#1922). The owner has decided it goes on
+  the storage nodes with Silo as its hot tier ([kbf-on-js-agent.md](kbf-on-js-agent.md) section 6.2). `kbf-pack` is wired into the frontend and daemon behind flags that default off (kbf#1706, #1710, #1747, #1750).
+
 ## 4.1 Scheduler core
 `crates/kbf-sched` is a pure, single-threaded state machine: no async, network, clock, randomness or hashed collections
 (`#![deny(clippy::disallowed_*)]` in `crates/kbf-sched/src/lib.rs`; layering checked in `crates/kbf-integration-test/tests/layering.rs`,

@@ -33,6 +33,8 @@ fn poll_maps_every_state() {
         ("removing 0 false", Ok(Status::Running)),
         ("created 0 false", Ok(Status::Running)),
         ("configured 0 false", Ok(Status::Running)),
+        ("initialized 0 false", Ok(Status::Running)),
+        ("stopping 0 false", Ok(Status::Running)),
         ("exited 3 false\n", ok(3, false)),
         ("dead 1 false", ok(1, false)),
         ("dead 0 false", Ok(Status::Gone)),
@@ -54,6 +56,10 @@ fn poll_maps_every_state() {
         ),
         (
             "exited 1 false extra",
+            Err(RuntimeError::new("inspect: unreadable output")),
+        ),
+        (
+            "unknown 0 false",
             Err(RuntimeError::new("inspect: unreadable output")),
         ),
         (
