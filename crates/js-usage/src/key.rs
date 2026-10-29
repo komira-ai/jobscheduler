@@ -78,8 +78,11 @@ mod tests {
         }
         assert_eq!(ProfileKey::parse(""), Err(BadKey::Length));
         assert_eq!(ProfileKey::parse(&"a".repeat(129)), Err(BadKey::Length));
-        for bad in ["A", "a/b", "a b", "%2e", "é", "a\n", "a:b", "a*"] {
+        for bad in ["a/b", "a b", "aA", "a%2e", "aé", "a\n", "a:b", "a*"] {
             assert_eq!(ProfileKey::parse(bad), Err(BadKey::Byte), "{bad:?}");
+        }
+        for bad in ["A", "%2e", "é", "/a", " a"] {
+            assert_eq!(ProfileKey::parse(bad), Err(BadKey::First), "{bad:?}");
         }
     }
 
