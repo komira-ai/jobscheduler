@@ -395,6 +395,11 @@ struct Shared {
     closed: AtomicBool,
     /// Stop every run the agent holds, once.
     stop_all: AtomicBool,
+    /// A prepare order waits in the queue: set by [`WorkerHost`] when it sends one, cleared
+    /// by the worker when it takes the order, so questions never crowd replies out.
+    prepare_queued: AtomicBool,
+    /// The same for a restore order.
+    restore_queued: AtomicBool,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
@@ -751,11 +756,13 @@ fn work(
             }
             Ok(Order::Settle(done)) => settle = Some(done),
             Ok(Order::Prepare { lease }) => {
+                shared.prepare_queued.store(false, Ordering::SeqCst);
                 let mut events = Vec::new();
                 answers.prepare(&mut life, hook.as_ref(), lease, &mut events);
                 lines.extend(describe(&events));
             }
             Ok(Order::Restore { lease }) => {
+                shared.restore_queued.store(false, Ordering::SeqCst);
                 let mut events = Vec::new();
                 answers.restore(&mut life, lease, &mut events);
                 lines.extend(describe(&events));
@@ -792,9 +799,16 @@ impl WorkerHost {
         Self { handle }
     }
 
-    /// Sends `order` if the queue has room; a full queue drops it.
-    fn ask(&self, order: Order) {
-        let _ = self.handle.orders.try_send(order);
+    /// Sends `order` unless a question of its kind already waits in the queue (the worker
+    /// clears `queued` when it takes the order, so at most one of each kind is queued and
+    /// questions never crowd replies out), or the queue has no room, which drops it.
+    fn ask(&self, order: Order, queued: &AtomicBool) {
+        if queued.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.handle.orders.try_send(order).is_err() {
+            queued.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -804,9 +818,10 @@ impl Quiesce for WorkerHost {
         match published {
             Some((held, quiet)) if held == lease && quiet != Quiet::Busy => quiet,
             _ => {
-                self.ask(Order::Prepare {
+                let order = Order::Prepare {
                     lease: lease.to_owned(),
-                });
+                };
+                self.ask(order, &self.handle.shared.prepare_queued);
                 Quiet::Busy
             }
         }
@@ -817,9 +832,10 @@ impl Quiesce for WorkerHost {
         match published {
             Some((held, Restored::Done)) if held == lease => Restored::Done,
             _ => {
-                self.ask(Order::Restore {
+                let order = Order::Restore {
                     lease: lease.to_owned(),
-                });
+                };
+                self.ask(order, &self.handle.shared.restore_queued);
                 Restored::Busy
             }
         }
