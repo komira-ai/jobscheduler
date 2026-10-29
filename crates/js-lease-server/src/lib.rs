@@ -82,6 +82,8 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
+//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //!
 //! [[pool]]
 //! name     = "gpu-static"

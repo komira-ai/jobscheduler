@@ -9,7 +9,7 @@ use hyper::Uri;
 use js_lease::Settings;
 
 use super::{Load, Section};
-use crate::config::{BootMode, Limits, TlsFiles, Token, parse_token};
+use crate::config::{BootMode, DEFAULT_PROFILE_STORE_BYTES, Limits, TlsFiles, Token, parse_token};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
 
@@ -35,6 +35,9 @@ const SERVER_KEYS: &[&str] = &[
     "agent_hello_burst",
     "agent_hello_interval",
     "require_host_credential",
+    "usage_db",
+    "usage_off",
+    "profile_store_bytes",
 ];
 
 /// What the `[server]` table says.
@@ -50,6 +53,15 @@ pub(crate) struct Server {
     pub(crate) settings: Settings,
     pub(crate) limits: Limits,
     pub(crate) agents: AgentKeys,
+    pub(crate) usage: UsageKeys,
+}
+
+/// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
+/// `--usage-off` and `--profile-store-bytes`, with their defaults.
+pub(crate) struct UsageKeys {
+    pub(crate) db: Option<PathBuf>,
+    pub(crate) off: bool,
+    pub(crate) profile_store_bytes: u64,
 }
 
 /// The keys of `[server]` that belong to agent registration, as the file gave them. They
@@ -202,6 +214,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         interval: s.duration("agent_hello_interval")?,
         require_host_credential: s.boolean("require_host_credential")?,
     };
+    let usage = read_usage(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
@@ -219,6 +232,28 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         settings,
         limits,
         agents,
+        usage,
+    })
+}
+
+/// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
+/// beside `usage_off = true`.
+fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
+    let db = s.path("usage_db")?;
+    let off = s.boolean("usage_off")?.unwrap_or(false);
+    let bytes = s.bounded(
+        "profile_store_bytes",
+        1,
+        u64::MAX,
+        DEFAULT_PROFILE_STORE_BYTES,
+    )?;
+    if db.is_some() & off {
+        return Err(s.fail("usage_db", "not allowed with server.usage_off"));
+    }
+    Ok(UsageKeys {
+        db,
+        off,
+        profile_store_bytes: bytes,
     })
 }
 
