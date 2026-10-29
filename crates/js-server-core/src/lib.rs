@@ -57,8 +57,8 @@ mod store;
 mod write;
 
 pub use self::core::{
-    Admitted, Config, Core, Held, NodeAction, NodeUnread, NotQueued, PlaceError, SubmitOptions,
-    UnknownNode,
+    Admitted, Config, Core, Held, NodeAction, NodeHeld, NodeUnread, NotQueued, PlaceError,
+    SubmitOptions, UnknownNode,
 };
 pub use adapter::{Adapter, Delivery, Link, Lowered, Stage, View};
 pub use admission::{Admission, AllowAll, Denied};
