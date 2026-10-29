@@ -18,7 +18,7 @@
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
 //! | `--token-file <path>` | required: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
-//! | `--ca-cert <path>` | required for `https://`: the PEM file with the certificate to trust; the platform's roots are never read |
+//! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
@@ -101,7 +101,15 @@
 //! the session (it restarted) gets one hello at once.
 //!
 //! A refusal that asking again cannot change ends the agent with exit status 2 and the
-//! server's code on stderr: 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
+//! server's code on stderr (with `--container-bin` the agent first stops the containers it
+//! holds, bounded, and the results it could not send are lost; the same when the job worker
+//! stops, which ends it with status 1, except that the stop does not go through the
+//! worker; a container that could not be stopped is named on stderr, and the agent relies
+//! on its supervisor and on the next process adopting it, so the supervisor must restart
+//! the agent after every exit, status 0 and 2 included: with systemd that is
+//! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
+//! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
+//! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
 //! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
@@ -173,6 +181,7 @@ use std::fmt::Display;
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -186,6 +195,7 @@ pub use facts::{
 };
 pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
+use jobs::Seams;
 use lifecycle::{Local, StateRoot};
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
@@ -197,8 +207,8 @@ pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, Plan, QUEUE, STALL_MARGIN, STEP_EVERY, Snapshot, Worker,
-    stall_bound,
+    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue, STALL_CALLS_MAX,
+    STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, stall_bound,
 };
 
 /// The exit statuses of `js-agent`.
@@ -243,6 +253,8 @@ pub struct Services<'a> {
     pub machine: Arc<dyn Machine>,
     /// Told of the job worker once it has started (a test's way to wait for it).
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
+    /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
+    pub rescue_bound: Option<Duration>,
 }
 
 /// Why the program ends without a stop request.
@@ -288,6 +300,7 @@ pub fn main_with(
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
                 worker_hook: None,
+                rescue_bound: None,
             };
             run_with(args, out, err, services)
         }
@@ -373,8 +386,12 @@ fn execute(
             SUGGESTED_WATCH_DIRS.join(", ")
         );
     }
-    let (machine, hook) = (&services.machine, services.worker_hook);
-    let started = jobs::start(local, &offer.hello, platform, machine, hook, err);
+    let seams = Seams {
+        machine: &services.machine,
+        hook: services.worker_hook,
+        rescue_bound: services.rescue_bound,
+    };
+    let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain, outbox)) = &jobs {

@@ -17,6 +17,7 @@ use js_agent::{
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
+use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
@@ -33,17 +34,20 @@ pub const SECRET: &str = "sess-secret-0001-abcdefghijklmnop";
 /// the test ends.
 pub struct Scratch {
     dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
         bounds::install();
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-agent")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-agent"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -59,10 +63,25 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's file and dropping the second does
+/// not remove the first. It catches a path named by the test alone, which two tests of
+/// one name, or two runs of one test binary at once, would share and delete under each
+/// other.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
 /// The probes' command lines. Every program is named by its absolute path: the agent never
@@ -549,6 +568,10 @@ pub fn run(
 /// The machine the jobs run on and the hook that is told of their worker.
 pub type Jobs<'a> = (Arc<dyn Machine>, Option<&'a dyn Fn(Handle)>);
 
+/// The bound of the rescue in the tests that run the whole agent: a regression that hangs
+/// in the rescue ends the test in seconds, not at the bound of a host.
+pub const RESCUE_TEST_BOUND: Duration = Duration::from_secs(30);
+
 /// Runs the program on `args` against `host`, with the machine and the worker hook given.
 pub fn run_on(
     args: &[&str],
@@ -568,6 +591,7 @@ pub fn run_on(
         sleeper,
         machine: jobs.0,
         worker_hook: jobs.1,
+        rescue_bound: Some(RESCUE_TEST_BOUND),
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();

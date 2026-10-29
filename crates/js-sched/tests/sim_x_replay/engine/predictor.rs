@@ -203,6 +203,23 @@ impl Belief {
         Arc::ptr_eq(&self.curves, &other.curves)
     }
 
+    /// The same belief over other curves: the flag, `L` and `p_bar` are kept. `None` if
+    /// either curve is empty or the two lengths differ.
+    pub fn with_curves(&self, cores_milli: Vec<u64>, mem_mib: Vec<u64>) -> Option<Belief> {
+        (!cores_milli.is_empty() && cores_milli.len() == mem_mib.len()).then(|| Belief {
+            curves: Arc::new(Curves {
+                cores_milli,
+                mem_mib,
+            }),
+            ..self.clone()
+        })
+    }
+
+    /// The stored points of the cores curve and of the memory curve, one length.
+    pub fn curves(&self) -> (&[u64], &[u64]) {
+        (&self.curves.cores_milli, &self.curves.mem_mib)
+    }
+
     /// Predicted cores at `minute` of the lease's life, millicores.
     pub fn cores_milli_at(&self, minute: usize, tail: Tail) -> u64 {
         self.at(&self.curves.cores_milli, minute, tail)

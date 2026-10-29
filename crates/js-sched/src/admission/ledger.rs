@@ -583,6 +583,18 @@ impl WorkerLoad {
         )
     }
 
+    /// The flat-memory guard for a lease of `cost` on this worker
+    /// ([`horizon::flat_memory_refusal`]); a VM, which has no predicate, is held to it
+    /// alone, with its booked memory as its cost.
+    pub(crate) fn flat_memory_refusal(
+        &self,
+        cost: &LeaseCost,
+        capacity: &Resources,
+        cfg: &LoadConfig,
+    ) -> Option<Refusal> {
+        horizon::flat_memory_refusal(&self.totals, cost, capacity, cfg)
+    }
+
     /// Whether a lease of `cost` (already clamped to the capacity) fits beside `left`.
     ///
     /// On a worker charged by measurement, when the new lease or a lease on the worker is
@@ -616,7 +628,7 @@ impl WorkerLoad {
                 return Err(Refusal::Memory);
             }
         }
-        if let Some(refusal) = horizon::flat_memory_refusal(&self.totals, cost, capacity, cfg) {
+        if let Some(refusal) = self.flat_memory_refusal(cost, capacity, cfg) {
             return Err(refusal);
         }
         if cost.cold && self.cold_admitted(now, cfg) >= cfg.cold_cap(capacity) {

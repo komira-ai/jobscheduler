@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/object-does-not-exist",
+    "message": "Specified instance does not exist. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-object_does_not_exist"
+  }
+}

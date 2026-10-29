@@ -17,10 +17,19 @@ pub struct Cli {
     /// clear.
     #[arg(long, value_name = "URL")]
     pub server: String,
-    /// A file holding the pool's join token: a regular file owned by the user running the
-    /// agent, mode 0600 or 0400. The token is sent only in the `Authorization` header.
+    /// A file holding the pool's join token, or the one-time token minted for this
+    /// instance: a regular file owned by the user running the agent, mode 0600 or 0400.
+    /// The token is sent only in the `Authorization` header. A one-time token is this
+    /// host's credential for as long as the host stays registered, so the agent leaves
+    /// the file in place: it reads it again at every start.
     #[arg(long, value_name = "PATH")]
     pub token_file: PathBuf,
+    /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`
+    /// (`lambdalabs:0920582c...`), read when the agent starts. The hello names the
+    /// instance, which a one-time join token minted for that instance requires: the server
+    /// refuses a hello that names another instance or none. The file is not secret.
+    #[arg(long, value_name = "PATH")]
+    pub instance_file: Option<PathBuf>,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
     /// authority that issued it). Required for `https://`; the platform's roots are not
     /// read.

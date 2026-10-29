@@ -37,6 +37,34 @@
 //! signals back the end mark up: a reply the worker's queue no longer has anybody to take
 //! ([`Delivery::Gone`]), and a worker that has been inside one order or step for longer than
 //! [`stall_bound`] on the lifecycle's clock ([`Worker::stalled`]).
+//!
+//! # Leaving with jobs held
+//!
+//! The thread is never joined, so a worker that is stuck cannot keep the process from
+//! ending. An agent that ends for a reason other than a stop request must still not leave a
+//! container with nobody to enforce its wall limit:
+//!
+//! - After a refusal for good the worker is alive: [`Worker::wind_down`] closes it, asks it
+//!   to stop every run and waits until none is running or the worker has ended, for at
+//!   most the stop grace plus [`WIND_DOWN_MARGIN`] (and never past the [`Rescue`] bound).
+//!   What is still running then is stopped by the [`Rescue`] below. The results of the
+//!   stopped runs are not sent: the server no longer takes them, and they may be lost.
+//! - After the worker's end the worker cannot be asked. [`Worker::rescue`] closes the
+//!   worker first (a worker that wakes from a stall must not start the runs still queued),
+//!   makes a runtime of its own from the machine, lists the containers by the agent's
+//!   label, and stops the ones that are running (at most [`RESCUE_MAX`], each call bounded
+//!   by the runner's [`CALL_LIMIT`] and the stop grace, the whole by the [`Rescue`] bound,
+//!   [`RESCUE_BOUND`] unless the stop grace is longer, on a thread that is left behind
+//!   when the bound passes). A container that cannot be read is still stopped, and each one
+//!   that could not be read or stopped is reported as a line. What is left is the
+//!   supervisor's: it restarts the agent, whose next process adopts the containers that
+//!   still exist and enforces their limits. The supervisor must restart the agent after
+//!   every exit, status 0 and 2 included (systemd: `Restart=always`, no
+//!   `RestartPreventExitStatus=2`). So the agent's own time to leave is the wind-down wait
+//!   plus the rescue bound, minutes and not hours.
+//!
+//! A start the worker is already inside when it is closed is not undone: its container may
+//! be made after the rescue listed, and then it is the next process's to adopt.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -46,12 +74,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use js_agent_wire::{Command, HeartbeatReply, HeldRun, RunResult, Taint};
+use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Taint};
 
 use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{Config, Event, Lifecycle};
+use crate::lifecycle::{Config, Event, Lifecycle, Status};
 use crate::system::{Machine, RuntimeBuild, SharedClock};
 use crate::usage::{Collector, Outbox};
 
@@ -65,12 +93,16 @@ pub const STEP_EVERY: Duration = Duration::from_secs(1);
 /// runtime before it counts as stalled: each call may take [`CALL_LIMIT`] and, for a stop,
 /// the stop grace on top, and [`STALL_MARGIN`] more is allowed for everything else. A drain
 /// that stops many runs at once legitimately takes this long, so the bound grows with the
-/// calls and the grace; `calls` is at least 1.
+/// calls and the grace; `calls` is held to between 1 and [`STALL_CALLS_MAX`], or a host with
+/// thousands of runs would have no watchdog at all.
 pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     let each = CALL_LIMIT.saturating_add(stop_grace);
-    let calls = u32::try_from(calls.max(1)).unwrap_or(u32::MAX);
+    let calls = u32::try_from(calls.clamp(1, STALL_CALLS_MAX)).unwrap_or(u32::MAX);
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
+
+/// The most calls [`stall_bound`] allows time for.
+pub const STALL_CALLS_MAX: usize = 64;
 
 /// What is allowed on top of the calls of [`stall_bound`].
 pub const STALL_MARGIN: Duration = Duration::from_secs(60);
@@ -97,6 +129,137 @@ pub struct Plan {
     /// Where the usage of the leases is published for the session to take. Without it, or
     /// without `--actions-cgroup` in the settings, nothing is sampled.
     pub usage: Option<Arc<Outbox>>,
+    /// The bound of the [`Rescue`] in place of [`RESCUE_BOUND`]: for a test.
+    pub rescue_bound: Option<Duration>,
+}
+
+/// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
+/// is far above what a host runs at once, so every container the agent started is stopped,
+/// and it keeps the number of calls bounded.
+pub const RESCUE_MAX: usize = 256;
+
+/// How long a [`Rescue`] may take, unless the stop grace is longer (then the grace plus
+/// [`WIND_DOWN_MARGIN`]). The stops are made one after the other, so with many containers
+/// the bound can pass first; what is left is adopted by the next process, which the
+/// supervisor starts.
+pub const RESCUE_BOUND: Duration = Duration::from_secs(600);
+
+/// What [`Worker::wind_down`] allows on top of the stop grace for the worker to stop the
+/// runs itself.
+pub const WIND_DOWN_MARGIN: Duration = Duration::from_secs(60);
+
+/// How the agent stops its containers without the worker: a runtime of its own, made by
+/// the machine the worker was made from.
+#[derive(Clone)]
+pub struct Rescue {
+    machine: Arc<dyn Machine>,
+    settings: Settings,
+    host_id: String,
+    platform: Platform,
+    stop_grace: Duration,
+    max: usize,
+    bound: Duration,
+    wind: Duration,
+}
+
+impl Rescue {
+    /// A rescue over `machine` for the agent `host_id`, bounded by [`RESCUE_BOUND`] (or the
+    /// stop grace and [`WIND_DOWN_MARGIN`], when that is longer) and stopping at most
+    /// [`RESCUE_MAX`] containers. [`Worker::wind_down`] waits for the worker for the stop
+    /// grace and [`WIND_DOWN_MARGIN`].
+    pub fn new(
+        machine: Arc<dyn Machine>,
+        settings: Settings,
+        host_id: String,
+        platform: Platform,
+        stop_grace: Duration,
+    ) -> Self {
+        Self {
+            machine,
+            settings,
+            host_id,
+            platform,
+            stop_grace,
+            max: RESCUE_MAX,
+            bound: RESCUE_BOUND.max(stop_grace.saturating_add(WIND_DOWN_MARGIN)),
+            wind: stop_grace.saturating_add(WIND_DOWN_MARGIN),
+        }
+    }
+
+    /// The same, with the number of stops and the time they may take given: for a test.
+    #[must_use]
+    pub fn limited(mut self, max: usize, bound: Duration) -> Self {
+        self.max = max;
+        self.bound = bound;
+        self
+    }
+
+    /// The same, with the time [`Worker::wind_down`] waits for the worker given: for a test.
+    #[must_use]
+    pub fn winding(mut self, wait: Duration) -> Self {
+        self.wind = wait;
+        self
+    }
+
+    /// Stops every container the agent labelled, on a runtime of its own. One line for each
+    /// thing that did not work. Blocks for as long as the runtime does; see [`Rescue::run`].
+    fn stop_all(&self) -> Vec<String> {
+        let wanted = RuntimeBuild {
+            settings: &self.settings,
+            host_id: &self.host_id,
+            platform: &self.platform,
+            stop_grace: self.stop_grace,
+        };
+        let mut runtime = match self.machine.runtime(&wanted) {
+            Ok((runtime, _)) => runtime,
+            Err(why) => return vec![format!("rescue: no runtime: {why}")],
+        };
+        let ids = match runtime.list_ids() {
+            Ok(ids) => ids,
+            Err(why) => return vec![format!("rescue: cannot list the containers: {why}")],
+        };
+        // Exited containers (the listing holds them too) must not use up the limit. One
+        // that cannot be read is still tried: it may be running.
+        let mut unread = Vec::new();
+        let mut found = Vec::new();
+        for id in ids {
+            match runtime.poll(&id) {
+                Ok(Status::Exited(_)) => {}
+                Ok(_) => found.push(id),
+                Err(why) => {
+                    unread.push(format!(
+                        "rescue: cannot read {}: {why}; stopping it anyway",
+                        id.0
+                    ));
+                    found.push(id);
+                }
+            }
+        }
+        let stopped = found.iter().take(self.max).filter_map(|id| {
+            let done = runtime.stop(id, self.stop_grace);
+            done.err()
+                .map(|why| format!("rescue: cannot stop {}: {why}", id.0))
+        });
+        let stopped: Vec<String> = stopped.collect();
+        let skipped = found
+            .iter()
+            .skip(self.max)
+            .map(|id| format!("rescue: {} not tried: too many containers", id.0));
+        unread.into_iter().chain(stopped).chain(skipped).collect()
+    }
+
+    /// [`Rescue::stop_all`] on a thread of its own, waited for at most the bound. A thread
+    /// that is still inside the runtime then is left behind; the process ends anyway.
+    fn run(&self) -> Vec<String> {
+        let (done, lines) = sync_channel(1);
+        let own = self.clone();
+        thread::spawn(move || {
+            let _ = done.send(own.stop_all());
+        });
+        lines.recv_timeout(self.bound).unwrap_or_else(|_| {
+            vec!["rescue: did not finish in time; the next process adopts what is left".to_owned()]
+        })
+    }
 }
 
 /// What the next heartbeat carries of the jobs.
@@ -117,6 +280,12 @@ impl Snapshot {
             results: life.results(),
             taint: life.pending_taint(),
         }
+    }
+
+    /// Whether a run is in the running state.
+    pub fn running(&self) -> bool {
+        let running = |run: &HeldRun| run.state == HeldState::Running;
+        self.held.iter().any(running)
     }
 
     /// Whether the agent holds nothing and owes nothing.
@@ -170,6 +339,9 @@ struct Ending<'a>(&'a Shared);
 impl Drop for Ending<'_> {
     fn drop(&mut self) {
         self.0.ended.store(true, Ordering::SeqCst);
+        // Taking the lock between the mark and the wake-up keeps a waiter that has just
+        // read the mark as unset from missing the wake-up.
+        drop(self.0.lock());
         self.0.changed.notify_all();
     }
 }
@@ -250,6 +422,7 @@ impl Handle {
 pub struct Worker {
     handle: Handle,
     clock: SharedClock,
+    rescue: Rescue,
 }
 
 impl Worker {
@@ -268,8 +441,20 @@ impl Worker {
         let clock = plan.machine.clock();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
         let stop_grace = plan.config.stop_grace;
-        // The thread is not joined: the agent ends with the process, and a container that
-        // is still there is adopted by the next one.
+        let rescue = Rescue::new(
+            plan.machine.clone(),
+            plan.settings.clone(),
+            plan.host_id.clone(),
+            plan.platform.clone(),
+            stop_grace,
+        );
+        let rescue = plan
+            .rescue_bound
+            .into_iter()
+            .fold(rescue, |rescue, bound| rescue.limited(RESCUE_MAX, bound));
+        // The thread is not joined, so a stuck worker cannot keep the process from ending;
+        // the agent stops the containers it still holds itself (see the module) and a
+        // container that is still there is adopted by the next process.
         thread::spawn(move || {
             let _ending = Ending(&own);
             match build(plan, thread_clock.clone()) {
@@ -297,6 +482,7 @@ impl Worker {
         outcome.map(|()| Self {
             handle: Handle { orders, shared },
             clock,
+            rescue,
         })
     }
 
@@ -315,7 +501,7 @@ impl Worker {
     /// mark. Its queue has no reader, so every reply is [`Delivery::Gone`]; it publishes
     /// `snapshot` and no more.
     #[doc(hidden)]
-    pub fn orphaned(clock: SharedClock, snapshot: Snapshot) -> Self {
+    pub fn orphaned(clock: SharedClock, snapshot: Snapshot, rescue: Rescue) -> Self {
         let (orders, _) = sync_channel(QUEUE);
         let published = Published {
             snapshot,
@@ -331,6 +517,7 @@ impl Worker {
                 shared: Arc::new(shared),
             },
             clock,
+            rescue,
         }
     }
 
@@ -361,6 +548,40 @@ impl Worker {
     pub fn stop_all(&self) {
         self.handle.shared.stop_all.store(true, Ordering::SeqCst);
         let _ = self.handle.orders.try_send(Order::Nudge);
+    }
+
+    /// The end after a refusal for good: closes the worker, asks it to stop every run and
+    /// waits until none is running or the worker has ended, for at most the stop grace and
+    /// [`WIND_DOWN_MARGIN`] (and the [`Rescue`] bound, when that is shorter); a worker that
+    /// ended, or runs that still run then, are stopped by [`Worker::rescue`]. The lines say
+    /// what could not be stopped.
+    pub fn wind_down(&self) -> Vec<String> {
+        self.close();
+        self.stop_all();
+        let shared = &self.handle.shared;
+        let published = shared.lock();
+        let waiting = |published: &mut Published| {
+            published.snapshot.running() && !shared.ended.load(Ordering::SeqCst)
+        };
+        let wait = self.rescue.wind.min(self.rescue.bound);
+        let _ = shared
+            .changed
+            .wait_timeout_while(published, wait, waiting)
+            .unwrap_or_else(PoisonError::into_inner);
+        // A worker that ended may have been inside a start: what it made is not in the
+        // snapshot.
+        match self.snapshot().running() || self.ended() {
+            true => self.rescue(),
+            false => Vec::new(),
+        }
+    }
+
+    /// Closes the worker, so one that wakes from a stall takes no start that still waits in
+    /// its queue, and stops every container of the agent without it, see the module. One
+    /// line for each container that could not be stopped.
+    pub fn rescue(&self) -> Vec<String> {
+        self.close();
+        self.rescue.run()
     }
 
     /// The lines the worker wants printed since the last call; a first line says how many
@@ -456,7 +677,8 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len(),
             _ => 0,
         });
-        let calls = life.held().len().saturating_add(asked);
+        // A run held may cost two calls (a stop, then an inspect or a remove).
+        let calls = life.held().len().saturating_mul(2).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls).as_millis();
         let bound = u64::try_from(bound).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);

@@ -1,6 +1,6 @@
 //! The binner over samples built by hand: minutes, straddles, gaps, folds and the queue.
 
-use js_agent::usage::{
+use js_agent_usage::{
     Binner, ClosedMinute, LeaseSample, MAX_UNSENT_AGE_USEC, MIN_SPAN_USEC, MINUTE_USEC,
     Observation, Sample, TAIL_MINUTE, WindowPart, window_parts,
 };
@@ -651,4 +651,68 @@ fn a_straddle_keeps_each_minutes_own_working_set() {
     assert_eq!(binner.take(10, 62 * S), vec![minute("a", 0, 0, 0, 100)]);
     binner.observe(&sample(120 * S, vec![lease("a", 0, 0, 900)]));
     assert_eq!(binner.take(10, 120 * S), vec![minute("a", 1, 0, 0, 900)]);
+}
+
+/// Asserts that a 55 s step is a gap under a 5 s window and an ordinary window once the
+/// window is set to 20 s: the same samples give a gap and a thin minute in one binner and
+/// a full minute (mean 1000, peak 1000) in the other, and the sample before the change is
+/// not reread.
+#[test]
+fn a_longer_window_makes_a_former_gap_valid() {
+    let series = [0, 55 * S, 60 * S];
+
+    let mut kept = Binner::new(5 * S);
+    let seen = drive(&mut kept, "a", 0, series, |t| (t, 0));
+    assert!(seen[1].covered.is_empty());
+    assert_eq!(kept.counters().gaps, 1);
+    assert!(kept.take(10, 60 * S).is_empty());
+
+    let mut longer = Binner::new(5 * S);
+    drive(&mut longer, "a", 0, [series[0]], |t| (t, 0));
+    longer.set_window(20 * S);
+    let seen = drive(&mut longer, "a", 0, [series[1], series[2]], |t| (t, 0));
+    assert_eq!(seen[0].covered, ["a"]);
+    assert_eq!(seen[1].covered, ["a"]);
+    assert_eq!(longer.counters().gaps, 0);
+    assert_eq!(longer.take(10, 60 * S), vec![minute("a", 0, 1000, 1000, 0)]);
+}
+
+/// Asserts that narrowing the window turns a step that was valid into a gap: the 55 s step
+/// is an ordinary window under a 20 s window (full minute, no gaps) and is a gap, counted
+/// in `gaps` with no span, when the window is set to 5 s after the first sample. A
+/// `set_window` that only ever grows the window would leave the step valid.
+#[test]
+fn a_shorter_window_makes_a_former_valid_step_a_gap() {
+    let series = [0, 55 * S, 60 * S];
+
+    let mut kept = Binner::new(20 * S);
+    let seen = drive(&mut kept, "a", 0, series, |t| (t, 0));
+    assert_eq!(seen[1].covered, ["a"]);
+    assert_eq!(kept.counters().gaps, 0);
+    assert_eq!(kept.take(10, 60 * S), vec![minute("a", 0, 1000, 1000, 0)]);
+
+    let mut shorter = Binner::new(20 * S);
+    drive(&mut shorter, "a", 0, [series[0]], |t| (t, 0));
+    shorter.set_window(5 * S);
+    let seen = drive(&mut shorter, "a", 0, [series[1], series[2]], |t| (t, 0));
+    assert!(seen[0].covered.is_empty());
+    assert_eq!(shorter.counters().gaps, 1);
+    assert!(shorter.take(10, 60 * S).is_empty());
+}
+
+/// Asserts that a window of 0 is read as 1 microsecond, both by `set_window` and by `new`:
+/// a step of 3 microseconds (three windows) is a window, a step of 4 is a gap. A zero
+/// window taken literally would make every step a gap.
+#[test]
+fn set_window_zero_is_clamped() {
+    let mut made_with_zero = Binner::new(0);
+    let mut set_to_zero = Binner::new(10 * S);
+    set_to_zero.set_window(0);
+    for binner in [&mut made_with_zero, &mut set_to_zero] {
+        let seen = drive(binner, "a", 0, [0, 3, 7], |t| (t, 0));
+        assert!(seen[0].covered.is_empty());
+        assert_eq!(seen[1].covered, ["a"]);
+        assert!(seen[2].covered.is_empty());
+        assert_eq!(binner.counters().gaps, 1);
+    }
 }

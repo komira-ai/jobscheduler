@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/not-found",
+    "message": "The requested resource was not found. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-not_found"
+  }
+}

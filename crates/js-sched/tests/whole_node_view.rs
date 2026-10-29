@@ -15,7 +15,8 @@ mod whole_rig;
 use std::collections::BTreeMap;
 
 use js_sched::{
-    DaemonInstance, Event, Request, Scheduler, WholeReason, WholeState, WholeSummary, WholeWait,
+    DaemonInstance, Event, Request, Scheduler, Unservable, WholeReason, WholeState, WholeSummary,
+    WholeWait,
 };
 use js_types::sched::{FarmTime, LeaseGrant, LeaseKind, NodePhase, OperationId, Resources};
 use js_whole::WholeNodeConfig;
@@ -380,7 +381,16 @@ fn a_request_no_worker_could_hold_is_unservable_until_one_registers() {
     f.submit(big);
     assert!(f.grants().is_empty());
     let reason = f.s.waiting(op).expect("no worker could run it").to_owned();
-    assert_eq!(state(&f, op), WholeState::Unservable { reason });
+    let cause = f.s.unservable(op).expect("typed too").clone();
+    assert_eq!(cause.to_string(), reason);
+    assert_eq!(
+        cause,
+        Unservable::TooLarge {
+            matching: 1,
+            asked: Resources::new(64_000, GIB)
+        }
+    );
+    assert_eq!(state(&f, op), WholeState::Unservable { reason, cause });
     assert_eq!(summary(&f).waiting, counts(&[(WholeReason::Unservable, 1)]));
     f.feed(Event::WorkerUp {
         worker: w("big"),

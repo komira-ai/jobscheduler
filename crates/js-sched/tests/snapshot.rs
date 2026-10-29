@@ -357,6 +357,12 @@ fn work_nobody_can_run_is_grouped_by_its_reason() {
             Some(group.reason.as_str()),
             "the example waits for the reason"
         );
+        assert_eq!(
+            h.s.unservable(group.example),
+            Some(&group.cause),
+            "the group carries the example's typed reason"
+        );
+        assert_eq!(group.cause.to_string(), group.reason);
     }
     let reasons: Vec<&str> = queue.waiting.iter().map(|g| g.reason.as_str()).collect();
     let mut sorted = reasons.clone();

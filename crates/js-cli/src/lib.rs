@@ -14,7 +14,7 @@
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` (a bearer token never crosses a network in clear); no user, path or query |
 //! | `--token-file <path>` | required: a regular file owned by you, mode 0600 or 0400, holding one token of printable ASCII (the server checks its own token file the same way) |
-//! | `--ca-cert <path>` | required for `https://`: a PEM file with the certificate to trust (the server's, or the authority that issued it; a system bundle such as `/etc/ssl/certs/ca-certificates.crt` works). The platform's roots are never read on their own, because the loaders find them through environment variables. Ignored for `http://` |
+//! | `--ca-cert <path>` | optional for `https://`: a PEM file with the certificate to trust (the server's, or the authority that issued it; a system bundle such as `/etc/ssl/certs/ca-certificates.crt` works), and then only those are trusted. Without it the public roots bundled in the program (`webpki-roots`) are trusted, never the platform's store. Ignored for `http://` |
 //! | `--json` | machine output: one JSON object per line (for `list` the server's own body), errors on stderr as `{"error": kind, "message": text}` |
 //!
 //! No proxy setting is read, no redirect is followed and the token is sent to the one

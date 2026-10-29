@@ -14,8 +14,8 @@ use std::time::Duration;
 use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, NodePhase, OpState, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, NotQueued, Report, Reported,
-    Settles, Stage, Stream, Taken, View, Writer,
+    Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, Lowered, NotQueued, Report,
+    Reported, Settles, Stage, Stream, Taken, View, Writer,
 };
 use js_store::Ending;
 use js_types::sched::{
@@ -131,6 +131,14 @@ pub struct Rig {
     pub shown: BTreeMap<WaiterId, Stage>,
     /// The operations clients ask for by name, and what each was last shown.
     pub watching: BTreeMap<OperationId, Option<Stage>>,
+    /// The summary name each size key's floor decays with ([`Adapter::summary_name`]).
+    pub names: BTreeMap<u64, String>,
+    /// The names each `key_names` call was told, in order.
+    pub key_names_told: Vec<Vec<(u64, String)>>,
+    /// The leases `learned_requeue` was told were given up, in order.
+    pub learned: Vec<LeaseId>,
+    /// The floors the next poll of `lowered` hands to the core.
+    pub to_lower: Vec<Lowered>,
 }
 
 impl Rig {
@@ -245,6 +253,22 @@ impl Adapter for Rig {
 
     fn requeued(&mut self, requeue: &Requeue) {
         self.calls.push(Call::Requeued(requeue.lease));
+    }
+
+    fn summary_name(&self, size_key: u64) -> Option<String> {
+        self.names.get(&size_key).cloned()
+    }
+
+    fn key_names(&mut self, names: &[(u64, String)]) {
+        self.key_names_told.push(names.to_vec());
+    }
+
+    fn learned_requeue(&mut self, _: &View<'_>, requeue: &Requeue) {
+        self.learned.push(requeue.lease);
+    }
+
+    fn lowered(&mut self) -> Vec<Lowered> {
+        std::mem::take(&mut self.to_lower)
     }
 
     fn settle(&mut self, _: &View<'_>, answer: &Answer, ack: Option<&WorkerId>) -> Delivery {

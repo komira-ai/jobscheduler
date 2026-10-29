@@ -12,13 +12,22 @@ use super::{OpState, Scheduler};
 use crate::admission::{LoadCounters, LoadView, Prediction};
 use crate::cordon::Cordon;
 use crate::input::Request;
+use crate::unservable::Unservable;
 
 impl Scheduler {
     /// Why no live worker can run `operation` now, while it is queued and none can.
     #[must_use]
     pub fn waiting(&self, operation: OperationId) -> Option<&str> {
         let op = self.ops.get(&operation)?;
-        op.unservable.as_ref().map(|u| u.reason.as_str())
+        op.unservable.as_ref().map(|u| u.text.as_str())
+    }
+
+    /// [`Scheduler::waiting`] as a value: the cause, to match on, count or group by. Its
+    /// `Display` is the text `waiting` returns.
+    #[must_use]
+    pub fn unservable(&self, operation: OperationId) -> Option<&Unservable> {
+        let op = self.ops.get(&operation)?;
+        op.unservable.as_ref().map(|u| &u.reason)
     }
 
     /// The request `operation` was submitted with, if the scheduler holds it.
