@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/quota-exceeded",
+    "message": "Quota exceeded. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-quota"
+  }
+}

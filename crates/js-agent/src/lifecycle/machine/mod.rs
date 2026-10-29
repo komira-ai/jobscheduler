@@ -61,6 +61,14 @@ impl Lifecycle {
     /// beside it still count.
     pub fn apply(&mut self, reply: &HeartbeatReply) -> Vec<Event> {
         let received = self.clock.now_ms();
+        self.apply_at(reply, received)
+    }
+
+    /// [`Lifecycle::apply`] for a reply that arrived at `received` on the lifecycle's clock
+    /// (milliseconds, [`Clock::now_ms`]): a start's `valid_for_ms` is counted from then, so
+    /// a reply that waited for a worker busy with a slow runtime call is not given the time
+    /// it spent waiting.
+    pub fn apply_at(&mut self, reply: &HeartbeatReply, received: u64) -> Vec<Event> {
         let checked = reply.validate();
         let mut events: Vec<Event> = checked
             .refused

@@ -1,0 +1,25 @@
+{
+  "data": {
+    "terminated_instances": [
+      {
+        "id": "c0ffee00c0ffee00c0ffee00c0ffee01",
+        "name": "js-0123456789ab-000000000001",
+        "status": "terminating",
+        "ssh_key_names": ["fixture-key"],
+        "file_system_names": [],
+        "region": { "name": "region-a", "description": "Place A" },
+        "instance_type": {
+          "name": "gpu_1x_sample",
+          "description": "1x Sample GPU (24 GB)",
+          "gpu_description": "Sample GPU (24 GB)",
+          "price_cents_per_hour": 75,
+          "specs": { "vcpus": 30, "memory_gib": 200, "storage_gib": 500, "gpus": 1 },
+          "architecture": "x86_64"
+        },
+        "first_healthy": null,
+        "actions": {},
+        "extra_field_from_a_newer_api": true
+      }
+    ]
+  }
+}

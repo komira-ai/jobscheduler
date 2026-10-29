@@ -15,7 +15,7 @@ use ureq::{Agent, Error as TransportError};
 use crate::api::LambdaApi;
 use crate::error::{ApiError, cut};
 use crate::key::ApiKey;
-use crate::model::{Instance, InstanceId, InstanceTypeOffer};
+use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest};
 use crate::wire;
 
 /// The path every call lives under.
@@ -116,14 +116,33 @@ impl HttpApi {
 
     /// `GET path`: the body of a success, or the failure.
     fn get(&self, path: &str) -> Result<Vec<u8>, ApiError> {
+        self.send(path, None)
+    }
+
+    /// `POST path` with a JSON `body`: the body of a success, or the failure.
+    fn post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, ApiError> {
+        self.send(path, Some(body))
+    }
+
+    fn send(&self, path: &str, body: Option<&[u8]>) -> Result<Vec<u8>, ApiError> {
         let transport = |err: TransportError| ApiError::Transport(cut(&err.to_string(), QUOTED));
-        let mut response = self
-            .agent
-            .get(format!("{}{API}{path}", self.base))
-            .header("authorization", &self.authorization)
-            .header("accept", "application/json")
-            .call()
-            .map_err(transport)?;
+        let url = format!("{}{API}{path}", self.base);
+        let sent = match body {
+            None => self
+                .agent
+                .get(url)
+                .header("authorization", &self.authorization)
+                .header("accept", "application/json")
+                .call(),
+            Some(bytes) => self
+                .agent
+                .post(url)
+                .header("authorization", &self.authorization)
+                .header("accept", "application/json")
+                .header("content-type", "application/json")
+                .send(bytes),
+        };
+        let mut response = sent.map_err(transport)?;
         let status = response.status().as_u16();
         let retry_after = response
             .headers()
@@ -175,6 +194,14 @@ impl LambdaApi for HttpApi {
                 "the answer is for another instance than the one asked for".to_owned(),
             )),
         }
+    }
+
+    fn launch(&self, request: &LaunchRequest) -> Result<Vec<InstanceId>, ApiError> {
+        wire::launched(&self.post("/instance-operations/launch", &wire::launch_body(request))?)
+    }
+
+    fn terminate(&self, id: &InstanceId) -> Result<Vec<InstanceId>, ApiError> {
+        wire::terminated(&self.post("/instance-operations/terminate", &wire::terminate_body(id))?)
     }
 }
 

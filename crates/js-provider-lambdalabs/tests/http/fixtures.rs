@@ -54,6 +54,23 @@ fn instance_fixtures_carry_the_required_fields() {
 }
 
 #[test]
+fn launch_and_terminate_fixtures_carry_the_documented_fields() {
+    let launched = json("launch.json");
+    assert!(launched["data"]["instance_ids"].is_array());
+    let ended = json("terminate.json");
+    for row in ended["data"]["terminated_instances"].as_array().unwrap() {
+        require(row, INSTANCE, "terminated instance");
+        require(&row["instance_type"], TYPE, "instance type");
+    }
+    assert!(
+        json("terminate_none.json")["data"]["terminated_instances"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn type_fixtures_carry_the_required_fields_except_the_sparse_row_made_on_purpose() {
     let types = json("instance_types.json");
     for (name, item) in types["data"].as_object().unwrap() {
@@ -76,6 +93,8 @@ fn error_fixtures_carry_code_and_message() {
         "error_rate_limited.json",
         "error_internal.json",
         "error_provider_unavailable.json",
+        "error_insufficient_capacity.json",
+        "error_quota_exceeded.json",
     ] {
         require(&json(name)["error"], &["code", "message"], name);
     }

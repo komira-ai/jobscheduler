@@ -128,23 +128,22 @@
 //! # The threading contract of the runtime seam
 //!
 //! [`ContainerRuntime`] calls block (an image pull, the grace of a stop, a slow daemon).
-//! They are made by [`Lifecycle`] only. No worker thread exists yet: this is a
-//! requirement on the change that wires the lifecycle to the session, and on the backend.
-//! A [`Lifecycle`] must be driven from its own worker thread, never from the session's
-//! heartbeat loop, so that a slow runtime call delays the next [`Lifecycle::step`] but
-//! never a heartbeat, and a slow docker call cannot make the agent miss its heartbeat
-//! deadline and fence itself. The worker owns the lifecycle (build it on that thread, so
-//! the runtime needs no `Send` bound); the session loop hands it replies and takes
-//! [`Lifecycle::held`], [`Lifecycle::results`] and [`Lifecycle::free`] as snapshots the
-//! worker publishes after each call.
+//! They are made by [`Lifecycle`] only, and a [`Lifecycle`] is driven from its own worker
+//! thread (see [`Worker`](crate::Worker)), never from the session's heartbeat loop, so
+//! that a slow runtime call delays the next [`Lifecycle::step`] but never a heartbeat, and
+//! a slow docker call cannot make the agent miss its heartbeat deadline and fence itself.
+//! The worker owns the lifecycle (it is built on that thread, so the runtime needs no
+//! `Send` bound); the session loop hands it replies and takes [`Lifecycle::held`],
+//! [`Lifecycle::results`] and [`Lifecycle::pending_taint`] as the snapshot the worker
+//! publishes after each order and step.
 //!
-//! # Not wired yet
+//! # How it is wired
 //!
-//! Nothing here touches the network. The change that wires it will feed
-//! [`Lifecycle::apply`] each heartbeat reply, call [`Lifecycle::step`] on each tick,
-//! put [`Lifecycle::held`] and [`Lifecycle::results`] in the next heartbeat and a
-//! capacity change from [`Lifecycle::free`] into the session, and build the [`Config`]
-//! from the flags ([`Local`]) and the hello's shape ([`Capacity::of`]).
+//! Nothing here touches the network. The worker feeds [`Lifecycle::apply_at`] each
+//! heartbeat reply (stamped with the moment it arrived), calls [`Lifecycle::step`] after
+//! each order and whenever it has had none for a second, and the session puts the held
+//! runs, the results and the taint in the next heartbeat. The [`Config`] is built from
+//! the flags ([`Local`]) and the hello's shape ([`Capacity::of`]).
 
 mod machine;
 mod mounts;
@@ -476,6 +475,24 @@ pub struct Local {
     pub state: Option<StateRoot>,
     /// The `--watch-dir` flags, canonicalised, sorted, each once.
     pub watch: Vec<PathBuf>,
+    /// `--stop-grace`, or [`DEFAULT_STOP_GRACE`].
+    pub stop_grace: Duration,
+    /// `--drain-wait`, or the stop grace.
+    pub drain_wait: Duration,
+}
+
+/// How long a container gets to stop on its own when `--stop-grace` is not given.
+pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
+
+/// The most seconds `--stop-grace` and `--drain-wait` take.
+pub const MAX_GRACE_SECS: u64 = 3600;
+
+/// A number of seconds a flag gave, or `default`.
+fn seconds(flag: &str, given: Option<u64>, default: Duration) -> Result<Duration, String> {
+    given.map_or(Ok(default), |secs| match secs <= MAX_GRACE_SECS {
+        true => Ok(Duration::from_secs(secs)),
+        false => Err(format!("{flag}: at most {MAX_GRACE_SECS} seconds")),
+    })
 }
 
 impl Local {
@@ -531,6 +548,12 @@ impl Local {
                     .to_owned(),
             );
         }
+        let graces = [cli.stop_grace, cli.drain_wait];
+        if container.is_none() && graces.iter().any(Option::is_some) {
+            return Err("--stop-grace and --drain-wait: need --container-bin".to_owned());
+        }
+        let stop_grace = seconds("--stop-grace", cli.stop_grace, DEFAULT_STOP_GRACE)?;
+        let drain_wait = seconds("--drain-wait", cli.drain_wait, stop_grace)?;
         if let Some(state) = &state {
             let mut writable = mounts.paths().chain(scratch.iter().map(ScratchRoot::path));
             if writable.any(|root| state.path().starts_with(root)) {
@@ -546,12 +569,22 @@ impl Local {
             .chain(scratch.iter().map(ScratchRoot::path))
             .chain(state.iter().map(StateRoot::path))
             .collect();
+        let watch = watch_dirs(&cli.watch_dirs, &busy)?;
+        if container.is_some() && scratch.is_none() {
+            return Err(
+                "--scratch-root: required with --container-bin: each run's private \
+                 directory is made there"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
-            watch: watch_dirs(&cli.watch_dirs, &busy)?,
+            watch,
             mounts,
             scratch,
             container,
             state,
+            stop_grace,
+            drain_wait,
         })
     }
 }
