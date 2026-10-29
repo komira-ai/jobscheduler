@@ -43,18 +43,22 @@
 //!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
 //!   mark is never released, except that a silent host whose leases the registry gave up
 //!   ([`HostFacts::lease_given_up`]) is not kept by the runs and streams it lists, which a
-//!   job that can no longer report leaves behind. Hosts the scaler did not launch are
-//!   never released. One the registry no longer shows is released too, but only on a
-//!   complete registry view ([`Input::registry_complete`], the shell's duty to vouch for)
-//!   with the machine missing on complete views `unknown_hold` apart; otherwise it is held
-//!   and counted. A booting machine is given up on at `boot_timeout` on a complete view
-//!   only, and only once its host has been missing on complete views for a third of
-//!   `boot_timeout`, so a restart does not release a machine whose agent is about to say
-//!   hello. The times a silent host was first seen silent and a machine was first seen
-//!   missing are in [`Records`] with the time of the step that wrote them, so a scaler
-//!   restarted more often than `unknown_hold` still reaches the hold by the time it
-//!   observed; the time it was down is not counted. One the provider says it no longer has
-//!   ([`Input::not_found`]) is settled.
+//!   job that can no longer report leaves behind. A registered host never heard from since
+//!   its hello ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books
+//!   nothing is a failed boot, released at `boot_timeout` after its launch with the
+//!   boot-failure cooldown, unless it was seen live and heard from on an earlier step
+//!   ([`Record::seen_live`]): a host whose agent restarted and said hello again is not a
+//!   lost Welcome. Hosts the scaler did not launch are never released. One the registry no
+//!   longer shows is released too, but only on a complete registry view
+//!   ([`Input::registry_complete`], the shell's duty to vouch for) with the machine missing
+//!   on complete views `unknown_hold` apart; otherwise it is held and counted. A booting
+//!   machine is given up on at `boot_timeout` on a complete view only, and only once its
+//!   host has been missing on complete views for a third of `boot_timeout`, so a restart
+//!   does not release a machine whose agent is about to say hello. The times a silent host
+//!   was first seen silent and a machine was first seen missing are in [`Records`] with the
+//!   time of the step that wrote them, so a scaler restarted more often than `unknown_hold`
+//!   still reaches the hold by the time it observed; the time it was down is not counted.
+//!   One the provider says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is
 //!   revoked and the machine released, every step, until a read by id says gone. There is

@@ -110,6 +110,7 @@ pub fn host(name: &str, pool: &str) -> HostFacts {
         mark: None,
         busy: false,
         lease_given_up: false,
+        heard_since_hello: true,
     }
 }
 
@@ -307,5 +308,6 @@ pub fn record(phase: Phase, price: u64, launched: u64) -> Record {
         condemned: false,
         clean_lists: 0,
         last_clean: None,
+        seen_live: false,
     }
 }

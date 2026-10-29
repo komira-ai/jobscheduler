@@ -152,9 +152,10 @@ impl Rows {
     }
 
     /// Writes the key floor `floor` as it now stands, or deletes its row when it was forgotten
-    /// (an `ask` of 0): outside any give-up, after the estimator's decay lowered it. The row
-    /// keeps its stamp, and names the size summary `summary` that its floor decays with, or
-    /// the one it already names.
+    /// (an `ask` of 0), whatever the row holds: outside any give-up. A decay that lowers a
+    /// floor writes it with [`Rows::lower_key_floor`], which does not overwrite a floor
+    /// another frontend raised. The row keeps its stamp, and names the size summary
+    /// `summary` that its floor decays with, or the one it already names.
     ///
     /// # Errors
     /// The store cannot be read or written.

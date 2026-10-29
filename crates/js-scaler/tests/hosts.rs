@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use js_elastic::HostStatus;
-use js_scaler::{Action, HostState, Mark, Phase};
+use js_scaler::{Action, CooldownReason, HostState, Mark, Phase, Records};
 
 /// Asserts that the boot clock runs from the launch, as the token's does, and not from
 /// the answer: a machine accepted ten minutes after its launch is given up on at
@@ -336,4 +336,161 @@ fn a_static_host_is_never_released() {
         assert!(rig.tick(at(later)).is_empty());
     }
     assert!(rig.state.records.instances.is_empty());
+}
+
+/// A rig whose machine was launched at the start and whose host said hello at two seconds
+/// and never heartbeated: the registry shows it silent and `heard_since_hello` is false.
+fn welcome_lost() -> (Rig, String) {
+    let (mut rig, plan, _) = booting(settings("gpu"), "i-1");
+    let mut hello = host(&plan.name, "gpu");
+    hello.heard_since_hello = false;
+    rig.input.hosts = vec![hello];
+    rig.tick(at(2 * SECOND));
+    assert_eq!(rig.phase(0), Phase::Registered);
+    rig.input.hosts[0].state = HostState::Lost;
+    (rig, plan.name)
+}
+
+/// Asserts that a host that said hello and never heartbeated since, and books nothing, is
+/// a failed boot: left alone a millisecond before `boot_timeout` after the launch,
+/// revoked and released at it, with the boot-failure cooldown started, as for a boot that
+/// never said hello.
+#[test]
+fn a_lost_welcome_is_released_at_boot_timeout_and_starts_the_cooldown() {
+    let (mut rig, _) = welcome_lost();
+    assert!(rig.tick(at(15 * MINUTE - 1)).is_empty());
+    assert_eq!(rig.phase(0), Phase::Registered);
+    assert!(rig.state.records.cooldowns.is_empty());
+
+    let actions = rig.tick(at(15 * MINUTE));
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(rig.phase(0), Phase::Releasing);
+    let cooldown = rig.state.records.cooldowns["gpu"];
+    assert_eq!(cooldown.reason, CooldownReason::BootFailed);
+    assert_eq!(cooldown.until, at(25 * MINUTE));
+    assert_eq!(rig.state.refused, 0);
+}
+
+/// Asserts that a host that heartbeated at least once after its hello is not released by
+/// the boot rule: it keeps the silent-host rules, which wait for its leases to be given up
+/// and for `unknown_hold`.
+#[test]
+fn a_host_that_heartbeated_once_is_not_released_at_boot_timeout() {
+    let (mut rig, _) = welcome_lost();
+    rig.input.hosts[0].heard_since_hello = true;
+    for later in [15 * MINUTE - 1, 15 * MINUTE, 3 * SECOND + 30 * MINUTE] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
+    assert!(rig.state.records.cooldowns.is_empty());
+}
+
+/// Asserts that a host that was heard from, whose agent then restarted and said hello
+/// again (the registry's heartbeat count starts over, so `heard_since_hello` is false) and
+/// went silent before a heartbeat, is not a failed boot, however old its machine is: it is
+/// not released at `boot_timeout`, the pool gets no cooldown, and it keeps the silent-host
+/// rules.
+#[test]
+fn a_host_heard_before_a_re_hello_is_not_released_at_boot_timeout() {
+    let (mut rig, plan, _) = booting(settings("gpu"), "i-1");
+    rig.input.hosts = vec![host(&plan.name, "gpu")];
+    rig.tick(at(2 * SECOND));
+    rig.tick(at(3 * SECOND));
+    assert_eq!(rig.phase(0), Phase::Registered);
+
+    rig.input.hosts[0].heard_since_hello = false;
+    rig.tick(at(4 * MINUTE));
+    rig.input.hosts[0].state = HostState::Lost;
+    for later in [20 * MINUTE, 20 * MINUTE + 1, 3 * HOUR] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
+    assert!(rig.state.records.cooldowns.is_empty());
+    assert_eq!(rig.state.refused, 0);
+}
+
+/// Asserts that after an upgrade, a Registered idle host whose record came from a file
+/// written before `seen_live` existed (so it reads true), re-said hello and went silent, is
+/// not released at `boot_timeout` and starts no cooldown: it keeps the silent-host rules.
+#[test]
+fn a_host_recorded_before_the_upgrade_is_not_released_at_boot_timeout() {
+    let (mut rig, _) = welcome_lost();
+    assert!(!rig.record(0).seen_live);
+    let encoded = rig.state.records.encode().unwrap();
+    let old = encoded
+        .replace(",\n      \"seen_live\": false", "")
+        .replace(",\n      \"seen_live\": true", "");
+    assert!(!old.contains("seen_live"));
+    rig.state.records = Records::decode(&old).unwrap();
+    assert!(rig.record(0).seen_live);
+    for later in [15 * MINUTE - 1, 15 * MINUTE, 3 * HOUR] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
+    assert!(rig.state.records.cooldowns.is_empty());
+    assert_eq!(rig.state.refused, 0);
+}
+
+/// Asserts that a host whose Welcome was lost is still released at exactly `boot_timeout`
+/// when the registry showed it live (and not heard from) on the steps between its hello
+/// and the lapse of its heartbeats: only a heartbeat makes a host seen, not a live state.
+#[test]
+fn a_lost_welcome_host_shown_live_before_it_lapsed_is_still_released_at_boot_timeout() {
+    let (mut rig, name) = welcome_lost();
+    rig.input.hosts[0].state = HostState::Live;
+    rig.tick(at(5 * MINUTE));
+    assert!(!rig.record(0).seen_live);
+    rig.input.hosts[0].state = HostState::Lost;
+    assert!(rig.tick(at(15 * MINUTE - 1)).is_empty());
+    let actions = rig.tick(at(15 * MINUTE));
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
+    assert_eq!(rig.phase(0), Phase::Releasing);
+    assert_eq!(
+        rig.state.records.cooldowns["gpu"].reason,
+        CooldownReason::BootFailed
+    );
+    assert_eq!(rig.record(0).name, name);
+}
+
+/// Asserts that a draining machine whose host was never heard from since its hello is not
+/// caught by the boot rule, which reads registered machines only: it falls back to the
+/// silent-host rules and is released when its leases are given up and `unknown_hold` has
+/// passed, with no boot-failure cooldown. That is the safe direction.
+#[test]
+fn a_draining_machine_with_a_lost_welcome_waits_for_the_unknown_hold() {
+    let (mut rig, _) = welcome_lost();
+    rig.state.records.instances[0].phase = Phase::Draining;
+    rig.input.hosts[0].lease_given_up = true;
+    assert!(rig.tick(at(15 * MINUTE)).is_empty());
+    assert!(rig.tick(at(45 * MINUTE - 1)).is_empty());
+    assert_eq!(rig.phase(0), Phase::Draining);
+    let actions = rig.tick(at(45 * MINUTE));
+    assert_eq!(kinds(&actions), ["Drain", "ReleaseHost"]);
+    assert_eq!(rig.phase(0), Phase::Draining);
+    assert!(rig.state.records.cooldowns.is_empty());
+}
+
+/// Asserts that a never-heartbeated host that shows work is not released by the boot rule,
+/// whichever way: it is busy, it is marked `Held` or `Reserved`, or a waiting request holds
+/// it.
+#[test]
+fn a_host_that_never_heartbeated_but_books_work_is_not_released_at_boot_timeout() {
+    type Work = fn(&mut Rig, &str);
+    let works: [Work; 4] = [
+        |rig, _| rig.input.hosts[0].busy = true,
+        |rig, _| rig.input.hosts[0].mark = Some(Mark::Held),
+        |rig, _| rig.input.hosts[0].mark = Some(Mark::Reserved),
+        |rig, name| rig.input.waiting = vec![reserved("r2", name)],
+    ];
+    for work in works {
+        let (mut rig, name) = welcome_lost();
+        work(&mut rig, &name);
+        let actions = rig.tick(at(15 * MINUTE));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+        assert!(rig.state.records.cooldowns.is_empty());
+    }
 }

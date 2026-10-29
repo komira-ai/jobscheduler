@@ -813,7 +813,9 @@ Rules, each tied to a requirement or to existing behaviour:
   is placed by the registry's normal path on the consumer's next poll.
 - Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
   token's life is): the agent never said hello (or was refused `host-contract`). A host the
-  registry shows has said hello, so a silent one is not released by this. Only a complete
+  registry shows has said hello, so a silent one is not released by this, with one exception: a registered host
+  that has not been heard from since its hello and books nothing (a lost Welcome, 7.2) is released at `boot_timeout`
+  from the launch, with the same cooldown. Only a complete
   registry view gives up on a machine: on an incomplete one its host may have said hello and be
   missing from the part that was read, so the machine is held and counted. Even on a complete
   view the machine is given up on only once its host has been missing from complete views for
@@ -882,7 +884,11 @@ Rules, each tied to a requirement or to existing behaviour:
   every saved silent and missing time forward by the span since `last_step`, and records
   with no `last_step` begin the counts again at that step. `last_step` is written only with
   the records, never alone, so it is a lower bound on the last step the old process ran,
-  and a restart errs toward counting less. Hosts of a static pool are never released by the
+  and a restart errs toward counting less.
+  A registered host that said hello and has not been heard from since
+  (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
+  heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
+  cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
   scaler. Until then the machine counts toward the caps and the state shows the age of its
   silence.
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
@@ -1046,8 +1052,14 @@ launch, not as an option:
   state as tokens (`agent_state::replace`), revoked by the same `revoke_for(pool, name)`, and
   carries the same `CREDENTIAL_TTL` silence bound.
 - Failure case: the `Welcome` is lost on the wire after the registry retired the token. The
-  host cannot re-register; the scaler sees Booting with no heartbeat, `boot_timeout` releases it.
-  Tested in 13.3.
+  host cannot re-register; the registry shows the host (its hello was admitted) and it never heartbeats, so the scaler releases it at `boot_timeout`
+  from the launch (`heard_since_hello`, 6.2 Lost), not at `unknown_hold`.
+  The exception is a host that was seen live and heard from on an earlier step
+  (`Record::seen_live`, kept in the records): a long-running host whose agent restarts and
+  says hello again reads `heard_since_hello` false until its next heartbeat, is not a lost
+  Welcome, and keeps the `unknown_hold` rules. Tested in 13.2 (`js-scaler`: the rule at
+  `boot_timeout` to the millisecond, the re-hello exception, a draining record); the
+  registry, agent and wire halves are not tested there.
 - The Welcome that can carry the credential is sent with `Cache-Control: no-store` and
   `Pragma: no-cache`.
 - An agent that is given no `--token-file` uses the `host-credential` file of its `--state-root`
@@ -1455,10 +1467,14 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `release_host`; (d) a run started by a lease booked before the mark. In every order either the work
   runs and the host is kept, or the host is released and the work is refused.
 - Release: `Revoke` precedes `Release` and follows `ReleaseHost`; `Released::Unknown` retries every
-  tick and never removes; `Gone` removes and revokes once. Booting past `boot_timeout` is released and
-  starts `boot_fail_cooldown`; on an incomplete registry view it is held. A Lost host the provider
-  calls `terminated` is removed. A silent host that books nothing is drained and released after
-  `unknown_hold`; one that shows work is never released. Failing health
+  tick and never removes; `Gone` removes and revokes. A `Failed` record was revoked when it failed
+  and may be revoked again on entering release; that is harmless, for revoking a missing token is a
+  no-op. Booting past `boot_timeout` is released and starts `boot_fail_cooldown`; on an incomplete
+  registry view it is held. A registered host that said hello, was never heard from since and was
+  never seen live and heard from, and books nothing (a lost Welcome), is released at `boot_timeout`
+  from the launch with the same cooldown, not at `unknown_hold`. A Lost host the provider calls
+  `terminated` is removed. Any other silent host that books nothing is drained and released after
+  `unknown_hold` (so is a draining lost-Welcome one); one that shows work is never released. Failing health
   or `Checking`: no launch, running hosts still released.
 
 ### 13.3 End to end (PR 9), in process, with fakes
