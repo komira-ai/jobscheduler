@@ -170,6 +170,7 @@ mod tests {
             phase: Phase::Serving,
             lease: None,
             shape: Shape::new(resources, BTreeMap::new()),
+            claim: None,
             labels: BTreeMap::new(),
             agent_version: None,
             epoch: 1,

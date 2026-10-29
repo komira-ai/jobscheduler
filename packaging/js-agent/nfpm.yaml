@@ -1,0 +1,38 @@
+# The js-agent deb, built by nfpm (pinned by SHA-256 in .github/workflows/js-agent-deb.yml)
+# from the statically linked musl binary, then checked by `cargo xtask pkg check-deb`
+# (crates/xtask/src/pkg.rs), which holds the list of what the package may contain. No
+# maintainer script, no dependency: the directories come from tmpfiles.d (made by the unit
+# before every start, and by hand on a first install: the unit's header has the sequence),
+# and the package manager installs it with a plain `dpkg --install`. Every file is root's.
+# VERSION is the release version, set by the workflow; SOURCE_DATE_EPOCH is the time of every
+# file. The copyright file is the repository's LICENSE (checked by `pkg check-deb --license`).
+name: js-agent
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: none
+section: admin
+priority: optional
+maintainer: komira-ai <noreply@komira.com>
+description: The jobscheduler agent, which offers this host to a lease server, and its systemd unit.
+homepage: https://github.com/komira-ai/jobscheduler
+license: Apache-2.0
+deb:
+  compression: gzip
+contents:
+  - src: target/x86_64-unknown-linux-musl/release/js-agent
+    dst: /usr/bin/js-agent
+    file_info:
+      mode: 0755
+  - src: packaging/js-agent/js-agent.service
+    dst: /usr/lib/systemd/system/js-agent.service
+    file_info:
+      mode: 0644
+  - src: packaging/js-agent/tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/js-agent.conf
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/js-agent/copyright
+    file_info:
+      mode: 0644

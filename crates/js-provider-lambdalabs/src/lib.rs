@@ -20,10 +20,15 @@
 //!   ([`ApiError`], [`ErrorCode`]), which are matched on Lambda's `code`, never on its
 //!   message text;
 //! - [`ApiKey`], the key read from an owner-only file and never printed;
-//! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked.
+//! - [`OptionTable`], the `[[option]]` rows of the configuration, parsed and checked;
+//! - [`kind::build`], the `lambdalabs` kind of the service's table of provider kinds: the
+//!   provider table of a pool, checked offline and turned into a [`LambdaProvider`].
 //!
-//! Nothing here has a built-in address: [`HttpApi::connect`] takes the base URL from its
-//! caller, and a plain `http://` address is accepted for the loopback interface only.
+//! Nothing here has a built-in address except in one place: [`HttpApi::connect`] takes the
+//! base URL from its caller, and a plain `http://` address is accepted for the loopback
+//! interface only. The [`kind`] module, which builds a provider from the service's
+//! configuration, holds Lambda's address ([`kind::DEFAULT_API_URL`]) for a table that names
+//! none, and an `api_url` overrides it.
 //!
 //! The guard's memory (launches sent, launches answered and not yet listed, the time of
 //! the last launch) is one process's `Mutex`: run one provider instance per scheduler id.
@@ -68,6 +73,7 @@ pub mod first_launch;
 mod host;
 mod http;
 mod key;
+pub mod kind;
 mod model;
 mod options;
 mod own;

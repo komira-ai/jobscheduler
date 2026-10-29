@@ -359,6 +359,8 @@ pub fn container_flags(dir: &Scratch) -> Vec<String> {
         exec.display().to_string(),
         "--container-user".to_owned(),
         user,
+        "--container-subuid".to_owned(),
+        "jobmap".to_owned(),
         "--state-root".to_owned(),
         private(dir, "state").display().to_string(),
         "--scratch-root".to_owned(),
