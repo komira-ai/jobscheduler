@@ -87,7 +87,7 @@ impl Run {
     /// Whether the node was under CPU pressure during the run ([`RunSeries::NODE_PRESSURE`]).
     #[must_use]
     pub fn under_node_pressure(&self) -> bool {
-        self.flags & RunSeries::NODE_PRESSURE != 0
+        self.flags & RunSeries::CENSORED != 0
     }
 
     /// The run `series` makes, or why it does not enter.
