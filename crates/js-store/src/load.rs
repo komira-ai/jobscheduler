@@ -1,6 +1,6 @@
 //! What a start reads of the state store, and what a look at one operation or at the queue
-//! reads: the unfinished operations, each with its lease, loss count, fate, parcel and size
-//! key, and the first ids to hand out.
+//! reads: the unfinished operations, each with its lease, loss count, fate, parcel, size
+//! key and longest run, and the first ids to hand out.
 //!
 //! A `lease/` or `op/` row that holds a command this binary does not know was written by a
 //! later binary: a scan skips it, and the rows it can read load. A start ([`Rows::load`])
@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use js_sched::{Fate, Floor, KeyFloor, Recovered, RecoveredLease, Request};
 use js_state::{Version, Versioned};
@@ -22,7 +23,7 @@ use js_types::sched::{LeaseGrant, OperationId, WaiterId, WorkerId};
 
 use crate::codec::HeldLease;
 use crate::cordon::StoredCordon;
-use crate::{Rows, StateError, fate, keys, number, opkey};
+use crate::{Rows, StateError, fate, keys, number, opkey, opwall};
 
 /// What a store holds of the scheduler, as a start reads it.
 #[derive(Debug, PartialEq, Eq)]
@@ -68,6 +69,9 @@ pub struct StoredOperation {
     pub parcel: Option<Vec<u8>>,
     /// Its size key, if the writer named one (`opkey/` row) and size keys are read.
     pub size_key: Option<u64>,
+    /// The longest it may run, if the writer named one (`opwall/` row). Read whatever the
+    /// settings: the scheduler ignores it unless its whole-node option is on.
+    pub max_wall: Option<Duration>,
 }
 
 impl StoredOperation {
@@ -117,6 +121,11 @@ fn size_key_row(key: &str, row: &Versioned) -> Result<u64, StateError> {
     opkey::decode(&row.value).map_err(|why| StateError::corrupt(key, why))
 }
 
+/// The longest run an `opwall/` row holds.
+fn wall_row(key: &str, row: &Versioned) -> Result<Duration, StateError> {
+    opwall::decode(&row.value).map_err(|why| StateError::corrupt(key, why))
+}
+
 impl Rows {
     /// Whether the `opkey/` rows are read. A store that never had the learned sizes on
     /// holds none, and with them off a row an earlier run left is neither loaded nor
@@ -156,6 +165,11 @@ impl Rows {
                 size_keys.insert(operation, size_key_row(&key, &row)?);
             }
         }
+        let mut walls = BTreeMap::new();
+        for (key, row) in self.store.scan_prefix(keys::OPWALL)? {
+            let operation = keys::operation_of(keys::OPWALL, &key)?;
+            walls.insert(operation, wall_row(&key, &row)?);
+        }
         let floors = self.stored_floors()?;
         let (key_floors, key_names) = if self.size_keys.load(Ordering::SeqCst) {
             self.stored_key_floors()?
@@ -176,6 +190,7 @@ impl Rows {
                 fate: fates.remove(&operation),
                 parcel: parcels.remove(&operation),
                 size_key: size_keys.remove(&operation),
+                max_wall: walls.remove(&operation),
             });
         }
         Ok(Stored {
@@ -239,6 +254,12 @@ impl Rows {
         } else {
             None
         };
+        let wall = keys::opwall(operation);
+        let max_wall = self
+            .store
+            .get(&wall)?
+            .map(|row| wall_row(&wall, &row))
+            .transpose()?;
         Ok(Some(StoredOperation {
             operation,
             request,
@@ -248,6 +269,7 @@ impl Rows {
             fate,
             parcel,
             size_key,
+            max_wall,
         }))
     }
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::Resources;
+use crate::{DISK_GIB_KEY, Resources};
 
 /// Typed key/value facts a host reports, or a request needs (design section 3).
 pub type Capabilities = BTreeMap<String, String>;
@@ -32,11 +32,20 @@ impl Shape {
     }
 
     /// Whether the host offers at least `wanted` and reports every key in `required`
-    /// with the same value.
+    /// with the same value. The one key compared as a minimum is `disk-gib`: the host's
+    /// free GiB must be at least the amount required, and a host that reports no number
+    /// (or a required amount that is not one) does not satisfy it.
     pub fn satisfies(&self, wanted: &Resources, required: &Capabilities) -> bool {
-        let caps_ok = required
-            .iter()
-            .all(|(key, value)| self.capabilities.get(key) == Some(value));
+        let caps_ok = required.iter().all(|(key, value)| {
+            let have = self.capabilities.get(key);
+            match key.as_str() {
+                DISK_GIB_KEY => have
+                    .and_then(|have| have.parse::<u64>().ok())
+                    .zip(value.parse::<u64>().ok())
+                    .is_some_and(|(have, want)| want <= have),
+                _ => have == Some(value),
+            }
+        });
         [wanted.fits_in(&self.resources), caps_ok]
             .into_iter()
             .all(|ok| ok)
@@ -71,5 +80,24 @@ mod tests {
         assert!(!shape.satisfies(&big, &caps(&[])));
         assert_eq!(shape.resources().gpus(), 1);
         assert_eq!(shape.capabilities().len(), 2);
+    }
+
+    /// Asserts that `disk-gib` is a minimum, with the exact edge accepted, that a host
+    /// reporting no disk or a non-number, or a requirement that is not a number, never
+    /// satisfies it, and that `exec` stays an equality.
+    #[test]
+    fn disk_is_a_minimum_and_exec_is_equal() {
+        let resources = Resources::new(8000, 100, 0, None).unwrap();
+        let shape = |pairs: &[(&str, &str)]| Shape::new(resources.clone(), caps(pairs));
+        let host = shape(&[("disk-gib", "100"), ("exec", "container")]);
+        let none = Resources::new(0, 0, 0, None).unwrap();
+        assert!(host.satisfies(&none, &caps(&[("disk-gib", "99")])));
+        assert!(host.satisfies(&none, &caps(&[("disk-gib", "100")])));
+        assert!(!host.satisfies(&none, &caps(&[("disk-gib", "101")])));
+        assert!(host.satisfies(&none, &caps(&[("exec", "container")])));
+        assert!(!host.satisfies(&none, &caps(&[("exec", "sandbox-exec")])));
+        assert!(!shape(&[]).satisfies(&none, &caps(&[("disk-gib", "1")])));
+        assert!(!shape(&[("disk-gib", "lots")]).satisfies(&none, &caps(&[("disk-gib", "1")])));
+        assert!(!host.satisfies(&none, &caps(&[("disk-gib", "lots")])));
     }
 }

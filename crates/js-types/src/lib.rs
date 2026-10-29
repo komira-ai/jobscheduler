@@ -27,7 +27,8 @@ mod shape;
 pub use class::{Admission, ClassError, ResourceClass};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use job::{
-    ContainerSpec, ExecMode, ImageDigestRef, ImageRefError, Requirements, UnknownExecMode,
+    ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, Requirements,
+    RequirementsError, UnknownExecMode,
 };
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use request::{Request, RequestError};
