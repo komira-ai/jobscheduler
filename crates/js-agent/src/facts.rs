@@ -363,8 +363,12 @@ fn watch_streams(
     err: PipeReader,
     keep: usize,
 ) -> (Streams, Status) {
-    let err_reader = thread::spawn(move || read_tail(err, keep));
-    let (stdout, cut_out, _) = read_tail(out, keep);
+    let mut out = out;
+    let err_reader = thread::spawn(move || {
+        let mut err = err;
+        read_tail(&mut err, keep)
+    });
+    let (stdout, cut_out, _) = read_tail(&mut out, keep);
     let (stderr, cut_err, _) = err_reader.join().unwrap_or_default();
     let lost = Status {
         code: None,
@@ -384,8 +388,9 @@ fn watch_streams(
 
 /// The last `keep` bytes `reader` yields, whether it yielded more, and the most the buffer
 /// held at any moment. The buffer is trimmed whenever it holds twice `keep` (and one read
-/// is at most 8 KiB), so memory stays bounded however much is read.
-fn read_tail<R: Read>(mut reader: R, keep: usize) -> (Vec<u8>, bool, usize) {
+/// is at most 8 KiB), so memory stays bounded however much is read. It takes a `dyn Read`
+/// so the one body is measured once, not once per reader type.
+fn read_tail(reader: &mut dyn Read, keep: usize) -> (Vec<u8>, bool, usize) {
     let mut kept: Vec<u8> = Vec::new();
     let mut dropped = false;
     let mut peak = 0;
@@ -864,7 +869,7 @@ mod tests {
     #[test]
     fn the_stream_reader_keeps_the_end_in_bounded_memory() {
         let (keep, total) = (1000, 5_000_000);
-        let (bytes, dropped, peak) = read_tail(Counting { at: 0, total }, keep);
+        let (bytes, dropped, peak) = read_tail(&mut Counting { at: 0, total }, keep);
         assert!(dropped);
         assert!(peak <= 2 * keep + 8192, "{peak}");
         assert_eq!(bytes.len(), keep);
@@ -876,7 +881,7 @@ mod tests {
                 .all(|(i, b)| usize::from(*b) == (first + i) % 251)
         );
 
-        let (bytes, dropped, _) = read_tail(Counting { at: 0, total: keep }, keep);
+        let (bytes, dropped, _) = read_tail(&mut Counting { at: 0, total: keep }, keep);
         assert_eq!((bytes.len(), dropped), (keep, false));
     }
 
