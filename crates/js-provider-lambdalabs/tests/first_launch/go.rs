@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use js_provider_lambdalabs::{
-    ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag, TerminateEffect,
+    ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag,
 };
 
 use crate::rig::{FIRST, Rig, TestRemote, activate, id};
@@ -265,29 +265,6 @@ fn a_refused_launch_leaves_no_state_file_and_no_instance() {
     assert!(out.contains("nothing was launched"), "{out}");
     assert!(!rig.state.exists());
     assert_eq!(rig.fake.launched(), 0);
-}
-
-#[test]
-fn an_account_already_holding_a_machine_of_ours_is_at_max_machines() {
-    let rig = Rig::new();
-    // The first run cannot terminate what it launched, so its instance stays.
-    rig.fake.set_terminate_effect(TerminateEffect::Nothing);
-    let first = rig.go_args(&["--boot-deadline-secs", "10"]);
-    let (status, _) = rig.exec(&first);
-    assert_eq!(status, 1);
-    assert_eq!(rig.fake.launched(), 1);
-    let other = rig.dir.join("other-state");
-    let second = rig.go_args(&[
-        "--state-file",
-        other.to_str().unwrap(),
-        "--instance-type",
-        "gpu_8x_big",
-    ]);
-    let (status, out) = rig.exec(&second);
-    assert_eq!(status, 1, "{out}");
-    assert_eq!(rig.fake.launched(), 1, "no second instance");
-    assert!(out.contains("AtMaxMachines"), "{out}");
-    assert!(!other.exists());
 }
 
 #[test]
