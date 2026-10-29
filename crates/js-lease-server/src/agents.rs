@@ -212,7 +212,6 @@ impl Agents {
 
     /// The instance a launched host names in its hello: the pool as the provider and the
     /// host's name as the instance id.
-    #[cfg_attr(not(test), expect(dead_code))]
     fn instance_of(pool: &ProviderId, name: &HostName) -> InstanceIdentity {
         InstanceIdentity {
             provider: pool.to_string(),
