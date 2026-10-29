@@ -209,7 +209,8 @@ impl Adapter for Rig {
             self.hooks.lock().expect("hooks").last(),
             Some(Hook::After { .. })
         );
-        self.finished.push((operation.to_owned(), taken, after_seen));
+        self.finished
+            .push((operation.to_owned(), taken, after_seen));
         log_finished_line(operation, worker, report, taken);
     }
 
