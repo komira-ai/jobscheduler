@@ -18,7 +18,9 @@
 //!   --label jobscheduler.dev/agent=<host>
 //!   --cpus 1.500 --memory 1073741824 --memory-swap 1073741824 --pids-limit 4096
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
-//!   --mount type=bind,src=<scratch>,dst=/scratch
+//!   --mount type=bind,src=<scratch>,dst=/scratch,nosuid,nodev            (Podman)
+//!   --mount type=volume,dst=/scratch,volume-driver=local,volume-nocopy,
+//!     volume-opt=type=none,volume-opt=device=<scratch>,"volume-opt=o=bind,nosuid,nodev" (Docker)
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
@@ -26,6 +28,7 @@
 //!   [--pid private] --pull never --user <base uid + slot>:<base gid + slot>
 //!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
+//! <bin> volume inspect --format "{{json .Options}}" -- <scratch volume>   (Docker)
 //! <bin> start -- <id>
 //! <bin> inspect --type container --format "{{.State.Pid}} {{.State.Status}}" -- <id>
 //! ```
@@ -103,7 +106,11 @@
 //! what it can: after `create` it reads the mounts back from the engine (`inspect`,
 //! `.Mounts`) and requires that every bind has the source the agent resolved (the
 //! scratch path is canonical, see `ScratchRoot`), the destination and the access it asked
-//! for, and that there is no other bind; the tmpfs and volumes are not looked at. A
+//! for, and that there is no other bind; the tmpfs and other volumes are not looked at. On
+//! Docker the scratch directory is not a bind but a volume of the local driver that
+//! binds it `nosuid,nodev`, so the read-back also requires that volume at `/scratch`
+//! (local driver, writable) and, from `volume inspect`, exactly the options that bind the
+//! resolved directory with those two flags. A
 //! container whose mounts differ is removed, `start` is not called, and the start fails
 //! (`failed_to_start`, detail `runtime-failed`; the finding the lifecycle keeps says the
 //! mounts differ). **The window that remains** is the time between the agent's resolution
@@ -260,8 +267,8 @@ use serde_json::Value;
 
 use args::user_args;
 pub use args::{
-    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
+    label_args, limits_to_args, scratch_volume_options,
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
@@ -508,6 +515,9 @@ pub struct CliRuntime {
     settings: Settings,
     engine: Engine,
     recursive_ro: bool,
+    /// Whether the agent's own mounts are the ones the containers see (not on macOS,
+    /// where the engine runs in a VM): the submount check applies only then.
+    host_mounts: bool,
     host_id: String,
     gpus: bool,
     now_ms: fn() -> u64,
@@ -589,6 +599,7 @@ impl CliRuntime {
             recursive_ro: docker_major.is_some_and(|major| major >= RECURSIVE_RO_DOCKER),
             host_id: host_id.to_owned(),
             gpus: platform.os != "macos",
+            host_mounts: platform.os != "macos",
             now_ms,
             runner,
             chown: hand_over,
@@ -739,6 +750,10 @@ impl CliRuntime {
         labels.insert(label::CREATED_MS.to_owned(), created_ms.to_string());
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
         args.extend(label_args(&labels)?);
+        if !self.recursive_ro && self.host_mounts {
+            let mountinfo = (self.proc_read)("/proc/self/mountinfo");
+            check_submounts(spec, mountinfo.as_deref())?;
+        }
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
@@ -864,7 +879,10 @@ impl CliRuntime {
     }
 
     /// Reads the binds of the container back and compares them with what `spec` asked
-    /// for (see the module documentation).
+    /// for (see the module documentation). On Docker the scratch directory is a volume,
+    /// not a bind: it must be the one volume at [`SCRATCH_TARGET`], of the local driver
+    /// and writable, and `volume inspect` must print exactly the options that bind the
+    /// directory `nosuid,nodev` ([`scratch_volume_options`]).
     fn verify_mounts(&self, id: &ContainerId, spec: &ContainerSpec) -> Result<(), CliError> {
         let unreadable = || CliError::Unreadable { call: "inspect" };
         let text = self
@@ -872,9 +890,49 @@ impl CliRuntime {
             .ok_or_else(unreadable)?;
         let mut seen = binds_read(&text).ok_or_else(unreadable)?;
         let mut asked = binds_of(spec);
+        if self.engine == Engine::Docker {
+            asked.remove(0);
+        }
         seen.sort();
         asked.sort();
-        (seen == asked).then_some(()).ok_or(CliError::MountsDiffer)
+        (seen == asked)
+            .then_some(())
+            .ok_or(CliError::MountsDiffer)?;
+        match self.engine {
+            Engine::Podman => Ok(()),
+            Engine::Docker => self.verify_scratch_volume(&text, spec),
+        }
+    }
+
+    /// The Docker half of [`CliRuntime::verify_mounts`]: `text` is the `.Mounts` JSON.
+    fn verify_scratch_volume(&self, text: &str, spec: &ContainerSpec) -> Result<(), CliError> {
+        let volumes = volumes_read(text)
+            .ok_or(CliError::Unreadable { call: "inspect" })?
+            .into_iter()
+            .filter(|volume| volume.destination == SCRATCH_TARGET)
+            .collect::<Vec<_>>();
+        let [volume] = &volumes[..] else {
+            return Err(CliError::MountsDiffer);
+        };
+        if volume.driver != "local" || !volume.writable {
+            return Err(CliError::MountsDiffer);
+        }
+        let options = self.call(
+            "volume",
+            &[
+                "volume",
+                "inspect",
+                "--format",
+                "{{json .Options}}",
+                "--",
+                &volume.name,
+            ],
+        )?;
+        let options: Value = serde_json::from_str(options.trim())
+            .map_err(|_| CliError::Unreadable { call: "volume" })?;
+        (options == scratch_volume_options(&spec.scratch))
+            .then_some(())
+            .ok_or(CliError::MountsDiffer)
     }
 
     /// Whether the runtime still has the container.
@@ -1107,14 +1165,20 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
+/// The entries of the JSON `.Mounts` of an `inspect` (`null` is none). `None` when the
+/// text is not a list or `null`.
+fn mount_entries(text: &str) -> Option<Vec<Value>> {
+    match serde_json::from_str(text.trim()).ok()? {
+        Value::Null => Some(Vec::new()),
+        Value::Array(entries) => Some(entries),
+        _ => None,
+    }
+}
+
 /// The bind mounts in the JSON `.Mounts` of an `inspect`; other kinds are left out. `None`
 /// when the text is not that.
 fn binds_read(text: &str) -> Option<Vec<Bind>> {
-    let entries = match serde_json::from_str(text.trim()).ok()? {
-        Value::Null => Vec::new(),
-        Value::Array(entries) => entries,
-        _ => return None,
-    };
+    let entries = mount_entries(text)?;
     let each = entries.iter().map(bind_of);
     each.collect::<Option<Vec<_>>>()
         .map(|binds| binds.into_iter().flatten().collect())
@@ -1130,6 +1194,38 @@ fn bind_of(entry: &Value) -> Option<Option<Bind>> {
     let destination = entry.get("Destination")?.as_str()?;
     let writable = entry.get("RW")?.as_bool()?;
     Some(Some((source.to_owned(), destination.to_owned(), writable)))
+}
+
+/// A volume in the JSON `.Mounts` of an `inspect`.
+struct VolumeMount {
+    name: String,
+    destination: String,
+    driver: String,
+    writable: bool,
+}
+
+/// The volumes in the JSON `.Mounts` of an `inspect`; other kinds are left out. `None`
+/// when the text is not that, or a volume lacks the fields of one.
+fn volumes_read(text: &str) -> Option<Vec<VolumeMount>> {
+    let entries = mount_entries(text)?;
+    let each = entries.iter().map(volume_of);
+    each.collect::<Option<Vec<_>>>()
+        .map(|volumes| volumes.into_iter().flatten().collect())
+}
+
+/// One entry of `.Mounts`: `Some(None)` for a kind other than a volume, `None` for an
+/// entry that does not have the fields of its kind.
+fn volume_of(entry: &Value) -> Option<Option<VolumeMount>> {
+    if entry.get("Type")?.as_str()? != "volume" {
+        return Some(None);
+    }
+    let text = |key: &str| Some(entry.get(key)?.as_str()?.to_owned());
+    Some(Some(VolumeMount {
+        name: text("Name")?,
+        destination: text("Destination")?,
+        driver: text("Driver")?,
+        writable: entry.get("RW")?.as_bool()?,
+    }))
 }
 
 /// Whether `text` is a container id as `ps --no-trunc` prints it.

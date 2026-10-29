@@ -383,21 +383,22 @@ fn execute(
     // to the session wraps its host in `Hooked`.
     ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
     let toolkit = ToolkitHook::from_cli(&cli).map_err(Failure::Usage)?;
-    // The job flags are checked now so a wrong one stops the agent before it registers;
-    // the worker is built from them below, before the first hello.
-    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
-    local
-        .check_filesystems(services.files)
-        .map_err(Failure::Usage)?;
     // The post-job checks read /proc, which a Mac does not have: a container job there
-    // would run unchecked, so none is accepted (see `integrity`).
-    if platform.is_macos() && local.container.is_some() {
+    // would run unchecked, so none is accepted (see `integrity`). This comes before the
+    // container flags are read, so a Mac is told this rather than what a Linux host needs.
+    if platform.is_macos() && cli.container_bin.is_some() {
         return Err(Failure::Usage(
             "--container-bin: container jobs are Linux-only: the post-job checks read /proc, \
              which a Mac does not have"
                 .to_owned(),
         ));
     }
+    // The job flags are checked now so a wrong one stops the agent before it registers;
+    // the worker is built from them below, before the first hello.
+    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    local
+        .check_filesystems(services.files)
+        .map_err(Failure::Usage)?;
     // The agent must see what its jobs do: a container job runs where the agent's own
     // `/proc` and mounts show it.
     if local.container.is_some() {
