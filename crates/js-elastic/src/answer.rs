@@ -221,10 +221,10 @@ mod tests {
             HostStatus::parse("a b\u{7}c"),
             HostStatus::Unknown("abc".to_owned())
         );
-        let HostStatus::Unknown(long) = HostStatus::parse(&"s".repeat(100)) else {
-            panic!("not unknown");
-        };
-        assert_eq!(long.len(), 40);
+        assert_eq!(
+            HostStatus::parse(&"s".repeat(100)),
+            HostStatus::Unknown("s".repeat(40))
+        );
     }
 
     /// Asserts that the answers compare by value, so a caller can match a refusal on
