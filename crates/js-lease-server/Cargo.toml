@@ -38,6 +38,7 @@ tracing-subscriber.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+js-agent = { path = "../js-agent" }
 js-provider-fake = { path = "../js-provider-fake" }
 js-testkit = { path = "../js-testkit" }
 # The test that keeps the secrets out of every log line reads the HTTP client's own

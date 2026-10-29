@@ -18,7 +18,10 @@ use std::time::Duration;
 
 use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
 use js_registry::{PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, ProviderId,
+    ResourceClass, Resources, Shape,
+};
 
 use crate::adapt::SharedClock;
 use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
@@ -52,6 +55,7 @@ const POOL_KEYS: &[&str] = &[
     "name",
     "class",
     "exec",
+    MEMORY_PERCENT_KEY,
     "max_instances",
     "max_spend_per_hour",
     "max_spend_per_day",
@@ -123,6 +127,8 @@ pub struct ElasticPlan {
     pub kind: String,
     /// The least the pool's sizes bring, as far as the kind knows it offline.
     pub floor: Floor,
+    /// The floor's memory, the percent of it the pool books and what that comes to.
+    pub memory: MemoryHeadroom,
     /// A request for exactly the floor: what a launch is planned for while no request
     /// waits.
     pub(crate) floor_demand: Demand,
@@ -172,6 +178,7 @@ impl fmt::Debug for ElasticPlan {
             .field("name", &self.name)
             .field("kind", &self.kind)
             .field("floor", &self.floor)
+            .field("memory", &self.memory)
             .field("launch", &self.launch)
             .field("max_instances", &self.max_instances)
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
@@ -379,6 +386,18 @@ impl Section {
             tables.push(table);
         }
         Ok(tables)
+    }
+
+    /// The pool's `memory_schedulable_percent` when the table gives it: a whole number
+    /// from 1 to 100.
+    fn memory_percent(&mut self) -> Result<Option<MemoryPercent>, StartupError> {
+        let Some(percent) = self.integer(MEMORY_PERCENT_KEY)? else {
+            return Ok(None);
+        };
+        let bounded = MemoryPercent::new(percent);
+        bounded
+            .map(Some)
+            .map_err(|_| self.fail(MEMORY_PERCENT_KEY, "must be from 1 to 100"))
     }
 
     /// A spend in cents: a string holding a decimal with at most two places, above zero.
@@ -597,6 +616,7 @@ fn read_pool(
         network: s.table("network")?,
         agent: s.table("agent")?,
     };
+    let memory_percent = s.memory_percent()?;
     let launch = match s.string("launch")?.as_deref() {
         None | Some("plan") => Launch::Plan,
         Some("live") => Launch::Live,
@@ -612,6 +632,7 @@ fn read_pool(
         let ctx = BuildCtx {
             pool: &name,
             class: &class,
+            memory_percent,
             clock: ld.clock.clone(),
             files: ld.files,
             scheduler,
@@ -641,6 +662,7 @@ fn read_pool(
                 name: &name,
                 id,
                 class,
+                memory_percent: memory_percent.unwrap_or_default(),
                 keys,
                 launch,
                 kind: &kind,
@@ -658,6 +680,7 @@ struct Elastic<'a> {
     name: &'a str,
     id: ProviderId,
     class: ResourceClass,
+    memory_percent: MemoryPercent,
     keys: ElasticKeys,
     launch: Launch,
     kind: &'a str,
@@ -671,6 +694,7 @@ impl Elastic<'_> {
             name,
             id,
             class,
+            memory_percent,
             keys,
             launch,
             kind,
@@ -746,11 +770,12 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id.clone(), &class, shape, max, exec)?;
+        let pool = registry_pool(s, id.clone(), &class, shape, max, exec, memory_percent)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
             floor: built.floor,
+            memory: pool.memory_headroom(),
             floor_demand,
             launch,
             max_instances: max,
@@ -828,8 +853,8 @@ fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupErr
 }
 
 /// The registry's pool for an elastic pool of `class`: `max` machines, the floor `shape`,
-/// the host contract of `exec` when the pool asks for one, and, for a whole-node class,
-/// the settings of a dedicated pool.
+/// the host contract of `exec` when the pool asks for one, the booked share of the floor's
+/// memory, and, for a whole-node class, the settings of a dedicated pool.
 fn registry_pool(
     s: &Section,
     id: ProviderId,
@@ -837,8 +862,9 @@ fn registry_pool(
     shape: Shape,
     max: usize,
     exec: Option<ExecMode>,
+    memory_percent: MemoryPercent,
 ) -> Result<PoolConfig, StartupError> {
-    let pool = PoolConfig::new(id, class.clone(), shape, max);
+    let pool = PoolConfig::new(id, class.clone(), shape, max).with_memory_percent(memory_percent);
     let pool = match exec {
         Some(mode) => pool.with_exec(mode),
         None => pool,
@@ -936,17 +962,18 @@ mod tests {
     #[test]
     fn the_registry_pool_takes_the_class_and_the_contract() {
         let id = ProviderId::new("x").unwrap();
+        let full = MemoryPercent::FULL;
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None);
+        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None, full);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
         let exec = Some(ExecMode::Container);
-        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec).unwrap();
+        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec, full).unwrap();
         assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
         assert_eq!(built.exec(), exec);
         let gpu = ResourceClass::gpu_host();
-        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None).unwrap();
+        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None, full).unwrap();
         assert!(plain.whole_node().is_none());
         assert_eq!(plain.exec(), None);
     }

@@ -41,6 +41,23 @@ A node joins with a one-time token (the mint refuses any other `provider` than t
 mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
 `--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
 
+**Memory headroom.** One key, `memory_schedulable_percent`, a whole number from 1 to 100 (default 100), sets how much of the memory an
+operator configured the server books; there is no other memory knob. It is written in three places, each in its own format and read the
+same way (0, 101, a negative number or a word is refused at the check that reads it, naming the key):
+
+| where | what it cuts |
+|---|---|
+| a `[[pool]]` of the `--config` file | the hosts of a static pool (the pool's key replaces the hosts file's, once, never on top of it; it may be larger as well as smaller than the file's own value), and the floor memory (1 GiB) of an elastic pool |
+| the hosts file of a static pool (top level, before the first `[[host]]`; `--pool-config` or a `hosts_file`) | the `memory_bytes` of every host the file lists |
+| the agent pool file (`--agent-pool-config`; top level, before `[shape]`) | the `[shape]` `memory_bytes` the pool books for each host |
+
+The server books `floor(memory x percent / 100)` bytes, computed once where the booked shape is built, and every booking path sees that
+number: a lease, a whole-node lease, a run's memory limit, a reservation and the host listing. It applies to the memory the operator
+configured and never to a figure an agent reports about itself: a host that claims more than the pool lists is still booked at the cut. A
+host's hello is held to the whole listed memory, not the cut (a host must really have the memory; the pool books less of it). `GET
+/v1/hosts` shows, per host, `memory: {configured_bytes, schedulable_percent, bookable_bytes}` (`shape.memory_bytes` is the bookable
+figure), and `GET /v1/pools` and `/status` show the same three for an elastic pool's floor.
+
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 
 ```toml

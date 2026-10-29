@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
 use crate::error::{Rule, ValidationError};
+use crate::files::{self, RunFile};
 use crate::hello::WireShape;
 use crate::image;
 use crate::limits;
@@ -181,6 +182,13 @@ pub struct JobSpec {
     /// root and rel is a duplicate whether the two are read-only or not).
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    /// Files the agent writes for the job before it starts, read at `/run/js-files/<name>`
+    /// (see [`RunFile`]): at most [`limits::MAX_RUN_FILES`], contents secret. Contained
+    /// jobs only: an agent refuses a host job that has any. An agent that predates the
+    /// field ignores it, so a server sends a start with files only to an agent that
+    /// reported the `run-files` capability. Absent means none, and none is not written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<RunFile>,
     /// Container or host. Absent means contained.
     #[serde(default)]
     pub isolation: Isolation,
@@ -239,7 +247,7 @@ impl JobSpec {
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
-    /// indices, mounts and labels. The server calls it before it queues a start and the
+    /// indices, mounts, files and labels. The server calls it before it queues a start and the
     /// agent before it acts on one.
     pub fn validate(&self) -> Result<(), ValidationError> {
         let at = At::new("job", refusal::INVALID_JOB);
@@ -266,6 +274,7 @@ impl JobSpec {
             .iter()
             .map(|mount| (mount.root_name.as_str(), mount.rel.as_str()));
         check::distinct(mounts, places)?;
+        files::validate_files(&self.files)?;
         check::labels(at.field("labels"), &self.labels)?;
         check::range(
             at.field("valid_for_ms"),
