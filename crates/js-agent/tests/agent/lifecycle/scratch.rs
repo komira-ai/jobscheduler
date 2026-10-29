@@ -7,6 +7,8 @@ use std::path::Path;
 
 use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
 
+use js_agent::lifecycle::label;
+
 use super::{Harness, job, names};
 
 fn chmod(path: &Path, mode: u32) {
@@ -156,4 +158,56 @@ fn restart_removes_orphan_scratch_and_keeps_adopted_runs() {
     assert_eq!(fs::read_to_string(outside.join("keep")).unwrap(), "keep");
     assert_eq!(fs::read_to_string(kept.join("work")).unwrap(), "w");
     assert!(root.is_dir());
+}
+
+/// Asserts that a run id that is not one normal path component (empty, `.`, `..`, or
+/// holding a `/`) is refused and removes nothing: the file and directory beside the
+/// run's directory survive. It catches a removal that follows a run id out of the root.
+#[test]
+fn a_run_id_that_is_not_one_path_component_is_refused() {
+    let h = Harness::new("bad-id");
+    let root = h.config.scratch.path().to_owned();
+    fs::create_dir_all(root.join("a").join("b")).unwrap();
+    fs::write(root.join("a").join("b").join("f"), "f").unwrap();
+    fs::write(root.join("file"), "f").unwrap();
+    for bad in ["", ".", "..", "a/b", "/a", "a/", "../scratch/a"] {
+        let why = h.config.scratch.remove(bad).unwrap_err();
+        assert_eq!(why.kind(), std::io::ErrorKind::InvalidInput, "{bad:?}");
+    }
+    assert!(root.join("a").join("b").join("f").is_file());
+    assert!(root.join("file").is_file());
+}
+
+/// Asserts that the directory of a container that could not be removed (it may still
+/// run) is not swept at a restart, and is swept at the restart after the container is
+/// gone, while the directory of a container that was evicted and removed is swept at
+/// once. It catches a sweep that removes scratch from under a live container.
+#[test]
+fn restart_keeps_the_scratch_of_a_container_it_could_not_remove() {
+    let mut h = Harness::new("sweep-stuck");
+    let root = h.config.scratch.path().to_owned();
+    let odd = [
+        (label::RUN, "odd"),
+        (label::LEASE, "a b"),
+        (label::CPU_MILLIS, "1000"),
+        (label::MEMORY_BYTES, "1073741824"),
+        (label::GPUS, "1"),
+        (label::WALL_MS, "60000"),
+        (label::ISOLATION, "contained"),
+    ];
+    h.fake.leak(&odd, 0);
+    h.fake.fail("remove", 1);
+    fs::create_dir(root.join("odd")).unwrap();
+    fs::write(root.join("odd").join("f"), "f").unwrap();
+
+    h.restart().unwrap();
+    assert!(
+        root.join("odd").join("f").is_file(),
+        "the container is still there"
+    );
+
+    h.life.step();
+    assert!(h.fake.existing().is_empty(), "the retry removed it");
+    h.restart().unwrap();
+    assert!(!root.join("odd").exists());
 }
