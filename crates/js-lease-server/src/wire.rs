@@ -330,10 +330,8 @@ mod tests {
             assert_eq!(err.status, StatusCode::BAD_REQUEST);
             let reason = err.reason.as_deref().unwrap();
             assert!(reason.starts_with(said), "{caps}");
-            assert!(
-                !reason.contains("lots") && !reason.contains("vm"),
-                "{reason}"
-            );
+            assert!(!reason.contains("lots"), "{reason}");
+            assert!(!reason.contains("vm"), "{reason}");
         }
     }
 
