@@ -525,7 +525,6 @@ impl<'a> Pass<'a> {
             !host.heard_since_hello,
             record.phase == Phase::Registered,
             self.now.since(record.launched_at) >= pool.settings.boot_timeout,
-            idle,
         ];
         if failed_boot.into_iter().all(|ok| ok) {
             self.start_release(i);
