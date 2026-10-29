@@ -24,9 +24,9 @@ fn the_system_clock_is_monotonic() {
 
 /// Asserts that the system's usage clock counts microseconds on the same zero as its clock
 /// of the jobs (a reading of the clock in milliseconds, then one of the usage clock, is at
-/// least as many thousand microseconds) and does not go back, and that its cgroup files are
-/// this machine's. It catches a lease start stamped on one clock and sampled on another,
-/// which would put every minute boundary in the wrong place.
+/// least as many thousand microseconds) and does not go back. It catches a lease start
+/// stamped on one clock and sampled on another, which would put every minute boundary in the
+/// wrong place.
 #[test]
 fn the_system_usage_clock_shares_the_jobs_zero() {
     let machine = System::new();
@@ -35,7 +35,20 @@ fn the_system_usage_clock_shares_the_jobs_zero() {
     let first = usage.now_usec();
     assert!(first >= ms * 1000);
     assert!(usage.now_usec() >= first);
-    assert!(machine.cgroup_files().read("/proc/self/cgroup").is_ok());
+}
+
+/// Asserts that the system's cgroup files are this machine's: it reads this process's own
+/// `/proc/self/cgroup`. Linux only, as control groups and `/proc` are. It catches a reader
+/// over the wrong files.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_system_cgroup_files_are_this_machines() {
+    assert!(
+        System::new()
+            .cgroup_files()
+            .read("/proc/self/cgroup")
+            .is_ok()
+    );
 }
 
 /// Asserts that the system's view of the host is this machine's `/proc`: the process table
