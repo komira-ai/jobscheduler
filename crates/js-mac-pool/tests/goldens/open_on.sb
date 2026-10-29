@@ -14,8 +14,6 @@
 (deny network-bind (local unix-socket (subpath (param "RD_0"))))
 (deny network-outbound (remote unix-socket (subpath (param "RD_1"))))
 (deny network-bind (local unix-socket (subpath (param "RD_1"))))
-(deny network-outbound (remote unix-socket (subpath (param "RD_1"))))
-(deny network-bind (local unix-socket (subpath (param "RD_1"))))
 (deny process-info* (target others))
 (allow process-info* (target self) (target same-sandbox))
 (deny mach-register)
