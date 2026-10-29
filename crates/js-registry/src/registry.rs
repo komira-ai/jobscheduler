@@ -776,6 +776,7 @@ impl Registry {
         work_key: Option<WorkKey>,
     ) -> Result<RunView, RunRefusal> {
         spec.lease_id = lease.to_string();
+        spec.labels.extend(work_key.iter().map(|k| ("work".to_string(), k.class.clone())));
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
         let State {
