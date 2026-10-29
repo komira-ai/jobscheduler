@@ -372,18 +372,77 @@ async fn a_reading_held_in_the_sink_does_not_stop_other_requests() {
     let h = start_usage("usage_parked", &fake, &[]).await;
     let (slow, quick) = (join(&h, "burst-1").await, join(&h, "burst-2").await);
     let (mut arrived, release) = fake.park_next_reading();
-    let parked = beat_load(&h, &slow, load(1, 1000, &[]));
+    let mut parked = Box::pin(beat_load(&h, &slow, load(1, 1000, &[])));
+    // The reading must reach the sink. If the beat is answered first it never will, and the
+    // test says so rather than wait for an arrival that cannot come.
+    tokio::select! {
+        biased;
+        got = arrived.recv() => assert!(got.is_some(), "the gate closed before the reading arrived"),
+        reply = &mut parked => panic!(
+            "the beat was answered {} before its reading reached the sink: {}",
+            reply.status, reply.body
+        ),
+    }
     let meanwhile = async {
-        arrived.recv().await.unwrap();
         assert_eq!(get(&h, "/healthz").await.status, 200);
         let other = beat_load(&h, &quick, load(1, 1000, &[])).await;
         assert_eq!(other.status, 200, "{}", other.body);
         release.send(()).unwrap();
     };
-    let (reply, ()) = tokio::join!(parked, meanwhile);
+    let (reply, ()) = tokio::join!(&mut parked, meanwhile);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(!fake.read_inline());
     assert_eq!(fake.seen().len(), 2);
+}
+
+/// Asserts that minutes are filed only for leases the registry holds for the host that sends
+/// them: a host sends minutes for a lease the registry holds for another host and for a
+/// lease nobody holds, `minutes_unheld` counts both, and the series of the lease's own host
+/// is what that host sent. It catches a server that lets any host's minutes into any
+/// lease's series, which would let one node teach admission another run's cost.
+#[tokio::test]
+async fn minutes_for_a_lease_held_by_another_host_or_by_none_are_not_filed() {
+    let fake = Arc::new(Fake::default());
+    let h = start_usage("usage_unheld", &fake, &[("run-1-1", "act.build")]).await;
+    let me = join(&h, "burst-1").await;
+    beat(&h, &me, &[], &[]).await;
+    let lease = lease(&h).await;
+    assert_eq!(lease, "1-1");
+    let other = join(&h, "burst-2").await;
+    let minute = |lease: &str, minute: u16| {
+        json!({
+            "lease_id": lease, "minute": minute, "cpu_mean_millis": 9000,
+            "cpu_peak_window_millis": 9500, "ws_max_bytes": 999_999,
+        })
+    };
+    let mut foreign = load(1, 1000, &[]);
+    foreign["covered"] = json!([]);
+    foreign["minutes"] = json!([minute("1-1", 1), minute("9-9", 0)]);
+    let reply = beat_load(&h, &other, foreign).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(h.running.usage_counters().minutes_unheld, 2);
+
+    let run = queued(&h, &lease, 1000).await;
+    beat(&h, &me, &[], &[]).await;
+    let mut running = me.beat();
+    running["held"] = json!([held(&run, "running")]);
+    running["load"] = load(1, 1_000_000, &[0]);
+    let sent = post(&h, "/v1/agent/heartbeat", Some(JOIN), &running).await;
+    assert_eq!(sent.status, 200, "{}", sent.body);
+    let exited = [held(&run, "exited_unacked")];
+    let reply = beat(&h, &me, &exited, &[result(&run, &lease)]).await;
+    assert_eq!(verdicts(&reply), [format!("{run} ACCEPTED")]);
+    beat(&h, &me, &[], &[]).await;
+    beat(&h, &me, &[], &[]).await;
+    let ended = fake.ended();
+    assert_eq!(ended.len(), 1);
+    let own = RunMinute {
+        minute: 0,
+        cores_milli: 1500,
+        ws_bytes: 4096,
+    };
+    assert_eq!(ended[0].series.minutes, vec![own]);
+    assert_eq!(h.running.usage_counters().minutes_unheld, 2);
 }
 
 /// Asserts that a sink that panics on a reading costs the beat nothing: the beat that
