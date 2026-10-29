@@ -3,15 +3,19 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{Cooldown, CooldownReason, Phase, Record, Records, StoredExec, StoredOffer};
 use js_types::ExecMode;
 
-const GOLDEN: &str = include_str!("golden/records_v1.json");
+const GOLDEN: &str = include_str!("golden/records_v2.json");
+const GOLDEN_V1: &str = include_str!("golden/records_v1.json");
 
 /// The records the golden file holds: one launch with every optional field empty, and
-/// an orphan with every one of them set, in the other execution mode.
+/// an orphan with every one of them set, in the other execution mode, one silent machine
+/// and one missing machine.
 fn sample() -> Records {
     let launching = record(Phase::Launching, 60, 0);
     let mut orphan = record(Phase::Orphan, 90, MINUTE);
@@ -39,9 +43,15 @@ fn sample() -> Records {
         },
     );
     records
+        .silent_since
+        .insert("js-made-0-60".to_owned(), at(30 * SECOND));
+    records
+        .missing_since
+        .insert("js-gone-away".to_owned(), at(2 * MINUTE));
+    records
 }
 
-/// Asserts the literal text of the records file, version 1, for a launch and for an
+/// Asserts the literal text of the records file, version 2, for a launch and for an
 /// orphan with every field set: names, order, the phase and reason spellings, the
 /// execution mode spelling and the times as milliseconds. A renamed or reordered field,
 /// or a changed spelling, changes the text.
@@ -60,6 +70,27 @@ fn the_golden_text_reads_back() {
     );
 }
 
+/// Asserts that a file of version 1, written before the silent and missing times were
+/// kept, still reads: its machines and cooldowns are what they were and the times are
+/// empty, so the counts start again; and that what is written back is version 2.
+#[test]
+fn a_version_1_file_is_read_and_written_back_as_version_2() {
+    let old = Records::decode(GOLDEN_V1).unwrap();
+    let expected = Records {
+        silent_since: BTreeMap::new(),
+        missing_since: BTreeMap::new(),
+        ..sample()
+    };
+    assert_eq!(old, expected);
+    let text = old.encode().unwrap();
+    assert!(text.starts_with("{\n  \"version\": 2,"), "{text}");
+    assert_eq!(Records::decode(&text).unwrap(), expected);
+
+    let extra = GOLDEN_V1.replace("\"version\": 1,", "\"version\": 1, \"silent_since\": {},");
+    let error = Records::decode(&extra).unwrap_err();
+    assert!(error.to_string().contains("silent_since"), "{error}");
+}
+
 /// Asserts what is refused: text that is not JSON, a file of another version or of none,
 /// a field the format does not have, a missing field, and an acquire id that is not one.
 /// Each error says what is wrong.
@@ -68,20 +99,20 @@ fn a_file_that_is_not_records_of_this_version_is_refused() {
     let broken = Records::decode("{not json").unwrap_err();
     assert!(broken.to_string().starts_with("records: "), "{broken}");
 
-    let other = GOLDEN.replace("\"version\": 1", "\"version\": 2");
+    let other = GOLDEN.replace("\"version\": 2", "\"version\": 3");
     let error = Records::decode(&other).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "records: version Some(2), this reader reads 1"
+        "records: version Some(3), this reader reads 1 to 2"
     );
 
     let none = Records::decode("{}").unwrap_err();
     assert_eq!(
         none.to_string(),
-        "records: version None, this reader reads 1"
+        "records: version None, this reader reads 1 to 2"
     );
 
-    let extra = GOLDEN.replace("\"version\": 1,", "\"version\": 1, \"surprise\": 1,");
+    let extra = GOLDEN.replace("\"version\": 2,", "\"version\": 2, \"surprise\": 1,");
     let error = Records::decode(&extra).unwrap_err();
     assert!(error.to_string().contains("surprise"), "{error}");
 

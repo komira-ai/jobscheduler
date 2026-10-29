@@ -68,18 +68,20 @@ fn listed(record: &Record, held: &Held) -> bool {
 
 /// Whether a host's announced shape is below the offer its machine was launched from, in
 /// cpu, memory, gpus or gpu class.
-fn below(offer: &StoredOffer, host: &js_elastic::Offer) -> bool {
-    let holds = [
-        host.cpu_millis >= offer.cpu_millis,
-        host.memory_bytes >= offer.memory_bytes,
-        host.gpus >= offer.gpus,
-        offer.gpu_class.as_deref().is_none_or(|class| {
-            host.gpu_class
-                .as_ref()
-                .is_some_and(|own| own.as_str() == class)
-        }),
-    ];
-    !holds.into_iter().all(|ok| ok)
+fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
+    host.is_none_or(|host| {
+        let holds = [
+            host.cpu_millis >= offer.cpu_millis,
+            host.memory_bytes >= offer.memory_bytes,
+            host.gpus >= offer.gpus,
+            offer.gpu_class.as_deref().is_none_or(|class| {
+                host.gpu_class
+                    .as_ref()
+                    .is_some_and(|own| own.as_str() == class)
+            }),
+        ];
+        !holds.into_iter().all(|ok| ok)
+    })
 }
 
 impl<'a> Pass<'a> {
@@ -430,7 +432,7 @@ impl<'a> Pass<'a> {
     /// has done since, so one that is silent now is registered too and then held.
     fn on_hello(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
         let record = &mut self.records.instances[i];
-        let short = below(&record.offer, &host.shape);
+        let short = below(&record.offer, host.shape.as_ref());
         record.registered = true;
         record.condemned = short;
         self.go(i, Phase::Registered);

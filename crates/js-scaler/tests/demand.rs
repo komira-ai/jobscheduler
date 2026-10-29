@@ -165,9 +165,9 @@ fn a_host_that_cannot_serve_does_not_cover() {
         |h| h.mark = Some(Mark::Held),
         |h| h.state = HostState::Lost,
         |h| h.pool = "other".to_owned(),
-        |h| h.shape.cpu_millis = 1000,
-        |h| h.shape.os = "macos".to_owned(),
-        |h| h.shape.arch = "aarch64".to_owned(),
+        |h| shape(h).cpu_millis = 1000,
+        |h| shape(h).os = "macos".to_owned(),
+        |h| shape(h).arch = "aarch64".to_owned(),
     ];
     for break_it in breakers {
         let mut rig = Rig::new(settings("gpu"));

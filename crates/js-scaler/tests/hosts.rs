@@ -56,7 +56,7 @@ fn a_short_hello_releases_a_quiet_host_at_once_and_waits_for_a_busy_one() {
     };
     let (mut quiet, plan, _) = booting(settings("gpu"), "i-1");
     let mut announced = host(&plan.name, "gpu");
-    announced.shape.cpu_millis = 7999;
+    shape(&mut announced).cpu_millis = 7999;
     quiet.input.hosts = vec![announced.clone()];
     assert_eq!(marks(&quiet.tick(at(2 * SECOND))), ["Drain", "ReleaseHost"]);
 
@@ -115,7 +115,7 @@ fn a_registered_host_marked_releasing_is_released() {
 fn a_silent_host_is_held_and_its_age_is_shown() {
     let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
     rig.input.hosts[0].state = HostState::Lost;
-    assert!(rig.tick(at(3 * SECOND)).is_empty());
+    assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     assert_eq!(rig.state.silent[&plan.name], at(3 * SECOND));
     assert!(rig.tick(at(HOUR)).is_empty());
     assert_eq!(rig.state.silent[&plan.name], at(3 * SECOND));
@@ -206,7 +206,9 @@ fn forgotten() -> Rig {
 
 /// Asserts that a view the shell cannot vouch for releases nothing: the machine is held
 /// and counted however long the registry shows nothing, and a step on an incomplete
-/// view starts the count of missing steps over.
+/// view neither releases nor starts the count of missing steps over: the count is of the
+/// complete views that show the machine missing, so the view of a registry that has not
+/// settled yet leaves it as it was.
 #[test]
 fn an_incomplete_registry_view_releases_nothing() {
     let mut rig = forgotten();
@@ -218,14 +220,18 @@ fn an_incomplete_registry_view_releases_nothing() {
         assert!(rig.record(0).counts());
     }
 
-    let mut reset = forgotten();
-    reset.tick(at(3 * SECOND));
-    reset.input.registry_complete = false;
-    reset.tick(at(10 * MINUTE));
-    reset.input.registry_complete = true;
-    let actions = reset.tick(at(3 * SECOND + 30 * MINUTE));
-    assert_eq!(count(&actions, "Release"), 0);
-    assert_eq!(reset.phase(0), Phase::Registered);
+    let mut kept = forgotten();
+    kept.tick(at(3 * SECOND));
+    kept.input.registry_complete = false;
+    kept.tick(at(10 * MINUTE));
+    kept.input.registry_complete = true;
+    assert_eq!(
+        count(&kept.tick(at(3 * SECOND + 30 * MINUTE - 1)), "Release"),
+        0
+    );
+    let actions = kept.tick(at(3 * SECOND + 30 * MINUTE));
+    assert_eq!(count(&actions, "Release"), 1);
+    assert_eq!(kept.phase(0), Phase::Releasing);
 }
 
 /// Asserts that a host missing on one step is not released, and that one missing on two
@@ -289,7 +295,7 @@ fn a_silent_host_with_leases_still_held_is_not_released() {
 #[test]
 fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hold() {
     let (mut rig, name) = silent_for_a_while(true);
-    assert!(rig.tick(at(3 * SECOND)).is_empty());
+    assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     assert!(rig.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
     assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);

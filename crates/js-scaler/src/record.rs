@@ -307,6 +307,12 @@ pub struct Records {
     pub instances: Vec<Record>,
     /// The pools that are waiting out a failure, by name.
     pub cooldowns: BTreeMap<String, Cooldown>,
+    /// Since when each registered machine whose host the registry shows but does not hear
+    /// from has been silent, as the scaler first saw it.
+    pub silent_since: BTreeMap<String, Millis>,
+    /// Since when each registered machine the registry does not show has been missing from
+    /// complete views, unbroken.
+    pub missing_since: BTreeMap<String, Millis>,
 }
 
 #[derive(Serialize)]
@@ -370,6 +376,7 @@ impl Records {
         Ok(Self {
             instances: wire.instances,
             cooldowns: wire.cooldowns,
+            ..Self::default()
         })
     }
 }

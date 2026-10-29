@@ -83,7 +83,9 @@ impl Pass<'_> {
                     !host.busy,
                     !condemned,
                     !claims.hosts.contains(host.id.as_str()),
-                    host.shape.fit(&request.demand).is_ok(),
+                    host.shape
+                        .as_ref()
+                        .is_some_and(|shape| shape.fit(&request.demand).is_ok()),
                 ]
                 .into_iter()
                 .all(|ok| ok)
@@ -178,7 +180,9 @@ impl Pass<'_> {
                     [
                         host.state == HostState::Live,
                         host.mark == Some(Mark::Draining),
-                        host.shape.fit(&request.demand).is_ok(),
+                        host.shape
+                            .as_ref()
+                            .is_some_and(|shape| shape.fit(&request.demand).is_ok()),
                     ]
                     .into_iter()
                     .all(|ok| ok)

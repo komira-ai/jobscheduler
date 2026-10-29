@@ -49,20 +49,25 @@ fn silent_given_up(change: impl FnOnce(&mut HostFacts)) -> Rig {
 }
 
 /// Asserts that a step sends nothing at all toward a silent host that shows work or is
-/// held, and leaves its record registered, however long it has been silent.
+/// held, and leaves its record registered, however long it has been silent. The only thing
+/// it does is write the time the host was first seen silent.
 fn assert_left_alone(mut rig: Rig) {
-    for later in [3 * SECOND, 3 * SECOND + 30 * MINUTE, 2 * HOUR] {
+    assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
+    for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR] {
         let actions = rig.tick(at(later));
         assert!(actions.is_empty(), "{:?}", kinds(&actions));
         assert_eq!(rig.phase(0), Phase::Registered);
     }
 }
 
-/// Asserts that a silent host whose snapshot shows a lease, a run or a stream gets no
-/// action at all, whatever the lease flag says.
+/// Asserts that a silent host whose snapshot shows a lease, a run or a stream while the
+/// registry still books its lease gets no action at all.
 #[test]
 fn a_silent_host_that_shows_work_is_not_released() {
-    assert_left_alone(silent_given_up(|host| host.busy = true));
+    assert_left_alone(silent_given_up(|host| {
+        host.busy = true;
+        host.lease_given_up = false;
+    }));
 }
 
 /// Asserts that a silent host with a whole-node lease committed on it gets no action at
@@ -88,7 +93,8 @@ fn a_silent_host_that_shows_work_is_not_released_although_marked_releasing() {
 #[test]
 fn a_silent_host_marked_reserved_is_left_alone() {
     let mut rig = silent_given_up(|host| host.mark = Some(Mark::Reserved));
-    for later in [3 * SECOND, 3 * SECOND + 30 * MINUTE, 2 * HOUR] {
+    assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
+    for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR] {
         assert!(rig.tick(at(later)).is_empty());
     }
     assert_eq!(rig.phase(0), Phase::Registered);
