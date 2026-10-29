@@ -13,8 +13,12 @@ on:
 
 permissions: {}
 
+# One run per workflow and pull request: a new push to a PR cancels that PR's queued or
+# running run (macOS runners are scarce). A push to main gets a group of its own (the run
+# id), so it is never cancelled and never replaced while pending: GitHub keeps only one
+# pending run per group, and the release runs only after a main run succeeds.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

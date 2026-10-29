@@ -22,7 +22,7 @@ use crate::support::Scratch;
 fn daemonised_child() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(300, 1, 2000, 900, "0::/user.slice"));
+    host.start_process(process(300, 1, 2000, 900, "0::/"));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
@@ -65,7 +65,13 @@ fn process_as_job_user_after_end() {
         after(&mut checks, "r0").is_ok(),
         "the process that was there is not new"
     );
-    host.start_process(process(401, 100, JOB_UID, 901, "0::/user.slice"));
+    host.start_process(process(
+        401,
+        100,
+        JOB_UID,
+        901,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
