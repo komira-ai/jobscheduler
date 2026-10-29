@@ -677,6 +677,29 @@ fn a_longer_window_makes_a_former_gap_valid() {
     assert_eq!(longer.take(10, 60 * S), vec![minute("a", 0, 1000, 1000, 0)]);
 }
 
+/// Asserts that narrowing the window turns a step that was valid into a gap: the 55 s step
+/// is an ordinary window under a 20 s window (full minute, no gaps) and is a gap, counted
+/// in `gaps` with no span, when the window is set to 5 s after the first sample. A
+/// `set_window` that only ever grows the window would leave the step valid.
+#[test]
+fn a_shorter_window_makes_a_former_valid_step_a_gap() {
+    let series = [0, 55 * S, 60 * S];
+
+    let mut kept = Binner::new(20 * S);
+    let seen = drive(&mut kept, "a", 0, series, |t| (t, 0));
+    assert_eq!(seen[1].covered, ["a"]);
+    assert_eq!(kept.counters().gaps, 0);
+    assert_eq!(kept.take(10, 60 * S), vec![minute("a", 0, 1000, 1000, 0)]);
+
+    let mut shorter = Binner::new(20 * S);
+    drive(&mut shorter, "a", 0, [series[0]], |t| (t, 0));
+    shorter.set_window(5 * S);
+    let seen = drive(&mut shorter, "a", 0, [series[1], series[2]], |t| (t, 0));
+    assert!(seen[0].covered.is_empty());
+    assert_eq!(shorter.counters().gaps, 1);
+    assert!(shorter.take(10, 60 * S).is_empty());
+}
+
 /// Asserts that a window of 0 is read as 1 microsecond, both by `set_window` and by `new`:
 /// a step of 3 microseconds (three windows) is a window, a step of 4 is a gap. A zero
 /// window taken literally would make every step a gap.
