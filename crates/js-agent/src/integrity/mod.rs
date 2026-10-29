@@ -118,7 +118,8 @@
 //!   `machine.slice`) always counts, wherever it is, and so does a scope under a system
 //!   service. A job's process left in its own container's control group counts, and so
 //!   does a process in the agent's own control group (read from `/proc/self/cgroup` when
-//!   the agent starts; an agent that cannot read it does not start) or below it.
+//!   the agent starts; an agent that cannot read it does not start) or below it, other than
+//!   a Podman monitor's scope there.
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
@@ -366,11 +367,21 @@ fn is_live(job: &Finished<'_>, text: &str) -> bool {
 ///
 /// The agent's own control group (`own`, its unified path) and every group below it are
 /// not the host's: a child of the agent that outlives it is in the agent's service, and is
-/// judged like any other process.
+/// judged like any other process. A Podman monitor's scope is the host's even there.
 fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
     let Some(path) = unified(cgroup) else {
         return false;
     };
+    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
+    // A Podman monitor's scope is the host's wherever it is, the agent's own group included
+    // (containers parented under the agent's group put their monitors there too): a job
+    // cannot place a process in it.
+    let monitor = units
+        .last()
+        .is_some_and(|unit| unit.starts_with("libpod-conmon-") && unit.ends_with(".scope"));
+    if monitor {
+        return true;
+    }
     let agents = own.is_some_and(|own| {
         path == own
             || path
@@ -379,13 +390,6 @@ fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
     });
     if agents {
         return false;
-    }
-    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
-    let monitor = units
-        .last()
-        .is_some_and(|unit| unit.starts_with("libpod-conmon-") && unit.ends_with(".scope"));
-    if monitor {
-        return true;
     }
     if units.iter().any(|unit| names_a_container(unit)) {
         return false;
