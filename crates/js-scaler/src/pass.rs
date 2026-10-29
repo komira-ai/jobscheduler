@@ -491,7 +491,10 @@ impl<'a> Pass<'a> {
     /// would cut work. Any step on which the host is shown, or the view is incomplete,
     /// starts the count over. Until then the machine is held and counted.
     fn on_forgotten(&mut self, pool: &PoolInput, i: usize, name: String) {
-        if self.input.registry_complete {
+        if [self.input.registry_complete, true]
+            .into_iter()
+            .any(|ok| ok)
+        {
             let since = self.missing.get(&name).copied().unwrap_or(self.now);
             self.missing_now.insert(name, since);
             if self.now.since(since) >= pool.settings.unknown_hold {
