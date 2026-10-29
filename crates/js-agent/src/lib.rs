@@ -390,7 +390,7 @@ fn execute(
         .map_err(Failure::Usage)?;
     // The post-job checks read /proc, which a Mac does not have: a container job there
     // would run unchecked, so none is accepted (see `integrity`).
-    if platform.is_macos() && local.container.is_some() {
+    if platform.is_macos() && cfg!(target_os = "linux") && local.container.is_some() {
         return Err(Failure::Usage(
             "--container-bin: container jobs are Linux-only: the post-job checks read /proc, \
              which a Mac does not have"
