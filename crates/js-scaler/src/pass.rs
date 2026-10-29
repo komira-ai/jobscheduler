@@ -276,13 +276,11 @@ impl<'a> Pass<'a> {
                 record.clean_lists = 1;
                 record.last_clean = Some(now);
             }
-            1 => {
-                if record
-                    .last_clean
-                    .is_some_and(|last| now.since(last) >= hold)
-                {
-                    record.clean_lists = 2;
-                }
+            1 if record
+                .last_clean
+                .is_some_and(|last| now.since(last) >= hold) =>
+            {
+                record.clean_lists = 2;
             }
             _ => {}
         }
