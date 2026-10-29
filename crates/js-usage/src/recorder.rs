@@ -13,6 +13,10 @@
 //! A reading is refused, never an error, when it cannot be trusted (see [`DropReason`]);
 //! the refusal is counted in [`Counters`]. The state is in memory: after a restart the
 //! first reading of each node only sets a baseline.
+//!
+//! A caller that keeps no node series builds the recorder with [`Recorder::leases_only`]:
+//! the lease side behaves the same, but node minutes are never stored, so none pile up
+//! and [`Recorder::node_minutes_due`] has nothing to drain.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,6 +162,7 @@ struct HostState {
 /// The state of every node a server hears from.
 #[derive(Default)]
 pub struct Recorder {
+    leases_only: bool,
     hosts: BTreeMap<HostId, HostState>,
     counters: Counters,
 }
@@ -167,6 +172,19 @@ impl Recorder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A recorder that has heard from no node and keeps lease series only: the run
+    /// series, lease clocks and checks work as in [`Recorder::new`], but a reading's CPU
+    /// and working set are not stored as node minutes, so [`Recorder::node_minutes_due`]
+    /// is always empty and memory does not grow with node minutes. For a caller that
+    /// keeps no node series and so would never drain them.
+    #[must_use]
+    pub fn leases_only() -> Self {
+        Self {
+            leases_only: true,
+            ..Self::default()
+        }
     }
 
     /// Judges `load`, the reading of node `host` under `epoch`, received in wall minute
@@ -191,6 +209,7 @@ impl Recorder {
             mono: load.mono_usec,
             cpu: load.cpu_usage_usec,
         };
+        let leases_only = self.leases_only;
         let counters = &mut self.counters;
         let state = match self.hosts.entry(host.clone()) {
             Entry::Vacant(slot) => {
@@ -231,18 +250,20 @@ impl Recorder {
             return no_minutes(counters, DropReason::MemoryOverFourXCapacity);
         }
         state.last = reading;
-        let running: BTreeSet<&LeaseId> = load
-            .covered
-            .iter()
-            .chain(load.clocks.iter().map(|clock| &clock.lease))
-            .collect();
-        let acc = state.minutes.entry(now_wall_minute).or_default();
-        acc.cpu_usec += d_cpu;
-        acc.mono_usec += d_mono;
-        acc.ws_max = acc.ws_max.max(load.working_set_bytes);
-        acc.leases = acc
-            .leases
-            .max(u32::try_from(running.len()).unwrap_or(u32::MAX));
+        if !leases_only {
+            let running: BTreeSet<&LeaseId> = load
+                .covered
+                .iter()
+                .chain(load.clocks.iter().map(|clock| &clock.lease))
+                .collect();
+            let acc = state.minutes.entry(now_wall_minute).or_default();
+            acc.cpu_usec += d_cpu;
+            acc.mono_usec += d_mono;
+            acc.ws_max = acc.ws_max.max(load.working_set_bytes);
+            acc.leases = acc
+                .leases
+                .max(u32::try_from(running.len()).unwrap_or(u32::MAX));
+        }
         (
             Observed::Accepted,
             state.take(load, now_wall_minute, counters),
@@ -273,6 +294,14 @@ impl Recorder {
             }
         }
         due
+    }
+
+    /// How many node minutes are held, not yet handed out by
+    /// [`Recorder::node_minutes_due`]; always 0 for a [`Recorder::leases_only`] recorder.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn held_node_minutes(&self) -> usize {
+        self.hosts.values().map(|state| state.minutes.len()).sum()
     }
 
     /// Forgets a node, as when it leaves the pool. Its open minutes are lost.
