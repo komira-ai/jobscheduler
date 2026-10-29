@@ -1082,13 +1082,15 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    without `--container-subuid <user>`, and checks that `/etc/subuid` and `/etc/subgid` give
    the user one entry of exactly 65536 ids, not from 0, overlapping no host id, and that the
    Docker daemon runs `userns-remap` set to that user. The renderer (`bootstrap/userns.rs`)
-   first fails if either id file holds an entry for `js-jobs` or any entry overlapping the
-   range (LXD conventionally owns `root:1000000:1000000000`, so the range sits at 2000000000),
-   makes a system user `js-jobs`, appends `js-jobs:2000000000:65536` to both id files, merges
-   `"userns-remap": "js-jobs"` into `/etc/docker/daemon.json` with a constant `python3`
-   heredoc (every other key is kept, as the NVIDIA toolkit writes `runtimes` there; a different
-   remap already set is refused; the file is replaced by a rename of a complete temporary
-   file), restarts the daemon, and the agent's unit passes `--container-subuid js-jobs`. No
+   first creates a missing `/etc/subuid` or `/etc/subgid` empty with mode 0644, then fails if
+   either id file holds an entry for `js-jobs` or any entry overlapping the range (comment
+   lines skipped; LXD conventionally owns `root:1000000:1000000000`, so the range sits at
+   2000000000), merges `"userns-remap": "js-jobs"` into `/etc/docker/daemon.json` with a
+   constant `python3 -I` heredoc (every other key is kept, as the NVIDIA toolkit writes
+   `runtimes` there; an empty file counts as `{}`; a different remap already set is refused,
+   before anything else is written; the file is replaced by a rename of a complete temporary
+   file), makes a system user `js-jobs`, appends `js-jobs:2000000000:65536` to both id files,
+   restarts the daemon, and the agent's unit passes `--container-subuid js-jobs`. No
    path of `dockerd` and no unit file is named: the agent reads the remap from `docker info`,
    so the configuration file is as good as a command-line flag. Whether `python3` and the merge
    work on the stock image is checked live (Open questions 5).
@@ -1554,7 +1556,7 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    `docker info` lists `name=userns` in `SecurityOptions` and shows the remapped
    `DockerRootDir`; a real `--gpus device=0` job runs a CUDA device query and a small kernel (not `nvidia-smi` alone), on the first live run before any scale-up; the scratch
    directory is writable by container uid 65534 (host uid 2000065534 under the remap); and `/etc/docker/daemon.json`
-   still holds the toolkit's `runtimes` beside `userns-remap`. If the GPU job fails under the remap, the fallback is Podman on launched hosts: the same engine and `--uidmap` path used elsewhere, so one engine serves Linux everywhere. It is not a change to the agent's Docker rule. If the Docker daemon is
+   still holds the toolkit's `runtimes` beside `userns-remap`. The id-file check and the `daemon.json` merge are proven by text only; the first live run confirms them (`cat /etc/subuid /etc/subgid`; `cat /etc/docker/daemon.json`). If the GPU job fails under the remap, the fallback is Podman on launched hosts: the same engine and `--uidmap` path used elsewhere, so one engine serves Linux everywhere. It is not a change to the agent's Docker rule. If the Docker daemon is
    instead configured by a unit that overrides `daemon.json`, `systemctl show -p ExecStart
    docker.service` shows it.
 6. Where the host gets the agent binary. Decided: from the operator's pin per architecture

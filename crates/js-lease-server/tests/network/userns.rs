@@ -24,24 +24,23 @@ fn section(script: &str) -> &str {
     &script[start..end]
 }
 
-/// The whole user namespace section, pinned character for character: the check, the user,
-/// both entries, the constant `python3` merge into `daemon.json` and the restart. A change
-/// to any line, including a dropped or reordered one, is a change to this text.
+/// The whole user namespace section, pinned character for character: the check (which makes
+/// a missing id file, mode 0644), the constant `python3 -I` merge into `daemon.json`, the
+/// user, both entries and the restart. A change to any line, including a dropped or
+/// reordered one, is a change to this text.
 const SECTION: &str = r#"# container user namespace
-for f in /etc/subuid /etc/subgid; do awk -F: -v u=js-jobs -v lo=2000000000 -v hi=2000065536 '$1 == u || ($2 + 0 < hi + 0 && $2 + $3 > lo + 0) { bad = 1 } END { exit bad }' "$f" || { echo "bootstrap: $f is unreadable, holds an entry for js-jobs, or holds one overlapping 2000000000:65536" >&2; exit 1; }; done
-useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
-printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
-printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
+for f in /etc/subuid /etc/subgid; do test -e "$f" || install -m 0644 /dev/null "$f"; awk -F: -v u=js-jobs -v lo=2000000000 -v hi=2000065536 '/^#/ { next } $1 == u || ($2 + 0 < hi + 0 && $2 + $3 > lo + 0) { bad = 1 } END { exit bad }' "$f" || { echo "bootstrap: $f is unreadable, holds an entry for js-jobs, or holds one overlapping 2000000000:65536" >&2; exit 1; }; done
 mkdir -p /etc/docker
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json, os, sys
 path = "/etc/docker/daemon.json"
 user = "js-jobs"
 try:
     with open(path) as f:
-        conf = json.load(f)
+        text = f.read()
 except FileNotFoundError:
-    conf = {}
+    text = ""
+conf = json.loads(text) if text.strip() else {}
 if not isinstance(conf, dict):
     sys.exit("bootstrap: " + path + " is not a JSON object")
 if conf.get("userns-remap", user) != user:
@@ -54,6 +53,9 @@ with open(tmp, "w") as f:
 os.chmod(tmp, 0o644)
 os.rename(tmp, path)
 PY
+useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
 systemctl restart docker.service
 "#;
 
@@ -106,21 +108,21 @@ fn the_section_is_pinned_exactly() {
     assert!(!script.contains("docker.service.d"));
 }
 
-/// Asserts the order: the check, then the user, then both id lines, then the daemon
-/// configuration, then the restart, then the identity and the agent's unit.
+/// Asserts the order: the check, then the daemon configuration (which can refuse), then the
+/// user, then both id lines, then the restart, then the identity and the agent's unit.
 #[test]
 fn the_daemon_is_restarted_under_the_remap_before_the_agent() {
     let script = script();
     let at = |needle: &str| script.find(needle).unwrap_or_else(|| panic!("{needle}"));
     let order = [
         "# container user namespace\n".to_owned(),
-        "for f in /etc/subuid /etc/subgid; do awk".to_owned(),
+        "for f in /etc/subuid /etc/subgid; do test -e \"$f\" || install -m 0644 /dev/null \"$f\"; awk".to_owned(),
+        "mkdir -p /etc/docker\n".to_owned(),
+        "python3 -I - <<'PY'\n".to_owned(),
+        "\nPY\n".to_owned(),
         format!("useradd --system --no-create-home --shell /usr/sbin/nologin {SUBID_USER}\n"),
         format!("{SUBID_USER}:{SUBID_START}:{SUBID_COUNT} >> /etc/subuid\n"),
         format!("{SUBID_USER}:{SUBID_START}:{SUBID_COUNT} >> /etc/subgid\n"),
-        "mkdir -p /etc/docker\n".to_owned(),
-        "python3 - <<'PY'\n".to_owned(),
-        "\nPY\n".to_owned(),
         "systemctl restart docker.service\n".to_owned(),
         "# identity\n".to_owned(),
         "cat > /etc/systemd/system/js-agent.service".to_owned(),

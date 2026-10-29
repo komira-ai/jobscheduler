@@ -47,20 +47,18 @@ systemctl daemon-reload
 systemctl enable --now js-metadata-block.service
 test "$(/usr/sbin/nft list table inet js_metadata | grep -c drop)" = 2
 # container user namespace
-for f in /etc/subuid /etc/subgid; do awk -F: -v u=js-jobs -v lo=2000000000 -v hi=2000065536 '$1 == u || ($2 + 0 < hi + 0 && $2 + $3 > lo + 0) { bad = 1 } END { exit bad }' "$f" || { echo "bootstrap: $f is unreadable, holds an entry for js-jobs, or holds one overlapping 2000000000:65536" >&2; exit 1; }; done
-useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
-printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
-printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
+for f in /etc/subuid /etc/subgid; do test -e "$f" || install -m 0644 /dev/null "$f"; awk -F: -v u=js-jobs -v lo=2000000000 -v hi=2000065536 '/^#/ { next } $1 == u || ($2 + 0 < hi + 0 && $2 + $3 > lo + 0) { bad = 1 } END { exit bad }' "$f" || { echo "bootstrap: $f is unreadable, holds an entry for js-jobs, or holds one overlapping 2000000000:65536" >&2; exit 1; }; done
 mkdir -p /etc/docker
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json, os, sys
 path = "/etc/docker/daemon.json"
 user = "js-jobs"
 try:
     with open(path) as f:
-        conf = json.load(f)
+        text = f.read()
 except FileNotFoundError:
-    conf = {}
+    text = ""
+conf = json.loads(text) if text.strip() else {}
 if not isinstance(conf, dict):
     sys.exit("bootstrap: " + path + " is not a JSON object")
 if conf.get("userns-remap", user) != user:
@@ -73,6 +71,9 @@ with open(tmp, "w") as f:
 os.chmod(tmp, 0o644)
 os.rename(tmp, path)
 PY
+useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
 systemctl restart docker.service
 # identity
 mkdir -p /etc/jobscheduler
