@@ -258,52 +258,98 @@ fn the_silent_time_is_saved_when_it_starts_and_when_it_ends() {
     assert!(rig.state.records.silent_since.is_empty());
 }
 
-/// Asserts that a scaler restarted more often than `unknown_hold` still releases a silent
-/// host: the time the host was first seen silent comes back from the records file, so the
-/// hold is reached across restarts, to the millisecond.
+/// Makes the provider list a machine nobody launched, so that the step at `now` changes the
+/// records and writes them; the scaler's last write is then `now`. `n` tells the machines
+/// apart.
+fn write_at(rig: &mut Rig, n: u64, now: u64) {
+    let held = Held {
+        id: HostRef(format!("stray-{n}")),
+        acquire: String::new(),
+        name: None,
+        offer: "a10".to_owned(),
+        zone: None,
+        status: HostStatus::Running,
+    };
+    rig.pool().held.as_mut().unwrap().push(held);
+    assert_eq!(kinds(&rig.tick(at(now))), ["Save"]);
+}
+
+/// Asserts that the time a scaler observed a silent host before a restart and the time it
+/// observes it after add up to the hold, to the millisecond: the hold is reached across a
+/// restart, and the downtime between the two is not part of it.
 #[test]
-fn a_silent_host_is_released_across_restarts() {
+fn a_silent_host_is_released_when_the_time_seen_before_and_after_a_restart_adds_up() {
     let (mut first, name) = silent_registered();
     first.tick(at(3 * SECOND));
+    write_at(&mut first, 1, 14 * MINUTE);
 
     let mut second = restart(&first);
-    assert!(second.tick(at(3 * SECOND + 14 * MINUTE)).is_empty());
-    assert_eq!(second.state.silent[&name], at(3 * SECOND));
-    let mut third = restart(&second);
-    assert!(third.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
-    let mut fourth = restart(&third);
-    let actions = fourth.tick(at(3 * SECOND + 30 * MINUTE));
+    let back = HOUR;
+    assert_eq!(count(&second.tick(at(back)), "Drain"), 0);
+    let seen = 14 * MINUTE - 3 * SECOND;
+    let last = back + 30 * MINUTE - seen;
+    assert_eq!(second.state.silent[&name], at(back - seen));
+    assert!(second.tick(at(last - 1)).is_empty());
+    let actions = second.tick(at(last));
     assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
 }
 
-/// Asserts that the first time a machine was seen missing from a complete view is written
-/// with the records, and that a restarted scaler releases it when the hold since then has
-/// passed, to the millisecond, through the incomplete views the restarted registry shows
-/// before it has settled.
+/// Asserts the same for a machine missing from complete views, through the incomplete view
+/// a restarted registry shows first.
 #[test]
-fn a_missing_host_is_released_across_restarts() {
+fn a_missing_host_is_released_when_the_time_seen_before_and_after_a_restart_adds_up() {
     let (mut first, name) = forgotten();
     assert_eq!(kinds(&first.tick(at(3 * SECOND))), ["Save"]);
     assert_eq!(first.state.records.missing_since[&name], at(3 * SECOND));
-    assert!(first.tick(at(10 * MINUTE)).is_empty());
+    write_at(&mut first, 1, 14 * MINUTE);
 
     let mut second = restart(&first);
     second.input.registry_complete = false;
-    assert_eq!(
-        count(&second.tick(at(3 * SECOND + 10 * MINUTE)), "Release"),
-        0
-    );
-    assert_eq!(second.state.records.missing_since[&name], at(3 * SECOND));
+    let back = HOUR;
+    assert_eq!(count(&second.tick(at(back)), "Release"), 0);
+    let seen = 14 * MINUTE - 3 * SECOND;
+    assert_eq!(second.state.records.missing_since[&name], at(back - seen));
     second.input.registry_complete = true;
-    let mut third = restart(&second);
-    assert_eq!(
-        count(&third.tick(at(3 * SECOND + 30 * MINUTE - 1)), "Release"),
-        0
-    );
-    let mut fourth = restart(&third);
-    let actions = fourth.tick(at(3 * SECOND + 30 * MINUTE));
+    let last = back + 30 * MINUTE - seen;
+    assert_eq!(count(&second.tick(at(last - 1)), "Release"), 0);
+    let actions = second.tick(at(last));
     assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
-    assert_eq!(fourth.phase(0), Phase::Releasing);
+    assert_eq!(second.phase(0), Phase::Releasing);
+}
+
+/// Asserts that a scaler restarted again and again reaches the hold after enough time it
+/// observed, spread over three runs with hours of downtime between them, and not before.
+#[test]
+fn the_hold_is_reached_by_time_seen_across_several_restarts() {
+    let (mut first, _) = silent_registered();
+    first.tick(at(3 * SECOND));
+    write_at(&mut first, 1, 10 * MINUTE);
+
+    let mut second = restart(&first);
+    assert_eq!(count(&second.tick(at(3 * HOUR)), "Drain"), 0);
+    write_at(&mut second, 2, 3 * HOUR + 10 * MINUTE);
+
+    let mut third = restart(&second);
+    assert_eq!(count(&third.tick(at(9 * HOUR)), "Drain"), 0);
+    let seen = 2 * (10 * MINUTE) - 3 * SECOND;
+    let last = 9 * HOUR + 30 * MINUTE - seen;
+    assert!(third.tick(at(last - 1)).is_empty());
+    let actions = third.tick(at(last));
+    assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
+}
+
+/// Asserts that restarts alone never reach the hold, however long the scaler is down
+/// between them.
+#[test]
+fn downtime_alone_never_reaches_the_hold() {
+    let (mut rig, _) = silent_registered();
+    rig.tick(at(3 * SECOND));
+    for n in 1..=10 {
+        rig = restart(&rig);
+        let actions = rig.tick(at(3 * SECOND + n * 40 * MINUTE));
+        assert_eq!(count(&actions, "Drain") + count(&actions, "ReleaseHost"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
 }
 
 /// Asserts that a restarted scaler that was never written a time starts the count at its
