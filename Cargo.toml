@@ -24,6 +24,9 @@ block2 = "0.6.2"
 clap = { version = "4.6.7", features = ["derive"] }
 # macOS only (js-mac-session): CFData for the caller's audit token.
 core-foundation = "0.10.1"
+# The pack format's per-record and footer checksum (js-pack-format): the CPU's CRC32C
+# instructions where it has them, a portable table otherwise; the same value either way.
+crc32c = "0.6.8"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["std", "objc2"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
