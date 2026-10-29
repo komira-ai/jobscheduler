@@ -123,8 +123,10 @@ pub struct NativeSpec {
     #[serde(default)]
     pub args: Vec<String>,
     /// The environment, literal and not secret: at most [`limits::MAX_ENV`] entries. A name
-    /// is `[A-Za-z_][A-Za-z0-9_]*` and does not start `DYLD_`, `LD_`, `SANDBOX_` or
-    /// `JS_AGENT_`; a value holds no NUL.
+    /// is `[A-Za-z_][A-Za-z0-9_]*` and does not start `DYLD_`, `LD_`, `SANDBOX_`,
+    /// `JS_AGENT_`, `__XPC_`, `MALLOC`, `Malloc` or `OBJC_`; a value holds no NUL. A value
+    /// may hold a newline or other control characters, so whatever logs the environment
+    /// must escape them.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// The working directory: relative to the exec root, as a mount's `rel`, or empty for
@@ -132,10 +134,11 @@ pub struct NativeSpec {
     #[serde(default)]
     pub cwd: String,
     /// What appears in the run directory: at most [`limits::MAX_INPUTS`], no two at one
-    /// `dest` and none below another's `dest`.
+    /// `dest` and none below another's `dest`, compared without regard to case.
     #[serde(default)]
     pub inputs: Vec<InputRef>,
-    /// What to collect at the end: at most [`limits::MAX_OUTPUTS`], none twice.
+    /// What to collect at the end: at most [`limits::MAX_OUTPUTS`], none twice, none below
+    /// or above another output or an input `dest`, compared without regard to case.
     #[serde(default)]
     pub outputs: Vec<OutputSpec>,
     /// The most network the job may use. Absent means none.
@@ -144,7 +147,19 @@ pub struct NativeSpec {
 }
 
 /// Name prefixes the agent keeps for itself and the dynamic loader and sandbox read.
-const RESERVED_ENV_PREFIXES: [&str; 4] = ["DYLD_", "LD_", "SANDBOX_", "JS_AGENT_"];
+/// `MALLOC` covers `MALLOC_*`; `Malloc` covers `MallocStackLogging` and `MallocLogFile`,
+/// which make the allocator write files. `__XPC_` is launchd's own, `OBJC_` the Objective-C
+/// runtime's debug switches.
+const RESERVED_ENV_PREFIXES: [&str; 8] = [
+    "DYLD_",
+    "LD_",
+    "SANDBOX_",
+    "JS_AGENT_",
+    "__XPC_",
+    "MALLOC",
+    "Malloc",
+    "OBJC_",
+];
 
 impl NativeSpec {
     /// Checks the body alone, without the job around it.
@@ -207,24 +222,8 @@ impl NativeSpec {
         for input in &self.inputs {
             input.check()?;
         }
-        // Dests are valid paths now, so equal strings are the only equal paths. The
-        // pairs are at most 256 * 256.
-        for (index, input) in self.inputs.iter().enumerate() {
-            for other in &self.inputs[index + 1..] {
-                let (one, two) = (input.dest(), other.dest());
-                if one == two {
-                    return Err(at.fail(Rule::Duplicate));
-                }
-                let nested = [(one, two), (two, one)].iter().any(|&(outer, inner)| {
-                    inner
-                        .strip_prefix(outer)
-                        .is_some_and(|r| r.starts_with('/'))
-                });
-                if nested {
-                    return Err(at.fail(Rule::Inconsistent));
-                }
-            }
-        }
+        let dests: Vec<&str> = self.inputs.iter().map(InputRef::dest).collect();
+        disjoint(at, &dests)?;
         Ok(())
     }
 
@@ -234,7 +233,16 @@ impl NativeSpec {
         for output in &self.outputs {
             rel_path(at, &output.path, false)?;
         }
-        check::distinct(at, self.outputs.iter().map(|output| output.path.as_str()))
+        // An output may not repeat, nest in or contain another output, or share ground
+        // with an input `dest`: the job would write into a staged input, or two collection
+        // rules would claim one path.
+        let paths = self
+            .inputs
+            .iter()
+            .map(InputRef::dest)
+            .chain(self.outputs.iter().map(|output| output.path.as_str()))
+            .collect::<Vec<_>>();
+        disjoint(at, &paths)
     }
 }
 
@@ -277,7 +285,14 @@ fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// A relative path as a mount's `rel` is, or the empty path when `allow_empty`.
+/// A relative path as a mount's `rel` is, or the empty path when `allow_empty`, and ASCII
+/// only. The agent runs on case-insensitive APFS, where `A` and `a`, or `\u{e9}` composed
+/// and decomposed, are one name; ASCII keeps the overlap checks exact with a lower-case
+/// fold and needs no Unicode tables. Mount sources (`rel` of a mount input) are not
+/// compared and keep the mount rules.
+///
+/// A `..` that reaches outside through a symlink is not visible here: refusing it is the
+/// staging code's duty, when it resolves the path under the run directory.
 fn rel_path(at: At, value: &str, allow_empty: bool) -> Result<(), ValidationError> {
     if value.is_empty() {
         return if allow_empty {
@@ -291,7 +306,7 @@ fn rel_path(at: At, value: &str, allow_empty: bool) -> Result<(), ValidationErro
     }
     if value
         .chars()
-        .any(|c| check::hidden(c) || matches!(c, ':' | ',' | '\\'))
+        .any(|c| check::hidden(c) || !c.is_ascii() || matches!(c, ':' | ',' | '\\'))
     {
         return Err(at.fail(Rule::BadChars));
     }
@@ -312,4 +327,25 @@ fn stage_digest(at: At, value: &str) -> Result<(), ValidationError> {
         true => Ok(()),
         false => Err(at.fail(Rule::BadChars)),
     }
+}
+
+/// No two paths are equal, and none is below another, once folded to lower case.
+fn disjoint(at: At, paths: &[&str]) -> Result<(), ValidationError> {
+    let folded: Vec<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
+    let below = |inner: &str, outer: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    for (index, one) in folded.iter().enumerate() {
+        for two in &folded[index + 1..] {
+            if one == two {
+                return Err(at.fail(Rule::Duplicate));
+            }
+            if [below(one, two), below(two, one)].contains(&true) {
+                return Err(at.fail(Rule::Inconsistent));
+            }
+        }
+    }
+    Ok(())
 }
