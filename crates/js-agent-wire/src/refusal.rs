@@ -21,6 +21,16 @@ pub const INVALID_IMAGE: &str = "invalid-image";
 /// `field` is `image`. Agents run with the pull policy `missing`, so a tag could change
 /// under a fleet; a name with a tag as well as a digest is accepted.
 pub const IMAGE_DIGEST_REQUIRED: &str = "image-digest-required";
+/// A job whose bundle is malformed or contradicts the rest of the spec: a name outside
+/// the image alphabet, a digest that breaks the grammar (upper case hex, fewer than 32
+/// digits), a bundle without a native body (a bundle needs `native`), or a bundle beside a native body (not yet supported). The refusal's `field` is `bundle`.
+pub const INVALID_BUNDLE: &str = "invalid-bundle";
+/// A job whose bundle is not pinned by digest: it has no `@sha256:<64 lower case hex>`
+/// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's
+/// `field` is `bundle`. A bundle is a toolchain a host unpacks once and keeps, so a tag
+/// that moves would change the tools under a fleet; a name with a tag as well as a
+/// digest is accepted and the tag is not read.
+pub const BUNDLE_DIGEST_REQUIRED: &str = "bundle-digest-required";
 /// A native job whose `program` is empty, relative, climbs with `..`, or holds a
 /// character a path may not.
 pub const INVALID_PROGRAM: &str = "invalid-program";
