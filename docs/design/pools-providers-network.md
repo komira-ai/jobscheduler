@@ -898,6 +898,24 @@ launch, not as an option:
 - Failure case: the `Welcome` is lost on the wire after the registry retired the token. The
   host cannot re-register; the scaler sees Booting with no heartbeat, `boot_timeout` releases it.
   Tested in 13.3.
+- The Welcome that can carry the credential is sent with `Cache-Control: no-store` and
+  `Pragma: no-cache`.
+- An agent that is given no `--token-file` uses the `host-credential` file of its `--state-root`
+  when there is one it can read; with none it refuses to start, naming `--token-file`.
+- The server flag `--require-host-credential` (off by default; turn it on once every agent is new)
+  refuses the first hello of a one-time token that does not say the agent keeps a credential
+  (`join-token-credential-required`, token left unused). Pool join tokens are unaffected. The
+  flag may move to `[server]` of the configuration file.
+- Not done: removing the token file from the host. The boot script ends at
+  `systemctl enable --now js-agent.service`, when the agent has not yet read the file or said
+  hello, so the `EXIT` trap cannot remove it without the agent losing its way in (a restart before
+  the credential is saved needs the token). A safe point needs either a wait in the script for the
+  credential file, which holds the boot for as long as the server is out of reach, or the agent
+  removing the file after its credential is durable and a unit that does not name it. Follow-up.
+- Not done: retiring the token at the credential's first use, so that a lost Welcome does not
+  strand the host. A re-hello with the token would have to return the same credential, which the
+  server holds only as a digest; keeping the secret in the file for that would change what the file
+  holds. The lost-Welcome case stays as above.
 
 In code: `Agents` gains `mint_for(pool, name, ttl)` and `revoke_for(pool, name)`, in-process
 wrappers over `joins.mint` and `joins.revoke`; the HTTP routes stay for tooling. Docs in

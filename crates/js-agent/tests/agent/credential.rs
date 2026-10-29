@@ -1,10 +1,11 @@
 //! The host credential in the agent: kept by the session, written to the state root before
 //! it is used, read again at start, and sent with every call in place of the token.
 
+use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use js_agent::{
@@ -12,12 +13,14 @@ use js_agent::{
     CredentialStore, Dialer, HEARTBEAT_PATH, HELLO_PATH, Note, Session, Step,
 };
 use js_agent_wire::HostCredential;
+use js_client::ClientError;
 use serde_json::{Value, json};
 
 use crate::jobs::private;
 use crate::support::{
-    ADOPTED, CountingSleeper, Host, Lowest, Scratch, Script, ScriptConnector, Sent, beat_ok, code,
-    flags, hello, lowest, mac_host, reply, run, run_scripted, welcome, welcome_issuing,
+    ADOPTED, CountingSleeper, Host, Lowest, POOL, Ran, Reply, Scratch, Script, ScriptConnector,
+    Sent, beat_ok, code, flags, hello, lowest, mac_host, reply, run, run_scripted, welcome,
+    welcome_issuing,
 };
 
 /// The credential of the scripted welcomes.
@@ -394,4 +397,111 @@ fn the_real_transport_takes_a_credential_or_says_why_not() {
     let said = transport.adopt_credential("has space").unwrap_err();
     assert!(said.contains("printable ASCII"), "{said}");
     assert!(!said.contains("has space"), "{said}");
+}
+
+/// The flags of a run with no `--token-file`: a state root and nothing else of the token.
+fn tokenless(state: &str) -> Vec<String> {
+    let flags = [
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        POOL,
+        "--host-id",
+        "h1",
+        "--state-root",
+        state,
+    ];
+    flags.map(str::to_owned).to_vec()
+}
+
+/// A connector that records the file each connect was told to read its bearer from.
+struct Recording<'a> {
+    script: ScriptConnector,
+    files: &'a RefCell<Vec<PathBuf>>,
+}
+
+impl Connector for Recording<'_> {
+    fn connect(
+        &self,
+        server: &str,
+        token_file: &Path,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn js_agent::Transport>, ClientError> {
+        self.files.borrow_mut().push(token_file.to_path_buf());
+        self.script.connect(server, token_file, ca_cert)
+    }
+}
+
+/// Runs the program with `args` over a script of `replies`, stopping at its first wait;
+/// returns the run, what was sent and the files the connector was given.
+fn run_recording(args: &[String], replies: Vec<Reply>) -> (Ran, Sent, Vec<PathBuf>) {
+    let (script, sent) = Script::new(replies);
+    let files = RefCell::new(Vec::new());
+    let connector = Recording {
+        script: ScriptConnector::of(script),
+        files: &files,
+    };
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let ran = run(&args, &mac_host(), &connector, &mut sleeper, &mut Lowest);
+    (ran, sent, files.into_inner())
+}
+
+/// The start matrix of `--token-file`: with a usable `host-credential` in the state root and
+/// no token file the agent starts, connects from the credential file, adopts it before its
+/// hello and goes on; with no credential file, with no state root, or with a damaged file
+/// it ends with the usage status before anything is sent, naming `--token-file` for the
+/// first two and the credential file (never its text) for the last. It catches a start
+/// that still demands a token file once the credential is saved, one that starts with no
+/// bearer at all, and one that takes a damaged file for an absent one.
+#[test]
+fn the_token_file_is_optional_only_with_a_credential_in_the_state_root() {
+    let (_scratch, dir) = state_dir("credential-tokenless");
+    let state = dir.display().to_string();
+    let args = tokenless(&state);
+
+    let (ran, sent, files) = run_recording(&args, vec![welcome(1)]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .starts_with("js-agent: --token-file: required unless"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty(), "{:?}", sent);
+    assert!(files.is_empty(), "{files:?}");
+
+    let no_root: Vec<String> = args[..args.len() - 2].to_vec();
+    let (ran, sent, files) = run_recording(&no_root, vec![welcome(1)]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(ran.err.contains("--token-file: required"), "{}", ran.err);
+    assert!(sent.borrow().is_empty(), "{:?}", sent);
+    assert!(files.is_empty(), "{files:?}");
+
+    let file = CredentialFile::in_dir(&dir);
+    file.save(&HostCredential::parse(CREDENTIAL).unwrap())
+        .unwrap();
+    let (ran, sent, files) = run_recording(&args, vec![welcome(2)]);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(files, [file.path()]);
+    assert_eq!(paths(&sent), [ADOPTED, HELLO_PATH, HEARTBEAT_PATH]);
+    assert_eq!(sent.borrow()[0].1, json!(CREDENTIAL));
+    assert!(!ran.err.contains(CREDENTIAL) && !ran.out.contains(CREDENTIAL));
+
+    fs::write(file.path(), "not a credential").unwrap();
+    let (ran, sent, files) = run_recording(&args, vec![welcome(2)]);
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains(&file.path().display().to_string()),
+        "{}",
+        ran.err
+    );
+    assert!(
+        ran.err.contains("does not hold a host credential"),
+        "{}",
+        ran.err
+    );
+    assert!(!ran.err.contains("not a credential"), "{}", ran.err);
+    assert!(sent.borrow().is_empty(), "{:?}", sent);
+    assert!(files.is_empty(), "{files:?}");
 }

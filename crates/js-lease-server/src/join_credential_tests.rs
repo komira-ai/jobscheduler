@@ -412,3 +412,47 @@ fn an_admission_prints_no_secret() {
     assert!(!text.contains(one.secret.expose()), "{text}");
     assert!(text.contains("HostCredential(***)"), "{text}");
 }
+
+/// With the switch on, the first hello of an unused token that does not ask for a
+/// credential is refused with its own code, nothing is written, and the token stays unused:
+/// a hello that asks then registers the host and gets the credential. It catches a switch
+/// that admits an unasked first hello, one that uses the token up while refusing, and a
+/// refusal that is not told apart from the others.
+#[test]
+fn a_required_credential_refuses_an_unasked_first_hello_and_keeps_the_token() {
+    let path = scratch("required");
+    let (joins, _) = tokens(&path);
+    let joins = joins.requiring_credential(true);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    let token = Credential::of_token(&minted.token);
+    let before = fs::read_to_string(&path).unwrap();
+    let refused = joins.admit_with(&token, "host-a", Some(&instance("i-1")), false);
+    assert_eq!(refused, Err(JoinRefusal::CredentialRequired));
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    assert!(joins.identify(&minted.token).is_some());
+    let asked = joins.admit_with(&token, "host-a", Some(&instance("i-1")), true);
+    let asked = asked.unwrap();
+    assert_eq!(asked.admission, Admission::Fresh);
+    assert!(asked.issued.is_some());
+}
+
+/// The switch concerns the first hello only: a token that registered its host before the
+/// switch was turned on (a restart with the flag) says hello again without a credential
+/// and is admitted as the same host, and a credential's own hello needs no flag. It
+/// catches a switch that locks out hosts that are already registered.
+#[test]
+fn a_required_credential_leaves_a_registered_host_alone() {
+    let path = scratch("required_later");
+    let (joins, _) = tokens(&path);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    let token = Credential::of_token(&minted.token);
+    let plain = joins.admit_with(&token, "host-a", Some(&instance("i-1")), false);
+    assert_eq!(plain.unwrap().admission, Admission::Fresh);
+    let (joins, _) = tokens(&path);
+    let joins = joins.requiring_credential(true);
+    let again = joins.admit_with(&token, "host-a", Some(&instance("i-1")), false);
+    assert_eq!(again.unwrap().admission, Admission::Again);
+    let kept = swapped(&joins, "i-2", "host-b");
+    let hello = joins.admit_with(&kept.digest, "host-b", None, false);
+    assert_eq!(hello.unwrap().admission, Admission::Again);
+}

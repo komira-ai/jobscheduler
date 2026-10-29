@@ -234,3 +234,44 @@ fn a_lost_welcome_leaves_the_agent_refused_for_good() {
     assert!(!state.join(CREDENTIAL_FILE).exists());
     assert_eq!(server.host("mac-1")["source"], "registered");
 }
+
+/// Asserts that a host whose credential is in its state root restarts with no
+/// `--token-file` at all: the first agent is given the credential through the token, the
+/// second is started without the flag after its session lapsed, says hello with the file's
+/// credential and heartbeats, and leaves the file as it was. It catches an agent that
+/// still insists on a token file it no longer needs, and one that ignores the file when no
+/// token is there.
+#[test]
+fn a_restart_needs_no_token_file_once_the_credential_is_saved() {
+    let server = Server::start("cred_tokenless", &[]);
+    let files = Scratch::new("cred_tokenless-files");
+    let token = one_time_token(&server, &files);
+    let state = private(&files, "state");
+    let state_flag = state.display().to_string();
+    let first = Agent::spawn(
+        server.url(),
+        token,
+        &flags(&state_flag, &[]),
+        launched,
+        Dialer,
+    );
+    assert_eq!(first.next_wait(), secs(5), "the hello");
+    let file = state.join(CREDENTIAL_FILE);
+    let credential = fs::read_to_string(&file).unwrap();
+    let ran = first.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+
+    server.clock.advance(secs(60));
+    let again = Agent::spawn_tokenless(server.url(), &flags(&state_flag, &[]), launched, Dialer);
+    assert_eq!(again.next_wait(), secs(5), "the hello with the credential");
+    again.elapse();
+    assert_eq!(
+        again.next_wait(),
+        secs(5),
+        "a heartbeat with the credential"
+    );
+    assert_eq!(server.host("mac-1")["state"], "live");
+    let ran = again.stop();
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert_eq!(fs::read_to_string(&file).unwrap(), credential);
+}

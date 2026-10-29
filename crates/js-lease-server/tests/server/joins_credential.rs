@@ -5,13 +5,15 @@
 use std::fs;
 use std::time::Duration;
 
+use clap::Parser;
+use js_lease_server::Cli;
 use serde_json::{Value, json};
 
 use crate::agents_support::{
-    JOIN, Session, hello_body, hosts, listed, post, restarted, session, start_agents,
+    JOIN, Session, agent_args, hello_body, hosts, listed, post, restarted, session, start_agents,
 };
 use crate::joins::{MINT, beat_with, code, hello, minted};
-use crate::support::{Harness, LogCapture, Reply};
+use crate::support::{Harness, LogCapture, Reply, Scratch};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -276,4 +278,77 @@ async fn the_credential_is_shown_once_and_stored_never() {
             assert!(!held.contains(&token), "{}", path.display());
         }
     }
+}
+
+/// Asserts that every welcome says `Cache-Control: no-store` and `Pragma: no-cache`, the
+/// one that carries a credential and the one that does not (a hello with the pool's join
+/// token). It catches a welcome with the credential that a cache may store.
+#[tokio::test]
+async fn a_welcome_is_not_cacheable() {
+    let h = start_agents("cred_no_store", false).await;
+    let token = minted(&h, "i-1").await;
+    let issuing = asking(&h, &token, "burst-1", "i-1").await;
+    credential(&issuing);
+    let pooled = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("burst-2")).await;
+    for welcome in [&issuing, &pooled] {
+        assert_eq!(welcome.status, 200, "{}", welcome.body);
+        assert!(
+            welcome.head.contains("cache-control: no-store"),
+            "{}",
+            welcome.head
+        );
+        assert!(
+            welcome.head.contains("pragma: no-cache"),
+            "{}",
+            welcome.head
+        );
+    }
+}
+
+/// A server with agent registration on and `--require-host-credential`.
+async fn start_requiring(name: &str) -> Harness {
+    let scratch = Scratch::new(name);
+    let mut args = agent_args(&scratch, false);
+    args.push("--require-host-credential".into());
+    Harness::with(scratch, args, None).await
+}
+
+/// Asserts the switch on: the first hello of a one-time token that does not ask is refused
+/// 403 `join-token-credential-required`, repeatedly, with the token still good for a hello
+/// that asks (which gets the credential); the pool's shared token is welcomed without a
+/// flag as before. With the switch off (the default, the other tests of this file and
+/// `an_older_agent_and_a_pool_token_keep_the_token_path`) the same unasked hello is
+/// welcomed. It catches a switch that does nothing, one that spends the token while
+/// refusing, and one that reaches the pool's tokens.
+#[tokio::test]
+async fn the_switch_refuses_an_unasked_first_hello_of_a_one_time_token() {
+    let h = start_requiring("cred_required").await;
+    let token = minted(&h, "i-1").await;
+    for _ in 0..2 {
+        let refused = hello(&h, &token, "burst-1", "i-1").await;
+        assert_eq!(
+            (refused.status, code(&refused)),
+            (403, "join-token-credential-required".into())
+        );
+    }
+    assert!(hosts(&h).await["hosts"].as_array().unwrap().is_empty());
+    let welcome = asking(&h, &token, "burst-1", "i-1").await;
+    credential(&welcome);
+    let pooled = post(&h, "/v1/agent/hello", Some(JOIN), &hello_body("burst-2")).await;
+    assert_eq!(pooled.status, 200, "{}", pooled.body);
+    assert!(pooled.json().get("host_credential").is_none());
+}
+
+/// Asserts the switch is a flag of the registration side: it is refused without
+/// `--agent-pool-config`, as the hello flags are. It catches a switch that parses where it
+/// could do nothing.
+#[test]
+fn the_switch_needs_agent_registration() {
+    let scratch = Scratch::new("cred_required_flag");
+    let mut args = crate::support::base_args(&scratch);
+    args.push("--require-host-credential".into());
+    assert!(Cli::try_parse_from(args).is_err());
+    let mut args = agent_args(&scratch, false);
+    args.push("--require-host-credential".into());
+    assert!(Cli::try_parse_from(args).is_ok());
 }

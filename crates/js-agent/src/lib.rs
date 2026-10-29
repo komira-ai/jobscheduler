@@ -17,7 +17,7 @@
 //! | flag | meaning |
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
-//! | `--token-file <path>` | required: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
+//! | `--token-file <path>` | required unless `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
@@ -187,6 +187,7 @@ mod worker;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -319,6 +320,33 @@ pub fn main_with(
     }
 }
 
+/// The file the transport first reads its bearer from: `--token-file` when given, and
+/// otherwise the host credential file of `--state-root`, which has the same form (one run
+/// of printable ASCII, owner-only). The agent adopts the credential from the same file
+/// again below, so a file that is there and not a credential stops it either way.
+///
+/// # Errors
+///
+/// [`Failure::Usage`] naming `--token-file` when there is neither, and the path of the
+/// credential file when it is there and cannot be used.
+fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
+    if let Some(token_file) = &cli.token_file {
+        return Ok(token_file.clone());
+    }
+    let kept = match &cli.state_root {
+        Some(root) => {
+            let file = CredentialFile::in_dir(root);
+            file.load().map_err(Failure::Usage)?.map(|_| file.path())
+        }
+        None => None,
+    };
+    kept.ok_or_else(|| {
+        Failure::Usage(
+            "--token-file: required unless --state-root holds a host credential".to_owned(),
+        )
+    })
+}
+
 /// Runs the agent on `args` (the program name first) until it is stopped or refused.
 pub fn run_with(
     args: Vec<OsString>,
@@ -337,9 +365,10 @@ fn execute(
 ) -> Result<(), Failure> {
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
     let ca_cert = cli.ca_cert.as_deref();
+    let bearer_file = bearer_file(&cli)?;
     let mut transport = services
         .connector
-        .connect(&cli.server, &cli.token_file, ca_cert)
+        .connect(&cli.server, &bearer_file, ca_cert)
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
@@ -390,7 +419,8 @@ fn execute(
         checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
     }
     // A host that was given a credential in an earlier life uses it from the first hello:
-    // its token is dead. The token file is still read (above), which the flags require.
+    // its token is dead. The transport was connected with the token file, or with this very
+    // file when no token file was given (above).
     let credentials = local
         .state
         .as_ref()
