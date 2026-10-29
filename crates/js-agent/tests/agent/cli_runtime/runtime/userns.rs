@@ -13,7 +13,7 @@ use js_agent::lifecycle::ContainerRuntime;
 use super::super::scripted::Scripted;
 use super::super::subid::host;
 use super::super::{
-    HOST, created, docker, in_another_pid_namespace, made_at, no_file, platform,
+    HOST, created, docker, in_another_pid_namespace, made_at, no_file, platform, profile_dir,
     sees_the_engines_pid, settings, spec,
 };
 use crate::support::{FakeFiles, Scratch};
@@ -22,9 +22,17 @@ use crate::support::{FakeFiles, Scratch};
 const PODMAN: &str = "podman version 5.2.0\n";
 
 /// Docker's security options and data root when the daemon remaps onto the range of
-/// `host()`.
+/// `exact_host()`.
 const REMAPPED: &str =
     "[\"name=seccomp,profile=builtin\",\"name=userns\"] /var/lib/docker/231072.462144\n";
+
+/// `host()` with one entry of exactly 65536 ids for `jobmap` in each file, the allocation
+/// Docker needs; the other user's range does not touch it.
+fn exact_host() -> FakeFiles {
+    host()
+        .with("/etc/subuid", "alice:100000:65536\njobmap:231072:65536\n")
+        .with("/etc/subgid", "alice:100000:65536\njobmap:462144:65536\n")
+}
 
 /// The settings of an agent that runs as root and maps its jobs onto `jobmap`'s range.
 fn mapped() -> Settings {
@@ -56,14 +64,15 @@ fn open_in(
         claims,
     )
     .map(|rt| {
-        rt.with_pid_seen(sees_the_engines_pid)
+        rt.with_profile_dir(profile_dir())
+            .with_pid_seen(sees_the_engines_pid)
             .with_proc_files(no_file, in_another_pid_namespace)
     })
 }
 
-/// The runtime of `mapped()` over `world`, with `/etc` as `host()` has it.
+/// The runtime of `mapped()` over `world`, with `/etc` as `exact_host()` has it.
 fn open_mapped(world: &Scripted, claims: &Scratch) -> Result<CliRuntime, CliError> {
-    open_in(world, mapped(), &host(), &claims.path("claims"))
+    open_in(world, mapped(), &exact_host(), &claims.path("claims"))
 }
 
 thread_local! {
@@ -240,7 +249,7 @@ fn the_scratch_is_given_to_the_mapped_ids() {
     let world = podman();
     let dir = Scratch::new("userns-scratch");
     let claims = dir.path("claims");
-    let mut rt = open_in(&world, mapped(), &host(), &claims)
+    let mut rt = open_in(&world, mapped(), &exact_host(), &claims)
         .unwrap()
         .with_chown(record);
     rt.create_and_start(&spec("r1")).unwrap();
@@ -251,7 +260,7 @@ fn the_scratch_is_given_to_the_mapped_ids() {
         .with_agent(0, 0)
         .unwrap();
     drop(rt);
-    let mut rt = open_in(&world, other, &host(), &claims)
+    let mut rt = open_in(&world, other, &exact_host(), &claims)
         .unwrap()
         .with_chown(record);
     rt.create_and_start(&spec("r2")).unwrap();
@@ -285,7 +294,7 @@ fn a_mapped_runtime_needs_an_agent_that_is_root() {
         .unwrap()
         .with_agent(65534, 65534)
         .unwrap();
-    let said = open_in(&world, own, &host(), &dir.path("claims"))
+    let said = open_in(&world, own, &exact_host(), &dir.path("claims"))
         .err()
         .unwrap();
     assert_eq!(said, CliError::AgentNotRoot);
@@ -303,7 +312,7 @@ fn an_unusable_range_stops_the_runtime_when_it_opens() {
     let world = podman();
     let dir = Scratch::new("userns-bad-range");
     let claims = dir.path("claims");
-    let identity = host().with("/etc/subuid", "jobmap:0:65536\n");
+    let identity = exact_host().with("/etc/subuid", "jobmap:0:65536\n");
     let said = open_in(&world, mapped(), &identity, &claims).err().unwrap();
     assert_eq!(
         said,
@@ -312,7 +321,7 @@ fn an_unusable_range_stops_the_runtime_when_it_opens() {
             file: "/etc/subuid"
         })
     );
-    let holds_a_user = host().with("/etc/passwd", "alice:x:231100:1000::/:/bin/sh\n");
+    let holds_a_user = exact_host().with("/etc/passwd", "alice:x:231100:1000::/:/bin/sh\n");
     let said = open_in(&world, mapped(), &holds_a_user, &claims)
         .err()
         .unwrap();
@@ -328,7 +337,9 @@ fn an_unusable_range_stops_the_runtime_when_it_opens() {
         .unwrap()
         .with_agent(0, 0)
         .unwrap();
-    let said = open_in(&world, nobody, &host(), &claims).err().unwrap();
+    let said = open_in(&world, nobody, &exact_host(), &claims)
+        .err()
+        .unwrap();
     assert!(
         matches!(said, CliError::Subid(SubidError::NoEntry { .. })),
         "{said:?}"
@@ -346,12 +357,12 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
     let world = podman();
     let dir = Scratch::new("userns-second");
     let claims = dir.path("claims");
-    let two_users = host()
-        .with("/etc/subuid", "jobmap:231072:65536\nother:250000:65536\n")
-        .with("/etc/subgid", "jobmap:462144:65536\nother:600000:65536\n");
-    let first = open_in(&world, mapped(), &two_users, &claims).unwrap();
+    let first = open_in(&world, mapped(), &exact_host(), &claims).unwrap();
+    let other_files = exact_host()
+        .with("/etc/subuid", "other:250000:65536\n")
+        .with("/etc/subgid", "other:600000:65536\n");
 
-    let again = open_in(&world, mapped(), &two_users, &claims)
+    let again = open_in(&world, mapped(), &exact_host(), &claims)
         .err()
         .unwrap();
     assert_eq!(
@@ -363,7 +374,7 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
         .unwrap()
         .with_agent(0, 0)
         .unwrap();
-    let overlapping = open_in(&world, other.clone(), &two_users, &claims)
+    let overlapping = open_in(&world, other.clone(), &other_files, &claims)
         .err()
         .unwrap();
     assert_eq!(
@@ -376,7 +387,7 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
     );
 
     drop(first);
-    open_in(&world, other, &two_users, &claims).unwrap();
+    open_in(&world, other, &other_files, &claims).unwrap();
 }
 
 /// Asserts that Docker is refused when the user's allocation is not exactly one entry of
@@ -385,8 +396,8 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
 /// explicit, takes the same files. It catches Docker container ids that no check watches.
 #[test]
 fn docker_refuses_an_allocation_larger_than_the_range_and_podman_takes_it() {
-    let larger = host().with("/etc/subuid", "jobmap:231072:65537\n");
-    let two = host().with("/etc/subgid", "jobmap:462144:65536\njobmap:1000000:65536\n");
+    let larger = exact_host().with("/etc/subuid", "jobmap:231072:65537\n");
+    let two = exact_host().with("/etc/subgid", "jobmap:462144:65536\njobmap:1000000:65536\n");
     for (files, file) in [(larger, "/etc/subuid"), (two, "/etc/subgid")] {
         let world = docker();
         world.say("info", REMAPPED);
@@ -457,7 +468,7 @@ fn the_checks_keep_the_range_the_runtime_opened_with() {
     let world = podman();
     let dir = Scratch::new("userns-resolved");
     let set = mapped();
-    let _rt = open_in(&world, set.clone(), &host(), &dir.path("claims")).unwrap();
+    let _rt = open_in(&world, set.clone(), &exact_host(), &dir.path("claims")).unwrap();
 
     let edited = FakeHost::quiet();
     edited.set_file("/etc/subuid", "jobmap:900000:65536\n");
