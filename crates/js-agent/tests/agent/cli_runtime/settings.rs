@@ -238,20 +238,6 @@ fn the_pull_policy_and_the_tmp_size() {
     assert_eq!(set().with_tmp_size(None).unwrap().tmp_size(), "64m");
 }
 
-/// Asserts the warning an operator gets for a network: none for the default, one naming
-/// the flag and the egress for any network. It catches a network configured without the
-/// operator being told it gives the job a way out.
-#[test]
-fn a_network_is_warned_about() {
-    let none = Settings::new(bin(), None, None).unwrap();
-    assert!(none.warnings().is_empty());
-    let named = Settings::new(bin(), Some("jobs"), None).unwrap();
-    let warnings = named.warnings();
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].starts_with("--container-network jobs: a job can reach"));
-    assert!(warnings[0].contains("metadata endpoint"));
-}
-
 /// Asserts that without `--container-bin` there are no container settings, and that any
 /// container flag given alone is an error and not silently ignored; and that all the
 /// flags given with it make the settings. It catches a hardening flag that is accepted
@@ -282,6 +268,14 @@ fn network_and_user_need_the_runtime() {
         },
         Flags {
             add_hosts: &["store.example:192.0.2.10".to_owned()],
+            ..Flags::default()
+        },
+        Flags {
+            egress_allow: &["198.51.100.10:443".to_owned()],
+            ..Flags::default()
+        },
+        Flags {
+            nft: Some("/bin/sh"),
             ..Flags::default()
         },
     ];
@@ -438,8 +432,6 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ]);
         assert_eq!(status, code(0), "{err}");
         assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
-        // With the egress check the network is not "unless the firewall stops it".
-        assert!(!err.contains("warning: --container-network"), "{err}");
 
         let (status, err, sent) = start(&["--container-bin", exec]);
         assert_eq!(
@@ -652,7 +644,7 @@ fn egress_flags_are_checked() {
         with(Some("jobs"), &many, Some("/bin/sh")),
         Err(SettingsError::EgressCount)
     );
-    for nft in ["nft", "/no/such/nft", "/etc"] {
+    for nft in ["nft", ".", "/no/such/nft", "/etc"] {
         assert_eq!(
             with(Some("jobs"), &ok, Some(nft)),
             Err(SettingsError::Nft),

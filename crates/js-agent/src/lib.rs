@@ -199,7 +199,6 @@ use clap::Parser;
 
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
-use cli_runtime::Settings;
 use contract::ToolkitHook;
 pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
@@ -443,10 +442,6 @@ fn execute(
             "js-agent: warning: this host is tainted ({}): the agent starts no job on it",
             taint.reason
         );
-    });
-    let container = local.container.iter();
-    container.flat_map(Settings::warnings).for_each(|warning| {
-        let _ = writeln!(err, "js-agent: warning: {warning}");
     });
     if local.container.is_some() && local.watch.is_empty() {
         let _ = writeln!(

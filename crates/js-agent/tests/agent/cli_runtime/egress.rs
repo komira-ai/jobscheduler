@@ -286,7 +286,64 @@ fn a_table_that_differs_refuses() {
         rules.push(accept("input", "198.51.100.30", 22));
         rules
     };
+    // Rules in the place of the established accept that nft would never print for the
+    // script's ruleset: each must read as "not the expected rule", not as a pass.
+    let odd = |expr: Vec<Value>| {
+        let mut rules = forward();
+        rules[2] = rule("forward", expr);
+        rules
+    };
+    let number_state = odd(vec![
+        iif(),
+        json!({"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": 5}}),
+        json!({"accept": null}),
+    ]);
+    let other_meta = odd(vec![
+        iif(),
+        json!({"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}}),
+        json!({"accept": null}),
+    ]);
+    let set_daddr = odd(vec![
+        iif(),
+        payload("ip", "daddr", json!(["198.51.100.10"])),
+        json!({"accept": null}),
+    ]);
+    let ct_mark = odd(vec![
+        iif(),
+        json!({"match": {"op": "in", "left": {"ct": {"key": "mark"}}, "right": "new"}}),
+        json!({"accept": null}),
+    ]);
+    let reordered = {
+        let mut rules = forward();
+        rules.swap(1, 2);
+        rules
+    };
     let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "order swapped",
+            listing(&reordered, &input(), -10),
+            "forward",
+        ),
+        (
+            "ct state as a number",
+            listing(&number_state, &input(), -10),
+            "forward",
+        ),
+        (
+            "another meta key",
+            listing(&other_meta, &input(), -10),
+            "forward",
+        ),
+        (
+            "daddr as a list",
+            listing(&set_daddr, &input(), -10),
+            "forward",
+        ),
+        (
+            "another ct key",
+            listing(&ct_mark, &input(), -10),
+            "forward",
+        ),
         ("extra endpoint", listing(&extra, &input(), -10), "forward"),
         (
             "another port",
@@ -404,6 +461,17 @@ fn a_missing_table_or_a_failing_nft_refuses() {
         rt.egress_enforced().unwrap_err(),
         CliError::Egress(EgressError::NoTable)
     );
+    // A table of the same name in another family, and another name in the right one, are
+    // not ours: the rules of another table prove nothing.
+    for (family, name) in [("ip", "js_egress"), ("inet", "other")] {
+        let table = json!({"table": {"family": family, "name": name, "handle": 1}});
+        world.say("-j", &json!({"nftables": [table]}).to_string());
+        assert_eq!(
+            rt.egress_enforced().unwrap_err(),
+            CliError::Egress(EgressError::NoTable),
+            "{family} {name}"
+        );
+    }
 
     let mut stray = forward();
     stray.push(rule("elsewhere", vec![json!({"accept": null})]));

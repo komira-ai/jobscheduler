@@ -424,21 +424,6 @@ impl Settings {
     pub fn chown_scratch(&self) -> Option<(u32, u32)> {
         self.chown
     }
-
-    /// What the operator should know about this configuration, one sentence each, for the
-    /// agent to print when it starts.
-    pub fn warnings(&self) -> Vec<String> {
-        let reach = self.network != DEFAULT_NETWORK && self.egress.is_none();
-        reach
-            .then(|| {
-                format!(
-                    "--container-network {}: a job can reach whatever that network reaches, the host's metadata endpoint and the internal network included, unless the network or the host's firewall stops it",
-                    self.network
-                )
-            })
-            .into_iter()
-            .collect()
-    }
 }
 
 /// `name` when it is a plain network name other than `host`.

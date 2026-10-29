@@ -620,6 +620,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         stop_grace,
     };
     let (runtime, mut lines) = machine.runtime(&wanted)?;
+    // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
+    // alone, so a firewall that has gone never keeps it from stopping the containers.
+    runtime.check_egress().map_err(|why| why.to_string())?;
     let checks = Integrity::start(machine.view(), settings.uid(), watch)?;
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
