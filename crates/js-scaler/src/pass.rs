@@ -88,18 +88,32 @@ fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
     })
 }
 
+/// The times of a count read from the records of an earlier process: they begin no earlier
+/// than the first step of this one, since the hosts could not be heard while it was down.
+fn rebased(
+    times: BTreeMap<String, Millis>,
+    restored: bool,
+    now: Millis,
+) -> BTreeMap<String, Millis> {
+    times
+        .into_iter()
+        .map(|(name, since)| (name, if restored { since.max(now) } else { since }))
+        .collect()
+}
+
 impl<'a> Pass<'a> {
     pub(crate) fn new(state: State, input: &'a Input, now: Millis) -> Self {
+        let restored = state.restored;
         Self {
             input,
             now,
             records: state.records,
             quiet: state.quiet,
             quiet_now: BTreeSet::new(),
-            silent: state.silent,
+            silent: rebased(state.silent, restored, now),
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
-            missing: state.missing,
+            missing: rebased(state.missing, restored, now),
             missing_now: BTreeMap::new(),
             unheard: state.unheard,
             unheard_now: BTreeMap::new(),

@@ -119,6 +119,9 @@ pub struct State {
     /// machine is given up on only after a hold in this process, so a restart gives it the
     /// whole hold again, which is when its agent is about to say hello to the new registry.
     pub(crate) unheard: BTreeMap<String, Millis>,
+    /// Whether this state was made from records read at a start, and no step has run on it
+    /// yet: the times it carries were written before a downtime it cannot measure.
+    pub(crate) restored: bool,
 }
 
 impl State {
@@ -129,6 +132,7 @@ impl State {
             silent: records.silent_since.clone(),
             missing: records.missing_since.clone(),
             records,
+            restored: true,
             ..Self::default()
         }
     }

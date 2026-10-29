@@ -605,6 +605,7 @@ impl Pass<'_> {
             silent_released: self.silent_released,
             missing: self.missing_now,
             unheard: self.unheard_now,
+            restored: false,
         };
         (state, actions)
     }
