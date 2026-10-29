@@ -125,7 +125,8 @@ mod tests {
             "grant_type=client_credentials&client_id=id-1&client_secret=sh%2Fss"
         );
         let shown = format!("{client:?}");
-        assert!(shown.contains("id-1") && shown.contains("***"), "{shown}");
+        assert!(shown.contains("id-1"), "{shown}");
+        assert!(shown.contains("***"), "{shown}");
         assert!(!shown.contains("sh/ss"), "{shown}");
     }
 }

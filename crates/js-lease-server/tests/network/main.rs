@@ -3,6 +3,7 @@
 //! renderer's golden text and limits, and the rule that a provider sees a payload and no
 //! network type. Time is an injected clock; no test measures elapsed time.
 
+mod default_mode;
 mod fake;
 mod golden;
 mod oauth_file;
