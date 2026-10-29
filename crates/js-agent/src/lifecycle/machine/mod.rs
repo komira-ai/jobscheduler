@@ -338,6 +338,11 @@ impl Lifecycle {
                 return;
             }
         };
+        // On a host no other job is on, what changed since the last check is the host's.
+        let idle = self.stuck.is_empty() && self.jobs.iter().all(|job| job.stage == Stage::Freed);
+        if idle {
+            self.checks.idle();
+        }
         let started = self.config.scratch.create(run_id).map_err(|why| {
             (
                 detail::SCRATCH_FAILED,

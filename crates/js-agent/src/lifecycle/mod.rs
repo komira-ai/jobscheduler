@@ -246,6 +246,12 @@ pub trait CheckHook {
     /// What was found, or that the check could not run. The slot is not freed and the host
     /// is tainted.
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
+
+    /// The host is idle: a job is about to start, and no other job's container, scratch
+    /// directory or checks are on it, nor a container the agent could not remove. Nothing a
+    /// job did can change the host now, so a hook may take its baseline again. The default
+    /// does nothing.
+    fn idle(&mut self) {}
 }
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
