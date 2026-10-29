@@ -66,6 +66,7 @@ pub use handover::{FLUSH_LOOK, FOLLOW_EVERY};
 pub use host::{Beat, Reported, Stream};
 pub use intake::INTAKE_POLL;
 pub use js_sched::{LoadConfig, MemoryLadder, PlacementLoad};
+pub use js_types::sched::usage::CurveSource;
 pub use js_whole::WholeNodeConfig;
 pub use observer::Observer;
 pub use report::{Reason, Report, Standing, Taken};

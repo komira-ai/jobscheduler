@@ -3,6 +3,7 @@
 use js_types::sched::LeaseId as SchedLeaseId;
 use js_types::sched::usage::{Curve, CurveTooLong, LeaseClock, LeaseMinute, NodeLoad};
 
+use crate::error::MinuteTooLarge;
 use crate::fit::Fit;
 use crate::input::{ClockIn, LoadIn, MinuteIn};
 
@@ -51,6 +52,75 @@ impl From<LoadIn> for NodeLoad {
             lease_clocks: l.clocks.into_iter().map(LeaseClock::from).collect(),
             minutes: l.minutes.into_iter().map(LeaseMinute::from).collect(),
         }
+    }
+}
+
+/// The recorder's form of a lease id; the reverse of `sched_lease`.
+fn input_lease(id: SchedLeaseId) -> js_types::LeaseId {
+    js_types::LeaseId::new(id.term, id.seq)
+}
+
+impl TryFrom<&LeaseMinute> for MinuteIn {
+    type Error = MinuteTooLarge;
+
+    /// # Errors
+    /// [`MinuteTooLarge`] when the minute index is above `u16::MAX`. An index above
+    /// [`crate::TAIL_MINUTE`] that does fit is carried as it is; the recorder counts it
+    /// invalid.
+    fn try_from(m: &LeaseMinute) -> Result<Self, MinuteTooLarge> {
+        Ok(Self {
+            lease: input_lease(m.lease),
+            minute: u16::try_from(m.minute).map_err(|_| MinuteTooLarge { minute: m.minute })?,
+            mean_cores_milli: m.cpu_mean_millis,
+            peak_window_milli: m.cpu_peak_window_millis,
+            working_set_max_bytes: m.ws_max_bytes,
+        })
+    }
+}
+
+impl From<&LeaseClock> for ClockIn {
+    fn from(c: &LeaseClock) -> Self {
+        Self {
+            lease: input_lease(c.lease),
+            started_mono_usec: c.started_mono_usec,
+        }
+    }
+}
+
+impl TryFrom<&NodeLoad> for LoadIn {
+    type Error = MinuteTooLarge;
+
+    /// The reading a [`crate::Recorder`] takes, from the scheduler's form of it: the
+    /// reverse of `From<LoadIn> for NodeLoad`, so a caller holding a `NodeLoad` need not
+    /// map the fields itself.
+    ///
+    /// A [`LoadIn`] does not carry the active file pages, the throttled time or the CPU
+    /// pressure, so those three are dropped: `NodeLoad -> LoadIn -> NodeLoad` returns the
+    /// same value only when they are 0, and `LoadIn -> NodeLoad -> LoadIn` always does.
+    /// Order of the covered leases, clocks and minutes is kept.
+    ///
+    /// This is a `TryFrom` because a lease minute is a `u32` here and a `u16` in a
+    /// [`MinuteIn`]; the narrowing is checked and never truncated or clamped, so no
+    /// minute is silently moved to another one.
+    ///
+    /// # Errors
+    /// [`MinuteTooLarge`] for the first lease minute whose index is above `u16::MAX`;
+    /// the whole reading is refused.
+    fn try_from(n: &NodeLoad) -> Result<Self, MinuteTooLarge> {
+        Ok(Self {
+            seq: n.seq,
+            mono_usec: n.mono_usec,
+            cpu_usage_usec: n.cpu_usage_usec,
+            working_set_bytes: n.memory_working_set_bytes,
+            actions_cpu_limited: n.actions_cpu_limited,
+            covered: n.covered.iter().copied().map(input_lease).collect(),
+            minutes: n
+                .minutes
+                .iter()
+                .map(MinuteIn::try_from)
+                .collect::<Result<_, _>>()?,
+            clocks: n.lease_clocks.iter().map(ClockIn::from).collect(),
+        })
     }
 }
 
@@ -161,6 +231,144 @@ mod tests {
                 n.cpu_pressure_some_total_usec
             ),
             (0, 0, 0)
+        );
+    }
+
+    fn full_load() -> LoadIn {
+        LoadIn {
+            seq: 11,
+            mono_usec: 22,
+            cpu_usage_usec: 33,
+            working_set_bytes: 44,
+            actions_cpu_limited: true,
+            covered: vec![LeaseId::new(1, 2), LeaseId::new(3, 4)],
+            minutes: vec![
+                MinuteIn {
+                    lease: LeaseId::new(3, 4),
+                    minute: 7,
+                    mean_cores_milli: 100,
+                    peak_window_milli: 200,
+                    working_set_max_bytes: 300,
+                },
+                MinuteIn {
+                    lease: LeaseId::new(5, 6),
+                    minute: 63,
+                    mean_cores_milli: 400,
+                    peak_window_milli: 500,
+                    working_set_max_bytes: 600,
+                },
+            ],
+            clocks: vec![
+                ClockIn {
+                    lease: LeaseId::new(1, 2),
+                    started_mono_usec: 55,
+                },
+                ClockIn {
+                    lease: LeaseId::new(7, 8),
+                    started_mono_usec: 66,
+                },
+            ],
+        }
+    }
+
+    /// Catches: any field of the node load dropped, swapped for another of the same type
+    /// (every number differs), or the order of leases, clocks and minutes changed.
+    #[test]
+    fn a_node_load_becomes_the_reading_field_for_field() {
+        let node = NodeLoad {
+            memory_active_file_bytes: 77,
+            cpu_throttled_usec: 88,
+            cpu_pressure_some_total_usec: 99,
+            ..NodeLoad::from(full_load())
+        };
+        let back = LoadIn::try_from(&node).unwrap();
+        assert_eq!(back, full_load());
+        assert_eq!(back.minutes[1].minute, 63);
+        assert_eq!(back.clocks[1].started_mono_usec, 66);
+    }
+
+    /// Catches: a value changed on the way through, at the extremes of every integer, and
+    /// a round trip that does not give the load back.
+    #[test]
+    fn a_reading_survives_the_node_load_and_back_at_the_extremes() {
+        for load in [
+            LoadIn {
+                seq: 0,
+                mono_usec: 0,
+                cpu_usage_usec: 0,
+                working_set_bytes: 0,
+                actions_cpu_limited: false,
+                covered: vec![],
+                minutes: vec![],
+                clocks: vec![],
+            },
+            LoadIn {
+                seq: u64::MAX,
+                mono_usec: u64::MAX,
+                cpu_usage_usec: u64::MAX,
+                working_set_bytes: u64::MAX,
+                actions_cpu_limited: true,
+                covered: vec![LeaseId::new(u64::MAX, u64::MAX), LeaseId::new(0, 0)],
+                minutes: vec![MinuteIn {
+                    lease: LeaseId::new(u64::MAX, 0),
+                    minute: u16::MAX,
+                    mean_cores_milli: u32::MAX,
+                    peak_window_milli: u32::MAX,
+                    working_set_max_bytes: u64::MAX,
+                }],
+                clocks: vec![ClockIn {
+                    lease: LeaseId::new(0, u64::MAX),
+                    started_mono_usec: u64::MAX,
+                }],
+            },
+            full_load(),
+        ] {
+            let node = NodeLoad::from(load.clone());
+            assert_eq!(LoadIn::try_from(&node), Ok(load));
+            // And the other direction, for a node load with the telemetry fields at 0.
+            assert_eq!(NodeLoad::from(LoadIn::try_from(&node).unwrap()), node);
+        }
+    }
+
+    /// Catches: the telemetry fields a reading cannot carry changing the reading, or a
+    /// round trip claimed lossless when they are set.
+    #[test]
+    fn the_fields_a_reading_does_not_carry_are_dropped() {
+        let node = NodeLoad {
+            memory_active_file_bytes: 7,
+            cpu_throttled_usec: 8,
+            cpu_pressure_some_total_usec: 9,
+            ..NodeLoad::from(full_load())
+        };
+        let again = NodeLoad::from(LoadIn::try_from(&node).unwrap());
+        assert_eq!(
+            (
+                again.memory_active_file_bytes,
+                again.cpu_throttled_usec,
+                again.cpu_pressure_some_total_usec
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    /// Catches: a minute index wrapped or clamped into a u16 instead of the reading
+    /// refused, and the largest index that fits being refused.
+    #[test]
+    fn a_minute_index_beyond_u16_refuses_the_reading() {
+        let mut node = NodeLoad::from(full_load());
+        node.minutes[1].minute = u32::from(u16::MAX) + 1;
+        assert_eq!(
+            LoadIn::try_from(&node),
+            Err(MinuteTooLarge {
+                minute: u32::from(u16::MAX) + 1
+            })
+        );
+        node.minutes[1].minute = u32::from(u16::MAX);
+        assert_eq!(LoadIn::try_from(&node).unwrap().minutes[1].minute, u16::MAX);
+        let msg = MinuteTooLarge { minute: u32::MAX }.to_string();
+        assert_eq!(
+            msg,
+            "lease minute 4294967295 does not fit a reading's minute index (at most 65535)"
         );
     }
 }

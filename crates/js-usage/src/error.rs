@@ -46,3 +46,14 @@ pub enum UsageError {
         key: String,
     },
 }
+
+/// A scheduler lease minute whose index does not fit the `u16` of a [`crate::MinuteIn`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "lease minute {minute} does not fit a reading's minute index (at most {})",
+    u16::MAX
+)]
+pub struct MinuteTooLarge {
+    /// The minute index given.
+    pub minute: u32,
+}
