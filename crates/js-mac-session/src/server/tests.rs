@@ -632,7 +632,9 @@ fn a_caller_that_sends_nothing_is_dropped() {
 /// sends the 24 bytes of a frame, and each byte moves the connection's clock on by
 /// 100 ms; the request is due 400 ms after the hello, so it is refused at the deadline
 /// however the bytes and the reads interleave, and a per-read timeout would instead
-/// read the whole frame and answer "bad request".
+/// read the whole frame and answer "bad request". The socket read still carries a real
+/// timeout of the time left; a stall of 400 ms or more of real time would make that
+/// timeout fire first, which is also answered "the deadline passed".
 #[test]
 fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
     use std::io::Write as _;
