@@ -106,7 +106,7 @@ impl Effects for Handle {
         on.is_some_and(|view| view.lease.is_some())
     }
 
-    fn remove(&self, host: &str) -> Result<(), String> {
+    fn remove(&self, host: &str) -> Result<(), Busy> {
         let mut world = self.world();
         world.log.push(format!("remove:{host}"));
         match world.remove_ok {
