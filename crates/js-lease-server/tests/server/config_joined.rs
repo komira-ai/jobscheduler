@@ -332,3 +332,21 @@ fn a_bad_capabilities_table_is_refused() {
     );
     assert!(said.starts_with("pool \"burst\": capabilities: "), "{said}");
 }
+
+/// Asserts that a joined pool mints only for its own name: a mint whose `provider` is
+/// another name is a 400 naming `provider`, and writes no token, so the same instance can
+/// still be minted for under the pool's name. It catches a token minted for a provider
+/// that no hello of the pool can ever name.
+#[tokio::test]
+async fn a_mint_for_another_provider_is_refused() {
+    let h = serving("joined_mint_provider", |_| joined()).await;
+    let body = json!({ "provider": "elsewhere", "instance_id": "node-1" });
+    let reply = h.call("POST", "/v1/agent/join-tokens", Some(&body)).await;
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply.json()["reason"].as_str().unwrap().contains("provider"),
+        "{}",
+        reply.body
+    );
+    mint(&h, "node-1").await;
+}

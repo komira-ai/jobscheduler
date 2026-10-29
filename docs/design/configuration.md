@@ -37,7 +37,7 @@ join_token_file = "/run/credentials/js/join-token"           # optional shared p
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
 ```
 
-A node joins with a one-time token: `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
+A node joins with a one-time token (the mint refuses any other `provider` than the pool's name with a 400): `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
 mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
 `--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
 

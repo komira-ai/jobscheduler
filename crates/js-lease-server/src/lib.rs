@@ -110,7 +110,8 @@
 //! are each refused naming the key. It is the pool that registers agents, so it excludes
 //! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
 //! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
-//! `instance_id` the node's. An embedder builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
+//! `instance_id` the node's; a mint naming another provider is refused 400. An embedder
+//! builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
 //!
 //! # API
 //!

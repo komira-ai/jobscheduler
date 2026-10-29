@@ -168,6 +168,10 @@ pub(crate) struct Registering {
     pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
+    /// The one `provider` the mint route accepts, when the pool is the only thing that
+    /// admits hosts by hand: a joined pool's name. `None` takes any provider, as an
+    /// elastic pool's launches are minted for under the provider kind's name.
+    pub(crate) mint_provider: Option<String>,
 }
 
 /// The pools of the file, as the sources of hosts they make.
@@ -708,6 +712,7 @@ impl Elastic<'_> {
             plan: Some(plan),
             pool,
             tokens,
+            mint_provider: None,
         })
     }
 }

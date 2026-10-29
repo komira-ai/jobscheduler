@@ -299,6 +299,7 @@ pub(super) fn read(table: toml::Table, client: &Token) -> Result<Read, StartupEr
         plan: None,
         pool,
         tokens,
+        mint_provider: Some(joined.name.clone()),
     };
     Ok(Read {
         name: joined.name,
