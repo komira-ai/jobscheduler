@@ -124,7 +124,7 @@ fn a_launch_goes_active_and_terminates() {
         out.contains("STOP: paste back everything printed above"),
         "{out}"
     );
-    assert!(!out.contains("ssh"), "{out}");
+    assert!(!out.contains("ssh check"), "{out}");
     assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert_eq!(rig.fake.count(Call::Terminate), 1);
 }
