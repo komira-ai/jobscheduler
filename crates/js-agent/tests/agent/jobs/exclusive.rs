@@ -161,6 +161,53 @@ fn an_agent_with_jobs_follows_a_whole_node_lease_through_its_worker() {
     );
 }
 
+/// Asserts the readiness hook is wired into the whole agent: with `--container-bin` and
+/// `--readiness-hook` (a shell command that records each run in a file) the heartbeat that gets
+/// the worker's answer says `exclusive_ready`, and the program ran exactly once. It catches a hook that is checked and then dropped (no
+/// run), and a bound or flag that does not reach the worker.
+#[test]
+fn the_readiness_hook_runs_once_in_the_whole_agent() {
+    let dir = Scratch::new("jobs-exclusive-hook");
+    let marker = dir.path("hook-runs");
+    let script = format!("echo ran >> {}", marker.display());
+    let owned = container_flags(&dir);
+    let mut extra: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let hook_args = ["--readiness-hook", "/bin/sh", "--readiness-hook-arg=-c"];
+    extra.extend(hook_args);
+    extra.extend(["--readiness-hook-arg", &script]);
+    let args = flags(&extra);
+    let machine = Arc::new(FakeMachine::new());
+    let mut replies = vec![welcome(1)];
+    replies.extend((0..4).map(|_| naming(json!({ "commands": [] }), LEASE)));
+    replies.push(beat_ok());
+    let (script, sent) = Script::new(replies);
+    let seen: RefCell<Option<Handle>> = RefCell::new(None);
+    let hook = |handle: Handle| *seen.borrow_mut() = Some(handle);
+    let mut sleeper = Settle {
+        seen: &seen,
+        calls: 0,
+        stop_at: 5,
+        budget: WakeBudget::new(),
+    };
+    let jobs: Jobs<'_> = (machine, Some(&hook));
+    let ran = run_on(
+        &args,
+        &linux_host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+
+    let sent = sent.borrow();
+    let beats: Vec<&Value> = sent.iter().skip(1).map(|(_, body)| body).collect();
+    assert_eq!(beats[3]["exclusive_ready"], LEASE, "{}", beats[3]);
+    assert_eq!(beats[3]["phase"], "serving");
+    let runs = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(runs.lines().count(), 1, "{runs}");
+}
+
 /// Asserts the agent without `--container-bin` is the agent without jobs: a `Start` the
 /// server sends is counted in the log as an ignored command, no worker is built (the
 /// hook is never told of one and the machine is never asked for a container), and the

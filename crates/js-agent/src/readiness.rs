@@ -41,7 +41,13 @@
 //! That line goes to the scheduler verbatim (cut to the byte bound), so a hook must not
 //! print a secret, a token or anything else that must not leave the host. The hook runs
 //! only for a host the agent's own checks found quiet and clean ([`Hooked`]), once per
-//! `exclusive` grant.
+//! `exclusive` grant, and not for a lease taken over after a restart (the consumer is
+//! already using that host).
+//!
+//! The job worker runs the hook on its own thread, so while it runs (up to twice
+//! `prepare_timeout`) the worker applies no reply: starts, stops and acknowledgements wait
+//! in the queue, a start may go stale there, and replies beyond the queue are dropped and
+//! sent again. Heartbeats are not delayed.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -260,17 +266,21 @@ impl WorkerHook {
         }
     }
 
-    /// The longest a [`WorkerHook::vet`] can take.
+    /// The longest a run of the hook can take.
     pub fn bound(&self) -> Duration {
         self.bound
     }
 
     /// `found`, the lifecycle's answer: when it is [`Quiet::Ready`] the hook runs and its
     /// verdict is the answer; any other answer is returned as it is and the hook does not
-    /// run. Blocks as long as the hook runs.
-    pub fn vet(&self, found: Quiet) -> Quiet {
+    /// run. Blocks as long as the hook runs, up to [`WorkerHook::bound`]; `before_run` is
+    /// told that bound just before the hook starts (the worker extends its watchdog by it).
+    pub fn vet(&self, found: Quiet, before_run: &dyn Fn(Duration)) -> Quiet {
         match found {
-            Quiet::Ready => vetted(self.hook.run(self.runner.as_ref())),
+            Quiet::Ready => {
+                before_run(self.bound);
+                vetted(self.hook.run(self.runner.as_ref()))
+            }
             other => other,
         }
     }

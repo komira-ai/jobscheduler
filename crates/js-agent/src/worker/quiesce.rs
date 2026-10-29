@@ -3,6 +3,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use super::{Handle, Order};
 use crate::exclusive::Quiesce;
@@ -28,6 +29,7 @@ impl LeaseAnswers {
         hook: Option<&WorkerHook>,
         lease: String,
         events: &mut Vec<Event>,
+        before_hook: &dyn Fn(Duration),
     ) {
         let settled = self
             .quiet
@@ -37,9 +39,10 @@ impl LeaseAnswers {
             return;
         }
         let found = life.prepare(&lease, events);
+        // The hook measures an idle host: not one the consumer already uses.
         let answer = match hook {
-            Some(hook) => hook.vet(found),
-            None => found,
+            Some(hook) if !life.adopted() => hook.vet(found, before_hook),
+            _ => found,
         };
         self.quiet = Some((lease, answer));
     }
@@ -47,8 +50,12 @@ impl LeaseAnswers {
     /// Whether the host is clean after `lease`. A lifecycle that still follows a lease is
     /// not: the reply that ended it has not been applied.
     pub fn restore(&mut self, life: &mut Lifecycle, lease: String, events: &mut Vec<Event>) {
-        // A second order after `Done` only runs the checks once more, and a finding taints
-        // the host as after any job, so it is not skipped.
+        // A second order after `Done` (queued while the first ran) changes nothing: a job
+        // started since would turn the answer the session has not read into busy.
+        let done = matches!(&self.restored, Some((held, Restored::Done)) if *held == lease);
+        if done {
+            return;
+        }
         let answer = match life.exclusive() {
             Some(_) => Restored::Busy,
             None => life.restore(events),

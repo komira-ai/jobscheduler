@@ -13,7 +13,7 @@ use std::time::Duration;
 use js_agent::lifecycle::{Quiet, Restored};
 use js_agent::{
     Delivery, Drain, EXIT_NOT_QUIET, HEARTBEAT_PATH, HookRunner, Note, QUEUE, Quiesce, Ran,
-    ReadinessHook, Session, Worker, WorkerHook, WorkerHost,
+    ReadinessHook, Session, Worker, WorkerHook, WorkerHost, stall_bound,
 };
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, RefusalReason};
 use serde_json::{Value, json};
@@ -460,10 +460,11 @@ fn a_refusing_hook_refuses_the_lease_with_its_code() {
 
 /// Asserts that a full worker queue makes the question busy at once instead of waiting: with
 /// the worker inside a runtime call that does not return and [`QUEUE`] orders waiting, the
-/// question comes back `Busy` (the test would hang at the guard otherwise), and once the call
-/// returns and the run has ended the same question is answered. It catches a proxy that
-/// blocks the heartbeat loop on a busy worker, and one that gives up for good when its
-/// order was dropped.
+/// question comes back `Busy`, and once the call returns and the run has ended the same
+/// question is answered. The asking runs on a thread the test waits for under a guard, so a
+/// proxy that blocks fails the test instead of hanging it. It catches a proxy that blocks
+/// the heartbeat loop on a busy worker, and one that gives up for good when its order was
+/// dropped.
 #[test]
 fn a_full_queue_makes_the_question_busy_without_waiting() {
     let dir = Scratch::new("jobs-quiesce-full");
@@ -482,8 +483,21 @@ fn a_full_queue_makes_the_question_busy_without_waiting() {
             "reply {n} has room"
         );
     }
-    assert_eq!(host.prepare(LEASE), Quiet::Busy, "the order was dropped");
-    assert_eq!(host.restore(LEASE), Restored::Busy, "and so was this one");
+    let (answered, answers) = channel();
+    let asking = thread::spawn(move || {
+        let answer = (host.prepare(LEASE), host.restore(LEASE));
+        let _ = answered.send(answer);
+        host
+    });
+    let answer = answers
+        .recv_timeout(HANG_GUARD)
+        .expect("the questions blocked on a full queue");
+    assert_eq!(
+        answer,
+        (Quiet::Busy, Restored::Busy),
+        "the orders were dropped"
+    );
+    let mut host = asking.join().unwrap();
 
     machine.world.release();
     assert!(handle.settle());
@@ -499,11 +513,13 @@ fn a_full_queue_makes_the_question_busy_without_waiting() {
     assert_eq!(host.prepare(LEASE), Quiet::Ready);
 }
 
-/// Asserts that questions never crowd replies out of the queue: with the worker inside a
-/// runtime call, twenty prepare questions and twenty restore questions leave exactly one of
-/// each in the queue, so `QUEUE - 2` replies are still taken and only the next is `Full`
-/// (a question per heartbeat would have filled the queue and dropped replies earlier). It
-/// catches a proxy that queues a question on every heartbeat while the worker is busy.
+/// Asserts that questions cannot fill the queue: with the worker inside a runtime call,
+/// twenty prepare questions and twenty restore questions leave exactly one of each in the
+/// queue, so `QUEUE - 2` replies are still taken and only the next is `Full` (a question per
+/// heartbeat would have filled the queue and dropped replies earlier). Once the worker has
+/// taken them, a restore asked again is answered `Done` after the lease has ended, which a
+/// flag that is never cleared would stop. It catches a proxy that queues a question on every
+/// heartbeat while the worker is busy, and one that never asks again.
 #[test]
 fn questions_never_crowd_replies_out_of_the_queue() {
     let dir = Scratch::new("jobs-quiesce-crowd");
@@ -528,12 +544,16 @@ fn questions_never_crowd_replies_out_of_the_queue() {
     assert_eq!(worker.try_deliver(granting(LEASE, &[])), Delivery::Full);
 
     machine.world.release();
-    assert!(worker.handle().settle());
-    assert_eq!(
-        host.restore(LEASE),
-        Restored::Busy,
-        "asked again once taken"
-    );
+    let handle = worker.handle();
+    assert!(handle.settle());
+    machine.world.exit("r1", 0);
+    assert!(handle.settle());
+    let ended: HeartbeatReply = serde_json::from_value(body(None, &[], &["r1"])).unwrap();
+    assert_eq!(worker.try_deliver(ended), Delivery::Delivered);
+    assert!(handle.settle());
+    assert_eq!(host.restore(LEASE), Restored::Busy, "asked afresh");
+    assert!(handle.settle());
+    assert_eq!(host.restore(LEASE), Restored::Done);
 }
 
 /// A hook runner that tells the test when it has started and then waits to be released, and
@@ -631,4 +651,98 @@ fn a_second_question_taken_after_the_answer_does_not_rerun_the_hook() {
 
     assert_eq!(host.prepare(LEASE), Quiet::Ready);
     assert_eq!(runs.load(Ordering::SeqCst), 1, "the hook ran once");
+}
+
+/// Asserts that a question asked about one lease and then about another, before the worker
+/// has taken the first, is answered for the second only: the worker is held in the hook of an
+/// earlier lease, the host asks about `LEASE` and then about `OTHER` (one order queues), the
+/// worker follows `OTHER`, and when it is released the single order answers `OTHER` at once
+/// (the hook runs for the earlier lease and for `OTHER`, never for `LEASE`). It catches an
+/// order that answers for the lease first asked, which leaves the current lease unanswered.
+#[test]
+fn a_question_is_answered_for_the_lease_asked_last() {
+    let dir = Scratch::new("jobs-quiesce-latest");
+    let machine = FakeMachine::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (started, started_rx) = channel();
+    let (release_tx, release) = channel();
+    let runner = Gated {
+        runs: Arc::clone(&runs),
+        started,
+        release,
+    };
+    let worker = hooked(&dir, &machine, runner);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    let earlier = "whole-0";
+    assert_eq!(
+        worker.try_deliver(granting(earlier, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(earlier), Quiet::Busy);
+    started_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the hook started");
+    assert_eq!(
+        worker.try_deliver(granting(OTHER, &[])),
+        Delivery::Delivered
+    );
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    assert_eq!(
+        host.prepare(OTHER),
+        Quiet::Busy,
+        "the same order, now for OTHER"
+    );
+    release_tx.send(()).unwrap();
+    release_tx.send(()).unwrap();
+    assert!(handle.settle());
+
+    assert_eq!(host.prepare(OTHER), Quiet::Ready);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        2,
+        "the earlier lease and OTHER"
+    );
+}
+
+/// Asserts the worker's watchdog allows a hook its whole bound and no more: with the hook
+/// running and the manual clock moved past the watchdog's own limit but not past the hook's
+/// bound, the worker is not stalled; moved past the bound it is. It catches a hook that is
+/// mistaken for a stuck worker (the agent would end), and a bound that is not counted.
+#[test]
+fn a_hook_may_take_its_bound_without_the_worker_being_stalled() {
+    let dir = Scratch::new("jobs-quiesce-stall");
+    let machine = FakeMachine::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (started, started_rx) = channel();
+    let (release_tx, release) = channel();
+    let runner = Gated {
+        runs: Arc::clone(&runs),
+        started,
+        release,
+    };
+    let worker = hooked(&dir, &machine, runner);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    started_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the hook started");
+    let own = stall_bound(Duration::from_secs(1), 1);
+    machine
+        .clock
+        .advance(u64::try_from(own.as_millis()).unwrap() + 500);
+    assert!(!worker.stalled(), "inside the hook's bound");
+    machine.clock.advance(1000);
+    assert!(worker.stalled(), "past the hook's bound");
+    release_tx.send(()).unwrap();
+    assert!(handle.settle());
 }

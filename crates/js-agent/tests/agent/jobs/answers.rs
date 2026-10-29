@@ -39,6 +39,9 @@ fn counting() -> (WorkerHook, Arc<AtomicUsize>) {
     (hook, runs)
 }
 
+/// Told of the bound of each hook run (the worker extends its watchdog by it).
+fn at_hook(_bound: Duration) {}
+
 /// The reply that names `lease`, or none.
 fn naming(h: &mut Harness, lease: Option<&str>) {
     let reply = HeartbeatReply {
@@ -98,7 +101,13 @@ fn the_hook_does_not_run_for_a_taken_over_lease() {
     naming(&mut h, Some(LEASE));
     let (hook, runs) = counting();
     let mut answers = LeaseAnswers::default();
-    answers.prepare(&mut h.life, Some(&hook), LEASE.to_owned(), &mut Vec::new());
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        LEASE.to_owned(),
+        &mut Vec::new(),
+        &at_hook,
+    );
 
     assert_eq!(answers.quiet(), Some(&(LEASE.to_owned(), Quiet::Ready)));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
@@ -118,7 +127,13 @@ fn a_lease_granted_again_is_prepared_and_restored_afresh() {
     let mut events = Vec::new();
 
     naming(&mut h, Some(LEASE));
-    answers.prepare(&mut h.life, Some(&hook), LEASE.to_owned(), &mut events);
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        LEASE.to_owned(),
+        &mut events,
+        &at_hook,
+    );
     assert_eq!(answers.quiet(), Some(&(LEASE.to_owned(), Quiet::Ready)));
     naming(&mut h, None);
     answers.follow(h.life.exclusive());
@@ -129,7 +144,13 @@ fn a_lease_granted_again_is_prepared_and_restored_afresh() {
     naming(&mut h, Some(LEASE));
     answers.follow(h.life.exclusive());
     assert_eq!(answers.restored(), None, "dropped when a lease is followed");
-    answers.prepare(&mut h.life, Some(&hook), LEASE.to_owned(), &mut events);
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        LEASE.to_owned(),
+        &mut events,
+        &at_hook,
+    );
     assert_eq!(
         runs.load(Ordering::SeqCst),
         2,
@@ -152,7 +173,7 @@ fn a_question_that_lags_behind_a_switch_of_lease_is_dropped() {
     let mut events = Vec::new();
     naming(&mut h, Some(OTHER));
 
-    answers.prepare(&mut h.life, None, LEASE.to_owned(), &mut events);
+    answers.prepare(&mut h.life, None, LEASE.to_owned(), &mut events, &at_hook);
     assert_eq!(answers.quiet(), Some(&(LEASE.to_owned(), Quiet::Busy)));
     answers.restore(&mut h.life, LEASE.to_owned(), &mut events);
     assert_eq!(

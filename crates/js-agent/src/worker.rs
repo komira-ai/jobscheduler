@@ -29,6 +29,12 @@
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
 //!   hook runs here, once for each lease.
+//!   Because the hook runs on the worker's thread it holds the worker for as long as it
+//!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
+//!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
+//!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
+//!   Heartbeats go on. The watchdog allows the worker that long for the hook, and no longer
+//!   for anything else.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -673,6 +679,15 @@ fn work(
     (step_every, stop_grace): (Duration, Duration),
 ) {
     let mut answers = LeaseAnswers::default();
+    // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
+    // limit grows by the hook's bound when (and only when) a hook starts.
+    let extend = |bound: Duration| {
+        let ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
+        let due = shared.busy_until.load(Ordering::SeqCst);
+        shared
+            .busy_until
+            .store(due.saturating_add(ms), Ordering::SeqCst);
+    };
     loop {
         let mut lines = Vec::new();
         let mut settle = None;
@@ -683,12 +698,7 @@ fn work(
         });
         // A run held may cost two calls (a stop, then an inspect or a remove).
         let calls = life.held().len().saturating_mul(2).saturating_add(asked);
-        // A readiness hook that takes its whole time is not a stuck worker.
-        let hooked = match (&order, &hook) {
-            (Ok(Order::Prepare), Some(hook)) => hook.bound(),
-            _ => Duration::ZERO,
-        };
-        let bound = stall_bound(stop_grace, calls).saturating_add(hooked);
+        let bound = stall_bound(stop_grace, calls);
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
         shared.busy_until.store(due, Ordering::SeqCst);
@@ -709,7 +719,7 @@ fn work(
                 let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
                 asked.into_iter().for_each(|lease| {
-                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events);
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &extend);
                 });
                 lines.extend(describe(&events));
             }

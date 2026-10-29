@@ -62,12 +62,22 @@ const RESTORE_RUN: &str = "restore";
 pub(super) struct Hold {
     lease: String,
     ready: bool,
+    /// Ready because a run of the lease was taken over at start, not because the host was
+    /// found quiet: the consumer is already using it.
+    adopted: bool,
 }
 
 impl Lifecycle {
     /// The lease the host is held whole for, from the last reply that said so.
     pub fn exclusive(&self) -> Option<&str> {
         self.exclusive.as_ref().map(|hold| hold.lease.as_str())
+    }
+
+    /// Whether the lease the host is held for was ready from the start because a run of it
+    /// was taken over after a restart. The host is in use then, and nothing that measures an
+    /// idle host (the readiness hook) may run on it.
+    pub fn adopted(&self) -> bool {
+        self.exclusive.as_ref().is_some_and(|hold| hold.adopted)
     }
 
     /// Follows the `exclusive` of a reply: a lease that is not the one held starts a new
@@ -89,9 +99,13 @@ impl Lifecycle {
             .zip(lease)
             .is_some_and(|(held, new)| held == new);
         if !same {
-            self.exclusive = lease.map(|lease| Hold {
-                lease: lease.to_owned(),
-                ready: adopted.iter().any(|adopted| adopted == lease),
+            self.exclusive = lease.map(|lease| {
+                let taken_over = adopted.iter().any(|adopted| adopted == lease);
+                Hold {
+                    lease: lease.to_owned(),
+                    ready: taken_over,
+                    adopted: taken_over,
+                }
             });
         }
     }
