@@ -10,6 +10,10 @@
 //!   operator's pool file. With agent registration on (see "Agents" below), the static
 //!   pool and the hosts agents register are two sources of the same trait, layered
 //!   behind one provider.
+//! - [`network`]: how a machine the service launches reaches it (the `default` and
+//!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
+//!   from a plan with its secrets masked or filled. A provider receives the rendered
+//!   payload and no network type. Nothing in the server's routes calls either yet.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
@@ -318,6 +322,7 @@ mod agent_state;
 mod agent_tokens;
 mod agents;
 mod api;
+pub mod bootstrap;
 mod capacity;
 mod config;
 mod error;
@@ -327,6 +332,7 @@ mod join_api;
 mod join_tokens;
 mod layered;
 mod listener;
+pub mod network;
 mod rate;
 mod run_api;
 mod sched;
