@@ -179,7 +179,7 @@ fn heard(fx: &Fixture, host_name: &str) -> bool {
 }
 
 /// Asserts the listing's `heard_since_hello`: false for a host that only said hello, true
-/// once it heartbeats, and false again after a re-hello until its next heartbeat. It
+/// once it heartbeats, and false again after a re-hello (once the host has lapsed) until its next heartbeat. It
 /// catches a count that survives a new session, and one that never starts.
 #[test]
 fn a_host_is_heard_since_hello_only_after_a_heartbeat() {
@@ -188,6 +188,7 @@ fn a_host_is_heard_since_hello_only_after_a_heartbeat() {
     assert!(!heard(&fx, "a"));
     fx.beat("a", epoch);
     assert!(heard(&fx, "a"));
+    fx.pass_grace();
     let epoch = fx.join("a", "t");
     assert!(!heard(&fx, "a"));
     fx.beat("a", epoch);
