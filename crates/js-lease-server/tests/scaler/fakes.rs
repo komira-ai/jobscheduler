@@ -45,6 +45,8 @@ pub struct World {
     pub saved: Option<Records>,
     /// The hosts last written as the ones the registry would not remove.
     pub saved_unremoved: Option<BTreeSet<String>>,
+    /// Every set of unremoved hosts a write was asked for, in order, whether it succeeded or not.
+    pub unremoved_writes: Vec<BTreeSet<String>>,
     /// Whether a write of the unremoved hosts succeeds.
     pub save_unremoved_ok: bool,
     pub save_ok: bool,
@@ -167,6 +169,7 @@ impl Effects for Handle {
     fn save_unremoved(&self, hosts: &BTreeSet<String>) -> Result<(), String> {
         let mut world = self.world();
         world.log.push("save-unremoved".to_owned());
+        world.unremoved_writes.push(hosts.clone());
         match world.save_unremoved_ok {
             true => {
                 world.saved_unremoved = Some(hosts.clone());
@@ -328,6 +331,7 @@ pub fn new_world() -> Arc<Mutex<World>> {
         machines: Vec::new(),
         saved: None,
         saved_unremoved: None,
+        unremoved_writes: Vec::new(),
         save_unremoved_ok: true,
         save_ok: true,
         mint_ok: true,

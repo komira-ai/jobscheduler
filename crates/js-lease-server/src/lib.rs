@@ -23,7 +23,8 @@
 //!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
 //!   only and written whole before the call a record describes, and the hosts the registry
 //!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
-//!   same way, so that a restart tries them again.
+//!   same way and before the registry is asked to remove a host, so that a restart tries
+//!   them again.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
