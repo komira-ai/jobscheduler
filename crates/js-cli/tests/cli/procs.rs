@@ -2,14 +2,18 @@
 //! sleeping or measuring time: named pipes that a command and the test meet at, and a
 //! process id the test is told about the moment the process ends.
 
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, poll};
 use rustix::io::Errno;
-use rustix::process::{Pid, PidfdFlags, pidfd_open, test_kill_process};
+use rustix::process::{Pid, test_kill_process};
+#[cfg(target_os = "linux")]
+use rustix::process::{PidfdFlags, pidfd_open};
 
 use crate::support::Scratch;
 
@@ -37,7 +41,9 @@ pub fn path_str(path: &Path) -> &str {
 }
 
 /// A handle on the process `pid` that says when it has ended, which is whether or not
-/// anything has reaped it. Taken while the process still runs.
+/// anything has reaped it. Taken while the process still runs. A pidfd is Linux-only,
+/// so the tests that use it are too.
+#[cfg(target_os = "linux")]
 pub fn watch_pid(pid: &str) -> OwnedFd {
     let pid = Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
     pidfd_open(pid, PidfdFlags::empty()).unwrap()
@@ -46,6 +52,7 @@ pub fn watch_pid(pid: &str) -> OwnedFd {
 /// Returns when the process `watch_pid` was given has ended. A process nothing ends
 /// keeps this waiting: the commands of the tests that use it end on their own after a
 /// while and leave a mark that the test checks for, so a missing kill fails the test.
+#[cfg(target_os = "linux")]
 pub fn wait_gone(watch: &OwnedFd) {
     let mut fds = [PollFd::new(watch, PollFlags::IN)];
     poll(&mut fds, None).unwrap();
