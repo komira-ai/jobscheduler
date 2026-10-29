@@ -3041,6 +3041,7 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "js-elastic",
  "rcgen",
  "rustls",
  "rustls-native-certs",

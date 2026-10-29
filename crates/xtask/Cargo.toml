@@ -22,6 +22,8 @@ toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The paths the elastic boot payload gives its agent (tests/js_agent_package.rs).
+js-elastic = { path = "../js-elastic" }
 rcgen.workspace = true
 
 [lints]
