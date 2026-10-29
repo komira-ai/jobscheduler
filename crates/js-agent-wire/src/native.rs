@@ -123,8 +123,10 @@ pub struct NativeSpec {
     #[serde(default)]
     pub args: Vec<String>,
     /// The environment, literal and not secret: at most [`limits::MAX_ENV`] entries. A name
-    /// is `[A-Za-z_][A-Za-z0-9_]*` and does not start `DYLD_`, `LD_`, `SANDBOX_`,
-    /// `JS_AGENT_`, `__XPC_`, `MALLOC`, `Malloc` or `OBJC_`; a value holds no NUL. A value
+    /// is `[A-Za-z_][A-Za-z0-9_]*` and is not reserved
+    /// ([`js_types::env::env_name_reserved`]: the loader's, the sandbox's, the agent's
+    /// `JS_` prefix, launchd's, the allocator's and the Objective-C runtime's prefixes, and
+    /// the names the agent sets itself, `HOME` and `TMPDIR` among them); a value holds no NUL. A value
     /// may hold a newline or other control characters, so whatever logs the environment
     /// must escape them.
     #[serde(default)]
@@ -145,21 +147,6 @@ pub struct NativeSpec {
     #[serde(default)]
     pub network: NetworkLevel,
 }
-
-/// Name prefixes the agent keeps for itself and the dynamic loader and sandbox read.
-/// `MALLOC` covers `MALLOC_*`; `Malloc` covers `MallocStackLogging` and `MallocLogFile`,
-/// which make the allocator write files. `__XPC_` is launchd's own, `OBJC_` the Objective-C
-/// runtime's debug switches.
-const RESERVED_ENV_PREFIXES: [&str; 8] = [
-    "DYLD_",
-    "LD_",
-    "SANDBOX_",
-    "JS_AGENT_",
-    "__XPC_",
-    "MALLOC",
-    "Malloc",
-    "OBJC_",
-];
 
 impl NativeSpec {
     /// Checks the body alone, without the job around it.
@@ -279,7 +266,7 @@ fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
     if ![leads, inside].into_iter().all(|ok| ok) {
         return Err(at.fail(Rule::BadChars));
     }
-    if RESERVED_ENV_PREFIXES.iter().any(|p| key.starts_with(p)) {
+    if js_types::env::env_name_reserved(key) {
         return Err(at.fail(Rule::Reserved));
     }
     Ok(())
