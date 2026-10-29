@@ -653,14 +653,65 @@ fn feed(r: &mut Recorder, beats: u64) -> Vec<(Observed, Vec<MinuteIn>)> {
     out
 }
 
+/// Readings that pass through every way a reading is refused, an epoch change, and
+/// accepted readings between them, each carrying a lease minute and clock.
+fn feed_refusals(r: &mut Recorder) -> Vec<(Observed, Vec<MinuteIn>)> {
+    let h = host("h");
+    let over_cpu = 6 * SEC + 10 * SEC * 8 * IMPLAUSIBLE_FACTOR + 1;
+    let over_ws = (64u64 << 30) * IMPLAUSIBLE_FACTOR + 1;
+    // (epoch, seq, mono s, cpu usec, working set)
+    let steps = [
+        (7, 1, 100, 0, 0),
+        (7, 2, 110, 5 * SEC, 1),
+        (7, 2, 115, 5 * SEC, 1),
+        (7, 3, 110, 5 * SEC, 1),
+        (7, 4, 120, 10 * SEC, 2),
+        (7, 5, 130, SEC, 3),
+        (7, 6, 140, 6 * SEC, 4),
+        (7, 7, 150, over_cpu, 5),
+        (7, 8, 150, 7 * SEC, over_ws),
+        (7, 9, 160, 8 * SEC, 6),
+        (8, 1, 5, 0, 0),
+        (8, 2, 15, 3 * SEC, 7),
+    ];
+    let mut out = Vec::new();
+    for (n, (epoch, seq, mono, cpu, ws)) in (0u64..).zip(steps) {
+        let mut l = load(seq, mono * SEC, cpu, ws);
+        l.minutes = vec![minute_in(n, 1, 2, 3, 4)];
+        l.clocks = vec![ClockIn {
+            lease: lease(1, n),
+            started_mono_usec: 2 * SEC,
+        }];
+        out.push(r.observe(&h, epoch, &l, BIG, 500 + n));
+    }
+    out
+}
+
 // Asserts a leases-only recorder answers every reading as a normal one does, the
-// observed verdict, the lease minutes and the lease clocks alike; catches a leases-only
-// mode that also changes the lease side.
+// observed verdict, the lease minutes, the lease clocks and the counters alike, over
+// accepted readings, each refusal and an epoch change; catches a leases-only mode that
+// changes a drop path, a counter or the lease side.
 #[test]
 fn leases_only_gives_the_same_lease_output() {
     let mut normal = Recorder::new();
     let mut lean = Recorder::leases_only();
-    assert_eq!(feed(&mut normal, 12), feed(&mut lean, 12));
+    let seen = feed_refusals(&mut normal);
+    assert_eq!(seen, feed_refusals(&mut lean));
+    for reason in [
+        DropReason::NoBaseline,
+        DropReason::EpochChanged,
+        DropReason::SeqNotAbove,
+        DropReason::ClockBack,
+        DropReason::CounterBack,
+        DropReason::ImpliedCoresOverFourXThreads,
+        DropReason::MemoryOverFourXCapacity,
+    ] {
+        assert!(
+            seen.iter().any(|(o, _)| *o == Observed::Dropped(reason)),
+            "{reason:?} not reached"
+        );
+    }
+    assert!(seen.iter().any(|(o, _)| *o == Observed::Accepted));
     for n in 0..12 {
         assert_eq!(
             normal.elapsed_minute(&host("h"), &lease(1, n)),
