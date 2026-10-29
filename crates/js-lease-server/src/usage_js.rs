@@ -89,17 +89,14 @@ struct Inner {
     profiles: ProfileStore,
 }
 
-/// The key source the server runs on: the work key the client named when it queued the
-/// run, held by the registry beside the run, under the profile name `names` gives it. A run
-/// queued without a work key has no key, and is counted as a run without one.
-pub(crate) struct RegistryKeys(pub(crate) Registry, pub(crate) NameMap);
+/// The key source the server runs on: the profile name the client supplied when it queued
+/// the run, held by the registry beside the run. A run queued without a name has no key, and
+/// is counted as a run without one.
+pub(crate) struct RegistryKeys(pub(crate) Registry);
 
 impl KeySource for RegistryKeys {
     fn key_of(&self, run_id: &str) -> Option<ProfileKey> {
-        self.0
-            .work_key_of(run_id)
-            .as_ref()
-            .and_then(|key| (self.1)(key))
+        self.0.profile_of(run_id)
     }
 }
 

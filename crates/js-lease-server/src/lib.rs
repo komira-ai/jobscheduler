@@ -23,7 +23,7 @@
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
+//! below has a key in the file, and a flag given beside `--config` is refused, but for the usage flags below (`--usage-db`, `--usage-off`, `--profile-store-bytes`), which the file has no keys for and which apply on top of it. The one secret,
 //! the bearer token, is read from a file that only its owner can use.
 //!
 //! | flag | meaning |
@@ -58,7 +58,7 @@
 //! # The configuration file
 //!
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
-//! above, and no flag may be given beside it: the first one on the command line is refused,
+//! above, and no flag but the usage flags may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
 //! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
@@ -247,7 +247,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`, `work_key? {class, dedup}` (the work the run does, which a clean run's cost curve is learned under). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-work-key` (an empty class, or a class or dedup text over 256 bytes, counted in bytes and not characters), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`, `profile?` (a string of 1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a letter: the name of the profile a clean run's cost curve is learned under, the client's own key for the work the run does). 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `invalid-profile` (a `profile` that is not that grammar), `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
 //! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
@@ -372,8 +372,8 @@
 //! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
 //! outcome `succeeded` or `failed`) are handed to the sink with their series once the
 //! host has sent two more beats, so the lease's last partial minute is not lost, if a
-//! [`KeySource`] names the work they did; by default that is the `work_key` the client gave
-//! when it queued the run, so a run queued without one is not learned from and
+//! [`KeySource`] names the work they did; by default that is the `profile` name the client
+//! supplied when it queued the run, so a run queued without one is not learned from and
 //! `runs_without_key` counts it. The seam types and
 //! [`NoUsage`] are public so that a test or an embedding program can supply its own
 //! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own

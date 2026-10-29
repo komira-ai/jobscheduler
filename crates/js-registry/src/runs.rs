@@ -18,8 +18,8 @@ use js_agent_wire::{
 };
 use js_pool_static::HostBook;
 use js_provider::Observed;
-use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, Resources};
+use js_usage::ProfileKey;
 
 /// The most runs a host may hold live at once: queued, starting, running or exited but
 /// not yet gone from its held list. It keeps the commands of one reply, a start or a stop
@@ -90,8 +90,8 @@ pub struct RunView {
     pub state: RunState,
     /// The result the host reported and the server accepted, once there is one.
     pub result: Option<RunResult>,
-    /// The work the lease holder said the run does, when it said.
-    pub work_key: Option<WorkKey>,
+    /// The profile name the lease holder supplied for the work the run does, when it did.
+    pub profile: Option<ProfileKey>,
 }
 
 /// Why a run was not queued, or not stopped. Each has a constant code
@@ -208,7 +208,7 @@ struct Run {
     host: HostId,
     lease: LeaseId,
     spec: JobSpec,
-    work_key: Option<WorkKey>,
+    profile: Option<ProfileKey>,
     life: Life,
     stop: Stop,
     result: Option<RunResult>,
@@ -273,7 +273,7 @@ impl Run {
             host: self.host.clone(),
             state: self.state(),
             result: self.result.clone(),
-            work_key: self.work_key.clone(),
+            profile: self.profile.clone(),
         }
     }
 
@@ -353,13 +353,13 @@ impl Runs {
     /// their limits and their GPU indices together with this run's must fit `shape`.
     ///
     /// A `spec.valid_for_ms` above zero is the time the lease has left: the run ends its
-    /// bound that long after `now`. `work_key` is what the lease holder named the run's
-    /// work; the registry keeps it beside the run and never sends it to the host.
+    /// bound that long after `now`. `profile` is the name the lease holder supplied for the
+    /// run's work; the registry keeps it beside the run and never sends it to the host.
     pub(crate) fn admit(
         &mut self,
         host: &HostId,
         lease: &LeaseId,
-        (mut spec, work_key): (JobSpec, Option<WorkKey>),
+        (mut spec, profile): (JobSpec, Option<ProfileKey>),
         shape: &Resources,
         (beats, now): (u64, u64),
     ) -> Result<RunView, RunRefusal> {
@@ -393,7 +393,7 @@ impl Runs {
             host: host.clone(),
             lease: *lease,
             spec,
-            work_key,
+            profile,
             life: Life::Queued,
             stop: Stop::No,
             result: None,
@@ -405,10 +405,10 @@ impl Runs {
         Ok(view)
     }
 
-    /// The work key the lease holder named for run `run_id`, when the run is known and
-    /// was queued with one.
-    pub(crate) fn work_key_of(&self, run_id: &str) -> Option<WorkKey> {
-        self.map.get(run_id).and_then(|run| run.work_key.clone())
+    /// The profile name the lease holder supplied for run `run_id`, when the run is known
+    /// and was queued with one.
+    pub(crate) fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.map.get(run_id).and_then(|run| run.profile.clone())
     }
 
     /// Asks every live run of `lease` to stop: the lease ended or is being released.

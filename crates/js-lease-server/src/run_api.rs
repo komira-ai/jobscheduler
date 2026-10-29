@@ -30,7 +30,7 @@ use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
-use js_types::sched::WorkKey;
+use js_usage::ProfileKey;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -76,42 +76,24 @@ struct RunBody {
     isolation: Isolation,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
-    /// What work the run does, when the client knows: the key its cost curve is learned
-    /// under. Absent means the run teaches the server nothing.
+    /// The name of the profile the run's cost curve is learned under, when the client knows
+    /// one: its own key for the work the run does, in the grammar of [`ProfileKey`]. Absent
+    /// means the run teaches the server nothing.
     ///
-    /// Usage tracks are per lease: when runs of one lease name different keys, the first
-    /// accepted result takes the whole lease series under its own key. The server has one
-    /// trust domain: any holder of the client token can name any key, so a wrong or hostile
-    /// run can skew that key's curve.
+    /// Usage tracks are per lease: when runs of one lease name different profiles, the first
+    /// accepted result takes the whole lease series under its own name. The server has one
+    /// trust domain: any holder of the client token can name any profile, so a wrong or
+    /// hostile run can skew that profile's curve.
     #[serde(default)]
-    work_key: Option<WorkKeyBody>,
+    profile: Option<String>,
 }
 
-/// The longest part of a work key (class or dedup text), in bytes (not characters). Keys are kept in
-/// memory beside the run, so they are bounded like the rest of a body.
-const MAX_WORK_KEY_PART: usize = 256;
-
-/// The work key of a [`RunBody`]: [`WorkKey`]'s two plain-text parts.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkKeyBody {
-    class: String,
-    dedup: String,
-}
-
-impl WorkKeyBody {
-    /// The key, or the 422 `invalid-work-key` when the class is empty or a part is longer
-    /// than [`MAX_WORK_KEY_PART`] bytes.
-    fn into_key(self) -> Result<WorkKey, ApiError> {
-        let fits = |part: &str| part.len() <= MAX_WORK_KEY_PART;
-        match !self.class.is_empty() && fits(&self.class) && fits(&self.dedup) {
-            true => Ok(WorkKey::new(self.class, self.dedup)),
-            false => Err(ApiError::coded(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "invalid-work-key",
-            )),
-        }
-    }
+/// The profile name of a [`RunBody`], or the 422 `invalid-profile` when it is not a
+/// [`ProfileKey`] (1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a
+/// letter).
+fn profile_of(text: &str) -> Result<ProfileKey, ApiError> {
+    ProfileKey::parse(text)
+        .map_err(|_| ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid-profile"))
 }
 
 /// The limits of a [`RunBody`]. The wall time is bounded by what the lease has left
@@ -225,7 +207,7 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
-    let work_key = body.work_key.map(WorkKeyBody::into_key).transpose()?;
+    let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -258,7 +240,7 @@ async fn start(
     let queued = api
         .agents
         .registry
-        .queue_keyed_run(&host, &id, spec, work_key)?;
+        .queue_keyed_run(&host, &id, spec, profile)?;
     info!(lease = %id, host = %host, run = %run_id, "run queued");
     let accepted = Accepted {
         run_id,

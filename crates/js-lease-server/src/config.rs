@@ -402,21 +402,20 @@ impl UsageSetup {
         let Some(db) = self.db else {
             return Ok(None);
         };
-        let names = self.names.unwrap_or_else(no_names);
         let sink = match self.sink {
             Some(sink) => sink,
             None => {
                 let setup = StoreSetup {
                     db,
                     profile_store_bytes: self.profile_store_bytes,
-                    names: names.clone(),
+                    names: self.names.unwrap_or_else(no_names),
                 };
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
         let keys = self
             .keys
-            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone(), names)));
+            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
         let usage = Usage::new(sink, keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }

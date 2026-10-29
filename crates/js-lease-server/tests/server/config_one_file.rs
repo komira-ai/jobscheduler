@@ -16,6 +16,9 @@ use crate::support::{Harness, Reply, Scratch, request};
 
 const MINT: &str = "/v1/agent/join-tokens";
 
+/// The flags that are allowed beside `--config`: the file has no keys for them.
+const USAGE_FLAGS: [&str; 3] = ["--profile-store-bytes", "--usage-db", "--usage-off"];
+
 /// An elastic pool that admits agents with [`JOIN`] and asks nothing of a host's contract.
 fn pool(scratch: &Scratch) -> PoolText {
     let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
@@ -175,7 +178,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
 }
 
 /// The flags beside `--config`, with the refusal each gets. Every flag of the command
-/// line but `--config` is here (the next test checks that).
+/// line but `--config` and the usage flags is here (the next test checks that).
 fn beside() -> Vec<(Vec<&'static str>, String)> {
     let key = |flag: &'static str, value: &'static str| {
         let at = flag.trim_start_matches("--").replace('-', "_");
@@ -267,8 +270,8 @@ fn every_flag_beside_config_is_refused_by_name() {
 }
 
 /// Asserts that the table of the test above is every flag there is: the long flags of the
-/// command line less `--config` are exactly the flags it refuses. It catches a flag added
-/// later that the refusal test does not cover.
+/// command line less `--config` and the usage flags (the next-but-one test) are exactly the
+/// flags it refuses. It catches a flag added later that the refusal test does not cover.
 #[test]
 fn the_refused_flags_are_every_flag() {
     let asked: BTreeSet<String> = Cli::command()
@@ -276,6 +279,7 @@ fn the_refused_flags_are_every_flag() {
         .filter_map(|arg| arg.get_long())
         .filter(|long| *long != "config")
         .map(|long| format!("--{long}"))
+        .filter(|flag| !USAGE_FLAGS.contains(&flag.as_str()))
         .collect();
     let tried: BTreeSet<String> = beside()
         .into_iter()
