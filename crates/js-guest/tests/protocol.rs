@@ -29,6 +29,20 @@ fn refusal(result: Result<impl std::fmt::Debug, ClientError>) -> Refusal {
     }
 }
 
+/// Asserts that two shares made under one name are two directories: the second one's
+/// set-up does not remove the first one's files. It catches a path named by the test
+/// alone, which two tests of one name, or two runs of one test binary at once, would
+/// share and delete under each other.
+#[test]
+fn shares_of_one_name_are_separate() {
+    let first = Shares::new("same-name");
+    std::fs::write(first.inputs.join("f"), "one").unwrap();
+    let second = Shares::new("same-name");
+    assert_ne!(first.inputs, second.inputs);
+    assert_ne!(first.outputs, second.outputs);
+    assert_eq!(std::fs::read(first.inputs.join("f")).unwrap(), b"one");
+}
+
 /// Catches a skipped or partial token check (a prefix compare, a length-only check):
 /// a token that differs in its last byte is refused, the connection is closed, and the
 /// agent still serves the right token next.

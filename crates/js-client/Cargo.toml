@@ -15,6 +15,7 @@ thiserror.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+js-testkit = { path = "../js-testkit" }
 rcgen.workspace = true
 webpki-roots.workspace = true
 
