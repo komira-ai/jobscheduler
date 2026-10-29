@@ -123,7 +123,7 @@ pub(crate) fn billed_until(record: &Record, boot_timeout: Duration, now: Millis)
 /// ago costs nothing.
 fn spent(record: &Record, settings: &Settings, now: Millis) -> u64 {
     let until = billed_until(record, settings.boot_timeout, now);
-    let from = record.launched_at.max(now.back(DAY));
+    let from = record.launched_at;
     cents(record.price_cents_per_hour, until.since(from))
 }
 
