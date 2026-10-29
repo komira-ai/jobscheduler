@@ -159,7 +159,6 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_books_a_lease
     leased.lease = Some(LeaseId::new(1, 7));
     rig.world().hosts = vec![free, leased];
     rig.scaler.tick().await;
-    run_for(&rig, &rig.scaler, REGISTRY_QUIET).await;
     rig.advance(mins(30) - Duration::from_secs(1));
     rig.scaler.tick().await;
     assert!(rig.log().is_empty(), "{:?}", rig.log());
