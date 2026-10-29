@@ -3,7 +3,7 @@
 
 use super::Lifecycle;
 use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
-use crate::lifecycle::runtime::{ContainerId, Status};
+use crate::lifecycle::runtime::{RunHandle, Status};
 use crate::lifecycle::{CheckFinding, Event, Finished, code};
 
 impl Lifecycle {
@@ -70,7 +70,7 @@ impl Lifecycle {
     /// container, the scratch directory, the checks, then the slot. A step that fails
     /// ends the pass with the slot still booked.
     pub(super) fn clean(&mut self, index: usize, events: &mut Vec<Event>) {
-        let live: Vec<ContainerId> = self
+        let live: Vec<RunHandle> = self
             .jobs
             .iter()
             .enumerate()

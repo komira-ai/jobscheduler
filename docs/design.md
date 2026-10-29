@@ -11,7 +11,7 @@ jobscheduler itself are named `js-*`; the map is in 10.2.
 
 Code now exists on `main` of this repository: `js-types`, `js-provider`, `js-pool-static`, `js-provider-fake`, `js-conformance`, `js-lease`,
 `js-lease-server`, `js-cli`, `js-coverage`, `js-agent-wire` (the agent wire, protocol major 1), `js-registry` and `js-agent` (session,
-facts and a lifecycle over a `ContainerRuntime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
+facts and a lifecycle over a `Runtime` trait; a docker and podman backend is in review). Section 5.9 says what each becomes; 10.2 marks which crates are merged. Everything else
 describes future work. What exists in kbf today (the former section 4) is in [design/kbf-today.md](design/kbf-today.md); references of the
 form 4.n point there.
 
@@ -498,7 +498,7 @@ constraints is kbf's configuration; the companion has the worked example.
 Text in [design/vm-backend.md](design/vm-backend.md). `js-agent` gains a VM runtime beside the container one. **A fresh VM per run; a
 VM is never reused:** it is cloned from a base image, booted, given its inputs over a guest channel, run, collected, stopped and
 destroyed, whatever the outcome; a lease may hold several runs and each has its own VM; the host, not the VM, is reused (5.10). The lifecycle stays one state machine over a small `Sandbox`
-seam with two backend traits (`ContainerRuntime` unchanged, a new `VmRuntime`; D28). The guest channel is one hypervisor-tied stream per
+seam with two backend traits (`Runtime` unchanged, a new `VmRuntime`; D28). The guest channel is one hypervisor-tied stream per
 VM with bounded frames; nothing of the host is shared writable; the guest is untrusted. The cleanup order is the VM, the scratch, the
 checks, the slot; a failed destroy taints the host; destroying the VM is the cleanup of the guest. A base image is named, immutable and primed outside the agent; `base_images` is a capability.
 

@@ -89,7 +89,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
 - **D27. How sets and counters ride the wire.** (a) Pack them into the existing string map (`xcode=16.0,16.2`); (b) an additive typed
   `facts` field. Recommend (b): (a) needs a parsing convention per key, hits the 128-byte value cap, and cannot distinguish a set from a
   scalar; (b) is optional and skipped by an old server, and scalars are mirrored into the old map so old servers still match them (5.13).
-- **D28. Runtime traits for VMs.** (a) Widen `ContainerRuntime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
+- **D28. Runtime traits for VMs.** (a) Widen `Runtime` to cover VMs; (b) a second trait, `VmRuntime`, with one lifecycle over an
   internal `Sandbox` seam; (c) a second lifecycle. Recommend (b): the stages, channel, destroy and restart rules differ, (a) forces optional
   parts on every backend and changes merged code, and (c) writes the cleanup order, results and slot accounting twice (5.14).
 - **D29. VM reuse. Settled by the project owner:** a fresh VM for each run, cloned from its base image and destroyed after the run; a lease

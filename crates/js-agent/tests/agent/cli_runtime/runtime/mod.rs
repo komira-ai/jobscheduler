@@ -12,7 +12,7 @@ mod poll;
 mod seen;
 
 use js_agent::cli_runtime::CliRuntime;
-use js_agent::lifecycle::{ContainerId, ContainerRuntime};
+use js_agent::lifecycle::{RunHandle, Runtime};
 
 use super::scripted::Scripted;
 use super::spec;
@@ -22,7 +22,7 @@ fn strings(args: &[&str]) -> Vec<String> {
 }
 
 /// Starts `run_id` in `world` and returns its container id.
-fn start(rt: &mut CliRuntime, world: &Scripted, run_id: &str) -> ContainerId {
+fn start(rt: &mut CliRuntime, world: &Scripted, run_id: &str) -> RunHandle {
     let id = rt.create_and_start(&spec(run_id)).unwrap();
     assert_eq!(Some(id.0.clone()), world.id_of(run_id));
     id

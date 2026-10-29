@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use js_agent::lifecycle::{ContainerId, ContainerRuntime, Exit, RuntimeError, Status};
+use js_agent::lifecycle::{Exit, RunHandle, Runtime, RuntimeError, Status};
 
 use super::super::{docker, open};
 use super::{start, strings};
@@ -102,7 +102,7 @@ fn a_missing_container_is_gone_and_a_failing_one_is_an_error() {
 
     let calls = world.calls().len();
     for bad in ["", "r1", "--all", "ABC123456789", "0123456789abcdefg"] {
-        let said = rt.poll(&ContainerId(bad.to_owned())).unwrap_err();
+        let said = rt.poll(&RunHandle(bad.to_owned())).unwrap_err();
         assert_eq!(said.0, "not a container id", "{bad:?}");
     }
     assert_eq!(world.calls().len(), calls, "no call with a bad id");
@@ -118,7 +118,7 @@ fn a_short_id_is_refused_while_the_container_is_there() {
     let world = docker();
     let mut rt = open(&world);
     let id = start(&mut rt, &world, "r1");
-    let short = ContainerId(id.0[..12].to_owned());
+    let short = RunHandle(id.0[..12].to_owned());
     let calls = world.calls().len();
     assert_eq!(rt.poll(&short).unwrap_err().0, "not a container id");
     let stop = rt.stop(&short, Duration::from_secs(1)).unwrap_err();
@@ -196,7 +196,7 @@ fn stop_rounds_the_grace_up_and_a_gone_container_is_stopped() {
     world.vanish("r1");
     rt.stop(&id, Duration::from_secs(1)).unwrap();
     let said = rt
-        .stop(&ContainerId("x".to_owned()), Duration::ZERO)
+        .stop(&RunHandle("x".to_owned()), Duration::ZERO)
         .unwrap_err();
     assert_eq!(said.0, "not a container id");
 }
@@ -222,6 +222,6 @@ fn remove_forces_and_a_gone_container_is_removed() {
     assert_eq!(rm, strings(&["rm", "--force", "--volumes", "--", &id.0]));
     assert!(world.ids().is_empty());
     rt.remove(&id).unwrap();
-    let said = rt.remove(&ContainerId("x".to_owned())).unwrap_err();
+    let said = rt.remove(&RunHandle("x".to_owned())).unwrap_err();
     assert_eq!(said.0, "not a container id");
 }

@@ -4,7 +4,7 @@
 use js_agent::cli_runtime::{ProcLink, ProcRead};
 #[cfg(target_os = "linux")]
 use js_agent::cli_runtime::{pid_in_proc, read_proc, read_proc_link};
-use js_agent::lifecycle::ContainerRuntime;
+use js_agent::lifecycle::Runtime;
 
 use super::super::scripted::Scripted;
 use super::super::{

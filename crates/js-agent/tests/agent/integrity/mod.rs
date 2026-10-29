@@ -10,7 +10,7 @@ mod rules;
 use std::path::PathBuf;
 
 use js_agent::integrity::{FakeHost, Integrity, Mount, Process};
-use js_agent::lifecycle::{CheckFinding, CheckHook, ContainerId, Finished};
+use js_agent::lifecycle::{CheckFinding, CheckHook, Finished, RunHandle};
 
 /// The user the containers run as in these tests.
 pub const JOB_UID: u32 = 65534;
@@ -27,10 +27,7 @@ pub fn after(checks: &mut Integrity, run_id: &str) -> Result<(), CheckFinding> {
 
 /// The check after `run_id`, with the containers `live` still on the host.
 pub fn beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> Result<(), CheckFinding> {
-    let live: Vec<ContainerId> = live
-        .iter()
-        .map(|id| ContainerId((*id).to_owned()))
-        .collect();
+    let live: Vec<RunHandle> = live.iter().map(|id| RunHandle((*id).to_owned())).collect();
     checks.run(&Finished {
         run_id,
         live: &live,

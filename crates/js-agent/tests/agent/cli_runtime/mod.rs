@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 use js_agent::Platform;
 use js_agent::cli_runtime::{CliRuntime, PROFILE_FILE, Settings};
-use js_agent::lifecycle::{ContainerSpec, ResolvedMount, label};
+use js_agent::lifecycle::{Body, ResolvedMount, RunSpec, label};
 use js_agent_wire::Isolation;
 
 use scripted::{DOCKER, Scripted};
@@ -137,7 +137,7 @@ pub fn docker() -> Scripted {
 }
 
 /// A contained job of run `run_id`: 1.5 CPUs, 1 GiB, 100 processes, no GPU, no mount.
-pub fn spec(run_id: &str) -> ContainerSpec {
+pub fn spec(run_id: &str) -> RunSpec {
     let labels: BTreeMap<String, String> = [
         (label::RUN, run_id),
         (label::LEASE, "lease-1"),
@@ -146,10 +146,12 @@ pub fn spec(run_id: &str) -> ContainerSpec {
     .into_iter()
     .map(|(k, v)| (k.to_owned(), v.to_owned()))
     .collect();
-    ContainerSpec {
+    RunSpec {
         run_id: run_id.to_owned(),
-        image: "registry.example/job:1".to_owned(),
-        args: vec!["--go".to_owned(), "x y".to_owned()],
+        body: Body::Container {
+            image: "registry.example/job:1".to_owned(),
+            args: vec!["--go".to_owned(), "x y".to_owned()],
+        },
         cpu_millis: 1500,
         memory_bytes: 1 << 30,
         pids: Some(100),

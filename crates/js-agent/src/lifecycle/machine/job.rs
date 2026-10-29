@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
 use super::RETIRED_CAP;
-use crate::lifecycle::runtime::{ContainerId, ContainerSpec, Exit, Found, ResolvedMount};
+use crate::lifecycle::runtime::{Body, Exit, Found, ResolvedMount, RunHandle, RunSpec};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 
@@ -15,9 +15,9 @@ use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Stage {
     /// The container runs.
-    Running(ContainerId),
+    Running(RunHandle),
     /// The container has exited; it is to be removed.
-    Removing(ContainerId),
+    Removing(RunHandle),
     /// The scratch directory is to be removed.
     Scratch,
     /// The post-job checks are to run.
@@ -30,7 +30,7 @@ pub(super) enum Stage {
 
 impl Stage {
     /// The container of a job that is still on the host.
-    pub(super) fn container(&self) -> Option<&ContainerId> {
+    pub(super) fn container(&self) -> Option<&RunHandle> {
         match self {
             Self::Running(id) | Self::Removing(id) => Some(id),
             _ => None,
@@ -146,7 +146,7 @@ fn label_number(found: &Found, key: &str) -> Option<u64> {
 /// A container the agent could not remove: it may still run, so what it booked, or the
 /// whole offer when that is not known, stays booked until a removal succeeds.
 pub(super) struct Stuck {
-    pub(super) id: ContainerId,
+    pub(super) id: RunHandle,
     pub(super) booking: Booking,
     /// The run its labels name, whose scratch directory the container may still use.
     pub(super) run_id: Option<String>,
@@ -353,7 +353,7 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
-) -> ContainerSpec {
+) -> RunSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
         (label::RUN, spec.run_id.clone()),
@@ -372,10 +372,12 @@ pub(super) fn container_spec(
     ];
     let mut labels: BTreeMap<String, String> = spec.labels.clone();
     labels.extend(own.map(|(key, value)| (key.to_owned(), value)));
-    ContainerSpec {
+    RunSpec {
         run_id: spec.run_id.clone(),
-        image: spec.image.clone(),
-        args: spec.args.clone(),
+        body: Body::Container {
+            image: spec.image.clone(),
+            args: spec.args.clone(),
+        },
         cpu_millis: spec.limits.cpu_millis,
         memory_bytes: spec.limits.memory_bytes,
         pids: spec.limits.pids,

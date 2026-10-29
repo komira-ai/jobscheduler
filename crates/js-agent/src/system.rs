@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
 use crate::facts::Platform;
 use crate::integrity::{HostView, ProcHost};
-use crate::lifecycle::{Clock, ContainerRuntime};
+use crate::lifecycle::{Clock, Runtime};
 
 /// A monotonic clock both threads of the agent may read.
 pub type SharedClock = Arc<dyn Clock + Send + Sync>;
@@ -49,10 +49,7 @@ pub trait Machine: Send + Sync {
     /// # Errors
     ///
     /// The runtime cannot be made; the text says why.
-    fn runtime(
-        &self,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String>;
+    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String>;
 
     /// The host the post-job checks read. Called on the worker thread.
     fn view(&self) -> Box<dyn HostView>;
@@ -93,10 +90,7 @@ impl Machine for System {
         Arc::new(Monotonic(self.origin))
     }
 
-    fn runtime(
-        &self,
-        build: &RuntimeBuild<'_>,
-    ) -> Result<(Box<dyn ContainerRuntime>, Vec<String>), String> {
+    fn runtime(&self, build: &RuntimeBuild<'_>) -> Result<(Box<dyn Runtime>, Vec<String>), String> {
         let runner = Box::new(system_runner(build.stop_grace));
         let (settings, host_id) = (build.settings.clone(), build.host_id);
         let opened = CliRuntime::open(settings, host_id, build.platform, unix_ms, runner);

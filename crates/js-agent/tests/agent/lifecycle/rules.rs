@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use js_agent::lifecycle::{RETIRED_CAP, label};
+use js_agent::lifecycle::{Body, RETIRED_CAP, label};
 use js_agent_wire::limits::{MAX_COMMANDS, MAX_HELD, MAX_RESULTS};
 use js_agent_wire::{Command, HeldRun, HeldState, Isolation, Outcome};
 use serde_json::json;
@@ -633,6 +633,30 @@ fn a_cancel_reports_nothing_even_after_a_stop() {
     assert!(h.held().is_empty());
 }
 
+/// Asserts that a job with an image runs through the runtime seam as a container body:
+/// the runtime is handed that body, the exit is reported as the job's result and the
+/// container is removed. It catches a seam that loses the image or the command line on
+/// the way to the runtime, or a container run that no longer ends in a result.
+#[test]
+fn a_container_body_runs_to_its_result_through_the_runtime_seam() {
+    let mut h = Harness::new("body");
+    h.start(job("r1"));
+    let created = h.fake.created();
+    assert_eq!(created.len(), 1);
+    let Body::Container { image, args } = &created[0].body;
+    assert!(image.starts_with("registry.example/job:1@sha256:"));
+    assert_eq!(args, &["--go".to_owned()]);
+
+    h.fake.exit("r1", 0);
+    h.life.step();
+    let result = &h.life.results()[0];
+    assert_eq!(
+        (result.outcome, result.exit_code),
+        (Outcome::Succeeded, Some(0))
+    );
+    assert!(h.fake.gone("r1"));
+}
+
 /// Asserts that the container is created with the job's own labels and the agent's over
 /// them, its limits, its resolved scratch directory and its GPUs. It catches a runtime
 /// handed the wrong limits, and an agent label that a job could override.
@@ -645,10 +669,13 @@ fn the_container_is_created_with_the_jobs_limits_and_the_agents_labels() {
     h.start(spec);
     let made = &h.fake.created()[0];
     assert_eq!(
-        made.image,
-        "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        made.body,
+        Body::Container {
+            image: "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_owned(),
+            args: vec!["--go".to_owned()],
+        }
     );
-    assert_eq!(made.args, ["--go"]);
     assert_eq!((made.cpu_millis, made.memory_bytes), (1000, 1 << 30));
     assert_eq!(made.pids, Some(100));
     assert_eq!(made.gpu_indices, [1, 0]);

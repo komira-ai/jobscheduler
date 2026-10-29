@@ -1,6 +1,6 @@
 //! The mounts read back after `create` and before `start`.
 
-use js_agent::lifecycle::ContainerRuntime;
+use js_agent::lifecycle::Runtime;
 
 use super::super::scripted::{Bind, Change, Volume};
 use super::super::{docker, mount, open, spec};

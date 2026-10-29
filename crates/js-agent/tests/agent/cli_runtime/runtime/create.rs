@@ -5,7 +5,7 @@
 use std::fs;
 
 use js_agent::cli_runtime::{CliError, CliRuntime, Engine};
-use js_agent::lifecycle::{ContainerRuntime, label};
+use js_agent::lifecycle::{Body, Runtime, label};
 use js_agent_wire::Isolation;
 use sha2::{Digest, Sha256};
 
@@ -244,13 +244,16 @@ fn the_job_cannot_reach_the_runtimes_options() {
             "mounts" => job.mounts = vec![mount("/srv/in", "/mnt/data/in", false)],
             "no-pids" => job.pids = None,
             "hostile" => {
-                job.args = hostile.iter().map(|a| (*a).to_owned()).collect();
-                job.image = "-privileged".to_owned();
+                job.body = Body::Container {
+                    image: "-privileged".to_owned(),
+                    args: hostile.iter().map(|a| (*a).to_owned()).collect(),
+                };
             }
             _ => {}
         }
         rt.create_and_start(&job).unwrap();
-        kinds.push((job.run_id.clone(), job.image.clone(), job.args.clone()));
+        let Body::Container { image, args } = job.body.clone();
+        kinds.push((job.run_id.clone(), image, args));
     }
     let profile = profile_option();
     for (run, image, job_args) in kinds {
