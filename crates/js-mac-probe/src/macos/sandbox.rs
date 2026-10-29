@@ -52,7 +52,7 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         "",
         &control,
     ));
-    let denied = places.child(&sandboxed, "write", target.as_os_str());
+    let denied = places.child(&Mode::Control, "write", target.as_os_str());
     let denied_probe = Probe::asserted(
         "sandbox/deny-write-outside",
         denied.refused() && !target.exists(),
