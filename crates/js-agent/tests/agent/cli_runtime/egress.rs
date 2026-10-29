@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use js_agent::cli_runtime::{CliError, CliRuntime, EgressError, Settings, SettingsError};
-use js_agent::lifecycle::{Config, Runtime, Lifecycle, NoChecks};
+use js_agent::lifecycle::{Config, Lifecycle, NoChecks, Runtime};
 use js_agent_wire::Command;
 use serde_json::{Value, json};
 
