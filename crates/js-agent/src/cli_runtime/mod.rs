@@ -269,14 +269,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::Isolation;
 use serde_json::Value;
 
+mod egress;
 use args::user_args;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
     label_args, limits_to_args, scratch_volume_options,
 };
+pub use egress::{
+    ALLOW_MAX as EGRESS_ALLOW_MAX, Allow, DEFAULT_NFT, Egress, EgressError, TABLE as EGRESS_TABLE,
+};
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
+    ADD_HOST_MAX, CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull,
+    Settings, SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
@@ -418,6 +423,14 @@ pub enum CliError {
         /// The process id the engine reported (`State.Pid`).
         pid: u32,
     },
+    /// The egress check failed: the network or the firewall is not as
+    /// `--container-egress-allow` requires.
+    #[error("{0}")]
+    Egress(#[from] EgressError),
+    /// Egress flags with Docker: the check reads netavark's network and the host's nftables
+    /// table; Docker keeps its own iptables chains, which it does not read.
+    #[error("--container-egress-allow: only Podman is supported")]
+    EgressDocker,
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
     #[error("{why}{note}")]
@@ -596,6 +609,9 @@ impl CliRuntime {
                 why,
             })?;
         let engine = Engine::of_version(&printed).ok_or(CliError::NotAnEngine)?;
+        if engine == Engine::Docker && settings.egress().is_some() {
+            return Err(CliError::EgressDocker);
+        }
         let docker_major = major_of(&printed).filter(|_| engine == Engine::Docker);
         let mut runtime = Self {
             settings,
@@ -679,6 +695,29 @@ impl CliRuntime {
     /// The engine found.
     pub fn engine(&self) -> Engine {
         self.engine
+    }
+
+    /// Confirms that the named network is limited to the endpoints of
+    /// `--container-egress-allow`: see [`EgressError`]. Nothing is checked for the default
+    /// network. The agent calls this at start and before every job is created.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Egress`].
+    pub fn egress_enforced(&self) -> Result<(), CliError> {
+        let Some(egress) = self.settings.egress() else {
+            return Ok(());
+        };
+        let env = engine_env(&self.settings);
+        let proc = |path: &str| (self.proc_read)(path);
+        egress::check(
+            &*self.runner,
+            (self.settings.bin(), &env),
+            self.settings.network(),
+            egress,
+            &proc,
+        )
+        .map_err(CliError::Egress)
     }
 
     fn call(&self, call: &'static str, args: &[&str]) -> Result<String, CliError> {
@@ -864,6 +903,24 @@ impl CliRuntime {
         let theirs = (self.proc_link)(&format!("/proc/{pid}/ns/pid"));
         let own = (self.proc_link)("/proc/self/ns/pid");
         matches!((theirs, own), (Some(theirs), Some(own)) if theirs != own)
+    }
+
+    /// The control group directory of the started container `id`: the unified (`0::`) line of
+    /// its process's `/proc/<pid>/cgroup`, below [`CGROUP_ROOT`]. `None` without
+    /// `--actions-cgroup`, when the container is over, when its process or control group
+    /// cannot be read, and when the control group is not strictly below `--actions-cgroup`
+    /// (the engine ignored the parent, so the node's counter would not hold the lease).
+    fn cgroup_of(&self, id: &ContainerId) -> Option<PathBuf> {
+        let actions = Path::new(self.settings.actions_cgroup()?);
+        let text = self
+            .inspect(id, "{{.State.Pid}} {{.State.Status}}")
+            .ok()??;
+        let pid = parse_pid(&text)
+            .filter(|(pid, ended)| *pid != 0 && !ended)?
+            .0;
+        let table = (self.proc_read)(&format!("/proc/{pid}/cgroup"))?;
+        let dir = Path::new(CGROUP_ROOT).join(unified_path(&table)?);
+        (dir.starts_with(actions) && dir != actions).then_some(dir)
     }
 
     /// Gives the run's scratch directory to the container's user, when the agent is root:
@@ -1174,6 +1231,15 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
+/// The path of the unified (`0::<path>`) line of a `/proc/<pid>/cgroup`, without its leading
+/// `/`. `None` when there is no such line, or its path has an empty, `.` or `..` component
+/// (a process in a control group the agent's namespace cannot name).
+fn unified_path(table: &str) -> Option<&str> {
+    let path = table.lines().find_map(|line| line.strip_prefix("0::/"))?;
+    let plain = |part: &str| !matches!(part, "" | "." | "..");
+    path.split('/').all(plain).then_some(path)
+}
+
 /// The entries of the JSON `.Mounts` of an `inspect` (`null` is none). `None` when the
 /// text is not a list or `null`.
 fn mount_entries(text: &str) -> Option<Vec<Value>> {
@@ -1327,5 +1393,13 @@ impl ContainerRuntime for CliRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.egress_enforced().map_err(RuntimeError::from)
+    }
+
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        self.cgroup_of(id)
     }
 }

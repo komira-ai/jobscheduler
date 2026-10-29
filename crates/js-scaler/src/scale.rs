@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{billed_until, check, choose, nearest_miss};
+use crate::caps::{billed_until, check, choose, nearest_miss, unpriced};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -48,6 +48,21 @@ fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = 
     [Some(mint), acquire].into_iter().flatten()
 }
 
+/// The most a restart may lose of the time the scaler observed a pending silent or missing
+/// time: the records are written at least this often, or a sixth of the shortest
+/// `unknown_hold` among the pools if that is less. Derived, not a setting.
+const HOLD_SAVE_MOST: Duration = Duration::from_secs(5 * 60);
+
+/// How often the records are written while a silent or missing time is pending and
+/// nothing else changed. `None` when no pool is configured.
+fn hold_save_every(input: &Input) -> Option<Duration> {
+    input
+        .pools
+        .iter()
+        .map(|pool| (pool.settings.unknown_hold / 6).min(HOLD_SAVE_MOST))
+        .min()
+}
+
 impl Pass<'_> {
     /// The second half of a step for one pool, once every request has been matched to what
     /// covers it: notes the silent hosts, takes back the hosts whose undrain was lost,
@@ -83,7 +98,9 @@ impl Pass<'_> {
                     !host.busy,
                     !condemned,
                     !claims.hosts.contains(host.id.as_str()),
-                    host.shape.fit(&request.demand).is_ok(),
+                    host.shape
+                        .as_ref()
+                        .is_some_and(|shape| shape.fit(&request.demand).is_ok()),
                 ]
                 .into_iter()
                 .all(|ok| ok)
@@ -178,7 +195,9 @@ impl Pass<'_> {
                     [
                         host.state == HostState::Live,
                         host.mark == Some(Mark::Draining),
-                        host.shape.fit(&request.demand).is_ok(),
+                        host.shape
+                            .as_ref()
+                            .is_some_and(|shape| shape.fit(&request.demand).is_ok()),
                     ]
                     .into_iter()
                     .all(|ok| ok)
@@ -439,6 +458,7 @@ impl Pass<'_> {
         let mut served: Vec<&Waiting> = Vec::new();
         let mut left = Vec::new();
         let mut stopped = None;
+        let mut no_price = false;
         for request in uncovered {
             let room = [
                 stopped.is_none(),
@@ -446,8 +466,14 @@ impl Pass<'_> {
             ]
             .into_iter()
             .all(|ok| ok);
-            let offer =
-                choose(settings, &pool.offers, &request.demand, &self.declined).filter(|_| room);
+            let chosen = choose(settings, &pool.offers, &request.demand, &self.declined);
+            no_price |= [
+                chosen.is_none(),
+                unpriced(settings, &pool.offers, &request.demand, &self.declined),
+            ]
+            .into_iter()
+            .all(|ok| ok);
+            let offer = chosen.filter(|_| room);
             match offer.map(|offer| self.stage(settings, offer, &staged)) {
                 Some(Ok(record)) => {
                     staged.push(record);
@@ -460,6 +486,7 @@ impl Pass<'_> {
                 None => left.push(request),
             }
         }
+        let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
         if live {
             if let Some(blocked) = stopped {
                 self.blocked.insert(settings.pool.clone(), blocked);
@@ -575,7 +602,25 @@ impl Pass<'_> {
             .into_iter()
             .all(|keep| keep)
         });
-        let save = (self.records != *before).then(|| Action::Save(Box::new(self.records.clone())));
+        self.records.silent_since = self.silent_now.clone();
+        self.records.missing_since = self.missing_now.clone();
+        // The time of the step is written with the records and never alone, so a restart
+        // reads a time that is no later than the last step the old process took. While a
+        // silent or missing time is pending the records are also written once every
+        // `hold_save_every` of observed time, so a restart loses at most that much of it.
+        let pending = [!self.silent_now.is_empty(), !self.missing_now.is_empty()];
+        let stale = hold_save_every(input).is_some_and(|every| {
+            self.records
+                .last_step
+                .is_none_or(|last| now.since(last) >= every)
+        });
+        let due = [pending.into_iter().any(|each| each), stale];
+        let changed = [self.records != *before, due.into_iter().all(|each| each)];
+        let write = changed.into_iter().any(|each| each);
+        if write {
+            self.records.last_step = Some(now);
+        }
+        let save = write.then(|| Action::Save(Box::new(self.records.clone())));
         let mut actions: Vec<Action> = save.into_iter().collect();
         actions.append(&mut self.actions);
         let no_offer = uncovered
@@ -599,6 +644,8 @@ impl Pass<'_> {
             silent: self.silent_now,
             silent_released: self.silent_released,
             missing: self.missing_now,
+            unheard: self.unheard_now,
+            restored: false,
         };
         (state, actions)
     }

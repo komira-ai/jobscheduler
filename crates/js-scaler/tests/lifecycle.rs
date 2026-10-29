@@ -166,7 +166,8 @@ fn a_request_or_work_arriving_while_draining_takes_the_host_back() {
 fn a_draining_host_the_registry_hears_nothing_from_is_left_alone() {
     let (mut silent, _, now) = draining();
     silent.input.hosts[0].state = js_scaler::HostState::Lost;
-    assert!(silent.tick(at(now + SECOND)).is_empty());
+    assert_eq!(kinds(&silent.tick(at(now + SECOND))), ["Save"]);
+    assert!(silent.tick(at(now + 2 * SECOND)).is_empty());
     assert_eq!(silent.phase(0), Phase::Draining);
 }
 
@@ -186,11 +187,11 @@ fn short(change: fn(&mut HostFacts)) -> (Rig, js_scaler::AcquirePlan) {
 #[test]
 fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
     let below: [fn(&mut HostFacts); 5] = [
-        |h| h.shape.cpu_millis = 7999,
-        |h| h.shape.memory_bytes = (64 << 30) - 1,
-        |h| h.shape.gpus = 0,
-        |h| h.shape.gpu_class = Some(GpuClass::parse("nvidia-h100").unwrap()),
-        |h| h.shape.gpu_class = None,
+        |h| shape(h).cpu_millis = 7999,
+        |h| shape(h).memory_bytes = (64 << 30) - 1,
+        |h| shape(h).gpus = 0,
+        |h| shape(h).gpu_class = Some(GpuClass::parse("nvidia-h100").unwrap()),
+        |h| shape(h).gpu_class = None,
     ];
     for change in below {
         let (rig, _) = short(change);
@@ -202,7 +203,7 @@ fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
         assert_eq!(cooldown.until, at(2 * SECOND + 10 * MINUTE));
         assert_eq!(rig.state.blocked["gpu"], Blocked::BootFailed);
     }
-    let enough: [fn(&mut HostFacts); 2] = [|h| h.busy = false, |h| h.shape.cpu_millis = 16_000];
+    let enough: [fn(&mut HostFacts); 2] = [|h| h.busy = false, |h| shape(h).cpu_millis = 16_000];
     for change in enough {
         let (rig, _) = short(change);
         assert_eq!(rig.phase(0), Phase::Registered);
@@ -215,7 +216,7 @@ fn a_hello_below_its_offer_condemns_the_host_and_starts_the_cooldown() {
 /// taken back for a request, though the request fits it.
 #[test]
 fn a_condemned_host_is_never_taken_back_for_a_request() {
-    let (mut rig, plan) = short(|h| h.shape.cpu_millis = 7999);
+    let (mut rig, plan) = short(|h| shape(h).cpu_millis = 7999);
     rig.input.hosts[0].mark = Some(Mark::Draining);
     rig.input.waiting = vec![request("r2")];
     let actions = rig.tick(at(3 * SECOND));
