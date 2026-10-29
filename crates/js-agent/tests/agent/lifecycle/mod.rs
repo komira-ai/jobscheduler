@@ -202,7 +202,7 @@ pub fn job(run_id: &str) -> JobSpec {
     JobSpec {
         run_id: run_id.to_owned(),
         lease_id: format!("lease-{run_id}"),
-        image: "registry.example/job:1".to_owned(),
+        image: "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
         args: vec!["--go".to_owned()],
         limits: Limits {
             cpu_millis: 1000,

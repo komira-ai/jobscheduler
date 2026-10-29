@@ -19,7 +19,8 @@ fn job(run: &str, cpu: u64) -> JobSpec {
     JobSpec {
         run_id: run.into(),
         lease_id: String::new(),
-        image: "busybox:1".into(),
+        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
         args: Vec::new(),
         limits: Limits {
             cpu_millis: cpu,
@@ -252,6 +253,35 @@ fn a_listed_run_survives_the_loss_of_its_host() {
     fx.hello(&hello("a"), &cred("t")).unwrap();
     assert_eq!(state_of(&fx, "r1"), RunState::Ended);
     assert_eq!(welcome.epoch, 2);
+}
+
+/// Asserts that a job whose image is not pinned by a sha256 digest is refused before any
+/// state is read, with `image-digest-required`, and queues nothing; a digest alone and a
+/// tag with a digest are queued. It catches a start reaching a host that pulls what it
+/// lacks with a tag that can move.
+#[test]
+fn an_unpinned_image_is_refused_and_a_pinned_one_queued() {
+    let (fx, _epoch) = leased();
+    let ask = |spec: JobSpec| fx.registry.queue_run(&host("a"), &lease(1), spec);
+    let hex = "0123456789abcdef".repeat(4);
+    for image in [
+        "busybox:1".to_string(),
+        "busybox".to_string(),
+        format!("busybox@sha256:{}", &hex[..40]),
+        format!("busybox@sha512:{hex}{hex}"),
+    ] {
+        let mut bad = job("r1", 1);
+        bad.image = image.clone();
+        let err = ask(bad).unwrap_err();
+        assert_eq!(err.code(), refusal::IMAGE_DIGEST_REQUIRED, "{image}");
+    }
+    assert!(fx.registry.runs_of(&lease(1)).is_empty());
+    let mut digest = job("r1", 1);
+    digest.image = format!("busybox@sha256:{hex}");
+    ask(digest).unwrap();
+    let mut both = job("r2", 1);
+    both.image = format!("busybox:1@sha256:{hex}");
+    ask(both).unwrap();
 }
 
 /// Asserts every refusal of the admission and its code, in the order the registry checks

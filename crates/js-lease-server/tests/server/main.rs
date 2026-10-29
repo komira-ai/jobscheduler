@@ -14,6 +14,7 @@ mod agents_whole;
 mod auth;
 mod binary;
 mod config_file;
+mod config_one_file;
 mod config_pool_refusals;
 mod config_refusals;
 mod config_serve;

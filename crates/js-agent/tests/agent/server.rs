@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use clap::Parser;
 use js_agent::{
     Answer, Connector, Dialer, HEARTBEAT_PATH, Handle, Machine, Sleeper, Transport, Wake,
 };
