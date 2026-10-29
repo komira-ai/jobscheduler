@@ -8,6 +8,7 @@
 mod admission;
 mod cell;
 mod common;
+mod curves;
 mod feed;
 mod frontends;
 mod handover;
