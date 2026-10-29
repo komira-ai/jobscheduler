@@ -57,6 +57,8 @@ struct State {
     blind: bool,
     /// The control group directory of the container of each run.
     cgroups: BTreeMap<String, PathBuf>,
+    /// How many times the scripted checks were told the host is idle.
+    idles: u32,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -89,6 +91,11 @@ impl FakeRuntime {
     /// `list`) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// How many times the scripted checks were told the host is idle (`CheckHook::idle`).
+    pub fn idles(&self) -> u32 {
+        self.state.borrow().idles
     }
 
     /// The next `create_and_start` fails as a start does when the agent cannot see the host
@@ -356,6 +363,10 @@ impl ScriptedChecks {
 }
 
 impl CheckHook for ScriptedChecks {
+    fn idle(&mut self) {
+        self.runtime.state.borrow_mut().idles += 1;
+    }
+
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         let run_id = job.run_id;
         let container = match self.runtime.gone(run_id) {

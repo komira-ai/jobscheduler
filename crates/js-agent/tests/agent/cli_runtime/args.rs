@@ -125,7 +125,9 @@ fn a_limit_of_zero_is_refused() {
 /// Asserts that every contained job gets the hardening whatever it asked for: all
 /// capabilities dropped, no new privileges, no network by default, a read-only root
 /// with a `/tmp` that is a tmpfs which cannot run programs or hold devices or set-uid
-/// files and is limited in size, no core dumps, a private IPC namespace (and for Podman,
+/// files and is limited in size, no core dumps, a private IPC namespace, a private control
+/// group namespace (which the integrity checks rely on: a job sees only its own group, and
+/// cannot move a process out of it), (and for Podman,
 /// the only one of the two that takes the value, a private PID namespace), no pull, a
 /// user that is not root, and no `--rm` (the lifecycle removes the container after it
 /// has read the result). It catches a flag dropped from the list, a default network that
@@ -149,6 +151,8 @@ fn hardening_flags_always_present() {
         "--ulimit",
         "core=0",
         "--ipc",
+        "private",
+        "--cgroupns",
         "private",
     ];
     let tail = ["--pull", "never"];
