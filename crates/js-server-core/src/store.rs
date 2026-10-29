@@ -27,7 +27,7 @@ use js_types::sched::{
 };
 
 use crate::adapter::Adapter;
-use crate::core::{Held, NodeAction, NodeUnread, NotQueued, PlaceError, UnknownNode};
+use crate::core::{Held, NodeAction, NodeHeld, NodeUnread, NotQueued, PlaceError, UnknownNode};
 use crate::engine::Engine;
 use crate::write::{Attempt, Settles, Writer};
 
@@ -604,6 +604,42 @@ impl Engine {
             Ok(())
         });
         known
+    }
+
+    /// Which frontend holds `worker`: this one when it owns the node, or the node is
+    /// connected here and no frontend has claimed it; another when the store knows the node
+    /// and this core does not own it, with the leases the store holds on it. A core with no
+    /// state store, or a fenced one, holds the nodes connected to it and knows no other.
+    pub(crate) fn node_held(&mut self, now: FarmTime, worker: &WorkerId) -> NodeHeld {
+        let connected = self.links.contains_key(worker);
+        if self.fenced || self.rows.is_none() {
+            return if connected {
+                NodeHeld::Here
+            } else {
+                NodeHeld::Unknown
+            };
+        }
+        match self.owner_look(now, worker) {
+            None => return NodeHeld::Unread,
+            Some(true) => return NodeHeld::Here,
+            Some(false) => {}
+        }
+        match self.known_elsewhere(worker) {
+            None => return NodeHeld::Unread,
+            Some(false) if connected => return NodeHeld::Here,
+            Some(false) => return NodeHeld::Unknown,
+            Some(true) => {}
+        }
+        let mut leases = None;
+        self.attempt("a node look", &mut |rows| {
+            let held = rows.held_by(worker)?;
+            let granted = held.into_iter().filter_map(|op| op.lease);
+            leases = Some(granted.map(|grant| grant.lease).collect::<Vec<_>>());
+            Ok(())
+        });
+        // The lease rows are keyed by zero-padded hexadecimal term and sequence, so the
+        // store lists them in lease order.
+        leases.map_or(NodeHeld::Unread, |leases| NodeHeld::Elsewhere { leases })
     }
 
     /// Cordons, drains or uncordons `worker` (see `js_sched::Cordon`), after the store has
