@@ -27,6 +27,7 @@ fn sample() -> Records {
     orphan.condemned = true;
     orphan.clean_lists = 2;
     orphan.last_clean = Some(at(3 * MINUTE));
+    orphan.seen_live = true;
     let mut records = Records {
         instances: vec![launching, orphan],
         ..Records::default()
@@ -92,6 +93,26 @@ fn a_file_that_is_not_records_of_this_version_is_refused() {
     let bad_id = GOLDEN.replace("made-0-60", "not an id");
     let error = Records::decode(&bad_id).unwrap_err();
     assert!(error.to_string().contains("an id is 1 to 128"), "{error}");
+}
+
+/// Asserts that `seen_live` survives the file, and that a file written before the field
+/// existed (every record without it) still reads, with the field `true`: the safe direction,
+/// as the lost-Welcome rule stays off for a host that may have been heard from.
+#[test]
+fn seen_live_is_kept_and_an_old_file_without_it_reads_true() {
+    let kept = Records::decode(&sample().encode().unwrap()).unwrap();
+    assert!(!kept.instances[0].seen_live);
+    assert!(kept.instances[1].seen_live);
+
+    let old: String = GOLDEN
+        .replace(",\n      \"seen_live\": false", "")
+        .replace(",\n      \"seen_live\": true", "");
+    assert!(!old.contains("seen_live"));
+    let read = Records::decode(&old).unwrap();
+    assert!(read.instances.iter().all(|each| each.seen_live));
+    let mut expected = sample();
+    expected.instances[0].seen_live = true;
+    assert_eq!(read, expected);
 }
 
 /// Asserts that an offer's shape survives the file: both execution modes, a gpu class and
