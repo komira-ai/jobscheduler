@@ -65,7 +65,7 @@ pub struct Fit {
 #[must_use]
 pub fn fit(ring: &Ring) -> Option<Fit> {
     let runs = ring.len();
-    if runs < MIN_RUNS_FOR_CURVE {
+    if ring.runs().filter(|r| !r.under_node_pressure()).count() < MIN_RUNS_FOR_CURVE {
         return None;
     }
     let cores_learned =
