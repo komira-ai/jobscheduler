@@ -112,15 +112,15 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     let count = |out: &Outcome| out.stdout.lines().count();
     let control = run(places.command(&Mode::Control, OsStr::new("/usr/bin/pgrep"), &ps_args));
     let mut probe =
-        Probe::info("sandbox/process-info-others").fact("control_ps_processes", count(&control));
+        Probe::info("sandbox/process-info-others").fact("control_pgrep_processes", count(&control));
     for (name, rules) in variants {
         let mode = Mode::Sandboxed(&off, rules);
         let ps = run(places.command(&mode, OsStr::new("/usr/bin/pgrep"), &ps_args));
         let true_ = run(places.command(&mode, OsStr::new("/usr/bin/true"), &[]));
         probe = probe
-            .fact(&format!("{name}_ps_processes"), count(&ps))
+            .fact(&format!("{name}_pgrep_processes"), count(&ps))
             .fact(&format!("{name}_true_ok"), true_.ok);
-        probe = describe(probe, &format!("{name}_ps_"), &ps);
+        probe = describe(probe, &format!("{name}_pgrep_"), &ps);
         if !true_.ok {
             probe = probe.fact(&format!("{name}_true_stderr"), true_.stderr_tail());
         }
