@@ -45,13 +45,6 @@ impl SchedulerId {
         valid_id(text, MAX_SCHEDULER).map(Self)
     }
 
-    /// The id `text`, unchecked. The caller promises `text` is 1 to 64 letters, digits
-    /// and `-`, as a constant of its own is; anything read from outside goes through
-    /// [`SchedulerId::new`].
-    pub fn made(text: &str) -> Self {
-        Self(text.to_owned())
-    }
-
     /// The id as text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -70,13 +63,6 @@ impl AcquireId {
     /// [`InvalidId`] when `text` is not an id.
     pub fn new(text: &str) -> Result<Self, InvalidId> {
         valid_id(text, MAX_ACQUIRE).map(Self)
-    }
-
-    /// The id `text`, unchecked. The caller promises `text` is 1 to 128 letters, digits
-    /// and `-`, as one it built from a constant and a hex digest is; anything read from
-    /// outside goes through [`AcquireId::new`].
-    pub fn made(text: String) -> Self {
-        Self(text)
     }
 
     /// The id as text.
@@ -155,8 +141,8 @@ mod tests {
     use super::*;
 
     /// Asserts that an id is accepted exactly when it is 1 to its limit of letters,
-    /// digits, `.`, `_` and `-`, that the error names the limit, and that an unchecked
-    /// id reads back as given.
+    /// digits, `.`, `_` and `-`, that the error names the limit, and that an id reads
+    /// back as given.
     #[test]
     fn ids_are_checked() {
         assert_eq!(
@@ -175,10 +161,9 @@ mod tests {
             err.to_string(),
             "an id is 1 to 128 letters, digits, '.', '_' or '-'"
         );
-        assert_eq!(SchedulerId::made("first-launch").as_str(), "first-launch");
-        let made = AcquireId::made("first-launch-ab12".to_owned());
-        assert_eq!(made.as_str(), "first-launch-ab12");
-        assert_eq!(made.to_string(), "first-launch-ab12");
+        let acquire = AcquireId::new("first-launch-ab12").unwrap();
+        assert_eq!(acquire.as_str(), "first-launch-ab12");
+        assert_eq!(acquire.to_string(), "first-launch-ab12");
     }
 
     /// Asserts that a host name is the scheduler's prefix and a hash of the acquire id,

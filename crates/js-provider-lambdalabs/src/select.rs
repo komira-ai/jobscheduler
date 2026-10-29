@@ -57,8 +57,8 @@ pub(crate) fn offers(table: &OptionTable, types: &[InstanceTypeOffer]) -> Vec<Of
 }
 
 /// The offers that are available and fit `demand`, in the order to try them: cheapest
-/// first, then fewest GPUs, then id, then zone. The price orders and never excludes. No
-/// offer means no capacity.
+/// first (an offer with no price last), then fewest GPUs, then id, then zone. The price
+/// orders and never excludes. No offer means no capacity.
 pub(crate) fn candidates(offers: &[Offer], demand: &Demand) -> Vec<Offer> {
     let mut fits: Vec<&Offer> = offers
         .iter()
@@ -68,13 +68,18 @@ pub(crate) fn candidates(offers: &[Offer], demand: &Demand) -> Vec<Offer> {
                 .all(|ok| ok)
         })
         .collect();
+    // An unpriced offer sorts after every priced one: no price is not a cheap price.
+    let key = |o: &Offer| {
+        (
+            o.price_cents_per_hour.is_none(),
+            o.price_cents_per_hour,
+            o.gpus,
+        )
+    };
     fits.sort_by(|a, b| {
-        (&a.price_cents_per_hour, a.gpus, &a.id, &a.zone).cmp(&(
-            &b.price_cents_per_hour,
-            b.gpus,
-            &b.id,
-            &b.zone,
-        ))
+        key(a)
+            .cmp(&key(b))
+            .then_with(|| (&a.id, &a.zone).cmp(&(&b.id, &b.zone)))
     });
     fits.into_iter().cloned().collect()
 }
@@ -132,5 +137,25 @@ mod tests {
         let chosen = candidates(&all, &anything());
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].zone.as_deref(), Some("r2"));
+    }
+
+    /// Asserts that an offer with no price is never chosen ahead of a priced one, even
+    /// when its id and zone sort first and its price would read as the smallest.
+    #[test]
+    fn an_unpriced_offer_is_never_chosen_ahead_of_a_priced_one() {
+        let table = OptionTable::parse(
+            "[[option]]\ninstance_type = \"gpu_1x_a\"\ngpu_class = \"nvidia-a\"\ngpus = 1\n\
+             [[option]]\ninstance_type = \"gpu_1x_b\"\ngpu_class = \"nvidia-a\"\ngpus = 1\n",
+        )
+        .unwrap();
+        let mut all = offers(
+            &table,
+            &[kind("gpu_1x_a", &["r1"]), kind("gpu_1x_b", &["r1"])],
+        );
+        all[0].price_cents_per_hour = None;
+        let chosen = candidates(&all, &anything());
+        assert_eq!(chosen.len(), 2);
+        assert_eq!(chosen[0].id, "gpu_1x_b");
+        assert_eq!(chosen[1].id, "gpu_1x_a");
     }
 }

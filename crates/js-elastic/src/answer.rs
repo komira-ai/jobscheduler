@@ -187,7 +187,8 @@ pub enum Released {
     Gone,
     /// The machine is being terminated, or terminate was accepted; the status read.
     Terminating(HostStatus),
-    /// The machine is not entirely ours; nothing was sent.
+    /// The machine is not entirely ours, or the reference is not this provider's at all
+    /// ([`Claim::Foreign`]); nothing was sent.
     Refused(Claim),
     /// No answer: nothing observed shows the machine gone or going. Callers must treat
     /// this as "retry", never as "gone".

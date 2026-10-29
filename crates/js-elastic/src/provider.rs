@@ -76,6 +76,10 @@ pub trait ElasticProvider: Send + Sync {
     fn list(&self) -> Result<Vec<Held>, ProviderError>;
 
     /// Terminates one machine, if it is ours, and reads it back.
+    ///
+    /// A reference that is not an id of this provider is not one of its machines: the
+    /// answer is [`Released::Refused`] with [`crate::Claim::Foreign`], a definite answer that is
+    /// never [`Released::Gone`], and nothing is sent to the provider.
     fn release(&self, id: &HostRef) -> Released;
 }
 

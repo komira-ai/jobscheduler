@@ -494,9 +494,9 @@ impl ElasticProvider for LambdaProvider {
     fn release(&self, id: &HostRef) -> Released {
         match InstanceId::new(id.as_str()) {
             Ok(id) => self.release_instance(&id),
-            // Not an id of this API, so not an instance of it: nothing was asked, and
-            // nothing shows it gone.
-            Err(_) => Released::Unknown,
+            // Not an id of this API, so not an instance of it and not ours: a definite
+            // answer, never "gone" and never one to retry. Nothing is asked of the API.
+            Err(_) => Released::Refused(Claim::Foreign),
         }
     }
 }

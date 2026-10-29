@@ -55,6 +55,16 @@ pub use state::sync_dir;
 
 /// The scheduler id and pool name on everything this runner launches.
 const OWNER: &str = "first-launch";
+
+/// The scheduler id of this runner.
+fn owner_id() -> SchedulerId {
+    SchedulerId::new(OWNER).expect("OWNER is a valid scheduler id")
+}
+
+/// The acquire id of the plan with `hash`: the owner and the hex digest.
+fn acquire_id(hash: &str) -> AcquireId {
+    AcquireId::new(&format!("{OWNER}-{hash}")).expect("the owner and a hex digest make an id")
+}
 /// How often the instance is looked at while booting.
 const POLL: Duration = Duration::from_secs(10);
 /// The most tries to terminate one instance.
@@ -265,7 +275,7 @@ impl Runner<'_, '_> {
                 "paste back this output.",
             ));
         };
-        let config = ElasticConfig::new(SchedulerId::made(OWNER), key_name, NonZeroUsize::MIN);
+        let config = ElasticConfig::new(owner_id(), key_name, NonZeroUsize::MIN);
         let Ok(config) = config else {
             return Err(self.fail(
                 "the ssh key name must be 1 to 64 printable ASCII characters",
@@ -382,7 +392,7 @@ impl Runner<'_, '_> {
     /// partial) and still exist, or why the account could not be read. `None` when the
     /// account holds none. A terminated instance no longer bills and is skipped.
     fn existing(&self) -> Option<(String, Vec<String>)> {
-        let owner = Owner::new(SchedulerId::made(OWNER));
+        let owner = Owner::new(owner_id());
         let all = match self.api.list_instances() {
             Ok(all) => all,
             Err(why) => {
@@ -457,7 +467,7 @@ impl Runner<'_, '_> {
     }
 
     fn launch(&mut self, plan: &Plan, provider: &LambdaProvider) -> i32 {
-        let acquire = AcquireId::made(format!("{OWNER}-{}", plan.hash));
+        let acquire = acquire_id(&plan.hash);
         let mut state = State {
             acquire: acquire.clone(),
             launched_unix: (self.seams.wall_unix)(),
@@ -495,7 +505,7 @@ impl Runner<'_, '_> {
         }
         let launched_at = self.seams.clock.now();
         let request = AcquireRequest {
-            name: HostName::derive(&SchedulerId::made(OWNER), &acquire),
+            name: HostName::derive(&owner_id(), &acquire),
             acquire: acquire.clone(),
             pool: OWNER.to_owned(),
             offer: plan.offer.clone(),
@@ -763,4 +773,19 @@ fn matching(held: &[Held], acquire: &AcquireId) -> Vec<HostRef> {
         .filter(|h| h.acquire == acquire.as_str())
         .map(|h| h.id.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that the runner's constant ids pass the checked constructors: the owner
+    /// as a scheduler id, and the owner with a 16-digit hex digest (the longest the plan
+    /// hash gets) as an acquire id.
+    #[test]
+    fn the_runners_constant_ids_are_valid() {
+        assert_eq!(owner_id().as_str(), OWNER);
+        let acquire = acquire_id("0123456789abcdef");
+        assert_eq!(acquire.as_str(), "first-launch-0123456789abcdef");
+    }
 }

@@ -493,13 +493,13 @@ fn the_provider_needs_no_host_preparation_and_carries_no_payload_yet() {
 }
 
 #[test]
-fn a_reference_that_is_no_instance_id_is_unknown_and_asks_the_api_nothing() {
+fn a_reference_that_is_no_instance_id_is_foreign_and_asks_the_api_nothing() {
     let rig = launched();
     let calls = rig.fake.calls().len();
     for bad in ["", "a b", "a/b", "../x"] {
         assert_eq!(
             rig.provider.release(&js_elastic::HostRef(bad.to_owned())),
-            Released::Unknown,
+            Released::Refused(Claim::Foreign),
             "{bad:?}"
         );
     }
