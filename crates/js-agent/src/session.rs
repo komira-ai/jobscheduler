@@ -82,13 +82,14 @@
 //!   one that has been inside a single order or step for longer than its calls can take
 //!   ([`Worker::stalled`]; it reads the worker's own clock, not a wall clock).
 //!
-//! - The worker does not implement [`Quiesce`]: a session built for jobs is given no
-//!   [`Session::with_quiesce`] host, so it does not follow the `exclusive` lease a reply
-//!   names. The heartbeat carries no `preparing`, `exclusive_ready` or `exclusive_refused`.
-//!   The worker's lifecycle still reads the lease from each reply, and while a reply names
-//!   one it refuses every start with `no-capacity` (reported as `failed_to_start`), because
-//!   nothing ever prepares the host for it; the runs it already holds go on, and starts are
-//!   accepted again from the first reply that names no lease.
+//! - The session follows a whole-node lease through a [`Quiesce`] host given with
+//!   [`Session::with_quiesce`]; the agent gives a session that runs jobs a
+//!   [`WorkerHost`](crate::worker::WorkerHost), which asks the worker without waiting. A
+//!   session built with a worker and no such host does not follow the `exclusive` lease a
+//!   reply names: its heartbeats carry no `preparing`, `exclusive_ready` or
+//!   `exclusive_refused`, and the worker's lifecycle refuses every start with `no-capacity`
+//!   (reported as `failed_to_start`) while a reply names a lease, since nothing prepares
+//!   the host for it.
 //!
 //! Without a worker the session carries nothing and counts the commands it ignores
 //! ([`Note::Ignored`]).
