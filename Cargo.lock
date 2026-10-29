@@ -1187,6 +1187,7 @@ dependencies = [
  "js-testkit",
  "libc",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",

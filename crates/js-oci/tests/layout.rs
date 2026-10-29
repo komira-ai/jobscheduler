@@ -4,6 +4,7 @@
 
 mod support;
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -587,4 +588,117 @@ async fn a_manifest_the_index_does_not_list_is_refused() {
     );
     assert!(format!("{layout:?}").contains("Layout"));
     assert!(format!("{err:?}").contains("TooLarge"));
+}
+
+/// Proves a FIFO where a blob, `index.json` or `oci-layout` belongs is refused at once as
+/// not a regular file, and does not hold the read open waiting for a writer.
+#[tokio::test]
+async fn a_fifo_where_a_file_belongs_is_refused() {
+    let kind = Kind::bundle();
+    let fifo = |path: &Path| {
+        let _ = std::fs::remove_file(path);
+        let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL");
+        // SAFETY: `name` is a NUL-terminated string that lives until the call returns, and
+        // mkfifo(3) only reads it.
+        let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    };
+    let (dir, artifact) = layout_of(Artifact::bundle(layers()));
+    let layout = Layout::open(dir.path()).await.expect("layout");
+    let manifest = layout
+        .fetch_manifest(&artifact.digest, &kind)
+        .await
+        .expect("manifest");
+    fifo(&blob_path(&dir, manifest.layers()[0].digest()));
+    let err = fault(
+        layout
+            .fetch_blob(&manifest.layers()[0], &mut Recording::default())
+            .await
+            .expect_err("fifo blob"),
+    );
+    assert!(matches!(err, LayoutFault::NotRegular(_)), "{err}");
+    fifo(&dir.join("index.json"));
+    let err = fault(manifest_error(&layout, &artifact.digest, &kind).await);
+    assert!(
+        matches!(&err, LayoutFault::NotRegular(p) if p == "index.json"),
+        "{err}"
+    );
+    fifo(&dir.join("oci-layout"));
+    let err = open_fault(dir.path()).await;
+    assert!(
+        matches!(&err, LayoutFault::NotRegular(p) if p == "oci-layout"),
+        "{err}"
+    );
+}
+
+/// Proves `index.json` and `oci-layout` that are symlinks are not followed, though the
+/// files they point at hold exactly the right bytes.
+#[tokio::test]
+async fn a_symlinked_index_or_marker_is_refused() {
+    let kind = Kind::bundle();
+    let (dir, artifact) = layout_of(Artifact::bundle(layers()));
+    let elsewhere = outside("js-oci-linked-files");
+    let layout = Layout::open(dir.path()).await.expect("layout");
+    let marker = dir.join("oci-layout");
+    let index = dir.join("index.json");
+    for path in [&marker, &index] {
+        let target = elsewhere.join(path.file_name().expect("name"));
+        std::fs::rename(path, &target).expect("move");
+        std::os::unix::fs::symlink(&target, path).expect("symlink");
+    }
+    let err = fault(manifest_error(&layout, &artifact.digest, &kind).await);
+    assert!(
+        matches!(&err, LayoutFault::Symlink(p) if p == "index.json"),
+        "{err}"
+    );
+    let err = open_fault(dir.path()).await;
+    assert!(
+        matches!(&err, LayoutFault::Symlink(p) if p == "oci-layout"),
+        "{err}"
+    );
+}
+
+/// Proves a blob that is a hard link to a regular file is read: what it holds is checked
+/// by its length and digest, so where else the file is linked from does not matter.
+#[tokio::test]
+async fn a_hard_linked_blob_with_the_right_bytes_is_read() {
+    let (dir, artifact) = layout_of(Artifact::bundle(layers()));
+    let elsewhere = outside("js-oci-hard-link");
+    let layout = Layout::open(dir.path()).await.expect("layout");
+    let manifest = layout
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    let digest = manifest.layers()[0].digest();
+    let path = blob_path(&dir, digest);
+    let original = elsewhere.join("original");
+    std::fs::rename(&path, &original).expect("move");
+    std::fs::hard_link(&original, &path).expect("link");
+    let mut sink = Recording::default();
+    layout
+        .fetch_blob(&manifest.layers()[0], &mut sink)
+        .await
+        .expect("read");
+    assert_eq!((sink.bytes, sink.finished), (layers()[0].clone(), true));
+}
+
+/// Proves a root or a `blobs` directory that does not exist is reported as unreadable,
+/// not as a link or a wrong kind of file.
+#[tokio::test]
+async fn a_missing_root_or_blobs_directory_is_unreadable() {
+    let kind = Kind::bundle();
+    let (dir, artifact) = layout_of(Artifact::bundle(layers()));
+    let layout = Layout::open(dir.path()).await.expect("layout");
+    std::fs::remove_dir_all(dir.join("blobs")).expect("remove");
+    let err = fault(manifest_error(&layout, &artifact.digest, &kind).await);
+    assert!(
+        matches!(&err, LayoutFault::Unreadable { path, source }
+            if path == "blobs" && source.kind() == std::io::ErrorKind::NotFound),
+        "{err}"
+    );
+    let err = open_fault(&dir.join("no such layout")).await;
+    assert!(
+        matches!(&err, LayoutFault::Unreadable { path, .. } if path == "."),
+        "{err}"
+    );
 }
