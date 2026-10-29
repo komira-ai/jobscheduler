@@ -1,6 +1,7 @@
 //! The core: one lock around the scheduler's driver and the server's own state.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
@@ -9,6 +10,7 @@ use js_sched::{
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
+use js_types::sched::usage::CurveSource;
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
 use js_whole::WholeNodeConfig;
 
@@ -20,6 +22,25 @@ use crate::observer::Observer;
 use crate::report::{Report, Standing, Taken, log_refusal};
 use crate::store::Storage;
 use crate::write::Writer;
+
+/// The curve source a [`Config`] hands the scheduler. Clones share the source; two are equal
+/// when they are the same source.
+#[derive(Clone)]
+pub(crate) struct Curves(pub(crate) Arc<dyn CurveSource + Send + Sync>);
+
+impl fmt::Debug for Curves {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Curves")
+    }
+}
+
+impl PartialEq for Curves {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Curves {}
 
 /// How a core is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +77,9 @@ pub struct Config {
     /// and their summary names a start takes up. Off, a key is ignored and the rows of an
     /// earlier run are neither read nor allowed to fail a start.
     pub size_keys: bool,
+    /// Where the scheduler finds the learned curves of action keys
+    /// ([`Config::with_curves`]); `None` is the scheduler's default, no curves.
+    pub(crate) curves: Option<Curves>,
 }
 
 impl Config {
@@ -73,6 +97,7 @@ impl Config {
             loss_requeues: LOSS_REQUEUES,
             whole_node: None,
             size_keys: false,
+            curves: None,
         }
     }
 
@@ -112,6 +137,15 @@ impl Config {
     #[must_use]
     pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Self {
         self.whole_node = Some(whole);
+        self
+    }
+
+    /// This configuration, giving the scheduler `curves` to read
+    /// ([`Scheduler::with_curves`](js_sched::Scheduler::with_curves)). Every core built from
+    /// this configuration, a restart's included, holds this same source.
+    #[must_use]
+    pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
+        self.curves = Some(Curves(curves));
         self
     }
 

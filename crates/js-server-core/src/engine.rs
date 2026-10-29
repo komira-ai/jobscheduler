@@ -138,6 +138,9 @@ impl Engine {
         if let Some(whole) = &config.whole_node {
             sched = sched.with_whole_node(whole.clone());
         }
+        if let Some(curves) = &config.curves {
+            sched = sched.with_curves(Arc::clone(&curves.0));
+        }
         if let Some(bound) = config.memory_floors {
             sched = sched.with_memory_floors(bound);
         }
