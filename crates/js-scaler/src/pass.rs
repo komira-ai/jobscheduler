@@ -3,9 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use js_elastic::{Acquired, Held, HostStatus, RefusalCode, Released};
+use js_elastic::{Acquired, Extra, Held, HostStatus, RefusalCode, Released};
 
-use crate::input::{HostFacts, HostState, Input, Mark, PoolInput};
+use crate::input::{AcquireResult, HostFacts, HostState, Input, Mark, PoolInput};
 use crate::record::{Cooldown, CooldownReason, Phase, Record, Records, StoredOffer};
 use crate::settings::{Blocked, Settings};
 use crate::state::{Action, PlanLine, State};
@@ -19,6 +19,14 @@ pub(crate) struct Pass<'a> {
     pub(crate) records: Records,
     pub(crate) quiet: BTreeMap<String, Millis>,
     pub(crate) quiet_now: BTreeSet<String>,
+    /// Since when each silent host was silent at the last step, and at this one.
+    silent: BTreeMap<String, Millis>,
+    pub(crate) silent_now: BTreeMap<String, Millis>,
+    /// Records for the machines an acquire answer named besides the one wanted, added when
+    /// the lists have been read.
+    extras: Vec<Record>,
+    /// How many of the step's random values the launches so far have used.
+    pub(crate) drawn: usize,
     pub(crate) blocked: BTreeMap<String, Blocked>,
     pub(crate) plan: Vec<PlanLine>,
     pub(crate) refused: u64,
@@ -30,11 +38,6 @@ pub(crate) struct Pass<'a> {
 /// The host named `name`, if the registry knows it.
 pub(crate) fn host_named<'a>(input: &'a Input, name: &str) -> Option<&'a HostFacts> {
     input.hosts.iter().find(|host| host.id.as_str() == name)
-}
-
-/// The live host named `name`.
-fn live_host<'a>(input: &'a Input, name: &str) -> Option<&'a HostFacts> {
-    host_named(input, name).filter(|host| host.state == HostState::Live)
 }
 
 /// Whether a listed machine is gone or going for good.
@@ -82,6 +85,10 @@ impl<'a> Pass<'a> {
             records: state.records,
             quiet: state.quiet,
             quiet_now: BTreeSet::new(),
+            silent: state.silent,
+            silent_now: BTreeMap::new(),
+            extras: Vec::new(),
+            drawn: 0,
             blocked: BTreeMap::new(),
             plan: Vec::new(),
             refused: state.refused,
@@ -135,6 +142,7 @@ impl<'a> Pass<'a> {
             self.apply_list(pool, held);
         }
         self.apply_hosts(pool);
+        self.records.instances.append(&mut self.extras);
     }
 
     fn apply_acquired(&mut self, pool: &PoolInput) {
@@ -145,31 +153,65 @@ impl<'a> Pass<'a> {
                     == (pool.settings.pool.as_str(), Some(&result.acquire))
             });
             if let Some(i) = found {
-                self.on_acquired(pool, i, &result.answer);
+                self.on_acquired(pool, i, result);
             }
         }
     }
 
-    fn on_acquired(&mut self, pool: &PoolInput, i: usize, answer: &Acquired) {
-        match answer {
-            Acquired::Accepted { held, .. } => {
+    fn on_acquired(&mut self, pool: &PoolInput, i: usize, result: &AcquireResult) {
+        match &result.answer {
+            Acquired::Accepted { held, extras } => {
                 let to = match self.records.instances[i].phase {
                     Phase::Failed => Phase::Releasing,
                     _ => Phase::Booting,
                 };
                 if self.go(i, to) {
                     self.records.instances[i].cloud_id = Some(held.id.0.clone());
+                    self.record_extras(i, extras);
                 }
             }
             Acquired::Refused(refusal) => self.on_refused(pool, i, refusal.code),
             Acquired::Unknown => {
                 self.go(i, Phase::Unresolved);
             }
-            Acquired::Deferred { wait } => {
+            // A deferral answers one call. One for an earlier attempt than the record's is
+            // a replay of an answer already acted on: planning the launch again would send
+            // a second token for a call that may have gone out.
+            Acquired::Deferred { wait } if result.attempt == self.records.instances[i].attempt => {
                 if self.go(i, Phase::Planned) {
                     self.records.instances[i].retry_at = Some(self.now.plus(*wait));
                 }
             }
+            Acquired::Deferred { .. } => {}
+        }
+    }
+
+    /// Records the machines an accepted launch named besides the one wanted, as the
+    /// provider reported them: one it released is a gone record (billed like a boot that
+    /// failed, which can only overstate), one it could not confirm released is an orphan
+    /// that is counted until a list stops showing it. They carry the launch's pool, offer
+    /// and price, and no acquire id or name, so a list matches them by the provider's id.
+    fn record_extras(&mut self, i: usize, extras: &[Extra]) {
+        let launch = self.records.instances[i].clone();
+        for extra in extras {
+            let released = matches!(extra.released, Released::Gone);
+            self.extras.push(Record {
+                acquire: None,
+                name: String::new(),
+                phase: if released { Phase::Gone } else { Phase::Orphan },
+                since: self.now,
+                launched_at: self.now,
+                token_expires: None,
+                cloud_id: Some(extra.id.0.clone()),
+                retry_at: None,
+                attempt: 0,
+                gone_at: released.then_some(self.now),
+                registered: false,
+                condemned: false,
+                clean_lists: 0,
+                last_clean: None,
+                ..launch.clone()
+            });
         }
     }
 
@@ -199,14 +241,22 @@ impl<'a> Pass<'a> {
                     == (pool.settings.pool.as_str(), result.host.as_str())
             });
             if let (Some(i), Released::Gone) = (found, &result.answer) {
-                let moved = self.go(i, Phase::Gone);
-                if moved {
-                    let name = self.records.instances[i].name.clone();
-                    self.records.instances[i].gone_at = Some(self.now);
-                    self.actions.push(Action::RemoveHost(name.clone()));
-                    self.actions.push(Action::ForgetNetwork(name));
-                }
+                self.confirm_gone(i);
             }
+        }
+    }
+
+    /// The machine is confirmed gone: the host is removed from the registry and its network
+    /// device forgotten, once. Both are asked of the shell a single time: a failed forget is
+    /// logged and does not block (the device is ephemeral and drops when offline), and the
+    /// registry removes the host itself when it has heard nothing for its retention
+    /// (`forget_lost`), so a repeat could only repeat a no-op.
+    fn confirm_gone(&mut self, i: usize) {
+        if self.go(i, Phase::Gone) {
+            let name = self.records.instances[i].name.clone();
+            self.records.instances[i].gone_at = Some(self.now);
+            self.actions.push(Action::RemoveHost(name.clone()));
+            self.actions.push(Action::ForgetNetwork(name));
         }
     }
 
@@ -246,6 +296,11 @@ impl<'a> Pass<'a> {
                 }
             }
             (Phase::Orphan, true) => self.orphan_gone(i),
+            (Phase::Orphan, false) => {
+                let record = &mut self.records.instances[i];
+                record.clean_lists = 0;
+                record.last_clean = None;
+            }
             _ => {}
         }
     }
@@ -261,13 +316,19 @@ impl<'a> Pass<'a> {
                 self.clean_list(i, hold);
             }
             (Phase::Failed, _) => self.clean_list(i, hold),
-            (Phase::Orphan, _) => self.orphan_gone(i),
+            (Phase::Orphan, _) => {
+                self.clean_list(i, hold);
+                if self.records.instances[i].clean_lists >= 2 {
+                    self.orphan_gone(i);
+                }
+            }
             _ => {}
         }
     }
 
-    /// Counts a list that shows no instance of a failed acquire. Two of them, at least
-    /// `hold` apart, settle it.
+    /// Counts a list that shows no instance of a failed acquire or of an orphan. Two of
+    /// them, at least `hold` apart, settle it: a late list proves little, so one list that
+    /// lacks a machine does not make it gone.
     fn clean_list(&mut self, i: usize, hold: std::time::Duration) {
         let now = self.now;
         let record = &mut self.records.instances[i];
@@ -293,13 +354,19 @@ impl<'a> Pass<'a> {
 
     /// A listed machine no record knows becomes an orphan: counted at its offer's
     /// current price (or the whole hourly cap when the catalog has no price for it),
-    /// reported and left alone.
+    /// reported and left alone. A record that is gone or was refused does not know it: a
+    /// machine such a record described, listed running, is counted again as a new orphan
+    /// and the old record keeps the time it was billed.
     fn adopt(&mut self, pool: &PoolInput, held: &Held) {
         let settings = &pool.settings;
         let known = self.records.instances.iter().any(|record| {
-            [record.pool == settings.pool, listed(record, held)]
-                .into_iter()
-                .all(|same| same)
+            [
+                record.pool == settings.pool,
+                ![Phase::Gone, Phase::Refused].contains(&record.phase),
+                listed(record, held),
+            ]
+            .into_iter()
+            .all(|same| same)
         });
         if [!known, !is_dead(&held.status)].into_iter().all(|ok| ok) {
             let offer = pool
@@ -340,18 +407,19 @@ impl<'a> Pass<'a> {
         let input = self.input;
         for i in self.indices(&pool.settings.pool) {
             let record = &self.records.instances[i];
-            let host = live_host(input, &record.name);
+            let host = host_named(input, &record.name);
             match (record.phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
                 (Phase::Booting, None) => self.on_boot_wait(pool, i),
-                (Phase::Draining, Some(host)) => self.on_drain_mark(i, host),
+                (Phase::Registered | Phase::Draining, host) => self.on_held(i, host),
                 _ => {}
             }
         }
     }
 
     /// The first hello of a booting machine: it is registered, and condemned if it
-    /// announced less than its offer.
+    /// announced less than its offer. A host the registry shows has said hello whatever it
+    /// has done since, so one that is silent now is registered too and then held.
     fn on_hello(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
         let record = &mut self.records.instances[i];
         let short = below(&record.offer, &host.shape);
@@ -363,23 +431,68 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// A machine that has not said hello is given up on after `boot_timeout`.
+    /// A machine that has not said hello is given up on `boot_timeout` after its launch,
+    /// the instant its join token was minted from.
     fn on_boot_wait(&mut self, pool: &PoolInput, i: usize) {
-        let waited = self.now.since(self.records.instances[i].since);
+        let waited = self.now.since(self.records.instances[i].launched_at);
         if waited >= pool.settings.boot_timeout {
             self.start_release(i);
             self.cool(&pool.settings, CooldownReason::BootFailed);
         }
     }
 
-    /// Reads the registry's mark back into a draining record: `release_host` took, or the
-    /// drain did not (the host was busy), or it is still draining.
-    fn on_drain_mark(&mut self, i: usize, host: &HostFacts) {
-        match host.mark {
-            Some(Mark::Releasing) => self.start_release(i),
-            Some(Mark::Draining) => {}
-            _ => {
+    /// A registered or draining machine and what the registry shows of its host.
+    ///
+    /// * A live host: its mark is read back ([`Pass::on_mark`]).
+    /// * A host the provider says it no longer has (`not_found`) and the registry does not
+    ///   hear from: revoked, forgotten and removed, and gone.
+    /// * A host the registry no longer shows: it forgot it (`forget_lost`), so it holds no
+    ///   lease, and the machine is still billed and still counted; it is released.
+    /// * A host the registry shows but does not hear from: held and counted, never released
+    ///   on silence, until the provider says it is terminated or not found.
+    fn on_held(&mut self, i: usize, host: Option<&HostFacts>) {
+        let name = self.records.instances[i].name.clone();
+        let not_found = self.input.not_found.contains(&name);
+        match (host.map(|host| (host.state, host.mark)), not_found) {
+            (Some((HostState::Live, mark)), _) => self.on_mark(i, mark),
+            (_, true) => {
+                self.start_release(i);
+                self.confirm_gone(i);
+            }
+            (None, false) => self.start_release(i),
+            (Some(_), false) => {}
+        }
+    }
+
+    /// Reads the registry's mark on a live host back into its record. `Releasing` means the
+    /// registry books nothing on the host and nothing clears the mark, so the machine is
+    /// released, whatever the scaler had last done with it. For a draining record, a mark
+    /// that is still `Draining` changes nothing, and any other means the drain did not
+    /// take (the host was busy) or was undone, so the host is registered again.
+    fn on_mark(&mut self, i: usize, mark: Option<Mark>) {
+        match (self.records.instances[i].phase, mark) {
+            (_, Some(Mark::Releasing)) => self.start_release(i),
+            (Phase::Draining, Some(Mark::Draining)) => {}
+            (Phase::Draining, _) => {
                 self.go(i, Phase::Registered);
+            }
+            _ => {}
+        }
+    }
+
+    /// Notes since when each registered or draining machine whose host the registry shows
+    /// but does not hear from has been silent.
+    pub(crate) fn track_silent(&mut self, pool: &PoolInput) {
+        let input = self.input;
+        for i in self.indices(&pool.settings.pool) {
+            let record = &self.records.instances[i];
+            let silent =
+                host_named(input, &record.name).is_some_and(|host| host.state != HostState::Live);
+            let held = [Phase::Registered, Phase::Draining].contains(&record.phase);
+            if [silent, held].into_iter().all(|ok| ok) {
+                let name = record.name.clone();
+                let since = self.silent.get(&name).copied().unwrap_or(self.now);
+                self.silent_now.insert(name, since);
             }
         }
     }

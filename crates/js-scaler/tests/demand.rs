@@ -16,36 +16,41 @@ fn id(text: &str) -> RequestId {
     RequestId::new(text).unwrap()
 }
 
-/// Asserts the first launch writes its record, then mints, then acquires; that the record
-/// holds the stored price and the minute-of-launch; and that the same step on the same
-/// state and input gives the same answer. It catches an acquire that is not preceded by
-/// its record, and a step that reads anything but its arguments.
+/// Asserts the first launch writes the records, then mints, then acquires; that the record
+/// holds the stored price, the time of launch and a token that lives `boot_timeout` plus
+/// its margin; and that the same step on the same state and input gives the same answer.
+/// It catches an acquire that is not preceded by its records, and a step that reads
+/// anything but its arguments.
 #[test]
 fn one_waiting_request_gets_one_launch_in_the_order_record_mint_acquire() {
     let mut rig = Rig::new(settings("gpu"));
     rig.input.waiting = vec![request("r1")];
+    rig.input.entropy = vec![draw(1)];
     let (again_state, again_actions) = step(State::default(), &rig.input, at(0));
     let actions = rig.tick(at(0));
     assert_eq!(actions, again_actions);
     assert_eq!(rig.state, again_state);
-    assert_eq!(kinds(&actions), ["Record", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
     let plan = acquires(&actions).remove(0);
     assert_eq!(plan.pool, "gpu");
     assert_eq!(plan.offer.id, "a10");
     assert_eq!(plan.offer.price_cents_per_hour, Some(60));
-    assert_eq!(actions[0], Action::Record(Box::new(rig.record(0).clone())));
+    assert_eq!(
+        actions[0],
+        Action::Save(Box::new(rig.state.records.clone()))
+    );
+    assert_eq!(plan.acquire.as_str(), format!("gpu-{}", draw_text(1)));
     assert_eq!(
         actions[1],
         Action::Mint {
             host: plan.name.clone(),
-            valid_for: minutes(15)
+            valid_for: minutes(20)
         }
     );
     assert_eq!(rig.phase(0), Phase::Launching);
     assert_eq!(rig.record(0).price_cents_per_hour, 60);
     assert_eq!(rig.record(0).launched_at, at(0));
-    assert_eq!(rig.record(0).token_expires, Some(at(15 * MINUTE)));
-    assert_eq!(rig.state.records.launches, 1);
+    assert_eq!(rig.record(0).token_expires, Some(at(20 * MINUTE)));
 }
 
 /// Asserts that the same request presented again, with the record of its launch in the
@@ -85,8 +90,8 @@ fn a_hundred_requests_never_exceed_the_instance_cap() {
     }
 }
 
-/// Asserts that launches of one step have different acquire ids and host names, which
-/// carry the pool, and that the count of launches is kept.
+/// Asserts that launches of one step have different acquire ids and host names, and that
+/// the ids carry the pool.
 #[test]
 fn every_launch_has_its_own_acquire_id_and_name() {
     let mut limits = settings("gpu");
@@ -100,7 +105,6 @@ fn every_launch_has_its_own_acquire_id_and_name() {
     assert_eq!(ids.len(), 3);
     assert_eq!(names.len(), 3);
     assert!(ids.iter().all(|each| each.starts_with("gpu-")));
-    assert_eq!(rig.state.records.launches, 3);
 }
 
 /// Asserts that a request holding a reservation gets no machine, that the same request

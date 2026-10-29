@@ -44,7 +44,7 @@ fn a_restart_between_the_record_and_the_call_launches_nothing_twice() {
 
     fresh.pool().held = Some(vec![listed(&plan, "i-1", HostStatus::Booting)]);
     let actions = fresh.tick(at(10 * SECOND));
-    assert_eq!(kinds(&actions), ["Record"]);
+    assert_eq!(kinds(&actions), ["Save"]);
     assert_eq!(fresh.phase(0), Phase::Booting);
     assert_eq!(fresh.record(0).cloud_id.as_deref(), Some("i-1"));
 }
@@ -55,13 +55,13 @@ fn a_restart_between_the_record_and_the_call_launches_nothing_twice() {
 fn an_unknown_answer_then_a_list_showing_the_machine_makes_it_booting() {
     let (mut rig, plan) = launched(settings("gpu"));
     rig.input.acquired = vec![answered(&plan, Acquired::Unknown)];
-    assert_eq!(kinds(&rig.tick(at(SECOND))), ["Record"]);
+    assert_eq!(kinds(&rig.tick(at(SECOND))), ["Save"]);
     assert_eq!(rig.phase(0), Phase::Unresolved);
     assert!(rig.tick(at(2 * SECOND)).is_empty());
 
     rig.pool().held = Some(vec![listed(&plan, "i-9", HostStatus::Booting)]);
     let actions = rig.tick(at(3 * SECOND));
-    assert_eq!(kinds(&actions), ["Record"]);
+    assert_eq!(kinds(&actions), ["Save"]);
     assert_eq!(rig.phase(0), Phase::Booting);
     assert_eq!(rig.record(0).cloud_id.as_deref(), Some("i-9"));
 }
@@ -78,7 +78,7 @@ fn a_machine_never_listed_fails_after_the_hold_and_counts_until_two_clean_lists(
     assert_eq!(rig.phase(0), Phase::Launching);
 
     let actions = rig.tick(at(30 * MINUTE));
-    assert_eq!(kinds(&actions), ["Record", "Revoke", "ForgetNetwork"]);
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
     assert_eq!(rig.phase(0), Phase::Failed);
     assert_eq!(rig.record(0).clean_lists, 1);
     assert_eq!(rig.state.blocked["gpu"], Blocked::MaxInstances);
@@ -87,7 +87,7 @@ fn a_machine_never_listed_fails_after_the_hold_and_counts_until_two_clean_lists(
     assert_eq!(rig.record(0).clean_lists, 1);
 
     let actions = rig.tick(at(60 * MINUTE));
-    assert_eq!(kinds(&actions), ["Record", "Record", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
     assert_eq!(rig.record(0).clean_lists, 2);
     assert_eq!(rig.state.records.instances.len(), 2);
 
@@ -119,7 +119,7 @@ fn a_machine_listed_after_failing_is_released_and_stays_counted() {
 
     rig.pool().held = Some(vec![listed(&plan, "i-late", HostStatus::Active)]);
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Record", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(
         actions[1],
         Action::Release {
@@ -150,7 +150,7 @@ fn a_late_acceptance_of_a_failed_acquire_is_released() {
     rig.tick(at(30 * MINUTE));
     rig.input.acquired = vec![accepted(&plan, "i-late")];
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Record", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.record(0).cloud_id.as_deref(), Some("i-late"));
 }
@@ -166,14 +166,7 @@ fn a_capacity_refusal_tries_the_next_offer() {
     let actions = rig.tick(at(SECOND));
     assert_eq!(
         kinds(&actions),
-        [
-            "Record",
-            "Record",
-            "Revoke",
-            "ForgetNetwork",
-            "Mint",
-            "Acquire"
-        ]
+        ["Save", "Revoke", "ForgetNetwork", "Mint", "Acquire"]
     );
     assert_eq!(rig.phase(0), Phase::Refused);
     assert_eq!(acquires(&actions)[0].offer.id, "b");
@@ -195,7 +188,7 @@ fn quota_denied_and_shape_block_the_pool_for_the_cooldown() {
         rig.input.acquired = vec![answered(&plan, refusal(code))];
         let first = 5 * SECOND;
         let actions = rig.tick(at(first));
-        assert_eq!(kinds(&actions), ["Record", "Revoke", "ForgetNetwork"]);
+        assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
         assert_eq!(rig.state.blocked["gpu"], expected);
 
         let actions = rig.tick(at(first + 10 * MINUTE - 1));
@@ -220,13 +213,13 @@ fn a_deferred_acquire_is_retried_with_the_same_id_when_its_time_comes() {
             wait: std::time::Duration::from_secs(12),
         },
     )];
-    assert_eq!(kinds(&rig.tick(at(SECOND))), ["Record"]);
+    assert_eq!(kinds(&rig.tick(at(SECOND))), ["Save"]);
     assert_eq!(rig.phase(0), Phase::Planned);
     assert_eq!(rig.record(0).retry_at, Some(at(13 * SECOND)));
 
     assert!(rig.tick(at(13 * SECOND - 1)).is_empty());
     let actions = rig.tick(at(13 * SECOND));
-    assert_eq!(kinds(&actions), ["Record", "Mint", "Acquire"]);
+    assert_eq!(kinds(&actions), ["Save", "Mint", "Acquire"]);
     assert_eq!(acquires(&actions)[0].acquire, plan.acquire);
     assert_eq!(acquires(&actions)[0].name, plan.name);
     assert_eq!(rig.phase(0), Phase::Launching);
@@ -323,8 +316,8 @@ fn stray(id: &str, acquire: &str, status: HostStatus) -> Held {
 
 /// Asserts that machines in the list that no record knows become orphan records, with an
 /// acquire id only when their marks carry a usable one; that an orphan is reported and
-/// never released; that it goes when the list stops showing it; and that a listed machine
-/// already terminated is not adopted and one that becomes terminated is dropped.
+/// never released; that a list that stops showing it does not make it gone, and a machine
+/// listed terminated does; and that a listed machine already terminated is not adopted.
 #[test]
 fn unknown_machines_are_adopted_as_orphans_and_never_released() {
     let mut rig = Rig::new(settings("gpu"));
@@ -334,7 +327,7 @@ fn unknown_machines_are_adopted_as_orphans_and_never_released() {
         stray("i-dead", "", HostStatus::Terminated),
     ]);
     let actions = rig.tick(at(0));
-    assert_eq!(kinds(&actions), ["Record", "Record"]);
+    assert_eq!(kinds(&actions), ["Save"]);
     assert_eq!(rig.state.records.instances.len(), 2);
     assert_eq!(rig.phase(0), Phase::Orphan);
     assert_eq!(rig.record(0).acquire, None);
@@ -351,28 +344,11 @@ fn unknown_machines_are_adopted_as_orphans_and_never_released() {
 
     rig.pool().held = Some(vec![stray("i-b", "old-acquire-1", HostStatus::Terminated)]);
     let actions = rig.tick(at(20 * SECOND));
-    assert_eq!(kinds(&actions), ["Record", "Record"]);
-    assert_eq!(rig.phase(0), Phase::Gone);
-    assert_eq!(rig.record(0).gone_at, Some(at(20 * SECOND)));
+    assert_eq!(kinds(&actions), ["Save"]);
+    assert_eq!(rig.phase(0), Phase::Orphan);
+    assert_eq!(rig.record(0).clean_lists, 1);
+    assert!(rig.record(0).counts());
     assert_eq!(rig.phase(1), Phase::Gone);
+    assert_eq!(rig.record(1).gone_at, Some(at(20 * SECOND)));
     assert_eq!(count(&actions, "Release"), 0);
-}
-
-/// Asserts that a machine already confirmed gone, still shown by a list that lags, is not
-/// adopted as an orphan.
-#[test]
-fn a_gone_machine_in_a_lagging_list_is_not_an_orphan() {
-    let mut rig = Rig::new(settings("gpu"));
-    let gone = record(Phase::Gone, 60, 0);
-    rig.pool().held = Some(vec![Held {
-        id: HostRef(gone.cloud_id.clone().unwrap()),
-        acquire: String::new(),
-        name: None,
-        offer: "a10".to_owned(),
-        zone: None,
-        status: HostStatus::Active,
-    }]);
-    rig.state.records.instances = vec![gone];
-    assert!(rig.tick(at(HOUR)).is_empty());
-    assert_eq!(rig.state.records.instances.len(), 1);
 }

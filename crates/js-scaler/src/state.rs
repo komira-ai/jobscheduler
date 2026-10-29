@@ -6,7 +6,7 @@ use std::time::Duration;
 use js_elastic::{AcquireId, Dimension, HostRef, Offer};
 use js_types::RequestId;
 
-use crate::record::{Record, Records};
+use crate::record::Records;
 use crate::settings::Blocked;
 use crate::time::Millis;
 
@@ -27,14 +27,13 @@ pub struct AcquirePlan {
     pub offer: Offer,
 }
 
-/// One thing the caller does. A step lists them in the order to run them: every
-/// [`Action::Record`] first, so a record is durable before the call it describes.
+/// One thing the caller does. A step lists them in the order to run them: the
+/// [`Action::Save`] first, so the records are durable before any call they describe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Write this record. The caller may write all of [`State::records`] instead.
-    Record(Box<Record>),
     /// Write these records, whole, before running any later action of the step. Sent when
-    /// the step changed them.
+    /// the step changed them; it carries everything the scaler keeps (the machines and the
+    /// cooldowns), so a caller cannot write part of it.
     Save(Box<Records>),
     /// Mint a join token for the host, valid for `valid_for`. Sent for a new acquire id
     /// and for the retry of a deferred one, never for a record found after a restart.

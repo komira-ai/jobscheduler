@@ -84,6 +84,13 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// How long the join token of a launch lives: `boot_timeout` plus `token_margin`.
+    pub(crate) fn token_life(&self) -> Duration {
+        self.boot_timeout.saturating_add(self.token_margin)
+    }
+}
+
 /// Why a pool launches nothing now, as the pool's status shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Blocked {

@@ -1,6 +1,5 @@
 {
   "version": 1,
-  "launches": 2,
   "instances": [
     {
       "pool": "gpu",
@@ -25,6 +24,7 @@
       "token_expires": null,
       "cloud_id": "i-0-60",
       "retry_at": null,
+      "attempt": 0,
       "gone_at": null,
       "registered": false,
       "condemned": false,
@@ -54,6 +54,7 @@
       "token_expires": 1000000120000,
       "cloud_id": "i-stray",
       "retry_at": 1000000240000,
+      "attempt": 3,
       "gone_at": 1000000300000,
       "registered": true,
       "condemned": true,

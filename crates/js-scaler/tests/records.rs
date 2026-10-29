@@ -21,13 +21,13 @@ fn sample() -> Records {
     orphan.token_expires = Some(at(2 * MINUTE));
     orphan.cloud_id = Some("i-stray".to_owned());
     orphan.retry_at = Some(at(4 * MINUTE));
+    orphan.attempt = 3;
     orphan.gone_at = Some(at(5 * MINUTE));
     orphan.registered = true;
     orphan.condemned = true;
     orphan.clean_lists = 2;
     orphan.last_clean = Some(at(3 * MINUTE));
     let mut records = Records {
-        launches: 2,
         instances: vec![launching, orphan],
         ..Records::default()
     };
@@ -81,13 +81,13 @@ fn a_file_that_is_not_records_of_this_version_is_refused() {
         "records: version None, this reader reads 1"
     );
 
-    let extra = GOLDEN.replace("\"launches\": 2,", "\"launches\": 2, \"surprise\": 1,");
+    let extra = GOLDEN.replace("\"version\": 1,", "\"version\": 1, \"surprise\": 1,");
     let error = Records::decode(&extra).unwrap_err();
     assert!(error.to_string().contains("surprise"), "{error}");
 
-    let missing = GOLDEN.replace("\"launches\": 2,", "");
+    let missing = GOLDEN.replace("\"clean_lists\": 0,", "");
     let error = Records::decode(&missing).unwrap_err();
-    assert!(error.to_string().contains("launches"), "{error}");
+    assert!(error.to_string().contains("clean_lists"), "{error}");
 
     let bad_id = GOLDEN.replace("made-0-60", "not an id");
     let error = Records::decode(&bad_id).unwrap_err();

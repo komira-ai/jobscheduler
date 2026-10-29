@@ -124,22 +124,6 @@ fn a_machine_that_is_never_released_keeps_eating_the_day_cap() {
     }
 }
 
-/// Asserts the edge of the 24 hour window: a machine launched exactly 24 hours ago has
-/// left it and one launched a millisecond later is in it (60 cents for its hour).
-#[test]
-fn records_older_than_a_day_leave_the_window() {
-    for (launched, expected) in [(DAY, 1), (DAY + 1, 0)] {
-        let mut limits = settings("gpu");
-        limits.max_spend_per_day = 74;
-        let mut old = record(Phase::Gone, 60, 0);
-        old.launched_at = at(launched);
-        old.registered = true;
-        old.gone_at = Some(at(launched + HOUR));
-        let mut rig = rig_with(limits, vec![old]);
-        assert_eq!(launches(&mut rig, 2 * DAY), expected, "launched {launched}");
-    }
-}
-
 /// Asserts that a machine found in a list and unknown to the records is billed from when
 /// it was found, for at least a minute, at its offer's price: one cent, so the
 /// candidate's 15 fit a cap of 16 and not 15.

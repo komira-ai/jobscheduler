@@ -95,28 +95,36 @@ pub(crate) fn least_cost(settings: &Settings, price: u64) -> u64 {
     cents(price, settings.boot_timeout.max(MINUTE))
 }
 
-/// The least time a record is billed for, or `None` when it never cost anything: a
-/// launch still waiting, and one the provider refused.
-fn billed_at_least(record: &Record, settings: &Settings) -> Option<Duration> {
-    match record.phase {
-        Phase::Planned | Phase::Refused => None,
-        Phase::Orphan => Some(MINUTE),
-        _ if record.registered => Some(MINUTE),
-        _ => Some(settings.boot_timeout.max(MINUTE)),
-    }
+/// The last instant a record is billed to: when it was confirmed gone, or now while it
+/// counts and runs; never before the least it is billed for. A launch still waiting for
+/// its time, and a record that no longer counts and has no end, are billed the least and
+/// nothing more. A refused acquire is billed nothing.
+///
+/// The least is a minute, and for a boot that never said hello (a failed boot, an acquire
+/// never seen, a launch waiting) `boot_timeout`. `boot_timeout` is that of the record's
+/// pool.
+pub(crate) fn billed_until(record: &Record, boot_timeout: Duration, now: Millis) -> Millis {
+    let least = match (record.phase, record.registered) {
+        (Phase::Refused, _) => Duration::ZERO,
+        (Phase::Orphan, _) | (_, true) => MINUTE,
+        _ => boot_timeout.max(MINUTE),
+    };
+    let end = match (record.phase, record.counts()) {
+        (Phase::Planned, _) | (_, false) => record.gone_at.unwrap_or(record.launched_at),
+        _ => record.gone_at.unwrap_or(now),
+    };
+    end.max(record.launched_at.plus(least))
 }
 
-/// What a record has cost: its stored price over the time from launch to gone (or to
-/// `now`), at least a minute, and for a boot that never said hello at least
-/// `boot_timeout`.
+/// What a record has cost inside the last 24 hours: its stored price over the part of its
+/// billed time (see [`billed_until`]) that lies after `now` minus a day, rounded up to
+/// whole minutes and then a whole cent. A machine that still runs keeps accruing, so a
+/// long-lived or stuck one goes on eating the day cap, and one that ended more than a day
+/// ago costs nothing.
 fn spent(record: &Record, settings: &Settings, now: Millis) -> u64 {
-    billed_at_least(record, settings).map_or(0, |least| {
-        let end = record.gone_at.unwrap_or(now);
-        cents(
-            record.price_cents_per_hour,
-            end.since(record.launched_at).max(least),
-        )
-    })
+    let until = billed_until(record, settings.boot_timeout, now);
+    let from = record.launched_at.max(now.back(DAY));
+    cents(record.price_cents_per_hour, until.since(from))
 }
 
 /// Whether one more machine of `price` may be launched into the pool.
@@ -153,13 +161,9 @@ pub(crate) fn check(
     let hourly = held.iter().fold(0u64, |sum, record| {
         sum.saturating_add(record.price_cents_per_hour)
     });
-    let day = ours
-        .iter()
-        .copied()
-        .filter(|record| now.since(record.launched_at) < DAY)
-        .fold(0u64, |sum, record| {
-            sum.saturating_add(spent(record, settings, now))
-        });
+    let day = ours.iter().fold(0u64, |sum, record| {
+        sum.saturating_add(spent(record, settings, now))
+    });
     [
         (held.len() < settings.max_instances, Blocked::MaxInstances),
         (

@@ -16,7 +16,7 @@ use crate::time::Millis;
 /// Planned -> Launching -> Booting -> Registered <-> Draining -> Releasing -> Gone
 ///               |  \-> Refused           \-> Releasing (boot_timeout, lost)
 ///               \-> Unresolved -> Booting | Failed -> Releasing (listed late)
-/// Orphan -> Gone (the list no longer shows it)
+/// Orphan -> Gone (two lists, `unknown_hold` apart, no longer show it)
 /// ```
 ///
 /// The design's "Failed (Refused)" is [`Phase::Refused`] here: no machine exists and
@@ -43,10 +43,12 @@ pub enum Phase {
     Refused,
     /// The acquire was never seen after `unknown_hold`. Counted until two clean lists.
     Failed,
-    /// The machine is gone, confirmed by a read by id. Kept for the day window.
+    /// The machine is gone, confirmed by a read by id (or, for an orphan, by two clean
+    /// lists). Kept until its billed time has left the day window.
     Gone,
-    /// The provider lists a machine of ours that no record knows. Counted and reported,
-    /// never released by default.
+    /// The provider lists a machine of ours that no record knows, or a launch answer named
+    /// a machine it could not confirm released. Counted and reported, never released by
+    /// default.
     Orphan,
 }
 
@@ -236,9 +238,10 @@ pub struct Record {
     /// Whether its hello was below its offer: it is drained and released as soon as it is
     /// quiet and is never taken back for a request.
     pub condemned: bool,
-    /// For `Failed`: how many clean lists have shown no instance of it.
+    /// For `Failed` and `Orphan`: how many clean lists have shown no instance of it. A list
+    /// that shows an orphan starts the count over.
     pub clean_lists: u8,
-    /// For `Failed`: when the last of them was taken.
+    /// For `Failed` and `Orphan`: when the last of them was taken.
     pub last_clean: Option<Millis>,
 }
 
@@ -257,7 +260,7 @@ impl Record {
 
     /// Moves to `to` and says so, or does nothing and answers `false` when the state
     /// machine does not allow it.
-    pub fn go(&mut self, to: Phase, now: Millis) -> bool {
+    pub(crate) fn go(&mut self, to: Phase, now: Millis) -> bool {
         let allowed = self.phase.may_become(to);
         if allowed {
             self.phase = to;
@@ -294,12 +297,11 @@ pub struct Cooldown {
 /// The version of the records file. A reader refuses any other.
 pub const VERSION: u32 = 1;
 
-/// Everything the scaler remembers.
+/// Everything the scaler remembers. The caller writes all of it, as one file, whenever a
+/// step returns [`Action::Save`](crate::Action::Save), before it runs any other action of
+/// the step: nothing the scaler needs after a restart lives outside it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Records {
-    /// How many acquires have been made; part of each acquire id, so two ids differ even
-    /// when the clock reads the same.
-    pub launches: u64,
     /// The machines, oldest first.
     pub instances: Vec<Record>,
     /// The pools that are waiting out a failure, by name.
@@ -309,7 +311,6 @@ pub struct Records {
 #[derive(Serialize)]
 struct WireOut<'a> {
     version: u32,
-    launches: u64,
     instances: &'a [Record],
     cooldowns: &'a BTreeMap<String, Cooldown>,
 }
@@ -319,7 +320,6 @@ struct WireOut<'a> {
 struct WireIn {
     #[serde(rename = "version")]
     _version: u32,
-    launches: u64,
     instances: Vec<Record>,
     cooldowns: BTreeMap<String, Cooldown>,
 }
@@ -347,7 +347,6 @@ impl Records {
     pub fn encode(&self) -> Result<String, RecordsError> {
         let wire = WireOut {
             version: VERSION,
-            launches: self.launches,
             instances: &self.instances,
             cooldowns: &self.cooldowns,
         };
@@ -368,7 +367,6 @@ impl Records {
         }
         let wire: WireIn = serde_json::from_value(value)?;
         Ok(Self {
-            launches: wire.launches,
             instances: wire.instances,
             cooldowns: wire.cooldowns,
         })
