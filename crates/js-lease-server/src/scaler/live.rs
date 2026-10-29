@@ -249,10 +249,13 @@ mod tests {
             )),
             scheduler(),
             "https://sched.example.org:7301".to_owned(),
-            Artifact {
-                url: "https://sched.example.org:7301/agent".to_owned(),
-                sha256: [1; 32],
-            },
+            BTreeMap::from([(
+                "x86_64".to_owned(),
+                Artifact {
+                    url: "https://sched.example.org:7301/agent".to_owned(),
+                    sha256: [1; 32],
+                },
+            )]),
         );
         let file = RecordsFile::new(dir.join("records"));
         let checks = Arc::new(Mutex::new(Checks::default()));

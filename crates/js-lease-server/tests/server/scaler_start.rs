@@ -17,7 +17,8 @@ use serde_json::json;
 
 use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    account, beat, hello, join, name_of, records_path, spec, start, text, text_with, token_in,
+    account, beat, hello, host_id_in, join, name_of, records_path, spec, start, text, text_with,
+    token_in,
 };
 use crate::support::{Harness, Scratch, T0};
 
@@ -162,9 +163,15 @@ async fn a_machine_is_launched_registered_idle_released_and_removed() {
     let name = h.running.scaler().unwrap().state().records.instances[0]
         .name
         .clone();
-    let token = token_in(account.launches()[0].user_data().unwrap());
+    let script = account.launches()[0].user_data().unwrap().to_owned();
+    let token = token_in(&script);
+    // The agent registers under the id its unit names, which is the record's name; the
+    // scaler finds the host by that name, so the record moves past Booting.
+    let registers_as = host_id_in(&script);
+    assert_eq!(registers_as, name);
     h.ticks.step().await;
-    let me = join(&h, &token, &name).await;
+    assert_eq!(phase(&h), Phase::Booting);
+    let me = join(&h, &token, &registers_as).await;
     h.ticks.step().await;
     assert_eq!(phase(&h), Phase::Registered);
 

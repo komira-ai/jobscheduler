@@ -4,6 +4,7 @@
 //! ships it, read offline through the owner-only reader. Each refusal is checked with its
 //! exact message, naming the pool and the field.
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 
 use js_elastic::Artifact;
@@ -32,8 +33,14 @@ fn dialable(scratch: &Scratch) -> String {
     )
 }
 
-fn agent(url: &str, sha: &str) -> String {
+/// One pin: an address and a hash.
+fn pin(url: &str, sha: &str) -> String {
     format!("{{ url = {}, sha256 = {} }}", quote(url), quote(sha))
+}
+
+/// The `agent` table with this pin for `x86_64`.
+fn agent(url: &str, sha: &str) -> String {
+    format!("{{ x86_64 = {} }}", pin(url, sha))
 }
 
 /// The refusal of a file whose elastic pool is `pool`, beside a server that can be dialed.
@@ -76,8 +83,9 @@ fn the_scheduler_id_defaults_and_is_checked() {
     }
 }
 
-/// Asserts the `agent` table: a pinned download is read as its address and hash, and each
-/// way it can be wrong is refused naming the field: not a table, an unknown key, a missing
+/// Asserts the `agent` table: a pinned download is read as its address and hash by CPU
+/// architecture (two here), and each way it can be wrong is refused naming the field and
+/// the architecture: not a table, a key that is no architecture, an unknown key, a missing
 /// or non-https address, and a hash that is missing or not 64 lower-case hex digits (short,
 /// long, upper case, or a digit that is not hex in either place of a pair). A static pool
 /// has no use for it. It catches a download over plain http (the bootstrap refuses it, so
@@ -86,11 +94,12 @@ fn the_scheduler_id_defaults_and_is_checked() {
 fn the_agent_pin_is_an_https_address_and_a_hash() {
     let scratch = Scratch::new("launch_agent");
     let pool = |value: &str| PoolText::elastic(&scratch).set("agent", value);
-    let config = load(
-        &scratch,
-        &file(&dialable(&scratch), &[&pool(&agent(URL, SHA))]),
-    )
-    .unwrap();
+    let both = format!(
+        "{{ x86_64 = {}, aarch64 = {} }}",
+        pin(URL, SHA),
+        pin("https://pkgs.example.org/agent-arm", SHA)
+    );
+    let config = load(&scratch, &file(&dialable(&scratch), &[&pool(&both)])).unwrap();
     let pinned = config.elastic_pool().unwrap().agent.clone();
     let expected = Artifact {
         url: URL.to_owned(),
@@ -100,7 +109,13 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
             0x89, 0xab, 0xcd, 0xef,
         ],
     };
-    assert_eq!(pinned, Some(expected));
+    let arm = Artifact {
+        url: "https://pkgs.example.org/agent-arm".to_owned(),
+        sha256: expected.sha256,
+    };
+    let want: BTreeMap<String, Artifact> =
+        [("x86_64".to_owned(), expected), ("aarch64".to_owned(), arm)].into();
+    assert_eq!(pinned, want);
 
     let case = |value: String, said: &str| {
         let got = elastic(&scratch, &pool(&value));
@@ -108,15 +123,32 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
     };
     case("5".to_owned(), ": must be a table");
     case(
+        "{ x86_64 = 5 }".to_owned(),
+        ".x86_64: must be a table { url, sha256 }",
+    );
+    let letters =
+        ": an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64";
+    case(
+        format!("{{ X86 = {} }}", pin(URL, SHA)),
+        &format!(".X86{letters}"),
+    );
+    case(
+        format!("{{ \"\" = {} }}", pin(URL, SHA)),
+        &format!(".{letters}"),
+    );
+    case(
         format!(
-            "{{ url = {}, sha256 = {}, size = 1 }}",
+            "{{ x86_64 = {{ url = {}, sha256 = {}, size = 1 }} }}",
             quote(URL),
             quote(SHA)
         ),
-        ".size: unknown field; known: url, sha256",
+        ".x86_64.size: unknown field; known: url, sha256",
     );
-    case(format!("{{ sha256 = {} }}", quote(SHA)), ".url: required");
-    let https = ".url: must be an https:// URL: the host refuses any other";
+    case(
+        format!("{{ x86_64 = {{ sha256 = {} }} }}", quote(SHA)),
+        ".x86_64.url: required",
+    );
+    let https = ".x86_64.url: must be an https:// URL: the host refuses any other";
     for url in [
         "http://pkgs.example.org/agent",
         "https://",
@@ -125,8 +157,11 @@ fn the_agent_pin_is_an_https_address_and_a_hash() {
     ] {
         case(agent(url, SHA), https);
     }
-    case(format!("{{ url = {} }}", quote(URL)), ".sha256: required");
-    let hash = ".sha256: must be 64 lower-case hex digits";
+    case(
+        format!("{{ x86_64 = {{ url = {} }} }}", quote(URL)),
+        ".x86_64.sha256: required",
+    );
+    let hash = ".x86_64.sha256: must be 64 lower-case hex digits";
     let long = format!("{SHA}0");
     let upper = SHA.replace('a', "A");
     let high = format!("g{}", &SHA[1..]);

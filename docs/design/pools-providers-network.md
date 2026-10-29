@@ -278,10 +278,13 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth",
              tag = "tag:js-agent" }
+agent    = { x86_64 = { url = "https://pkgs.example.org/js-agent-x86_64", sha256 = "<64 hex digits>" } }
 ```
 
-That is the whole pool (eleven lines with the two spend keys). Not in it: the bootstrap, join
-tokens, Tailscale keys, the firewall, the agent download, the CA file. The service makes them.
+That is the whole pool (twelve lines with the two spend keys; `agent` is needed once the pool is
+`live`, and `plan` leaves it out). Not in it: the bootstrap, join tokens, Tailscale keys, the
+firewall, the CA file. The service makes them. The agent download is the operator's pin, one
+entry per CPU architecture the pool's offers have (7.3).
 Two things the ten lines depend on, stated plainly:
 
 - The `types` row names the gpu class by hand. Lambda's catalog gives the GPU as free text (3.5),
@@ -336,6 +339,8 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 },
                       { name = "gpu_2x_a10", gpu = "nvidia-a10", gpus = 2 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth", tag = "tag:js-agent" }
+agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "<64 hex digits>" },
+             aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "<64 hex digits>" } }
 ```
 
 A pool whose hosts already have a route to the scheduler omits `network` (mode `default`). The
@@ -1011,7 +1016,14 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
 3. Run the network steps the pool's mode contributed (`tailscale`: binary fetched with checksum,
    `tailscale up`; `default`: nothing).
 4. Fetch the agent for the offer's arch from `BootPlan.agent.url`, verify the sha256 before
-   the agent ever starts, install to `/usr/local/bin/js-agent`.
+   the agent ever starts, install to `/usr/local/bin/js-agent`. The pool's `agent` table pins
+   one artifact (`url`, `sha256`) per CPU architecture; the launch takes the entry for the
+   offer's architecture and never another's. An offer whose architecture has no entry is not
+   launched: the pool's checks mark it unavailable naming the offer, the architecture and the
+   field (`agent.<arch>`), and a launch that reaches the provider layer anyway is refused with
+   a `Shape` refusal. Write the GPU toolkit hook (`/usr/local/lib/js-agent/gpu-toolkit-hook`,
+   mode 0700), a program that runs `nvidia-container-cli info`, which fails without a working
+   driver and toolkit (`--version` would prove nothing).
 5. Make the agent's state root. `js-agent` with `--container-bin` requires `--state-root`
    on a different device from every mount root and the scratch root and refuses to start
    otherwise (`crates/js-agent/src/cli.rs`). Lambda instances have one root disk. PROPOSAL:
@@ -1019,8 +1031,11 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    its own `st_dev`. A tmpfs is wrong: the agent says a taint on a tmpfs is lost at reboot.
    Needs one live test (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
-   `--pool`, `--container-bin`, `--state-root`, `--scratch-root`, the `--watch-dir` list the
-   agent's help suggests, and labels.
+   `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
+   a record), `--container-bin`, `--container-pull missing`, `--gpu-toolkit-hook` (on every
+   offer; the agent runs the hook only when the host offers a GPU, and a pool with GPUs refuses
+   a host without it as `host-contract` on `gpu-toolkit`), `--state-root`, `--scratch-root`, the
+   `--watch-dir` list the agent's help suggests, and labels.
 7. Cleanup, from a `trap ... EXIT` installed as the first line of the script, so a failure at any
    earlier step still runs it. It removes (with `rm`; on a journaling or copy-on-write
    filesystem that does not erase blocks, and nothing here claims it does) the secret files used
@@ -1044,12 +1059,12 @@ every download checksummed before use; secret files removed after use by the EXI
 Tailscale key is removed with `rm` after `tailscale up`; no claim of erasure); the whole render
 below the user_data limit.
 
-The agent artifact. The service image carries the agent binaries for the arches it can
-launch and serves them at `GET /v1/bootstrap/agent/<arch>` with no token (a binary is not a
-secret; its sha256 is computed at start and is what the bootstrap checks). The host fetches
-from `advertise_url`. PROPOSAL; the alternative is a pinned URL table (Open questions 6). A
-checksum in `user_data` guards against a corrupt or swapped download from a reachable
-server; it does not guard against a compromised service, which can mint tokens anyway.
+The agent artifact. The operator pins it per CPU architecture in the pool's `agent` table
+(`url` over https and `sha256`, 4.1), and the host fetches from that address; the service
+serves nothing for it, so its API is its only surface and no route is unauthenticated for
+the download. A checksum in `user_data` guards against a corrupt or swapped download from a
+reachable server; it does not guard against a compromised service, which can mint tokens
+anyway.
 
 The launch call carries: region and instance type from the offer, the one ssh key name, the
 one no-inbound ruleset id, `user_data` (the opaque payload from the service, a `Secret`), the `HostName` as
@@ -1105,11 +1120,10 @@ compromised GPU host to the agent port, so the design does not leave it unchecke
   `server.listen` and the network decides who reaches them (9). A launched host carries
   `tag:js-agent`, and one port cannot tell agent routes from operator routes. So the split is in
   the first slice (PR 4): `server.agent_listen` is required with an elastic pool and serves only
-  the agent routes (hello, heartbeat, bootstrap agent route); the agent routes are not served on
+  the agent routes (hello, heartbeat); the agent routes are not served on
   `listen`, and the other routes are not served on `agent_listen`. The policy snippet gives the tag
   the agent port only. Without the split the network could not separate a launched host from the
-  operator routes, which is why it is not optional. The bootstrap agent route is unauthenticated
-  on purpose (a binary is not a secret). Open risk: the split holds only while the operator's
+  operator routes, which is why it is not optional. Open risk: the split holds only while the operator's
   policy gives the tag the agent port alone; the service cannot verify the policy (the warning
   above is best effort), so 13.4 checks it live.
 
@@ -1326,8 +1340,8 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `agent_listen`, or `agent_listen` equal to `listen`, is refused naming `server.agent_listen`.
   `listen = "0.0.0.0:7300"` is accepted and shows the `server: warning: binds all interfaces` status
   line (default mode on a VPC stays supported).
-- Route split (PR 4), against a real server with both ports bound: `hello`, heartbeat and the
-  bootstrap agent route answer on `agent_listen` and get 404 on `listen`; `GET /v1/pools`,
+- Route split (PR 4), against a real server with both ports bound: `hello` and heartbeat
+  answer on `agent_listen` and get 404 on `listen`; `GET /v1/pools`,
   `/status`, the client routes and the operator routes answer on `listen` and get 404 on
   `agent_listen`. Catches a route left on the wrong port, which would let a tag that may reach
   only the agent port reach operator routes. With one port in the test the same check cannot fail,
@@ -1440,8 +1454,8 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 5. The stock Lambda image: driver, runtime, toolkit, and a state root on its own device (loop
    image). Not verified. Recommendation: the install table starts empty, the live run fills it, and
    the bootstrap fails visibly rather than guessing.
-6. Where the host gets the agent binary. Recommendation: from the service, checksummed; the
-   alternative, a release URL table, adds an outbound dependency to every new host.
+6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
+   (`agent` in the pool, 7.3), checksummed; the service serves no download.
 7. Provider hierarchy (`providers.md`). Recommendation: one provider per pool, pools chosen by
    label; add pool priority only if a consumer needs fall-through.
 8. Orphans: report-only, adopted and counted. Recommendation: a `release_orphans = true` pool

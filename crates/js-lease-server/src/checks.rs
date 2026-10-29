@@ -18,6 +18,7 @@
 //! which are written to be shown (a message never quotes the body of an answer), and offer
 //! ids and numbers.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -144,7 +145,11 @@ struct Pass {
 
 /// The provider half: the catalog call is the credential check, and the catalog it
 /// returns is checked against the pool's floor.
-fn provider_checks(provider: &dyn ElasticProvider, floor: &Floor) -> Provided {
+fn provider_checks(
+    provider: &dyn ElasticProvider,
+    floor: &Floor,
+    pins: Option<&AgentPins>,
+) -> Provided {
     match provider.catalog() {
         Err(error) => Provided {
             credentials: Err(format!("credentials: failed ({error})")),
@@ -153,7 +158,7 @@ fn provider_checks(provider: &dyn ElasticProvider, floor: &Floor) -> Provided {
         },
         Ok(offers) => Provided {
             credentials: Ok(()),
-            notes: catalog_notes(&offers, floor),
+            notes: catalog_notes(&offers, floor, pins),
             offers,
         },
     }
@@ -162,7 +167,7 @@ fn provider_checks(provider: &dyn ElasticProvider, floor: &Floor) -> Provided {
 /// What is wrong with a catalog: no offer at all, an offer with no price, an offer with
 /// fewer GPUs than the pool's sizes give at least, an offer with GPUs of another class.
 /// Each kind is said once, for the first offer that has it.
-fn catalog_notes(offers: &[Offer], floor: &Floor) -> Vec<String> {
+fn catalog_notes(offers: &[Offer], floor: &Floor, pins: Option<&AgentPins>) -> Vec<String> {
     let mut notes = Vec::new();
     if offers.is_empty() {
         notes.push("catalog: no offers".to_owned());
@@ -183,7 +188,25 @@ fn catalog_notes(offers: &[Offer], floor: &Floor) -> Vec<String> {
             offer.id
         ));
     }
+    if let Some(offer) = pins.and_then(|pins| pins.missing(offers)) {
+        notes.push(format!(
+            "catalog: {} is for the architecture {}, which has no agent pin (agent.{})",
+            offer.id, offer.arch, offer.arch
+        ));
+    }
     notes
+}
+
+/// The architectures a pool that launches has an agent pinned for. An offer of another
+/// is never launched, so the pool says so while it is unavailable.
+#[derive(Debug, Clone)]
+pub(crate) struct AgentPins(pub(crate) BTreeSet<String>);
+
+impl AgentPins {
+    /// The first of `offers` of an architecture with no pin.
+    fn missing<'a>(&self, offers: &'a [Offer]) -> Option<&'a Offer> {
+        offers.iter().find(|offer| !self.0.contains(&offer.arch))
+    }
 }
 
 /// The network half: whether the mode can issue what a launch needs. A mode that could
@@ -201,9 +224,11 @@ async fn pass(
     provider: &Arc<dyn ElasticProvider>,
     floor: &Floor,
     mode: &Result<Arc<dyn NetworkMode>, NetworkError>,
+    pins: &Option<AgentPins>,
 ) -> Pass {
-    let (provider, floor) = (provider.clone(), floor.clone());
-    let provided = spawn_blocking(move || provider_checks(provider.as_ref(), &floor));
+    let (provider, floor, pins) = (provider.clone(), floor.clone(), pins.clone());
+    let provided =
+        spawn_blocking(move || provider_checks(provider.as_ref(), &floor, pins.as_ref()));
     let mode = mode.clone();
     let networked = spawn_blocking(move || network_check(&mode));
     let (provided, networked) = tokio::join!(provided, networked);
@@ -263,6 +288,8 @@ pub(crate) struct Checker {
     pub(crate) provider: Arc<dyn ElasticProvider>,
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     pub(crate) floor: Floor,
+    /// The agents pinned, when the pool launches.
+    pub(crate) pins: Option<AgentPins>,
     pub(crate) clock: SharedClock,
     pub(crate) health: Arc<Mutex<Health>>,
 }
@@ -285,7 +312,7 @@ impl Checker {
 
     /// One pass. Whether every check held.
     async fn once(&self) -> bool {
-        let found = pass(&self.provider, &self.floor, &self.mode).await;
+        let found = pass(&self.provider, &self.floor, &self.mode, &self.pins).await;
         let mut health = self.health.lock().unwrap_or_else(PoisonError::into_inner);
         let before = health.state();
         health.record(found, self.clock.now());

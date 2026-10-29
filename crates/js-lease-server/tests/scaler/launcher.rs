@@ -132,10 +132,23 @@ fn rig(limit: usize, mode: Mode) -> Rig {
         Arc::new(Handle(mode.clone())),
         SchedulerId::new("sched").unwrap(),
         "https://sched.example.org:7301".to_owned(),
-        Artifact {
-            url: "https://sched.example.org:7301/agent".to_owned(),
-            sha256: [7; 32],
-        },
+        [
+            (
+                "x86_64".to_owned(),
+                Artifact {
+                    url: "https://sched.example.org:7301/agent".to_owned(),
+                    sha256: [7; 32],
+                },
+            ),
+            (
+                "aarch64".to_owned(),
+                Artifact {
+                    url: "https://sched.example.org:7301/agent-arm".to_owned(),
+                    sha256: [9; 32],
+                },
+            ),
+        ]
+        .into(),
     );
     Rig {
         provider,
@@ -196,9 +209,20 @@ fn a_launch_hands_the_provider_a_payload_with_both_secrets() {
         "prepare-image",
         "/etc/net.key",
         "https://sched.example.org:7301",
+        // The agent registers under the machine's name, which the scaler finds its record
+        // by; pulls an image only when it is missing; and runs the toolkit hook.
+        format!("--host-id \"{name}\"").as_str(),
+        "--container-pull missing",
+        "--gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook",
+        "exec nvidia-container-cli info",
     ] {
         assert!(payload.contains(wanted), "{wanted} is not in the payload");
     }
+    // The name is a host id, so the agent's hello registers under exactly the record's name.
+    assert_eq!(
+        js_types::HostId::new(name.as_str()).unwrap().as_str(),
+        name.as_str()
+    );
     assert!(!payload.contains("***"), "the payload was rendered masked");
     let seen = rig.mode.seen.lock().unwrap();
     let launch = ("burst".to_owned(), name.to_string(), KEY_VALID_FOR);
@@ -270,4 +294,38 @@ fn a_released_host_is_forgotten_and_a_failed_cleanup_is_not_fatal() {
     let broken = rig(1 << 20, failing);
     broken.launcher.forget(&name);
     assert_eq!(broken.mode.seen.lock().unwrap().forgotten.len(), 1);
+}
+
+/// Asserts that each architecture gets its own agent: an x86_64 offer is launched with the
+/// x86_64 address and hash, an aarch64 offer with the aarch64 ones and not the others'; and
+/// an offer of an architecture with no pin is refused `Shape` and nothing is sent, never
+/// launched with another architecture's binary. It catches a launch that uses the wrong
+/// binary for a machine, which would boot and never join.
+#[test]
+fn each_architecture_gets_its_own_agent_and_one_with_none_is_refused() {
+    let rig = rig(1 << 20, mode("network.key"));
+    let (mut plan, _) = plan();
+    rig.launcher.acquire(&plan, join_token());
+    plan.offer.arch = "aarch64".to_owned();
+    rig.launcher.acquire(&plan, join_token());
+    {
+        let asked = rig.provider.asked.lock().unwrap();
+        let (x86, arm) = (&asked.payload[0], &asked.payload[1]);
+        assert!(
+            x86.contains("7301/agent") && !x86.contains("agent-arm"),
+            "{x86}"
+        );
+        assert!(x86.contains(&"07".repeat(32)) && !x86.contains(&"09".repeat(32)));
+        assert!(arm.contains("7301/agent-arm"), "{arm}");
+        assert!(arm.contains(&"09".repeat(32)) && !arm.contains(&"07".repeat(32)));
+    }
+
+    plan.offer.arch = "riscv64".to_owned();
+    let answer = rig.launcher.acquire(&plan, join_token());
+    let Acquired::Refused(refusal) = answer else {
+        panic!("not refused: {answer:?}");
+    };
+    assert_eq!(refusal.code, RefusalCode::Shape);
+    assert!(matches!(refusal.reason, Reason::Boot(why) if why.contains("riscv64")));
+    assert_eq!(rig.provider.asked.lock().unwrap().payload.len(), 2);
 }
