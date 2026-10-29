@@ -512,7 +512,10 @@ async fn authentication_failures_say_what_failed() {
         ),
         (
             "refused",
-            change(|b| b.refuse_token = true),
+            change(|b| {
+                b.refuse_token = true;
+                b.token_answer = Some(r#"{"token":"x"}"#.to_owned());
+            }),
             "refused the token",
         ),
         (
