@@ -228,8 +228,9 @@ impl Rows {
     /// is made at the version read, and a row that changed since is read again (at most
     /// [`crate::CAS_TRIES`] tries in all). The row is left alone when it holds more than
     /// `before` (another frontend raised it after the decay's last look at the key, and the
-    /// higher floor is the safe side), when it already holds `floor.ask` or less, and when
-    /// there is none to lower. The row keeps its stamp, and names the size summary `summary`
+    /// higher floor is the safe side) and when it already holds `floor.ask` or less. With no
+    /// row the floor is written (an earlier write of it was refused), and a forgotten floor
+    /// has nothing to delete. The row keeps its stamp, and names the size summary `summary`
     /// that its floor decays with, or the one it already names.
     ///
     /// # Errors
@@ -243,20 +244,22 @@ impl Rows {
     ) -> Result<(), StateError> {
         let key = keys::key_floor(floor.key);
         contended(|| {
-            let Some(row) = self.store.get(&key)? else {
-                return Ok(());
-            };
+            let row = self.store.get(&key)?;
             // A row that cannot be read counts for nothing, and is written over.
-            let held = decode_key(&row.value).map_or(0, |(held, _)| held.ask);
-            if held > before || (held != 0 && held <= floor.ask) {
+            let held = row
+                .as_ref()
+                .map(|row| decode_key(&row.value).map_or(0, |(held, _)| held.ask));
+            if held.is_some_and(|held| held > before || (held != 0 && held <= floor.ask)) {
                 return Ok(());
             }
-            let cond = Cond::Version(row.version);
             let txn = if floor.ask == 0 {
-                Txn::new().delete(key.clone(), cond)
+                if row.is_none() {
+                    return Ok(());
+                }
+                Txn::new().delete(key.clone(), found(row))
             } else {
-                let value = key_floor_over(floor, summary, Some(&row));
-                Txn::new().put(key.clone(), value, cond)
+                let value = key_floor_over(floor, summary, row.as_ref());
+                Txn::new().put(key.clone(), value, found(row))
             };
             self.commit(txn)
         })

@@ -565,7 +565,16 @@ impl Engine {
             let Some(row) = self.sched.lower_key_floor(size_key, ask) else {
                 continue;
             };
-            self.unwritten_floors.retain(|f| f.row.key != size_key);
+            // A row still waiting for the store replaces an older one of its key, and the
+            // store's row is still the one the older lowering saw: the larger `before` stands.
+            let mut before = before;
+            self.unwritten_floors.retain(|f| {
+                let same = f.row.key == size_key;
+                if same {
+                    before = before.max(f.before);
+                }
+                !same
+            });
             self.unwritten_floors.push(Lowering { row, before });
         }
         self.write_key_floors(a);

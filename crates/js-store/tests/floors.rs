@@ -666,19 +666,20 @@ fn a_lowering_writes_the_row_it_read_and_keeps_its_name() {
 
 /// Asserts that a lowering leaves the row alone when it holds more than the floor the
 /// estimator lowered from (another frontend raised it), when it already holds the ask or
-/// less (another frontend lowered it as far), for a forgotten floor too, and writes nothing
-/// when there is no row. Catches: a lowering that undoes a raise it never saw, one that
-/// raises a row, and one that creates a row.
+/// less (another frontend lowered it as far), for a forgotten floor too; with no row it
+/// writes the floor (an earlier write of it was refused) and deletes nothing. Catches: a
+/// lowering that undoes a raise it never saw, one that raises a row, a floor the store never
+/// took that stays unwritten, and a forgotten floor that writes a row.
 #[test]
 fn a_lowering_leaves_a_row_that_holds_more_than_it_saw_or_less_than_it_asks() {
     let (store, rows) = handle();
 
-    rows.lower_key_floor(&lowered_to(4 << 30), 8 << 30, None)
-        .expect("no row");
     rows.lower_key_floor(&lowered_to(0), 8 << 30, None)
         .expect("no row");
-    assert_eq!(count(&store, "keyfloor/"), 0, "nothing to lower");
-
+    assert_eq!(count(&store, "keyfloor/"), 0, "nothing to delete");
+    rows.lower_key_floor(&lowered_to(4 << 30), 8 << 30, None)
+        .expect("no row");
+    assert_eq!(held_9(&rows).0, 4 << 30, "written where there was no row");
     rows.put_key_floor(&a_key_floor(9, 1), Some("est/x"))
         .expect("written");
     rows.lower_key_floor(&lowered_to(4 << 30), 8 << 30, None)
