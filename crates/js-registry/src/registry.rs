@@ -775,6 +775,9 @@ impl Registry {
         mut spec: JobSpec,
         work_key: Option<WorkKey>,
     ) -> Result<RunView, RunRefusal> {
+        if let Some(k) = &work_key {
+            spec.labels.insert("work_key".into(), k.class.clone());
+        }
         spec.lease_id = lease.to_string();
         let now = self.shared.clock.now();
         let mut guard = self.lock_at(now);
