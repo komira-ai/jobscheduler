@@ -42,12 +42,16 @@
 //! print a secret, a token or anything else that must not leave the host. The hook runs
 //! only for a host the agent's own checks found quiet and clean ([`Hooked`]), once per
 //! `exclusive` grant, and not for a lease taken over after a restart (the consumer is
-//! already using that host).
+//! already using that host). An agent that restarts while it holds no run of the lease did
+//! not take it over: it prepares the lease again on a quiet host, so the hook runs again
+//! for that grant, once per grant and per agent start with no run of it held.
 //!
 //! The job worker runs the hook on its own thread, so while it runs (up to twice
 //! `prepare_timeout`) the worker applies no reply: starts, stops and acknowledgements wait
 //! in the queue, a start may go stale there, and replies beyond the queue are dropped and
-//! sent again. Heartbeats are not delayed.
+//! sent again. Heartbeats are not delayed. The worker's stall watchdog is allowed the
+//! hook's bound only while the hook runs ([`HookWindow`]): it is given back when the hook
+//! returns, so the rest of the order has the plain stall bound again.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -245,10 +249,34 @@ fn vetted(verdict: Verdict) -> Quiet {
     }
 }
 
+/// A change to the time the worker's watchdog allows, told by [`WorkerHook::vet`] around a
+/// hook run: the hook's bound is added when the hook is about to start and taken away when
+/// it has returned, so the allowance lasts for the hook and for nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookWindow {
+    /// The hook is about to start; it may take this long.
+    Opens(Duration),
+    /// The hook has returned; the same time is taken back.
+    Closes(Duration),
+}
+
+impl HookWindow {
+    /// `limit` (the watchdog's limit in milliseconds) after this change. Taking back never
+    /// goes below zero.
+    pub fn moves(self, limit: u64) -> u64 {
+        let millis = |bound: Duration| u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
+        match self {
+            Self::Opens(bound) => limit.saturating_add(millis(bound)),
+            Self::Closes(bound) => limit.saturating_sub(millis(bound)),
+        }
+    }
+}
+
 /// The hook as the job worker owns it: the checked command, the runner that starts it and
 /// the longest a run of it can take, which the worker's watchdog is told of so a hook that
 /// takes its full time is not taken for a stuck worker. The worker runs it, on its own
-/// thread, once for each lease its lifecycle found quiet.
+/// thread, once for each lease its lifecycle found quiet (not for a lease a run found at the
+/// agent's start belongs to).
 pub struct WorkerHook {
     hook: ReadinessHook,
     runner: Box<dyn HookRunner + Send>,
@@ -269,13 +297,16 @@ impl WorkerHook {
     /// `found`, the lifecycle's answer: when it is [`Quiet::Ready`] the hook runs and its
     /// verdict is the answer; any other answer is returned as it is and the hook does not
     /// run. Blocks as long as the hook runs, up to the bound given to [`WorkerHook::new`];
-    /// `before_run` is told that bound just before the hook starts (the worker extends its
-    /// watchdog by it).
-    pub fn vet(&self, found: Quiet, before_run: &dyn Fn(Duration)) -> Quiet {
+    /// `watch` is told [`HookWindow::Opens`] with that bound just before the hook starts and
+    /// [`HookWindow::Closes`] with it as soon as the hook has returned (the worker moves its
+    /// watchdog's limit by it); it is told nothing when the hook does not run.
+    pub fn vet(&self, found: Quiet, watch: &dyn Fn(HookWindow)) -> Quiet {
         match found {
             Quiet::Ready => {
-                before_run(self.bound);
-                vetted(self.hook.run(self.runner.as_ref()))
+                watch(HookWindow::Opens(self.bound));
+                let verdict = self.hook.run(self.runner.as_ref());
+                watch(HookWindow::Closes(self.bound));
+                vetted(verdict)
             }
             other => other,
         }

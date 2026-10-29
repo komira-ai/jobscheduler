@@ -28,13 +28,16 @@
 //!   restore order without waiting and reads the last answer the worker published, which
 //!   is tagged with the lease it is about. An answer for another lease is never handed
 //!   back; the worker drops its answers when its lifecycle follows a different lease. The
-//!   hook runs here, once for each lease.
+//!   hook runs here, once for each grant (and again after an agent restart that holds no run
+//!   of the lease, which prepares it afresh; a lease taken over with a run held runs none).
 //!   Because the hook runs on the worker's thread it holds the worker for as long as it
 //!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
 //!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
 //!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
-//!   Heartbeats go on. The watchdog allows the worker that long for the hook, and no longer
-//!   for anything else.
+//!   Heartbeats go on. The watchdog allows the worker that long for the hook, only while the
+//!   hook runs: its limit grows by the bound when the hook is about to start and falls by the
+//!   same when the hook returns ([`HookWindow`]), so every other part of an order has the
+//!   plain stall bound.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -87,7 +90,7 @@ use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle, Status};
-use crate::readiness::WorkerHook;
+use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
 
@@ -680,13 +683,13 @@ fn work(
 ) {
     let mut answers = LeaseAnswers::default();
     // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
-    // limit grows by the hook's bound when (and only when) a hook starts.
-    let extend = |bound: Duration| {
-        let ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
-        let due = shared.busy_until.load(Ordering::SeqCst);
+    // limit grows by the hook's bound while a hook runs, and by nothing else. (The worker is
+    // the only writer of `busy_until` during an order.)
+    let watch = |window: HookWindow| {
+        let limit = shared.busy_until.load(Ordering::SeqCst);
         shared
             .busy_until
-            .store(due.saturating_add(ms), Ordering::SeqCst);
+            .store(window.moves(limit), Ordering::SeqCst);
     };
     loop {
         let mut lines = Vec::new();
@@ -719,7 +722,7 @@ fn work(
                 let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
                 asked.into_iter().for_each(|lease| {
-                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &extend);
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &watch);
                 });
                 lines.extend(describe(&events));
             }

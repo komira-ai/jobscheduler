@@ -3,12 +3,12 @@
 //! chance: a repeat of an answered question, a lease that ends and is granted again, a lag
 //! behind a switch of lease, and a lease taken over after a restart.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use js_agent::lifecycle::{Quiet, Restored};
-use js_agent::{HookRunner, LeaseAnswers, Ran, ReadinessHook, WorkerHook};
+use js_agent::{HookRunner, HookWindow, LeaseAnswers, Ran, ReadinessHook, WorkerHook};
 use js_agent_wire::{HeartbeatReply, JobSpec};
 
 use crate::lifecycle::{Harness, job};
@@ -39,8 +39,8 @@ fn counting() -> (WorkerHook, Arc<AtomicUsize>) {
     (hook, runs)
 }
 
-/// Told of the bound of each hook run (the worker extends its watchdog by it).
-fn at_hook(_bound: Duration) {}
+/// Told of each hook run (the worker moves its watchdog's limit by it).
+fn at_hook(_window: HookWindow) {}
 
 /// The reply that names `lease`, or none.
 fn naming(h: &mut Harness, lease: Option<&str>) {
@@ -111,6 +111,143 @@ fn the_hook_does_not_run_for_a_taken_over_lease() {
 
     assert_eq!(answers.quiet(), Some(&(LEASE.to_owned(), Quiet::Ready)));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
+}
+
+/// Asserts the other half of the adoption rule: the agent restarts with a run of `LEASE`
+/// adopted, and the first reply that names a lease names `OTHER`, a fresh one. `OTHER` is not
+/// taken over, so it is prepared like any grant: busy while the adopted run is held, and,
+/// once the run has ended and its result is acknowledged, ready only after the hook has run
+/// (once). It catches an adoption signal that is "some lease was adopted" instead of "this
+/// lease was adopted", which would skip the hook for a fresh lease and report it ready
+/// without measuring the host.
+#[test]
+fn the_hook_runs_for_a_fresh_lease_after_a_restart_that_adopted_another() {
+    let mut h = Harness::new("answers-adopted-other");
+    let own = JobSpec {
+        lease_id: LEASE.to_owned(),
+        ..job("a")
+    };
+    h.start(own);
+    h.restart().unwrap();
+    naming(&mut h, Some(OTHER));
+    let (hook, runs) = counting();
+    let mut answers = LeaseAnswers::default();
+    let mut events = Vec::new();
+
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        OTHER.to_owned(),
+        &mut events,
+        &at_hook,
+    );
+    assert_eq!(answers.quiet(), Some(&(OTHER.to_owned(), Quiet::Busy)));
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "the adopted run is held");
+
+    h.fake.exit("a", 0);
+    h.life.step();
+    h.ack("a", "ACCEPTED");
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        OTHER.to_owned(),
+        &mut events,
+        &at_hook,
+    );
+    assert_eq!(answers.quiet(), Some(&(OTHER.to_owned(), Quiet::Ready)));
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "the fresh lease was vetted");
+}
+
+/// A hook runner that exits with a code and notes `run` in a log shared with the watchdog
+/// seam.
+struct Noting(Arc<Mutex<Vec<String>>>, i32);
+
+impl HookRunner for Noting {
+    fn execute(&self, _program: &str, _args: &[&str], _env: &[(&str, &str)]) -> Ran {
+        self.0.lock().unwrap().push("run".to_owned());
+        Ran::Exited {
+            code: Some(self.1),
+            text: format!("exit status: {}", self.1),
+            stdout: String::new(),
+        }
+    }
+}
+
+/// What the watchdog seam heard, and the hook's runs, in order, while `LEASE` is prepared
+/// on `h` with a hook that exits with `code`.
+fn watched(h: &mut Harness, code: i32) -> (Quiet, Vec<String>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let program = ReadinessHook::new("/bin/sh", &[]).unwrap();
+    let bound = Duration::from_secs(1);
+    let hook = WorkerHook::new(program, Box::new(Noting(Arc::clone(&log), code)), bound);
+    let heard = Arc::clone(&log);
+    let watch = move |window: HookWindow| heard.lock().unwrap().push(format!("{window:?}"));
+    let mut answers = LeaseAnswers::default();
+    answers.prepare(
+        &mut h.life,
+        Some(&hook),
+        LEASE.to_owned(),
+        &mut Vec::new(),
+        &watch,
+    );
+    let (_, quiet) = answers.quiet().cloned().unwrap();
+    let heard = log.lock().unwrap().clone();
+    (quiet, heard)
+}
+
+/// Asserts the watchdog is told of the hook's run, and of nothing else: for a ready host it
+/// hears the window open with the hook's bound, the run, and the same window close; a hook
+/// that refuses closes the window as well; a prepare answered busy (a run held) or ready by
+/// adoption (the hook is skipped) hears nothing. It catches an allowance that is never taken
+/// back (no `Closes`), one given to a prepare that does not reach the hook, and one that is
+/// not given before the hook.
+#[test]
+fn the_watchdog_hears_of_the_hook_run_and_of_nothing_else() {
+    let mut h = Harness::new("answers-window");
+    naming(&mut h, Some(LEASE));
+    let (quiet, heard) = watched(&mut h, 0);
+    assert_eq!(quiet, Quiet::Ready);
+    assert_eq!(heard, ["Opens(1s)", "run", "Closes(1s)"]);
+
+    let mut h = Harness::new("answers-window-refused");
+    naming(&mut h, Some(LEASE));
+    let (quiet, heard) = watched(&mut h, js_agent::EXIT_NOT_QUIET);
+    assert!(matches!(quiet, Quiet::Refused { .. }));
+    assert_eq!(heard, ["Opens(1s)", "run", "Closes(1s)"]);
+
+    let mut h = Harness::new("answers-window-busy");
+    h.start(job("a"));
+    naming(&mut h, Some(LEASE));
+    let (quiet, heard) = watched(&mut h, 0);
+    assert_eq!(quiet, Quiet::Busy);
+    assert_eq!(heard, Vec::<String>::new(), "a run is held: no hook");
+
+    let mut h = Harness::new("answers-window-adopted");
+    h.start(JobSpec {
+        lease_id: LEASE.to_owned(),
+        ..job("a")
+    });
+    h.restart().unwrap();
+    naming(&mut h, Some(LEASE));
+    let (quiet, heard) = watched(&mut h, 0);
+    assert_eq!(quiet, Quiet::Ready);
+    assert_eq!(heard, Vec::<String>::new(), "taken over: no hook");
+}
+
+/// Asserts the window arithmetic: opening adds exactly the bound (in milliseconds) to the
+/// limit and closing takes exactly it back, so open then close is the identity; closing
+/// never goes below zero; opening never wraps. It catches a window that is not taken back
+/// (or taken back twice, or by a different amount) and one that wraps.
+#[test]
+fn a_closed_window_takes_back_exactly_what_the_open_one_gave() {
+    let bound = Duration::from_millis(1500);
+    for limit in [1, 61_001, u64::MAX - 1500] {
+        let open = HookWindow::Opens(bound).moves(limit);
+        assert_eq!(open, limit + 1500);
+        assert_eq!(HookWindow::Closes(bound).moves(open), limit);
+    }
+    assert_eq!(HookWindow::Closes(bound).moves(1000), 0);
+    assert_eq!(HookWindow::Opens(bound).moves(u64::MAX), u64::MAX);
 }
 
 /// Asserts that a lease that ends and is granted again is prepared afresh: the ready
