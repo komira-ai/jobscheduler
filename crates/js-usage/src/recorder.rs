@@ -430,7 +430,6 @@ impl HostState {
                 continue;
             }
             if ended.contains(&minute.lease) {
-                counters.minutes_after_end += 1;
                 continue;
             }
             let figures = Figures {
