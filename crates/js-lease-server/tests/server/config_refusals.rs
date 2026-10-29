@@ -72,9 +72,9 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     let text = file(&server(&scratch, ""), &[&pool.set("colour", "\"red\"")]);
     assert_eq!(
         refusal(&scratch, &text),
-        "pool \"hosts\": colour: unknown field; known: name, class, exec, max_instances, \
-         max_spend_per_hour, max_spend_per_day, idle, boot_timeout, launch, join_token_file, \
-         provider, network"
+        "pool \"hosts\": colour: unknown field; known: name, class, exec, \
+         memory_schedulable_percent, max_instances, max_spend_per_hour, max_spend_per_day, \
+         idle, boot_timeout, launch, join_token_file, provider, network"
     );
 }
 

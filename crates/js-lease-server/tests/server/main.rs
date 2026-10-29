@@ -24,6 +24,7 @@ mod joins;
 mod joins_credential;
 mod joins_revoke;
 mod limits;
+mod memory_percent;
 mod pools_checks;
 mod pools_policy;
 mod pools_status;

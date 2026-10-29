@@ -13,7 +13,9 @@ use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{
+    Admission, ClassId, ExecMode, MemoryPercent, ProviderId, ResourceClass, Resources, Shape,
+};
 use serde::Deserialize;
 use tracing::warn;
 
@@ -32,6 +34,8 @@ struct RawPool {
     class: String,
     max_machines: usize,
     shape: RawShape,
+    // The share of `shape.memory_bytes` the pool books, from 1 to 100; absent, all of it.
+    memory_schedulable_percent: Option<u64>,
     #[serde(default)]
     capabilities: BTreeMap<String, String>,
     heartbeat_interval: Option<String>,
@@ -155,8 +159,13 @@ fn parse_with(
         DEFAULT_HEARTBEAT_INTERVAL_MS,
     )?;
     let grace = millis("grace", raw.grace, DEFAULT_GRACE_MS)?;
+    let percent = match raw.memory_schedulable_percent {
+        Some(percent) => MemoryPercent::new(percent).map_err(|err| err.to_string())?,
+        None => MemoryPercent::FULL,
+    };
     let shape = Shape::new(resources, raw.capabilities);
     let pool = PoolConfig::new(name, class, shape, raw.max_machines)
+        .with_memory_percent(percent)
         .with_timing(interval, grace)
         .map_err(|err| format!("heartbeat_interval and grace: {err}"))?;
     let retention = millis(
@@ -341,6 +350,30 @@ mod tests {
         assert_eq!(container.exec(), Some(ExecMode::Container));
         let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
         assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
+    }
+
+    /// `memory_schedulable_percent` cuts the memory of `[shape]` the pool books, rounding
+    /// down, and leaves the floor a host must meet whole; a file without it books all of
+    /// it; 0 and 101 are refused naming the key; the key placed after `[shape]` is a key of
+    /// that table and refused. It catches a percent read and dropped, one that cuts the
+    /// floor instead of the booking, and one that rounds up.
+    #[test]
+    fn the_memory_percent_cuts_what_is_booked_and_not_the_floor() {
+        let whole = parse(MINIMAL).unwrap().memory_headroom();
+        assert_eq!(whole.percent(), MemoryPercent::FULL);
+        assert_eq!(whole.bookable_bytes(), 8_589_934_592);
+        let cut = parse(&with("memory_schedulable_percent = 90")).unwrap();
+        assert_eq!(cut.memory_headroom().configured_bytes(), 8_589_934_592);
+        assert_eq!(cut.memory_headroom().percent().get(), 90);
+        assert_eq!(cut.memory_headroom().bookable_bytes(), 7_730_941_132);
+        assert_eq!(cut.memory_percent().get(), 90);
+        for bad in ["0", "101"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
+        let inside = format!("{MINIMAL}memory_schedulable_percent = 90\n");
+        let said = parse(&inside).unwrap_err();
+        assert!(said.contains("memory_schedulable_percent"), "{said}");
     }
 
     /// A file in the temp directory that is removed when the guard drops, so a failing

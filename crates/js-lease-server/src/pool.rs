@@ -18,7 +18,7 @@ use js_elastic::{
     AcquireId, Artifact, BootPlan, BootStep, Demand, Dimension, ElasticProvider, HostName, Offer,
     SchedulerId,
 };
-use js_types::ExecMode;
+use js_types::{ExecMode, MemoryHeadroom};
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
@@ -78,6 +78,7 @@ pub(crate) struct Pool {
     mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     floor: Floor,
     pub(crate) floor_demand: Demand,
+    pub(crate) memory: MemoryHeadroom,
     advertise: Option<String>,
     agent_sha256: BTreeMap<String, [u8; 32]>,
 }
@@ -148,6 +149,7 @@ impl Pool {
             provider: plan.provider,
             floor: plan.floor,
             floor_demand: plan.floor_demand,
+            memory: plan.memory,
             advertise: setup.advertise,
             agent_sha256: setup.inputs.agent_sha256,
         }

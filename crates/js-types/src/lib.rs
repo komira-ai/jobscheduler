@@ -19,6 +19,7 @@ mod class;
 mod ids;
 mod job;
 mod labels;
+mod memory;
 mod request;
 mod resources;
 pub mod sched;
@@ -31,6 +32,7 @@ pub use job::{
     RequirementsError, UnknownExecMode,
 };
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
+pub use memory::{MEMORY_PERCENT_KEY, MemoryHeadroom, MemoryPercent, MemoryPercentError};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};
 pub use shape::{Capabilities, Shape};

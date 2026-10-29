@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use js_types::{HostId, IdError, Resources, Shape, TypeError};
+use js_types::{HostId, IdError, MemoryPercent, MemoryPercentError, Resources, Shape, TypeError};
 use serde::Deserialize;
 
 /// The example configuration shipped with the crate, shown in the crate docs.
@@ -40,11 +40,15 @@ pub enum ConfigError {
     /// The file lists no host.
     #[error("the pool lists no host")]
     NoHosts,
+    /// `memory_schedulable_percent` is not from 1 to 100.
+    #[error(transparent)]
+    MemoryPercent(#[from] MemoryPercentError),
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    memory_schedulable_percent: Option<u64>,
     #[serde(default)]
     host: Vec<RawHost>,
 }
@@ -59,10 +63,23 @@ struct RawHost {
     capabilities: BTreeMap<String, String>,
 }
 
+/// What a hosts file lists: the hosts, as the operator wrote them, and the share of their
+/// memory the file books.
+pub(crate) struct Parsed {
+    /// The hosts in file order, with the memory as written.
+    pub(crate) hosts: Vec<(HostId, Shape)>,
+    /// `memory_schedulable_percent`, or all of it when the file leaves it out.
+    pub(crate) memory_percent: MemoryPercent,
+}
+
 /// Reads configuration text into the hosts it lists, in file order.
-pub(crate) fn parse(source: &str) -> Result<Vec<(HostId, Shape)>, ConfigError> {
+pub(crate) fn parse(source: &str) -> Result<Parsed, ConfigError> {
     let raw: RawConfig =
         toml::from_str(source).map_err(|err| ConfigError::Parse(err.to_string()))?;
+    let memory_percent = match raw.memory_schedulable_percent {
+        Some(percent) => MemoryPercent::new(percent)?,
+        None => MemoryPercent::FULL,
+    };
     let mut hosts: Vec<(HostId, Shape)> = Vec::new();
     for entry in raw.host {
         let id = HostId::new(&entry.id)?;
@@ -84,7 +101,10 @@ pub(crate) fn parse(source: &str) -> Result<Vec<(HostId, Shape)>, ConfigError> {
     if hosts.is_empty() {
         return Err(ConfigError::NoHosts);
     }
-    Ok(hosts)
+    Ok(Parsed {
+        hosts,
+        memory_percent,
+    })
 }
 
 #[cfg(test)]
@@ -96,7 +116,7 @@ mod tests {
     /// Asserts that the shipped example parses into its two hosts with their shapes.
     #[test]
     fn example_config_parses() {
-        let hosts = parse(EXAMPLE_CONFIG).unwrap();
+        let hosts = parse(EXAMPLE_CONFIG).unwrap().hosts;
         let ids: Vec<_> = hosts.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(ids, ["gpu-01", "gpu-02"]);
         let shape = &hosts[0].1;
