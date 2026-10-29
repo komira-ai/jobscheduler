@@ -493,20 +493,26 @@ fn a_range_is_claimed_by_one_agent_at_a_time() {
 #[test]
 fn overlapping_ranges_are_refused_and_neighbours_are_not() {
     let dir = Scratch::new("subid-claim-overlap");
-    let claims = dir.path("claims");
-    let held = RangeClaim::take(&claims, Mapping::new(100_000, 400_000)).unwrap();
-    let refused = |uid: u32, gid: u32, other: &str| {
+    // Each refusal in a directory of its own: a refused attempt leaves its own file, and a
+    // child that another test forks may hold a copy of its lock until it execs, so a later
+    // attempt in the same directory could be refused for that file instead.
+    let refused = |at: &str, uid: u32, gid: u32| {
+        let claims = dir.path(at);
+        let held = RangeClaim::take(&claims, Mapping::new(100_000, 400_000)).unwrap();
         assert_eq!(
             RangeClaim::take(&claims, Mapping::new(uid, gid)).unwrap_err(),
-            SubidError::Claimed(other.to_owned()),
+            SubidError::Claimed("100000-400000".to_owned()),
             "{uid} {gid}"
         );
+        drop(held);
     };
-    refused(100_001, 900_000, "100000-400000");
-    refused(100_000 + 65_535, 900_000, "100000-400000");
-    refused(100_000 - 65_535, 900_000, "100000-400000");
-    refused(900_000, 400_001, "100000-400000");
-    refused(900_000, 400_000 - 65_535, "100000-400000");
+    refused("uid-start", 100_001, 900_000);
+    refused("uid-end", 100_000 + 65_535, 900_000);
+    refused("uid-below", 100_000 - 65_535, 900_000);
+    refused("gid-start", 900_000, 400_001);
+    refused("gid-below", 900_000, 400_000 - 65_535);
+    let claims = dir.path("claims");
+    let held = RangeClaim::take(&claims, Mapping::new(100_000, 400_000)).unwrap();
     let touching = [
         Mapping::new(100_000 + 65_536, 900_000),
         Mapping::new(100_000 - 65_536, 400_000 + 65_536),
