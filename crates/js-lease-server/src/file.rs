@@ -29,8 +29,10 @@ use crate::error::StartupError;
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
 
+mod joined;
 mod server;
 
+pub use joined::JoinedPool;
 pub(crate) use server::Server;
 use server::{check_listeners, read_client_token, read_server};
 
@@ -162,7 +164,8 @@ impl fmt::Debug for ElasticPlan {
 
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
 pub(crate) struct Registering {
-    pub(crate) plan: ElasticPlan,
+    /// The launching side; `None` for a pool of hand-joined agents.
+    pub(crate) plan: Option<ElasticPlan>,
     pub(crate) pool: PoolConfig,
     pub(crate) tokens: AgentTokens,
 }
@@ -523,6 +526,9 @@ fn read_pool(
     ld: &Load<'_>,
     client: &Token,
 ) -> Result<Read, StartupError> {
+    if table.contains_key("kind") {
+        return joined::read(table, client);
+    }
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
     let head = match table.get("name").and_then(toml::Value::as_str) {
@@ -698,7 +704,11 @@ impl Elastic<'_> {
             network,
             provider: Arc::from(built.provider),
         };
-        Ok(Registering { plan, pool, tokens })
+        Ok(Registering {
+            plan: Some(plan),
+            pool,
+            tokens,
+        })
     }
 }
 

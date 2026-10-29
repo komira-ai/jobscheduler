@@ -17,8 +17,28 @@ status 2 and before the file is read: `--listen: not allowed with --config; set 
 | `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, same defaults; refused unless a pool registers agents |
 | `--token-file` | `server.client_token_file` |
 | `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
-| `--agent-pool-config` | a `[[pool]]` with an elastic provider (the pool's shape, caps and timing are its keys) |
+| `--agent-pool-config` | a `[[pool]]` with `kind = "joined"` for machines started by hand (the pool's shape and timing are its keys), or with an elastic provider for machines the server launches |
 | `--agent-token-file` | `join_token_file` of that pool |
+
+A pool of hand-joined agents is one `[[pool]]` of kind `joined`. It launches nothing, so it has no `provider`, `network`, `launch`,
+`max_instances`, `idle`, `boot_timeout` or spend key, and each of those is refused by name. It registers agents, so it counts as the one
+pool that may; `server.agent_listen` is required as for an elastic pool.
+
+```toml
+[[pool]]
+kind  = "joined"
+name  = "nodes"                       # the `pool` of a hello, and the `provider` of a one-time token
+class = "whole-node"
+exec  = "container"                   # optional; absent or "none": no host contract
+shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
+max_machines    = 6                   # optional; at most 262144
+join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
+heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
+```
+
+A node joins with a one-time token: `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
+mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
+`--agent-pool-config` file had and this kind lacks: `[capabilities]` and the whole-node keys (`max_whole_node`, `drain_after`, ...).
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 

@@ -443,7 +443,7 @@ impl Config {
                         static_pool,
                         agents,
                     },
-                    Some(plan),
+                    plan,
                 )
             }
         };
