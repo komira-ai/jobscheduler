@@ -126,7 +126,7 @@ fn headers_carry_fixed_metadata_in_path_order() {
     let mut sorted = paths.clone();
     sorted.sort();
     assert_eq!(paths, sorted);
-    assert_eq!(paths.len() as u64, GOLDEN_ENTRIES);
+    assert_eq!(paths.len(), 15);
     assert!(paths.iter().any(|p| p.len() > 100));
 }
 
