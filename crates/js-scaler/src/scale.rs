@@ -545,6 +545,7 @@ impl Pass<'_> {
             refused: self.refused,
             quiet,
             silent: self.silent_now,
+            silent_released: Vec::new(),
             missing: self.missing_now,
         };
         (state, actions)

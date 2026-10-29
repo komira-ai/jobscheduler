@@ -259,3 +259,64 @@ fn a_host_that_reappears_resets_the_count() {
     let actions = rig.tick(at(3 * SECOND + 60 * MINUTE));
     assert_eq!(count(&actions, "Release"), 1);
 }
+
+/// A rig as `registered` leaves it, whose host the registry then hears nothing from.
+fn silent_for_a_while(leases_given_up: bool) -> (Rig, String) {
+    let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
+    rig.input.hosts[0].state = HostState::Lost;
+    rig.input.hosts[0].lease_given_up = leases_given_up;
+    (rig, plan.name)
+}
+
+/// Asserts that a silent elastic host whose leases the registry still holds is not
+/// released, however long it is silent.
+#[test]
+fn a_silent_host_with_leases_still_held_is_not_released() {
+    let (mut rig, _) = silent_for_a_while(false);
+    for later in [3 * SECOND, 30 * MINUTE, 2 * HOUR, 2 * DAY] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
+    assert!(rig.state.silent_released.is_empty());
+}
+
+/// Asserts that a silent elastic host whose leases were given up is released once it has
+/// been silent `unknown_hold`, to the millisecond, the release is named in the state for
+/// the shell to log, and the usual read-back then ends it Gone.
+#[test]
+fn a_silent_host_with_its_leases_given_up_is_released_after_the_hold() {
+    let (mut rig, name) = silent_for_a_while(true);
+    assert!(rig.tick(at(3 * SECOND)).is_empty());
+    assert!(rig.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
+    assert!(rig.state.silent_released.is_empty());
+    let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
+    assert_eq!(count(&actions, "Revoke"), 1);
+    assert_eq!(count(&actions, "Release"), 1);
+    assert_eq!(rig.phase(0), Phase::Releasing);
+    assert_eq!(rig.state.silent_released, [name.clone()]);
+
+    rig.input.released = vec![js_scaler::ReleaseResult {
+        host: name,
+        answer: js_elastic::Released::Gone,
+    }];
+    let actions = rig.tick(at(3 * SECOND + 31 * MINUTE));
+    assert_eq!(count(&actions, "RemoveHost"), 1);
+    assert_eq!(rig.phase(0), Phase::Gone);
+    assert!(rig.state.silent_released.is_empty());
+}
+
+/// Asserts that a host the scaler did not launch (a static pool's) is never released,
+/// silent or not, whatever the registry says of its leases: it is shown, nothing more.
+#[test]
+fn a_static_host_is_never_released() {
+    let mut rig = Rig::new(settings("gpu"));
+    let mut fixed = host("static-1", "gpu");
+    fixed.state = HostState::Lost;
+    fixed.lease_given_up = true;
+    rig.input.hosts = vec![fixed];
+    for later in [SECOND, HOUR, 2 * DAY] {
+        assert!(rig.tick(at(later)).is_empty());
+    }
+    assert!(rig.state.records.instances.is_empty());
+}

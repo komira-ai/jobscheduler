@@ -108,6 +108,7 @@ pub fn host(name: &str, pool: &str) -> HostFacts {
         },
         mark: None,
         busy: false,
+        lease_given_up: false,
     }
 }
 

@@ -67,6 +67,11 @@ pub struct HostFacts {
     pub mark: Option<Mark>,
     /// Whether the host holds a lease, a run or a stream.
     pub busy: bool,
+    /// Whether the registry's lease grace has given up the host's leases: it was silent
+    /// past grace and its bookings were dropped, so nothing is lost by releasing the
+    /// machine. The shell sets it from the lease table; it is `false` for a host that
+    /// still holds a lease or whose bookings it cannot read.
+    pub lease_given_up: bool,
 }
 
 /// One pool: its settings, the state of its checks, its offers and what its provider
