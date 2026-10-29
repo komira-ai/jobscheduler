@@ -26,6 +26,16 @@ pub enum Child {
         /// The host name.
         host: String,
     },
+    /// Print a file's contents.
+    Read {
+        /// The path.
+        path: PathBuf,
+    },
+    /// Print `set=<value>` or `unset` for an environment variable.
+    Env {
+        /// The variable's name.
+        name: String,
+    },
     /// Create or overwrite a file.
     Write {
         /// The path.
@@ -41,6 +51,14 @@ pub fn run(child: &Child) -> ExitCode {
             std::net::TcpStream::connect_timeout(addr, CONNECT_LIMIT).map(|_| String::new())
         }
         Child::Resolve { host } => resolve(host),
+        Child::Read { path } => {
+            let _ = path;
+            Ok(String::new())
+        }
+        Child::Env { name } => {
+            let _ = name;
+            Ok(String::new())
+        }
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
     };
     match outcome {
@@ -53,6 +71,16 @@ pub fn run(child: &Child) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn read_text(path: &std::path::Path) -> std::io::Result<String> {
+    let _ = path;
+    Ok(String::new())
+}
+
+fn env_text(name: &str) -> String {
+    let _ = name;
+    String::new()
 }
 
 fn resolve(host: &str) -> std::io::Result<String> {
@@ -106,5 +134,27 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let missing = scratch("missing-dir").join("file");
         assert_eq!(run(&Child::Write { path: missing }), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn read_prints_a_file_and_fails_for_a_missing_one() {
+        let path = scratch("read");
+        std::fs::write(&path, b"secret\n").unwrap();
+        assert_eq!(read_text(&path).unwrap(), "secret\n");
+        assert_eq!(run(&Child::Read { path: path.clone() }), ExitCode::SUCCESS);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(run(&Child::Read { path }), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn env_reports_a_set_variable_with_its_value_and_an_unset_one() {
+        assert!(env_text("PATH").starts_with("set=/"));
+        assert_eq!(env_text("JS_MAC_PROBE_SURELY_UNSET"), "unset\n");
+        assert_eq!(
+            run(&Child::Env {
+                name: "PATH".into()
+            }),
+            ExitCode::SUCCESS
+        );
     }
 }

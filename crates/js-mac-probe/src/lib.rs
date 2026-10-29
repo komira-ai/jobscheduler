@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 pub mod child;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod parse;
 pub mod report;
 
 use report::Report;
