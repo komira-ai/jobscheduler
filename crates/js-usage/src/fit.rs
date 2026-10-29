@@ -68,8 +68,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
     if runs < MIN_RUNS_FOR_CURVE {
         return None;
     }
-    let cores_learned =
-        ring.runs().filter(|r| !r.under_node_pressure()).count() >= MIN_RUNS_FOR_CURVE;
+    let cores_learned = runs >= MIN_RUNS_FOR_CURVE;
     let mut raw: Vec<MinutePoint> = Vec::new();
     // Leading minutes no clean run recorded: they take the first clean value below.
     let mut lead = 0;
