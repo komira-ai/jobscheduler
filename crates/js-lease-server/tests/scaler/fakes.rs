@@ -15,7 +15,9 @@ use js_elastic::{
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, Scaler, SharedClock};
-use js_registry::{HostMark, HostState, HostView, SequentialSessions, SessionSource, Waiting};
+use js_registry::{
+    Busy, HostMark, HostState, HostView, SequentialSessions, SessionSource, Waiting,
+};
 use js_scaler::{
     AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
 };
@@ -112,7 +114,7 @@ impl Effects for Handle {
                 world.hosts.retain(|view| view.id.as_str() != host);
                 Ok(())
             }
-            false => Err("a lease is booked on the host".to_owned()),
+            false => Err(Busy::Lease),
         }
     }
 

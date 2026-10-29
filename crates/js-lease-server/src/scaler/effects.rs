@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
-use js_registry::{HostView, Waiting};
+use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 
 /// A call on the registry that names one host, other than the removal of a host. None of
@@ -78,9 +78,9 @@ pub trait Effects: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Why the registry refused: a lease is booked on the host. It is asked again at the
+    /// Why the registry refused: a lease is booked on the host ([`Busy::Lease`]). It is asked again at the
     /// next tick.
-    fn remove(&self, host: &str) -> Result<(), String>;
+    fn remove(&self, host: &str) -> Result<(), Busy>;
 
     /// Forgets the host's network device, if its network mode has one. Best effort.
     fn forget(&self, host: &str);
