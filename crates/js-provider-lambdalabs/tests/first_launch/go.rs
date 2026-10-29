@@ -5,9 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag,
-};
+use js_provider_lambdalabs::{ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag};
 
 use crate::rig::{FIRST, Rig, TestRemote, activate, id};
 
