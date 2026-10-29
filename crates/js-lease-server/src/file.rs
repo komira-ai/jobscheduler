@@ -215,13 +215,13 @@ impl Section {
 
     /// Refuses the first field that is not one of `known`.
     fn only(&self, known: &[&str]) -> Result<(), StartupError> {
-        match self.map.keys().find(|key| !known.contains(&key.as_str())) {
-            None => Ok(()),
-            Some(key) => {
+        for key in self.map.keys() {
+            if !known.contains(&key.as_str()) {
                 let reason = format!("unknown field; known: {}", known.join(", "));
-                Err(self.fail(key, &reason))
+                return Err(self.fail(key, &reason));
             }
         }
+        Ok(())
     }
 
     fn string(&mut self, key: &str) -> Result<Option<String>, StartupError> {
@@ -233,8 +233,10 @@ impl Section {
     }
 
     fn required_string(&mut self, key: &str) -> Result<String, StartupError> {
-        let text = self.string(key)?;
-        text.ok_or_else(|| self.fail(key, "required"))
+        match self.string(key)? {
+            Some(text) => Ok(text),
+            None => Err(self.fail(key, "required")),
+        }
     }
 
     fn path(&mut self, key: &str) -> Result<Option<PathBuf>, StartupError> {
@@ -242,16 +244,19 @@ impl Section {
     }
 
     fn required_path(&mut self, key: &str) -> Result<PathBuf, StartupError> {
-        let path = self.path(key)?;
-        path.ok_or_else(|| self.fail(key, "required"))
+        match self.path(key)? {
+            Some(path) => Ok(path),
+            None => Err(self.fail(key, "required")),
+        }
     }
 
     fn integer(&mut self, key: &str) -> Result<Option<u64>, StartupError> {
         match self.map.remove(key) {
             None => Ok(None),
-            Some(toml::Value::Integer(number)) => u64::try_from(number)
-                .map(Some)
-                .map_err(|_| self.fail(key, "must not be negative")),
+            Some(toml::Value::Integer(number)) => match u64::try_from(number) {
+                Ok(number) => Ok(Some(number)),
+                Err(_) => Err(self.fail(key, "must not be negative")),
+            },
             Some(_) => Err(self.fail(key, "must be an integer")),
         }
     }
@@ -275,10 +280,10 @@ impl Section {
         let Some(text) = self.string(key)? else {
             return Ok(None);
         };
-        let parsed = parse_duration(&text);
-        parsed
-            .map(Some)
-            .map_err(|_| self.fail(key, "must be a positive duration such as 600s, 10m or 1h"))
+        match parse_duration(&text) {
+            Ok(duration) => Ok(Some(duration)),
+            Err(_) => Err(self.fail(key, "must be a positive duration such as 600s, 10m or 1h")),
+        }
     }
 
     fn duration_or(&mut self, key: &str, default: Duration) -> Result<Duration, StartupError> {
@@ -289,10 +294,10 @@ impl Section {
         let Some(text) = self.string(key)? else {
             return Ok(None);
         };
-        let parsed = text.parse::<SocketAddr>();
-        parsed
-            .map(Some)
-            .map_err(|_| self.fail(key, "must be an address such as 127.0.0.1:7300"))
+        match text.parse::<SocketAddr>() {
+            Ok(address) => Ok(Some(address)),
+            Err(_) => Err(self.fail(key, "must be an address such as 127.0.0.1:7300")),
+        }
     }
 
     fn table(&mut self, key: &str) -> Result<Option<toml::Table>, StartupError> {
@@ -304,19 +309,21 @@ impl Section {
     }
 
     fn tables(&mut self, key: &str) -> Result<Vec<toml::Table>, StartupError> {
-        let value = self.map.remove(key);
-        let must = || self.fail(key, "must be an array of tables, written [[pool]]");
-        match value {
-            None => Ok(Vec::new()),
-            Some(toml::Value::Array(items)) => items
-                .into_iter()
-                .map(|item| match item {
-                    toml::Value::Table(table) => Ok(table),
-                    _ => Err(must()),
-                })
-                .collect(),
-            Some(_) => Err(must()),
+        let must = "must be an array of tables, written [[pool]]";
+        let Some(value) = self.map.remove(key) else {
+            return Ok(Vec::new());
+        };
+        let toml::Value::Array(items) = value else {
+            return Err(self.fail(key, must));
+        };
+        let mut tables = Vec::new();
+        for item in items {
+            let toml::Value::Table(table) = item else {
+                return Err(self.fail(key, must));
+            };
+            tables.push(table);
         }
+        Ok(tables)
     }
 
     /// A spend in cents: a string holding a decimal with at most two places, above zero.
@@ -335,10 +342,17 @@ impl Section {
     }
 }
 
+fn is_digit(byte: u8) -> bool {
+    byte.is_ascii_digit()
+}
+
+fn digits(part: &str) -> bool {
+    part.bytes().all(is_digit)
+}
+
 /// `text` as cents: digits, then optionally a point and one or two digits.
 fn cents(text: &str) -> Option<u64> {
     let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
-    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
     let valid = [
         !whole.is_empty(),
         fraction.len() <= 2,
@@ -346,37 +360,41 @@ fn cents(text: &str) -> Option<u64> {
         digits(whole),
         digits(fraction),
     ];
-    match valid.into_iter().all(|ok| ok) {
-        false => None,
-        true => format!("{whole}{fraction:0<2}").parse().ok(),
+    match valid.contains(&false) {
+        true => None,
+        false => format!("{whole}{fraction:0<2}").parse().ok(),
     }
 }
 
 /// The line of `text` at which the parser stopped; the first when it gives no position.
 fn line_of(text: &str, error: &toml::de::Error) -> usize {
-    let start = error.span().map_or(0, |span| span.start.min(text.len()));
-    1 + text.as_bytes()[..start]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
+    let start = error.span().unwrap_or(0..0).start.min(text.len());
+    1 + text.get(..start).unwrap_or("").matches('\n').count()
 }
 
 /// Reads the file at `path` and checks it, offline.
 pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let place = format!("--config {}", path.display());
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| StartupError::at(&place, format!("cannot read: {err}")))?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => return Err(StartupError::at(&place, format!("cannot read: {err}"))),
+    };
     // Neither `message` nor `Display` of a TOML error: both can quote the value the parser
     // stopped at, and the value may be a secret. Only the line is said.
-    let document = text.parse::<toml::Table>().map_err(|err| {
-        let line = line_of(&text, &err);
-        StartupError::at(&place, format!("not valid TOML (line {line})"))
-    })?;
+    let document = match text.parse::<toml::Table>() {
+        Ok(document) => document,
+        Err(err) => {
+            let line = line_of(&text, &err);
+            let reason = format!("not valid TOML (line {line})");
+            return Err(StartupError::at(&place, reason));
+        }
+    };
     let mut root = Section::open(document, String::new());
     root.only(ROOT_KEYS)?;
-    let server = root
-        .table("server")?
-        .ok_or_else(|| root.fail("server", "required: add a [server] table"))?;
+    let server = match root.table("server")? {
+        Some(table) => table,
+        None => return Err(root.fail("server", "required: add a [server] table")),
+    };
     let pools = root.tables("pool")?;
     let server = read_server(server)?;
     let client_token = read_client_token(&server, ld)?;
@@ -385,22 +403,22 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
         let read = read_pool(table, index + 1, ld, &client_token)?;
-        let at = |key: &str| format!("pool {:?}{key}", read.name);
+        let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
-            return Err(StartupError::at(at(": name"), reason));
+            return Err(StartupError::at(format!("{pool}: name"), reason));
         }
         match read.pool {
             Pool::Static(source) => {
                 if static_pool.replace(source).is_some() {
                     let reason = "only one static pool is served in this version";
-                    return Err(StartupError::at(at(""), reason));
+                    return Err(StartupError::at(pool, reason));
                 }
             }
-            Pool::Elastic(pool) => {
-                if registering.replace(pool).is_some() {
+            Pool::Elastic(elastic) => {
+                if registering.replace(elastic).is_some() {
                     let reason = "only one pool may register agents in this version";
-                    return Err(StartupError::at(at(""), reason));
+                    return Err(StartupError::at(pool, reason));
                 }
             }
         }
@@ -430,16 +448,20 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
 /// hosts; the warnings the server shows.
 fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<String>, StartupError> {
     if elastic {
-        let apart = server
-            .agent_listen
-            .is_some_and(|agent| agent != server.listen);
+        let apart = match server.agent_listen {
+            Some(agent) => agent != server.listen,
+            None => false,
+        };
         if !apart {
             return Err(StartupError::at(
                 "server.agent_listen",
                 "required with an elastic pool; must differ from server.listen",
             ));
         }
-        let refused = server.advertise_url.as_deref().is_some_and(plain_http);
+        let refused = match &server.advertise_url {
+            Some(url) => plain_http(url),
+            None => false,
+        };
         if refused {
             return Err(StartupError::at(
                 "server.advertise_url",
@@ -447,27 +469,27 @@ fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<String>, Startu
             ));
         }
     }
-    let listeners: Vec<(&str, SocketAddr)> = [
-        ("server.listen", Some(server.listen)),
-        ("server.agent_listen", server.agent_listen),
-    ]
-    .into_iter()
-    .filter_map(|(key, addr)| Some((key, addr?)))
-    .collect();
-    let clear = listeners.iter().find(|(_, addr)| !addr.ip().is_loopback());
-    if let (None, Some((key, addr))) = (&server.tls, clear) {
-        return Err(StartupError::at(
-            key,
-            format!(
-                "{addr} is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear"
-            ),
-        ));
+    let mut listeners = vec![("server.listen", server.listen)];
+    if let Some(agent) = server.agent_listen {
+        listeners.push(("server.agent_listen", agent));
     }
-    Ok(listeners
-        .iter()
-        .filter(|(_, addr)| addr.ip().is_unspecified())
-        .map(|(key, addr)| format!("server: warning: binds all interfaces ({key} {addr})"))
-        .collect())
+    let mut warnings = Vec::new();
+    for (key, addr) in listeners {
+        if server.tls.is_none() & !addr.ip().is_loopback() {
+            return Err(StartupError::at(
+                key,
+                format!(
+                    "{addr} is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear"
+                ),
+            ));
+        }
+        if addr.ip().is_unspecified() {
+            warnings.push(format!(
+                "server: warning: binds all interfaces ({key} {addr})"
+            ));
+        }
+    }
+    Ok(warnings)
 }
 
 /// Whether `url` is `http://` to a host that is not loopback, which an agent refuses.
@@ -477,17 +499,20 @@ fn plain_http(url: &str) -> bool {
     };
     let host = uri.host().unwrap_or_default();
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let address = bare.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
-    let loopback = [host == "localhost", address].into_iter().any(|is| is);
+    let address = match bare.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    };
+    let loopback = (host == "localhost") | address;
     let plain = uri.scheme_str() == Some("http");
-    [plain, !loopback].into_iter().all(|is| is)
+    plain & !loopback
 }
 
 fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let mut s = Section::open(table, "server.".to_owned());
     s.only(SERVER_KEYS)?;
     let listen = s.address("listen")?;
-    let listen = listen.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7300)));
+    let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
     let agent_listen = s.address("agent_listen")?;
     let advertise_url = s.string("advertise_url")?;
     let state_file = s.required_path("state_file")?;
@@ -521,8 +546,10 @@ fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         drain_timeout: s.duration_or("drain_timeout", defaults.drain_timeout)?,
     };
     // The same check as `--default-ttl` and `--max-ttl`.
-    let settings = Settings::new(default_ttl, max_ttl);
-    let settings = settings.map_err(|err| s.fail("default_ttl", &err.to_string()))?;
+    let settings = match Settings::new(default_ttl, max_ttl) {
+        Ok(settings) => settings,
+        Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
+    };
     Ok(Server {
         listen,
         agent_listen,
@@ -540,12 +567,17 @@ fn read_server(table: toml::Table) -> Result<Server, StartupError> {
 fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token, StartupError> {
     let place = "server.client_token_file";
     let path = &server.client_token_file;
-    let bytes = ld
-        .files
-        .read(path)
-        .map_err(|reason| StartupError::at(place, reason))?;
-    parse_token(&bytes)
-        .map_err(|reason| StartupError::at(place, format!("{} {reason}", path.display())))
+    let bytes = match ld.files.read(path) {
+        Ok(bytes) => bytes,
+        Err(reason) => return Err(StartupError::at(place, reason)),
+    };
+    match parse_token(&bytes) {
+        Ok(token) => Ok(token),
+        Err(reason) => {
+            let reason = format!("{} {reason}", path.display());
+            Err(StartupError::at(place, reason))
+        }
+    }
 }
 
 /// A pool of the file, built.
@@ -584,7 +616,12 @@ impl ElasticKeys {
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
         ];
-        given.into_iter().find(|(_, set)| *set).map(|(key, _)| key)
+        for (key, set) in given {
+            if set {
+                return Some(key);
+            }
+        }
+        None
     }
 }
 
@@ -596,21 +633,23 @@ fn read_pool(
 ) -> Result<Read, StartupError> {
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
-    let named = table.get("name").and_then(toml::Value::as_str);
-    let named = named.filter(|name| ProviderId::new(name).is_ok());
-    let head = match named {
-        Some(name) => format!("pool {name:?}: "),
-        None => format!("pool #{number}: "),
+    let head = match table.get("name").and_then(toml::Value::as_str) {
+        Some(name) if ProviderId::new(name).is_ok() => format!("pool {name:?}: "),
+        _ => format!("pool #{number}: "),
     };
     let mut s = Section::open(table, head);
     s.only(POOL_KEYS)?;
     let name = s.required_string("name")?;
-    let id = ProviderId::new(&name);
-    let id = id.map_err(|_| s.fail("name", "must be 1 to 63 characters of [a-z0-9._-]"))?;
+    let id = match ProviderId::new(&name) {
+        Ok(id) => id,
+        Err(_) => return Err(s.fail("name", "must be 1 to 63 characters of [a-z0-9._-]")),
+    };
     s.head = format!("pool {name:?}: ");
     let class = s.required_string("class")?;
-    let class = ClassId::new(&class);
-    let class = class.map_err(|_| s.fail("class", "must be 1 to 63 characters of [a-z0-9._-]"))?;
+    let class = match ClassId::new(&class) {
+        Ok(class) => class,
+        Err(_) => return Err(s.fail("class", "must be 1 to 63 characters of [a-z0-9._-]")),
+    };
     let class = (ld.classes)(class);
     if matches!(class.admission(), Admission::Book(_)) {
         return Err(s.fail("class", crate::agent_pool::MIXED_UNSERVED));
@@ -630,9 +669,10 @@ fn read_pool(
         Some("live") => Launch::Live,
         Some(_) => return Err(s.fail("launch", "must be plan or live")),
     };
-    let provider = s
-        .table("provider")?
-        .ok_or_else(|| s.fail("provider", "required"))?;
+    let provider = match s.table("provider")? {
+        Some(provider) => provider,
+        None => return Err(s.fail("provider", "required")),
+    };
     let mut p = Section::open(provider, format!("pool {name:?}: provider."));
     let kind = p.required_string("kind")?;
     let built = {
@@ -644,7 +684,10 @@ fn read_pool(
         };
         ld.kinds.build(&kind, &p.map, &ctx)
     };
-    let built = built.map_err(|err| p.fail(&err.field, &err.reason))?;
+    let built = match built {
+        Ok(built) => built,
+        Err(err) => return Err(p.fail(&err.field, &err.reason)),
+    };
     let pool = match built {
         Built::Static(source) => {
             if let Some(key) = keys.first_given() {
@@ -694,8 +737,7 @@ impl Elastic<'_> {
             launch,
             kind,
         } = self;
-        let required = |key: &str, value: Option<u64>| value.ok_or_else(|| s.fail(key, "required"));
-        let max_instances = required("max_instances", keys.max_instances)?;
+        let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
             return Err(s.fail("max_instances", "must be at least 1"));
         }
@@ -703,40 +745,44 @@ impl Elastic<'_> {
             let reason = format!("{max_instances} exceeds {MAX_INSTANCES}");
             return Err(s.fail("max_instances", &reason));
         }
-        let hour = required("max_spend_per_hour", keys.hour)?;
-        let day = required("max_spend_per_day", keys.day)?;
+        let hour = require(s, "max_spend_per_hour", keys.hour)?;
+        let day = require(s, "max_spend_per_day", keys.day)?;
         if day < hour {
             let reason = "must not be below max_spend_per_hour";
             return Err(s.fail("max_spend_per_day", reason));
         }
-        let exec = keys.exec.as_deref().unwrap_or("container");
-        let exec = match exec {
+        let exec = match keys.exec.as_deref().unwrap_or("container") {
             "none" => None,
-            other => Some(
-                other
-                    .parse::<ExecMode>()
-                    .map_err(|_| s.fail("exec", "must be container, sandbox-exec or none"))?,
-            ),
+            other => match other.parse::<ExecMode>() {
+                Ok(mode) => Some(mode),
+                Err(_) => return Err(s.fail("exec", "must be container, sandbox-exec or none")),
+            },
         };
-        let unlaunchable = exec.filter(|mode| !built.exec.contains(mode));
-        if let Some(mode) = unlaunchable {
-            let reason = format!("{mode} hosts cannot be launched by provider kind {kind:?}");
-            return Err(s.fail("exec", &reason));
+        match exec {
+            Some(mode) if !built.exec.contains(&mode) => {
+                let reason = format!("{mode} hosts cannot be launched by provider kind {kind:?}");
+                return Err(s.fail("exec", &reason));
+            }
+            _ => {}
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
         let tokens = match &keys.join_token_file {
-            Some(path) => AgentTokens::open(path, client)
-                .map_err(|err| s.fail("join_token_file", err.reason()))?,
+            Some(path) => match AgentTokens::open(path, client) {
+                Ok(tokens) => tokens,
+                Err(err) => return Err(s.fail("join_token_file", err.reason())),
+            },
             None => AgentTokens::none(),
         };
         let gpu_class = built.floor.gpu_class.as_ref().map(ToString::to_string);
-        let resources = Resources::new(
+        let resources = match Resources::new(
             FLOOR_CPU_MILLIS,
             FLOOR_MEMORY_BYTES,
             built.floor.gpus,
             gpu_class,
-        );
-        let resources = resources.map_err(|err| s.fail("provider", &err.to_string()))?;
+        ) {
+            Ok(resources) => resources,
+            Err(err) => return Err(s.fail("provider", &err.to_string())),
+        };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
         let pool = registry_pool(s, id, &class, shape, max, exec)?;
@@ -753,6 +799,14 @@ impl Elastic<'_> {
             provider: built.provider,
         };
         Ok(Registering { plan, pool, tokens })
+    }
+}
+
+/// `value`, or the refusal that `key` of the pool is required.
+fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupError> {
+    match value {
+        Some(value) => Ok(value),
+        None => Err(s.fail(key, "required")),
     }
 }
 
@@ -773,10 +827,10 @@ fn registry_pool(
         None => pool,
     };
     match class.admission() {
-        Admission::Whole => {
-            let whole = pool.with_whole_node(WholeNodeConfig::dedicated(max));
-            whole.map_err(|err| s.fail("class", &err.to_string()))
-        }
+        Admission::Whole => match pool.with_whole_node(WholeNodeConfig::dedicated(max)) {
+            Ok(pool) => Ok(pool),
+            Err(err) => Err(s.fail("class", &err.to_string())),
+        },
         _ => Ok(pool),
     }
 }
@@ -799,9 +853,10 @@ fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan,
             if !valid_tag(&tag) {
                 return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
             }
-            let client = OAuthClient::from_file(&file);
-            let client = client.map_err(|err| s.fail("oauth_client_file", &err.to_string()))?;
-            Ok(NetworkPlan::Tailscale { client, tag })
+            match OAuthClient::from_file(&file) {
+                Ok(client) => Ok(NetworkPlan::Tailscale { client, tag }),
+                Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
+            }
         }
         _ => {
             let reason = format!("{kind:?} is not a kind; known: default, tailscale");
@@ -829,17 +884,14 @@ mod tests {
         let section = Section::open(toml::Table::new(), "pool \"x\": ".to_owned());
         let floor = Resources::new(1000, 1 << 30, 0, None).unwrap();
         let shape = Shape::new(floor, BTreeMap::new());
-        let id = || ProviderId::new("x").unwrap();
+        let id = ProviderId::new("x").unwrap();
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section, id(), &whole, shape.clone(), 0, None);
+        let refused = registry_pool(&section, id.clone(), &whole, shape.clone(), 0, None);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
-        let built = registry_pool(&section, id(), &whole, shape, 2, None).unwrap();
-        assert_eq!(
-            built.whole_node().map(|whole| whole.max_whole_node),
-            Some(2)
-        );
+        let built = registry_pool(&section, id, &whole, shape, 2, None).unwrap();
+        assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
     }
 
     /// A class that books part of a host, which no name stands for today.
