@@ -203,6 +203,10 @@ fn a_container_that_cannot_be_removed_quarantines_its_slot() {
     h.fake.fail("remove", 1);
     h.restart().unwrap();
     assert_eq!(h.life.quarantined_slots(), [3]);
+    assert!(
+        h.life.is_tainted(),
+        "a quarantined slot comes with a taint, so no idle start can rebaseline over it"
+    );
     assert_eq!(h.life.busy_slots(), [1]);
     h.fake.exit("r1", 0);
     h.life.step();
