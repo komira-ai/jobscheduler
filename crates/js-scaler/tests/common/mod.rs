@@ -120,14 +120,29 @@ pub fn input(pool: PoolInput) -> Input {
         hosts: Vec::new(),
         acquired: Vec::new(),
         released: Vec::new(),
+        not_found: Vec::new(),
+        entropy: Vec::new(),
     }
 }
 
-/// A scaler and the input it is fed. `tick` runs a step and clears the answers, which the
-/// caller hands over once.
+/// The random value number `n`: 16 bytes, so an acquire id made from it is the pool, a dash
+/// and `draw_text(n)`.
+pub fn draw(n: u64) -> [u8; 16] {
+    u128::from(n).to_be_bytes()
+}
+
+/// The 32 hex digits of `draw(n)`.
+pub fn draw_text(n: u64) -> String {
+    format!("{n:032x}")
+}
+
+/// A scaler and the input it is fed. `tick` runs a step and clears the answers and the
+/// random values, which the caller hands over once. A step with no values set is given
+/// sixteen new ones, numbered from 1000 up, that no earlier step had.
 pub struct Rig {
     pub state: State,
     pub input: Input,
+    pub drawn: u64,
 }
 
 impl Rig {
@@ -135,15 +150,22 @@ impl Rig {
         Self {
             state: State::default(),
             input: input(pool(settings)),
+            drawn: 1000,
         }
     }
 
     pub fn tick(&mut self, now: Millis) -> Vec<Action> {
+        if self.input.entropy.is_empty() {
+            self.input.entropy = (self.drawn..self.drawn + 16).map(draw).collect();
+            self.drawn += 16;
+        }
         let state = std::mem::take(&mut self.state);
         let (state, actions) = step(state, &self.input, now);
         self.state = state;
         self.input.acquired.clear();
         self.input.released.clear();
+        self.input.not_found.clear();
+        self.input.entropy.clear();
         actions
     }
 
@@ -206,6 +228,7 @@ pub fn listed(plan: &AcquirePlan, cloud: &str, status: HostStatus) -> Held {
 pub fn accepted(plan: &AcquirePlan, cloud: &str) -> AcquireResult {
     AcquireResult {
         acquire: plan.acquire.clone(),
+        attempt: plan.attempt,
         answer: Acquired::Accepted {
             held: listed(plan, cloud, HostStatus::Booting),
             extras: Vec::new(),
@@ -217,6 +240,7 @@ pub fn accepted(plan: &AcquirePlan, cloud: &str) -> AcquireResult {
 pub fn answered(plan: &AcquirePlan, answer: Acquired) -> AcquireResult {
     AcquireResult {
         acquire: plan.acquire.clone(),
+        attempt: plan.attempt,
         answer,
     }
 }
@@ -267,6 +291,7 @@ pub fn record(phase: Phase, price: u64, launched: u64) -> Record {
         token_expires: None,
         cloud_id: Some(format!("i-{launched}-{price}")),
         retry_at: None,
+        attempt: 0,
         gone_at: None,
         registered: false,
         condemned: false,

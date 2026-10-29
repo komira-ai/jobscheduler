@@ -16,6 +16,9 @@ use crate::time::Millis;
 pub struct AcquirePlan {
     /// The acquire's id. Asking again with it launches nothing new.
     pub acquire: AcquireId,
+    /// Which call this is for the acquire id: 0 for the first, one more for each retry of a
+    /// launch the provider told to wait. The answer carries it back.
+    pub attempt: u32,
     /// The pool the machine is for.
     pub pool: String,
     /// The name to give the machine, chosen before the launch.
@@ -30,6 +33,9 @@ pub struct AcquirePlan {
 pub enum Action {
     /// Write this record. The caller may write all of [`State::records`] instead.
     Record(Box<Record>),
+    /// Write these records, whole, before running any later action of the step. Sent when
+    /// the step changed them.
+    Save(Box<Records>),
     /// Mint a join token for the host, valid for `valid_for`. Sent for a new acquire id
     /// and for the retry of a deferred one, never for a record found after a restart.
     Mint {
@@ -96,6 +102,11 @@ pub struct State {
     /// Since when each registered host has been quiet. Not written to disk: after a
     /// restart the idle time counts again from the first step.
     pub(crate) quiet: BTreeMap<String, Millis>,
+    /// Since when each registered host the registry does not hear from (lost, or waiting
+    /// to say hello again) has been silent, as this process first saw it. A silent host is
+    /// held and counted, never released on its silence, so this is the age a status page
+    /// shows. Not written to disk: after a restart the age counts again from the first step.
+    pub silent: BTreeMap<String, Millis>,
 }
 
 impl State {

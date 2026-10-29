@@ -43,8 +43,11 @@ pub struct Settings {
     pub max_spend_per_day: u64,
     /// How long a registered host holds no lease and no run before it is drained.
     pub idle: Duration,
-    /// How long a launched machine may take to say hello.
+    /// How long a launched machine may take to say hello, counted from the launch.
     pub boot_timeout: Duration,
+    /// How long past `boot_timeout` a join token lives, so a host that boots at the very
+    /// limit still finds its token alive.
+    pub token_margin: Duration,
     /// How long the pool launches nothing after a boot failure, a quota or a refusal.
     pub boot_fail_cooldown: Duration,
     /// How long an unanswered or unseen acquire is waited for before it is given up on,
@@ -56,8 +59,8 @@ pub struct Settings {
 
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
-    /// 15 minutes, `boot_fail_cooldown` 10 minutes, `unknown_hold` 30 minutes and
-    /// `max_step` 1.
+    /// 15 minutes, `token_margin` 5 minutes (a token lives 20), `boot_fail_cooldown` 10
+    /// minutes, `unknown_hold` 30 minutes and `max_step` 1.
     #[must_use]
     pub fn new(
         pool: &str,
@@ -73,6 +76,7 @@ impl Settings {
             max_spend_per_day,
             idle: Duration::from_secs(10 * 60),
             boot_timeout: Duration::from_secs(15 * 60),
+            token_margin: Duration::from_secs(5 * 60),
             boot_fail_cooldown: Duration::from_secs(10 * 60),
             unknown_hold: Duration::from_secs(30 * 60),
             max_step: 1,
@@ -101,6 +105,11 @@ pub enum Blocked {
     Denied,
     /// A provider answered that the request does not fit anything it has.
     Shape,
+    /// A launch the provider told to wait is waiting, so nothing new is launched until its
+    /// time.
+    Deferred,
+    /// The caller gave fewer random values than launches, or repeated one.
+    Entropy,
     /// The pool holds `max_instances`.
     MaxInstances,
     /// One more machine would take the hourly spend over `max_spend_per_hour`.

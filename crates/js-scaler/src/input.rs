@@ -7,7 +7,8 @@ use js_types::{HostId, RequestId};
 use crate::settings::{Health, Settings};
 
 /// One whole-node request on the registry's wait list (`js_registry::Waiting`), in queue
-/// order.
+/// order. The registry's `since` is not here: no rule of the step reads how long a request
+/// has waited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Waiting {
     /// The request id.
@@ -19,7 +20,7 @@ pub struct Waiting {
     pub reserved: Option<HostId>,
 }
 
-/// How a host is set aside (`js_registry::HostMark`).
+/// How a host is set aside (`js_registry::HostMark`, variant for variant).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
     /// Set aside for a waiting request.
@@ -32,13 +33,20 @@ pub enum Mark {
     Releasing,
 }
 
-/// Whether the registry hears from a host.
+/// Whether the registry hears from a host (`js_registry::HostState`, variant for variant).
+///
+/// Only `Live` is acted on: a host in either other state covers no request, is never
+/// drained and is never released on its silence. The registry keeps the host's booking in
+/// both, and so does the scaler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostState {
-    /// Live.
+    /// Said hello or heartbeat within grace.
     Live,
     /// Silent past grace. Silence alone releases nothing.
     Lost,
+    /// Put back after a restart of the registry and not heard from since: its booking is
+    /// held and cannot be seen, so it is treated as `Lost`.
+    Awaiting,
 }
 
 /// One host the registry knows, as the scaler needs it.
@@ -81,6 +89,10 @@ pub struct PoolInput {
 pub struct AcquireResult {
     /// The acquire it answers.
     pub acquire: AcquireId,
+    /// The attempt it answers: [`AcquirePlan::attempt`](crate::AcquirePlan::attempt) of
+    /// the call that was made. A `Deferred` for an earlier attempt than the record's is a
+    /// replay and is ignored.
+    pub attempt: u32,
     /// The answer.
     pub answer: Acquired,
 }
@@ -109,4 +121,13 @@ pub struct Input {
     pub acquired: Vec<AcquireResult>,
     /// Answers to releases.
     pub released: Vec<ReleaseResult>,
+    /// Host names of machines a read by id found the provider no longer has
+    /// (`get_instance` answered not found). Read with a host the registry does not hear
+    /// from, it settles the machine: revoked, forgotten and removed.
+    pub not_found: Vec<String>,
+    /// Random bytes for the acquire ids of this step's launches, one value for each
+    /// launch the step may make (the sum of the pools' `max_step`). The step has no
+    /// randomness of its own; the caller draws these from a source of entropy and never
+    /// repeats one.
+    pub entropy: Vec<[u8; 16]>,
 }

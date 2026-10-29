@@ -326,6 +326,7 @@ impl<'a> Pass<'a> {
                 token_expires: None,
                 cloud_id: Some(held.id.0.clone()),
                 retry_at: None,
+                attempt: 0,
                 gone_at: None,
                 registered: false,
                 condemned: false,

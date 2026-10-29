@@ -349,6 +349,7 @@ fn a_request_falls_through_to_the_next_pool_and_answers_find_their_own_record() 
     ];
     both.input.acquired.push(js_scaler::AcquireResult {
         acquire: stranger(),
+        attempt: 0,
         answer: js_elastic::Acquired::Unknown,
     });
     both.tick(at(SECOND));

@@ -226,6 +226,9 @@ pub struct Record {
     pub cloud_id: Option<String>,
     /// For `Planned`: when the provider allows the launch.
     pub retry_at: Option<Millis>,
+    /// How many times the launch has been retried after a `Deferred` answer. The call for
+    /// each attempt carries its number, so a replayed answer for an earlier one is known.
+    pub attempt: u32,
     /// When it was confirmed gone.
     pub gone_at: Option<Millis>,
     /// Whether its agent said hello.

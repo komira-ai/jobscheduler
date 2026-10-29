@@ -38,6 +38,7 @@ fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = 
     let acquire = record.acquire.clone().map(|acquire| {
         Action::Acquire(Box::new(AcquirePlan {
             acquire,
+            attempt: record.attempt,
             pool: record.pool.clone(),
             name: record.name.clone(),
             offer: record.offer.to_offer(record.price_cents_per_hour),
@@ -386,6 +387,7 @@ impl Pass<'_> {
             token_expires: Some(self.now.plus(settings.boot_timeout)),
             cloud_id: None,
             retry_at: None,
+            attempt: 0,
             gone_at: None,
             registered: false,
             condemned: false,
@@ -436,6 +438,7 @@ impl Pass<'_> {
             no_offer,
             refused: self.refused,
             quiet,
+            silent: std::collections::BTreeMap::new(),
         };
         (state, actions)
     }
