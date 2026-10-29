@@ -243,6 +243,15 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
             "server: warning: binds all interfaces (server.listen 0.0.0.0:7300); /v1/pools and /status are served only to private peers"
         ]
     );
+    // The status pages are on `server.listen` alone, so the agent port's warning does
+    // not mention them.
+    let agent_wide = "agent_listen = \"0.0.0.0:7301\"\ntls_cert = \"/c\"\ntls_key = \"/k\"";
+    let text = file(&server(&scratch, agent_wide), &[&hosts(&scratch)]);
+    let config = load(&scratch, &text).unwrap();
+    assert_eq!(
+        config.warnings(),
+        ["server: warning: binds all interfaces (server.agent_listen 0.0.0.0:7301)"]
+    );
 }
 
 /// Asserts that an elastic pool needs the agent routes on a port of their own, with the
