@@ -281,16 +281,20 @@ pub trait Adapter: Send {
 
     /// The cost prediction for the queued `operation`, which the core takes up from the state
     /// store: at the start, from another frontend's queue at an intake poll, or when a
-    /// request joins it. The scheduler charges it the prediction at its next placement round;
-    /// `None` is the booked cost. `request` and `size_key` are as for [`Adapter::adopted`].
+    /// request joins it. The scheduler charges it the prediction at its next placement round.
+    /// `None` is the booked cost: the request's cores, no memory. `request` and `size_key`
+    /// are as for [`Adapter::adopted`].
     ///
     /// Runs under the core lock, after `adopted`: every other submit, report and tick waits
-    /// for it. It must not read the store and must not block: the server predicts outside
-    /// the lock (as for [`Core::submit_with`](crate::Core::submit_with)) and answers here
-    /// from what it has kept. The type does not enforce this: the adapter is a trait, free
-    /// to hold a store handle or a mutex, and one that does stalls the whole core. The prediction is not stored with the
-    /// operation: the stored row is the same with or without one. An operation that holds a
-    /// lease keeps the cost it was charged, and is not asked about.
+    /// for it. It must not read the store, do I/O, block, or take any other lock: the server
+    /// predicts outside the lock (as for [`Core::submit_with`](crate::Core::submit_with))
+    /// and answers here from what it has kept. The type does not enforce this: the adapter
+    /// is a trait, free to hold a store handle or a mutex, and one that does stalls the
+    /// whole core.
+    ///
+    /// The prediction is not stored with the operation: the stored row is the same with or
+    /// without one. An operation that holds a lease keeps the cost it was charged, and is
+    /// not asked about.
     fn predicted(
         &mut self,
         _operation: OperationId,
