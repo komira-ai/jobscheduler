@@ -75,6 +75,12 @@ pub struct HostFacts {
     /// registry booked nothing on it when it set the mark. The scaler also reads `busy` and
     /// `mark` and never releases a host that shows work, whatever this says.
     pub lease_given_up: bool,
+    /// Whether the registry has heard a heartbeat from the host since its hello. The shell
+    /// sets it from the registry's record of the host; it is `false` only for a host that
+    /// said hello and has not been heard from since (a host whose Welcome was lost cannot
+    /// heartbeat, for it never got the credential), and `true` for any host that has
+    /// heartbeated at least once, and for a host the shell cannot tell about.
+    pub heard_since_hello: bool,
 }
 
 /// One pool: its settings, the state of its checks, its offers and what its provider
