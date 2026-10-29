@@ -151,6 +151,38 @@ fn hardening_flags_always_present() {
     );
 }
 
+/// Asserts, for both engines, the properties of the hardening list that keep a job
+/// from gaining privilege: every capability dropped, `no-new-privileges`, and exactly one
+/// seccomp profile that names a file (never `unconfined`, never the engine's built-in
+/// default, which changes with the engine's version). It catches a job that runs with the
+/// engine's own syscall filter, and a list that loses either of the older flags when the
+/// profile is added.
+#[test]
+fn hardening_pins_privileges_and_the_syscall_filter() {
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&settings(), engine);
+        let values = |flag: &str| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        assert_eq!(values("--cap-drop"), ["ALL"], "{engine:?}");
+        let options = values("--security-opt");
+        assert!(
+            options.contains(&"no-new-privileges".to_owned()),
+            "{engine:?}"
+        );
+        let profiles: Vec<&String> = options
+            .iter()
+            .filter(|option| option.starts_with("seccomp="))
+            .collect();
+        assert_eq!(profiles.len(), 1, "{engine:?}");
+        assert!(profiles[0].starts_with("seccomp=/"), "{engine:?}");
+        assert!(!profiles[0].contains("unconfined"), "{engine:?}");
+    }
+}
+
 /// Asserts that the settings reach the hardening list: the network, the user, the pull
 /// policy and the size of `/tmp`. It catches a flag that is checked and not used.
 #[test]

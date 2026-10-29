@@ -2,17 +2,21 @@
 //! refusals that reach the runtime not at all, the name of a container, and the failures
 //! of a create or a start.
 
+use std::fs;
+
 use js_agent::cli_runtime::{CliError, CliRuntime, Engine};
 use js_agent::lifecycle::{ContainerRuntime, label};
 use js_agent_wire::Isolation;
+use sha2::{Digest, Sha256};
 
-use super::super::scripted::Scripted;
+use super::super::scripted::{DOCKER, Scripted};
 use super::super::{
-    HOST, NAME_R1, created, docker, made_at, mount, open, open_at, open_with, platform, settings,
-    spec,
+    HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount, no_file, open,
+    open_at, open_with, platform, sees_the_engines_pid, settings, spec,
 };
 use super::cleanup::other_agent;
 use super::{start, strings, subs};
+use crate::support::Scratch;
 
 /// The `/tmp` of a container with the defaults.
 const TMPFS: &str = "/tmp:rw,noexec,nosuid,nodev,size=64m";
@@ -472,4 +476,114 @@ fn the_id_is_the_last_line_of_create() {
     world.preface("create", "Unable to find image locally\nPulling fs layer\n");
     let id = start(&mut rt, &world, "r1");
     assert_eq!(id.0.len(), 64);
+}
+
+/// The sha256 of the pinned profile, spelled out here and not computed from the source
+/// file, so that an edit of the profile fails this test until the pin is changed on
+/// purpose.
+const PROFILE_SHA256: &str = "e2bbdceda151ab5482a7ffeca6a8650ab5d111c8ed65ba7fb8f5ca2b95bcef67";
+
+/// The file the agent keeps the profile in, beside the run directories.
+const PROFILE_FILE: &str = "seccomp+pinned.json";
+
+fn sha256_of(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// A runtime over `world` that keeps its profile where it is told to in production: in
+/// the directory above the run's scratch directory.
+fn bare(world: &Scripted) -> CliRuntime {
+    CliRuntime::open(
+        settings(),
+        HOST,
+        &platform("linux"),
+        made_at,
+        Box::new(world.clone()),
+    )
+    .unwrap()
+    .with_pid_seen(sees_the_engines_pid)
+    .with_proc_files(no_file, in_another_pid_namespace)
+}
+
+/// The `--security-opt` values of a create argv.
+fn security_options(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--security-opt")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+/// Asserts, for Docker and for Podman, that a create names a profile file that exists
+/// when the engine is called, that the file is the pinned profile byte for byte (by
+/// its sha256, and a default-deny `defaultAction`), that it sits in the scratch root
+/// (the directory above the run's own, which only the agent may enter), and that
+/// `no-new-privileges` is still there. It catches a create with no profile of its own,
+/// a profile named but never written, a copy that differs from the pin, and a file
+/// that a job could read or replace because it is inside the run's directory.
+#[test]
+fn create_passes_the_pinned_profile_file() {
+    for (n, version) in [DOCKER, "podman version 5.2.1\n"].into_iter().enumerate() {
+        let root = Scratch::new("seccomp-create");
+        let world = Scripted::new(version);
+        let mut rt = bare(&world);
+        let run = format!("r{n}");
+        let mut job = spec(&run);
+        job.scratch = root.path(&run);
+        rt.create_and_start(&job).unwrap();
+        let options = security_options(&created(&world, &run));
+        let profile = root.path(PROFILE_FILE);
+        assert_eq!(
+            options,
+            [
+                "no-new-privileges".to_owned(),
+                format!("seccomp={}", profile.display())
+            ]
+        );
+        let bytes = fs::read(&profile).unwrap();
+        assert_eq!(sha256_of(&bytes), PROFILE_SHA256);
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["defaultAction"], "SCMP_ACT_ERRNO");
+    }
+}
+
+/// Asserts that a profile file that was replaced by something else is made right again
+/// before the next create, and one that is right is left as it is. It catches an agent
+/// that trusts a file because it exists.
+#[test]
+fn a_changed_profile_file_is_written_again() {
+    let root = Scratch::new("seccomp-rewrite");
+    let world = docker();
+    let mut rt = bare(&world);
+    let profile = root.path(PROFILE_FILE);
+    fs::write(&profile, "{\"defaultAction\":\"SCMP_ACT_ALLOW\"}").unwrap();
+    for run in ["a1", "a2"] {
+        let mut job = spec(run);
+        job.scratch = root.path(run);
+        rt.create_and_start(&job).unwrap();
+        assert_eq!(
+            sha256_of(&fs::read(&profile).unwrap()),
+            PROFILE_SHA256,
+            "{run}"
+        );
+    }
+}
+
+/// Asserts that a create whose profile cannot be written fails before the engine is
+/// asked to create anything, whether the scratch directory has no parent or the parent
+/// is not a directory that exists, and that the error names the profile. It catches a
+/// job started without its syscall filter because the file was missing.
+#[test]
+fn no_profile_no_container() {
+    let world = docker();
+    let mut rt = bare(&world);
+    for scratch in ["/", "/no/such/root/r1"] {
+        let mut job = spec("r1");
+        job.scratch = scratch.into();
+        let said = rt.create_and_start(&job).err().unwrap().to_string();
+        assert!(
+            said.starts_with("scratch: seccomp profile"),
+            "{scratch}: {said}"
+        );
+    }
+    assert!(world.calls_of("create").is_empty());
 }
