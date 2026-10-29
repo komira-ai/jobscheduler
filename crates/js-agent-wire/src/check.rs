@@ -156,6 +156,26 @@ pub(crate) fn range(at: At, value: u64, min: u64, max: u64) -> Result<(), Valida
     Ok(())
 }
 
+/// The arguments of a job: [`limits::MAX_ARGS`] entries of [`limits::MAX_ARG_LEN`] bytes,
+/// [`limits::MAX_ARGS_TOTAL_BYTES`] in all, no NUL.
+pub(crate) fn args(at: At, args: &[String]) -> Result<(), ValidationError> {
+    count(at, args.len(), limits::MAX_ARGS)?;
+    let mut total = 0usize;
+    for arg in args {
+        if arg.len() > limits::MAX_ARG_LEN {
+            return Err(at.fail(Rule::TooLong));
+        }
+        if arg.contains('\0') {
+            return Err(at.fail(Rule::BadChars));
+        }
+        total += arg.len();
+    }
+    if total > limits::MAX_ARGS_TOTAL_BYTES {
+        return Err(at.fail(Rule::TooLong));
+    }
+    Ok(())
+}
+
 /// No entry repeats.
 pub(crate) fn distinct<T: Ord>(
     at: At,

@@ -18,9 +18,10 @@
 //! names the work by an action's digest, and a row of another class is as good a row here.
 
 use js_sched::{Floor, KeyFloor};
-use js_state::{Cond, Versioned};
+use js_state::{Cond, Txn, Versioned};
 use js_types::sched::WorkKey;
 
+use crate::blocks::contended;
 use crate::{Rows, StateError, keys};
 
 const VERSION: u8 = 1;
@@ -218,17 +219,64 @@ impl Rows {
         floor: &KeyFloor,
         summary: Option<&str>,
     ) -> Result<Vec<u8>, StateError> {
-        let given = summary.filter(|name| name.len() <= usize::from(u16::MAX));
-        let name = match given {
-            Some(name) => Some(name.to_owned()),
-            None => self
-                .store
-                .get(&keys::key_floor(floor.key))?
-                .and_then(|row| decode_key(&row.value).ok())
-                .and_then(|(_, name)| name),
-        };
-        Ok(encode_key(floor, name.as_deref()))
+        let row = self.store.get(&keys::key_floor(floor.key))?;
+        Ok(key_floor_over(floor, summary, row.as_ref()))
     }
+
+    /// Writes the key floor `floor` the estimator's decay lowered from `before`, or deletes
+    /// its row when it was forgotten (an `ask` of 0), only over the row it read: the write
+    /// is made at the version read, and a row that changed since is read again (at most
+    /// [`crate::CAS_TRIES`] tries in all). The row is left alone when it holds more than
+    /// `before` (another frontend raised it after the decay's last look at the key, and the
+    /// higher floor is the safe side) and when it already holds `floor.ask` or less. With no
+    /// row the floor is written (an earlier write of it was refused), and a forgotten floor
+    /// has nothing to delete. The row keeps its stamp, and names the size summary `summary`
+    /// that its floor decays with, or the one it already names.
+    ///
+    /// # Errors
+    /// The store cannot be read or written, or other writers won every try
+    /// ([`StateError::Conflict`]).
+    pub fn lower_key_floor(
+        &self,
+        floor: &KeyFloor,
+        before: u64,
+        summary: Option<&str>,
+    ) -> Result<(), StateError> {
+        let key = keys::key_floor(floor.key);
+        contended(|| {
+            let row = self.store.get(&key)?;
+            // A row that cannot be read counts for nothing, and is written over.
+            let held = row
+                .as_ref()
+                .map(|row| decode_key(&row.value).map_or(0, |(held, _)| held.ask));
+            if held.is_some_and(|held| held > before || (held != 0 && held <= floor.ask)) {
+                return Ok(());
+            }
+            let txn = if floor.ask == 0 {
+                if row.is_none() {
+                    return Ok(());
+                }
+                Txn::new().delete(key.clone(), found(row))
+            } else {
+                let value = key_floor_over(floor, summary, row.as_ref());
+                Txn::new().put(key.clone(), value, found(row))
+            };
+            self.commit(txn)
+        })
+    }
+}
+
+/// The value of the `keyfloor/` row of `floor` over `row`, the row as it stands: it names
+/// the size summary `summary` when it is given and fits, else the name `row` holds.
+fn key_floor_over(floor: &KeyFloor, summary: Option<&str>, row: Option<&Versioned>) -> Vec<u8> {
+    let given = summary.filter(|name| name.len() <= usize::from(u16::MAX));
+    let name = match given {
+        Some(name) => Some(name.to_owned()),
+        None => row
+            .and_then(|row| decode_key(&row.value).ok())
+            .and_then(|(_, name)| name),
+    };
+    encode_key(floor, name.as_deref())
 }
 
 /// What a write that replaces `row` must find: its version, or no row.
