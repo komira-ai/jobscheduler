@@ -408,9 +408,10 @@ fn tokenless(state: &str) -> Vec<String> {
         POOL,
         "--host-id",
         "h1",
+        "--state-root",
+        state,
     ];
-    let flags = flags.iter().chain(&["--state-root", state]);
-    flags.map(|flag| (*flag).to_owned()).collect()
+    flags.map(str::to_owned).to_vec()
 }
 
 /// A connector that records the file each connect was told to read its bearer from.
