@@ -182,6 +182,7 @@ mod tests {
     #[test]
     fn the_floor_is_built_from_the_limiters_defaults() {
         let limit = HelloLimit::default();
+        assert_eq!(hello_drain_ms(HERD, limit.burst, limit.interval), 140_000);
         assert_eq!(limit.burst, DEFAULT_HELLO_BURST);
         assert_eq!(limit.interval, DEFAULT_HELLO_INTERVAL);
         let cli = crate::config::Cli::try_parse_from([
@@ -213,23 +214,29 @@ mod tests {
             names.iter().cloned(),
         );
         let mut retry_at: Vec<u64> = vec![0; names.len()];
+        let mut pending: Vec<usize> = (0..names.len()).collect();
         let mut admitted: Vec<&str> = Vec::new();
         let mut last_hello = None;
         let records = Records::default();
         let mut seconds = 0u64;
         loop {
             let now = clock.now().millis();
-            for (n, name) in names.iter().enumerate() {
-                if retry_at[n] <= now && !admitted.contains(&name.as_str()) {
-                    match limiter.admit(&credential) {
-                        Ok(()) => {
-                            admitted.push(name);
-                            last_hello = Some(seconds);
-                        }
-                        Err(held) => retry_at[n] = now + held.wait.as_millis() as u64,
+            pending.retain(|&n| {
+                if retry_at[n] > now {
+                    return true;
+                }
+                match limiter.admit(&credential) {
+                    Ok(()) => {
+                        admitted.push(&names[n]);
+                        last_hello = Some(seconds);
+                        false
+                    }
+                    Err(held) => {
+                        retry_at[n] = now + held.wait.as_millis() as u64;
+                        true
                     }
                 }
-            }
+            });
             let complete = gate.observe(Millis::new(now), &records, admitted.iter().copied());
             let everyone = admitted.len() == names.len();
             if !everyone {
