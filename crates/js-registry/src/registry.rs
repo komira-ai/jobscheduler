@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
-use js_caps::HostContract;
+use js_caps::{FLAG_SET, HostContract, RUN_FILES};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
@@ -133,6 +133,10 @@ struct Record {
     seated: Option<Timestamp>,
     agent_version: Option<String>,
     labels: BTreeMap<String, String>,
+    /// Whether the host's last hello reported the `run-files` capability. It changes only
+    /// at a hello, and a hello of a lost host gives up every run still queued for it, so
+    /// the check at queueing time is the only one a start needs.
+    files: bool,
     /// The run ids the host listed as held in its last hello or heartbeat.
     held: BTreeSet<String>,
     /// The heartbeats taken in this session.
@@ -167,6 +171,7 @@ impl Record {
             seated: Some(seated),
             agent_version: None,
             labels: BTreeMap::new(),
+            files: false,
             held: BTreeSet::new(),
             beats: 0,
             exclusive: Exclusive::Free,
@@ -615,6 +620,7 @@ impl Registry {
                 seated: None,
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
+                files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
                 held,
                 beats: 0,
                 taint: kept_taint,
@@ -797,7 +803,9 @@ impl Registry {
     /// Refused, in this order: [`RunRefusal::HostNotRegistered`] for a host that did not
     /// register itself; the job when it breaks a wire rule ([`RunRefusal::Invalid`]),
     /// asks for host isolation ([`RunRefusal::HostJobsNotAllowed`]) or exceeds the
-    /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); [`RunRefusal::HostLost`]
+    /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); a job with run files for a
+    /// host whose hello did not report the `run-files` capability
+    /// ([`RunRefusal::FilesUnsupported`]); [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
     /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
@@ -827,6 +835,9 @@ impl Registry {
         let record = records.get(host).ok_or(RunRefusal::HostNotRegistered)?;
         let shape = self.shared.config.shape();
         vet(&spec, shape.resources())?;
+        if !spec.files.is_empty() && !record.files {
+            return Err(RunRefusal::FilesUnsupported);
+        }
         if record.state(now, self.grace_ms()) != HostState::Live {
             return Err(RunRefusal::HostLost);
         }
