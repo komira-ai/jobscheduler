@@ -23,7 +23,7 @@
 //!   does not hide processes: on a hosted runner `pgrep` listed the same processes with
 //!   and without it. Hiding another user's processes is the user boundary's job.
 //! - Loopback is shared by every user of the Mac; see [`Net`].
-//! - The loopback profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
+//! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).
 //! - It starts nothing; applying the profile is the caller's `exec` of
 //!   [`Profile::argv`].
