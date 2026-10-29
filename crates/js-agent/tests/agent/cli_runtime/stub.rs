@@ -154,6 +154,8 @@ fn cli_runtime_argv_snapshot() {
             "core=0",
             "--ipc",
             "private",
+            "--cgroupns",
+            "private",
             "--pull",
             "never",
             "--user",
