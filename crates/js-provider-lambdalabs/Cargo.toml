@@ -20,6 +20,9 @@ tracing.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The example installs its signal handlers with `libc::signal` (rustix has no form of it);
+# libc is already a workspace dependency, so Cargo.lock gains no package.
+libc.workspace = true
 # Test certificates for the https round trip.
 rcgen.workspace = true
 # `ureq` writes its own diagnostics through `log`; the test that keeps the API key out of

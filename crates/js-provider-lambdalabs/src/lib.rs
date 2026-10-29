@@ -41,6 +41,7 @@ mod config;
 mod elastic;
 mod error;
 mod fake;
+pub mod first_launch;
 mod http;
 mod key;
 mod model;

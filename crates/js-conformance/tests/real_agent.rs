@@ -22,6 +22,7 @@ use js_agent_wire::{
 use js_lease::{ManualClock, Timestamp};
 use js_provider::{Observed, Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{Credential, PoolConfig, Registry, RunState};
+use js_testkit::dir::TestDir;
 use js_types::{
     Admission, Capabilities, ClassId, HostId, LeaseId, ProviderId, Request, ResourceClass,
     Resources, Shape,
@@ -175,6 +176,8 @@ struct Agent {
     /// it ready (the real agent has no preparation step yet, so a prepared host is one
     /// that has seen the word).
     prepared: Option<String>,
+    /// The scratch and state roots, removed after the lifecycle that uses them is gone.
+    _dirs: (TestDir, TestDir),
 }
 
 fn credential() -> Credential {
@@ -184,16 +187,11 @@ fn credential() -> Credential {
 impl Agent {
     /// An agent for host `a` that has said hello to `registry`.
     fn join(registry: &Registry, name: &str) -> Self {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join(format!("real-agent-{name}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
-        let state = dir.with_file_name(format!("real-agent-{name}-state"));
-        let _ = fs::remove_dir_all(&state);
-        fs::create_dir_all(&state).unwrap();
-        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let dir = TestDir::under(&target, &format!("real-agent-{name}"));
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let state = TestDir::under(&target, &format!("real-agent-{name}-state"));
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let config = Config {
             capacity: Capacity {
                 cpu_millis: 4000,
@@ -202,8 +200,8 @@ impl Agent {
             },
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
-            scratch: ScratchRoot::open(&dir).unwrap(),
-            state: StateRoot::open(&state).unwrap(),
+            scratch: ScratchRoot::open(dir.path()).unwrap(),
+            state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
         };
         let fake = Fake::default();
@@ -220,6 +218,7 @@ impl Agent {
             epoch: 0,
             session: String::new(),
             prepared: None,
+            _dirs: (dir, state),
         };
         agent.hello(registry);
         agent
@@ -447,4 +446,25 @@ fn a_whole_node_lease_is_usable_after_the_agent_reports_it_ready() {
 
     registry.queue_run(&host(), &lease, job("r1")).unwrap();
     assert_eq!(words(&agent.beat(&registry)), ["start r1"]);
+}
+
+/// Asserts that two agents joined under one name (each to a registry of its own, since a
+/// host joins a registry once) get two scratch roots and two state roots, each named with
+/// this process's id: the directories under the target directory whose names carry
+/// `-<pid>-` and the agents' name are four. It catches a root named by
+/// the test alone, which a second run of this binary (a coverage run beside a test run)
+/// or a second agent of the name would remove under the first.
+#[test]
+fn agents_of_one_name_get_roots_of_their_own() {
+    let _first = Agent::join(&registry(), "same-root");
+    let _second = Agent::join(&registry(), "same-root");
+    let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let mine = format!("-{}-", std::process::id());
+    let roots = fs::read_dir(target)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("real-agent-same-root") && name.contains(&mine))
+        .count();
+    assert_eq!(roots, 4);
 }

@@ -28,20 +28,27 @@ struct Launching {
     /// An entry ends when a list shows the instance, when the launch is answered, or
     /// when the hold runs out.
     unknown: BTreeMap<String, Duration>,
-    /// Launches that were answered with an instance id, by acquire id, until a list shows
-    /// the instance. A list can lag a write, so for a while the instance exists only in
-    /// the API's list-to-be: it counts toward `max_machines` and a retry of the same
-    /// acquire gets the earlier answer. An entry ends when a list shows the instance or
-    /// when the hold runs out.
-    answered: BTreeMap<String, Answered>,
+    /// Instances a launch answered with, until a list shows them as ours. A list can lag
+    /// a write, so for a while an instance exists only in the API's list-to-be: it counts
+    /// toward `max_machines` and a retry of the same acquire gets the earlier answer.
+    /// An entry never ends on the clock alone, because an instance we may own must not
+    /// leave the count while it might exist. It ends when a list shows a row of that id
+    /// that is ours, or when the probe made once the hold has run out finds the
+    /// instance terminated or (a trusted 404) gone. A probe that finds it, or fails,
+    /// holds the entry for another period.
+    answered: Vec<Answered>,
 }
 
-/// A launch that was answered and that no list shows yet.
+/// An instance a launch answered with that no list has shown as ours yet.
 struct Answered {
     /// What the answer named.
     held: Held,
-    /// When the launch was answered.
-    sent: Duration,
+    /// Whether this is the instance the launch is answered with on a retry. A launch
+    /// asks for one instance; any other id it returns is an extra, counted all the same.
+    primary: bool,
+    /// When the instance is read by id next: the launch time plus the hold, then
+    /// the time of each probe plus the hold.
+    due: Duration,
 }
 
 /// What a sweep found. Nothing is terminated by it.
@@ -154,9 +161,9 @@ impl LambdaProvider {
         })
     }
 
-    /// Forgets the unknown and the answered launches a list shows or the hold has
-    /// outlasted. After the hold a list is trusted: an instance it still hides is not
-    /// counted, as with an unknown launch.
+    /// Forgets the unknown launches a list shows or the hold has outlasted (after the
+    /// hold a list is trusted), and the answered instances that [`Self::still_held`]
+    /// no longer holds.
     fn settle(&self, gate: &mut Launching, rows: &[Instance], now: Duration) {
         let hold = self.config.unknown_hold;
         gate.unknown.retain(|acquire, sent| {
@@ -165,10 +172,39 @@ impl LambdaProvider {
                 .any(|row| Owner::acquire_of(row) == Some(acquire.as_str()));
             !seen && now.saturating_sub(*sent) < hold
         });
-        gate.answered.retain(|_, launched| {
-            let seen = rows.iter().any(|row| row.id == launched.held.id);
-            !seen && now.saturating_sub(launched.sent) < hold
-        });
+        gate.answered
+            .retain_mut(|launched| self.still_held(launched, rows, now));
+    }
+
+    /// Whether the answered instance still counts. A list row of its id that is ours ends
+    /// it; a row with fewer marks does not (it is not read as ours, and a row with none
+    /// is filtered out of the live set). When the hold has run out the instance is read
+    /// by id: found and not terminated, or any error, keeps it for another hold; only
+    /// a terminated reading or a 404 that [`Self::trust_absent`] accepts ends it.
+    fn still_held(&self, launched: &mut Answered, rows: &[Instance], now: Duration) -> bool {
+        let listed_ours = rows
+            .iter()
+            .any(|row| row.id == launched.held.id && self.owner.claim(row) == Claim::Ours);
+        if listed_ours {
+            return false;
+        }
+        if now < launched.due {
+            return true;
+        }
+        let id = &launched.held.id;
+        let keep = match self.api.get_instance(id) {
+            Ok(found) => found.status != Status::Terminated,
+            Err(error) if self.trust_absent(&error) => false,
+            Err(error) => {
+                tracing::warn!(%error, %id, "the probe of an unlisted instance failed; still counting it");
+                true
+            }
+        };
+        if keep {
+            tracing::warn!(%id, "an answered instance is still not listed as ours; still counting it");
+            launched.due = now + self.config.unknown_hold;
+        }
+        keep
     }
 
     /// The answer of the API to a launch that did not succeed.
@@ -257,7 +293,11 @@ impl LambdaProvider {
             );
             return Acquired::Deferred { wait };
         }
-        if let Some(launched) = gate.answered.get(wanted) {
+        if let Some(launched) = gate
+            .answered
+            .iter()
+            .find(|a| a.primary && a.held.acquire == wanted)
+        {
             // The launch of this acquire was answered and no list shows the instance yet
             // (the caller may have crashed before it recorded the answer): give the
             // answer again rather than launch a second instance.
@@ -278,7 +318,13 @@ impl LambdaProvider {
             );
             return Self::refuse(RefusalCode::Denied, Reason::HalfMarked { count: half });
         }
-        let held = live.len() + gate.unknown.len() + gate.answered.len();
+        // An answered instance a list shows as a suspect is in `live` already.
+        let unlisted = gate
+            .answered
+            .iter()
+            .filter(|a| !live.iter().any(|(row, _)| row.id == a.held.id))
+            .count();
+        let held = live.len() + gate.unknown.len() + unlisted;
         let max_machines = self.config.max_machines.get();
         if held >= max_machines {
             tracing::warn!(held, max_machines, "no launch: max_machines is reached");
@@ -327,13 +373,23 @@ impl LambdaProvider {
             region: launch.region.clone(),
             status: Status::Booting,
         };
-        gate.answered.insert(
-            wanted.to_owned(),
-            Answered {
-                held: held.clone(),
-                sent: now,
-            },
-        );
+        let due = now + self.config.unknown_hold;
+        gate.answered.push(Answered {
+            held: held.clone(),
+            primary: true,
+            due,
+        });
+        // Every id the launch returned counts from the answer on, the extras too.
+        for id in rest {
+            gate.answered.push(Answered {
+                held: Held {
+                    id: id.clone(),
+                    ..held.clone()
+                },
+                primary: false,
+                due,
+            });
+        }
         let extras = rest
             .iter()
             .map(|id| {
