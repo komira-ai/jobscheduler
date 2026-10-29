@@ -279,8 +279,12 @@ fn a_file_that_is_not_a_deb_is_malformed() {
             .collect::<Vec<(&str, &[u8])>>())
     };
     let bad = |bytes: &[u8], expected: &str| match parse_deb(bytes) {
-        Err(Error::Malformed(why)) => assert!(why.contains(expected), "{why}"),
-        other => panic!("{other:?}"),
+        Err(e @ Error::Malformed(_)) => {
+            let why = e.to_string();
+            assert!(why.starts_with("not a deb: "), "{why}");
+            assert!(why.contains(expected), "{why}");
+        }
+        _ => panic!("not refused as malformed"),
     };
     bad(b"not an archive", "no ar magic");
     bad(b"!<arch>\nshort", "a short ar header");
@@ -418,10 +422,27 @@ fn check_names_the_file_it_cannot_read() {
         let dir = scratch(&format!("unreadable-{}", gone.replace('/', "-")));
         std::fs::remove_file(dir.join(gone)).expect("remove");
         match check(&args(&dir)) {
-            Err(Error::Read(why)) => assert!(why.contains(gone), "{why}"),
+            Err(e @ Error::Read(_)) => {
+                let why = e.to_string();
+                assert!(why.contains(gone), "{why}");
+            }
             other => panic!("{other:?}"),
         }
     }
+}
+
+/// The errors compare and print: two refusals with the same reasons are equal, and the
+/// reasons are in the text.
+#[test]
+fn errors_compare_and_print() {
+    let refused = Error::Refused(vec!["a".to_owned(), "b".to_owned()]);
+    assert_eq!(
+        refused,
+        Error::Refused(vec!["a".to_owned(), "b".to_owned()])
+    );
+    assert_ne!(refused, Error::Read("a".to_owned()));
+    assert!(refused.to_string().ends_with("a; b"));
+    assert!(format!("{refused:?}").contains("Refused"));
 }
 
 /// The verb's exit status: 0 and the line for the package, 1 and the reason for another.

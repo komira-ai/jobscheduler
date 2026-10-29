@@ -39,7 +39,7 @@ pub const FILES: [(&str, u32, Source); 4] = [
 const FORBIDDEN_FIELDS: [&str; 4] = ["Depends:", "Pre-Depends:", "Breaks:", "Conflicts:"];
 
 /// Where the bytes of a package file must come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub enum Source {
     /// The `--binary` file.
     Binary,
@@ -81,7 +81,6 @@ pub enum Error {
 }
 
 /// One entry of the data archive.
-#[derive(Debug, PartialEq, Eq)]
 pub struct Member {
     /// The mode.
     pub mode: u32,
@@ -98,7 +97,6 @@ pub struct Member {
 }
 
 /// A deb as read back.
-#[derive(Debug, PartialEq, Eq)]
 pub struct Deb {
     /// The `control` file.
     pub control: String,
