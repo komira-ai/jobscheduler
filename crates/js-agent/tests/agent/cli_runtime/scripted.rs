@@ -28,6 +28,9 @@ pub struct Volume {
 /// How a job's tampering changes the binds a container ends up with.
 pub type Change = Box<dyn Fn(&mut Vec<Bind>)>;
 
+/// How a job's tampering changes the options the engine reports for each bind.
+pub type ChangeOptions = Box<dyn Fn(&mut Vec<Vec<String>>)>;
+
 /// How a job's tampering changes the volume a container ends up with.
 pub type ChangeVolume = Box<dyn Fn(&mut Volume)>;
 
@@ -40,6 +43,8 @@ struct Container {
     labels: BTreeMap<String, String>,
     create: Vec<String>,
     binds: Vec<Bind>,
+    /// The `Options` the engine reports for each bind, in the order of `binds`.
+    options: Vec<Vec<String>>,
     /// The name of the volume the container was made with, in [`State::volumes`].
     volume: Option<String>,
     started: bool,
@@ -62,6 +67,7 @@ struct State {
     after_create: Option<Result<String, ()>>,
     tamper: Option<Change>,
     tamper_volume: Option<ChangeVolume>,
+    tamper_options: Option<ChangeOptions>,
     /// The volumes that exist, by name.
     volumes: BTreeMap<String, Volume>,
     /// What every look at the process of a container prints, instead of its pid and state.
@@ -145,6 +151,12 @@ impl Scripted {
     /// swapped a directory for a link while the daemon was setting up would.
     pub fn tamper(&self, change: impl Fn(&mut Vec<Bind>) + 'static) {
         self.0.borrow_mut().tamper = Some(Box::new(change));
+    }
+
+    /// Makes every `create` report the options of its binds as `change` says, as a Podman
+    /// that did not apply an option it was asked for would.
+    pub fn tamper_options(&self, change: impl Fn(&mut Vec<Vec<String>>) + 'static) {
+        self.0.borrow_mut().tamper_options = Some(Box::new(change));
     }
 
     /// Makes every `create` make its volume as `change` says, as an engine that bound the
@@ -336,6 +348,23 @@ fn binds_of(args: &[&str]) -> Vec<Bind> {
         .collect()
 }
 
+/// The `Options` Podman reports for each bind a `create` asks for, in the order of
+/// [`binds_of`]: the mount options the argument names (`readonly` as `ro`) and `rbind`.
+fn options_of(args: &[&str]) -> Vec<Vec<String>> {
+    values(args, "--mount")
+        .into_iter()
+        .filter(|value| value.starts_with("type=bind,"))
+        .map(|value| {
+            let named = value.split(',').filter_map(|item| match item {
+                "readonly" => Some("ro"),
+                "nosuid" | "nodev" => Some(item),
+                _ => None,
+            });
+            named.chain(["rbind"]).map(str::to_owned).collect()
+        })
+        .collect()
+}
+
 /// The fields of a CSV record, as the engine reads a `--mount` value: a field in double
 /// quotes may hold commas.
 fn csv_fields(value: &str) -> Vec<String> {
@@ -400,6 +429,10 @@ impl State {
         if let Some(change) = &self.tamper {
             change(&mut binds);
         }
+        let mut options = options_of(args);
+        if let Some(change) = &self.tamper_options {
+            change(&mut options);
+        }
         let name = values(args, "--name")
             .first()
             .map_or_else(|| format!("auto-{}", self.next), |name| (*name).to_owned());
@@ -416,6 +449,7 @@ impl State {
             labels,
             create,
             binds,
+            options,
             volume,
             started: false,
             exit: None,
@@ -433,10 +467,12 @@ impl State {
         let mut mounts: Vec<serde_json::Value> = container
             .binds
             .iter()
-            .map(|(src, dst, rw)| {
+            .enumerate()
+            .map(|(at, (src, dst, rw))| {
+                let options = container.options.get(at).cloned().unwrap_or_default();
                 serde_json::json!({
                     "Type": "bind", "Source": src, "Destination": dst,
-                    "Mode": "", "RW": rw, "Propagation": "rprivate"
+                    "Mode": "", "Options": options, "RW": rw, "Propagation": "rprivate"
                 })
             })
             .collect();
