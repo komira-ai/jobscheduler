@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
+js-elastic = { path = "../js-elastic" }
 js-lease = { path = "../js-lease" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
@@ -31,10 +32,15 @@ tokio ={ workspace = true, features = ["macros", "net", "rt-multi-thread", "sign
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The Tailscale API client (a blocking client, as the Lambda provider's).
+ureq.workspace = true
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
 js-testkit = { path = "../js-testkit" }
+# The test that keeps the secrets out of every log line reads the HTTP client's own
+# `log` output.
+log.workspace = true
 rcgen.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 

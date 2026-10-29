@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use js_agent::{
-    Answer, Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP, Reason, Session, Step,
+    Answer, CredentialState, Fatal, HEARTBEAT_PATH, HELLO_PATH, Jitter, Note, RETRY_AFTER_CAP,
+    Reason, Session, Step,
 };
 use js_agent_wire::ProtocolRange;
 use serde_json::{Value, json};
@@ -64,6 +65,7 @@ fn the_session_secret_is_sent_in_every_heartbeat_and_nowhere_else() {
     let registered = Note::Registered {
         epoch: 7,
         interval: Duration::from_secs(5),
+        credential: CredentialState::None,
     };
     assert_eq!(note(&steps[0]), Some(registered));
     assert_eq!(wait(&steps[0]), Duration::from_secs(5));
@@ -659,8 +661,33 @@ fn notes_read_as_plain_sentences() {
             Note::Registered {
                 epoch: 3,
                 interval: Duration::from_secs(5),
+                credential: CredentialState::None,
             },
             "registered, epoch 3, heartbeat every 5000ms",
+        ),
+        (
+            Note::Registered {
+                epoch: 3,
+                interval: Duration::from_secs(5),
+                credential: CredentialState::Saved,
+            },
+            "registered, epoch 3, heartbeat every 5000ms; the host credential is saved",
+        ),
+        (
+            Note::Registered {
+                epoch: 3,
+                interval: Duration::from_secs(5),
+                credential: CredentialState::Unsaved,
+            },
+            "registered, epoch 3, heartbeat every 5000ms; the host credential could not be saved: a restart cannot register this host again",
+        ),
+        (
+            Note::Registered {
+                epoch: 3,
+                interval: Duration::from_secs(5),
+                credential: CredentialState::Refused,
+            },
+            "registered, epoch 3, heartbeat every 5000ms; the transport refused the host credential: this host can no longer authenticate",
         ),
         (
             Note::Lost {

@@ -168,6 +168,7 @@ mod cli;
 pub mod cli_runtime;
 mod container;
 mod contract;
+mod credential;
 mod exclusive;
 mod facts;
 mod host;
@@ -196,6 +197,7 @@ pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
 use cli_runtime::Settings;
 use contract::ToolkitHook;
+pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
@@ -210,7 +212,9 @@ pub use readiness::{
     ReadinessHook, Verdict, hook_runner,
 };
 pub use run::{Exit, Sleeper, Wake, drive};
-pub use session::{Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
+pub use session::{
+    CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
+};
 pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
@@ -385,6 +389,20 @@ fn execute(
         let checked = offer.hello.validate();
         checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
     }
+    // A host that was given a credential in an earlier life uses it from the first hello:
+    // its token is dead. The token file is still read (above), which the flags require.
+    let credentials = local
+        .state
+        .as_ref()
+        .map(|state| CredentialFile::in_dir(state.path()));
+    if let Some(file) = &credentials {
+        let found = file.load().map_err(Failure::Usage)?;
+        if let Some(credential) = found {
+            transport
+                .adopt_credential(credential.expose())
+                .map_err(|why| Failure::Usage(format!("{}: {why}", file.path().display())))?;
+        }
+    }
     let taint = local.state.iter().filter_map(StateRoot::read);
     taint.for_each(|taint| {
         let _ = writeln!(
@@ -416,6 +434,9 @@ fn execute(
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain)) = &jobs {
         session = session.with_jobs(worker, *drain);
+    }
+    if let Some(file) = &credentials {
+        session = session.with_credential_store(file);
     }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

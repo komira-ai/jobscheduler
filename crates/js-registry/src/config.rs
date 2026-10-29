@@ -91,6 +91,7 @@ impl PoolConfig {
             grace_ms,
             pool: self.name.to_string(),
             session: "probe".to_string(),
+            host_credential: None,
         };
         probe.validate()?;
         self.heartbeat_interval_ms = heartbeat_interval_ms;
