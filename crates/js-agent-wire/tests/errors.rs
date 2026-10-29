@@ -79,6 +79,7 @@ fn display_is_field_and_rule_text() {
         Rule::Reserved,
         Rule::Escapes,
         Rule::UnsupportedProtocol,
+        Rule::NotPinned,
     ];
     let mut texts: Vec<String> = rules.iter().map(ToString::to_string).collect();
     texts.sort();

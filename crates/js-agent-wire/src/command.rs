@@ -156,7 +156,8 @@ pub struct JobSpec {
     /// optional port only in the first component, lower-case path components, a tag of
     /// at most 128 bytes, a digest `algorithm:hex`). A transport prefix such as `oci:`,
     /// `dir:`, `docker-archive:`, `containers-storage:` or `docker://` is refused, and a
-    /// reference starts with a letter or digit, so it is never read as an option.
+    /// reference starts with a letter or digit, so it is never read as an option. A
+    /// start must also pin the image: [`JobSpec::require_pinned`].
     pub image: String,
     /// The command line after the image: at most [`limits::MAX_ARGS`] entries, no NUL.
     #[serde(default)]
@@ -186,6 +187,18 @@ pub struct JobSpec {
 }
 
 impl JobSpec {
+    /// Checks that the image is pinned by a `sha256:` digest, after [`JobSpec::validate`]
+    /// has passed. A tag-only image is refused with [`refusal::IMAGE_DIGEST_REQUIRED`]
+    /// naming `image`; `name:tag@sha256:...` passes. The server calls it with `validate`
+    /// before it queues a start and the agent before it acts on one, so no host pulls an
+    /// image whose content can move.
+    pub fn require_pinned(&self) -> Result<(), ValidationError> {
+        image::pinned(
+            At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
+            &self.image,
+        )
+    }
+
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
     /// indices, mounts and labels. The server calls it before it queues a start and the
     /// agent before it acts on one.
@@ -293,7 +306,7 @@ impl Command {
     /// id. An unknown command passes; the agent skips it.
     pub fn validate(&self) -> Result<(), ValidationError> {
         match self {
-            Self::Start(spec) => spec.validate(),
+            Self::Start(spec) => spec.validate().and_then(|()| spec.require_pinned()),
             Self::Stop { run_id } | Self::Cancel { run_id } => {
                 check::ident(At::new("run_id", refusal::INVALID_REPLY), run_id)
             }
