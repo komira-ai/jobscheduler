@@ -137,6 +137,7 @@ impl Engine {
         // Named before the feed: a report that finishes the operation may drop its callers.
         let name = a.name(&self.view(), operation);
         let recorded_before = self.runs_recorded(operation);
+        a.before_report(&self.view(), now, worker, &report);
         let event = Event::Report {
             operation,
             lease,
@@ -176,6 +177,10 @@ impl Engine {
                 tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
             }
         }
+        a.after_report(&self.view(), now, worker, &report, &answers, taken);
+        // What the estimator learned from the report may lower a key floor.
+        let lowered = a.lowered();
+        self.lower_key_floors(a, lowered);
         (answers, taken)
     }
 

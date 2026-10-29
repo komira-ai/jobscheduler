@@ -8,6 +8,7 @@ use js_types::{HostId, ProviderId, Resources, Shape, TypeError};
 use serde::{Deserialize, Serialize};
 
 use crate::check::{self, At};
+use crate::credential::HostCredential;
 use crate::error::{Rule, ValidationError};
 use crate::heartbeat::HeldRun;
 use crate::limits;
@@ -199,6 +200,18 @@ pub struct Hello {
     /// server never sees a gap that would make it requeue running work.
     #[serde(default)]
     pub held: Vec<HeldRun>,
+    /// Whether the agent keeps a [`HostCredential`] it is given: it has a durable place to
+    /// write one and uses it for every later call. A server that issues credentials
+    /// issues one only to an agent that says so, and an agent that does not (an older
+    /// one, or one with no state root) goes on with its join token. Absent means false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub accepts_host_credential: bool,
+}
+
+/// Whether `value` is false: a hello that does not ask for a credential does not carry the
+/// field, so it reads as it did before the field existed.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Hello {
@@ -273,6 +286,18 @@ impl Hello {
 }
 
 impl InstanceIdentity {
+    /// Checks the identity by the rules a hello applies to its `instance`: the provider
+    /// is a provider id and the instance id is an id of the id alphabet. A server that
+    /// names an instance (to bind a join token to it) uses this, so that it never binds
+    /// to an identity no hello could carry.
+    ///
+    /// # Errors
+    ///
+    /// The field and the rule that failed.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("hello", refusal::INVALID_HELLO))
+    }
+
     fn check(&self, at: At) -> Result<(), ValidationError> {
         let provider = at.field("instance.provider");
         check::ident(provider, &self.provider)?;
@@ -315,10 +340,19 @@ pub struct Welcome {
     /// refuses: such an agent cannot keep a session with a server that checks it.
     #[serde(default)]
     pub session: String,
+    /// The credential that replaces the join token, present only in the welcome of a
+    /// hello that asked for one ([`Hello::accepts_host_credential`]) and was admitted with
+    /// a one-time join token for the first time. The token is dead from then on: the agent
+    /// writes this to a file only it can read before it uses it, and sends it in place of
+    /// the token with every later hello and heartbeat. Absent means the agent goes on with
+    /// the token it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_credential: Option<HostCredential>,
 }
 
-/// Every field but `session`, which prints as `".."`: the secret never reaches a log or a
-/// panic message, also through a type that holds a welcome ([`HelloReply`]).
+/// Every field but `session` and `host_credential`, which print as `".."` (the second only
+/// when there is one): the secrets never reach a log or a panic message, also through a
+/// type that holds a welcome ([`HelloReply`]).
 impl fmt::Debug for Welcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Welcome")
@@ -328,6 +362,10 @@ impl fmt::Debug for Welcome {
             .field("grace_ms", &self.grace_ms)
             .field("pool", &self.pool)
             .field("session", &"..")
+            .field(
+                "host_credential",
+                &self.host_credential.as_ref().map(|_| ".."),
+            )
             .finish()
     }
 }
@@ -372,6 +410,11 @@ pub struct Refused {
     /// For [`refusal::UNSUPPORTED_PROTOCOL`]: the majors the server speaks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported: Option<ProtocolRange>,
+    /// For [`refusal::HOST_CONTRACT`] and [`refusal::EXECUTION_MISMATCH`]: the capability
+    /// at fault (`runtime`, `gpu-toolkit` or `exec`). A peer that predates the field
+    /// ignores it and reads the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 impl Refused {
@@ -384,6 +427,10 @@ impl Refused {
             limits::MAX_CODE_LEN,
             check::ident_byte,
         )?;
+        if let Some(field) = &self.field {
+            let max = limits::MAX_CAPABILITY_KEY_LEN;
+            check::token(at.field("field"), field, max, check::ident_byte)?;
+        }
         match &self.supported {
             Some(range) => range.check("supported", refusal::INVALID_WELCOME),
             None => Ok(()),
@@ -395,7 +442,8 @@ impl Refused {
 /// transport-neutral form. Over HTTP the lease server sends the welcome bare (status 200,
 /// the fields of [`Welcome`]) and a refusal as the error body every route of the API
 /// uses: a 4xx or 5xx status and `{"error": "<code>"}`, with `"supported"` (a
-/// [`ProtocolRange`]) beside it for [`refusal::UNSUPPORTED_PROTOCOL`]. [`Refused::code`]
+/// [`ProtocolRange`]) beside it for [`refusal::UNSUPPORTED_PROTOCOL`] and `"field"` (the
+/// capability at fault) for [`refusal::HOST_CONTRACT`] and [`refusal::EXECUTION_MISMATCH`]. [`Refused::code`]
 /// is that `error`. The agent reads that HTTP shape, not this tagged one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

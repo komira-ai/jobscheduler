@@ -319,6 +319,27 @@ fn instance_identity_is_bounded() {
     assert_eq!(ok.validate(), Ok(()));
 }
 
+/// An identity checked on its own gives the verdict a hello carrying it would get: the
+/// same field names and the same pass. It catches a standalone check that is looser or
+/// stricter than the hello's, which would let a server bind a token to an identity no
+/// agent could send.
+#[test]
+fn an_instance_identity_validates_alone_as_in_a_hello() {
+    let identity = |provider: &str, instance: &str| InstanceIdentity {
+        provider: provider.into(),
+        instance_id: instance.into(),
+    };
+    assert_eq!(identity("aws", "i-0abc123").validate(), Ok(()));
+    assert_eq!(
+        identity("AWS", "i-0abc").validate().unwrap_err().field(),
+        "instance.provider"
+    );
+    assert_eq!(
+        identity("aws", "i 0").validate().unwrap_err().field(),
+        "instance.instance_id"
+    );
+}
+
 /// A protocol range that is empty or starts at zero is refused as a bad hello; one with
 /// no major in common with this crate is refused with the protocol code. It catches an
 /// agent of an unknown future being admitted and a malformed range being trusted.

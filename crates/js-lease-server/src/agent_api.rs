@@ -26,6 +26,7 @@ use tracing::{info, warn};
 
 use crate::agents::Agents;
 use crate::api::{BODY_LIMIT, bearer};
+use crate::join_tokens::{Admission, JoinRefusal};
 
 /// The agent routes. The caller merges them into the server's router; they have no
 /// fallback of their own.
@@ -39,26 +40,43 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
         .with_state(agents)
 }
 
-/// Refuses a request that does not carry one of the join tokens, with a 401 that says
-/// nothing else, and passes the credential of the token on. The client token of the
-/// lease routes is not a join token and gets the same 401.
+/// Marks a request that was authenticated with a one-time token or a host credential (see
+/// [`crate::join_tokens`]) and not with one of the pool's join tokens: the routes then hold
+/// it to the host that secret registered. It holds the digest of the secret the request
+/// carried, which is the key of its row; the [`Credential`] the registry sees is the one
+/// the host was registered under (the same for a token, the token's for a host credential).
+#[derive(Clone)]
+struct OneTime(Credential);
+
+/// Refuses a request that does not carry one of the join tokens, a one-time token or a host
+/// credential, with a 401 that says nothing else, and passes the credential the registry
+/// knows the host by on (and the mark [`OneTime`] when it is a one-time token or a host
+/// credential). A retired token is not known, so it gets the same 401, as does the client
+/// token of the lease routes.
 async fn authenticate(
     State(agents): State<Arc<Agents>>,
     mut request: Request,
     next: Next,
 ) -> Response {
-    let credential = request
+    let given = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(bearer)
-        .and_then(|given| agents.tokens.identify(given));
-    match credential {
-        Some(credential) => {
+        .and_then(bearer);
+    let pooled = given.and_then(|given| agents.tokens.identify(given));
+    let single = || given.and_then(|given| agents.joins.identify(given));
+    match (pooled, single()) {
+        (Some(credential), _) => {
             request.extensions_mut().insert(credential);
             next.run(request).await
         }
-        None => StatusCode::UNAUTHORIZED.into_response(),
+        (None, Some(presented)) => {
+            let registered = agents.joins.registered_as(&presented);
+            request.extensions_mut().insert(registered);
+            request.extensions_mut().insert(OneTime(presented));
+            next.run(request).await
+        }
+        (None, None) => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 
@@ -98,24 +116,88 @@ fn retry_after(wait: Duration) -> u64 {
 async fn hello(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
+    one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
+) -> Result<Response, Refused> {
+    let presented = one_time.map(|Extension(OneTime(presented))| presented);
+    let welcome = serve_hello(&agents, who, presented, body, &|| ()).await?;
+    // The Welcome can carry the host credential, so no cache may keep it (as for a token
+    // response in RFC 6749, section 5.1).
+    let headers = [
+        (header::CACHE_CONTROL, "no-store"),
+        (header::PRAGMA, "no-cache"),
+    ];
+    Ok((headers, welcome).into_response())
+}
+
+/// The hello route. `between` runs after a one-time token was admitted and before the
+/// registry is asked: the point at which another hello can get in. Production passes a
+/// function that does nothing; a test passes the other hello, so the interleaving is
+/// exact and no thread races on timing. `who` is the credential the registry knows the host
+/// by; `one_time` is the digest of the one-time token or host credential the request
+/// carried, when it carried one.
+async fn serve_hello(
+    agents: &Arc<Agents>,
+    who: Credential,
+    one_time: Option<Credential>,
+    body: Result<Bytes, BytesRejection>,
+    between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    let welcome = agents.registry.hello(&hello, &who).map_err(|refusal| {
-        warn!(code = refusal.code(), "agent hello refused");
-        Refused::of(&refusal)
-    })?;
+    // A one-time token registers the host that names its instance, and only that host
+    // thereafter. The token is consumed before the registry is asked, so that two hellos
+    // cannot both pass; a hello the registry then refuses (the pool is full, the host id
+    // is bound to another credential) gives the use back, and the token stays unused for
+    // its instance. Not when a later hello of the same host was admitted meanwhile: the
+    // registry may have accepted that one, and the token then stays the host's.
+    //
+    // A hello that says it keeps a host credential, and registers its host with an unused
+    // token, retires the token in the same step and is answered with the credential: the
+    // token alone opens nothing from then on. When the registry refuses that hello the
+    // credential goes back with the use, since the answer that carries it is not sent.
+    let mut fresh_use = None;
+    let mut issued = None;
+    if let Some(presented) = &one_time {
+        let instance = hello.instance.clone();
+        let host = hello.host_id.clone();
+        let asked = hello.accepts_host_credential;
+        let admitted = agents
+            .admit_join(presented.clone(), host, instance, asked)
+            .await;
+        let admitted = admitted.map_err(|refusal| {
+            warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
+            Refused::join(refusal)
+        })?;
+        if admitted.admission == Admission::Fresh {
+            fresh_use = Some(presented.clone());
+        }
+        issued = admitted.issued;
+    }
+    between();
+    let mut welcome = match agents.registry.hello(&hello, &who) {
+        Ok(welcome) => welcome,
+        Err(refusal) => {
+            if let Some(presented) = fresh_use {
+                agents.release_join(presented, hello.host_id.clone()).await;
+            }
+            warn!(code = refusal.code(), "agent hello refused");
+            return Err(Refused::of(&refusal));
+        }
+    };
+    let credential_issued = issued.is_some();
+    welcome.host_credential = issued;
     agents.save_bindings().await;
-    info!(host = %hello.host_id, epoch = welcome.epoch, "agent admitted");
+    info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
 }
 
 async fn heartbeat(
     State(agents): State<Arc<Agents>>,
     Extension(who): Extension<Credential>,
+    one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<HeartbeatReply>, Refused> {
     let heartbeat: Heartbeat = decode(
@@ -125,6 +207,12 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
+    if let Some(Extension(OneTime(presented))) = one_time {
+        let served = agents
+            .serve_join(presented, heartbeat.host_id.clone())
+            .await;
+        served.map_err(Refused::join)?;
+    }
     // The reply carries the starts, stops and cancels for this host and the verdict on
     // each result, and acknowledges a taint report. The agent stops reporting once it is
     // acknowledged, so the report must be in the state file first: when it cannot be
@@ -173,6 +261,9 @@ pub(crate) struct Refused {
     error: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     supported: Option<ProtocolRange>,
+    /// The capability at fault, for the two refusals of the host contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'static str>,
 }
 
 impl Refused {
@@ -181,7 +272,19 @@ impl Refused {
             status,
             error,
             supported: None,
+            field: None,
         }
+    }
+
+    /// The answer to a refused one-time token: 503 when the use could not be written down or
+    /// the credential could not be made, 403 otherwise. The code names the fault and
+    /// nothing of the token.
+    fn join(refusal: JoinRefusal) -> Self {
+        let status = match refusal {
+            JoinRefusal::Unsaved | JoinRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::FORBIDDEN,
+        };
+        Self::new(status, refusal.code())
     }
 
     /// The answer to a registry refusal: 400 for a message that breaks the wire's rules,
@@ -198,6 +301,8 @@ impl Refused {
             | Refusal::HostBound
             | Refusal::HostListed
             | Refusal::ShapeNotAccepted
+            | Refusal::HostContract { .. }
+            | Refusal::ExecutionMismatch { .. }
             | Refusal::PoolFull
             | Refusal::SessionMismatch => StatusCode::FORBIDDEN,
             Refusal::SessionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -206,6 +311,7 @@ impl Refused {
         let unsupported = code == js_agent_wire::refusal::UNSUPPORTED_PROTOCOL;
         Self {
             supported: unsupported.then_some(ProtocolRange::THIS),
+            field: refusal.field(),
             ..Self::new(status, code)
         }
     }
@@ -280,6 +386,16 @@ mod tests {
             (Refusal::HostBound, 403, "host-bound"),
             (Refusal::HostListed, 403, "host-listed"),
             (Refusal::ShapeNotAccepted, 403, "shape-not-accepted"),
+            (
+                Refusal::HostContract { field: "runtime" },
+                403,
+                "host-contract",
+            ),
+            (
+                Refusal::ExecutionMismatch { field: "exec" },
+                403,
+                "execution-mismatch",
+            ),
             (Refusal::PoolFull, 403, "pool-full"),
             (Refusal::SessionMismatch, 403, "session-mismatch"),
             (Refusal::SessionUnavailable, 503, "session-unavailable"),
@@ -290,6 +406,32 @@ mod tests {
             assert_eq!(answer.error, code);
             let says_majors = code == "unsupported-protocol";
             assert_eq!(answer.supported.is_some(), says_majors, "{code}");
+            assert_eq!(answer.field, refusal.field(), "{code}");
+        }
+    }
+
+    /// Every refusal of a one-time token has its status and code: 503 for the use that
+    /// could not be written down (the agent may try again), 403 for the rest.
+    #[test]
+    fn every_join_refusal_has_its_status_and_code() {
+        let cases = [
+            (JoinRefusal::Expired, 403, "join-token-expired"),
+            (JoinRefusal::Used, 403, "join-token-used"),
+            (JoinRefusal::WrongInstance, 403, "join-token-instance"),
+            (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
+            (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
+            (JoinRefusal::Unavailable, 503, "join-token-unavailable"),
+            (
+                JoinRefusal::CredentialRequired,
+                403,
+                "join-token-credential-required",
+            ),
+        ];
+        for (refusal, status, code) in cases {
+            let answer = Refused::join(refusal);
+            assert_eq!(answer.status.as_u16(), status, "{code}");
+            assert_eq!(answer.error, code);
+            assert!(answer.supported.is_none());
         }
     }
 
@@ -307,3 +449,7 @@ mod tests {
         assert_eq!(retry_after(Duration::MAX), u64::MAX);
     }
 }
+
+#[cfg(test)]
+#[path = "agent_api_race_tests.rs"]
+mod race_tests;

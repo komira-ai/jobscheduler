@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "global/forbidden",
+    "message": "You are not authorized. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-forbidden"
+  }
+}

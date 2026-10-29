@@ -8,7 +8,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use clap::Parser;
-use js_agent::{Answer, Connector, Dialer, Sleeper, Transport, Wake};
+use js_agent::{
+    Answer, Connector, Dialer, HEARTBEAT_PATH, Handle, Machine, Sleeper, Transport, Wake,
+};
 use js_agent_wire::ProtocolRange;
 use js_client::{Client, ClientError, Reply};
 use js_lease::{ManualClock, Timestamp};
@@ -16,7 +18,8 @@ use js_lease_server::{Cli, Config, Running, SharedClock, TickHandle, channel_tic
 use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 
-use crate::support::{Host, Lowest, Ran, Scratch, run};
+use crate::jobs::fake::FakeMachine;
+use crate::support::{Host, Lowest, Ran, Scratch, run_on};
 
 /// The wall time the server's clock starts at.
 pub const T0: u64 = 1_000_000;
@@ -206,7 +209,27 @@ impl Server {
     pub fn post(&self, path: &str) -> Reply {
         self.client().post(path, &json!({})).unwrap()
     }
+
+    /// `POST path` with the lease token and `body`.
+    pub fn post_body(&self, path: &str, body: &Value) -> Reply {
+        self.client().post(path, body).unwrap()
+    }
 }
+
+/// A pool that books a host as 4 CPUs and 4 GiB and asks only that it runs Linux: a machine
+/// that offers more joins it, and a lease on it holds runs up to that shape.
+pub const POOL_RUNS_TOML: &str = r#"
+name = "macs"
+class = "mac"
+max_machines = 4
+
+[shape]
+cpu_millis = 4000
+memory_bytes = 4294967296
+
+[capabilities]
+os = "linux"
+"#;
 
 /// Opens the waits of an agent one at a time.
 struct Gate {
@@ -238,11 +261,13 @@ pub struct Agent {
     slept: Receiver<Duration>,
     go: Sender<Wake>,
     handle: JoinHandle<Ran>,
+    worker: Receiver<Handle>,
 }
 
 impl Agent {
     /// Runs the agent of `host` against `url`, with the join token in `token`, and `extra`
-    /// flags. It uses the real transport, through `connector`.
+    /// flags. It uses the real transport, through `connector`, and a machine whose runtime
+    /// is in memory.
     pub fn spawn(
         url: String,
         token: PathBuf,
@@ -250,14 +275,52 @@ impl Agent {
         host: fn() -> Host,
         connector: impl Connector + Send + 'static,
     ) -> Self {
+        let machine = Arc::new(FakeMachine::new());
+        Self::spawn_on(url, token, extra, host, connector, machine)
+    }
+
+    /// [`Agent::spawn`] over `machine`, which the test keeps a handle to.
+    pub fn spawn_on(
+        url: String,
+        token: PathBuf,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<FakeMachine>,
+    ) -> Self {
+        Self::launch(url, Some(token), extra, host, connector, machine)
+    }
+
+    /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
+    /// root `extra` names.
+    pub fn spawn_tokenless(
+        url: String,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+    ) -> Self {
+        let machine = Arc::new(FakeMachine::new());
+        Self::launch(url, None, extra, host, connector, machine)
+    }
+
+    fn launch(
+        url: String,
+        token: Option<PathBuf>,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<FakeMachine>,
+    ) -> Self {
+        let (tell, worker) = channel();
         let (slept, waits) = channel();
         let (go, gate) = channel();
-        let mut args: Vec<String> = vec![
-            "--server".into(),
-            url,
-            "--token-file".into(),
-            token.to_str().unwrap().to_owned(),
-        ];
+        let mut args: Vec<String> = vec!["--server".into(), url];
+        if let Some(token) = token {
+            args.extend([
+                "--token-file".to_owned(),
+                token.to_str().unwrap().to_owned(),
+            ]);
+        }
         if !extra.contains(&"--pool") {
             args.extend(["--pool".to_owned(), "macs".to_owned()]);
         }
@@ -267,13 +330,32 @@ impl Agent {
         let handle = thread::spawn(move || {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             let mut sleeper = Gate { slept, go: gate };
-            run(&args, &host(), &connector, &mut sleeper, &mut Lowest)
+            let hook = move |worker: Handle| {
+                let _ = tell.send(worker);
+            };
+            let machine: Arc<dyn Machine> = machine;
+            let jobs = (machine, Some(&hook as &dyn Fn(Handle)));
+            run_on(&args, &host(), &connector, &mut sleeper, &mut Lowest, jobs)
         });
         Self {
             slept: waits,
             go,
             handle,
+            worker,
         }
+    }
+
+    /// The handle to the agent's job worker, once it has started: an agent started with
+    /// `--container-bin` has one before its first hello.
+    pub fn worker(&self) -> Handle {
+        self.worker
+            .recv_timeout(HANG_GUARD)
+            .expect("the agent started no job worker")
+    }
+
+    /// Delivers a stop request, as a signal would, without waiting for the agent to end.
+    pub fn signal(&self) {
+        self.go.send(Wake::Stop).unwrap();
     }
 
     /// Waits until the agent has done its next exchange and returns the wait it asks for.
@@ -308,6 +390,7 @@ pub struct Redirect(pub Arc<Mutex<String>>);
 struct Redirected {
     to: Arc<Mutex<String>>,
     token_file: PathBuf,
+    credential: Option<String>,
 }
 
 impl Connector for Redirect {
@@ -320,6 +403,7 @@ impl Connector for Redirect {
         Ok(Box::new(Redirected {
             to: self.0.clone(),
             token_file: token_file.to_path_buf(),
+            credential: None,
         }))
     }
 }
@@ -330,7 +414,17 @@ impl Transport for Redirected {
         Dialer
             .connect(&url, &self.token_file, None)
             .map_err(|err| err.to_string())
-            .and_then(|mut transport| transport.post(path, body))
+            .and_then(|mut transport| {
+                if let Some(credential) = &self.credential {
+                    transport.adopt_credential(credential)?;
+                }
+                transport.post(path, body)
+            })
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.credential = Some(secret.to_owned());
+        Ok(())
     }
 }
 
@@ -363,6 +457,47 @@ impl Transport for Rewriting {
         let mut body = body.clone();
         body["protocol"] = json!({ "min": self.majors.min, "max": self.majors.max });
         self.inner.post(path, &body)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
+}
+
+/// Counts the heartbeats the agent posts.
+#[derive(Clone, Default)]
+pub struct Counting(pub Arc<std::sync::atomic::AtomicUsize>);
+
+struct Counted {
+    inner: Box<dyn Transport>,
+    beats: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Connector for Counting {
+    fn connect(
+        &self,
+        server: &str,
+        token_file: &Path,
+        ca_cert: Option<&Path>,
+    ) -> Result<Box<dyn Transport>, ClientError> {
+        let inner = Dialer.connect(server, token_file, ca_cert)?;
+        Ok(Box::new(Counted {
+            inner,
+            beats: self.0.clone(),
+        }))
+    }
+}
+
+impl Transport for Counted {
+    fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
+        let beat = usize::from(path == HEARTBEAT_PATH);
+        self.beats
+            .fetch_add(beat, std::sync::atomic::Ordering::SeqCst);
+        self.inner.post(path, body)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
     }
 }
 
@@ -397,5 +532,9 @@ impl Transport for Spying {
             self.seen.lock().unwrap().push(answer.body.clone());
         }
         answer
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
     }
 }

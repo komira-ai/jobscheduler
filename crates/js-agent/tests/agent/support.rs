@@ -8,15 +8,20 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::{
-    Answer, CommandRunner, Connector, FileReader, Jitter, Platform, Services, Sleeper, Transport,
-    Wake, run_with,
+    Answer, CommandRunner, Connector, FileReader, Handle, Jitter, Machine, Platform, Services,
+    Sleeper, Transport, Wake, run_with,
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
+use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
+
+use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
+use crate::jobs::fake::FakeMachine;
 
 /// The pool the tests' hosts ask to join.
 pub const POOL: &str = "macs";
@@ -29,16 +34,20 @@ pub const SECRET: &str = "sess-secret-0001-abcdefghijklmnop";
 /// the test ends.
 pub struct Scratch {
     dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-agent")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        bounds::install();
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-agent"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -54,10 +63,25 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's file and dropping the second does
+/// not remove the first. It catches a path named by the test alone, which two tests of
+/// one name, or two runs of one test binary at once, would share and delete under each
+/// other.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
 /// The probes' command lines. Every program is named by its absolute path: the agent never
@@ -359,6 +383,16 @@ pub fn welcome_speaking(epoch: u64, interval_ms: u64, grace_ms: u64, protocol: u
     )
 }
 
+/// A welcome for `epoch` that carries the host credential `credential`.
+pub fn welcome_issuing(epoch: u64, credential: &str) -> Reply {
+    let mut body = match welcome(epoch) {
+        Ok(answer) => answer.body,
+        Err(why) => panic!("{why}"),
+    };
+    body["host_credential"] = json!(credential);
+    reply(200, body)
+}
+
 /// An accepted heartbeat with nothing to say.
 pub fn beat_ok() -> Reply {
     reply(
@@ -371,29 +405,71 @@ pub fn beat_ok() -> Reply {
 pub type Sent = Rc<RefCell<Vec<(String, Value)>>>;
 
 /// A transport that answers from a list and records what it was sent. When the list is
-/// used up every post fails as if the server were down.
+/// used up every post fails as if the server were down. It panics when it is sent more than
+/// [`SENT_LIMIT`] messages: a loop that does not end would otherwise record its heartbeats
+/// until the machine is out of memory.
 pub struct Script {
     replies: VecDeque<Reply>,
     sent: Sent,
+    limit: usize,
+    refuses_credentials: bool,
 }
 
 impl Script {
     pub fn new(replies: Vec<Reply>) -> (Self, Sent) {
+        Self::capped(replies, SENT_LIMIT)
+    }
+
+    /// A script that panics when it is sent more than `limit` messages.
+    pub fn capped(replies: Vec<Reply>, limit: usize) -> (Self, Sent) {
+        bounds::install();
         let sent = Sent::default();
         let script = Self {
             replies: replies.into(),
             sent: sent.clone(),
+            limit,
+            refuses_credentials: false,
         };
         (script, sent)
     }
+
+    /// The same script, whose transport will not take a credential as its bearer.
+    pub fn refusing_credentials(self) -> Self {
+        Self {
+            refuses_credentials: true,
+            ..self
+        }
+    }
 }
+
+/// The path under which [`Script`] records that its bearer was replaced by a credential;
+/// the body is the credential's text.
+pub const ADOPTED: &str = "(adopt-credential)";
 
 impl Transport for Script {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
-        self.sent.borrow_mut().push((path.to_owned(), body.clone()));
+        let mut sent = self.sent.borrow_mut();
+        assert!(
+            sent.len() < self.limit,
+            "the transport was sent more than {} messages: the loop that sends them does not end",
+            self.limit
+        );
+        sent.push((path.to_owned(), body.clone()));
+        drop(sent);
         self.replies
             .pop_front()
             .unwrap_or_else(|| Err("the script is used up".to_owned()))
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        match self.refuses_credentials {
+            true => Err("the script takes no credential".to_owned()),
+            false => {
+                let adopted = (ADOPTED.to_owned(), Value::String(secret.to_owned()));
+                self.sent.borrow_mut().push(adopted);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -422,6 +498,7 @@ impl Connector for ScriptConnector {
 pub struct CountingSleeper {
     pub waits: Rc<RefCell<Vec<Duration>>>,
     stop_at: usize,
+    budget: WakeBudget,
 }
 
 impl CountingSleeper {
@@ -429,12 +506,14 @@ impl CountingSleeper {
         Self {
             waits: Rc::default(),
             stop_at,
+            budget: WakeBudget::new(),
         }
     }
 }
 
 impl Sleeper for CountingSleeper {
     fn sleep(&mut self, duration: Duration) -> Wake {
+        self.budget.spend();
         let mut waits = self.waits.borrow_mut();
         waits.push(duration);
         match waits.len() >= self.stop_at {
@@ -488,6 +567,7 @@ pub fn hello(host: &str) -> Hello {
         labels: BTreeMap::new(),
         phase: Phase::Serving,
         held: Vec::new(),
+        accepts_host_credential: false,
     }
 }
 
@@ -509,7 +589,7 @@ impl Ran {
     }
 }
 
-/// Runs the program on `args` against `host`.
+/// Runs the program on `args` against `host`, with a machine whose runtime lives in memory.
 pub fn run(
     args: &[&str],
     host: &Host,
@@ -517,7 +597,27 @@ pub fn run(
     sleeper: &mut dyn Sleeper,
     jitter: &mut dyn Jitter,
 ) -> Ran {
-    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let machine = Arc::new(FakeMachine::new());
+    run_on(args, host, connector, sleeper, jitter, (machine, None))
+}
+
+/// The machine the jobs run on and the hook that is told of their worker.
+pub type Jobs<'a> = (Arc<dyn Machine>, Option<&'a dyn Fn(Handle)>);
+
+/// The bound of the rescue in the tests that run the whole agent: a regression that hangs
+/// in the rescue ends the test in seconds, not at the bound of a host.
+pub const RESCUE_TEST_BOUND: Duration = Duration::from_secs(30);
+
+/// Runs the program on `args` against `host`, with the machine and the worker hook given.
+pub fn run_on(
+    args: &[&str],
+    host: &Host,
+    connector: &dyn Connector,
+    sleeper: &mut dyn Sleeper,
+    jitter: &mut dyn Jitter,
+    jobs: Jobs<'_>,
+) -> Ran {
+    let (mut out, mut err) = (Capped::new(), Capped::new());
     let mut services = Services {
         platform: host.platform.clone(),
         commands: &host.commands,
@@ -525,14 +625,17 @@ pub fn run(
         connector,
         jitter,
         sleeper,
+        machine: jobs.0,
+        worker_hook: jobs.1,
+        rescue_bound: Some(RESCUE_TEST_BOUND),
     };
     let argv = std::iter::once("js-agent").chain(args.iter().copied());
     let argv = argv.map(Into::into).collect();
     let status = run_with(argv, &mut out, &mut err, &mut services);
     Ran {
         status,
-        out: String::from_utf8(out).unwrap(),
-        err: String::from_utf8(err).unwrap(),
+        out: out.text(),
+        err: err.text(),
     }
 }
 

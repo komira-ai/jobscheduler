@@ -111,6 +111,7 @@ pub use load::{
 mod requeue;
 mod scheduler;
 mod servable;
+mod unservable;
 
 pub use admission::{
     FlagError, HORIZON_MINUTES, LoadConfig, LoadCounters, LoadView, MAX_CPU_SLACK_PERMILLE,
@@ -133,3 +134,4 @@ pub use scheduler::{
     UNSERVABLE_WAIT, WaitingGroup, WholeMark, WholeReason, WholeState, WholeSummary, WholeWait,
     platform_label,
 };
+pub use unservable::Unservable;

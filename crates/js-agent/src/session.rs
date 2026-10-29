@@ -21,7 +21,8 @@
 //!   so the session ends with the status and the server's code ([`Fatal`]) and the
 //!   program exits 2. These are the refusals that name something only the operator can
 //!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
-//!   (`shape-not-accepted`), the credential the host id was admitted with (`host-bound`),
+//!   (`shape-not-accepted`), the host contract of an execution mode (`host-contract`,
+//!   `execution-mismatch`; the refusal names the capability at fault), the credential the host id was admitted with (`host-bound`),
 //!   the pool's static host list (`host-listed`), and a message the server cannot read or
 //!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
 //!   `body-too-large`). The operator fixes the cause and restarts the agent.
@@ -45,21 +46,69 @@
 //!
 //! The session secret is held in memory, goes into the body of every heartbeat and into
 //! nothing else: it is in no log line, no [`Note`] and no `Debug` output.
+//!
+//! # The host credential
+//!
+//! A session given a [`CredentialStore`] ([`Session::with_credential_store`]) keeps the host
+//! credential a welcome may carry. The server issues one only to a hello that says the agent
+//! keeps it (the agent says so when it has a state root), and retires the one-time token in
+//! the same step, so the credential is written to the store first and only then made the
+//! bearer of every later call ([`Transport::adopt_credential`]). A write that fails does not
+//! stop the session: the credential serves this process, and the note says that a restart
+//! could not register the host again ([`CredentialState::Unsaved`]). A welcome without a
+//! credential changes nothing, so an agent that meets an older server, or a pool's shared
+//! token, goes on with the token it has. A session with no store ignores a credential it is
+//! sent.
+//!
+//! # Jobs
+//!
+//! A session given a [`Worker`] ([`Session::with_jobs`]) carries what the worker holds. It
+//! never calls the container runtime and never waits for the worker:
+//!
+//! - Every heartbeat carries the worker's published [`Snapshot`]: the held runs, the
+//!   results not yet acknowledged and the taint to report. So does every hello, as its
+//!   held list, so a server that restarted learns what the agent still runs. A new epoch
+//!   keeps the worker and everything it holds.
+//! - Every accepted reply that says anything (a command, an acknowledgement, a
+//!   `taint_ack`) is handed to the worker, which checks it as a whole and acts on each
+//!   command in order; a command it refuses is logged by its place in the reply. A reply
+//!   the worker has no room for is dropped and noted ([`Note::Busy`]): the server sends
+//!   everything again.
+//! - A `taint_ack` counts only when the heartbeat it answers carried the taint. The
+//!   session clears it from a reply to a heartbeat that did not, so the worker never
+//!   marks as told a taint the server was not told.
+//! - A worker that has ended ends the session with [`Step::Failed`]. So does one that is
+//!   found gone without having said so (a reply that finds nobody to read the queue), and
+//!   one that has been inside a single order or step for longer than its calls can take
+//!   ([`Worker::stalled`]; it reads the worker's own clock, not a wall clock).
+//!
+//! - The worker does not implement [`Quiesce`]: a session built for jobs is given no
+//!   [`Session::with_quiesce`] host, so it does not follow the `exclusive` lease a reply
+//!   names. The heartbeat carries no `preparing`, `exclusive_ready` or `exclusive_refused`.
+//!   The worker's lifecycle still reads the lease from each reply, and while a reply names
+//!   one it refuses every start with `no-capacity` (reported as `failed_to_start`), because
+//!   nothing ever prepares the host for it; the runs it already holds go on, and starts are
+//!   accepted again from the first reply that names no lease.
+//!
+//! Without a worker the session carries nothing and counts the commands it ignores
+//! ([`Note::Ignored`]).
 
 use std::fmt;
 use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, RefusalReason, Refused,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, RefusalReason, Refused,
     ValidationError, Welcome,
 };
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
+use crate::credential::CredentialStore;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
+use crate::worker::{Delivery, Snapshot, Worker};
 
 /// The route of the hello.
 pub const HELLO_PATH: &str = "/v1/agent/hello";
@@ -93,6 +142,9 @@ pub struct Fatal {
     pub code: String,
     /// The majors the server speaks, when it said so (`unsupported-protocol`).
     pub supported: Option<ProtocolRange>,
+    /// The capability at fault, when the server named one (`host-contract`,
+    /// `execution-mismatch`).
+    pub field: Option<String>,
 }
 
 impl fmt::Display for Fatal {
@@ -101,9 +153,14 @@ impl fmt::Display for Fatal {
             .supported
             .map(|range| format!("; it speaks majors {} to {}", range.min, range.max))
             .unwrap_or_default();
+        let field = self
+            .field
+            .as_ref()
+            .map(|field| format!("; the capability at fault is {field}"))
+            .unwrap_or_default();
         write!(
             f,
-            "the server refused the {} with status {} ({}{majors}); not retrying",
+            "the server refused the {} with status {} ({}{majors}{field}); not retrying",
             self.what, self.status, self.code
         )
     }
@@ -135,6 +192,38 @@ impl fmt::Display for Reason {
     }
 }
 
+/// What became of the host credential a welcome carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialState {
+    /// The welcome carried none, or the session has nowhere to keep one: the host goes on
+    /// with its token.
+    None,
+    /// It is on disk and authenticates every later call.
+    Saved,
+    /// It could not be written. It authenticates this process's calls, but a restart cannot
+    /// register the host again: the token it was issued for is dead.
+    Unsaved,
+    /// The transport would not use it. The token is dead, so the next call is refused.
+    Refused,
+}
+
+/// The text a [`Note::Registered`] adds for the credential: nothing, or a clause that starts
+/// with a semicolon.
+impl fmt::Display for CredentialState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "",
+            Self::Saved => "; the host credential is saved",
+            Self::Unsaved => {
+                "; the host credential could not be saved: a restart cannot register this host again"
+            }
+            Self::Refused => {
+                "; the transport refused the host credential: this host can no longer authenticate"
+            }
+        })
+    }
+}
+
 /// Something the operator may want to read in the log. None of them holds a token or a
 /// session secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +234,8 @@ pub enum Note {
         epoch: u64,
         /// How often the host heartbeats.
         interval: Duration,
+        /// What became of the host credential the welcome carried, if it carried one.
+        credential: CredentialState,
     },
     /// The server no longer holds the session; the agent says hello again.
     Lost {
@@ -158,7 +249,8 @@ pub enum Note {
         /// Why it failed.
         reason: Reason,
     },
-    /// A heartbeat answer carried commands, which this agent does not act on yet.
+    /// A heartbeat answer carried commands, which this agent does not act on: it runs no
+    /// jobs.
     Ignored {
         /// How many.
         commands: usize,
@@ -175,6 +267,9 @@ pub enum Note {
     },
     /// The lease ended; the agent restores the host.
     Restoring,
+    /// The job worker had no room for a heartbeat answer, which was dropped; the server
+    /// sends what it said again.
+    Busy,
     /// The host announced that it is draining.
     Draining {
         /// Whether the server acknowledged it.
@@ -185,21 +280,29 @@ pub enum Note {
 impl fmt::Display for Note {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Registered { epoch, interval } => write!(
+            Self::Registered {
+                epoch,
+                interval,
+                credential,
+            } => write!(
                 f,
-                "registered, epoch {epoch}, heartbeat every {}ms",
+                "registered, epoch {epoch}, heartbeat every {}ms{credential}",
                 interval.as_millis()
             ),
             Self::Lost { code } => write!(f, "the server lost the session ({code})"),
             Self::Retrying { what, reason } => write!(f, "{what} failed: {reason}"),
             Self::Ignored { commands } => {
-                write!(f, "ignoring {commands} command(s): not handled yet")
+                write!(f, "ignoring {commands} command(s): this agent runs no jobs")
             }
             Self::Preparing { lease } => write!(f, "preparing the host for lease {lease}"),
             Self::Refused { code } => {
                 write!(f, "refusing the whole-node lease: {}", String::from(*code))
             }
             Self::Restoring => write!(f, "the whole-node lease ended: restoring the host"),
+            Self::Busy => write!(
+                f,
+                "the job worker is busy: an answer was dropped and will be sent again"
+            ),
             Self::Draining { told: true } => write!(f, "draining: the server was told"),
             Self::Draining { told: false } => {
                 write!(f, "draining: the server could not be told")
@@ -218,8 +321,29 @@ pub enum Step {
         /// What happened, when it is worth a log line.
         note: Option<Note>,
     },
-    /// The agent ends.
+    /// The agent ends: the server refused the host for good.
     Fatal(Fatal),
+    /// The agent ends: the job worker is gone, so the jobs would run unsupervised.
+    Failed(String),
+}
+
+/// What the agent says when its job worker has ended.
+const WORKER_ENDED: &str = "the job worker stopped: the agent cannot supervise its jobs";
+
+/// How a drain treats the jobs that are running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Drain {
+    /// How long the jobs may go on before they are stopped.
+    pub wait: Duration,
+    /// How long after the stop the agent goes on heartbeating, so the results of the
+    /// stopped jobs reach the server.
+    pub settle: Duration,
+}
+
+/// The worker a session carries, and how a drain treats its jobs.
+struct Jobs<'a> {
+    worker: &'a Worker,
+    drain: Drain,
 }
 
 /// How an answer's status and code read.
@@ -255,6 +379,7 @@ fn code_of(body: &Value) -> String {
             .unwrap_or_default()
             .to_owned(),
         supported: None,
+        field: None,
     };
     match refused.validate() {
         Ok(()) => refused.code,
@@ -271,8 +396,19 @@ fn supported_of(body: &Value, code: &str) -> Option<ProtocolRange> {
     let refused = Refused {
         code: code.to_owned(),
         supported,
+        field: None,
     };
     refused.validate().ok().and(refused.supported)
+}
+
+/// The capability a refusal body names under `field`, when it is a plain token.
+fn field_of(body: &Value, code: &str) -> Option<String> {
+    let refused = Refused {
+        code: code.to_owned(),
+        supported: None,
+        field: body.get("field").and_then(Value::as_str).map(str::to_owned),
+    };
+    refused.validate().ok().and(refused.field)
 }
 
 /// The welcome in an answer body, checked.
@@ -284,20 +420,6 @@ fn welcome(body: &Value) -> Result<Welcome, &'static str> {
                 .validate()
                 .map(|()| welcome)
                 .map_err(|err| err.code())
-        })
-}
-
-/// What a heartbeat answer says, checked as a whole: the number of commands (accepted or
-/// refused), and the whole-node lease it names (`Some(None)` when it names none, `None`
-/// when the lease id it names is not acceptable and the agent changes nothing).
-fn reply_of(body: &Value) -> Result<(usize, Option<Option<String>>), &'static str> {
-    serde_json::from_value::<HeartbeatReply>(body.clone())
-        .map_err(|_| refusal::INVALID_REPLY)
-        .map(|reply| {
-            let checked = reply.validate();
-            let commands = checked.commands.len() + checked.refused.len();
-            let lease = checked.exclusive.is_ok().then(|| reply.exclusive.clone());
-            (commands, lease)
         })
 }
 
@@ -315,6 +437,13 @@ pub struct Session<'a> {
     /// backed off from more and more, not forgiven by each welcome.
     lost_young: bool,
     hold: Option<Hold<'a>>,
+    jobs: Option<Jobs<'a>>,
+    /// Where the host credential of a welcome is kept, when the agent has a place for it.
+    store: Option<&'a dyn CredentialStore>,
+    /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
+    carried: bool,
+    /// The worker's queue had no reader when a reply was handed to it.
+    worker_gone: bool,
 }
 
 impl<'a> Session<'a> {
@@ -333,6 +462,30 @@ impl<'a> Session<'a> {
             proven: false,
             lost_young: false,
             hold: None,
+            jobs: None,
+            store: None,
+            carried: false,
+            worker_gone: false,
+        }
+    }
+
+    /// The same session carrying the jobs of `worker` (see the module documentation), with
+    /// `drain` saying how a drain treats them.
+    #[must_use]
+    pub fn with_jobs(self, worker: &'a Worker, drain: Drain) -> Self {
+        Self {
+            jobs: Some(Jobs { worker, drain }),
+            ..self
+        }
+    }
+
+    /// The same session keeping the host credential a welcome carries in `store` (see the
+    /// module documentation).
+    #[must_use]
+    pub fn with_credential_store(self, store: &'a dyn CredentialStore) -> Self {
+        Self {
+            store: Some(store),
+            ..self
         }
     }
 
@@ -361,21 +514,34 @@ impl<'a> Session<'a> {
 
     /// Does one exchange: a hello when there is no session, a heartbeat when there is.
     pub fn tick(&mut self) -> Step {
+        if self.worker_down() {
+            return Step::Failed(WORKER_ENDED.to_owned());
+        }
         match self.live.take() {
             None => self.hello_step(),
             Some(live) => self.beat_step(live),
         }
     }
 
+    /// Whether the job worker is gone, by its end mark, by a reply that found nobody to read
+    /// the queue, or by a stall (see [`Worker::stalled`]). The last two do not rely on the
+    /// thread having set its mark on the way out.
+    fn worker_down(&self) -> bool {
+        let down = |jobs: &Jobs<'_>| jobs.worker.ended() || jobs.worker.stalled();
+        self.worker_gone || self.jobs.iter().any(down)
+    }
+
     /// Announces that the host is draining, once: one heartbeat with the phase
     /// `draining`, answered or not. Nothing is sent, and `None` returned, when there is
     /// no session. The lease is reported as already decided (see [`Hold::peek`]): the
-    /// host is not asked, and the lease's stage does not move.
+    /// host is not asked, and the lease's stage does not move. This is the whole drain of an
+    /// agent with no jobs; one with jobs drains with [`Session::begin_drain`] and ticks.
     pub fn drain(&mut self) -> Option<Note> {
         self.phase = Phase::Draining;
         let lease = self.hold.as_ref().map(Hold::peek).unwrap_or_default();
+        let jobs = self.snapshot();
         self.live.take().map(|live| {
-            let message = self.heartbeat_message(&live, lease);
+            let message = self.heartbeat_message(&live, lease, jobs);
             let told = self.post(HEARTBEAT_PATH, message);
             Note::Draining {
                 told: told.is_ok_and(|answer| answer.status == 200),
@@ -383,13 +549,81 @@ impl<'a> Session<'a> {
         })
     }
 
-    fn hello_message(&self) -> Result<Value, ValidationError> {
-        self.hello
-            .validate()
-            .map(|()| serde_json::to_value(&self.hello).unwrap_or_default())
+    /// Starts a drain with jobs: the phase is `draining` in every heartbeat and in a
+    /// hello that may follow, and the worker takes no new job. The caller goes on ticking
+    /// ([`Session::tick`]) while [`Session::jobs_left`], and stops the jobs when the
+    /// [`Drain::wait`] has passed ([`Session::stop_jobs`]).
+    pub fn begin_drain(&mut self) {
+        self.phase = Phase::Draining;
+        self.hello.phase = Phase::Draining;
+        self.jobs.iter().for_each(|jobs| jobs.worker.close());
     }
 
-    fn heartbeat_message(&self, live: &Live, lease: Fields) -> Result<Value, ValidationError> {
+    /// How the drain treats the jobs, when the session has a worker.
+    pub fn drain_plan(&self) -> Option<Drain> {
+        self.jobs.as_ref().map(|jobs| jobs.drain)
+    }
+
+    /// Whether the worker holds a run or a result the server has not acknowledged.
+    pub fn jobs_left(&self) -> bool {
+        self.jobs
+            .iter()
+            .any(|jobs| !jobs.worker.snapshot().is_empty())
+    }
+
+    /// Asks the worker to stop every run it holds.
+    pub fn stop_jobs(&self) {
+        self.jobs.iter().for_each(|jobs| jobs.worker.stop_all());
+    }
+
+    /// The end after a refusal for good: stops the runs through the worker, and what it
+    /// cannot stop without it, bounded (see [`Worker::wind_down`]). The lines say what
+    /// could not be stopped; none for a session with no worker.
+    pub fn wind_down_jobs(&self) -> Vec<String> {
+        let down = self.jobs.iter().flat_map(|jobs| jobs.worker.wind_down());
+        down.collect()
+    }
+
+    /// The end after the worker's own end: stops the containers without the worker,
+    /// bounded (see [`Worker::rescue`]). The lines say what could not be stopped; none for a
+    /// session with no worker.
+    pub fn rescue_jobs(&self) -> Vec<String> {
+        let rescued = self.jobs.iter().flat_map(|jobs| jobs.worker.rescue());
+        rescued.collect()
+    }
+
+    /// The lines the worker wants printed since the last call.
+    pub fn job_lines(&self) -> Vec<String> {
+        let lines = self.jobs.iter().map(|jobs| jobs.worker.take_lines());
+        lines.flatten().collect()
+    }
+
+    /// What the worker publishes (nothing, for a session with no worker), and whether the
+    /// heartbeat that carries it carries the taint.
+    fn snapshot(&mut self) -> Snapshot {
+        let published = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot());
+        let snapshot = published.unwrap_or_default();
+        self.carried = snapshot.taint.is_some();
+        snapshot
+    }
+
+    fn hello_message(&self) -> Result<Value, ValidationError> {
+        let mut hello = self.hello.clone();
+        let held = self.jobs.as_ref().map(|jobs| jobs.worker.snapshot().held);
+        if let Some(held) = held {
+            hello.held = held;
+        }
+        hello
+            .validate()
+            .map(|()| serde_json::to_value(&hello).unwrap_or_default())
+    }
+
+    fn heartbeat_message(
+        &self,
+        live: &Live,
+        lease: Fields,
+        jobs: Snapshot,
+    ) -> Result<Value, ValidationError> {
         // The lease puts the agent in a phase only when nothing else does.
         let phase = match (self.phase, lease.phase) {
             (Phase::Serving, Some(phase)) => phase,
@@ -400,9 +634,9 @@ impl<'a> Session<'a> {
             epoch: live.epoch,
             session: live.secret.0.clone(),
             phase,
-            held: Vec::new(),
-            results: Vec::new(),
-            taint: None,
+            held: jobs.held,
+            results: jobs.results,
+            taint: jobs.taint,
             exclusive_ready: lease.ready,
             exclusive_refused: lease.refused,
             load: None,
@@ -445,7 +679,22 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Keeps the credential a welcome carried: written to the store first, then made the
+    /// bearer of every later call. The credential is sent nowhere else and printed nowhere.
+    fn keep_credential(&mut self, credential: Option<&HostCredential>) -> CredentialState {
+        let (Some(credential), Some(store)) = (credential, self.store) else {
+            return CredentialState::None;
+        };
+        let saved = store.save(credential).is_ok();
+        match (self.transport.adopt_credential(credential.expose()), saved) {
+            (Err(_), _) => CredentialState::Refused,
+            (Ok(()), true) => CredentialState::Saved,
+            (Ok(()), false) => CredentialState::Unsaved,
+        }
+    }
+
     fn registered(&mut self, welcome: &Welcome) -> Step {
+        let credential = self.keep_credential(welcome.host_credential.as_ref());
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
         self.live = Some(Live {
             epoch: welcome.epoch,
@@ -461,13 +710,15 @@ impl<'a> Session<'a> {
             note: Some(Note::Registered {
                 epoch: welcome.epoch,
                 interval,
+                credential,
             }),
         }
     }
 
     fn beat_step(&mut self, live: Live) -> Step {
         let lease = self.hold.as_mut().map(Hold::fields).unwrap_or_default();
-        let message = self.heartbeat_message(&live, lease);
+        let jobs = self.snapshot();
+        let message = self.heartbeat_message(&live, lease, jobs);
         match self.post(HEARTBEAT_PATH, message) {
             Err(reason) => {
                 self.live = Some(live);
@@ -491,24 +742,55 @@ impl<'a> Session<'a> {
     }
 
     fn beat_done(&mut self, body: &Value, interval: Duration) -> Step {
-        match reply_of(body) {
-            Ok((commands, lease)) => {
+        match serde_json::from_value::<HeartbeatReply>(body.clone()) {
+            Ok(reply) => {
                 self.backoff.reset();
                 self.proven = true;
                 self.lost_young = false;
+                // `None` when the lease id the reply names is not acceptable: the agent
+                // then changes nothing.
+                let lease = reply
+                    .validate()
+                    .exclusive
+                    .is_ok()
+                    .then(|| reply.exclusive.clone());
                 let followed = lease.and_then(|lease| {
                     let hold = self.hold.as_mut()?;
                     hold.follow(lease.as_deref())
                 });
                 let refused = self.hold.as_mut().and_then(Hold::take_note);
+                let accepted = self.accept(reply);
                 Step::Wait {
                     after: interval,
-                    note: followed
-                        .or(refused)
-                        .or_else(|| (commands > 0).then_some(Note::Ignored { commands })),
+                    note: followed.or(refused).or(accepted),
                 }
             }
-            Err(wire) => self.retry("heartbeat", Reason::Unusable(wire), None),
+            Err(_) => self.retry("heartbeat", Reason::Unusable(refusal::INVALID_REPLY), None),
+        }
+    }
+
+    /// What a decoded reply does: handed to the worker, or counted as ignored when there
+    /// is none.
+    fn accept(&mut self, reply: HeartbeatReply) -> Option<Note> {
+        let Some(jobs) = &self.jobs else {
+            let checked = reply.validate();
+            let commands = checked.commands.len() + checked.refused.len();
+            return (commands > 0).then_some(Note::Ignored { commands });
+        };
+        let reply = HeartbeatReply {
+            taint_ack: reply.taint_ack & self.carried,
+            ..reply
+        };
+        match reply == HeartbeatReply::default() {
+            true => None,
+            false => match jobs.worker.try_deliver(reply) {
+                Delivery::Delivered => None,
+                Delivery::Full => Some(Note::Busy),
+                Delivery::Gone => {
+                    self.worker_gone = true;
+                    None
+                }
+            },
         }
     }
 
@@ -541,6 +823,7 @@ impl<'a> Session<'a> {
                 what,
                 status: answer.status,
                 supported: supported_of(&answer.body, &code),
+                field: field_of(&answer.body, &code),
                 code,
             }),
             _ => {

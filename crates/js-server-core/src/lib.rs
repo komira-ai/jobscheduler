@@ -60,13 +60,15 @@ pub use self::core::{
     Admitted, Config, Core, Held, NodeAction, NodeHeld, NodeUnread, NotQueued, PlaceError,
     UnknownNode,
 };
-pub use adapter::{Adapter, Delivery, Link, Stage, View};
+pub use adapter::{Adapter, Delivery, Link, Lowered, Stage, View};
 pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
 pub use handover::{FLUSH_LOOK, FOLLOW_EVERY};
 pub use host::{Beat, Reported, Stream};
 pub use intake::INTAKE_POLL;
-pub use js_sched::{LoadConfig, PlacementLoad};
+pub use js_sched::{LoadConfig, MemoryLadder, PlacementLoad};
+pub use js_types::sched::usage::CurveSource;
+pub use js_whole::WholeNodeConfig;
 pub use observer::Observer;
 pub use report::{Reason, Report, Standing, Taken};
 pub use store::Storage;

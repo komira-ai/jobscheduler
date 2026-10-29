@@ -56,8 +56,8 @@ pub struct Client {
 
 impl Client {
     /// Checks the flags and builds the client: the URL, the owner-only token file and,
-    /// for `https://`, the roots to trust (the PEM file of `--ca-cert`, which is required:
-    /// the platform's roots are not read). The agent reads no proxy setting and follows no
+    /// for `https://`, the roots to trust: the PEM file of `--ca-cert` when given (and only
+    /// that file), otherwise the bundled public roots (never the platform's). The agent reads no proxy setting and follows no
     /// redirect, so the token goes to the one host named and nowhere else.
     ///
     /// # Errors
@@ -75,7 +75,7 @@ impl Client {
         let roots = roots(server.https, ca_cert)?;
         let tls = TlsConfig::builder()
             .provider(TlsProvider::Rustls)
-            .root_certs(RootCerts::Specific(Arc::new(roots)))
+            .root_certs(roots)
             .unversioned_rustls_crypto_provider(Arc::new(default_provider()))
             .build();
         let agent: Agent = Agent::config_builder()
@@ -97,6 +97,19 @@ impl Client {
             bearer,
             limit,
         })
+    }
+
+    /// Makes `secret` the bearer of every later request, in place of the token the client
+    /// was built with. The agent calls it once it holds the credential a welcome carried.
+    /// The client keeps the old bearer when `secret` is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Flag`] when `secret` is empty or is not one run of printable ASCII
+    /// (see [`bearer_of`]).
+    pub fn set_bearer(&mut self, secret: &str) -> Result<(), ClientError> {
+        self.bearer = token::bearer_of(secret)?;
+        Ok(())
     }
 
     fn url(&self, path: &str) -> String {
@@ -183,25 +196,23 @@ impl Client {
     }
 }
 
-/// The certificates to trust: none for plain http, the PEM file's for `--ca-cert`. An
-/// `https://` server without `--ca-cert` is refused: the platform's roots are found
-/// through the environment (the loaders honour `SSL_CERT_FILE` and `SSL_CERT_DIR`), and
-/// `js` sends its token only to a server trusted by a flag.
-fn roots(https: bool, ca_cert: Option<&Path>) -> Result<Vec<Certificate<'static>>, ClientError> {
+/// The roots to trust: none for plain http; for `https://`, the certificates of the
+/// `--ca-cert` PEM file when it is given and only those, and otherwise the public roots
+/// bundled in the `webpki-roots` crate (a Mozilla set, pinned by `Cargo.lock`). The
+/// platform's own store is never read: the loaders find it through environment variables
+/// (`SSL_CERT_FILE`, `SSL_CERT_DIR`), so what is trusted would depend on the process's
+/// surroundings.
+fn roots(https: bool, ca_cert: Option<&Path>) -> Result<RootCerts, ClientError> {
     let der = match (https, ca_cert) {
         (false, _) => Vec::new(),
         (true, Some(path)) => pem_roots(path)?,
-        (true, None) => {
-            return Err(ClientError::flag(
-                "--ca-cert",
-                "required for an https:// server",
-            ));
-        }
+        (true, None) => return Ok(RootCerts::WebPki),
     };
-    Ok(der
+    let certs = der
         .iter()
         .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
-        .collect())
+        .collect();
+    Ok(RootCerts::Specific(Arc::new(certs)))
 }
 
 /// The certificates in a PEM file; a file without one is refused.
@@ -213,5 +224,27 @@ fn pem_roots(path: &Path) -> Result<Vec<CertificateDer<'static>>, ClientError> {
     match found.is_empty() {
         true => Err(refuse("no certificate found".to_owned())),
         false => Ok(found),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that without `--ca-cert` an `https://` server is checked against the
+    /// bundled `webpki-roots` set, not a file and not the platform's store, and that plain
+    /// http names no root at all. It catches a change of the default to an empty, a
+    /// system or a trust-everything store.
+    #[test]
+    fn no_ca_cert_means_the_bundled_public_roots() {
+        // Compared as text: a `matches!` arm that never fails is a branch no test takes.
+        assert_eq!(format!("{:?}", roots(true, None).unwrap()), "WebPki");
+        assert_eq!(format!("{:?}", roots(false, None).unwrap()), "Specific([])");
+        // What `RootCerts::WebPki` means in ureq: exactly this crate's anchors.
+        let bundled = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        assert!(!bundled.is_empty());
+        assert_eq!(bundled.len(), webpki_roots::TLS_SERVER_ROOTS.len());
     }
 }

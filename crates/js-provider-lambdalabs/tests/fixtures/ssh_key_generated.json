@@ -1,0 +1,8 @@
+{
+  "data": {
+    "id": "k3",
+    "name": "js-sched-one",
+    "public_key": "ssh-ed25519 AAAAC3Nzc js-sched-one",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nPRIVATE-CANARY-7c1e\n-----END PRIVATE KEY-----\n"
+  }
+}

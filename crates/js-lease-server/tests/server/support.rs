@@ -16,6 +16,7 @@ use js_lease_server::{
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
+use js_testkit::dir::TestDir;
 use js_types::ProviderId;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -31,16 +32,19 @@ pub const TOKEN: &str = "test-token-0123456789-abcdefghijkl";
 /// when the test ends.
 pub struct Scratch {
     pub dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-lease-server")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease-server"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -60,10 +64,25 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's files and dropping the second does
+/// not remove the first. It catches a path named by the test alone, which two tests of
+/// one name, or two runs of one test binary at once, would share and delete under each
+/// other.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
 /// Installs a subscriber that discards what the server logs, so the log calls of the
@@ -267,6 +286,8 @@ impl Provider for SharedProvider {
 #[derive(Debug)]
 pub struct Reply {
     pub status: u16,
+    /// The status line and headers, in lower case.
+    pub head: String,
     pub body: String,
 }
 
@@ -336,6 +357,7 @@ pub fn parse_reply(raw: &[u8]) -> Reply {
         .map_or(0, |code| code.parse().unwrap());
     Reply {
         status,
+        head: head.to_ascii_lowercase(),
         body: body.to_string(),
     }
 }

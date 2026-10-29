@@ -1,12 +1,18 @@
 //! The core: one lock around the scheduler's driver and the server's own state.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use js_sched::{DaemonInstance, Event, FINISHED_RETENTION, LoadConfig, Request, UNSERVABLE_WAIT};
+use js_sched::{
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
+    Request, UNSERVABLE_WAIT,
+};
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
+use js_types::sched::usage::CurveSource;
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
+use js_whole::WholeNodeConfig;
 
 use crate::adapter::{Adapter, Delivery, View};
 use crate::admission::{Admission, AllowAll, Denied};
@@ -16,6 +22,25 @@ use crate::observer::Observer;
 use crate::report::{Report, Standing, Taken, log_refusal};
 use crate::store::Storage;
 use crate::write::Writer;
+
+/// The curve source a [`Config`] hands the scheduler. Clones share the source; two are equal
+/// when they are the same source.
+#[derive(Clone)]
+pub(crate) struct Curves(pub(crate) Arc<dyn CurveSource + Send + Sync>);
+
+impl fmt::Debug for Curves {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Curves")
+    }
+}
+
+impl PartialEq for Curves {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Curves {}
 
 /// How a core is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +61,25 @@ pub struct Config {
     /// How long a lease whose node has no session row anywhere is left before the intake
     /// poll requeues it ([`Core::intake`]).
     pub orphan_wait: Duration,
+    /// The rungs an action's memory booking climbs after it passes its own memory limit;
+    /// `None` is [`MemoryLadder::default`].
+    pub memory_ladder: Option<MemoryLadder>,
+    /// The most memory floors the scheduler keeps; `None` is [`js_sched::MEMORY_FLOORS`].
+    pub memory_floors: Option<usize>,
+    /// How many times an operation's lease may be lost before the operation is refused
+    /// instead of run again (the loss that reaches this count refuses it).
+    pub loss_requeues: u32,
+    /// How the scheduler holds and drains workers for whole-machine requests; `None` holds
+    /// a worker at once, with no drain wait, deadline or give-up.
+    pub whole_node: Option<WholeNodeConfig>,
+    /// Whether the core reads and writes size keys: the `opkey/` row of a submission that
+    /// names one ([`Core::submit_keyed`]), the key floors a kill raises, and the key floors
+    /// and their summary names a start takes up. Off, a key is ignored and the rows of an
+    /// earlier run are neither read nor allowed to fail a start.
+    pub size_keys: bool,
+    /// Where the scheduler finds the learned curves of action keys
+    /// ([`Config::with_curves`]); `None` is the scheduler's default, no curves.
+    pub(crate) curves: Option<Curves>,
 }
 
 impl Config {
@@ -48,7 +92,61 @@ impl Config {
             finished_retention: FINISHED_RETENTION,
             load: None,
             orphan_wait: ORPHAN_WAIT,
+            memory_ladder: None,
+            memory_floors: None,
+            loss_requeues: LOSS_REQUEUES,
+            whole_node: None,
+            size_keys: false,
+            curves: None,
         }
+    }
+
+    /// This configuration, reading and writing size keys when `on` ([`Config::size_keys`]).
+    #[must_use]
+    pub const fn with_size_keys(mut self, on: bool) -> Self {
+        self.size_keys = on;
+        self
+    }
+
+    /// This configuration, climbing `ladder` after an action passes its own memory limit
+    /// instead of [`MemoryLadder::default`].
+    #[must_use]
+    pub fn with_memory_ladder(mut self, ladder: MemoryLadder) -> Self {
+        self.memory_ladder = Some(ladder);
+        self
+    }
+
+    /// This configuration, keeping at most `bound` memory floors instead of
+    /// [`js_sched::MEMORY_FLOORS`]; past that, the one raised longest ago is forgotten first.
+    #[must_use]
+    pub const fn with_memory_floors(mut self, bound: usize) -> Self {
+        self.memory_floors = Some(bound);
+        self
+    }
+
+    /// This configuration, refusing an operation whose lease has been lost `count` times
+    /// instead of [`LOSS_REQUEUES`].
+    #[must_use]
+    pub const fn with_loss_requeues(mut self, count: u32) -> Self {
+        self.loss_requeues = count;
+        self
+    }
+
+    /// This configuration, holding and draining workers for whole-machine requests as
+    /// `whole` says ([`Scheduler::with_whole_node`](js_sched::Scheduler::with_whole_node)).
+    #[must_use]
+    pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Self {
+        self.whole_node = Some(whole);
+        self
+    }
+
+    /// This configuration, giving the scheduler `curves` to read
+    /// ([`Scheduler::with_curves`](js_sched::Scheduler::with_curves)). Every core built from
+    /// this configuration, a restart's included, holds this same source.
+    #[must_use]
+    pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
+        self.curves = Some(Curves(curves));
+        self
     }
 
     /// This configuration, refusing unservable work after `wait`.
@@ -319,11 +417,62 @@ impl<A: Adapter> Core<A> {
         parcel: &[u8],
         enrol: impl FnOnce(&mut A, &Admitted),
     ) -> Result<Admitted, NotQueued> {
+        self.submit_keyed(now, request, parcel, None, enrol)
+    }
+
+    /// [`Core::submit`] for a request with a size key: the key its kill-driven memory floor
+    /// is kept under, which the caller derives outside the lock. A core over a store writes
+    /// it in the same transaction as the request (the `opkey/` row), unless the request
+    /// joins an operation the scheduler or the store holds: that operation keeps its own key.
+    /// The scheduler books the operation's first placement round with the floor of the key.
+    /// A key is ignored by a core that has size keys off ([`Config::with_size_keys`]).
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_keyed(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
+        self.submit_with(now, request, parcel, size_key, None, enrol)
+    }
+
+    /// [`Core::submit_keyed`] for a request with a cost `prediction` the caller computed
+    /// outside the lock (predicting reads the server's own store rows): what the scheduler
+    /// charges the lease the operation gets. `None` is the booked cost: the request's cores,
+    /// no memory, not cold.
+    ///
+    /// The scheduler is given the cost after the operation is numbered and before its
+    /// `Submit` is fed, so the operation's first placement round is charged it. Nothing is
+    /// read or written for it: the prediction is not in the operation's stored rows.
+    ///
+    /// A request that joins an operation the scheduler holds keeps that operation's cost,
+    /// unless the operation still waits for a lease: then `prediction`, if there is one,
+    /// replaces the held cost, as the newer estimate. Once the operation holds a lease the
+    /// prediction is ignored: the lease was charged when it was granted, and an operation
+    /// requeued after a lost lease is placed at the cost it was last given. A request for an
+    /// operation another frontend holds ([`Held::Elsewhere`]) sets nothing: this scheduler
+    /// never places it.
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_with(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        prediction: Option<Prediction>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(adapter, &request, parcel, now)?;
+        let admitted = engine.admit(adapter, &request, parcel, size_key, prediction, now)?;
         enrol(adapter, &admitted);
         match admitted.held {
             Held::Here => {

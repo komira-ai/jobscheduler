@@ -54,9 +54,11 @@ pub struct LoadConfig {
     /// cores. Default 750; kept within 500 and `f`.
     pub profile_floor_permille: u32,
     /// The node guard on flat memory (`d`, in thousandths): an action lease, charged by
-    /// a curve or flat, is admitted only if the flat memory costs of every lease on the
-    /// worker, its own included, stay within `(1 + d) * C_mem`. Never applies to a
-    /// whole-host, whole-machine or exclusive lease; a VM keeps the booked-capacity rule.
+    /// a curve or flat, or a VM, whose booked memory is its flat cost, is admitted only
+    /// if the flat memory costs of every lease on the worker (VMs at their bookings), its
+    /// own included, stay within `(1 + d) * C_mem`. Never applies to a whole-machine
+    /// lease; a whole-host lease runs alone and passes on its own cost; a VM also keeps
+    /// the booked-capacity rule.
     /// `None` turns it off. Default `Some(0)`: the sum of flat costs stays within the
     /// worker's memory.
     pub flat_memory_slack_permille: Option<u32>,

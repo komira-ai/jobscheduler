@@ -13,7 +13,7 @@ use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 use serde::Deserialize;
 use tracing::warn;
 
@@ -37,6 +37,9 @@ struct RawPool {
     heartbeat_interval: Option<String>,
     grace: Option<String>,
     lost_retention: Option<String>,
+    // `container` or `sandbox-exec`: the mode the pool's hosts run jobs in. Absent, the
+    // pool requires no host contract, as before.
+    exec: Option<String>,
     // The whole-node class (design whole-node.md, section 6). Every key is optional.
     max_whole_node: Option<usize>,
     max_draining: Option<usize>,
@@ -74,7 +77,7 @@ impl RawPool {
 }
 
 /// Why a mixed pool (a class admitted `Book`) is refused at load.
-const MIXED_UNSERVED: &str =
+pub(crate) const MIXED_UNSERVED: &str =
     "a mixed pool (a class that books part of a host) is not served by this server yet";
 
 /// The `[shape]` table: what the pool promises and books for every host.
@@ -168,6 +171,11 @@ fn parse_with(
         Some(whole) => pool.with_whole_node(whole).map_err(|err| err.to_string())?,
         None => pool,
     };
+    let exec = raw.exec.as_deref().map(str::parse::<ExecMode>);
+    let pool = match exec.transpose().map_err(|err| format!("exec: {err}"))? {
+        Some(exec) => pool.with_exec(exec),
+        None => pool,
+    };
     match admission {
         Admission::Book(_) => Err(MIXED_UNSERVED.to_string()),
         _ => Ok(pool),
@@ -236,9 +244,14 @@ fn millis_or_zero(field: &str, text: &Option<String>, default: u64) -> Result<u6
 /// beyond what the pool's shape offers.
 fn class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| format!("class: {err}"))?;
+    Ok(shipped_class(id))
+}
+
+/// The class `id` names: a shipped class, else one that books a whole host (see [`class`]).
+pub(crate) fn shipped_class(id: ClassId) -> ResourceClass {
     let shipped = [ResourceClass::whole_node(), ResourceClass::gpu_host()];
     let found = shipped.into_iter().find(|class| *class.id() == id);
-    Ok(found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0)))
+    found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0))
 }
 
 /// Refuses a `value` above `max`: a floor no hello could meet (the wire refuses a hello
@@ -315,6 +328,19 @@ mod tests {
         assert_eq!(retained, full);
         let timed = full.clone().with_timing(10_000, 60_000).unwrap();
         assert_eq!(timed, full);
+    }
+
+    /// The `exec` key sets the mode the pool's hosts run jobs in, and a file without it
+    /// leaves the pool requiring nothing of the host contract. It catches an `exec` that is
+    /// read and dropped, and a default that would refuse every agent that predates the
+    /// capabilities.
+    #[test]
+    fn exec_sets_the_host_contract_and_its_absence_leaves_none() {
+        assert_eq!(parse(MINIMAL).unwrap().exec(), None);
+        let container = parse(&with("exec = \"container\"")).unwrap();
+        assert_eq!(container.exec(), Some(ExecMode::Container));
+        let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
+        assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
     }
 
     /// A file in the temp directory that is removed when the guard drops, so a failing
@@ -412,6 +438,8 @@ mod tests {
             (with("grace = \"5s\""), "heartbeat_interval and grace"),
             (with("lost_retention = \"1s\""), "lost_retention"),
             (with("lost_retention = \"later\""), "lost_retention"),
+            (with("exec = \"vm\""), "exec: unknown execution mode"),
+            (with("exec = \"\""), "known: container, sandbox-exec"),
             (String::from("name = ["), "TOML"),
         ];
         for (text, names) in cases {

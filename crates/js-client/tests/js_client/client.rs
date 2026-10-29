@@ -173,16 +173,14 @@ fn the_flags_are_checked_in_order() {
     );
 }
 
-/// Asserts that an `https://` server needs a readable `--ca-cert` holding a certificate,
-/// and that `--ca-cert` is not read for plain http.
+/// Asserts that an `https://` server without `--ca-cert` connects (it then trusts the
+/// bundled public roots), that a `--ca-cert` file which is missing or holds no certificate
+/// is refused naming `--ca-cert`, and that `--ca-cert` is not read for plain http.
 #[test]
 fn the_ca_cert_rules() {
     let dir = Scratch::new("client_ca_rules");
     let token = token_file(&dir);
-    assert_eq!(
-        refused(Client::connect("https://localhost:1", &token, None, LIMIT)),
-        "--ca-cert: required for an https:// server"
-    );
+    assert!(Client::connect("https://localhost:1", &token, None, LIMIT).is_ok());
     let missing = dir.path("missing.pem");
     let said = refused(Client::connect(
         "https://localhost:1",
@@ -235,6 +233,21 @@ fn tls_trusts_only_the_given_certificate() {
     assert_eq!(fake.requests(), vec![String::new()]);
 }
 
+/// Asserts that without `--ca-cert` a server whose certificate comes from a private
+/// authority is refused at the handshake and never sees the token. It proves the
+/// public-roots mode does not trust everything.
+#[test]
+fn without_a_ca_cert_a_private_certificate_is_refused() {
+    let dir = Scratch::new("client_tls_no_ca");
+    let token = token_file(&dir);
+    let cert = Cert::new();
+    let fake = Fake::tls(vec![json_reply(200, "{}")], &cert);
+    let client = Client::connect(&fake.url("https"), &token, None, LIMIT).unwrap();
+    let err = client.get("/v1/leases").err().unwrap();
+    assert!(matches!(err, ClientError::Server(_)), "{err:?}");
+    assert_eq!(fake.requests(), vec![String::new()]);
+}
+
 /// Asserts the text of the error kinds.
 #[test]
 fn errors_print_as_their_text() {
@@ -261,4 +274,45 @@ fn a_reply_prints_without_its_body() {
         text,
         "Reply { status: 200, body: <redacted>, retry_after: Some(3s) }"
     );
+}
+
+/// Asserts that after `set_bearer` every request carries the new secret and none carries
+/// the token, that a secret which cannot be a header value is refused by name without the
+/// secret in the message, and that the refusal leaves the bearer that was set. It catches
+/// a switch that is not applied to all four calls, a client that keeps sending the old
+/// token, and a refusal that clears the bearer or echoes the secret.
+#[test]
+fn a_set_bearer_replaces_the_token_on_every_call() {
+    let dir = Scratch::new("client_set_bearer");
+    let fake = Fake::plain(vec![
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+    ]);
+    let mut client = Client::connect(&fake.url("http"), &token_file(&dir), None, LIMIT).unwrap();
+    client.set_bearer("host-cred-0123").unwrap();
+    let said = client
+        .set_bearer("has a space")
+        .expect_err("a space is refused")
+        .to_string();
+    assert_eq!(
+        said,
+        "--token-file: the credential must hold one token of printable ASCII with no space or line break inside it"
+    );
+    assert!(client.set_bearer("").is_err());
+    talk(&client, "/a");
+    client.post("/b", &json!({})).unwrap();
+    client
+        .post_within("/c", &json!({}), Duration::from_secs(5))
+        .unwrap();
+    client.delete("/d").unwrap();
+    for head in fake.requests() {
+        let head = head.to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer host-cred-0123\r\n"),
+            "{head}"
+        );
+        assert!(!head.contains("tok-123"), "{head}");
+    }
 }

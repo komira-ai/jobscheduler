@@ -170,3 +170,69 @@ fn whole_machine_and_exclusive_leases_keep_their_rules() {
     r.keyed("y", 1_000, GIB, warm(1_000, GIB));
     assert_eq!(starts(&mut r), 0, "nothing beside it");
 }
+
+/// A measured worker `a` of 32 GiB with one VM slot, which runs VMs.
+fn vm_worker(config: LoadConfig) -> Rig {
+    let mut r = Rig::with_curves(config, Curves::new("load"));
+    r.up_with(
+        "a",
+        small().with_vms(1),
+        load_rig::caps("container").with_drivers(["container", "vm"]),
+    );
+    r.set_clock("a", HOUR);
+    r.baseline("a");
+    r.window("a", 0, 0, &[]);
+    r
+}
+
+/// A worker with one VM slot holding an action that books 8 GiB and is charged `flat`
+/// bytes flat (a retry up the ladder is charged above its booking), then a VM of
+/// `vm_bytes`: how many leases start for the VM, 0 or 1.
+fn vm_beside_an_action(slack: Option<u32>, flat: u64, vm_bytes: u64) -> usize {
+    let config = LoadConfig {
+        flat_memory_slack_permille: slack,
+        ..LoadConfig::default()
+    };
+    let mut r = vm_worker(config);
+    r.keyed("p", 1_000, 8 * GIB, warm(1_000, flat));
+    assert_eq!(starts(&mut r), 1, "the action is placed");
+    let mut vm = r.request(LeaseKind::Vm, 4_000, vm_bytes);
+    vm.resources = vm.resources.with_vms(1);
+    r.submit(vm);
+    starts(&mut r)
+}
+
+/// Catches: a VM judged by bookings alone. The action books 8 GiB but is charged 20 GiB
+/// flat; the VM books 16 GiB, which fits the 24 GiB still unbooked, but 20 + 16 is over
+/// the worker's 32 GiB, so the VM waits.
+#[test]
+fn a_vm_beside_actions_whose_flat_costs_exceed_their_bookings_waits() {
+    assert_eq!(vm_beside_an_action(Some(0), 20 * GIB, 16 * GIB), 0);
+}
+
+/// Catches: the VM's memory off by a byte in the flat sum, or the sum compared with `>=`:
+/// a VM of 12 GiB beside the 20 GiB action makes exactly 32 GiB and is admitted, one
+/// byte more is refused (both fit the unbooked 24 GiB).
+#[test]
+fn a_vm_fits_the_flat_sum_exactly_and_a_byte_more_is_refused() {
+    assert_eq!(vm_beside_an_action(Some(0), 20 * GIB, 12 * GIB), 1);
+    assert_eq!(vm_beside_an_action(Some(0), 20 * GIB, 12 * GIB + 1), 0);
+}
+
+/// Catches: the guard off still refusing a VM: with `None` the VM is placed by the
+/// booked-capacity rule alone, as before.
+#[test]
+fn with_the_guard_off_a_vm_is_admitted_by_its_booking_alone() {
+    assert_eq!(vm_beside_an_action(None, 20 * GIB, 16 * GIB), 1);
+}
+
+/// Catches: the guard applied to a VM that owns the worker: a VM booking the worker's
+/// whole memory is placed on an idle worker, where nothing is summed beside it.
+#[test]
+fn a_vm_at_the_whole_host_memory_on_an_idle_worker_is_admitted() {
+    let mut r = vm_worker(LoadConfig::default());
+    let mut vm = r.request(LeaseKind::Vm, 4_000, 32 * GIB);
+    vm.resources = vm.resources.with_vms(1);
+    r.submit(vm);
+    assert_eq!(starts(&mut r), 1);
+}

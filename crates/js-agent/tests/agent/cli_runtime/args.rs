@@ -207,6 +207,26 @@ fn gpu_flag_lists_exact_indices() {
     }
 }
 
+/// Asserts the exact argument pair Docker gets for one GPU and for two: `--gpus` and then
+/// one argument that holds the quotes, `"device=1"` and `"device=0,1"`. The engine reads
+/// the value as a CSV field, so the quotes are part of the argument (the agent starts the
+/// engine without a shell that would strip them) and are what keeps the comma between two
+/// indices from splitting the value. It catches a value passed bare, or split into two
+/// arguments, which the engine would read as another option or as every GPU. Not verified
+/// against a real engine yet.
+#[test]
+fn docker_gets_the_gpu_indices_as_one_quoted_argument() {
+    let mut job = spec("r1");
+    for (indices, value) in [(vec![1], "\"device=1\""), (vec![0, 1], "\"device=0,1\"")] {
+        job.gpu_indices = indices;
+        let args = limits_to_args(Engine::Docker, &job, true).unwrap();
+        let pairs: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0], ["--gpus".to_owned(), value.to_owned()]);
+        assert_eq!(args.iter().filter(|a| a.contains("device=")).count(), 1);
+    }
+}
+
 fn mounts_of(args: &[String]) -> Vec<&String> {
     args.windows(2)
         .filter(|pair| pair[0] == "--mount")

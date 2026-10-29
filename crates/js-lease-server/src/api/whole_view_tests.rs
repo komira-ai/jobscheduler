@@ -53,15 +53,24 @@ fn request(class: &str, wall_s: u64) -> Request {
 /// A server over one registered host, `a`, in a pool that gives up a reserved host after
 /// thirty seconds and keeps a request that is not presented again on its wait list for ten
 /// minutes, so only the drain deadline ends a reservation here.
-struct Rig {
-    shared: Arc<Shared>,
+pub(super) struct Rig {
+    pub(super) shared: Arc<Shared>,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
-    registry: Registry,
+    pub(super) registry: Registry,
 }
 
 impl Rig {
-    async fn new(name: &str) -> Self {
+    pub(super) async fn new(name: &str) -> Self {
+        Self::build(name, false).await
+    }
+
+    /// A rig whose server serves the status routes (to private peers).
+    pub(super) async fn serving_status(name: &str) -> Self {
+        Self::build(name, true).await
+    }
+
+    async fn build(name: &str, status: bool) -> Self {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/whole_view_unit")
             .join(name);
@@ -103,6 +112,7 @@ impl Rig {
             labels: Default::default(),
             phase: Phase::Serving,
             held: Vec::new(),
+            accepts_host_credential: false,
         };
         registry.hello(&hello, &Credential::of_token("t")).unwrap();
         let classes = vec![share_class(), ResourceClass::whole_node()];
@@ -119,7 +129,10 @@ impl Rig {
         .unwrap();
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
-        let shared = Arc::new(Shared::new(table, token, Some(Arc::new(agents))));
+        let shared = Shared::new(table, token, Some(Arc::new(agents)));
+        let served =
+            status.then(|| Arc::new(Status::new(None, None, Vec::new(), shared_clock.clone())));
+        let shared = Arc::new(shared.with_status(served));
         Self {
             shared,
             clock,
@@ -133,7 +146,7 @@ impl Rig {
     }
 
     /// Takes a share lease on the host; its id.
-    async fn lease(&self) -> String {
+    pub(super) async fn lease(&self) -> String {
         let mut table = self.shared.table.lock().await;
         table
             .acquire(request("share", 600), None)
@@ -143,7 +156,7 @@ impl Rig {
     }
 
     /// Polls whole-node request `name`, as its consumer would.
-    fn ask(&mut self, name: &str) {
+    pub(super) fn ask(&mut self, name: &str) {
         let classes = [ResourceClass::whole_node()];
         let spec = StartSpec::new(
             js_types::LeaseId::new(9, 1),

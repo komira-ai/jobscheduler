@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
+use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
+
+use js_caps::DETECTED_KEYS;
 
 use crate::cli::Cli;
 use crate::facts::{CommandRunner, FileReader, Platform, detect, host_id, machine_id};
@@ -41,7 +43,8 @@ fn class(
     }
 }
 
-/// The capabilities to report: the operator's, and `os` and `arch` as detected.
+/// The capabilities to report: the operator's, and `os` and `arch` as detected. The keys
+/// of the host contract are detected too and cannot be given.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -49,7 +52,7 @@ fn capabilities(
     let clash = given
         .iter()
         .map(|(key, _)| key.as_str())
-        .find(|key| matches!(*key, "os" | "arch"));
+        .find(|key| matches!(*key, "os" | "arch") || DETECTED_KEYS.contains(key));
     match clash {
         Some(key) => Err(format!("--capability: {key} is detected and cannot be set")),
         None => Ok(given
@@ -78,6 +81,26 @@ fn id(
     }
 }
 
+/// The instance the host runs on, from `--instance-file`; none without the flag.
+fn instance(cli: &Cli, files: &dyn FileReader) -> Result<Option<InstanceIdentity>, String> {
+    let Some(path) = &cli.instance_file else {
+        return Ok(None);
+    };
+    let text = files
+        .read(&path.to_string_lossy())
+        .map_err(|why| format!("--instance-file: {why}"))?;
+    let (provider, instance_id) = text.trim().split_once(':').ok_or_else(|| {
+        format!(
+            "--instance-file: {} must hold PROVIDER:INSTANCE_ID",
+            path.display()
+        )
+    })?;
+    Ok(Some(InstanceIdentity {
+        provider: provider.to_owned(),
+        instance_id: instance_id.to_owned(),
+    }))
+}
+
 /// Detects the host and applies the flags.
 ///
 /// # Errors
@@ -98,6 +121,7 @@ pub fn offer(
     let gpu_class = class(cli.gpu_class.clone(), gpus, detected.gpus.class)?;
     let capabilities = capabilities(platform, &cli.capabilities)?;
     let host_id = id(cli, platform, runner, files)?;
+    let instance = instance(cli, files)?;
     let devices = detected
         .gpus
         .devices
@@ -110,7 +134,7 @@ pub fn offer(
             host_id,
             pool: cli.pool.clone(),
             agent_version: agent_version.to_owned(),
-            instance: None,
+            instance,
             shape: WireShape {
                 cpu_millis,
                 memory_bytes,
@@ -123,6 +147,8 @@ pub fn offer(
             labels: cli.labels.iter().cloned().collect(),
             phase: Phase::Serving,
             held: Vec::new(),
+            // The credential has a home only under a state root.
+            accepts_host_credential: cli.state_root.is_some(),
         },
         warnings: detected.warnings,
     })

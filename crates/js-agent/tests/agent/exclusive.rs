@@ -69,6 +69,7 @@ pub fn note(step: &Step) -> Option<Note> {
     match step {
         Step::Wait { note, .. } => note.clone(),
         Step::Fatal(fatal) => panic!("fatal: {fatal}"),
+        Step::Failed(why) => panic!("failed: {why}"),
     }
 }
 
@@ -131,6 +132,10 @@ impl Transport for Tap {
             self.harness.borrow_mut().life.apply(&decoded);
         }
         Ok(answer)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
     }
 }
 
