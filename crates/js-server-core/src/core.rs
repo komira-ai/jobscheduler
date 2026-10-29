@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
-    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Request,
-    UNSERVABLE_WAIT,
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
+    Request, UNSERVABLE_WAIT,
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
@@ -415,11 +415,42 @@ impl<A: Adapter> Core<A> {
         size_key: Option<u64>,
         enrol: impl FnOnce(&mut A, &Admitted),
     ) -> Result<Admitted, NotQueued> {
+        self.submit_with(now, request, parcel, size_key, None, enrol)
+    }
+
+    /// [`Core::submit_keyed`] for a request with a cost `prediction` the caller computed
+    /// outside the lock (predicting reads the server's own store rows): what the scheduler
+    /// charges the lease the operation gets. `None` is the booked cost: the request's cores,
+    /// no memory, not cold.
+    ///
+    /// The scheduler is given the cost after the operation is numbered and before its
+    /// `Submit` is fed, so the operation's first placement round is charged it. Nothing is
+    /// read or written for it: the prediction is not in the operation's stored rows.
+    ///
+    /// A request that joins an operation the scheduler holds keeps that operation's cost,
+    /// unless the operation still waits for a lease: then `prediction`, if there is one,
+    /// replaces the held cost, as the newer estimate. Once the operation holds a lease the
+    /// prediction is ignored: the lease was charged when it was granted, and an operation
+    /// requeued after a lost lease is placed at the cost it was last given. A request for an
+    /// operation another frontend holds ([`Held::Elsewhere`]) sets nothing: this scheduler
+    /// never places it.
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_with(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        prediction: Option<Prediction>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(adapter, &request, parcel, size_key, now)?;
+        let admitted = engine.admit(adapter, &request, parcel, size_key, prediction, now)?;
         enrol(adapter, &admitted);
         match admitted.held {
             Held::Here => {

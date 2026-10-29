@@ -4,9 +4,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use js_agent_wire::InstanceIdentity;
+use js_elastic::HostName;
 use js_registry::{Credential, OsSessions, Registry};
+use js_types::ProviderId;
 use tracing::{error, warn};
 
 use crate::adapt::SharedClock;
@@ -15,7 +18,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
-use crate::join_tokens::{Admission, JoinRefusal, JoinTokens};
+use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens, MintError, Minted, RevokeError};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
 use crate::util::blocking;
@@ -69,13 +72,15 @@ pub(crate) fn assemble(
                 tokens,
                 pool,
                 hello_limit,
+                require_host_credential,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
                 state_path(state_file, ".joins"),
                 clock.clone(),
                 Box::new(OsSessions),
-            )?;
+            )?
+            .requiring_credential(require_host_credential);
             let bindings = agent_state::load(&path)?;
             let registry = Registry::new(pool, clock.clone());
             for (host, binding) in &bindings {
@@ -131,21 +136,24 @@ impl Agents {
         }
     }
 
-    /// Lets the hello of `host` register with the one-time token `who`, consuming the
-    /// token on its first use. The check and the file write run on the pool for blocking
+    /// Lets the hello of `host` register with the one-time token or host credential `who`
+    /// (the digest of what the request carried), consuming the token on its first use. With
+    /// `issue`, that first use also retires the token for a new host credential (see
+    /// [`JoinTokens::admit_with`]). The check and the file write run on the pool for blocking
     /// calls.
     pub(crate) async fn admit_join(
         self: &Arc<Self>,
         who: Credential,
         host: String,
         instance: Option<InstanceIdentity>,
-    ) -> Result<Admission, JoinRefusal> {
+        issue: bool,
+    ) -> Result<Admitted, JoinRefusal> {
         let this = Arc::clone(self);
-        blocking(move || this.joins.admit(&who, &host, instance.as_ref())).await
+        blocking(move || this.joins.admit_with(&who, &host, instance.as_ref(), issue)).await
     }
 
-    /// Gives back the use that [`Agents::admit_join`] made for `host`, after the registry
-    /// refused its hello.
+    /// Gives back the use that [`Agents::admit_join`] made for `host`, and the credential it
+    /// issued, after the registry refused its hello.
     pub(crate) async fn release_join(self: &Arc<Self>, who: Credential, host: String) {
         let this = Arc::clone(self);
         blocking(move || this.joins.release(&who, &host)).await;
@@ -161,6 +169,56 @@ impl Agents {
     ) -> Result<(), JoinRefusal> {
         let this = Arc::clone(self);
         blocking(move || this.joins.serves(&who, &host)).await
+    }
+
+    /// Mints the one-time join token for the host `name` of the pool `pool`: the in-process
+    /// form of `POST /v1/agent/join-tokens`, for the scaler that launches the machine. The
+    /// token is bound to the instance `<pool>:<name>`, which is the line the launched
+    /// agent's `--instance-file` holds, and lasts `ttl` from now (at most
+    /// [`crate::join_tokens::MAX_TTL`]; a longer one is the caller's mistake, the route
+    /// refuses it). A second mint for the same pool and name replaces the first unused
+    /// token, so a caller mints once per launch and never again for a machine that may
+    /// have booted. A blocking call, as it writes the token file: run it on the pool for
+    /// blocking calls.
+    ///
+    /// # Errors
+    ///
+    /// [`MintError`] as for the route.
+    // The scaler of a later change is the caller.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn mint_for(
+        &self,
+        pool: &ProviderId,
+        name: &HostName,
+        ttl: Duration,
+    ) -> Result<Minted, MintError> {
+        self.joins.mint(Self::instance_of(pool, name), ttl)
+    }
+
+    /// Revokes every token and host credential bound to `<pool>:<name>`, used or not:
+    /// the in-process form of `DELETE /v1/agent/join-tokens`. Returns how many rows were
+    /// dropped; a name with none drops none and succeeds, so a repeat is a no-op. A blocking
+    /// call, as [`Agents::mint_for`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevokeError::Unsaved`] when the file could not be written; nothing was dropped.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn revoke_for(
+        &self,
+        pool: &ProviderId,
+        name: &HostName,
+    ) -> Result<usize, RevokeError> {
+        self.joins.revoke(&Self::instance_of(pool, name))
+    }
+
+    /// The instance a launched host names in its hello: the pool as the provider and the
+    /// host's name as the instance id.
+    fn instance_of(pool: &ProviderId, name: &HostName) -> InstanceIdentity {
+        InstanceIdentity {
+            provider: pool.to_string(),
+            instance_id: name.to_string(),
+        }
     }
 
     /// A run id no earlier run has had, in this boot or any before it: the lease table's
@@ -223,6 +281,10 @@ impl Agents {
         saved.is_ok()
     }
 }
+
+#[cfg(test)]
+#[path = "agents_mint_tests.rs"]
+mod mint_tests;
 
 #[cfg(test)]
 mod tests {

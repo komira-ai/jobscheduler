@@ -133,6 +133,10 @@ impl Transport for Tap {
         }
         Ok(answer)
     }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
 }
 
 struct Wired(Rc<RefCell<Harness>>);

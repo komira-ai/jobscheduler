@@ -17,12 +17,12 @@
 //! | flag | meaning |
 //! |---|---|
 //! | `--server <url>` | required: `https://host:port`; `http://` only for `localhost`, `127.0.0.0/8` and `::1` |
-//! | `--token-file <path>` | required: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
+//! | `--token-file <path>` | required unless `--state-root` holds a usable `host-credential` file: the pool's join token, in a regular file owned by the user running the agent, mode 0600 or 0400 |
 //! | `--ca-cert <path>` | optional for `https://`: the PEM file with the certificate to trust, and then only that is trusted. Without it the public roots bundled in the agent (`webpki-roots`, pinned by `Cargo.lock`) are trusted, so a publicly trusted endpoint works with no certificate pushed; the platform's roots are never read. Ignored for `http://` |
 //! | `--pool <name>` | required: the pool to join |
 //! | `--host-id <id>` | the id to register under; by default `h-` and 32 hex digits of a salted SHA-256 of the machine id, never the machine id |
 //! | `--label k=v` | a label on the host; repeatable |
-//! | `--capability k=v` | a capability to report; repeatable; `os` and `arch` are detected and cannot be set |
+//! | `--capability k=v` | a capability to report; repeatable; `os`, `arch`, `runtime`, `exec` and `gpu-toolkit` are detected and cannot be set |
 //! | `--cpu-millis`, `--memory-bytes`, `--gpus` | offer less than the host has; never more |
 //! | `--gpu-class <class>` | the class the offered GPUs are reported under, instead of the detected one |
 //! | `--allow-host-jobs` | not available yet: refused at start, because the scheduler does not record a host job's taint yet; without it a start with `isolation = host` creates nothing and is refused |
@@ -36,6 +36,7 @@
 //! | `--container-host <uri>` | the engine to talk to: a socket on this machine, `unix:///<path>`, passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; `tcp://` and `ssh://` are refused (the post-job checks read this machine, and a job on another one would pass them all); needs `--container-bin` |
 //! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
+//! | `--gpu-toolkit-hook <path>` | the absolute path of a program that checks the GPU container toolkit, run once at start when the host offers a GPU; exit 0 makes the hello report `gpu-toolkit`, anything else leaves it out and warns; needs `--container-bin` |
 //! | `--stop-grace <seconds>` | how long a container gets to stop on its own before it is killed, whenever the agent stops one; by default 10, at most 3600; needs `--container-bin` |
 //! | `--drain-wait <seconds>` | how long SIGTERM lets the running jobs finish before the agent stops them; by default the stop grace, at most 3600; needs `--container-bin` |
 //!
@@ -78,6 +79,12 @@
 //! is never invented. The capabilities `os` and `arch` are the platform's. `--gpus 0`
 //! offers none.
 //!
+//! The host contract (see `contract`): once the job half has started, which ran the engine
+//! program, the hello carries `runtime=container` and `exec=container`; with GPUs offered
+//! and a `--gpu-toolkit-hook` that exits 0 it also carries `gpu-toolkit=true`. An agent that
+//! runs no jobs reports none of them, as an older agent does not. A pool that declares an
+//! execution mode refuses a host without them (`host-contract`, `execution-mismatch`).
+//!
 //! On Linux the CPU count and memory are the lowest of the machine's total and what the
 //! process may use: the CPU quota and memory limit of its cgroup (version 2) and of the
 //! cgroups above it, and the CPUs it is allowed to run on (`taskset`, a cpuset). An agent
@@ -109,7 +116,7 @@
 //! `Restart=always` and no `RestartPreventExitStatus=2`, because a refusal exits with 2
 //! and a SIGTERM with 0, and `Restart=on-failure` would leave the leftovers of either
 //! unsupervised; see `run`): 401 (the token), 403 `unknown-pool`, `shape-not-accepted`,
-//! `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
+//! `host-contract`, `execution-mismatch`, `host-bound` and `host-listed` (things only the operator can change), and the 4xx that
 //! say the message cannot be read or served (`invalid-hello`, `invalid-heartbeat`,
 //! `unsupported-protocol`, `body-too-large`). A 403 `pool-full` is not among them: a pool
 //! has room again when a host leaves, so the agent waits and asks again. Everything else
@@ -160,6 +167,8 @@ mod backoff;
 mod cli;
 pub mod cli_runtime;
 mod container;
+mod contract;
+mod credential;
 mod exclusive;
 mod facts;
 mod host;
@@ -178,6 +187,7 @@ mod worker;
 use std::ffi::OsString;
 use std::fmt::Display;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,6 +197,8 @@ use clap::Parser;
 pub use backoff::{BASE, Backoff, CAP, Jitter, RETRY_AFTER_CAP, SystemJitter};
 pub use cli::Cli;
 use cli_runtime::Settings;
+use contract::ToolkitHook;
+pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, CredentialStore};
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
@@ -201,7 +213,9 @@ pub use readiness::{
     ReadinessHook, Verdict, hook_runner,
 };
 pub use run::{Exit, Sleeper, Wake, drive};
-pub use session::{Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step};
+pub use session::{
+    CredentialState, Drain, Fatal, HEARTBEAT_PATH, HELLO_PATH, Note, Reason, Session, Step,
+};
 pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
@@ -306,6 +320,33 @@ pub fn main_with(
     }
 }
 
+/// The file the transport first reads its bearer from: `--token-file` when given, and
+/// otherwise the host credential file of `--state-root`, which has the same form (one run
+/// of printable ASCII, owner-only). The agent adopts the credential from the same file
+/// again below, so a file that is there and not a credential stops it either way.
+///
+/// # Errors
+///
+/// [`Failure::Usage`] naming `--token-file` when there is neither, and the path of the
+/// credential file when it is there and cannot be used.
+fn bearer_file(cli: &Cli) -> Result<PathBuf, Failure> {
+    if let Some(token_file) = &cli.token_file {
+        return Ok(token_file.clone());
+    }
+    let kept = match &cli.state_root {
+        Some(root) => {
+            let file = CredentialFile::in_dir(root);
+            file.load().map_err(Failure::Usage)?.map(|_| file.path())
+        }
+        None => None,
+    };
+    kept.ok_or_else(|| {
+        Failure::Usage(
+            "--token-file: required unless --state-root holds a host credential".to_owned(),
+        )
+    })
+}
+
 /// Runs the agent on `args` (the program name first) until it is stopped or refused.
 pub fn run_with(
     args: Vec<OsString>,
@@ -324,13 +365,14 @@ fn execute(
 ) -> Result<(), Failure> {
     let cli = Cli::try_parse_from(args).map_err(Failure::Clap)?;
     let ca_cert = cli.ca_cert.as_deref();
+    let bearer_file = bearer_file(&cli)?;
     let mut transport = services
         .connector
-        .connect(&cli.server, &cli.token_file, ca_cert)
+        .connect(&cli.server, &bearer_file, ca_cert)
         .map_err(|why| Failure::Usage(why.to_string()))?;
     let version = env!("CARGO_PKG_VERSION");
     let (platform, commands, files) = (&services.platform, services.commands, services.files);
-    let offer = offer(&cli, platform, commands, files, version).map_err(Failure::Usage)?;
+    let mut offer = offer(&cli, platform, commands, files, version).map_err(Failure::Usage)?;
     offer.warnings.iter().for_each(|warning| {
         let _ = writeln!(err, "js-agent: warning: {warning}");
     });
@@ -339,6 +381,7 @@ fn execute(
     // The hook is checked now for the same reason; the change that wires the lifecycle
     // to the session wraps its host in `Hooked`.
     ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
+    let toolkit = ToolkitHook::from_cli(&cli).map_err(Failure::Usage)?;
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
@@ -363,6 +406,32 @@ fn execute(
         );
         integrity::require_host_namespaces(&link, &read)
             .map_err(|why| Failure::Usage(format!("--container-bin: {why}")))?;
+    }
+    // An agent that runs containers says so in its hello. The hello is sent only after the
+    // job half below has started, and that ends the agent first if the program does not
+    // run, so no hello that names a runtime is sent for one that was not found.
+    if local.container.is_some() {
+        let found = contract::report(&mut offer.hello, toolkit.as_ref(), commands);
+        found.iter().for_each(|warning| {
+            let _ = writeln!(err, "js-agent: warning: {warning}");
+        });
+        let checked = offer.hello.validate();
+        checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
+    }
+    // A host that was given a credential in an earlier life uses it from the first hello:
+    // its token is dead. The transport was connected with the token file, or with this very
+    // file when no token file was given (above).
+    let credentials = local
+        .state
+        .as_ref()
+        .map(|state| CredentialFile::in_dir(state.path()));
+    if let Some(file) = &credentials {
+        let found = file.load().map_err(Failure::Usage)?;
+        if let Some(credential) = found {
+            transport
+                .adopt_credential(credential.expose())
+                .map_err(|why| Failure::Usage(format!("{}: {why}", file.path().display())))?;
+        }
     }
     let taint = local.state.iter().filter_map(StateRoot::read);
     taint.for_each(|taint| {
@@ -395,6 +464,9 @@ fn execute(
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain)) = &jobs {
         session = session.with_jobs(worker, *drain);
+    }
+    if let Some(file) = &credentials {
+        session = session.with_credential_store(file);
     }
     match drive(&mut session, &mut *services.sleeper, err) {
         Exit::Stopped => Ok(()),

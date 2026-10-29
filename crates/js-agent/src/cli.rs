@@ -19,11 +19,16 @@ pub struct Cli {
     pub server: String,
     /// A file holding the pool's join token, or the one-time token minted for this
     /// instance: a regular file owned by the user running the agent, mode 0600 or 0400.
-    /// The token is sent only in the `Authorization` header. A one-time token is this
-    /// host's credential for as long as the host stays registered, so the agent leaves
-    /// the file in place: it reads it again at every start.
+    /// The token is sent only in the `Authorization` header. Without `--state-root` a
+    /// one-time token is this host's credential for as long as the host stays registered,
+    /// so the agent leaves the file in place: it reads it again at every start. With a
+    /// state root, the first hello of a host that joins with a one-time token is answered
+    /// with a host credential that replaces the token (the server retires it): the agent
+    /// keeps the credential in the state root and sends it from then on. Required unless
+    /// `--state-root` holds a usable `host-credential` file, which the agent then sends in
+    /// place of a token; a token file given beside it is read as before.
     #[arg(long, value_name = "PATH")]
-    pub token_file: PathBuf,
+    pub token_file: Option<PathBuf>,
     /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`
     /// (`lambdalabs:0920582c...`), read when the agent starts. The hello names the
     /// instance, which a one-time join token minted for that instance requires: the server
@@ -81,9 +86,12 @@ pub struct Cli {
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
-    /// The directory the agent keeps its taint marker in: it must be owned by the user
-    /// running the agent, with no permission for group or others. Required with
-    /// `--container-bin`. A host that a post-job check found unclean is tainted for good:
+    /// The directory the agent keeps its taint marker and its host credential in: it must be
+    /// owned by the user running the agent, with no permission for group or others.
+    /// Required with `--container-bin`. Giving it also lets a server issue the host a
+    /// credential at its first hello (a file `host-credential`, mode 0600, which the agent
+    /// writes before it uses it and reads at start; a file that is there and unusable stops
+    /// the agent). A host that a post-job check found unclean is tainted for good:
     /// the marker survives a restart, and no code of the agent removes it. It may not be,
     /// or lie in, a mount root or the scratch root (a job with a read-write mount could
     /// delete the marker). It must be on a disk of its own: a job that fills a disk the
@@ -163,6 +171,15 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// The absolute path of a program that checks the host's GPU container toolkit, run
+    /// once at start when the host offers a GPU. Exit 0 makes the hello report
+    /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
+    /// limit, a program that cannot be started) leaves it out and warns. A pool with GPUs
+    /// refuses a host without it (`host-contract`). The program gets a `PATH` of its own
+    /// and no arguments, and its output is not read. It should run a container that uses
+    /// a GPU, since that is what the capability promises. Needs `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub gpu_toolkit_hook: Option<String>,
     /// The absolute path of a program the agent runs while it prepares the host for a
     /// whole-node lease, after its own checks: exit 0 reports the host ready, other exit
     /// statuses refuse the lease with a typed reason (75 `noise-over-bound`, 76

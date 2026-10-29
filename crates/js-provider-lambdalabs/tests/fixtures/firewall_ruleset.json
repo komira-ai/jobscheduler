@@ -1,0 +1,10 @@
+{
+  "data": {
+    "id": "rs-new",
+    "name": "js-sched-one-noinbound",
+    "region": {"name": "region-a", "description": "Region A"},
+    "rules": [],
+    "created": "2026-10-01T00:00:00Z",
+    "instance_ids": []
+  }
+}

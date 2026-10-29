@@ -103,6 +103,11 @@ impl Marks {
         found.map(|(host, mark)| (host.clone(), mark.clone()))
     }
 
+    /// The host set aside for request `id`.
+    pub(crate) fn host_of(&self, id: &RequestId) -> Option<HostId> {
+        self.of(id).map(|(host, _)| host)
+    }
+
     /// The request `host` is set aside for.
     pub(crate) fn holder(&self, host: &HostId) -> Option<&RequestId> {
         self.0.get(host).map(|mark| &mark.request)

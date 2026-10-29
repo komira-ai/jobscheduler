@@ -41,6 +41,7 @@ pub fn hello() -> Hello {
             model: "A100".into(),
             memory_bytes: 1 << 36,
         }],
+        accepts_host_credential: false,
         labels: map(&[("rack", "r1")]),
         phase: Phase::Serving,
         held: vec![HeldRun {
@@ -149,6 +150,7 @@ pub fn welcome() -> Welcome {
         grace_ms: 15_000,
         pool: "builders".into(),
         session: "s3cret-0".into(),
+        host_credential: None,
     }
 }
 

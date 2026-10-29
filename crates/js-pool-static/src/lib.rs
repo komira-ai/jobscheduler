@@ -38,6 +38,7 @@
 
 mod book;
 mod config;
+pub mod kind;
 mod pool;
 
 pub use book::{HostBook, SeatError};

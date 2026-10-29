@@ -10,13 +10,14 @@ publish.workspace = true
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
 js-caps = { path = "../js-caps" }
+js-elastic = { path = "../js-elastic" }
 js-lease = { path = "../js-lease" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
 js-types = { path = "../js-types" }
-axum = { workspace = true, features = ["http1", "json"] }
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
@@ -31,11 +32,20 @@ tokio ={ workspace = true, features = ["macros", "net", "rt-multi-thread", "sign
 tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# The Tailscale API client (a blocking client, as the Lambda provider's).
+ureq.workspace = true
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+# The test that renders the script a Lambda machine runs, with the provider's own steps.
+js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-testkit = { path = "../js-testkit" }
+# The test that keeps the secrets out of every log line reads the HTTP client's own
+# `log` output.
+log.workspace = true
 rcgen.workspace = true
+# `oneshot` on the router, for the tests that set the peer of a request.
+tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]

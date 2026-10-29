@@ -2,7 +2,8 @@
 
 use std::fs;
 
-use js_provider_lambdalabs::{ApiError, Call, Status, TerminateEffect};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{ApiError, Call, TerminateEffect};
 
 use crate::rig::{FIRST, Rig};
 
@@ -13,7 +14,7 @@ fn left_behind(rig: &Rig) {
     let args = rig.go_args(&["--boot-deadline-secs", "10"]);
     let (status, _) = rig.exec(&args);
     assert_eq!(status, 1);
-    assert_ne!(rig.status_of(FIRST), Status::Terminating);
+    assert_ne!(rig.status_of(FIRST), HostStatus::Terminating);
     rig.fake.set_terminate_effect(TerminateEffect::Terminating);
 }
 
@@ -30,7 +31,7 @@ fn teardown_only_terminates_what_the_state_file_names() {
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("tearing down: fake0001"), "{out}");
     assert!(out.contains("result: terminated"), "{out}");
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert_eq!(rig.fake.launched(), 1, "nothing is launched");
 }
 
@@ -54,7 +55,7 @@ fn teardown_only_finds_an_instance_a_crash_left_out_of_the_state_file() {
     assert_eq!(rig.fake.launched(), 1);
     let (status, out) = teardown(&rig);
     assert_eq!(status, 0, "{out}");
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -66,7 +67,7 @@ fn teardown_only_goes_on_when_the_list_fails_and_the_file_names_the_instance() {
     let (status, out) = teardown(&rig);
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("the instances could not be listed"), "{out}");
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
