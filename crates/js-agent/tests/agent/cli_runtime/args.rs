@@ -155,7 +155,7 @@ fn hardening_flags_always_present() {
         "--cgroupns",
         "private",
     ];
-    let tail = ["--pull", "never", "--user", "65534:65534"];
+    let tail = ["--pull", "never"];
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
@@ -254,8 +254,8 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
     }
 }
 
-/// Asserts that the settings reach the hardening list: the network, the user, the pull
-/// policy and the size of `/tmp`. It catches a flag that is checked and not used.
+/// Asserts that the settings reach the hardening list: the network, the pull policy and
+/// the size of `/tmp`; the user is not in it (it is the slot's, see `create.rs`). It catches a flag that is checked and not used.
 #[test]
 fn hardening_follows_the_settings() {
     let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
@@ -267,7 +267,6 @@ fn hardening_follows_the_settings() {
     let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
-    assert_eq!(value("--user"), "5:6");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }
