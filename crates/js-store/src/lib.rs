@@ -1,14 +1,14 @@
 //! The scheduler's rows in the state store: their keys, the blocks of ids a frontend
 //! numbers with, the epoch it serves under, which frontend owns a daemon's node, a daemon's
 //! session, how an operator placed a node, and the unfinished operations (their `op/`,
-//! `queue/`, `inflight/` and `opkey/` rows, and the load of them at a start), how those
+//! `queue/`, `inflight/`, `opkey/` and `opwall/` rows, and the load of them at a start), how those
 //! operations move on (the grant of a lease, a lease given up with the loss count, fate and
 //! memory floors that follow it, a result, a refusal, and the `done/` row an operation
 //! leaves), and the orphan sweep that gives up the leases of nodes no frontend hears, over
 //! [`js_state::Store`] and nothing else.
 //!
 //! The keys ([`keys`]) and the bytes of the `meta/`, `owner/`, `cordon/`, `queue/`,
-//! `lease-by-op/`, `inflight/`, `opkey/`, `loss/`, `fate/`, `floor/` and `keyfloor/` rows are
+//! `lease-by-op/`, `inflight/`, `opkey/`, `opwall/`, `loss/`, `fate/`, `floor/` and `keyfloor/` rows are
 //! those of the farm server's state store, byte for byte (`tests/golden/`): a store written by
 //! either reads under the other, and rows only ever gain new kinds, never new fields. The
 //! value of a `done/` row is the embedding server's, and this crate keeps it as it is.
@@ -56,6 +56,7 @@ pub mod keys;
 mod leases;
 mod load;
 mod opkey;
+mod opwall;
 mod owner;
 mod requeue;
 mod session;

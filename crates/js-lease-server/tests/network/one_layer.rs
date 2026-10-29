@@ -227,3 +227,95 @@ fn no_provider_crate_names_a_network_type() {
     }
     assert!(found.is_empty(), "{found:#?}");
 }
+
+/// The files of `js-lease-server/src` that name the path `network::` besides the module
+/// itself: the per-pool check calls a mode, the reader of the file builds the OAuth
+/// client of a pool's `network` table, and the launch inputs hold a mode.
+const MAY_NAME_NETWORK: [&str; 3] = ["checks.rs", "file.rs", "pool.rs"];
+
+/// The sources (path under `src`, text) that name the path `network::` and are neither in
+/// `network/` nor in `allowed`.
+fn strays<'a>(sources: &'a [(String, String)], allowed: &[&str]) -> Vec<&'a str> {
+    sources
+        .iter()
+        .filter(|(path, text)| {
+            let mine = path.starts_with("network/") || allowed.contains(&path.as_str());
+            !mine && text.to_ascii_lowercase().contains("network::")
+        })
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
+/// Every `.rs` and `.toml` file under `root`, as its path relative to `root` and its text.
+fn sources_under(root: &Path) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    files_under(root, &mut files);
+    let relative = |file: &PathBuf| file.strip_prefix(root).unwrap().display().to_string();
+    files
+        .iter()
+        .map(|file| (relative(file), fs::read_to_string(file).unwrap()))
+        .collect()
+}
+
+/// Asserts that the check of the design's 8.6 finds what it looks for: a file outside
+/// `network/` that names the path is a stray, the allowed files and the module are not,
+/// and a file that does not name it is clean.
+#[test]
+fn the_path_check_finds_a_stray_file() {
+    let named = "use crate::network::NetworkMode;".to_owned();
+    let sources = [
+        ("agent_api.rs".to_owned(), named.clone()),
+        ("checks.rs".to_owned(), named.clone()),
+        ("network/mod.rs".to_owned(), named),
+        (
+            "rate.rs".to_owned(),
+            "use crate::adapt::SharedClock;".to_owned(),
+        ),
+        ("util.rs".to_owned(), "use crate::NETWORK::Mode;".to_owned()),
+    ];
+    assert_eq!(
+        strays(&sources, &MAY_NAME_NETWORK),
+        ["agent_api.rs", "util.rs"]
+    );
+}
+
+/// Asserts the check of the design's 8.6 over the tree: the service names `network::` only
+/// in its `network/` module and the files that launch or check through a mode; and no
+/// provider crate (every directory `js-provider*`, so a new one is scanned too),
+/// `js-pool-static`, `js-registry` or `js-scaler` names a network type. It catches a
+/// provider that reaches for a mode, and a core module of the service that starts to
+/// depend on one.
+#[test]
+fn the_network_path_is_named_only_where_the_design_allows() {
+    let service = sources_under(&crate_dir("js-lease-server").join("src"));
+    assert!(service.len() > 30, "the scan found {} files", service.len());
+    assert_eq!(strays(&service, &MAY_NAME_NETWORK), Vec::<&str>::new());
+
+    let mut providers: Vec<PathBuf> = fs::read_dir(crate_dir("."))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("js-provider"))
+        })
+        .collect();
+    providers.push(crate_dir("js-pool-static"));
+    assert!(providers.len() >= 4, "the scan found {providers:?}");
+
+    let all = [NETWORK_WORDS.as_slice(), SERVICE_WORDS.as_slice()].concat();
+    let narrow = ["network::", "NetworkMode"];
+    let mut found = Vec::new();
+    let others = [crate_dir("js-registry"), crate_dir("js-scaler")];
+    for (dir, words) in providers
+        .iter()
+        .map(|dir| (dir, all.as_slice()))
+        .chain(others.iter().map(|dir| (dir, narrow.as_slice())))
+    {
+        for (path, text) in sources_under(dir) {
+            for word in names_in(&text, words) {
+                found.push(format!("{}/{path}: {word}", dir.display()));
+            }
+        }
+    }
+    assert!(found.is_empty(), "{found:#?}");
+}

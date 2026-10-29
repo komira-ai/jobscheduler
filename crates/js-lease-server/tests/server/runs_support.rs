@@ -13,7 +13,7 @@ use crate::support::{Harness, Reply, lease_body};
 /// default.
 pub fn run_body(cpu: u64) -> Value {
     json!({
-        "image": "busybox:1",
+        "image": "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "args": ["true"],
         "limits": { "cpu_millis": cpu, "memory_bytes": 1048576 },
     })
