@@ -1,9 +1,6 @@
 //! The label with which `lease run` marks its start, so that a lease whose answer was
 //! lost can be found again in the list.
 
-use rustix::io::Errno;
-use rustix::rand::{GetRandomFlags, getrandom};
-
 use crate::api::Entry;
 use crate::failure::Failure;
 
@@ -25,7 +22,7 @@ impl RunTag {
     }
 
     /// The tag of these random bytes, or the failure of the draw.
-    fn from_draw(drawn: Result<[u8; BYTES], Errno>) -> Result<Self, Failure> {
+    fn from_draw(drawn: Result<[u8; BYTES], getrandom::Error>) -> Result<Self, Failure> {
         drawn
             .map(|bytes| Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect()))
             .map_err(|why| Failure::Server(format!("cannot draw a random run label: {why}")))
@@ -42,9 +39,9 @@ impl RunTag {
     }
 }
 
-fn draw() -> Result<[u8; BYTES], Errno> {
+fn draw() -> Result<[u8; BYTES], getrandom::Error> {
     let mut bytes = [0u8; BYTES];
-    getrandom(&mut bytes, GetRandomFlags::empty()).map(|_| bytes)
+    getrandom::getrandom(&mut bytes).map(|()| bytes)
 }
 
 #[cfg(test)]
@@ -85,11 +82,28 @@ mod tests {
         assert!(!first.marks(&entry(&[])));
     }
 
+    /// Asserts that many tags drawn from the system source are all different and all in
+    /// the label format (32 lower-case hexadecimal characters), so no tag is reused
+    /// between starts.
+    #[test]
+    fn many_tags_are_distinct() {
+        let tags: std::collections::BTreeSet<String> = (0..64)
+            .map(|_| RunTag::fresh().unwrap().value().to_owned())
+            .collect();
+        assert_eq!(tags.len(), 64);
+        assert!(tags.iter().all(|tag| {
+            tag.len() == 32
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() | (b'a'..=b'f').contains(&b))
+        }));
+    }
+
     /// Asserts that a random source that fails is a failure naming it, not a tag of
     /// zeros.
     #[test]
     fn a_failed_draw_is_a_failure() {
-        let failed = RunTag::from_draw(Err(Errno::IO));
+        let failed = RunTag::from_draw(Err(getrandom::Error::UNEXPECTED));
         let message = failed.unwrap_err().to_string();
         assert!(
             message.starts_with("cannot draw a random run label: "),
