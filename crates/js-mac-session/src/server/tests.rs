@@ -645,8 +645,9 @@ fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
     let check = Scripted::fixed(Ok(()));
     let clock = Arc::new(AtomicU64::new(0));
     let helper_clock = clock.clone();
-    // Told at the helper's first reading of the clock, which starts the 400 ms: the
-    // caller sends nothing before that, so the deadline cannot start late.
+    // Told after the helper's first reading of the clock, which starts the 400 ms: the
+    // caller moves the clock and sends nothing before that, so the deadline cannot
+    // start late, however the two threads are scheduled.
     let (started, started_rx) = std::sync::mpsc::channel();
     let served = std::thread::spawn(move || {
         connection_on(
@@ -655,8 +656,9 @@ fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
             check.as_ref(),
             Duration::from_millis(400),
             &|| {
+                let reading = Duration::from_millis(helper_clock.load(Ordering::SeqCst));
                 let _ = started.send(());
-                Duration::from_millis(helper_clock.load(Ordering::SeqCst))
+                reading
             },
         );
     });
