@@ -245,10 +245,11 @@ async fn a_planned_launch_is_kept_while_the_provider_holds_a_call_for_it() {
 }
 
 /// Asserts the alerts. A machine of ours that no record knows (an orphan), a record of a
-/// pool the server does not have, and a silent host that books nothing and is still not
-/// marked releasing past twice `unknown_hold` (it finishes runs, so the step leaves it) are
-/// each logged, and each only once however many ticks it holds for. It catches an alert
-/// that is never raised, and one that repeats on every tick.
+/// pool the server does not have, and a silent host that books nothing, runs nothing and
+/// is still not marked releasing past twice `unknown_hold` (the registry refuses the mark)
+/// are each logged, and each only once however many ticks it holds for; a silent host that
+/// finishes runs is kept on purpose and is not one. It catches an alert that is never
+/// raised, one that repeats on every tick, and one for a host the step keeps by design.
 #[tokio::test]
 async fn orphans_records_of_unknown_pools_and_stuck_silent_hosts_are_said_once() {
     let orphan = Record {
@@ -261,7 +262,9 @@ async fn orphans_records_of_unknown_pools_and_stuck_silent_hosts_are_said_once()
         ..registered("js-stray-alert", "i-stray")
     };
     let stuck = registered("js-stuck-alert", "i-stuck");
-    let rig = rig(records(vec![orphan, stray, stuck]), live());
+    let refused = registered("js-refused-alert", "i-refused");
+    let rig = rig(records(vec![orphan, stray, stuck, refused]), live());
+    rig.world().marks_refused = true;
     rig.world().machines = vec![js_elastic::Held {
         id: js_elastic::HostRef("i-orphan-alert".to_owned()),
         acquire: "strange".to_owned(),
@@ -273,19 +276,23 @@ async fn orphans_records_of_unknown_pools_and_stuck_silent_hosts_are_said_once()
     let mut finishing = view("js-stuck-alert");
     finishing.state = HostState::Lost;
     finishing.releasing = true;
-    rig.world().hosts = vec![finishing];
+    let mut quiet = view("js-refused-alert");
+    quiet.state = HostState::Lost;
+    rig.world().hosts = vec![finishing, quiet];
     rig.scaler.tick().await;
     rig.scaler.tick().await;
     assert_eq!(times("i-orphan-alert"), 1);
     assert_eq!(times("js-stray-alert"), 1);
     assert_eq!(times("js-stuck-alert"), 0);
+    assert_eq!(times("js-refused-alert"), 0);
 
     rig.advance(mins(60));
     rig.scaler.tick().await;
     rig.scaler.tick().await;
     assert_eq!(times("i-orphan-alert"), 1);
     assert_eq!(times("js-stray-alert"), 1);
-    assert_eq!(times("host js-stuck-alert has been silent"), 1);
+    assert_eq!(times("host js-stuck-alert has been silent"), 0);
+    assert_eq!(times("host js-refused-alert has been silent"), 1);
 }
 
 /// Asserts that a host the registry will not remove is removed again at every tick, and

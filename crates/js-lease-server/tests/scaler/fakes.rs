@@ -45,6 +45,8 @@ pub struct World {
     pub mint_ok: bool,
     pub revoke_ok: bool,
     pub remove_ok: bool,
+    /// The registry does not mark a host draining or releasing, whatever it is asked.
+    pub marks_refused: bool,
     /// The registry's hosts as they are after the next save: a host that says hello and is
     /// booked between the shell's read of the registry and its calls.
     pub after_save: Option<Vec<HostView>>,
@@ -229,7 +231,9 @@ impl Effects for Handle {
     fn call(&self, call: Call, host: &str) {
         let mut world = self.world();
         world.log.push(format!("{call:?}:{host}"));
+        let refused = world.marks_refused && matches!(call, Call::Drain | Call::ReleaseHost);
         match call {
+            _ if refused => {}
             Call::Drain => world.mark(host, &[None], Some(HostMark::Draining)),
             Call::Undrain => world.mark(host, &[Some(HostMark::Draining)], None),
             Call::ReleaseHost => {
@@ -306,6 +310,7 @@ pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSo
         mint_ok: true,
         revoke_ok: true,
         remove_ok: true,
+        marks_refused: false,
         after_save: None,
         release_answer: None,
         gate: None,
