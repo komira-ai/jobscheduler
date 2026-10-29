@@ -6,7 +6,10 @@ mod support;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use js_oci::{Allow, BlobSink, Client, Digest, Error, Kind, Location, Platform, Policy, Timeouts};
+use js_oci::{
+    Allow, BlobSink, BundleSource, Client, Digest, Error, Kind, Location, Platform, Policy,
+    Timeouts,
+};
 use js_testkit::dir::TestDir;
 use support::{Artifact, Behaviour, Fixture, OTHER, REGISTRY, REPO};
 
