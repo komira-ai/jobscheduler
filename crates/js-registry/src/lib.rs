@@ -97,6 +97,19 @@
 //!   the request for `reserve_backoff`, and after `max_reserve_attempts` give-ups the
 //!   next deadline is the wall time and the reservation commits. Cancelling the request
 //!   or letting it expire drops the reservation at once. Reservations are in memory only.
+//! - **Scale-down marks.** A scaler that gives hosts back marks them in two steps,
+//!   [`Registry::drain`] and then [`Registry::release_host`] ([`HostMark::Draining`],
+//!   [`HostMark::Releasing`]). A marked host takes no start of any kind: no lease, no
+//!   whole-node commit, no reservation, no run. Each call sets its mark only if the host is
+//!   quiet (no lease, no run, nothing whole-node) and checks that under the lock that books
+//!   hosts, so a host that is releasing was quiet when marked and was never booked after;
+//!   a busy host answers [`Busy`] and keeps its mark. [`Registry::undrain`] ends a drain,
+//!   [`Registry::remove`] drops a releasing host and frees its place in the machine limit.
+//!   The marks have no deadline, are in memory only, and are not the whole-node
+//!   reservations above. [`Registry::waiting`] lists the whole-node requests that found no
+//!   host, with the host each holds a mark on; [`Registry::set_launchable`] tells the
+//!   registry that a request no listed host could serve can still wait, because a machine
+//!   could be launched for it.
 //! - **Restart.** The lease file is the record of leases and hosts re-announce
 //!   themselves, so [`RegisteredProvider::seat`] puts a booking back on an awaiting host
 //!   that the agent's next hello completes. The seat takes the binding the caller
@@ -125,7 +138,9 @@ pub use js_whole::{
 };
 pub use provider::RegisteredProvider;
 pub use refusal::Refusal;
-pub use registry::{HostMark, HostState, HostView, Registry, WholeCounts};
+pub use registry::{
+    Busy, HostMark, HostState, HostView, Launchable, Registry, Waiting, WholeCounts,
+};
 pub use runs::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, RunRefusal, RunState, RunView};
 pub use session::{OsSessions, SequentialSessions, SessionSource};
 pub use whole::queue::MAX_WAITING_REQUESTS;

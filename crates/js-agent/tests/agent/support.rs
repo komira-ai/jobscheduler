@@ -17,6 +17,7 @@ use js_agent::{
 };
 use js_agent_wire::{Hello, Phase, ProtocolRange, WireShape};
 use js_client::ClientError;
+use js_testkit::dir::TestDir;
 use serde_json::{Value, json};
 
 use crate::bounds::{self, Capped, SENT_LIMIT, WakeBudget};
@@ -33,17 +34,20 @@ pub const SECRET: &str = "sess-secret-0001-abcdefghijklmnop";
 /// the test ends.
 pub struct Scratch {
     dir: PathBuf,
+    _owner: TestDir,
 }
 
 impl Scratch {
     pub fn new(name: &str) -> Self {
         bounds::install();
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("js-agent")
-            .join(name);
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        Self { dir }
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-agent"),
+            name,
+        );
+        Self {
+            dir: owner.path().to_path_buf(),
+            _owner: owner,
+        }
     }
 
     pub fn path(&self, name: &str) -> PathBuf {
@@ -59,10 +63,25 @@ impl Scratch {
     }
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's file and dropping the second does
+/// not remove the first. It catches a path named by the test alone, which two tests of
+/// one name, or two runs of one test binary at once, would share and delete under each
+/// other.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    first.write("f", "one", 0o600);
+    let second = Scratch::new("same-name");
+    assert_ne!(first.path("f"), second.path("f"));
+    assert!(
+        first.path("f").exists(),
+        "a second scratch removed the first"
+    );
+    second.write("f", "two", 0o600);
+    let kept = first.path("f");
+    drop(second);
+    assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
 /// The probes' command lines. Every program is named by its absolute path: the agent never
@@ -364,6 +383,16 @@ pub fn welcome_speaking(epoch: u64, interval_ms: u64, grace_ms: u64, protocol: u
     )
 }
 
+/// A welcome for `epoch` that carries the host credential `credential`.
+pub fn welcome_issuing(epoch: u64, credential: &str) -> Reply {
+    let mut body = match welcome(epoch) {
+        Ok(answer) => answer.body,
+        Err(why) => panic!("{why}"),
+    };
+    body["host_credential"] = json!(credential);
+    reply(200, body)
+}
+
 /// An accepted heartbeat with nothing to say.
 pub fn beat_ok() -> Reply {
     reply(
@@ -383,6 +412,7 @@ pub struct Script {
     replies: VecDeque<Reply>,
     sent: Sent,
     limit: usize,
+    refuses_credentials: bool,
 }
 
 impl Script {
@@ -398,10 +428,23 @@ impl Script {
             replies: replies.into(),
             sent: sent.clone(),
             limit,
+            refuses_credentials: false,
         };
         (script, sent)
     }
+
+    /// The same script, whose transport will not take a credential as its bearer.
+    pub fn refusing_credentials(self) -> Self {
+        Self {
+            refuses_credentials: true,
+            ..self
+        }
+    }
 }
+
+/// The path under which [`Script`] records that its bearer was replaced by a credential;
+/// the body is the credential's text.
+pub const ADOPTED: &str = "(adopt-credential)";
 
 impl Transport for Script {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
@@ -416,6 +459,17 @@ impl Transport for Script {
         self.replies
             .pop_front()
             .unwrap_or_else(|| Err("the script is used up".to_owned()))
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        match self.refuses_credentials {
+            true => Err("the script takes no credential".to_owned()),
+            false => {
+                let adopted = (ADOPTED.to_owned(), Value::String(secret.to_owned()));
+                self.sent.borrow_mut().push(adopted);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -513,6 +567,7 @@ pub fn hello(host: &str) -> Hello {
         labels: BTreeMap::new(),
         phase: Phase::Serving,
         held: Vec::new(),
+        accepts_host_credential: false,
     }
 }
 

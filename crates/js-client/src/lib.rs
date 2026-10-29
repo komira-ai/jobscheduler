@@ -15,4 +15,4 @@ mod token;
 pub use client::{Client, REQUEST_LIMIT, Reply};
 pub use error::ClientError;
 pub use server_url::ServerUrl;
-pub use token::bearer;
+pub use token::{bearer, bearer_of};

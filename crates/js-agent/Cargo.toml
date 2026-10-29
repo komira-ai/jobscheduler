@@ -12,8 +12,11 @@ name = "js-agent"
 path = "src/main.rs"
 
 [dependencies]
+js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
+js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
+js-types = { path = "../js-types" }
 clap.workspace = true
 hex.workspace = true
 rustix = { workspace = true, features = ["process", "rand"] }
@@ -26,6 +29,7 @@ tokio = { workspace = true, features = ["rt", "signal"] }
 js-lease = { path = "../js-lease" }
 js-lease-server = { path = "../js-lease-server" }
 js-pool-static = { path = "../js-pool-static" }
+js-testkit = { path = "../js-testkit" }
 clap.workspace = true
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }

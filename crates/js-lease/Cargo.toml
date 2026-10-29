@@ -19,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 js-pool-static = { path = "../js-pool-static" }
 js-provider-fake = { path = "../js-provider-fake" }
+js-testkit = { path = "../js-testkit" }
 
 [lints]
 workspace = true

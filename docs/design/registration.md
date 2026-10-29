@@ -39,13 +39,38 @@ hello in message metadata, never in a log line.
   only while its host keeps using it: its first use sets a bound 24 hours out (the registry's default retention of a lost host), every
   hello and heartbeat it serves moves the bound to 24 hours from then (written to the file when it gains an hour), and past the bound hello
   and heartbeat are refused `join-token-expired` and the next mint drops the entry. A host silent for longer than the bound needs a new
-  token. The server is not told when the registry forgets a host, so the bound is what ends the token of a host that is gone. A hello the
+  token. The server is not told when the registry forgets a host, so the bound is what ends the token of a host that is gone, except for
+  an instance the scheduler terminates itself: its terminate path revokes the instance's tokens with `DELETE /v1/agent/join-tokens`
+  (client token only, body `{provider, instance_id}`), which drops every token bound to that instance, used or not, in one write of the
+  file. A revoked token is unknown, so its hello and heartbeat get the 401 of a token that never existed. The call answers 204 also for an
+  instance with no token (nothing is written then), so a retried terminate needs no care; an unused token past its expiry stays until the next
+  mint drops it, so revoking one is a write, and also a 204. The registry's binding of the host id to the revoked token's digest persists, so
+  a hello for that host id with a new token is refused `host-bound`: a fresh launch uses a fresh instance and host id; a file that cannot be written is a 503 `state-write-failed` and the tokens
+  stay. This closes the window of a used token for the instances the scheduler terminates; an instance that dies without that call falls
+  back to the bound. The 201 of the mint carries `Cache-Control: no-store`. A hello the
   registry refuses (the host id is bound to another credential, the pool is full, the shape is not accepted) gives the use back: the token
   stays unused for its instance. If the file cannot be written for that, the token stays tied to the host that named it and the operator
   mints another. The instance a hello names is the hello's own claim: the binding guards against mix-ups (a token delivered to the wrong
   machine, a host id reused by another instance), not against the holder of a token, who can name the instance too; and the client token can
   mint a token for any instance id. One server owns the state file at a time (the lock beside the lease file refuses a second one), and
   the file of tokens is written whole through a new temporary file, so a file a crash left under that name never decides its mode.
+- *Host credential (replaces a one-time token at the first hello).* A hello says `accepts_host_credential: true` when the agent has a
+  state root (`--state-root`) to keep one in. The first hello of a host that registers with an unused one-time token and says so is
+  answered with a `Welcome` that carries `host_credential`, 256 random bits as 64 hex digits, and in the same write the token is
+  retired: its row is replaced by a row for the credential, bound to the same instance and host, with the same 24 hour silence bound
+  renewed by the same hellos and heartbeats, so the token's copy in a launch request's user data authenticates nothing from then on (its
+  hello and heartbeat get the 401 of an unknown token). Only digests are kept, in the same owner-only whole-file state as the tokens
+  (`<state file>.joins`), a row naming the digest of the token it replaced (`replaces`), which is what the registry still knows the host
+  by. `DELETE /v1/agent/join-tokens` revokes the credential with the rest of the instance's rows. The agent writes the credential to
+  `host-credential` in its state root (mode 0600, through a temporary file, synced and renamed) before it uses it, sends it as the
+  bearer of every later call, and reads the file again at start. A hello that does not say it keeps a credential (an older agent, or one
+  with no state root) is answered as before and its token stays good, and so does a host that joins with the pool's shared token. A
+  server from before the field sends none, and the agent then goes on with its token. Of two first hellos for one token one is admitted
+  and gets the credential; the other finds the token gone. If the registry refuses the hello that issued the credential the credential
+  goes back and the token is unused again. If the welcome is lost on the wire after the token was retired, the host holds nothing that
+  authenticates: its next hello is refused (401), the agent ends, and the host stays until whoever launched it releases it when its boot
+  time is up; it does not register a second time. If the agent cannot write the file it uses the credential for that process and logs
+  that a restart cannot register the host again.
 - *Lifecycle.* A host that stops heartbeating is Unknown, its leases stay and the agent self-fences. Past the grace its self-fence
   leases are given up, since the agent has fenced itself (5.4); a run-on lease is given up only when the host is proven stopped
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention

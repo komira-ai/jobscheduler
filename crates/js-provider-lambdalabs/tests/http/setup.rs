@@ -68,11 +68,9 @@ fn a_base_url_is_scheme_and_host_and_nothing_more() {
 }
 
 #[test]
-fn an_https_base_url_needs_a_ca_bundle_with_a_certificate_in_it() {
-    assert_eq!(
-        connect("https://example.test", None).unwrap_err(),
-        SetupError::CaBundleRequired
-    );
+fn an_https_base_url_needs_no_bundle_and_a_bundle_must_hold_a_certificate() {
+    // No bundle: the bundled public roots are trusted, so the client builds.
+    assert!(connect("https://example.test", None).is_ok());
     let scratch = Scratch::new("setup-bundles");
     let missing = scratch.path("absent.pem");
     let empty = scratch.write("empty.pem", b"nothing here\n", 0o644);

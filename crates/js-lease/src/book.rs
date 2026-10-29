@@ -3,7 +3,6 @@
 //! is one non-generic function.
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -253,7 +252,7 @@ pub(crate) struct Book {
     settings: Settings,
     path: PathBuf,
     /// Held for the life of the book: the exclusive lock on the file.
-    _lock: fs::File,
+    _lock: store::Lock,
     term: u64,
     next_sequence: u64,
     leases: BTreeMap<LeaseId, Record>,

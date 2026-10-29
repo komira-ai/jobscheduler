@@ -1,6 +1,6 @@
 //! The token file: owner-only, one printable token.
 
-use js_client::bearer;
+use js_client::{bearer, bearer_of};
 
 use crate::support::Scratch;
 
@@ -77,5 +77,18 @@ fn a_file_without_one_printable_token_is_refused() {
             ),
             "{name}"
         );
+    }
+}
+
+/// Asserts that a secret held in memory gives the header value, and that an empty secret
+/// and ones with a space, a line break or a byte above 127 are refused with a message that
+/// never repeats them.
+#[test]
+fn a_secret_in_memory_gives_the_bearer_value() {
+    assert_eq!(bearer_of("abc-123_XYZ").unwrap(), "Bearer abc-123_XYZ");
+    for odd in ["", "a b", "a\nb", "caf\u{e9}"] {
+        let said = bearer_of(odd).unwrap_err().to_string();
+        assert!(said.starts_with("--token-file: the credential "), "{said}");
+        assert!(odd.is_empty() || !said.contains(odd), "{said}");
     }
 }

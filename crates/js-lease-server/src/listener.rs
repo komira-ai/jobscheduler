@@ -32,13 +32,15 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
+use axum::Extension;
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderValue;
 use axum::http::header::CONNECTION;
 use axum::middleware::{Next, from_fn_with_state};
@@ -139,7 +141,8 @@ async fn accept_counted(
 
 /// Serves `app` on `listener` until `stop` fires (or its sender is dropped), then
 /// drains: no new connections, each connection finishes the request it is serving, and
-/// the connections still open after `limits.drain_timeout` are cut. `slots` holds
+/// the connections still open after `limits.drain_timeout` are cut, and the cut ones are
+/// dropped before this returns. `slots` holds
 /// `limits.max_connections` slots.
 pub(crate) async fn serve(
     listener: TcpListener,
@@ -180,6 +183,10 @@ pub(crate) async fn serve(
     if drained.is_err() {
         warn!("connections still open at the end of the drain are cut");
         let _ = cut.send(());
+        // A cut task drops its connection (and the router clone in it) when it next runs,
+        // and gives its permit back after that: with every permit back, nothing of the
+        // server is held by a connection, and a restart finds the lease file free.
+        let _ = slots.gate.acquire_many(all).await;
     }
 }
 
@@ -192,10 +199,21 @@ async fn connection(
     limits: Limits,
     stopping: watch::Receiver<()>,
 ) {
+    // The peer is read before the handshake, so a plain and a TLS connection carry it the
+    // same way. A stream that cannot name its peer carries none, and the routes that
+    // gate on the peer refuse it.
+    let app = with_peer(app, stream.peer_addr().ok());
     let io = handshake(stream, tls, limits.handshake_timeout).await;
     if let Some(io) = io {
         talk(io, app, limits, stopping).await;
     }
+}
+
+/// `app` with `peer` as the [`ConnectInfo`] every request of the connection carries; with
+/// no peer it carries none.
+fn with_peer(app: Router, peer: Option<SocketAddr>) -> Router {
+    peer.into_iter()
+        .fold(app, |app, peer| app.layer(Extension(ConnectInfo(peer))))
 }
 
 /// Finishes the connection's handshake, if it is a TLS one. A client that fails or
@@ -335,5 +353,67 @@ mod tests {
         assert_eq!(slots.waits(), 1);
         drop((stream, permit));
         assert_eq!(slots.gate.available_permits(), 1);
+    }
+
+    /// What the handler of the next test holds: the signal that it was entered. The
+    /// test watches the state through a `Weak` to see when the last router clone and
+    /// handler future that hold it are gone.
+    struct Held {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    /// A handler that is entered and never answers. It is not an `async fn`, whose
+    /// closing line after the pending future could never run.
+    fn hold(State(held): State<Arc<Held>>) -> impl Future<Output = ()> {
+        held.entered.notify_one();
+        std::future::pending()
+    }
+
+    /// Asserts that `serve` returns only after the connections it cut have been dropped:
+    /// a request held in its handler past a drain timeout of zero is cut, and when
+    /// `serve` returns nothing of the router state is alive any more. The test awaits
+    /// `serve` in its own task on a one-thread runtime and looks at the state at once,
+    /// so a cut task that is only woken, not yet run, is seen as alive. It catches a
+    /// `serve` that returns while cut connection tasks still hold the router, which
+    /// lets a restart find the lease file still locked.
+    #[tokio::test]
+    async fn serve_returns_after_the_cut_connections_are_dropped() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let held = Arc::new(Held {
+            entered: entered.clone(),
+        });
+        let alive = Arc::downgrade(&held);
+        let app = Router::new()
+            .route("/", axum::routing::get(hold))
+            .with_state(held);
+        let limits = Limits {
+            drain_timeout: Duration::ZERO,
+            ..Limits::default()
+        };
+        let slots = Arc::new(Slots::new(limits.max_connections));
+        let (stop, stopped) = oneshot::channel();
+        let client = tokio::spawn(async move {
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let head = b"GET / HTTP/1.1\r\nHost: t\r\n\r\n";
+            tokio::io::AsyncWriteExt::write_all(&mut client, head)
+                .await
+                .unwrap();
+            entered.notified().await;
+            let _ = stop.send(());
+            client
+        });
+        let bound = Duration::from_secs(30);
+        let ended = serve(listener, None, app, limits, slots, stopped);
+        tokio::time::timeout(bound, ended)
+            .await
+            .expect("serve did not return");
+        assert_eq!(
+            alive.strong_count(),
+            0,
+            "a cut connection still holds the router"
+        );
+        drop(client.await.unwrap());
     }
 }

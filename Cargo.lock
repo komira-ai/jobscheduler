@@ -153,6 +153,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -933,17 +934,25 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
+ "js-agent-usage",
  "js-agent-wire",
+ "js-caps",
  "js-client",
  "js-lease",
  "js-lease-server",
  "js-pool-static",
+ "js-testkit",
+ "js-types",
  "rustix",
  "serde_json",
  "sha2 0.11.1",
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "js-agent-usage"
+version = "0.1.0"
 
 [[package]]
 name = "js-agent-wire"
@@ -959,6 +968,7 @@ dependencies = [
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
+ "js-types",
  "thiserror",
 ]
 
@@ -973,6 +983,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-testkit",
  "js-types",
  "rcgen",
  "rustix",
@@ -985,6 +996,7 @@ dependencies = [
 name = "js-client"
 version = "0.1.0"
 dependencies = [
+ "js-testkit",
  "rcgen",
  "rustix",
  "rustls",
@@ -1009,6 +1021,7 @@ dependencies = [
  "js-registry",
  "js-sched",
  "js-state",
+ "js-testkit",
  "js-types",
 ]
 
@@ -1038,6 +1051,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-elastic"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "js-guest"
 version = "0.1.0"
 dependencies = [
@@ -1045,6 +1067,7 @@ dependencies = [
  "clap",
  "hex",
  "js-guest-wire",
+ "js-testkit",
  "libc",
  "serde",
  "serde_json",
@@ -1069,6 +1092,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-testkit",
  "js-types",
  "serde",
  "thiserror",
@@ -1087,13 +1111,17 @@ dependencies = [
  "hyper-util",
  "js-agent-wire",
  "js-caps",
+ "js-elastic",
  "js-lease",
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-provider-lambdalabs",
  "js-registry",
  "js-sched",
+ "js-testkit",
  "js-types",
+ "log",
  "rcgen",
  "rustix",
  "rustls",
@@ -1104,8 +1132,10 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
@@ -1163,18 +1193,23 @@ dependencies = [
 name = "js-provider-lambdalabs"
 version = "0.1.0"
 dependencies = [
+ "js-elastic",
+ "js-types",
+ "libc",
  "log",
  "rcgen",
  "rustix",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "time",
  "toml",
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1183,6 +1218,8 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "js-agent-wire",
+ "js-caps",
+ "js-elastic",
  "js-lease",
  "js-pool-static",
  "js-provider",
@@ -1191,6 +1228,17 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "subtle",
+ "thiserror",
+]
+
+[[package]]
+name = "js-scaler"
+version = "0.1.0"
+dependencies = [
+ "js-elastic",
+ "js-types",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -2593,6 +2641,7 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "sync_wrapper",
+ "tokio",
  "tower-layer",
  "tower-service",
 ]

@@ -54,6 +54,23 @@ fn instance_fixtures_carry_the_required_fields() {
 }
 
 #[test]
+fn launch_and_terminate_fixtures_carry_the_documented_fields() {
+    let launched = json("launch.json");
+    assert!(launched["data"]["instance_ids"].is_array());
+    let ended = json("terminate.json");
+    for row in ended["data"]["terminated_instances"].as_array().unwrap() {
+        require(row, INSTANCE, "terminated instance");
+        require(&row["instance_type"], TYPE, "instance type");
+    }
+    assert!(
+        json("terminate_none.json")["data"]["terminated_instances"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn type_fixtures_carry_the_required_fields_except_the_sparse_row_made_on_purpose() {
     let types = json("instance_types.json");
     for (name, item) in types["data"].as_object().unwrap() {
@@ -76,6 +93,8 @@ fn error_fixtures_carry_code_and_message() {
         "error_rate_limited.json",
         "error_internal.json",
         "error_provider_unavailable.json",
+        "error_insufficient_capacity.json",
+        "error_quota_exceeded.json",
     ] {
         require(&json(name)["error"], &["code", "message"], name);
     }
@@ -106,4 +125,29 @@ fn the_fake_answers_what_the_client_does_for_the_same_data() {
     for instance in &instances {
         assert_eq!(fake.get_instance(&instance.id).unwrap(), *instance);
     }
+}
+
+#[test]
+fn ruleset_and_key_fixtures_carry_the_documented_fields() {
+    for row in json("firewall_rulesets.json")["data"].as_array().unwrap() {
+        require(
+            row,
+            &["id", "name", "region", "rules", "created", "instance_ids"],
+            "ruleset",
+        );
+    }
+    let made = json("firewall_ruleset.json");
+    require(
+        &made["data"],
+        &["id", "name", "region", "rules", "created", "instance_ids"],
+        "ruleset",
+    );
+    for row in json("ssh_keys.json")["data"].as_array().unwrap() {
+        require(row, &["id", "name", "public_key"], "ssh key");
+    }
+    require(
+        &json("ssh_key_generated.json")["data"],
+        &["id", "name", "public_key", "private_key"],
+        "generated ssh key",
+    );
 }

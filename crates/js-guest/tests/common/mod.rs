@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use js_guest::client::Client;
 use js_guest::server::{Agent, Config};
 use js_guest::wire::{RunRequest, TOKEN_LEN};
+use js_testkit::dir::TestDir;
 
 pub const TOKEN: [u8; TOKEN_LEN] = [0x5a; TOKEN_LEN];
 
@@ -18,19 +19,24 @@ pub const TOKEN: [u8; TOKEN_LEN] = [0x5a; TOKEN_LEN];
 pub struct Shares {
     pub inputs: PathBuf,
     pub outputs: PathBuf,
+    _owner: TestDir,
 }
 
 impl Shares {
     pub fn new(name: &str) -> Self {
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("kbf-guest")
-            .join(name);
-        let _ = std::fs::remove_dir_all(&root);
-        let inputs = root.join("inputs");
-        let outputs = root.join("outputs");
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join("kbf-guest"),
+            name,
+        );
+        let inputs = owner.path().join("inputs");
+        let outputs = owner.path().join("outputs");
         std::fs::create_dir_all(&inputs).expect("inputs");
         std::fs::create_dir_all(&outputs).expect("outputs");
-        Self { inputs, outputs }
+        Self {
+            inputs,
+            outputs,
+            _owner: owner,
+        }
     }
 
     pub fn config(&self) -> Config {

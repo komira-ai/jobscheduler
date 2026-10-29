@@ -14,28 +14,51 @@ use tracing::{info, warn};
 
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agents::assemble;
-use crate::api::{Shared, router};
+use crate::api::{Shared, agent_router, router};
 use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
 use crate::listener::{Slots, serve};
-use crate::ticker::Ticker;
+use crate::pool::{Pool, Setup};
+use crate::status::Status;
+use crate::ticker::{IntervalTicker, Ticker};
 use crate::tls;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
 pub struct Running {
     addr: SocketAddr,
+    agent: Option<AgentPort>,
     state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    _checking: Checking,
+}
+
+/// The listener that serves the agent routes alone (`server.agent_listen`).
+struct AgentPort {
+    addr: SocketAddr,
+    stop: oneshot::Sender<()>,
+    serving: JoinHandle<()>,
+}
+
+/// Binds `addr`, refusing the start naming `flag` when it cannot.
+async fn bind(
+    addr: SocketAddr,
+    flag: &'static str,
+) -> Result<(TcpListener, SocketAddr), StartupError> {
+    let bound = TcpListener::bind(addr)
+        .await
+        .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
+    bound.map_err(|err| StartupError::new(flag, err))
 }
 
 /// Starts a server: builds the provider from the capacity source, opens the lease table
-/// over the state file, binds the listener and begins serving and ticking.
+/// over the state file, binds the listener and begins serving and ticking. The checks of
+/// an elastic pool run on a timer of `--tick`; see [`start_with_checks`].
 ///
 /// Time comes from `clock` and ticks from `ticker`, so a test decides both. Each
 /// failure to start names the flag at fault.
@@ -44,18 +67,34 @@ pub async fn start<T: Ticker>(
     clock: SharedClock,
     ticker: T,
 ) -> Result<Running, StartupError> {
+    let checks = IntervalTicker::new(config.tick_period());
+    start_with_checks(config, clock, ticker, checks).await
+}
+
+/// [`start`] with the ticker of the pool checks given too. At each tick of `checks` the
+/// check loop of the elastic pool (if the configuration has one) asks the injected clock
+/// whether a pass is due, runs it if so, and finishes the tick when the pass is done, so a
+/// test steps the checks as it steps the table. Without an elastic pool `checks` is
+/// dropped.
+pub async fn start_with_checks<T: Ticker, C: Ticker>(
+    mut config: Config,
+    clock: SharedClock,
+    ticker: T,
+    checks: C,
+) -> Result<Running, StartupError> {
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
-    let bound = TcpListener::bind(config.listen)
-        .await
-        .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
-    let (listener, addr) = bound.map_err(|err| StartupError::new("--listen", err))?;
+    let (listener, addr) = bind(config.listen, config.listen_flag).await?;
+    let agent_listener = match config.agent_listen {
+        Some(agent) => Some(bind(agent, "server.agent_listen").await?),
+        None => None,
+    };
     let mut table = LeaseTable::open(
         BoxedProvider(provider),
-        clock,
+        clock.clone(),
         config.settings,
         &config.state_file,
         config.boot,
@@ -81,26 +120,58 @@ pub async fn start<T: Ticker>(
         tls = acceptor.is_some(),
         "listening"
     );
-    let shared = Arc::new(Shared::new(table, config.token, agents));
+    for warning in &config.warnings {
+        warn!("{warning}");
+    }
+    let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let pool = config.elastic.take().map(|plan| {
+        let setup = Setup {
+            advertise: config.advertise_url.clone(),
+            tls: config.tls.clone(),
+            inputs: std::mem::take(&mut config.launch_inputs),
+            clock: clock.clone(),
+        };
+        Pool::new(plan, setup)
+    });
+    let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
+    let status = Status::new(pool, registry, config.warnings.clone(), clock.clone());
+    let status = config.status.then(|| Arc::new(status));
+    let shared = Arc::new(Shared::new(table, config.token, agents).with_status(status));
+    let split = agent_listener.is_some();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(config.limits.max_connections));
     let serving = serve(
         listener,
-        acceptor,
-        router(shared.clone()),
+        acceptor.clone(),
+        router(shared.clone(), !split),
         config.limits,
         slots.clone(),
         stopped,
     );
+    let agent = agent_listener.map(|(listener, addr)| {
+        let (stop, stopped) = oneshot::channel::<()>();
+        let slots = Arc::new(Slots::new(config.limits.max_connections));
+        let app = agent_router(&shared);
+        let serving = serve(listener, acceptor, app, config.limits, slots, stopped);
+        info!(%addr, "listening for agents");
+        AgentPort {
+            addr,
+            stop,
+            serving: tokio::spawn(serving),
+        }
+    });
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
+    let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
+        agent,
         state_file: config.state_file,
         shared,
         stop,
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        _checking: checking,
     })
 }
 
@@ -111,6 +182,15 @@ struct Ticking(JoinHandle<()>);
 impl Drop for Ticking {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// The check loop of the elastic pool, ended when it is dropped.
+struct Checking(Option<JoinHandle<()>>);
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        self.0.iter().for_each(JoinHandle::abort);
     }
 }
 
@@ -138,6 +218,12 @@ impl Running {
     /// The address the server listens on, with the port the system chose for port 0.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// The address the agent routes alone are served on, with the port the system chose
+    /// for port 0; `None` when the agent routes share the port of [`Running::addr`].
+    pub fn agent_addr(&self) -> Option<SocketAddr> {
+        self.agent.as_ref().map(|agent| agent.addr)
     }
 
     /// A handle on the agent registry (the same registry the routes and the tick use),
@@ -181,7 +267,16 @@ impl Running {
     /// that says nothing would hide it. The cause is in the error and in the log.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
+        let agent = self.agent.take().map(|agent| {
+            let _ = agent.stop.send(());
+            agent.serving
+        });
         let served = self.serving.await.map_err(io::Error::other);
+        let agent_served = match agent {
+            Some(serving) => serving.await.map_err(io::Error::other),
+            None => Ok(()),
+        };
+        let served = served.and(agent_served);
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;

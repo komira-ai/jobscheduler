@@ -7,51 +7,11 @@
 //! with it before anything reads the table beyond parsing.
 
 use std::collections::BTreeSet;
-use std::fmt;
 
+use js_elastic::GpuClass;
 use serde::Deserialize;
 
 use crate::error::cut;
-
-/// A GPU class spelled as the agent reports it: the model name in lower case, its words
-/// joined by `-`, so `NVIDIA A100-SXM4-80GB` is `nvidia-a100-sxm4-80gb`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GpuClass(String);
-
-impl GpuClass {
-    /// The class `text`, which must already be in the agent's spelling.
-    ///
-    /// # Errors
-    ///
-    /// The reason `text` is not a class.
-    pub fn parse(text: &str) -> Result<Self, String> {
-        let words: Vec<&str> = text.split('-').collect();
-        let word = |w: &&str| {
-            !w.is_empty()
-                && w.bytes()
-                    .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
-        };
-        match (text.is_empty(), words.iter().all(word)) {
-            (true, _) => Err("is empty".to_owned()),
-            (false, false) => Err(
-                "must be lower case letters and digits joined by single '-', as the agent reports a GPU model"
-                    .to_owned(),
-            ),
-            (false, true) => Ok(Self(text.to_owned())),
-        }
-    }
-
-    /// The class as text.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for GpuClass {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        out.write_str(&self.0)
-    }
-}
 
 /// One instance type the provider may use.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,8 +4,11 @@
 //! machine that a provider launches for the pool should not hold such a token: it is
 //! delivered after boot, and whoever reads it can register hosts until the operator
 //! rotates it. A one-time token is the narrower credential. The operator's tooling mints
-//! one per launched instance (`POST /v1/agent/join-tokens`, behind the client token),
-//! names the provider's instance id, and delivers the token to that instance only.
+//! one per launched instance (`POST /v1/agent/join-tokens`, behind the client token, or
+//! [`crate::agents::Agents::mint_for`] in process), names an id the minting side chose
+//! for the instance, and delivers the token to that instance only. The id need not be
+//! the provider's own: the scaler chooses the host's name before the launch and binds the
+//! token to `<pool>:<name>`.
 //!
 //! A token is bound to the instance (provider and instance id) and to a time. The first
 //! hello that presents it, names that instance and arrives before the expiry registers the
@@ -31,6 +34,26 @@
 //! first used in the same minute do not all come due, and rewrite the whole file under the
 //! lock, at the same heartbeat.
 //!
+//! The host credential replaces the token at the first hello. A hello that says it keeps
+//! one ([`js_agent_wire::Hello::accepts_host_credential`]) and registers its host with an
+//! unused token is answered with a credential of 256 random bits, made here
+//! ([`Admitted::issued`]). In the one write that registers the host the token is retired:
+//! its row is dropped, and a row for the credential takes its place, bound to the same
+//! instance and host, with the same silence bound (the credential's own digest is its key,
+//! and `replaces` names the token's digest, which is what the registry knows the host by,
+//! [`JoinTokens::registered_as`]). A retired token is an unknown one: its hello and its
+//! heartbeat get the 401 of a token that never existed, so the copy that stays in a
+//! launch request's user data opens nothing. A credential serves the host's later hellos
+//! and heartbeats exactly as the token did, is renewed by them, and is dropped by
+//! [`JoinTokens::revoke`] with the rest of the instance's rows. A hello that does not say
+//! it keeps a credential (an older agent) leaves the token as it was.
+//!
+//! If the answer carrying the credential is lost, the host holds nothing that
+//! authenticates: it cannot register again, and whoever launched it releases it when its
+//! boot time is up. If the registry refuses the hello that issued the credential, the
+//! answer is not sent, so [`JoinTokens::release`] takes the credential back and puts the
+//! token back as it was.
+//!
 //! The instance a hello names is the hello's own claim: the binding guards against
 //! mix-ups (a token delivered to the wrong machine, a host id reused by another
 //! instance), not against a holder of the token, who can name the instance too. The
@@ -42,6 +65,14 @@
 //! That mark is kept in memory only: a restart in between leaves the use standing, which
 //! errs on the side of one token, one host. When that write fails the token stays tied to
 //! the host, which says hello again with it; if that host cannot register, mint another.
+//!
+//! The scheduler's terminate path revokes the token of the instance it terminates
+//! (`DELETE /v1/agent/join-tokens`, see [`crate::join_api`]): [`JoinTokens::revoke`] drops
+//! every token bound to the instance, used or not, in one whole-file write under the
+//! lock. A revoked token is unknown from then on, so its hello and heartbeat get the
+//! same 401 as a token that never existed. This closes the window of a used token (up to
+//! [`CREDENTIAL_TTL`] of silence) for the instances the scheduler terminates itself; an
+//! instance that dies without a terminate call still falls back to that bound.
 //!
 //! Only the SHA-256 digest of a token is kept, in memory and in `<state file>.joins`, which
 //! is written whole through a temporary file and renamed, like the file of bindings, and
@@ -57,6 +88,8 @@
 //! expires_at_ms = 1700000000000
 //! used_by = "host-7"          # once the token has registered a host,
 //! credential_expires_at_ms = 1700086400000   # with the time its use ends
+//! replaces = "<64 hex digits>"  # only on the row of a host credential: the digest of the
+//!                               # token it replaced; the row's hash is the credential's
 //! ```
 //!
 //! The lookup of a presented token is by its digest. The token is 256 random bits, so
@@ -71,7 +104,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_agent_wire::InstanceIdentity;
+use js_agent_wire::{HostCredential, InstanceIdentity};
 use js_lease::Clock;
 use js_registry::{Credential, SessionSource};
 use serde::{Deserialize, Serialize};
@@ -113,6 +146,10 @@ struct Entry {
     instance: InstanceIdentity,
     expires_at_ms: u64,
     used: Option<Used>,
+    /// On the entry of a host credential: the digest of the one-time token it replaced.
+    /// `expires_at_ms` is then that token's expiry, which gives the token back to a
+    /// [`JoinTokens::release`].
+    replaces: Option<String>,
 }
 
 /// The host a token registered and how long the token stays its credential.
@@ -135,6 +172,15 @@ pub(crate) enum Admission {
     Again,
 }
 
+/// What a granted admission did, and the credential it made, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Admitted {
+    pub(crate) admission: Admission,
+    /// Set only with [`Admission::Fresh`], when the hello asked for a credential: the token
+    /// is then retired and this is the host's credential, shown here once.
+    pub(crate) issued: Option<HostCredential>,
+}
+
 /// The tokens by digest, as 64 lower-case hex digits.
 type Entries = BTreeMap<String, Entry>;
 
@@ -155,6 +201,8 @@ struct Row {
     used_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_expires_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaces: Option<String>,
 }
 
 /// A token just made. The text is shown once, in the answer to the request that made it.
@@ -174,6 +222,13 @@ pub(crate) enum MintError {
     Unsaved,
 }
 
+/// Why no token was revoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RevokeError {
+    /// The file could not be written; nothing was dropped.
+    Unsaved,
+}
+
 /// Why a presented token was not accepted. Nothing of the token is in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum JoinRefusal {
@@ -188,6 +243,13 @@ pub(crate) enum JoinRefusal {
     NotAdmitted,
     /// The use could not be written down, so it was not allowed.
     Unsaved,
+    /// The hello asked for a credential and the operating system gave no random bytes for
+    /// it; nothing was used, and the host may say hello again.
+    Unavailable,
+    /// The server is set to require a host credential and the first hello of an unused
+    /// token did not ask for one. Nothing was used; the token stays good for a hello that
+    /// asks.
+    CredentialRequired,
 }
 
 impl JoinRefusal {
@@ -199,6 +261,8 @@ impl JoinRefusal {
             Self::WrongInstance => "join-token-instance",
             Self::NotAdmitted => "join-token-not-admitted",
             Self::Unsaved => "join-token-unsaved",
+            Self::Unavailable => "join-token-unavailable",
+            Self::CredentialRequired => "join-token-credential-required",
         }
     }
 }
@@ -208,6 +272,8 @@ pub(crate) struct JoinTokens {
     path: PathBuf,
     clock: SharedClock,
     random: Box<dyn SessionSource>,
+    /// Refuse the first hello of an unused token that does not ask for a host credential.
+    require_credential: bool,
     entries: Mutex<Entries>,
 }
 
@@ -224,8 +290,18 @@ impl JoinTokens {
             path,
             clock,
             random,
+            require_credential: false,
             entries: Mutex::new(entries),
         })
+    }
+
+    /// These tokens with the first hello of an unused one required to ask for a host
+    /// credential: a hello that does not is refused ([`JoinRefusal::CredentialRequired`])
+    /// and leaves the token unused. A token that already registered its host is not
+    /// affected, and pool tokens are not join tokens.
+    pub(crate) fn requiring_credential(mut self, require: bool) -> Self {
+        self.require_credential = require;
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Entries> {
@@ -273,6 +349,7 @@ impl JoinTokens {
             instance,
             expires_at_ms,
             used: None,
+            replaces: None,
         };
         next.insert(Credential::of_token(&token).to_hex(), entry);
         self.write(&next).map_err(|err| {
@@ -286,8 +363,21 @@ impl JoinTokens {
         })
     }
 
-    /// Lets the hello of `host`, naming `instance`, register with the token whose
-    /// credential is `credential`, and consumes the token when it was unused.
+    /// [`JoinTokens::admit_with`] for a hello that asks for no credential, and so leaves a
+    /// token what it was.
+    #[cfg(test)]
+    pub(crate) fn admit(
+        &self,
+        credential: &Credential,
+        host: &str,
+        instance: Option<&InstanceIdentity>,
+    ) -> Result<Admission, JoinRefusal> {
+        self.admit_with(credential, host, instance, false)
+            .map(|admitted| admitted.admission)
+    }
+
+    /// Lets the hello of `host`, naming `instance`, register with the token or host
+    /// credential whose digest is `credential`, and consumes the token when it was unused.
     ///
     /// The token is accepted when it already registered this very host and the time of
     /// its credential has not passed (the agent says hello again; the time moves), or
@@ -295,12 +385,19 @@ impl JoinTokens {
     /// check, the use and the write happen under one lock, so of two hellos that race for
     /// an unused token one wins. A caller whose hello is then refused elsewhere gives a
     /// [`Admission::Fresh`] use back with [`JoinTokens::release`].
-    pub(crate) fn admit(
+    ///
+    /// With `issue`, the use of an unused token also retires it: in the same write the
+    /// token's row is replaced by one for a new host credential, which is returned. The
+    /// hello that loses the race for the token finds it gone, so one credential is made
+    /// for one token. Nothing is made for a token that already registered its host, or
+    /// for a host credential.
+    pub(crate) fn admit_with(
         &self,
         credential: &Credential,
         host: &str,
         instance: Option<&InstanceIdentity>,
-    ) -> Result<Admission, JoinRefusal> {
+        issue: bool,
+    ) -> Result<Admitted, JoinRefusal> {
         let now = self.clock.now().millis();
         let key = credential.to_hex();
         let mut entries = self.lock();
@@ -315,7 +412,10 @@ impl JoinTokens {
             let held = entries.get_mut(&key).and_then(|entry| entry.used.as_mut());
             held.into_iter().for_each(|used| used.again_served = true);
             self.renew(&mut entries, &key, now);
-            return Ok(Admission::Again);
+            return Ok(Admitted {
+                admission: Admission::Again,
+                issued: None,
+            });
         }
         if entry.expires_at_ms <= now {
             return Err(JoinRefusal::Expired);
@@ -323,6 +423,10 @@ impl JoinTokens {
         if instance != Some(&entry.instance) {
             return Err(JoinRefusal::WrongInstance);
         }
+        if self.require_credential && !issue {
+            return Err(JoinRefusal::CredentialRequired);
+        }
+        let issued = self.credential_if(issue)?;
         let used = Entry {
             used: Some(Used {
                 host: host.to_owned(),
@@ -332,42 +436,90 @@ impl JoinTokens {
             ..entry.clone()
         };
         let mut next = entries.clone();
-        next.insert(key, used);
+        match &issued {
+            None => next.insert(key, used),
+            Some(issued) => {
+                next.remove(&key);
+                let replaces = Some(key);
+                next.insert(
+                    Credential::of_token(issued.expose()).to_hex(),
+                    Entry { replaces, ..used },
+                )
+            }
+        };
         self.write(&next).map_err(|err| {
             error!(error = %err, "cannot write the join token file");
             JoinRefusal::Unsaved
         })?;
         *entries = next;
-        Ok(Admission::Fresh)
+        Ok(Admitted {
+            admission: Admission::Fresh,
+            issued,
+        })
     }
 
-    /// Gives back the use that [`JoinTokens::admit`] just made for `host` with the token
-    /// whose credential is `credential`: the registry refused the hello, and the token
+    /// A new host credential when `issue`, drawn from the operating system's random bytes;
+    /// none when not.
+    fn credential_if(&self, issue: bool) -> Result<Option<HostCredential>, JoinRefusal> {
+        if !issue {
+            return Ok(None);
+        }
+        let bytes = self.random.fresh().ok_or(JoinRefusal::Unavailable)?;
+        Ok(Some(HostCredential::from_bytes(&bytes)))
+    }
+
+    /// The credential the registry knows the host of `presented` by: the digest of the
+    /// token that registered it when `presented` is a host credential, and `presented`
+    /// itself otherwise. The registry binds a host id to the first credential it was
+    /// admitted with, so a host that went on with its host credential must still present
+    /// that one to it.
+    pub(crate) fn registered_as(&self, presented: &Credential) -> Credential {
+        let replaced = self
+            .lock()
+            .get(&presented.to_hex())
+            .and_then(|entry| entry.replaces.clone());
+        replaced
+            .and_then(|hex| Credential::from_hex(&hex))
+            .unwrap_or_else(|| presented.clone())
+    }
+
+    /// Gives back the use that [`JoinTokens::admit_with`] just made for `host` with the
+    /// token whose credential is `credential`: the registry refused the hello, and the token
     /// stays good for the instance it was minted for. It does nothing when a hello of
     /// `host` was admitted [`Admission::Again`] since the use: that hello may have been
-    /// the one the registry accepted, and the token is then the host's. Written like the use; when the write
-    /// fails the token stays tied to `host` (a restart agrees with the memory), and the
-    /// operator mints again if that host cannot register.
+    /// the one the registry accepted, and the token is then the host's. A host credential
+    /// the use issued is dropped and the token comes back unused: the answer that would have
+    /// carried the credential was never sent. Written like the use; when the write fails the
+    /// token stays tied to `host` (a restart agrees with the memory), and the operator mints
+    /// again if that host cannot register.
     pub(crate) fn release(&self, credential: &Credential, host: &str) {
-        let key = credential.to_hex();
         let mut entries = self.lock();
-        let tied = entries.get(&key).filter(|entry| {
-            let held = entry.used.as_ref();
-            held.is_some_and(|used| used.host == host && !used.again_served)
-        });
-        let Some(entry) = tied else {
+        let Some(next) = given_back(&entries, &credential.to_hex(), host) else {
             return;
         };
-        let unused = Entry {
-            used: None,
-            ..entry.clone()
-        };
-        let mut next = entries.clone();
-        next.insert(key, unused);
         match self.write(&next) {
             Ok(()) => *entries = next,
             Err(err) => error!(error = %err, "cannot write the join token file"),
         }
+    }
+
+    /// Drops every token bound to `instance`, used or not, and writes the file; kept only
+    /// when the write succeeded. Returns how many were dropped. An instance with no token
+    /// drops none and writes nothing, so a repeated revoke is a no-op that succeeds.
+    pub(crate) fn revoke(&self, instance: &InstanceIdentity) -> Result<usize, RevokeError> {
+        let mut entries = self.lock();
+        let mut next = entries.clone();
+        next.retain(|_, entry| entry.instance != *instance);
+        let dropped = entries.len() - next.len();
+        if dropped == 0 {
+            return Ok(0);
+        }
+        self.write(&next).map_err(|err| {
+            error!(error = %err, "cannot write the join token file");
+            RevokeError::Unsaved
+        })?;
+        *entries = next;
+        Ok(dropped)
     }
 
     /// Whether the token whose credential is `credential` registered `host` and its
@@ -423,6 +575,43 @@ impl Entry {
             ..self.clone()
         })
     }
+}
+
+/// `entries` with the use of the token at `key` by `host` undone, or `None` when there is
+/// no such use to undo: either the token itself is tied to `host` and no later hello of
+/// the host was served with it, or a host credential of `host` replaced the token (the
+/// token is then put back unused, the credential dropped).
+fn given_back(entries: &Entries, key: &str, host: &str) -> Option<Entries> {
+    let mut next = entries.clone();
+    let tied = entries.get(key).filter(|entry| {
+        let held = entry.used.as_ref();
+        held.is_some_and(|used| used.host == host && !used.again_served)
+    });
+    if let Some(entry) = tied {
+        next.insert(
+            key.to_owned(),
+            Entry {
+                used: None,
+                ..entry.clone()
+            },
+        );
+        return Some(next);
+    }
+    let issued = entries.iter().find(|(_, entry)| {
+        let held = entry.used.as_ref();
+        entry.replaces.as_deref() == Some(key) && held.is_some_and(|used| used.host == host)
+    });
+    let (credential, entry) = issued?;
+    next.remove(credential);
+    next.insert(
+        key.to_owned(),
+        Entry {
+            used: None,
+            replaces: None,
+            ..entry.clone()
+        },
+    );
+    Some(next)
 }
 
 /// The gain over the file that makes a renewal of the token at `key` worth a write:
@@ -493,6 +682,16 @@ fn parse(text: &str) -> Result<Entries, String> {
                 return Err(both.to_string());
             }
         };
+        let replaces = row.replaces;
+        if replaces
+            .as_deref()
+            .is_some_and(|hash| Credential::from_hex(hash).is_none())
+        {
+            return Err("a replaced token hash is not 64 lower-case hex digits".to_string());
+        }
+        if replaces.is_some() && used.is_none() {
+            return Err("a host credential has no host".to_string());
+        }
         let entry = Entry {
             instance: InstanceIdentity {
                 provider: row.provider,
@@ -500,6 +699,7 @@ fn parse(text: &str) -> Result<Entries, String> {
             },
             expires_at_ms: row.expires_at_ms,
             used,
+            replaces,
         };
         if entries.insert(row.hash, entry).is_some() {
             return Err("a token hash is listed twice".to_string());
@@ -522,6 +722,7 @@ fn render(entries: &Entries) -> io::Result<String> {
                 .used
                 .as_ref()
                 .map(|used| used.credential_expires_at_ms),
+            replaces: entry.replaces.clone(),
         })
         .collect();
     let document = Document {
@@ -534,3 +735,7 @@ fn render(entries: &Entries) -> io::Result<String> {
 #[cfg(test)]
 #[path = "join_tokens_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "join_credential_tests.rs"]
+mod credential_tests;

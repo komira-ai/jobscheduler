@@ -327,6 +327,7 @@ fn refusal_and_hello_reply_are_checked() {
     let refused = |code: &str, supported| Refused {
         code: code.into(),
         supported,
+        field: None,
     };
     let code = refusal::INVALID_WELCOME;
     for bad in ["", "a b", "A\0"] {
@@ -352,6 +353,22 @@ fn refusal_and_hello_reply_are_checked() {
     assert_eq!(refused("unsupported-protocol", ok_range).validate(), Ok(()));
     assert_eq!(HelloReply::Welcome(welcome()).validate(), Ok(()));
     assert_eq!(HelloReply::Refused(refused("x", None)).validate(), Ok(()));
+    let named = |field: &str| Refused {
+        field: Some(field.into()),
+        ..refused(refusal::HOST_CONTRACT, None)
+    };
+    assert_eq!(named("gpu-toolkit").validate(), Ok(()));
+    for bad in ["", "a b", "A\0"] {
+        assert_eq!(named(bad).validate().unwrap_err().code(), code);
+    }
+    expect(
+        named(&long(MAX_CAPABILITY_KEY_LEN + 1))
+            .validate()
+            .unwrap_err(),
+        "field",
+        Rule::TooLong,
+        code,
+    );
     let mut bad = welcome();
     bad.epoch = 1;
     bad.grace_ms = 0;

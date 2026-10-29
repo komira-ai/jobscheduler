@@ -96,6 +96,7 @@
 
 mod check;
 mod command;
+mod credential;
 mod error;
 mod heartbeat;
 mod hello;
@@ -106,6 +107,7 @@ pub mod protocol;
 pub mod refusal;
 
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
+pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
 pub use heartbeat::{
     Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusalReason,
