@@ -22,6 +22,7 @@ mod config_serve;
 mod config_support;
 mod config_usage;
 mod gpu_path_pin;
+mod guard_names;
 mod joins;
 mod joins_credential;
 mod joins_revoke;
@@ -54,6 +55,7 @@ mod support;
 #[path = "../network/fake.rs"]
 mod tailnet;
 mod ticks;
+mod timings;
 mod tls;
 mod usage;
 mod usage_support;
