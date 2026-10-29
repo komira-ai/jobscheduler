@@ -269,6 +269,15 @@ and a job that requires one finds no host there unless the pool's `[capabilities
 (`Shape::satisfies`, `js_caps::Request`): a pool that lists `disk-gib` in its `[capabilities]`
 admits only hosts that report at least that much, and serves jobs that require up to it.
 
+Two limits, stated plainly:
+
+- Registry pools place jobs by the pool's booked shape. A host's reported `disk-gib` is only an
+  admission floor against the pool's promise, and never places a job by itself. A job with
+  `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
+- Disk is read once, at hello, so it goes stale afterwards. A host that fills up keeps its
+  booked promise. Re-reading it periodically or per heartbeat is tracked in
+  komira-ai/jobscheduler#328.
+
 ## 4. Configuration (requirement 9, 10)
 
 One flag: `--config <path>`. The file has a `[server]` table and `[[pool]]` tables. Every
