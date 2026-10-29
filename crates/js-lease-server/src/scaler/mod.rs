@@ -56,6 +56,7 @@ mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::Clock;
@@ -187,15 +188,16 @@ impl Scaler {
 
     /// The server's listeners are bound: the time before the scaler vouches for the
     /// registry's view counts from now, and `leased`, the hosts of the lease file at start
-    /// (refused seats included), are hosts it waits to hear from first.
-    pub fn listening<I: IntoIterator<Item = String>>(&self, leased: I) {
+    /// (refused seats included), are hosts it waits to hear from first. No tick adds more
+    /// than `cap` to the time counted, when given: a leap of the wall clock is not uptime.
+    pub fn listening<I: IntoIterator<Item = String>>(&self, cap: Option<Duration>, leased: I) {
         let now = Millis::new(self.core.clock.now().millis());
         let mut gate = self
             .core
             .gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        gate.bound(now, leased);
+        gate.bound((now, cap), leased);
     }
 
     /// Whether the last tick vouched for the registry's view; false before the first.

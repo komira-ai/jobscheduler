@@ -80,7 +80,7 @@ pub struct Cli {
     /// `--agent-hello-interval`. Needs `--agent-pool-config`.
     #[arg(
         long,
-        default_value = "60",
+        default_value_t = js_agent_wire::DEFAULT_HELLO_BURST,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub agent_hello_burst: u32,

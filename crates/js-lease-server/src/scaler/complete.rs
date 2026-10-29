@@ -23,18 +23,23 @@
 //! not part of it. It is the sum of the forward steps of the injected clock between two
 //! observations, never the difference of two readings: a clock that steps back adds
 //! nothing and does not stretch the uptime of a process that has already counted it.
+//!
+//! A forward leap of the wall clock (an NTP or RTC correction at boot, which is when a
+//! server restarts) must not complete the view at once. In production the server gives
+//! [`Scaler::listening`](super::Scaler::listening) a cap of twice its tick interval, and
+//! no observation adds more than that. A tick that stalls longer than the cap counts as
+//! the cap, which only delays the verdict. Tests that jump the clock on purpose pass no
+//! cap.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_agent_wire::DEFAULT_GRACE_MS;
+use js_agent_wire::{
+    DEFAULT_GRACE_MS, DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL, RETRY_AFTER_CAP,
+};
 use js_scaler::{Millis, Phase, Records};
 
 use super::Core;
-
-/// The longest wait the agent's backoff adds to a retry: `js_agent::RETRY_AFTER_CAP`,
-/// which this crate cannot depend on (the agent's tests depend on this crate).
-const AGENT_RETRY_AFTER_CAP_MS: u64 = 120_000;
 
 /// What the agent's connect and TLS handshake may take before its hello arrives.
 const CONNECT_MS: u64 = 25_000;
@@ -42,31 +47,24 @@ const CONNECT_MS: u64 = 25_000;
 /// The size of the fleet one credential can restart together that the floor covers.
 const HERD: u64 = 200;
 
-/// `--agent-hello-burst`'s default: the hellos one credential may say at once.
-const HELLO_BURST: u64 = 60;
-
-/// `--agent-hello-interval`'s default, in milliseconds: one more hello for a credential
-/// that spent its burst.
-const HELLO_INTERVAL_MS: u64 = 1_000;
-
 /// The time the hello limiter needs to admit `herd` agents of one credential that all
 /// say hello at once: the burst goes in, the rest one per interval.
-const fn hello_drain_ms(herd: u64, burst: u64, interval_ms: u64) -> u64 {
-    herd.saturating_sub(burst) * interval_ms
+const fn hello_drain_ms(herd: u64, burst: u32, interval: Duration) -> u64 {
+    herd.saturating_sub(burst as u64) * interval.as_millis() as u64
 }
 
 /// How long after the listeners are bound the view cannot be complete, whoever has been heard.
 ///
 /// A host that was told to wait before its next hello waits at most
-/// `RETRY_AFTER_CAP` (120 s); its heartbeat grace is `DEFAULT_GRACE_MS` (15 s); its
+/// `RETRY_AFTER_CAP` (120 s, the agent's own constant); its heartbeat grace is `DEFAULT_GRACE_MS` (15 s); its
 /// connection and TLS handshake may take 25 s; and a fleet of 200 agents on one
 /// credential restarting together is admitted at the hello limiter's default 60 at once
 /// and then one a second, so the last needs 140 s more. The sum is 300 s, 5 minutes.
 pub const REGISTRY_FLOOR: Duration = Duration::from_millis(
-    AGENT_RETRY_AFTER_CAP_MS
+    RETRY_AFTER_CAP.as_millis() as u64
         + DEFAULT_GRACE_MS
         + CONNECT_MS
-        + hello_drain_ms(HERD, HELLO_BURST, HELLO_INTERVAL_MS),
+        + hello_drain_ms(HERD, DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL),
 );
 
 /// How long after the listeners are bound a host of the roster that has not been heard stops
@@ -81,6 +79,8 @@ pub(super) struct Gate {
     /// The clock at the last observation.
     last: Millis,
     uptime: Duration,
+    /// The most one observation adds to the uptime, or `None` for no limit.
+    cap: Option<Duration>,
     /// The hosts of the lease file at start.
     leased: BTreeSet<String>,
     heard: BTreeSet<String>,
@@ -93,17 +93,24 @@ impl Gate {
         Self {
             last: now,
             uptime: Duration::ZERO,
+            cap: None,
             leased: BTreeSet::new(),
             heard: BTreeSet::new(),
             done: false,
         }
     }
 
-    /// The listeners are bound at `now`: the uptime starts again from zero, and the hosts
-    /// of the lease file join the roster.
-    pub(super) fn bound<I: IntoIterator<Item = String>>(&mut self, now: Millis, leased: I) {
+    /// The listeners are bound at `now`: the uptime starts again from zero, no observation
+    /// adds more than `cap` to it from now on, and the hosts of the lease file join the
+    /// roster.
+    pub(super) fn bound<I: IntoIterator<Item = String>>(
+        &mut self,
+        (now, cap): (Millis, Option<Duration>),
+        leased: I,
+    ) {
         self.last = now;
         self.uptime = Duration::ZERO;
+        self.cap = cap;
         self.leased.extend(leased);
     }
 
@@ -115,7 +122,8 @@ impl Gate {
         records: &Records,
         live: I,
     ) -> bool {
-        self.uptime += now.since(self.last);
+        let forward = now.since(self.last);
+        self.uptime += self.cap.map_or(forward, |cap| forward.min(cap));
         self.last = now;
         self.heard.extend(live.into_iter().map(str::to_owned));
         let ours = records.instances.iter().filter(|record| {
@@ -161,10 +169,10 @@ mod tests {
     /// default to; a change to one of them breaks this and not the settle. Checked at
     /// compile time.
     const _: () = {
-        let drain = hello_drain_ms(HERD, HELLO_BURST, HELLO_INTERVAL_MS);
+        let drain = (HERD - DEFAULT_HELLO_BURST as u64) * DEFAULT_HELLO_INTERVAL.as_millis() as u64;
         assert!(
             REGISTRY_FLOOR.as_millis() as u64
-                >= AGENT_RETRY_AFTER_CAP_MS + DEFAULT_GRACE_MS + drain
+                >= RETRY_AFTER_CAP.as_millis() as u64 + DEFAULT_GRACE_MS + CONNECT_MS + drain
         );
         assert!(REGISTRY_FLOOR.as_millis() < REGISTRY_QUIET.as_millis());
     };
@@ -174,8 +182,18 @@ mod tests {
     #[test]
     fn the_floor_is_built_from_the_limiters_defaults() {
         let limit = HelloLimit::default();
-        assert_eq!(u64::from(limit.burst), HELLO_BURST);
-        assert_eq!(limit.interval.as_millis() as u64, HELLO_INTERVAL_MS);
+        assert_eq!(limit.burst, DEFAULT_HELLO_BURST);
+        assert_eq!(limit.interval, DEFAULT_HELLO_INTERVAL);
+        let cli = crate::config::Cli::try_parse_from([
+            "js-lease-server",
+            "--state-file=a",
+            "--boot=resume",
+            "--pool-config=b",
+            "--token-file=c",
+        ])
+        .unwrap();
+        assert_eq!(cli.agent_hello_burst, DEFAULT_HELLO_BURST);
+        assert_eq!(cli.agent_hello_interval, DEFAULT_HELLO_INTERVAL);
         assert_eq!(REGISTRY_FLOOR, Duration::from_secs(300));
     }
 
@@ -190,7 +208,10 @@ mod tests {
         let credential = Credential::of_token("pool-token");
         let names: Vec<String> = (0..HERD).map(|n| format!("host-{n}")).collect();
         let mut gate = Gate::starting(Millis::new(clock.now().millis()));
-        gate.bound(Millis::new(clock.now().millis()), names.iter().cloned());
+        gate.bound(
+            (Millis::new(clock.now().millis()), None),
+            names.iter().cloned(),
+        );
         let mut retry_at: Vec<u64> = vec![0; names.len()];
         let mut admitted: Vec<&str> = Vec::new();
         let mut last_hello = None;

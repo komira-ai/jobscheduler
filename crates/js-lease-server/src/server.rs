@@ -85,6 +85,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     ticker: T,
     checks: C,
 ) -> Result<Running, StartupError> {
+    let tick = config.tick_period();
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
@@ -123,7 +124,8 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         None => None,
     };
     if let Some(scaler) = &scaler {
-        scaler.listening(bookings.iter().map(|booking| booking.host.to_string()));
+        let leased = bookings.iter().map(|booking| booking.host.to_string());
+        scaler.listening(Some(2 * tick), leased);
     }
     let table = LeaseTable::open(
         BoxedProvider(provider),

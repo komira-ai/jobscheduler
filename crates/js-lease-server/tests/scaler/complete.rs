@@ -20,6 +20,11 @@ const STEP: Duration = Duration::from_secs(5);
 /// A scaler over the rig's world and clock, started now over `records`, with the lease
 /// file naming `leased`: what a restarted server builds, and then tells that it listens.
 fn restart(rig: &Rig, records: Records, leased: &[&str]) -> Scaler {
+    restart_capped(rig, records, leased, None)
+}
+
+/// [`restart`] with the production cap on what one tick adds to the uptime.
+fn restart_capped(rig: &Rig, records: Records, leased: &[&str], cap: Option<Duration>) -> Scaler {
     let scaler = Scaler::new(
         Box::new(Handle(rig.world.clone())),
         SharedClock::new(rig.clock.clone()),
@@ -28,7 +33,7 @@ fn restart(rig: &Rig, records: Records, leased: &[&str]) -> Scaler {
         live(),
         records,
     );
-    scaler.listening(leased.iter().map(|host| (*host).to_owned()));
+    scaler.listening(cap, leased.iter().map(|host| (*host).to_owned()));
     scaler
 }
 
@@ -170,4 +175,20 @@ async fn a_leased_host_that_is_never_heard_holds_the_view_until_the_quiet_time()
     rig.world().hosts = vec![view("js-refused")];
     let heard = restart(&rig, Records::default(), &["js-refused"]);
     assert_eq!(until_complete(&rig, &heard).await, REGISTRY_FLOOR);
+}
+
+/// Asserts that a forward leap of the wall clock is not uptime: the server is told to
+/// cap what a tick adds at twice its tick interval, and an hour's leap right after the
+/// bind counts as the cap. The view is incomplete until the floor of counted time has
+/// passed, the first counted cap included. It catches an NTP or RTC correction at boot
+/// that completes the view at once and lets a booting machine be released.
+#[tokio::test]
+async fn a_leap_of_the_wall_clock_is_not_counted_as_uptime() {
+    let cap = 2 * STEP;
+    let rig = rig(Records::default(), live());
+    let scaler = restart_capped(&rig, Records::default(), &[], Some(cap));
+    rig.advance(Duration::from_secs(3600));
+    scaler.tick().await;
+    assert!(!scaler.registry_complete());
+    assert_eq!(until_complete(&rig, &scaler).await, REGISTRY_FLOOR - cap);
 }
