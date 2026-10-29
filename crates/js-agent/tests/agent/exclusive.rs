@@ -78,6 +78,8 @@ pub fn note(step: &Step) -> Option<Note> {
 pub struct Asked {
     pub prepared: usize,
     pub restored: usize,
+    /// The lease each question named, in order.
+    pub leases: Vec<String>,
 }
 
 /// A host that answers from lists (busy when a list is used up) and counts the questions.
@@ -100,13 +102,15 @@ impl Probe {
 }
 
 impl Quiesce for Probe {
-    fn prepare(&mut self) -> Quiet {
+    fn prepare(&mut self, lease: &str) -> Quiet {
         self.asked.borrow_mut().prepared += 1;
+        self.asked.borrow_mut().leases.push(lease.to_owned());
         self.prepare.pop_front().unwrap_or(Quiet::Busy)
     }
 
-    fn restore(&mut self) -> Restored {
+    fn restore(&mut self, lease: &str) -> Restored {
         self.asked.borrow_mut().restored += 1;
+        self.asked.borrow_mut().leases.push(lease.to_owned());
         self.restore.pop_front().unwrap_or(Restored::Busy)
     }
 }
@@ -142,11 +146,11 @@ impl Transport for Tap {
 struct Wired(Rc<RefCell<Harness>>);
 
 impl Quiesce for Wired {
-    fn prepare(&mut self) -> Quiet {
-        self.0.borrow_mut().life.prepare(&mut Vec::new())
+    fn prepare(&mut self, lease: &str) -> Quiet {
+        self.0.borrow_mut().life.prepare(lease, &mut Vec::new())
     }
 
-    fn restore(&mut self) -> Restored {
+    fn restore(&mut self, _lease: &str) -> Restored {
         self.0.borrow_mut().life.restore(&mut Vec::new())
     }
 }
@@ -440,8 +444,9 @@ fn an_unreadable_lease_id_changes_nothing() {
 }
 
 /// Asserts that a reply that names another lease starts the preparation over for it: the
-/// new lease is announced again, asked again, and its deadline counts from its own reply.
-/// It catches a ready or a deadline that outlives the lease it was for.
+/// new lease is announced again, asked again (naming the new lease), and its deadline counts
+/// from its own reply. It catches a ready or a deadline that outlives the lease it was for,
+/// and a question that names the wrong lease.
 #[test]
 fn another_lease_starts_over() {
     let (mut script, sent) = Script::new(vec![
@@ -468,6 +473,11 @@ fn another_lease_starts_over() {
         ]
     );
     assert_eq!(asked.borrow().prepared, 2);
+    assert_eq!(
+        asked.borrow().leases,
+        [LEASE, "whole-2"],
+        "each question names the lease it is about"
+    );
     assert_eq!(
         note(&steps[3]),
         Some(Note::Preparing {
@@ -514,6 +524,11 @@ fn restoring_is_asked_until_done_and_a_new_grant_interrupts_it() {
         ]
     );
     assert_eq!(asked.borrow().restored, 2);
+    assert_eq!(
+        asked.borrow().leases,
+        [LEASE, LEASE, LEASE],
+        "the restore names the lease that ended, not the one granted after it"
+    );
 }
 
 /// Asserts that a drain is not overridden by the lease: the last heartbeat says
