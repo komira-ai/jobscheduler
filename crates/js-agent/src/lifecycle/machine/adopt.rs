@@ -108,9 +108,10 @@ impl Lifecycle {
         // container that runs look like one that does not fit.
         this.stuck = stuck;
         this.adopted_leases = this.jobs.iter().map(|job| job.lease_id.clone()).collect();
-        this.config
-            .scratch
-            .sweep(this.jobs.iter().map(|job| job.run_id.as_str()));
+        // A container that could not be removed may still use its run's directory.
+        let kept = this.jobs.iter().map(|job| job.run_id.as_str());
+        let held = this.stuck.iter().filter_map(|held| held.run_id.as_deref());
+        this.config.scratch.sweep(kept.chain(held));
         Ok((this, events))
     }
 
@@ -193,6 +194,7 @@ impl Lifecycle {
                     code::UNADOPTABLE_KEPT,
                     format!("not removed, still on the host and booked: {failed}"),
                     Some(Stuck {
+                        run_id: label_id(found, label::RUN).map(str::to_owned),
                         id: id.clone(),
                         booking: Booking::from_labels(found)
                             .unwrap_or_else(|| Booking::everything(&self.config.capacity)),

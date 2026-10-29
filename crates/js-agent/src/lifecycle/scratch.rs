@@ -3,11 +3,13 @@
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, openat, statat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat,
+};
 use rustix::io::Errno;
 
 /// The canonical path of `path`, which must be a directory (not a link to one) that the
@@ -89,11 +91,19 @@ impl ScratchRoot {
     /// Restoring a mode on what another user owns needs the privilege to do that, which
     /// the agent has when it runs as root.
     ///
+    /// A directory on another device than the root (a mount left under it) is not entered
+    /// and is an error, so that a mount is never emptied.
+    ///
     /// # Errors
     ///
-    /// The run's path is not a directory, or something in it cannot be removed.
+    /// The run id is not one ordinary path component, the run's path is not a directory,
+    /// or something in it cannot be removed.
     pub fn remove(&self, run_id: &str) -> io::Result<()> {
-        let name = CString::new(run_id).map_err(|_| io::ErrorKind::InvalidInput)?;
+        let normal = !matches!(run_id, "" | "." | "..") && !run_id.contains('/');
+        let name = CString::new(run_id)
+            .ok()
+            .filter(|_| normal)
+            .ok_or(io::ErrorKind::InvalidInput)?;
         let root = self.open_root()?;
         match remove_tree(&root, &name) {
             Err(Errno::NOENT) | Ok(()) => Ok(()),
@@ -124,9 +134,10 @@ impl ScratchRoot {
             .collect();
         orphans
             .iter()
-            .filter(|name| match remove_tree(&root, name) {
-                Err(Errno::NOTDIR) => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
-                done => done.is_ok(),
+            .filter(|name| match is_dir(&root, name) {
+                Ok(true) => remove_tree(&root, name).is_ok(),
+                Ok(false) => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
+                Err(_) => false,
             })
             .count()
     }
@@ -141,20 +152,39 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-/// Opens the directory `name` of `parent`, which must be a directory and not a link,
-/// first giving its owner read, write and search permission when it lacks any.
-fn open_dir(parent: &OwnedFd, name: &CStr) -> rustix::io::Result<OwnedFd> {
-    let meta = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
-    if FileType::from_raw_mode(meta.st_mode) != FileType::Directory {
-        return Err(Errno::NOTDIR);
+const PATH_FLAGS: OFlags = OFlags::PATH
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Whether the entry `name` of `dir` is a directory (not a link to one).
+fn is_dir(dir: &OwnedFd, name: &CStr) -> rustix::io::Result<bool> {
+    let meta = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(FileType::from_raw_mode(meta.st_mode) == FileType::Directory)
+}
+
+/// A directory on another device than the one the removal started on is a mount.
+fn same_device(root: u64, found: u64) -> rustix::io::Result<()> {
+    match root == found {
+        true => Ok(()),
+        false => Err(Errno::XDEV),
     }
+}
+
+/// Opens the directory `name` of `parent`, which must be a directory and not a link, on
+/// the device `dev`, first giving its owner read, write and search permission when it
+/// lacks any. The entry is opened once, without following a link and without needing
+/// any permission on it (`O_PATH`); the mode is then changed through that open file, by
+/// its `/proc/self/fd` name, so no name that could be swapped is resolved again.
+fn open_dir(parent: &OwnedFd, name: &CStr, dev: u64) -> rustix::io::Result<OwnedFd> {
+    let entry = openat(parent, name, PATH_FLAGS, Mode::empty())?;
+    let meta = fstat(&entry)?;
+    same_device(dev, meta.st_dev)?;
     if meta.st_mode & 0o700 != 0o700 {
-        // The entry was just seen to be a directory, not a link, so this changes no
-        // file outside the tree; nothing else is running in a scratch directory whose
-        // container is gone.
-        chmodat(parent, name, Mode::RWXU, AtFlags::empty())?;
+        let via = format!("/proc/self/fd/{}", entry.as_raw_fd());
+        chmodat(CWD, via.as_str(), Mode::RWXU, AtFlags::empty())?;
     }
-    openat(parent, name, DIR_FLAGS, Mode::empty())
+    openat(&entry, c".", DIR_FLAGS, Mode::empty())
 }
 
 /// Removes the files in `dir` and returns the name of one of its subdirectories, if any.
@@ -168,8 +198,7 @@ fn clear_files(dir: &OwnedFd) -> rustix::io::Result<Option<CString>> {
         if bytes == b"." || bytes == b".." {
             continue;
         }
-        let meta = statat(dir, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)?;
-        match FileType::from_raw_mode(meta.st_mode) == FileType::Directory {
+        match is_dir(dir, &name)? {
             true => subdir = subdir.or(Some(name)),
             false => unlinkat(dir, name.as_c_str(), AtFlags::empty())?,
         }
@@ -178,22 +207,44 @@ fn clear_files(dir: &OwnedFd) -> rustix::io::Result<Option<CString>> {
 }
 
 /// Removes the directory `name` of `parent` and everything under it. The walk keeps one
-/// open directory and the names of the directories above it, goes down into a
-/// subdirectory, and goes back up through `..` once a directory is empty.
+/// open directory, and the name and identity of each directory above it; it goes down
+/// into a subdirectory, and goes back up through `..` once a directory is empty,
+/// checking that `..` is the directory it came from (one moved out of the tree
+/// meanwhile is an error, not a place to delete in).
 fn remove_tree(parent: &OwnedFd, name: &CStr) -> rustix::io::Result<()> {
-    let mut cur = open_dir(parent, name)?;
-    let mut trail: Vec<CString> = Vec::new();
+    let dev = fstat(parent)?.st_dev;
+    let mut cur = open_dir(parent, name, dev)?;
+    let mut trail: Vec<(CString, u64, u64)> = Vec::new();
     loop {
         if let Some(sub) = clear_files(&cur)? {
-            cur = open_dir(&cur, &sub)?;
-            trail.push(sub);
+            let here = fstat(&cur)?;
+            let below = open_dir(&cur, &sub, dev)?;
+            trail.push((sub, here.st_dev, here.st_ino));
+            cur = below;
             continue;
         }
-        let Some(done) = trail.pop() else {
+        let Some((done, up_dev, up_ino)) = trail.pop() else {
             return unlinkat(parent, name, AtFlags::REMOVEDIR);
         };
         let up = openat(&cur, c"..", DIR_FLAGS, Mode::empty())?;
+        let seen = fstat(&up)?;
+        if (seen.st_dev, seen.st_ino) != (up_dev, up_ino) {
+            return Err(Errno::STALE);
+        }
         unlinkat(&up, done.as_c_str(), AtFlags::REMOVEDIR)?;
         cur = up;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory on the device the removal started on is entered; one on another
+    /// device (a mount) is refused with a cross-device error.
+    #[test]
+    fn a_directory_on_another_device_is_refused() {
+        assert_eq!(same_device(7, 7), Ok(()));
+        assert_eq!(same_device(7, 8), Err(Errno::XDEV));
     }
 }
