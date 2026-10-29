@@ -9,7 +9,7 @@
 //! name  = "nodes"
 //! class = "whole-node"
 //! exec  = "container"                    # optional; absent or "none": no host contract
-//! max_machines = 6                       # optional; at most 262144
+//! max_machines = 6                       # required; from 1 to 262144
 //! join_token_file = "/etc/js/join-token" # optional shared pool token
 //! heartbeat_interval = "10s"             # optional
 //! grace              = "1m"              # optional
@@ -148,7 +148,7 @@ impl JoinedPool {
         let gpu_class = sh.string("gpu_class")?;
         let max_machines = match s.integer("max_machines")? {
             Some(most) => usize::try_from(most).unwrap_or(usize::MAX),
-            None => MAX_MACHINES,
+            None => return Err(s.fail("max_machines", "required")),
         };
         let exec = match s.string("exec")?.as_deref() {
             None | Some("none") => None,
@@ -285,21 +285,25 @@ mod tests {
     const MINIMAL: &str = "name = \"nodes\"\nclass = \"whole-node\"\n\
                            shape = { cpu_millis = 4000, memory_bytes = 8589934592 }\n";
 
+    /// [`MINIMAL`] with `extra` before it, and a machine count unless `extra` gives one.
     fn with(extra: &str) -> toml::Table {
-        table(&format!("{extra}\n{MINIMAL}"))
+        let count = match extra.contains("max_machines") {
+            true => "",
+            false => "max_machines = 3\n",
+        };
+        table(&format!("{extra}\n{MINIMAL}{count}"))
     }
 
     fn refused(table: toml::Table) -> String {
         JoinedPool::from_table(table).unwrap_err().to_string()
     }
 
-    /// The smallest joined pool parses with the wire's timing, the largest machine count
-    /// and no contract; a full one carries every field through to the registry's pool. It
+    /// The smallest joined pool parses with the wire's timing and no contract; a full one carries every field through to the registry's pool. It
     /// catches a key that is read and dropped and a default that drifts from the wire's.
     #[test]
     fn a_joined_pool_parses_with_defaults_and_with_every_field() {
         let small = JoinedPool::from_table(with("kind = \"joined\"")).unwrap();
-        assert_eq!(small.max_machines, MAX_MACHINES);
+        assert_eq!(small.max_machines, 3);
         assert_eq!(small.exec, None);
         assert_eq!(small.grace, Duration::from_millis(DEFAULT_GRACE_MS));
         assert_eq!(small.join_token_file, None);
@@ -364,8 +368,9 @@ mod tests {
         );
     }
 
-    /// Every other mistake is refused naming the pool and the field. It catches a field
-    /// that is checked by nobody, and a message that loses the pool.
+    /// Every other mistake is refused naming the pool and the field, a missing
+    /// `max_machines` among them. It catches a field that is checked by nobody, a count
+    /// that defaults to the wire's cap, and a message that loses the pool.
     #[test]
     fn a_bad_field_is_refused_naming_it() {
         let cases = [
@@ -395,7 +400,12 @@ mod tests {
         }
         let broken = [
             (
-                "name = \"Nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\n",
+                "shape = { cpu_millis = 1, memory_bytes = 1 }\n",
+                "pool \"nodes\": max_machines: required",
+            ),
+            (
+                "name = \"Nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 1 }\n",
                 "pool \"Nodes\": name: must be 1 to 63",
             ),
@@ -405,42 +415,42 @@ mod tests {
                 "pool \"nodes\": class: must be 1 to 63",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "",
                 "pool \"nodes\": shape: required",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { memory_bytes = 1 }\n",
                 "pool \"nodes\": shape.cpu_millis: required",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1 }\n",
                 "pool \"nodes\": shape.memory_bytes: required",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 4294967297, memory_bytes = 1 }\n",
                 "pool \"nodes\": shape.cpu_millis: is above",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 35184372088833 }\n",
                 "pool \"nodes\": shape.memory_bytes: is above",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 1, gpus = 257, gpu_class = \"g\" }\n",
                 "pool \"nodes\": shape.gpus: is above",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 1, gpus = 1 }\n",
                 "pool \"nodes\": shape:",
             ),
             (
-                "name = \"nodes\"\nclass = \"c\"\n",
+                "name = \"nodes\"\nclass = \"c\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 1, cores = 1 }\n",
                 "pool \"nodes\": shape.cores: unknown field",
             ),

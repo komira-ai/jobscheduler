@@ -99,9 +99,10 @@
 //!
 //! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
 //! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
-//! and optionally `gpus` and `gpu_class`), and optionally `exec` (as above, but absent is
-//! `none`), `max_machines` (at most 262144, the default), `heartbeat_interval`, `grace`,
-//! `lost_retention` and `join_token_file` (the shared pool token). It launches nothing:
+//! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as in
+//! the agent pool file), and optionally `exec` (as above, but absent is `none`),
+//! `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the shared pool
+//! token). It launches nothing:
 //! `launch`, `network`, `provider`, `max_instances`, `max_spend_per_hour`,
 //! `max_spend_per_day`, `idle` and `boot_timeout` are each refused naming the key. It is
 //! the pool that registers agents, so it excludes an elastic pool, and `server.agent_listen`

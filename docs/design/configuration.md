@@ -31,7 +31,7 @@ name  = "nodes"                       # the `pool` of a hello, and the `provider
 class = "whole-node"
 exec  = "container"                   # optional; absent or "none": no host contract
 shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
-max_machines    = 6                   # optional; at most 262144
+max_machines    = 6                   # required; from 1 to 262144, as in the agent pool file
 join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
 ```

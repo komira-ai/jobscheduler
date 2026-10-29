@@ -203,6 +203,11 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
     );
     let said = refusal(&scratch, &file(&server, &[&joined().without("shape")]));
     assert_eq!(said, "pool \"burst\": shape: required");
+    let said = refusal(
+        &scratch,
+        &file(&server, &[&joined().without("max_machines")]),
+    );
+    assert_eq!(said, "pool \"burst\": max_machines: required");
     let elastic = PoolText::elastic(&scratch).set("max_machines", "3");
     let said = refusal(&scratch, &file(&server, &[&elastic]));
     assert!(
