@@ -28,7 +28,13 @@
 //! - Under [`Net::On`] no address can be denied: the profile compiler takes only `*` and
 //!   `localhost` as the host of a `remote ip` filter (a runner test pins this). Blocking
 //!   the scheduler or the cloud metadata address needs a packet filter keyed on the
-//!   pool's user range.
+//!   pool's user range (tracked in komira-ai/jobscheduler#407).
+//! - Every read-denied path is also write-denied and its unix sockets are neither
+//!   connectable nor bindable, under every network level. The builder keeps such paths
+//!   and denies them, rather than refusing a read-denied path inside the run directory,
+//!   because a layout may keep a read-denied state directory under a granted one.
+//! - A path is only spelled correctly by [`AbsPath`]; its canonical form (symbolic
+//!   links, Unicode normalisation) is the caller's duty, and the host step pins it.
 //! - It starts nothing; applying the profile is the caller's `exec` of
 //!   [`Profile::argv`].
 

@@ -72,9 +72,12 @@ pub struct Profile {
 
 impl Profile {
     /// The profile of `policy`, in a fixed order: version and `(allow default)`; the
-    /// write denies; the write grants (the run directory, the user's folder entry and
-    /// `/dev`); the read denies; the write protection of inputs; the network; process
-    /// info; the floor.
+    /// write denies; the write grants (the run directory, the user's folder entry,
+    /// `/dev/null` and `/dev/fd`); the read denies, each with a write deny of the same
+    /// path (a read-denied path inside a granted directory is not writable either); the
+    /// write protection of inputs; the network; a deny of unix-socket connect and bind
+    /// under each read-denied path (after the network rules, so no network allow
+    /// reaches the agent's sockets); process info; the floor.
     ///
     /// A later rule wins, so the floor beats everything before it.
     ///
@@ -94,11 +97,12 @@ impl Profile {
             grant.push_str(" (subpath (param \"UENTRY\"))");
             params.push(("UENTRY".to_owned(), entry.as_str().to_owned()));
         }
-        grant.push_str(" (subpath \"/dev\"))");
+        grant.push_str(" (literal \"/dev/null\") (subpath \"/dev/fd\"))");
         lines.push(grant);
 
         for (i, path) in policy.read_denies().iter().enumerate() {
             lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
+            lines.push(format!("(deny file-write* (subpath (param \"RD_{i}\")))"));
             params.push((format!("RD_{i}"), path.as_str().to_owned()));
         }
         for (i, path) in policy.inputs().iter().enumerate() {
@@ -107,6 +111,14 @@ impl Profile {
         }
 
         net_rules(policy, &mut lines);
+        for i in 0..policy.read_denies().len() {
+            lines.push(format!(
+                "(deny network-outbound (remote unix-socket (subpath (param \"RD_{i}\"))))"
+            ));
+            lines.push(format!(
+                "(deny network-bind (local unix-socket (subpath (param \"RD_{i}\"))))"
+            ));
+        }
         push_all(&mut lines, &PROCESS_INFO);
         push_all(&mut lines, &FLOOR);
 

@@ -464,9 +464,9 @@ fn without_floor(profile: &Profile) -> String {
 }
 
 /// A floor rule beats an earlier grant: with a write grant over the protected store's
-/// parent, the floor still refuses the write, and the same profile cut before the floor
-/// leaves the outcome to the operating system. The two outcomes must differ, or the
-/// test could not tell a floor that works from one that is not there.
+/// parent, the floor still refuses the write, while the same profile cut before the
+/// floor lets the write land (the runner's user may write there). Without that second
+/// half the test could not tell a floor that works from one that is not there.
 #[test]
 fn a_floor_deny_beats_an_earlier_grant() {
     let scene = Scene::new("floor", "run");
@@ -497,24 +497,30 @@ fn a_floor_deny_beats_an_earlier_grant() {
             .expect("sandbox-exec starts")
     };
     let with_floor = run(profile.text(), &profile);
+    let created_with_floor = target.exists();
     let cut = without_floor(&profile);
     let os_only = run(&cut, &profile);
+    let created_without_floor = target.exists();
+    // Clean up before asserting, so a failure leaves nothing behind.
+    let _ = std::fs::remove_file(&target);
+    assert!(
+        created_without_floor,
+        "the grant alone writes there, so the floor is what refuses below: {}",
+        describe(&os_only)
+    );
     assert!(
         !with_floor.status.success(),
         "write refused: {}",
         describe(&with_floor)
     );
-    assert!(!target.exists(), "{target:?} was created");
-    assert_ne!(
-        String::from_utf8_lossy(&with_floor.stderr),
-        String::from_utf8_lossy(&os_only.stderr),
-        "the floor's refusal is the sandbox's, not the system's (cut profile: {})",
-        describe(&os_only)
+    assert!(
+        !created_with_floor,
+        "{target:?} was created under the floor"
     );
 }
 
-/// What `bootstrap_check_in` of a name nobody owns returns: the sandbox's refusal of
-/// `mach-register` and launchd's answer differ.
+/// Checks in a name nobody else owns and prints the kernel return code: 0 when the name
+/// is registered, otherwise the refusal.
 const CHECK_IN_C: &str = r#"#include <mach/mach.h>
 #include <servers/bootstrap.h>
 #include <stdio.h>
@@ -546,11 +552,8 @@ fn registering_a_mach_service_is_refused() {
         "sandboxed ran: {}",
         describe(&refused)
     );
-    assert_ne!(free_code, "0", "the control's check-in does not register");
-    assert_ne!(
-        refused_code, free_code,
-        "the sandbox changes the answer to a registration"
-    );
+    assert_eq!(free_code, "0", "the control registers the name");
+    assert_ne!(refused_code, "0", "the sandbox refuses the registration");
 }
 
 #[test]
@@ -562,14 +565,12 @@ fn mounting_is_refused() {
         "the runner has passwordless sudo: {}",
         describe(&sudo)
     );
-    let source = scene.run.join("source");
     let mountpoint = scene.run.join("mountpoint");
-    std::fs::create_dir_all(&source).expect("source");
     std::fs::create_dir_all(&mountpoint).expect("mountpoint");
     let mount = [
         OsString::from("-n"),
-        OsString::from("/sbin/mount_nullfs"),
-        os(&source),
+        OsString::from("/sbin/mount_devfs"),
+        OsString::from("devfs"),
         os(&mountpoint),
     ];
     let unmount = [

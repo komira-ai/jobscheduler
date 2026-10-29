@@ -44,6 +44,11 @@ pub enum PathError {
 /// first (a profile compares the path the kernel resolves, and `/var` resolves to
 /// `/private/var`), and the check refuses the common links by name. Quotes, parentheses
 /// and `=` are accepted because a parameter value never enters the profile text.
+///
+/// Canonicalisation is the caller's duty: symbolic links other than the three named
+/// above, and Unicode normalisation of the spelling, are not checked here. The host step
+/// that builds a [`SlotLayout`](super::SlotLayout) resolves every path through a
+/// descriptor first and pins the result.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AbsPath(String);
 

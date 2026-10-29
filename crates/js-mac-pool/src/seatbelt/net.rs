@@ -71,7 +71,9 @@ pub enum Net {
     /// The network is open: the profile has no network rule. Seatbelt cannot deny a
     /// literal address (the compiler accepts only `*` and `localhost` as the host of a
     /// `remote ip` filter), so egress control needs a packet filter keyed on the pool's
-    /// user range.
+    /// user range. Tracked in komira-ai/jobscheduler#407. Until then a run at this
+    /// level can reach any address the Mac can, the scheduler and the cloud metadata
+    /// address included.
     On,
 }
 
