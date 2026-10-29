@@ -182,10 +182,12 @@ pub fn name_of(scheduler: &str, acquire: &str) -> String {
     HostName::derive(&scheduler, &acquire).to_string()
 }
 
-/// The hello of the launched machine `name`, which names the instance it runs on.
+/// The hello of the launched machine `name`, which names the instance it runs on and
+/// announces the size of the offer it was launched from (8 cores, 64 GiB, one a100).
 pub fn hello_body_of(name: &str) -> Value {
     let mut body = hello_body(name);
     body["instance"] = json!({ "provider": "burst", "instance_id": name });
+    body["shape"]["memory_bytes"] = json!(64u64 << 30);
     body
 }
 
