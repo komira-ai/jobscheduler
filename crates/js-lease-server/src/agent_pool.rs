@@ -77,7 +77,7 @@ impl RawPool {
 }
 
 /// Why a mixed pool (a class admitted `Book`) is refused at load.
-const MIXED_UNSERVED: &str =
+pub(crate) const MIXED_UNSERVED: &str =
     "a mixed pool (a class that books part of a host) is not served by this server yet";
 
 /// The `[shape]` table: what the pool promises and books for every host.
@@ -244,9 +244,14 @@ fn millis_or_zero(field: &str, text: &Option<String>, default: u64) -> Result<u6
 /// beyond what the pool's shape offers.
 fn class(name: &str) -> Result<ResourceClass, String> {
     let id = ClassId::new(name).map_err(|err| format!("class: {err}"))?;
+    Ok(shipped_class(id))
+}
+
+/// The class `id` names: a shipped class, else one that books a whole host (see [`class`]).
+pub(crate) fn shipped_class(id: ClassId) -> ResourceClass {
     let shipped = [ResourceClass::whole_node(), ResourceClass::gpu_host()];
     let found = shipped.into_iter().find(|class| *class.id() == id);
-    Ok(found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0)))
+    found.unwrap_or_else(|| ResourceClass::new(id, Admission::BookAll, 0))
 }
 
 /// Refuses a `value` above `max`: a floor no hello could meet (the wire refuses a hello

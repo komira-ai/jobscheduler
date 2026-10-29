@@ -34,6 +34,7 @@ use js_elastic::{BootStep, HostName, Secret, SlotName};
 
 pub use default::DefaultMode;
 pub use oauth::{OAUTH_FILE_LIMIT, OAuthClient};
+pub(crate) use tailscale::valid_tag;
 pub use tailscale::{
     AUTH_KEY_PATH, AUTH_KEY_SLOT, MAX_KEY_VALID_FOR, TailscaleMode, TailscaleSettings,
 };

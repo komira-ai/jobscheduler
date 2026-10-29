@@ -138,8 +138,11 @@ impl Shared {
     }
 }
 
-/// The router: `/healthz` open, everything else behind the bearer token.
-pub(crate) fn router(shared: Arc<Shared>) -> Router {
+/// The router of the client, operator and status routes: `/healthz` open, everything else
+/// behind the bearer token. With `with_agents` the agent routes are served too (one port
+/// for everything, as without `server.agent_listen`); without it they are served by
+/// [`agent_router`] on a port of their own and answer 404 here.
+pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let guarded = Router::new()
         .route("/v1/leases", post(acquire).get(list))
         .route("/v1/leases/{id}/renew", post(renew))
@@ -154,11 +157,26 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared.clone());
     let app = open.merge(guarded);
     match &shared.agents {
-        Some(agents) => app
-            .merge(agent_api::router(agents.clone()))
-            .merge(join_api::router(shared.clone(), agents.clone()))
-            .merge(run_api::router(shared.clone(), agents.clone())),
+        Some(agents) => {
+            let app = app
+                .merge(join_api::router(shared.clone(), agents.clone()))
+                .merge(run_api::router(shared.clone(), agents.clone()));
+            match with_agents {
+                true => app.merge(agent_api::router(agents.clone())),
+                false => app,
+            }
+        }
         None => app,
+    }
+}
+
+/// The router of the agent routes alone, for the port `server.agent_listen` names. It
+/// serves nothing else: a client or operator route answers 404 here. Without agent
+/// registration it serves nothing at all.
+pub(crate) fn agent_router(shared: &Shared) -> Router {
+    match &shared.agents {
+        Some(agents) => agent_api::router(agents.clone()),
+        None => Router::new(),
     }
 }
 

@@ -39,6 +39,13 @@ pub struct TailscaleSettings {
     pub binary: Artifact,
 }
 
+/// Whether `tag` is `tag:` and a name of letters, digits and '-'.
+pub(crate) fn valid_tag(tag: &str) -> bool {
+    tag.strip_prefix("tag:").is_some_and(|name| {
+        !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
 /// The mode that joins hosts to a tailnet.
 pub struct TailscaleMode {
     api: TailscaleApi,
@@ -61,10 +68,7 @@ impl TailscaleMode {
     ///
     /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
     pub fn new(api: TailscaleApi, settings: TailscaleSettings) -> Result<Self, NetworkError> {
-        let named = settings.tag.strip_prefix("tag:").is_some_and(|name| {
-            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        });
-        match named {
+        match valid_tag(&settings.tag) {
             true => Ok(Self { api, settings }),
             false => Err(NetworkError::Misconfigured(format!(
                 "tailscale tag {:?} must be \"tag:\" and letters, digits or '-'",

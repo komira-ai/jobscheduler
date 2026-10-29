@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agents::assemble;
-use crate::api::{Shared, router};
+use crate::api::{Shared, agent_router, router};
 use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
@@ -26,12 +26,31 @@ use crate::tls;
 /// it the orderly way (requests in flight finish, one last tick).
 pub struct Running {
     addr: SocketAddr,
+    agent: Option<AgentPort>,
     state_file: PathBuf,
     shared: Arc<Shared>,
     stop: oneshot::Sender<()>,
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+}
+
+/// The listener that serves the agent routes alone (`server.agent_listen`).
+struct AgentPort {
+    addr: SocketAddr,
+    stop: oneshot::Sender<()>,
+    serving: JoinHandle<()>,
+}
+
+/// Binds `addr`, refusing the start naming `flag` when it cannot.
+async fn bind(
+    addr: SocketAddr,
+    flag: &'static str,
+) -> Result<(TcpListener, SocketAddr), StartupError> {
+    let bound = TcpListener::bind(addr)
+        .await
+        .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
+    bound.map_err(|err| StartupError::new(flag, err))
 }
 
 /// Starts a server: builds the provider from the capacity source, opens the lease table
@@ -49,10 +68,11 @@ pub async fn start<T: Ticker>(
     let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
-    let bound = TcpListener::bind(config.listen)
-        .await
-        .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
-    let (listener, addr) = bound.map_err(|err| StartupError::new("--listen", err))?;
+    let (listener, addr) = bind(config.listen, config.listen_flag).await?;
+    let agent_listener = match config.agent_listen {
+        Some(agent) => Some(bind(agent, "server.agent_listen").await?),
+        None => None,
+    };
     let table = LeaseTable::open(
         BoxedProvider(provider),
         clock,
@@ -80,20 +100,37 @@ pub async fn start<T: Ticker>(
         tls = acceptor.is_some(),
         "listening"
     );
+    for warning in &config.warnings {
+        warn!("{warning}");
+    }
     let shared = Arc::new(Shared::new(table, config.token, agents));
+    let split = agent_listener.is_some();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(config.limits.max_connections));
     let serving = serve(
         listener,
-        acceptor,
-        router(shared.clone()),
+        acceptor.clone(),
+        router(shared.clone(), !split),
         config.limits,
         slots.clone(),
         stopped,
     );
+    let agent = agent_listener.map(|(listener, addr)| {
+        let (stop, stopped) = oneshot::channel::<()>();
+        let slots = Arc::new(Slots::new(config.limits.max_connections));
+        let app = agent_router(&shared);
+        let serving = serve(listener, acceptor, app, config.limits, slots, stopped);
+        info!(%addr, "listening for agents");
+        AgentPort {
+            addr,
+            stop,
+            serving: tokio::spawn(serving),
+        }
+    });
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
     Ok(Running {
         addr,
+        agent,
         state_file: config.state_file,
         shared,
         stop,
@@ -139,6 +176,12 @@ impl Running {
         self.addr
     }
 
+    /// The address the agent routes alone are served on, with the port the system chose
+    /// for port 0; `None` when the agent routes share the port of [`Running::addr`].
+    pub fn agent_addr(&self) -> Option<SocketAddr> {
+        self.agent.as_ref().map(|agent| agent.addr)
+    }
+
     /// A handle on the agent registry (the same registry the routes and the tick use),
     /// for reading what it records, such as [`js_registry::Registry::request_record`];
     /// `None` without agent flags.
@@ -175,7 +218,16 @@ impl Running {
     /// that says nothing would hide it. The cause is in the error and in the log.
     pub async fn shutdown(mut self) -> io::Result<()> {
         let _ = self.stop.send(());
+        let agent = self.agent.take().map(|agent| {
+            let _ = agent.stop.send(());
+            agent.serving
+        });
         let served = self.serving.await.map_err(io::Error::other);
+        let agent_served = match agent {
+            Some(serving) => serving.await.map_err(io::Error::other),
+            None => Ok(()),
+        };
+        let served = served.and(agent_served);
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;

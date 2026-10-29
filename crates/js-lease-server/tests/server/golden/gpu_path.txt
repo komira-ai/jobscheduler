@@ -6,7 +6,8 @@
 --agent-hello-interval default=1s required=false
 --agent-pool-config default=none required=false
 --agent-token-file default=none required=false
---boot default=none required=true values=initialise|resume
+--boot default=none required=false values=initialise|resume
+--config default=none required=false
 --default-ttl default=600s required=false
 --drain-timeout default=10s required=false
 --handshake-timeout default=10s required=false
@@ -18,11 +19,11 @@
 --pool-config default=none required=false
 --read-timeout default=30s required=false
 --require-host-credential default=none required=false values=true|false
---state-file default=none required=true
+--state-file default=none required=false
 --tick default=5s required=false
 --tls-cert default=none required=false
 --tls-key default=none required=false
---token-file default=none required=true
+--token-file default=none required=false
 --write-timeout default=10s required=false
 
 == routes ==

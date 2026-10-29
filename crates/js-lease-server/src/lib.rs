@@ -4,8 +4,11 @@
 //! The library is the program: [`run`] takes the arguments and the streams to report
 //! to, and `main` calls it. The pieces:
 //!
-//! - [`Config`] and [`Cli`]: the flags, and the checks that refuse a start (a token file
-//!   anyone can read, a listen address off the loopback without TLS).
+//! - [`Config`] and [`Cli`]: the flags or the configuration file, and the checks that
+//!   refuse a start (a token file anyone can read, a listen address off the loopback
+//!   without TLS).
+//! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
+//!   compiled in (`static` today).
 //! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
 //!   operator's pool file. With agent registration on (see "Agents" below), the static
 //!   pool and the hosts agents register are two sources of the same trait, layered
@@ -45,6 +48,47 @@
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2.
+//!
+//! # The configuration file
+//!
+//! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
+//! above. Every table refuses a field it does not know, and the file holds no secret: a
+//! secret is the path of a file that only its owner can use. A refusal names where it is,
+//! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
+//! value of the file; a syntax error says the line. Nothing is checked over the network
+//! at start.
+//!
+//! Until the flags are refused beside `--config`, a flag given with it has no effect.
+//!
+//! ```toml
+//! [server]
+//! listen            = "100.64.0.1:7300"   # default 127.0.0.1:7300; off the loopback it needs tls_cert and tls_key
+//! agent_listen      = "100.64.0.1:7301"   # agent routes only; required with an elastic pool
+//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool
+//! state_file        = "/var/lib/jobscheduler/state"      # required
+//! boot              = "resume"                           # required: "initialise" or "resume"
+//! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
+//! tls_cert          = "/run/credentials/js/tls-cert"
+//! tls_key           = "/run/credentials/js/tls-key"
+//! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
+//! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
+//!
+//! [[pool]]
+//! name     = "gpu-static"
+//! class    = "gpu-host"
+//! provider = { kind = "static", hosts_file = "/etc/jobscheduler/hosts.toml" }
+//! ```
+//!
+//! A pool whose provider launches machines (an elastic pool) also has `max_instances`
+//! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
+//! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
+//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file` and `network`.
+//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing.
+//! `exec` is `container` unless the file says `sandbox-exec`, or `none` for a pool whose
+//! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
+//! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
+//! what a pool without it gets, or `{ kind = "tailscale", oauth_client_file = ..., tag
+//! = ... }`. At most one elastic pool and one static pool are served in this version.
 //!
 //! # API
 //!
@@ -328,10 +372,12 @@ pub mod bootstrap;
 mod capacity;
 mod config;
 mod error;
+mod file;
 mod hosts;
 mod io_timeout;
 mod join_api;
 mod join_tokens;
+mod kinds;
 mod layered;
 mod listener;
 pub mod network;
@@ -359,6 +405,10 @@ pub use api::BODY_LIMIT;
 pub use capacity::{CapacitySource, Seated, StaticPoolSource, Unseated};
 pub use config::{BootMode, Cli, Config, Limits, MIN_TOKEN_BYTES, TlsFiles, Token, parse_duration};
 pub use error::StartupError;
+pub use file::{ElasticPlan, Launch, NetworkPlan};
+pub use kinds::{
+    BuildCtx, Built, Ctor, ElasticBuilt, Floor, KindError, Kinds, OwnerOnlyFiles, SecretFiles,
+};
 #[doc(hidden)]
 pub use layered::LayeredProvider;
 pub use server::{Running, start};
