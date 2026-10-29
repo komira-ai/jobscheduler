@@ -71,19 +71,20 @@ fn the_default_of_a_hundred_books_all_of_it() {
     }
 }
 
-/// Asserts that 0, 101 and a negative number are refused when the file is read, naming
-/// the key, and that a word is refused naming the line. It catches a percent of 0 that
-/// books nothing without saying so, and one above 100 that books more than the host has.
+/// Asserts that 0, 101, a negative number, a word and a fraction are refused when the
+/// file is read, each message naming the key (the last three also the line). It catches a
+/// percent of 0 that books nothing without saying so, and one above 100 that books more than the host has.
 #[test]
 fn zero_and_above_a_hundred_are_refused() {
     for bad in ["0", "101", "1000", "256"] {
         let said = refused(&hosts(&format!("memory_schedulable_percent = {bad}\n")));
         assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
     }
-    let said = refused(&hosts("memory_schedulable_percent = -5\n"));
-    assert!(said.contains("line 1"), "{said}");
-    let said = refused(&hosts("memory_schedulable_percent = \"ninety\"\n"));
-    assert!(said.contains("line 1"), "{said}");
+    for bad in ["-1", "-5", "\"ninety\"", "90.5"] {
+        let said = refused(&hosts(&format!("memory_schedulable_percent = {bad}\n")));
+        assert!(said.contains("line 1"), "{bad}: {said}");
+        assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
+    }
     let err = StaticPool::from_toml(
         ProviderId::new("pool").unwrap(),
         &hosts("memory_schedulable_percent = 0\n"),

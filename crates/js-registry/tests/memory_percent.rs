@@ -5,7 +5,8 @@ mod support;
 use js_agent_wire::{Isolation, JobSpec, Limits, refusal};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal, RunRefusal, WholeNodeConfig};
-use js_types::{ExecMode, MemoryPercent, ProviderId, Request, ResourceClass, Resources};
+use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
+use support::world::{HOUR_S, World};
 use support::*;
 
 /// The memory the pool lists: 8 GiB.
@@ -169,6 +170,45 @@ fn a_whole_node_request_sees_the_cut_memory() {
     fx.join("a", "t");
     let over = fx.provider.start(ask(1, NINETY + 1));
     assert_eq!(over, StartAck::Refused(RefusalCode::NoFit));
+}
+
+/// Asserts that a whole-node booking that has to wait for a busy host sees the cut memory
+/// too: a request of the exact cut reserves the host (a draining mark) and commits it when
+/// the host's lease ends, and a request one byte over the cut is refused `no-fit` and
+/// leaves no mark. It catches a reservation path that reads the unreduced shape.
+#[test]
+fn a_reserved_host_is_held_to_the_cut_memory() {
+    let whole_ninety = || {
+        let name = ProviderId::new("builders").unwrap();
+        let pool = PoolConfig::new(name, ResourceClass::whole_node(), pool_shape(), 4);
+        let pool = pool.with_whole_node(WholeNodeConfig::dedicated(4)).unwrap();
+        pool.with_memory_percent(percent(90))
+    };
+    let ask = |sequence: u64, name: &str, memory_bytes: u64| {
+        let wanted = Request {
+            class: ResourceClass::whole_node().id().clone(),
+            resources: Resources::new(1000, memory_bytes, 0, None).unwrap(),
+            ..request()
+        };
+        let spec = StartSpec::new(lease(sequence), wanted, &[ResourceClass::whole_node()]);
+        spec.unwrap().with_request_id(RequestId::new(name).unwrap())
+    };
+    let mut exact = World::of(whole_ninety(), &["a"]);
+    exact.share(1, HOUR_S);
+    exact.provider.start(ask(2, "r1", NINETY));
+    exact.check();
+    assert_eq!(exact.reserved_host("r1"), Some("a".to_string()));
+    exact.stop(1);
+    exact.fx.registry.advance();
+    exact.provider.start(ask(2, "r1", NINETY));
+    exact.check();
+    assert_eq!(exact.lease_on("a"), Some(lease(2)));
+    let mut over = World::of(whole_ninety(), &["a"]);
+    over.share(1, HOUR_S);
+    let refused = over.provider.start(ask(2, "r1", NINETY + 1));
+    over.check();
+    assert_eq!(refused, StartAck::Refused(RefusalCode::NoFit));
+    assert_eq!(over.reserved_host("r1"), None);
 }
 
 /// Asserts that the registry's view lists the memory the pool lists, the percent and the

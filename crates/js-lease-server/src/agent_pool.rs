@@ -354,7 +354,7 @@ mod tests {
 
     /// `memory_schedulable_percent` cuts the memory of `[shape]` the pool books, rounding
     /// down, and leaves the floor a host must meet whole; a file without it books all of
-    /// it; 0 and 101 are refused naming the key; the key placed after `[shape]` is a key of
+    /// it; 0, 101, -1, a word and 90.5 are refused naming the key; the key placed after `[shape]` is a key of
     /// that table and refused. It catches a percent read and dropped, one that cuts the
     /// floor instead of the booking, and one that rounds up.
     #[test]
@@ -370,6 +370,10 @@ mod tests {
         for bad in ["0", "101"] {
             let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
             assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
+        for bad in ["-1", "\"ninety\"", "90.5"] {
+            let said = parse(&with(&format!("memory_schedulable_percent = {bad}"))).unwrap_err();
+            assert!(said.contains("memory_schedulable_percent"), "{bad}: {said}");
         }
         let inside = format!("{MINIMAL}memory_schedulable_percent = 90\n");
         let said = parse(&inside).unwrap_err();
