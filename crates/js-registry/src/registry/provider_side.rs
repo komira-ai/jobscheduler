@@ -82,7 +82,7 @@ impl Registry {
         let State { book, records, .. } = &mut *guard;
         let seated = match book.seat(host, lease) {
             Err(SeatError::Unlisted(_)) => {
-                book.insert_host(host.clone(), self.shared.config.shape().clone());
+                book.insert_host(host.clone(), self.shared.config.booked().clone());
                 records.insert(host.clone(), Record::awaiting(binding, now));
                 book.seat(host, lease)
             }

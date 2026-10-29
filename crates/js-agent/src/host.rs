@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
 
-use js_caps::DETECTED_KEYS;
+use js_caps::{DETECTED_KEYS, DISK_GIB};
 
 use crate::cli::Cli;
-use crate::facts::{CommandRunner, FileReader, Platform, detect, host_id, machine_id};
+use crate::facts::{CommandRunner, FileReader, Platform, detect, free_gib, host_id, machine_id};
 
 /// The hello, and what the operator should be told about how it was made.
 #[derive(Debug)]
@@ -66,6 +66,26 @@ fn capabilities(
     }
 }
 
+/// The free disk of the work volume, reported as `disk-gib`: the volume that holds
+/// `--scratch-root`, where every run gets its directory. Without the flag there is no work
+/// volume to speak of and nothing is reported. A volume that cannot be read is a warning,
+/// and nothing is reported, so a job that needs disk is not placed on a guess. It is read
+/// when the hello is made, not again.
+fn disk(cli: &Cli, runner: &dyn CommandRunner) -> (Option<(String, String)>, Option<String>) {
+    let Some(root) = &cli.scratch_root else {
+        return (None, None);
+    };
+    match free_gib(runner, root) {
+        Ok(gib) => (Some((DISK_GIB.to_owned(), gib.to_string())), None),
+        Err(why) => (
+            None,
+            Some(format!(
+                "--scratch-root: cannot read the free disk ({why}); disk-gib is not reported"
+            )),
+        ),
+    }
+}
+
 /// The id to register under.
 fn id(
     cli: &Cli,
@@ -119,7 +139,9 @@ pub fn offer(
     let cpu_millis = capped("--cpu-millis", cli.cpu_millis, detected.cpu_millis)?;
     let memory_bytes = capped("--memory-bytes", cli.memory_bytes, detected.memory_bytes)?;
     let gpu_class = class(cli.gpu_class.clone(), gpus, detected.gpus.class)?;
-    let capabilities = capabilities(platform, &cli.capabilities)?;
+    let mut capabilities = capabilities(platform, &cli.capabilities)?;
+    let (free, disk_warning) = disk(cli, runner);
+    capabilities.extend(free);
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;
     let devices = detected
@@ -150,6 +172,6 @@ pub fn offer(
             // The credential has a home only under a state root.
             accepts_host_credential: cli.state_root.is_some(),
         },
-        warnings: detected.warnings,
+        warnings: detected.warnings.into_iter().chain(disk_warning).collect(),
     })
 }

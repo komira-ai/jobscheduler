@@ -13,6 +13,8 @@ mod ops;
 mod procs;
 mod release;
 mod run;
+// These tests watch a process end through a pidfd, which only Linux has.
+#[cfg(target_os = "linux")]
 mod run_group;
 mod run_renew;
 mod servers;
