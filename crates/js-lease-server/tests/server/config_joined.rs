@@ -210,3 +210,20 @@ fn a_joined_pool_refuses_the_keys_of_a_launching_pool() {
         "{said}"
     );
 }
+
+/// Asserts that a loaded joined pool launches nothing: the configuration carries no elastic
+/// plan, and a server started on it lists no pool at `/v1/pools`. The launch pool, the check
+/// loop and the status all come from the plan, so a joined pool that left a plan in the
+/// registering side would show here. It catches a joined pool that starts to launch or to
+/// check a provider it does not have.
+#[tokio::test]
+async fn a_joined_pool_launches_nothing() {
+    let scratch = Scratch::new("joined_launches_nothing");
+    let text = file(&server_with_agents(&scratch), &[&joined()]);
+    let config = load(&scratch, &text).unwrap();
+    assert!(config.elastic_pool().is_none());
+    let h = Harness::over(scratch, config).await;
+    let reply = request(h.addr(), "GET", "/v1/pools", None, None).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["pools"], json!([]));
+}
