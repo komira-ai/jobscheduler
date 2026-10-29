@@ -2,7 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,6 +22,7 @@ use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
+use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
@@ -226,6 +227,43 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
+/// Whether `ip` is an address only a private network reaches: the loopback, the private
+/// ranges (10/8, 172.16/12, 192.168/16, and fc00::/7), link-local addresses, the shared
+/// range a tailnet uses (100.64/10; its IPv6 range is in fc00::/7), and, because a
+/// wildcard bind is normal in a VPC or a container and the server cannot tell what is
+/// behind it, the wildcard. Anything else is a public address.
+pub fn is_private_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let shared = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || shared
+        }
+        IpAddr::V6(v6) => {
+            let local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            let link = (v6.segments()[0] & 0xffc0) == 0xfe80;
+            let mapped = v6
+                .to_ipv4_mapped()
+                .is_some_and(|v4| is_private_address(v4.into()));
+            v6.is_loopback() || v6.is_unspecified() || local || link || mapped
+        }
+    }
+}
+
+/// Whether the status routes are served on `listen`; when not, says so in `warnings`.
+fn status_policy(flag: &str, listen: SocketAddr, warnings: &mut Vec<String>) -> bool {
+    let private = is_private_address(listen.ip());
+    if !private {
+        warnings.push(format!(
+            "server: warning: /v1/pools and /status are not served: {flag} {listen} is not a private address"
+        ));
+    }
+    private
+}
+
 /// The bearer token. It is compared in constant time and never printed.
 #[derive(Clone)]
 pub struct Token(Vec<u8>);
@@ -274,6 +312,9 @@ pub struct Config {
     pub(crate) agent_listen: Option<SocketAddr>,
     pub(crate) advertise_url: Option<String>,
     pub(crate) warnings: Vec<String>,
+    /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
+    pub(crate) status: bool,
+    pub(crate) launch_inputs: LaunchInputs,
     pub(crate) elastic: Option<ElasticPlan>,
     pub(crate) state_file: PathBuf,
     pub(crate) boot: Boot,
@@ -326,12 +367,16 @@ impl Config {
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
+        let mut warnings = Vec::new();
+        let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
             listen: cli.listen,
             listen_flag: "--listen",
             agent_listen: None,
             advertise_url: None,
-            warnings: Vec::new(),
+            warnings,
+            status,
+            launch_inputs: LaunchInputs::default(),
             elastic: None,
             state_file: required(cli.state_file, "--state-file")?,
             boot: required(cli.boot, "--boot")?.into(),
@@ -367,7 +412,7 @@ impl Config {
             server,
             client_token,
             hosts,
-            warnings,
+            mut warnings,
         } = file::load(path, &load)?;
         let (hosts, elastic) = match hosts {
             LoadedHosts::Static(source) => (Hosts::Static(source), None),
@@ -396,12 +441,15 @@ impl Config {
             }
         };
         let settings = with_pool_settings(server.settings, &hosts)?;
+        let status = status_policy("server.listen", server.listen, &mut warnings);
         Ok(Self {
             listen: server.listen,
             listen_flag: "server.listen",
             agent_listen: server.agent_listen,
             advertise_url: server.advertise_url,
             warnings,
+            status,
+            launch_inputs: LaunchInputs::default(),
             elastic,
             state_file: server.state_file,
             boot: server.boot.into(),
@@ -438,6 +486,21 @@ impl Config {
     /// to every interface.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
+    }
+
+    /// Whether the server serves `GET /v1/pools` and `GET /status`. They take no token, so
+    /// they are served only when the listen address is a private one
+    /// ([`is_private_address`]); on any other the routes do not exist, and the server says
+    /// so in [`warnings`](Self::warnings).
+    pub fn serves_status(&self) -> bool {
+        self.status
+    }
+
+    /// The same configuration with what a launch plan needs that the file does not carry:
+    /// the agent binary's digest, the Tailscale build, or a stand-in network mode.
+    pub fn with_launch_inputs(mut self, inputs: LaunchInputs) -> Self {
+        self.launch_inputs = inputs;
+        self
     }
 
     /// The elastic pool of the file, when it has one.

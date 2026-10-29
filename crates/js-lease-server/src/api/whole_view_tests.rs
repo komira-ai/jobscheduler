@@ -53,15 +53,15 @@ fn request(class: &str, wall_s: u64) -> Request {
 /// A server over one registered host, `a`, in a pool that gives up a reserved host after
 /// thirty seconds and keeps a request that is not presented again on its wait list for ten
 /// minutes, so only the drain deadline ends a reservation here.
-struct Rig {
-    shared: Arc<Shared>,
+pub(super) struct Rig {
+    pub(super) shared: Arc<Shared>,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
     registry: Registry,
 }
 
 impl Rig {
-    async fn new(name: &str) -> Self {
+    pub(super) async fn new(name: &str) -> Self {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/whole_view_unit")
             .join(name);

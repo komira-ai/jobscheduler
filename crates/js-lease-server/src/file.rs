@@ -13,10 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::Uri;
-use js_elastic::ElasticProvider;
+use js_elastic::{Demand, ElasticProvider};
 use js_lease::Settings;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
@@ -27,7 +28,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{BootMode, Limits, TlsFiles, Token, parse_duration, parse_token};
 use crate::error::StartupError;
-use crate::kinds::{BuildCtx, Built, ElasticBuilt, Kinds, SecretFiles};
+use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
@@ -88,6 +89,16 @@ pub enum Launch {
     Live,
 }
 
+impl Launch {
+    /// The word the file spells it with.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plan => "plan",
+            Self::Live => "live",
+        }
+    }
+}
+
 /// How a launched host reaches the server, as the pool's `network` table says it.
 #[derive(Debug)]
 pub enum NetworkPlan {
@@ -102,10 +113,27 @@ pub enum NetworkPlan {
     },
 }
 
+impl NetworkPlan {
+    /// The word the file spells the mode's kind with.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Tailscale { .. } => "tailscale",
+        }
+    }
+}
+
 /// An elastic pool, as the file describes it.
 pub struct ElasticPlan {
     /// The pool's name.
     pub name: String,
+    /// The provider kind the pool names, such as `lambdalabs`.
+    pub kind: String,
+    /// The least the pool's sizes bring, as far as the kind knows it offline.
+    pub floor: Floor,
+    /// A request for exactly the floor: what a launch is planned for while no request
+    /// waits.
+    pub(crate) floor_demand: Demand,
     /// Whether it launches.
     pub launch: Launch,
     /// The most instances at once.
@@ -122,7 +150,7 @@ pub struct ElasticPlan {
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
-    provider: Box<dyn ElasticProvider>,
+    pub(crate) provider: Arc<dyn ElasticProvider>,
 }
 
 impl ElasticPlan {
@@ -136,6 +164,8 @@ impl fmt::Debug for ElasticPlan {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         out.debug_struct("ElasticPlan")
             .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("floor", &self.floor)
             .field("launch", &self.launch)
             .field("max_instances", &self.max_instances)
             .field("max_spend_per_hour_cents", &self.max_spend_per_hour_cents)
@@ -787,11 +817,21 @@ impl Elastic<'_> {
             Ok(resources) => resources,
             Err(err) => return Err(s.fail("provider", &err.to_string())),
         };
+        let floor_demand = Demand {
+            resources: resources.clone(),
+            disk_bytes: None,
+            os: None,
+            arch: None,
+            exec,
+        };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
         let pool = registry_pool(s, id, &class, shape, max, exec)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
+            kind: kind.to_owned(),
+            floor: built.floor,
+            floor_demand,
             launch,
             max_instances: max,
             max_spend_per_hour_cents: hour,
@@ -800,7 +840,7 @@ impl Elastic<'_> {
             boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
             exec,
             network,
-            provider: built.provider,
+            provider: Arc::from(built.provider),
         };
         Ok(Registering { plan, pool, tokens })
     }

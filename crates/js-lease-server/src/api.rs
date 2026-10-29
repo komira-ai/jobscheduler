@@ -24,6 +24,7 @@ use crate::config::Token;
 use crate::hosts::HostList;
 use crate::join_api;
 use crate::run_api;
+use crate::status::{self, Status};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
     parse_id,
@@ -42,6 +43,9 @@ pub(crate) struct Shared {
     table: Mutex<Table>,
     token: Token,
     agents: Option<Arc<Agents>>,
+    /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
+    /// private one and the routes answer as if they did not exist.
+    status: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
     /// The whole-node counts the last tick logged.
@@ -54,10 +58,18 @@ impl Shared {
             table: Mutex::new(table),
             token,
             agents,
+            status: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
         }
+    }
+
+    /// The same state serving the status routes from `status`.
+    #[must_use]
+    pub(crate) fn with_status(mut self, status: Option<Arc<Status>>) -> Self {
+        self.status = status;
+        self
     }
 
     /// The lease table behind its lock. A handler that also needs the registry takes this
@@ -154,6 +166,8 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
         .with_state(shared.clone());
     let open = Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/pools", get(pools))
+        .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
     match &shared.agents {
@@ -212,6 +226,35 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
         true => "ok".into_response(),
         false => (StatusCode::SERVICE_UNAVAILABLE, "tick loop stopped").into_response(),
     }
+}
+
+/// `GET /v1/pools`: the elastic pools as JSON. No token: who may reach it is the
+/// network's to say (see [`crate::status`]). Not served, and a 404 like any unknown route,
+/// when the server listens on an address that is not private.
+async fn pools(State(shared): State<Arc<Shared>>) -> Response {
+    let served = |status: &Arc<Status>| json(StatusCode::OK, &status.view());
+    shared.status.as_ref().map_or_else(not_found, served)
+}
+
+/// `GET /status`: the same data as a page.
+async fn status_page(State(shared): State<Arc<Shared>>) -> Response {
+    shared.status.as_ref().map_or_else(not_found, page_response)
+}
+
+fn page_response(status: &Arc<Status>) -> Response {
+    let page = status::page(&status.view(), status.now());
+    let headers = [
+        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
+    ];
+    (StatusCode::OK, headers, page).into_response()
+}
+
+/// The answer of a status route that is not served: that of a route that does not exist.
+fn not_found() -> Response {
+    ApiError::no_route().into_response()
 }
 
 async fn no_route() -> ApiError {
@@ -304,6 +347,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, &list)
 }
 
+#[cfg(test)]
+mod status_gate_tests;
 #[cfg(test)]
 mod whole_view_tests;
 
