@@ -96,7 +96,6 @@ fn probe_5000() {
 
 #[test]
 fn probe_links_100_admitted() {
-    use js_bundle::*;
     let target = format!("{}a", "a/../".repeat(190));
     let mut tar = Tar::new().dir("a");
     for i in 0..100 {
