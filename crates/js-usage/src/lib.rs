@@ -26,6 +26,14 @@
 //! dependencies; its P90 is the same nearest-rank definition, so a flat and a curve charge
 //! agree. Values are raw: the memory margin and rounding are admission's.
 //!
+//! # The hub
+//!
+//! [`UsageHub`] is what a server keeps between heartbeats to feed a [`UsageSink`]: it files
+//! the lease minutes of each host's beats, waits out a clean run's last minute, hands the
+//! run to the sink under the key a [`KeySource`] named, and schedules the sink's flush and
+//! prune. Its inputs are plain values ([`Beat`]); any server, whatever its wire form and
+//! registry, adapts its heartbeat to them.
+//!
 //! # Time
 //!
 //! Three bases never mix: a node's monotonic microseconds (windows and lease minutes,
@@ -50,18 +58,27 @@ mod codec;
 mod convert;
 mod curves;
 mod fit;
+mod hub;
 mod key;
 mod profile_store;
 mod ring;
+mod sink;
 #[cfg(test)]
 mod testkit;
 
 pub use codec::{ROW_VERSION, RowError};
 pub use curves::{KeyMap, ProfileCurves, STALE_DAYS};
 pub use fit::{DILATE_MINUTES, Fit, MIN_RUNS_FOR_CURVE, fit, p90};
+pub use hub::{
+    AcceptedResult, Beat, BeatLoad, DroppedReadings, FLUSH_EVERY_MINUTES, Finish, Flushed,
+    GRACE_BEATS, MAX_TRACKS, TRACK_IDLE_MINUTES, Ticked, UsageCounters, UsageHub,
+};
 pub use key::{BadKey, MAX_KEY_LEN, ProfileKey};
 pub use profile_store::{KEY_PREFIX, KeyProfile, ProfileError, ProfileStore};
 pub use ring::{Admitted, BUCKETS, Bucket, RING_RUNS, Ring, Run, RunMinute, RunSeries};
+pub use sink::{
+    KeySource, NoKeys, NoUsage, Observation, RunEnd, SinkCounters, UsageFault, UsageSink, drop_name,
+};
 
 /// Wall minutes in an hour: the unit a node series is stored in (one row per hour).
 pub const MINUTES_PER_HOUR: u64 = 60;
