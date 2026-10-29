@@ -282,6 +282,12 @@ impl Admission {
         self.hints.remove(&operation);
     }
 
+    /// Whether a prediction is held for `operation`.
+    #[cfg(test)]
+    pub(crate) fn hinted(&self, operation: OperationId) -> bool {
+        self.hints.contains_key(&operation)
+    }
+
     /// The cost `request`, operation `operation`, is charged if placed now: its
     /// prediction (else its request's cores and no memory), the limit it runs under, and
     /// for a retry up the memory ladder (`retried`) at least that limit as memory: a

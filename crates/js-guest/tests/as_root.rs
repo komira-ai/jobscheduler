@@ -8,14 +8,16 @@
 //!   user, since it refuses root) it reports `System`. The daemon is the control: an
 //!   agent that always said `Aqua` would pass the first check alone.
 //!
-//! Every test is `#[ignore]`: each needs root. CI runs them with `cargo xtask sudo-test
-//! -p kbf-guest --test as_root`, which builds this file as the runner's user and runs
-//! the binary through `sudo -n` with `--ignored` (GitHub's hosted runners allow
-//! passwordless sudo).
+//! Every test but the scratch-name check is `#[ignore]`: each needs root. CI runs them
+//! with `cargo xtask sudo-test -p kbf-guest --test as_root`, which builds this file as
+//! the runner's user and runs the binary through `sudo -n` with `--ignored` (GitHub's
+//! hosted runners allow passwordless sudo).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+use js_testkit::dir::TestDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_kbf-guest");
 
@@ -31,22 +33,18 @@ fn assert_root() {
 }
 
 /// A directory of one test's own (mode 0755), removed when the test ends.
-struct Scratch(PathBuf);
+struct Scratch(TestDir);
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("kbf-guest-as-root-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("scratch");
-        set_mode(&dir, 0o755);
-        Scratch(dir)
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        // Root made it: leave no root-owned files in the runner's target directory.
-        let _ = std::fs::remove_dir_all(&self.0);
+        // Root makes it and root's `TestDir` removes it on drop: no root-owned files are
+        // left in the runner's target directory.
+        let owner = TestDir::under(
+            Path::new(env!("CARGO_TARGET_TMPDIR")),
+            &format!("kbf-guest-as-root-{name}"),
+        );
+        set_mode(owner.path(), 0o755);
+        Scratch(owner)
     }
 }
 
@@ -72,6 +70,24 @@ fn run_bounded(args: &[std::ffi::OsString]) -> Output {
     child.wait_with_output().expect("collected kbf-guest")
 }
 
+/// Asserts that two scratch directories made under one name are two directories: the
+/// second one's set-up does not remove the first one's files and dropping the second does
+/// not remove the first. It needs no root, so it is not ignored.
+#[test]
+fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
+    let first = Scratch::new("same-name");
+    std::fs::write(first.0.join("f"), "one").unwrap();
+    let second = Scratch::new("same-name");
+    assert_ne!(first.0.path(), second.0.path());
+    assert!(
+        first.0.join("f").exists(),
+        "a second scratch removed the first"
+    );
+    let kept = first.0.join("f");
+    drop(second);
+    assert_eq!(std::fs::read(kept).unwrap(), b"one");
+}
+
 /// Catches the root refusal skipped, or reported with a status a supervisor reads as
 /// success or as a crash: as root, `session` and `serve` each exit 2 with the refusal,
 /// and `serve` does not create its socket first. The token file holds a valid token,
@@ -92,9 +108,9 @@ fn as_root_every_subcommand_refuses_and_exits_2() {
         "--token-file".into(),
         token.into_os_string(),
         "--inputs".into(),
-        s.0.clone().into_os_string(),
+        s.0.to_path_buf().into_os_string(),
         "--outputs".into(),
-        s.0.clone().into_os_string(),
+        s.0.to_path_buf().into_os_string(),
     ];
     for args in [vec!["session".into()], serve] {
         let out = run_bounded(&args);
@@ -208,7 +224,7 @@ mod launchd {
     /// as that user) can write its output there; its plist written by root, mode 0644.
     fn job_files(name: &str, uid: u32, gid: u32, user: Option<&str>) -> (Scratch, String) {
         let s = Scratch::new(name);
-        chown(&s.0, Some(uid), Some(gid)).expect("chown scratch");
+        chown(s.0.path(), Some(uid), Some(gid)).expect("chown scratch");
         let label = format!("kbf.ci.guest-session.{name}");
         let out = s.0.join(format!("{name}.out"));
         let file = s.0.join(format!("{name}.plist"));
