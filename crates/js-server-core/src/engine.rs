@@ -521,7 +521,7 @@ impl Engine {
         // The cost likewise: a new operation is charged it from its first round. A twin keeps
         // its cost while it holds a lease; one that still waits takes the newer prediction.
         if let Some(prediction) = prediction.filter(|_| admitted.held == Held::Here) {
-            let waiting = self.sched.state(admitted.operation) == Some(&OpState::Queued);
+            let waiting = !matches!(self.sched.state(admitted.operation), Some(OpState::Completed { .. } | OpState::Failed { .. } | OpState::Refused { .. }));
             if !admitted.joined || waiting {
                 self.sched.set_cost(admitted.operation, prediction);
             }
