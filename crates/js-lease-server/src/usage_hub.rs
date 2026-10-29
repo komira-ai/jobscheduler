@@ -384,6 +384,7 @@ impl Usage {
             self.hub().counts.records_dropped += 1;
             return;
         };
+        info!("node minute");
         let now = self.now_minute();
         let fresh = match load {
             Some(load) => self.observe(&host, beat.epoch, load, now),
