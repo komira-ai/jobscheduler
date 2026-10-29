@@ -313,7 +313,7 @@ impl Runtime for FakeRuntime {
         Ok(())
     }
 
-    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         let state = self.state.borrow();
         let run = &state.containers.get(&id.0)?.run_id;
         state.cgroups.get(run).cloned()

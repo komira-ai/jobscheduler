@@ -250,7 +250,7 @@ pub trait Runtime {
     /// outside the control group the agent was told holds its containers. The lifecycle
     /// asks once, when a job starts or is adopted, and a lease with no control group is
     /// simply not sampled. A runtime with no control groups keeps the default.
-    fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, _id: &RunHandle) -> Option<PathBuf> {
         None
     }
 }

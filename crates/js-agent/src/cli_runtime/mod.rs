@@ -876,7 +876,7 @@ impl CliRuntime {
     /// `--actions-cgroup`, when the container is over, when its process or control group
     /// cannot be read, and when the control group is not strictly below `--actions-cgroup`
     /// (the engine ignored the parent, so the node's counter would not hold the lease).
-    fn cgroup_of(&self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup_of(&self, id: &RunHandle) -> Option<PathBuf> {
         let actions = Path::new(self.settings.actions_cgroup()?);
         let text = self
             .inspect(id, "{{.State.Pid}} {{.State.Status}}")
@@ -1361,7 +1361,7 @@ impl Runtime for CliRuntime {
         self.gpus
     }
 
-    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+    fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
         self.cgroup_of(id)
     }
 }
