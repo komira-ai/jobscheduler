@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, Request, Requeue, Scheduler,
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Prediction, Request,
+    Requeue, Scheduler,
 };
 use js_store::Rows;
 use js_types::sched::{
@@ -490,6 +491,7 @@ impl Engine {
         request: &Request,
         parcel: &[u8],
         size_key: Option<u64>,
+        prediction: Option<Prediction>,
         now: FarmTime,
     ) -> Result<Admitted, NotQueued> {
         if self.fenced {
@@ -515,6 +517,14 @@ impl Engine {
         // to it). A joined caller keeps the key of the operation it joined.
         if let Some(key) = size_key.filter(|_| !admitted.joined && held == Held::Here) {
             self.sched.set_size_key(admitted.operation, key);
+        }
+        // The cost likewise: a new operation is charged it from its first round. A twin keeps
+        // its cost while it holds a lease; one that still waits takes the newer prediction.
+        if let Some(prediction) = prediction.filter(|_| admitted.held == Held::Here) {
+            let waiting = self.sched.state(admitted.operation) == Some(&OpState::Queued);
+            if !admitted.joined || waiting {
+                self.sched.set_cost(admitted.operation, prediction);
+            }
         }
         Ok(admitted)
     }

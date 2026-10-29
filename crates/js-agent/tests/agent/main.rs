@@ -15,6 +15,8 @@ mod binary;
 mod bounds;
 mod cli_runtime;
 mod container;
+mod credential;
+mod credential_e2e;
 mod drive;
 mod e2e;
 mod exclusive;

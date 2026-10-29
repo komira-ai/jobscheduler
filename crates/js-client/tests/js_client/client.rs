@@ -275,3 +275,44 @@ fn a_reply_prints_without_its_body() {
         "Reply { status: 200, body: <redacted>, retry_after: Some(3s) }"
     );
 }
+
+/// Asserts that after `set_bearer` every request carries the new secret and none carries
+/// the token, that a secret which cannot be a header value is refused by name without the
+/// secret in the message, and that the refusal leaves the bearer that was set. It catches
+/// a switch that is not applied to all four calls, a client that keeps sending the old
+/// token, and a refusal that clears the bearer or echoes the secret.
+#[test]
+fn a_set_bearer_replaces_the_token_on_every_call() {
+    let dir = Scratch::new("client_set_bearer");
+    let fake = Fake::plain(vec![
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+        json_reply(200, "{}"),
+    ]);
+    let mut client = Client::connect(&fake.url("http"), &token_file(&dir), None, LIMIT).unwrap();
+    client.set_bearer("host-cred-0123").unwrap();
+    let said = client
+        .set_bearer("has a space")
+        .expect_err("a space is refused")
+        .to_string();
+    assert_eq!(
+        said,
+        "--token-file: the credential must hold one token of printable ASCII with no space or line break inside it"
+    );
+    assert!(client.set_bearer("").is_err());
+    talk(&client, "/a");
+    client.post("/b", &json!({})).unwrap();
+    client
+        .post_within("/c", &json!({}), Duration::from_secs(5))
+        .unwrap();
+    client.delete("/d").unwrap();
+    for head in fake.requests() {
+        let head = head.to_ascii_lowercase();
+        assert!(
+            head.contains("authorization: bearer host-cred-0123\r\n"),
+            "{head}"
+        );
+        assert!(!head.contains("tok-123"), "{head}");
+    }
+}
