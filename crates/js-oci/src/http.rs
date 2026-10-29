@@ -121,7 +121,11 @@ impl Http {
     /// The addresses `host` resolves to, each checked against the policy. The caller
     /// connects to these addresses and no others, so a name that answers differently a
     /// second time cannot move the connection.
-    async fn addresses(&self, host: &Authority) -> Result<Vec<SocketAddr>, Error> {
+    async fn addresses(
+        &self,
+        host: &Authority,
+        redirected: bool,
+    ) -> Result<Vec<SocketAddr>, Error> {
         let port = host.port();
         let found: Vec<SocketAddr> = match self.resolve.get(host.host()) {
             Some(ip) => vec![SocketAddr::new(*ip, port)],
@@ -134,7 +138,9 @@ impl Http {
                 .collect(),
         };
         for addr in &found {
-            self.policy.address_ok(host, addr.ip())?;
+            if !redirected {
+                self.policy.address_ok(host, addr.ip())?;
+            }
         }
         Ok(found)
     }
@@ -148,8 +154,8 @@ impl Http {
     ) -> Result<Response<Incoming>, Error> {
         let mut url = url.to_owned();
         let mut headers = headers.to_vec();
-        for _ in 0..=MAX_REDIRECTS {
-            let response = self.get_once(&url, &headers).await?;
+        for hop in 0..=MAX_REDIRECTS {
+            let response = self.get_once(&url, &headers, hop > 0).await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -174,6 +180,7 @@ impl Http {
         &self,
         url: &str,
         headers: &[(HeaderName, String)],
+        redirected: bool,
     ) -> Result<Response<Incoming>, Error> {
         let transport = |why: String| Error::Transport {
             what: url.to_owned(),
@@ -188,7 +195,7 @@ impl Http {
         let name = ServerName::try_from(authority.host().to_owned())
             .map_err(|e| transport(e.to_string()))?;
         let connect = async {
-            let addrs = self.addresses(&authority).await?;
+            let addrs = self.addresses(&authority, redirected).await?;
             let tcp = TcpStream::connect(addrs.as_slice())
                 .await
                 .map_err(|e| transport(format!("connect: {e}")))?;
