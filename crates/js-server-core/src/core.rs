@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
-    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
-    Request, UNSERVABLE_WAIT,
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder,
+    MemoryPercent, PercentError, Prediction, Request, UNSERVABLE_WAIT,
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
@@ -80,6 +80,32 @@ pub struct Config {
     /// Where the scheduler finds the learned curves of action keys
     /// ([`Config::with_curves`]); `None` is the scheduler's default, no curves.
     pub(crate) curves: Option<Curves>,
+    /// `memory_schedulable_percent`: the whole percent, 1 to 100, of the memory a worker
+    /// reports that admission books against; the rest is headroom. The scheduler takes
+    /// `floor(memory * percent / 100)` bytes as the worker's capacity wherever it enters
+    /// booking: the load predicate, the flat-memory guard, VM booking, the memory
+    /// ladder's cap, the whole-host and whole-machine tests, and the unservable check
+    /// (and a remote frontend's session, when this core looks for a host that could run
+    /// stuck work). The capacity the scheduler shows is the cut one. Cores, GPUs, VM
+    /// slots and the lease cap are not cut, and neither is any figure an agent measures
+    /// or a job's learned memory. Defaults to 100, which leaves admission unchanged.
+    /// [`Config::validate`] refuses 0 and anything above 100, and [`Core::open`] calls it,
+    /// so a server refuses to start on such a value; only [`Core::new`], which cannot fail,
+    /// holds one to 1 to 100, as a last resort. A remote frontend's daemons are judged by
+    /// this core's percent, not their own frontend's, so a fleet whose frontends run
+    /// different percents applies the local one to every daemon it looks at.
+    pub memory_schedulable_percent: u32,
+}
+
+/// Why [`Core::open`] did not start a core.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// The configuration is out of range.
+    #[error(transparent)]
+    Config(#[from] PercentError),
+    /// The state store cannot be read or written, or holds a row the scheduler did not write.
+    #[error(transparent)]
+    State(#[from] StateError),
 }
 
 impl Config {
@@ -98,7 +124,31 @@ impl Config {
             whole_node: None,
             size_keys: false,
             curves: None,
+            memory_schedulable_percent: 100,
         }
+    }
+
+    /// Whether this configuration can build a core: `memory_schedulable_percent` must be
+    /// an integer from 1 to 100. The error names the field. [`Core::open`] calls this
+    /// first; [`Core::new`], which cannot fail, does not.
+    ///
+    /// # Errors
+    ///
+    /// [`PercentError`] when `memory_schedulable_percent` is 0 or above 100.
+    pub fn validate(&self) -> Result<(), PercentError> {
+        MemoryPercent::new(self.memory_schedulable_percent).map(|_| ())
+    }
+
+    /// This configuration, booking `percent` of each worker's reported memory
+    /// ([`Config::memory_schedulable_percent`]).
+    ///
+    /// # Errors
+    ///
+    /// [`PercentError`] when `percent` is 0 or above 100.
+    pub fn with_memory_schedulable_percent(mut self, percent: u32) -> Result<Self, PercentError> {
+        MemoryPercent::new(percent)?;
+        self.memory_schedulable_percent = percent;
+        Ok(self)
     }
 
     /// This configuration, reading and writing size keys when `on` ([`Config::size_keys`]).
@@ -388,14 +438,16 @@ impl<A: Adapter> Core<A> {
     /// ([`Core::intake`]) requeues its lease. An operator's cordons are taken up too.
     ///
     /// # Errors
-    /// The store cannot be read or written, or holds a row that is not one the scheduler
-    /// wrote.
+    /// [`OpenError::Config`] when `config` fails [`Config::validate`]; [`OpenError::State`]
+    /// when the store cannot be read or written, or holds a row that is not one the
+    /// scheduler wrote.
     pub fn open(
         config: &Config,
         adapter: A,
         storage: Storage,
         now: FarmTime,
-    ) -> Result<Self, StateError> {
+    ) -> Result<Self, OpenError> {
+        config.validate()?;
         let mut core = Self::new(config, adapter);
         let Locked { engine, adapter } = core.state_mut();
         engine.keep_in(adapter, config.term, storage, now)?;

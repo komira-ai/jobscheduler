@@ -17,6 +17,7 @@
 
 mod class;
 mod digest;
+pub mod env;
 mod ids;
 mod job;
 mod labels;

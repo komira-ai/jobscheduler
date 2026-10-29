@@ -4,7 +4,9 @@
 //! An action is admitted to a worker when the worker's load, plus the predicted cost of
 //! what the measurement does not yet cover, plus the predicted cost of the new lease,
 //! stays within the worker's capacity, for CPU and for memory separately. With `C` the
-//! worker's capacity, `p` the cores and `m` the memory peak a lease was charged:
+//! worker's capacity (its reported memory cut to `floor(memory * percent / 100)` by
+//! [`Scheduler::with_memory_percent`](crate::Scheduler::with_memory_percent), 100 by
+//! default), `p` the cores and `m` the memory peak a lease was charged:
 //!
 //! ```text
 //! CPU:    max(measured, f * sum p(covered)) + sum p(uncovered) + V_cpu + p_new  <=  C_cpu * (1 + s_cpu)

@@ -967,6 +967,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-bundle"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
@@ -1119,6 +1129,7 @@ dependencies = [
  "js-provider-fake",
  "js-provider-lambdalabs",
  "js-registry",
+ "js-scaler",
  "js-sched",
  "js-testkit",
  "js-types",
@@ -1256,6 +1267,7 @@ dependencies = [
  "js-lease",
  "js-pool-static",
  "js-provider",
+ "js-sim",
  "js-types",
  "js-whole",
  "serde_json",
