@@ -116,3 +116,41 @@ fn leak(h: &Harness, run: &str, running_ms: u64) {
     ];
     h.fake.leak(&labels, running_ms);
 }
+
+/// Asserts that a run started here whose control group the runtime could not give is asked
+/// about again: the first call says so once, naming the run; once the runtime can say, the
+/// run lists its control group and no line follows. Runs that are not running (one that
+/// exited) and adopted runs (never sampled) are left alone and are never named. It catches
+/// a lease that stays unsampled for its whole life after one failed lookup, a line at every
+/// window, and lines about runs that no one samples.
+#[test]
+fn a_missing_cgroup_is_asked_again_and_told_once() {
+    let mut h = Harness::new("running-late-cgroup");
+    leak(&h, "older", 400_000);
+    h.restart().unwrap();
+    h.start(job("r1"));
+    h.start(job("r3"));
+    h.fake.exit("r3", 0);
+    h.life.step();
+
+    let told = h.life.find_cgroups();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("run r1 "), "{told:?}");
+    assert!(h.life.find_cgroups().is_empty(), "told once");
+
+    h.fake.set_cgroup("r1", &at("r1"));
+    assert!(h.life.find_cgroups().is_empty());
+    let found: Vec<_> = h
+        .life
+        .running()
+        .into_iter()
+        .map(|r| (r.lease_id, r.cgroup))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("lease-older".to_owned(), None),
+            ("lease-r1".to_owned(), Some(at("r1").into())),
+        ]
+    );
+}
