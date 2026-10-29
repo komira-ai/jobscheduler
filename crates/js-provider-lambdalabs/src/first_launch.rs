@@ -10,8 +10,12 @@
 //!   API gave and the limits, and stops. The plan ends in a hash of its text.
 //! - `--go --plan-hash H` launches only when the plan read now hashes to `H`; a price,
 //!   capacity or flag that changed since the dry run gives a different hash and a refusal.
+//! - `--go` first lists the instances; one carrying this runner's ownership marks, whole
+//!   or partial, that is not terminated refuses the launch, and so does a list that
+//!   fails. A dry run shows the same finding as a warning.
 //! - The state file is created before the launch is sent and rewritten when it answers,
-//!   so `--teardown-only <state file>` can find the instance after a crash.
+//!   so `--teardown-only <state file>` can find the instance after a crash. Each write
+//!   ends with an fsync of the directory.
 //! - A boot deadline, a wall-clock cap and a spend cap (the API's hourly price times the
 //!   time since the launch) each force teardown. Termination is tried a bounded number
 //!   of times and each try reads the instance back.
@@ -37,11 +41,13 @@ use crate::http::SetupError;
 use crate::key::ApiKey;
 use crate::model::{InstanceId, Status};
 use crate::options::{GpuClass, OptionTable};
-use crate::own::{AcquireId, SchedulerId};
+use crate::own::{AcquireId, Claim, Owner, SchedulerId};
 use crate::provider::LambdaProvider;
 
 use args::{Args, Mode, Ssh};
 use state::State;
+
+pub use state::sync_dir;
 
 /// The scheduler id and pool name on everything this runner launches.
 const OWNER: &str = "first-launch";
@@ -95,6 +101,9 @@ pub trait Remote {
 pub type Connect<'a> =
     dyn Fn(&str, &ApiKey, Option<&Path>) -> Result<Arc<dyn LambdaApi>, SetupError> + 'a;
 
+/// Makes the directory at the path durable (see [`sync_dir`]).
+pub type DirSync<'a> = dyn Fn(&Path) -> std::io::Result<()> + 'a;
+
 /// Everything outside the process that the runner touches, except the state file.
 pub struct Seams<'a> {
     /// The monotonic clock the limits read.
@@ -105,6 +114,9 @@ pub struct Seams<'a> {
     pub remote: &'a dyn Remote,
     /// Seconds since the Unix epoch, for the state file.
     pub wall_unix: &'a dyn Fn() -> u64,
+    /// Syncs the directory of the state file after the file was created or renamed into
+    /// place; the example passes [`sync_dir`].
+    pub sync_dir: &'a DirSync<'a>,
     /// Builds the API client.
     pub connect: &'a Connect<'a>,
     /// True once a stop was requested (the example sets it from a signal handler). Read
@@ -358,6 +370,46 @@ impl Runner<'_, '_> {
         ))
     }
 
+    /// The instances of the account that carry this runner's ownership marks (whole or
+    /// partial) and still exist, or why the account could not be read. `None` when the
+    /// account holds none. A terminated instance no longer bills and is skipped.
+    fn existing(&self) -> Option<(String, Vec<String>)> {
+        let owner = Owner::new(SchedulerId::made(OWNER));
+        let all = match self.api.list_instances() {
+            Ok(all) => all,
+            Err(why) => {
+                return Some((
+                    format!("the instances cannot be listed, so none can be ruled out: {why}"),
+                    Vec::new(),
+                ));
+            }
+        };
+        let lines: Vec<String> = all
+            .iter()
+            .filter(|i| i.status != Status::Terminated)
+            .filter_map(|i| {
+                let marks = match owner.claim(i) {
+                    Claim::Ours => "ours",
+                    Claim::Suspect => "suspect, some marks only",
+                    Claim::Foreign => return None,
+                };
+                Some(format!(
+                    "  {} name={} status={:?} marks={marks}",
+                    i.id,
+                    i.name.as_deref().unwrap_or("-"),
+                    i.status
+                ))
+            })
+            .collect();
+        match lines.is_empty() {
+            true => None,
+            false => Some((
+                "instances with this runner's ownership marks already exist".to_owned(),
+                lines,
+            )),
+        }
+    }
+
     fn plan_and_go(&mut self) -> i32 {
         let (plan, provider) = match self.plan() {
             Ok(found) => found,
@@ -368,6 +420,12 @@ impl Runner<'_, '_> {
         let given = match &self.args.mode {
             Mode::Go { plan_hash } => plan_hash.clone(),
             _ => {
+                if let Some((what, lines)) = self.existing() {
+                    self.say(format_args!("warning: {what}; --go would refuse"));
+                    for line in lines {
+                        self.say(line);
+                    }
+                }
                 self.say("dry run: nothing was launched.");
                 self.say("STOP: paste back this output, the plan hash line included.");
                 return 0;
@@ -378,6 +436,14 @@ impl Runner<'_, '_> {
                 "--go needs --plan-hash equal to the hash of the plan above; the plan read now does not match, so nothing was launched",
                 "paste back this output.",
             );
+        }
+        if let Some((what, lines)) = self.existing() {
+            self.say(format_args!("error: {what}; nothing was launched"));
+            for line in lines {
+                self.say(line);
+            }
+            self.say("STOP: run teardown (--teardown-only with the state file of that run) or inspect the provider console first, then paste back this output.");
+            return 1;
         }
         self.launch(&plan, &provider)
     }
@@ -393,7 +459,7 @@ impl Runner<'_, '_> {
             price_cents_per_hour: plan.candidate.price_cents_per_hour,
             instances: Vec::new(),
         };
-        if let Err(why) = state.create(&plan.state_file) {
+        if let Err(why) = state.create(&plan.state_file, self.seams.sync_dir) {
             return self.fail(
                 format_args!("{why}; nothing was launched"),
                 "remove or move the state file only if you know no instance runs, then paste back this output.",
@@ -454,7 +520,7 @@ impl Runner<'_, '_> {
             }
         };
         state.instances.clone_from(&ids);
-        let recorded = state.replace(&plan.state_file);
+        let recorded = state.replace(&plan.state_file, self.seams.sync_dir);
         let names: Vec<&str> = ids.iter().map(InstanceId::as_str).collect();
         self.say(format_args!("launched: {}", names.join(" ")));
         self.say(format_args!("state file: {}", plan.state_file.display()));

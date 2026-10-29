@@ -2,6 +2,8 @@
 //! moves only when the runner sleeps. Nothing here reaches a network.
 
 mod args;
+mod durable;
+mod existing;
 mod go;
 mod limits;
 mod rig;

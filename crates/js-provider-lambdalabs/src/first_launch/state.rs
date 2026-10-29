@@ -2,15 +2,36 @@
 //!
 //! Plain `key=value` lines, written owner-only. It is written before the launch is sent
 //! (with no instance yet) and again when the launch answers, so a crash at any point
-//! leaves enough to look for the instance: its acquire id.
+//! leaves enough to look for the instance: its acquire id. Each step ends with an fsync of
+//! the directory that holds the file, so that the record of a live instance survives a
+//! crash right after the step (a file's own fsync does not make its directory entry
+//! durable).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use super::DirSync;
 use crate::model::InstanceId;
 use crate::own::AcquireId;
+
+/// Makes the directory entries of `dir` durable. The seam of the runner takes this as a
+/// function so that a test can count the calls.
+///
+/// # Errors
+///
+/// The error of opening or syncing the directory.
+pub fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+/// The directory that holds `path`; the current directory for a bare file name.
+fn parent_of(path: &Path) -> &Path {
+    path.parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
 
 /// A state file's content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,19 +78,23 @@ impl State {
         )
     }
 
-    /// Creates `path`, which must not exist.
-    pub(super) fn create(&self, path: &Path) -> Result<(), StateError> {
-        write_new(path, &self.text())
+    /// Creates `path`, which must not exist, and syncs its directory.
+    pub(super) fn create(&self, path: &Path, sync: &DirSync<'_>) -> Result<(), StateError> {
+        write_new(path, &self.text())?;
+        sync(parent_of(path)).map_err(io(path))
     }
 
-    /// Replaces the content of `path` in one step.
-    pub(super) fn replace(&self, path: &Path) -> Result<(), StateError> {
+    /// Replaces the content of `path` in one step: a staging file next to it, made new
+    /// (any stale one removed first) and owner-only, renamed over `path`, then the
+    /// directory synced.
+    pub(super) fn replace(&self, path: &Path, sync: &DirSync<'_>) -> Result<(), StateError> {
         let mut name = path.as_os_str().to_owned();
         name.push(".new");
         let staging = PathBuf::from(name);
         let _ = fs::remove_file(&staging);
         write_new(&staging, &self.text())?;
-        fs::rename(&staging, path).map_err(io(path))
+        fs::rename(&staging, path).map_err(io(path))?;
+        sync(parent_of(path)).map_err(io(path))
     }
 
     /// Reads `path`.

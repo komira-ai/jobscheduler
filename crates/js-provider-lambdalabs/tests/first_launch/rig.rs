@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run};
+use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run, sync_dir};
 use js_provider_lambdalabs::{
     ApiKey, Architecture, FakeLambda, InstanceId, InstanceTypeOffer, LambdaApi, ManualClock,
     Region, SetupError, Status,
@@ -155,6 +155,10 @@ pub struct Rig {
     /// The read (1-based) from which the request counts as made; 0 for never. Lets a
     /// test place the request between two of the runner's own reads.
     pub stop_from_read: Cell<u32>,
+    /// The directories the runner asked to have synced, in order.
+    pub synced: RefCell<Vec<PathBuf>>,
+    /// The sync (1-based) that fails; 0 for none.
+    pub sync_fails_at: Cell<usize>,
 }
 
 impl Drop for Rig {
@@ -189,6 +193,8 @@ impl Rig {
             stop: Cell::new(false),
             stop_reads: Cell::new(0),
             stop_from_read: Cell::new(0),
+            synced: RefCell::new(Vec::new()),
+            sync_fails_at: Cell::new(0),
         }
     }
 
@@ -239,11 +245,19 @@ impl Rig {
                 || (self.stop_from_read.get() != 0
                     && self.stop_reads.get() >= self.stop_from_read.get())
         };
+        let sync = |dir: &Path| {
+            self.synced.borrow_mut().push(dir.to_path_buf());
+            match self.sync_fails_at.get() == self.synced.borrow().len() {
+                true => Err(std::io::Error::other("sync refused")),
+                false => sync_dir(dir),
+            }
+        };
         let seams = Seams {
             clock: self.clock.clone(),
             sleeper: &sleeper,
             remote,
             wall_unix: &wall,
+            sync_dir: &sync,
             connect: &connect,
             stop: &stop,
         };

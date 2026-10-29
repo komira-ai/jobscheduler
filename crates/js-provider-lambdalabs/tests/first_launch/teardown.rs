@@ -43,10 +43,11 @@ fn teardown_only_finds_an_instance_a_crash_left_out_of_the_state_file() {
         .lose_response(Call::Launch, ApiError::Transport("timeout".to_owned()));
     let args = rig.go_args(&[]);
     rig.fake.pass_next(Call::ListInstances);
+    rig.fake.pass_next(Call::ListInstances);
     rig.fake
         .fail_next(Call::ListInstances, ApiError::Transport("down".to_owned()));
-    // The first list is the launch guard's; the fault falls on the one after the lost
-    // answer.
+    // The first list is the check for instances already there, the second the launch
+    // guard's; the fault falls on the one after the lost answer.
     let (status, out) = rig.exec(&args);
     assert_eq!(status, 1, "{out}");
     assert!(rig.state_text().contains("instances=\n"));

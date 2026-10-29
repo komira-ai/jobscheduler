@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run};
+use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run, sync_dir};
 use js_provider_lambdalabs::{ApiKey, HttpApi, LambdaApi, SystemClock};
 
 /// Each API call is answered or fails within this long.
@@ -191,6 +191,7 @@ fn main() {
         sleeper: &RealSleep,
         remote: &Ssh,
         wall_unix: &wall,
+        sync_dir: &sync_dir,
         connect: &connect,
         stop: &stop,
     };
