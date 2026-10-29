@@ -227,6 +227,12 @@ impl Lifecycle {
         if self.taint.is_tainted() {
             return Err(no(refusal::HOST_TAINTED, "this host is tainted"));
         }
+        if spec.native.is_some() {
+            return Err(no(
+                refusal::NATIVE_UNSUPPORTED,
+                "this agent runs no native jobs",
+            ));
+        }
         self.admit_exclusive(spec)?;
         if (spec.isolation, self.config.allow_host_jobs) == (Isolation::Host, false) {
             return Err(no(
