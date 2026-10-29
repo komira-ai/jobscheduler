@@ -193,9 +193,10 @@ impl Allow {
     /// Whether this entry's host may be reached at an address of `class`.
     fn exempts(&self, class: AddressClass) -> bool {
         match class {
-            AddressClass::Private | AddressClass::Shared | AddressClass::UniqueLocal => {
-                self.private
-            }
+            AddressClass::Private
+            | AddressClass::Shared
+            | AddressClass::UniqueLocal
+            | AddressClass::Metadata => self.private,
             AddressClass::Loopback => self.loopback,
             _ => false,
         }
