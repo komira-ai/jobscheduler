@@ -400,6 +400,12 @@ impl Lifecycle {
                 return;
             }
         };
+        // On a host no other job is on, what changed since the last check is the host's. A
+        // container that could not be removed, or a check that found something, has tainted
+        // the host, and `admit` refused this start; so every other job being freed is enough.
+        if self.jobs.iter().all(|job| job.stage == Stage::Freed) {
+            self.checks.idle();
+        }
         let started = self.config.scratch.create(run_id).map_err(|why| {
             (
                 detail::SCRATCH_FAILED,
