@@ -32,15 +32,7 @@ pub(crate) fn shown(text: &str) -> String {
 /// and the fragment are dropped, since a registry's redirect to a CDN carries a
 /// signature in its query, and the result is [`escape`]d like any server text.
 pub(crate) fn url(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((scheme, rest)) if scheme.bytes().all(scheme_byte) => (format!("{scheme}://"), rest),
-        _ => (String::new(), url),
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(end);
-    let host = authority.rsplit('@').next().unwrap_or_default();
-    let path = &tail[..tail.find(['?', '#']).unwrap_or(tail.len())];
-    escape(&format!("{scheme}{host}{path}"))
+    escape(url)
 }
 
 /// Whether `byte` may be in a URI scheme after its first letter.
