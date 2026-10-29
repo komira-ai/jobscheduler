@@ -54,7 +54,7 @@ pub use metadata::{
     DROP_RULES, METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_TABLE, METADATA_UNIT, NFT_BIN,
 };
 use shell::{hex, single_quoted, unit_quoted, word};
-pub use userns::{DOCKER_DROPIN, SUBID_COUNT, SUBID_START, SUBID_USER};
+pub use userns::{DAEMON_JSON, SUBID_COUNT, SUBID_START, SUBID_USER};
 
 /// What a secret prints as in a masked render.
 pub const MASK: &str = "***";

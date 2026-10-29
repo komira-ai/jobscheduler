@@ -1082,11 +1082,16 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    without `--container-subuid <user>`, and checks that `/etc/subuid` and `/etc/subgid` give
    the user one entry of exactly 65536 ids, not from 0, overlapping no host id, and that the
    Docker daemon runs `userns-remap` set to that user. The renderer (`bootstrap/userns.rs`)
-   makes a system user `js-jobs`, appends `js-jobs:1000000:65536` to both id files, writes a
-   drop-in of `docker.service` that repeats the daemon's command line with
-   `--userns-remap=js-jobs` (so the image's `daemon.json` is not edited), restarts the
-   daemon, and the agent's unit passes `--container-subuid js-jobs`. The daemon's stock
-   command line is not verified for the stock image (Open questions 5).
+   first fails if either id file holds an entry for `js-jobs` or any entry overlapping the
+   range (LXD conventionally owns `root:1000000:1000000000`, so the range sits at 2000000000),
+   makes a system user `js-jobs`, appends `js-jobs:2000000000:65536` to both id files, merges
+   `"userns-remap": "js-jobs"` into `/etc/docker/daemon.json` with a constant `python3`
+   heredoc (every other key is kept, as the NVIDIA toolkit writes `runtimes` there; a different
+   remap already set is refused; the file is replaced by a rename of a complete temporary
+   file), restarts the daemon, and the agent's unit passes `--container-subuid js-jobs`. No
+   path of `dockerd` and no unit file is named: the agent reads the remap from `docker info`,
+   so the configuration file is as good as a command-line flag. Whether `python3` and the merge
+   work on the stock image is checked live (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
    a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
@@ -1544,8 +1549,14 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    the bootstrap fails visibly rather than guessing. Also to check live: that the metadata
    address is `169.254.169.254` on this image, whether the service also answers on its IPv6
    address (the block drops IPv4 only, and no IPv6 address is named here), that `nft` is on
-   the image, that `docker.service` starts with the command line the `userns-remap` drop-in
-   repeats, and that the NVIDIA runtime works under the remap.
+   the image, and that `python3` is on the image. GPU containers under `userns-remap` are an open live
+   question (reports say they can break under a remap). The live checks, on a launched host:
+   `docker info` lists `name=userns` in `SecurityOptions` and shows the remapped
+   `DockerRootDir`; a `docker run --gpus device=0` container runs `nvidia-smi`; the scratch
+   directory is writable by container uid 65534 (host uid 2000065534 under the remap); and `/etc/docker/daemon.json`
+   still holds the toolkit's `runtimes` beside `userns-remap`. If the Docker daemon is
+   instead configured by a unit that overrides `daemon.json`, `systemctl show -p ExecStart
+   docker.service` shows it.
 6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
    (`agent` in the pool, 7.3), checksummed; the service serves no download.
 7. Provider hierarchy (`providers.md`). Recommendation: one provider per pool, pools chosen by

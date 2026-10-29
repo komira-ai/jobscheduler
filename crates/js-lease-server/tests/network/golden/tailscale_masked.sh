@@ -47,17 +47,32 @@ systemctl daemon-reload
 systemctl enable --now js-metadata-block.service
 test "$(/usr/sbin/nft list table inet js_metadata | grep -c drop)" = 2
 # container user namespace
+for f in /etc/subuid /etc/subgid; do awk -F: -v u=js-jobs -v lo=2000000000 -v hi=2000065536 '$1 == u || ($2 + 0 < hi + 0 && $2 + $3 > lo + 0) { bad = 1 } END { exit bad }' "$f" || { echo "bootstrap: $f is unreadable, holds an entry for js-jobs, or holds one overlapping 2000000000:65536" >&2; exit 1; }; done
 useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
-printf '%s\n' js-jobs:1000000:65536 >> /etc/subuid
-printf '%s\n' js-jobs:1000000:65536 >> /etc/subgid
-mkdir -p /etc/systemd/system/docker.service.d
-cat > /etc/systemd/system/docker.service.d/js-userns.conf <<'REMAP'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --userns-remap=js-jobs
-REMAP
-chmod 0644 /etc/systemd/system/docker.service.d/js-userns.conf
-systemctl daemon-reload
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subuid
+printf '%s\n' js-jobs:2000000000:65536 >> /etc/subgid
+mkdir -p /etc/docker
+python3 - <<'PY'
+import json, os, sys
+path = "/etc/docker/daemon.json"
+user = "js-jobs"
+try:
+    with open(path) as f:
+        conf = json.load(f)
+except FileNotFoundError:
+    conf = {}
+if not isinstance(conf, dict):
+    sys.exit("bootstrap: " + path + " is not a JSON object")
+if conf.get("userns-remap", user) != user:
+    sys.exit("bootstrap: " + path + " already sets userns-remap to " + str(conf["userns-remap"]))
+conf["userns-remap"] = user
+tmp = path + ".js-tmp"
+with open(tmp, "w") as f:
+    json.dump(conf, f, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o644)
+os.rename(tmp, path)
+PY
 systemctl restart docker.service
 # identity
 mkdir -p /etc/jobscheduler
