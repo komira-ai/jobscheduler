@@ -874,3 +874,31 @@ async fn names_and_certificates_that_do_not_check_out_are_errors() {
         .expect_err("no such name");
     assert!(matches!(err, Error::Transport { .. }), "{err}");
 }
+
+/// Proves a connection that is refused and a token that cannot be sent are errors: the
+/// port nothing listens on, and a token with a newline in it, which is no header value.
+#[tokio::test]
+async fn a_refused_connection_and_an_unsendable_token_are_errors() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    let closed = Fixture::silent().await;
+    let port = closed.0;
+    closed.1.abort();
+    let _ = closed.1.await;
+    let entry = format!("{REGISTRY}:{port}/team");
+    let client = fx.client_for(&[&entry], true);
+    let location = Location::parse(&format!("{REGISTRY}:{port}/{REPO}")).expect("location");
+    let repo = client.repository(location).expect("repository");
+    let err = repo
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("connect:"), "{err}");
+
+    fx.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.token_answer = Some(r#"{"token":"a\nb"}"#.to_owned());
+    });
+    let err = manifest_error(&fx, &artifact, &Kind::bundle()).await;
+    assert!(matches!(err, Error::Transport { .. }), "{err}");
+}

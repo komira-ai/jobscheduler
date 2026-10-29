@@ -421,9 +421,9 @@ mod tests {
     fn the_artifact_type_must_be_the_kinds() {
         let wrong = bundle("application/vnd.example.other", "");
         let err = parsed(&wrong, &Kind::bundle()).expect_err("refused");
-        assert!(
-            matches!(&err, Error::ArtifactType { have: Some(h), .. } if h == "application/vnd.example.other"),
-            "{err}"
+        assert_eq!(
+            err.to_string(),
+            "the manifest has artifact type Some(\"application/vnd.example.other\"), not application/vnd.komira.js.bundle.v1"
         );
         let none = br#"{"schemaVersion":2,"config":{"mediaType":"application/vnd.komira.js.bundle.config.v1+json","digest":"sha256:0101010101010101010101010101010101010101010101010101010101010101","size":1},"layers":[]}"#;
         let err = parsed(none, &Kind::bundle()).expect_err("refused");
