@@ -135,7 +135,10 @@ async fn a_revoke_that_fails_holds_the_release_back() {
     let rig = timed_out();
     rig.world().revoke_ok = false;
     rig.scaler.tick().await;
-    assert_eq!(rig.log(), ["save", "revoke:js-booting"]);
+    assert_eq!(
+        rig.log(),
+        ["save", "MarkEnding:js-booting", "revoke:js-booting"]
+    );
     assert_eq!(
         rig.scaler.state().records.instances[0].phase,
         Phase::Releasing
@@ -145,7 +148,12 @@ async fn a_revoke_that_fails_holds_the_release_back() {
     rig.scaler.tick().await;
     assert_eq!(
         rig.log(),
-        ["save", "revoke:js-booting", "revoke:js-booting"]
+        [
+            "save",
+            "MarkEnding:js-booting",
+            "revoke:js-booting",
+            "revoke:js-booting"
+        ]
     );
 
     rig.world().revoke_ok = true;
@@ -155,6 +163,7 @@ async fn a_revoke_that_fails_holds_the_release_back() {
         rig.log(),
         [
             "save",
+            "MarkEnding:js-booting",
             "revoke:js-booting",
             "revoke:js-booting",
             "revoke:js-booting",

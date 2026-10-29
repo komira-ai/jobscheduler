@@ -53,7 +53,7 @@ fn the_records_are_written_whole_owner_only_and_read_back() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect();
-    assert_eq!(beside, [path.clone()]);
+    assert_eq!(beside, std::slice::from_ref(&path));
     assert_eq!(file.load().unwrap(), sample());
 
     let stale = dir.path().join("state.scaler.tmp");

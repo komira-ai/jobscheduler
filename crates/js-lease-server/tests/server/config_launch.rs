@@ -273,15 +273,13 @@ fn the_lambdalabs_kind_is_read_as_shipped() {
     assert!(!said.contains(secret), "{said}");
     std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let twice = format!(
-        "[{{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }}, \
-           {{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 2 }}]"
-    );
+    let twice = "[{ name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 1 }, \
+                 { name = \"gpu_1x_a10\", gpu = \"nvidia-a10\", gpus = 2 }]";
     let said = shipped(
         &scratch,
         &file(
             &server_with_agents(&scratch),
-            &[&lambda(&scratch, &key, &twice, "")],
+            &[&lambda(&scratch, &key, twice, "")],
         ),
     );
     assert_eq!(
