@@ -129,7 +129,7 @@ fn rig(limit: usize, mode: Mode) -> Rig {
     let mode = Arc::new(mode);
     let launcher = Launcher::new(
         provider.clone(),
-        Box::new(Handle(mode.clone())),
+        Arc::new(Handle(mode.clone())),
         SchedulerId::new("sched").unwrap(),
         "https://sched.example.org:7301".to_owned(),
         Artifact {

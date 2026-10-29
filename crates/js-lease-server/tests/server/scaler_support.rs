@@ -111,7 +111,8 @@ pub fn text(scratch: &Scratch, launch: &str, boot: &str) -> String {
     text_with(scratch, launch, boot, &[])
 }
 
-/// [`text`] with these keys of the pool set to these TOML values.
+/// [`text`] with these keys of the pool set to these TOML values; an empty value leaves the
+/// key out.
 pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &str)]) -> String {
     let key = scratch.path("api-key");
     let provider = format!(
@@ -131,7 +132,10 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
         .set("agent", &agent)
         .set("provider", &provider);
     for (key, value) in more {
-        pool = pool.set(key, value);
+        pool = match value.is_empty() {
+            true => pool.without(key),
+            false => pool.set(key, value),
+        };
     }
     let extra = "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\n\
                  advertise_url = \"https://sched.example.org:7301\"";
@@ -139,12 +143,15 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
     file(&head, &[&pool])
 }
 
-/// A server on `text`, read with the fake cloud's kinds.
+/// A server on `text`, read with the fake cloud's kinds, whose pool has had its first
+/// check pass: the scaler launches only while the checks pass.
 pub async fn start(scratch: Scratch, text: &str) -> Harness {
     let path = scratch.write("js.toml", text, 0o644);
     let clock = crate::config_support::clock();
     let config = Config::from_config_file(&path, &cloud_kinds(), &OwnerOnlyFiles, clock);
-    Harness::over(scratch, config.unwrap()).await
+    let harness = Harness::over(scratch, config.unwrap()).await;
+    harness.checks.step().await;
+    harness
 }
 
 /// The start of a whole-node request `id` for one a100, under the lease `lease`.

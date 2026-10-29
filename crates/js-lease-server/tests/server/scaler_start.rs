@@ -17,7 +17,7 @@ use serde_json::json;
 
 use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    account, beat, hello, join, name_of, records_path, spec, start, text, token_in,
+    account, beat, hello, join, name_of, records_path, spec, start, text, text_with, token_in,
 };
 use crate::support::{Harness, Scratch, T0};
 
@@ -59,6 +59,20 @@ async fn a_plan_pool_launches_nothing() {
     assert!(state.records.instances.is_empty());
 }
 
+/// Asserts that a pool in `plan` mode starts without the pin of the agent a live pool
+/// needs, and ticks without launching: the scaler holds it in plan. It catches a plan pool
+/// that needs what only a launch downloads.
+#[tokio::test]
+async fn a_plan_pool_starts_without_an_agent_pin() {
+    let scratch = Scratch::new("scaler_plan_no_agent");
+    account(&scratch);
+    let source = text_with(&scratch, "plan", "initialise", &[("agent", "")]);
+    let h = start(scratch, &source).await;
+    h.ticks.step().await;
+    let state = h.running.scaler().unwrap().state();
+    assert_eq!(state.blocked["burst"], Blocked::Plan);
+}
+
 /// Asserts that a `live` pool launches once for a request and not again after a restart:
 /// before the scaler has ticked a request is refused (no launch is known to be possible),
 /// after it the request waits; one tick later the machine is launched with a join token in
@@ -92,6 +106,11 @@ async fn a_live_pool_launches_once_and_not_again_after_a_restart() {
     let written = RecordsFile::new(path.clone()).load().unwrap();
     assert_eq!(written.instances.len(), 1);
     assert_eq!(written.instances[0].pool, "burst");
+    // The acquire id carries 128 bits from the operating system's source; the
+    // deterministic source of the tests ends in a long run of zero digits.
+    let acquire = written.instances[0].acquire.as_ref().unwrap().to_string();
+    assert!(acquire.starts_with("burst"), "{acquire}");
+    assert!(!acquire.ends_with("0000000000000000"), "{acquire}");
     let script = account.launches()[0].user_data().unwrap().to_owned();
     let name = written.instances[0].name.clone();
     assert!(script.contains(&format!("burst:{name}")));

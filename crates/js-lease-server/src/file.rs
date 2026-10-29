@@ -168,6 +168,12 @@ pub struct ElasticPlan {
 }
 
 impl ElasticPlan {
+    /// Takes the network table out of the plan, leaving `default` in its place, for the
+    /// one thing that builds the mode from it (the credential in it cannot be copied).
+    pub(crate) fn take_network(&mut self) -> NetworkPlan {
+        std::mem::replace(&mut self.network, NetworkPlan::Default)
+    }
+
     /// The provider the pool launches with.
     pub fn provider(&self) -> &dyn ElasticProvider {
         self.provider.as_ref()

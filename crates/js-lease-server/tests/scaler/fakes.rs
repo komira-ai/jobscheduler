@@ -14,8 +14,10 @@ use js_elastic::{
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::{Call, Effects, Scaler, SharedClock};
-use js_registry::{HostMark, HostState, HostView, SequentialSessions, Waiting};
-use js_scaler::{AcquirePlan, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer};
+use js_registry::{HostMark, HostState, HostView, SequentialSessions, SessionSource, Waiting};
+use js_scaler::{
+    AcquirePlan, Health, LaunchMode, Millis, Phase, Record, Records, Settings, StoredOffer,
+};
 use js_types::{ExecMode, HostId, RequestId, Requirements, Resources, Shape};
 
 /// The wall time every test clock starts at.
@@ -27,8 +29,14 @@ pub struct World {
     pub log: Vec<String>,
     pub waiting: Vec<Waiting>,
     pub hosts: Vec<HostView>,
-    pub catalog: Result<Vec<Offer>, ProviderError>,
-    pub catalog_reads: usize,
+    pub health: Health,
+    pub offers: Vec<Offer>,
+    /// The acquire ids the provider holds an unresolved call for.
+    pub unresolved: Vec<AcquireId>,
+    /// The provider ids a read by id finds gone.
+    pub gone: Vec<String>,
+    /// The provider ids a read by id was made for, in order.
+    pub gone_asked: Vec<String>,
     pub list_fails: bool,
     pub machines: Vec<Held>,
     pub saved: Option<Records>,
@@ -66,10 +74,19 @@ impl Effects for Handle {
         self.world().hosts.clone()
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+    fn checks(&self) -> (Health, Vec<Offer>) {
+        let world = self.world();
+        (world.health, world.offers.clone())
+    }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        self.world().unresolved.clone()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
         let mut world = self.world();
-        world.catalog_reads += 1;
-        world.catalog.clone()
+        world.gone_asked.push(id.as_str().to_owned());
+        world.gone.iter().any(|gone| gone == id.as_str())
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
@@ -221,13 +238,21 @@ pub fn live() -> Settings {
 /// A scaler for `settings` that starts from `records`, over a world with one a10 offer
 /// at 60 cents an hour and no machines, hosts or requests.
 pub fn rig(records: Records, settings: Settings) -> Rig {
+    rig_with(records, settings, Box::new(SequentialSessions::new()))
+}
+
+/// [`rig`] with `entropy` for the random part of the acquire ids.
+pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSource>) -> Rig {
     trace_everything();
     let world = Arc::new(Mutex::new(World {
         log: Vec::new(),
         waiting: Vec::new(),
         hosts: Vec::new(),
-        catalog: Ok(vec![offer()]),
-        catalog_reads: 0,
+        health: Health::Available,
+        offers: vec![offer()],
+        unresolved: Vec::new(),
+        gone: Vec::new(),
+        gone_asked: Vec::new(),
         list_fails: false,
         machines: Vec::new(),
         saved: None,
@@ -239,7 +264,7 @@ pub fn rig(records: Records, settings: Settings) -> Rig {
     let scaler = Scaler::new(
         Box::new(Handle(world.clone())),
         SharedClock::new(clock.clone()),
-        Box::new(SequentialSessions::new()),
+        entropy,
         (SchedulerId::new("sched").unwrap(), ExecMode::Container),
         settings,
         records,
@@ -251,14 +276,40 @@ pub fn rig(records: Records, settings: Settings) -> Rig {
     }
 }
 
-/// Installs a subscriber that takes every event and writes none: a disabled event does not
+/// Everything logged, as text.
+static LOG: Mutex<String> = Mutex::new(String::new());
+
+/// The writer of the subscriber: into [`LOG`].
+struct Capture;
+
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        LOG.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_str(&String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Everything logged so far by every test in this binary. A test looks for text only it
+/// can have caused (a host name of its own).
+pub fn logged() -> String {
+    LOG.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+/// Installs a subscriber that takes every event into [`LOG`]: a disabled event does not
 /// evaluate its fields, and the fields are code that must run once under test.
 fn trace_everything() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
-            .with_writer(std::io::sink)
+            .with_ansi(false)
+            .with_writer(|| Capture)
             .try_init();
     });
 }

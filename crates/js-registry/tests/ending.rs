@@ -118,3 +118,52 @@ fn a_host_lists_the_shape_it_announced() {
     assert_eq!(b.state, HostState::Awaiting);
     assert_eq!(b.claim, None);
 }
+
+/// Asserts that a host the registry does not hear from can be scaled away: a lost host and
+/// an awaiting one (put back after a restart, never heard from since), each with nothing
+/// booked on it, are marked draining, then releasing, and removed. It catches a mark that
+/// is refused for silence, which would leave the scaler repeating `Drain` and
+/// `ReleaseHost` for a paid machine that holds nothing.
+#[test]
+fn a_silent_host_that_books_nothing_is_drained_released_and_removed() {
+    let fx = fixture(3);
+    fx.join("a", "t");
+    fx.pass_grace();
+    let taint = Taint {
+        reason: "residue".to_owned(),
+        run_id: None,
+        check: None,
+    };
+    let binding = Binding::new(cred("t"), None).with_taint(Some(taint));
+    fx.registry.restore_tainted(&host("b"), binding);
+    for name in ["a", "b"] {
+        let id = host(name);
+        assert_ne!(view(&fx, name).state, HostState::Live, "{name}");
+        assert_eq!(fx.registry.drain(&id), Ok(()), "{name}");
+        assert_eq!(view(&fx, name).mark, Some(HostMark::Draining), "{name}");
+        assert_eq!(fx.registry.release_host(&id), Ok(()), "{name}");
+        assert_eq!(view(&fx, name).mark, Some(HostMark::Releasing), "{name}");
+        assert_eq!(fx.registry.remove(&id), Ok(()), "{name}");
+    }
+    assert!(fx.registry.hosts().is_empty());
+}
+
+/// Asserts that silence does not make a booked host quiet: a lost host and an awaiting
+/// one that still hold a lease are refused `drain` with `Busy::Lease` and keep no mark. It
+/// catches a rule that lets silence stand for "books nothing", which would cut a lease the
+/// registry still holds.
+#[test]
+fn a_silent_host_that_still_holds_a_lease_is_not_drained() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    let mut provider = fx.registry.provider();
+    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+    fx.pass_grace();
+    assert_eq!(view(&fx, "a").state, HostState::Lost);
+    assert_eq!(fx.registry.drain(&host("a")), Err(Busy::Lease));
+    fx.provider.seat(&host("b"), lease(2), None).unwrap();
+    assert_eq!(view(&fx, "b").state, HostState::Awaiting);
+    assert_eq!(fx.registry.drain(&host("b")), Err(Busy::Lease));
+    assert_eq!(view(&fx, "a").mark, None);
+    assert_eq!(view(&fx, "b").mark, None);
+}

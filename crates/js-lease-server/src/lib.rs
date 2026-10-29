@@ -437,7 +437,7 @@ pub use kinds::{
 pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
 pub use scaler::{
-    CATALOG_EVERY, Call, Effects, KEY_VALID_FOR, Launcher, RETRY_AFTER, RecordsFile, Scaler,
+    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_SETTLE, RETRY_AFTER, RecordsFile, Scaler,
 };
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};

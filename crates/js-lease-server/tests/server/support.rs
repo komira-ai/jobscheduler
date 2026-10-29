@@ -12,7 +12,7 @@ use clap::Parser;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
-    channel_ticker, start,
+    channel_ticker, start_with_checks,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
@@ -141,6 +141,8 @@ pub struct Harness {
     pub running: Running,
     pub clock: ManualClock,
     pub ticks: TickHandle,
+    /// Steps the pool checks of an elastic pool; a server without one ignores it.
+    pub checks: TickHandle,
     pub scratch: Scratch,
 }
 
@@ -177,13 +179,16 @@ impl Harness {
         quiet_logs();
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
-        let running = start(config, SharedClock::new(clock.clone()), ticker)
+        let (checks, check_ticker) = channel_ticker();
+        let shared = SharedClock::new(clock.clone());
+        let running = start_with_checks(config, shared, ticker, check_ticker)
             .await
             .unwrap();
         Self {
             running,
             clock,
             ticks,
+            checks,
             scratch,
         }
     }

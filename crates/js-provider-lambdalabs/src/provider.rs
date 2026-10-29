@@ -680,6 +680,22 @@ impl ElasticProvider for LambdaProvider {
             Err(_) => Released::Refused(Claim::Foreign),
         }
     }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        let gate = self.launching();
+        let ids = gate.unknown.keys();
+        ids.filter_map(|id| AcquireId::new(id).ok()).collect()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        let Ok(id) = InstanceId::new(id.as_str()) else {
+            return false;
+        };
+        match self.api.get_instance(&id) {
+            Ok(_) => false,
+            Err(error) => self.trust_absent(&error),
+        }
+    }
 }
 
 impl LambdaProvider {

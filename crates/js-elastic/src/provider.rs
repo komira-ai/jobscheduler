@@ -81,6 +81,22 @@ pub trait ElasticProvider: Send + Sync {
     /// answer is [`Released::Refused`] with [`crate::Claim::Foreign`], a definite answer that is
     /// never [`Released::Gone`], and nothing is sent to the provider.
     fn release(&self, id: &HostRef) -> Released;
+
+    /// The acquire ids with a call that got no answer and may have landed: while an id is
+    /// here, [`ElasticProvider::acquire`] with it does not launch again but answers
+    /// [`Acquired::Deferred`], and a retry settles the call once a list shows the machine
+    /// or the provider's hold has run out. The scheduler keeps a launch it planned for such
+    /// an id instead of forgetting it. A provider that holds no such call has none.
+    fn unresolved(&self) -> Vec<AcquireId> {
+        Vec::new()
+    }
+
+    /// Whether a read of the machine `id` by id says the provider no longer has it. Only a
+    /// definite answer counts: a failed read, a machine in any state (terminated
+    /// included) and a provider that cannot read by id are all `false`.
+    fn is_gone(&self, _id: &HostRef) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +146,44 @@ mod tests {
         assert!(!shown.contains("MARKER"), "{shown}");
         assert!(shown.contains("***"), "{shown}");
         assert!(shown.contains("gpu"));
+    }
+
+    /// A provider that implements only the required calls.
+    struct Bare;
+
+    impl ElasticProvider for Bare {
+        fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
+            Vec::new()
+        }
+
+        fn payload_limit(&self) -> usize {
+            0
+        }
+
+        fn acquire(&self, _request: &AcquireRequest) -> Acquired {
+            Acquired::Unknown
+        }
+
+        fn list(&self) -> Result<Vec<Held>, ProviderError> {
+            Ok(Vec::new())
+        }
+
+        fn release(&self, _id: &HostRef) -> Released {
+            Released::Unknown
+        }
+    }
+
+    /// Asserts the defaults of the two optional calls: a provider that does not say it
+    /// holds an unresolved call has none, and one that cannot read by id never says a
+    /// machine is gone. It catches a default that reads "no answer" as "gone", which would
+    /// have the scheduler settle a machine that may exist.
+    #[test]
+    fn a_provider_that_says_nothing_has_no_unresolved_call_and_finds_nothing_gone() {
+        assert!(Bare.unresolved().is_empty());
+        assert!(!Bare.is_gone(&HostRef("i-1".to_owned())));
     }
 }

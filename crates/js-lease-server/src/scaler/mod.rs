@@ -14,21 +14,36 @@
 //! - the hosts whose join token it could not revoke. A revoke that failed is tried again
 //!   at the start of every tick, and the host's `Release` is not sent until the revoke has
 //!   gone through, so a machine is never terminated while its token still works;
-//! - the offers of the provider's catalog, read again every [`CATALOG_EVERY`].
+//! - the alerts it has raised, so that each is said once while it holds.
+//!
+//! The pool's health and offers are the pool's checks' (the `checks` module): the shell asks
+//! the provider for no catalog of its own.
 //!
 //! The rules of the shell, each tested with a fake [`Effects`]:
 //!
 //! - The records are written first. If they cannot be written the tick does nothing else
 //!   and the step's result is dropped, so the next tick decides again from the same state.
+//!   No mint, launch, drain, release or revoke runs before the file holds the records they
+//!   depend on.
 //! - A join token that could not be minted sends no launch: the shell answers the step's
 //!   acquire with a deferral, and the step plans it again, minting again.
 //! - A machine whose record is `Releasing` is marked ending in the registry before the
 //!   step's other calls and before the server admits any hello after a restart
 //!   ([`Scaler::new`]), so a host whose release was under way and that says hello again
 //!   cannot be booked before its machine is gone.
+//! - The shell vouches for what the step cannot know: a registry view is complete only
+//!   once the server has been up for [`REGISTRY_SETTLE`] (a host registered before a restart
+//!   needs that long to say hello again); a silent host books nothing when the registry
+//!   shows no lease on it; a machine is "not found" when a read by id says the provider no
+//!   longer has it; the acquire ids the provider has an unresolved call for are the
+//!   provider's own.
+//! - It says what an operator must act on, once while it holds: an orphan, a record of a
+//!   pool the server no longer has, a silent host that books nothing and is still not
+//!   marked long past `unknown_hold`; and it logs each machine released on a host's silence.
 //! - Nothing here reads a clock or draws a random value directly: the clock is the
 //!   server's and the random values for acquire ids come from a [`SessionSource`].
 
+mod alert;
 mod build;
 mod effects;
 mod launch;
@@ -40,12 +55,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use js_elastic::{Acquired, Offer, SchedulerId, Secret};
+use js_elastic::{Acquired, HostRef, SchedulerId, Secret};
 use js_lease::Clock;
-use js_registry::{Launchable, SessionSource};
+use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
-    AcquireResult, Action, Health, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
-    Settings, State, launchable, step,
+    AcquireResult, Action, Input, Millis, Phase, PoolInput, Records, ReleaseResult, Settings,
+    State, launchable, step,
 };
 use js_types::ExecMode;
 use tracing::{debug, warn};
@@ -59,8 +74,12 @@ pub use launch::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
 pub(crate) use live::Live;
 pub use store::RecordsFile;
 
-/// How long the provider's catalog is trusted before it is read again.
-pub const CATALOG_EVERY: Duration = Duration::from_secs(30);
+/// How long after the server starts the shell does not vouch for the registry's view of
+/// its hosts. A host registered before a restart is missing from the registry until its
+/// agent says hello again (the agent beats every few seconds, and the registry's grace is
+/// 15 s unless the file says more); until then the step must not read a missing host as
+/// gone.
+pub const REGISTRY_SETTLE: Duration = Duration::from_secs(120);
 
 /// What the last tick saw, kept for the registry's question "could a launch serve this
 /// request".
@@ -76,8 +95,7 @@ struct Memory {
     acquired: Vec<AcquireResult>,
     released: Vec<ReleaseResult>,
     unrevoked: BTreeSet<String>,
-    offers: Vec<Offer>,
-    catalog_at: Option<Millis>,
+    alerted: BTreeSet<String>,
     save_errors: u64,
 }
 
@@ -95,6 +113,7 @@ struct Core {
     scheduler: SchedulerId,
     exec: ExecMode,
     settings: Settings,
+    started: Millis,
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
 }
@@ -139,10 +158,10 @@ impl Scaler {
             acquired: Vec::new(),
             released: Vec::new(),
             unrevoked,
-            offers: Vec::new(),
-            catalog_at: None,
+            alerted: BTreeSet::new(),
             save_errors: 0,
         };
+        let started = Millis::new(clock.now().millis());
         let core = Core {
             effects,
             clock,
@@ -150,6 +169,7 @@ impl Scaler {
             scheduler,
             exec,
             settings,
+            started,
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
         };
@@ -199,11 +219,12 @@ impl Core {
         let mut memory = self.memory();
         let now = Millis::new(self.clock.now().millis());
         self.retry_revokes(&mut memory);
-        let input = self.input(&mut memory, now);
+        let input = self.input(&memory, now);
         let (next, actions) = step(memory.state.clone(), &input, now);
         let Some(answers) = self.run(&mut memory, actions) else {
             return;
         };
+        self.report(&mut memory, (&next, &input), now);
         memory.state = next.clone();
         memory.acquired = answers.acquired;
         memory.released = answers.released;
@@ -225,34 +246,47 @@ impl Core {
         }
     }
 
-    /// The provider's catalog, read again when it is older than [`CATALOG_EVERY`] or the
-    /// last read failed; whether the pool is available.
-    fn refresh_offers(&self, memory: &mut Memory, now: Millis) -> Health {
-        let fresh = memory
-            .catalog_at
-            .is_some_and(|at| now.since(at) < CATALOG_EVERY);
-        if fresh {
-            return Health::Available;
+    /// Says what the step did that an operator should see: each machine released because
+    /// its host was silent, and each alert that was not already said.
+    fn report(&self, memory: &mut Memory, (next, input): (&State, &Input), now: Millis) {
+        for name in &next.silent_released {
+            warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
-        match self.effects.catalog() {
-            Ok(offers) => {
-                memory.offers = offers;
-                memory.catalog_at = Some(now);
-                Health::Available
-            }
-            Err(err) => {
-                warn!(%err, "cannot read the provider's catalog");
-                memory.offers.clear();
-                memory.catalog_at = None;
-                Health::Failing
+        let hold = self.settings.unknown_hold;
+        let found = alert::alerts(next, input, now, hold);
+        memory.alerted.retain(|key| found.contains_key(key));
+        for (key, message) in found {
+            if memory.alerted.insert(key) {
+                warn!("{message}");
             }
         }
     }
 
-    /// The step's input: the registry, the provider's list and catalog, the answers of
-    /// the last tick's calls, and random values for the launches this step may make.
-    fn input(&self, memory: &mut Memory, now: Millis) -> Input {
-        let health = self.refresh_offers(memory, now);
+    /// The machines the provider no longer has, as far as the records and the registry
+    /// tell where to look: a registered or draining machine whose host the registry does
+    /// not hear from, read by id.
+    fn not_found(&self, state: &State, views: &[HostView]) -> Vec<String> {
+        let heard: BTreeSet<&str> = views
+            .iter()
+            .filter(|host| host.state == HostState::Live)
+            .map(|host| host.id.as_str())
+            .collect();
+        let silent = state
+            .records
+            .instances
+            .iter()
+            .filter(|record| [Phase::Registered, Phase::Draining].contains(&record.phase))
+            .filter(|record| !heard.contains(record.name.as_str()));
+        let gone = |id: &String| self.effects.is_gone(&HostRef(id.clone()));
+        let asked = silent.filter(|record| record.cloud_id.as_ref().is_some_and(gone));
+        asked.map(|record| record.name.clone()).collect()
+    }
+
+    /// The step's input: the registry, the pool's checks and the provider's list, the
+    /// answers of the last tick's calls, and random values for the launches this step may
+    /// make.
+    fn input(&self, memory: &Memory, now: Millis) -> Input {
+        let (health, offers) = self.effects.checks();
         let held = match self.effects.list() {
             Ok(held) => Some(held),
             Err(err) => {
@@ -261,8 +295,9 @@ impl Core {
             }
         };
         let pool = &self.settings.pool;
-        let hosts = self.effects.hosts();
-        let hosts = hosts
+        let views = self.effects.hosts();
+        let not_found = self.not_found(&memory.state, &views);
+        let hosts = views
             .into_iter()
             .map(|host| view::host_facts(host, pool, self.exec));
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
@@ -271,8 +306,9 @@ impl Core {
             pools: vec![PoolInput {
                 settings: self.settings.clone(),
                 health,
-                offers: memory.offers.clone(),
+                offers,
                 held,
+                unresolved: self.effects.unresolved(),
             }],
             waiting: self
                 .effects
@@ -281,9 +317,10 @@ impl Core {
                 .map(view::waiting)
                 .collect(),
             hosts: hosts.collect(),
+            registry_complete: now.since(self.started) >= REGISTRY_SETTLE,
             acquired: memory.acquired.clone(),
             released: memory.released.clone(),
-            not_found: Vec::new(),
+            not_found,
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
         }
     }

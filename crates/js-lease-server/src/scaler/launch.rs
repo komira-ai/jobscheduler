@@ -25,7 +25,7 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// mode and what the machine is told to dial and run.
 pub struct Launcher {
     provider: Arc<dyn ElasticProvider>,
-    mode: Box<dyn NetworkMode>,
+    mode: Arc<dyn NetworkMode>,
     scheduler: SchedulerId,
     scheduler_url: String,
     agent: Artifact,
@@ -36,7 +36,7 @@ impl Launcher {
     /// dial `scheduler_url`, and to join the network as `mode` says.
     pub fn new(
         provider: Arc<dyn ElasticProvider>,
-        mode: Box<dyn NetworkMode>,
+        mode: Arc<dyn NetworkMode>,
         scheduler: SchedulerId,
         scheduler_url: String,
         agent: Artifact,

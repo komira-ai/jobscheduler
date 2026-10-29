@@ -73,7 +73,7 @@ impl TailscaleMode {
     /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
     pub fn new(api: TailscaleApi, settings: TailscaleSettings) -> Result<Self, NetworkError> {
         match valid_tag(&settings.tag) {
-            true => Ok(Self::unchecked(api, settings)),
+            true => Ok(Self { api, settings }),
             false => Err(NetworkError::Misconfigured(format!(
                 "tailscale tag {:?} must be \"tag:\" and letters, digits or '-'",
                 settings.tag
@@ -81,26 +81,24 @@ impl TailscaleMode {
         }
     }
 
-    /// The mode for a pool's `network` table: Tailscale's own API at [`API_BASE`], the
-    /// credential's own tailnet, every call bounded by [`API_TIMEOUT`]. Makes no request.
+    /// The mode for a pool's `network` table: Tailscale's API at `api_url` when the table
+    /// names one (a proxy, or a test), else at [`API_BASE`]; the credential's own tailnet;
+    /// every call bounded by [`API_TIMEOUT`]. Makes no request.
     ///
     /// # Errors
     ///
-    /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
+    /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name, or `api_url`
+    /// is not an address the client can use.
     pub fn for_client(
         client: OAuthClient,
         tag: String,
         binary: Artifact,
+        api_url: Option<&str>,
         clock: SharedClock,
     ) -> Result<Self, NetworkError> {
-        let api = TailscaleApi::new(API_BASE, "-", client, clock, API_TIMEOUT)?;
+        let base = api_url.unwrap_or(API_BASE);
+        let api = TailscaleApi::new(base, "-", client, clock, API_TIMEOUT)?;
         Self::new(api, TailscaleSettings { tag, binary })
-    }
-
-    /// The mode over `api` for a `settings` whose tag is known to pass [`valid_tag`], as
-    /// the configuration file's reader has already checked it.
-    pub(crate) fn unchecked(api: TailscaleApi, settings: TailscaleSettings) -> Self {
-        Self { api, settings }
     }
 
     /// The steps of one launch, with the auth key named by its slot.

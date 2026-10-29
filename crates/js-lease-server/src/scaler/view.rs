@@ -52,7 +52,9 @@ fn hearing(state: HostState) -> Hearing {
 
 /// `host`, a host of the pool `pool` whose jobs run in `exec` mode, as the scaler reads it.
 /// What it holds is what it announced when it did, and what the pool books for it
-/// otherwise. It is busy when it holds a lease or still has runs to finish.
+/// otherwise. It is busy when it holds a lease or still has runs to finish. It has given
+/// up its leases when the registry does not hear from it and books no lease on it: a silent
+/// host that never held one included.
 pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode) -> HostFacts {
     let shape = host.claim.as_ref().unwrap_or(&host.shape);
     HostFacts {
@@ -61,6 +63,7 @@ pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode) -> HostFact
         state: hearing(host.state),
         mark: host.mark.map(mark_of),
         busy: host.lease.is_some() | host.releasing,
+        lease_given_up: (host.state != HostState::Live) & host.lease.is_none(),
         id: host.id,
     }
 }

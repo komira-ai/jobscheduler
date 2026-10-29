@@ -1222,6 +1222,7 @@ dependencies = [
  "js-lease",
  "js-pool-static",
  "js-provider",
+ "js-sim",
  "js-types",
  "js-whole",
  "serde_json",

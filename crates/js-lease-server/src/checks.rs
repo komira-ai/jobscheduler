@@ -86,6 +86,15 @@ impl Health {
         }
     }
 
+    /// How the scaler reads the pool: it launches only while the checks pass.
+    pub(crate) fn for_scaler(&self) -> js_scaler::Health {
+        match self.state() {
+            State::Checking => js_scaler::Health::Checking,
+            State::Available => js_scaler::Health::Available,
+            State::Unavailable => js_scaler::Health::Failing,
+        }
+    }
+
     /// Every reason a check of the last pass failed, in the order the checks run, each
     /// once.
     pub(crate) fn reasons(&self) -> Vec<String> {
@@ -324,5 +333,19 @@ mod tests {
         schedule.after(start, false);
         assert_eq!(schedule.failures, u32::MAX);
         assert!(schedule.is_due(start.plus(secs(300))));
+    }
+
+    /// Asserts how the scaler reads a pool: before any pass it is still being checked, a
+    /// pass with no failed check makes it available, and one with a failed check makes it
+    /// failing. It catches an unavailable pool read as available, which would launch
+    /// machines through a refused key.
+    #[test]
+    fn the_scaler_reads_the_state_of_the_checks() {
+        let mut health = Health::default();
+        assert_eq!(health.for_scaler(), js_scaler::Health::Checking);
+        health.passes = 1;
+        assert_eq!(health.for_scaler(), js_scaler::Health::Available);
+        health.notes = vec!["catalog: no offers".to_owned()];
+        assert_eq!(health.for_scaler(), js_scaler::Health::Failing);
     }
 }

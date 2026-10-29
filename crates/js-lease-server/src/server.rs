@@ -87,16 +87,27 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
+    let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let elastic = config.elastic.take().map(|mut plan| {
+        let setup = Setup {
+            advertise: config.advertise_url.clone(),
+            tls: config.tls.clone(),
+            inputs: std::mem::take(&mut config.launch_inputs),
+            clock: clock.clone(),
+        };
+        (Pool::new(&mut plan, setup), plan)
+    });
     // Before anything is served: the scaler marks the machines its records show as being
     // released, so a host of theirs that says hello again is admitted already marked.
-    let scaler = match (config.elastic, agents.clone()) {
-        (Some(plan), Some(agents)) => {
-            let advertise_url = config.advertise_url.as_deref();
+    let scaler = match (&elastic, agents.clone()) {
+        (Some((pool, plan)), Some(agents)) => {
             let parts = Parts {
                 agents,
                 clock: clock.clone(),
                 state_file: &config.state_file,
-                advertise_url,
+                advertise_url: config.advertise_url.as_deref(),
+                health: pool.health.clone(),
+                mode: pool.mode(),
             };
             Some(build(plan, parts)?)
         }
@@ -139,16 +150,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     for warning in &config.warnings {
         warn!("{warning}");
     }
-    let registry = agents.as_ref().map(|agents| agents.registry.clone());
-    let pool = config.elastic.take().map(|plan| {
-        let setup = Setup {
-            advertise: config.advertise_url.clone(),
-            tls: config.tls.clone(),
-            inputs: std::mem::take(&mut config.launch_inputs),
-            clock: clock.clone(),
-        };
-        Pool::new(plan, setup)
-    });
+    let pool = elastic.map(|(pool, _)| pool);
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
     let status = Status::new(pool, registry, config.warnings.clone(), clock.clone());
     let status = config.status.then(|| Arc::new(status));

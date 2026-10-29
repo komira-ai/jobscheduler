@@ -1,10 +1,10 @@
 //! Putting the scaler together at start: the pool's plan from the configuration file, the
-//! server's agent side, and the records file.
+//! server's agent side, the pool's checks and network mode, and the records file.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use js_elastic::{Artifact, ElasticProvider};
+use js_elastic::Artifact;
 use js_registry::OsSessions;
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
@@ -12,11 +12,10 @@ use js_types::ExecMode;
 use super::{Launcher, Live, RecordsFile, Scaler};
 use crate::adapt::SharedClock;
 use crate::agents::{Agents, state_path};
+use crate::checks::Health;
 use crate::error::StartupError;
-use crate::file::{ElasticPlan, Launch, NetworkPlan};
-use crate::network::{
-    API_BASE, API_TIMEOUT, DefaultMode, NetworkMode, TailscaleApi, TailscaleMode, TailscaleSettings,
-};
+use crate::file::{ElasticPlan, Launch};
+use crate::network::{DefaultMode, NetworkError, NetworkMode};
 
 /// What the scaler is put together with besides the pool's plan.
 pub(crate) struct Parts<'a> {
@@ -28,6 +27,11 @@ pub(crate) struct Parts<'a> {
     pub(crate) state_file: &'a Path,
     /// The address launched hosts are told to dial, when the file gives one.
     pub(crate) advertise_url: Option<&'a str>,
+    /// What the pool's checks have found: the scaler launches only while they pass, and
+    /// launches from the offers they read.
+    pub(crate) health: Arc<Mutex<Health>>,
+    /// The pool's network mode, or why it could not be built.
+    pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
 }
 
 /// What a plan-mode pool is given where a live pool needs a pin it has not been given. A
@@ -40,32 +44,19 @@ fn unpinned() -> Artifact {
     }
 }
 
-/// The network mode of the pool `pool`.
+/// The network mode the scaler launches with. A pool in `plan` mode launches nothing, so
+/// when its mode could not be built (the checks show why) a stand-in that is never called
+/// serves; a live pool whose mode could not be built does not start.
 fn network_mode(
-    network: NetworkPlan,
-    pool: &str,
-    clock: SharedClock,
-    advertise_url: &str,
-) -> Result<Box<dyn NetworkMode>, StartupError> {
-    match network {
-        NetworkPlan::Default => Ok(Box::new(DefaultMode::new(advertise_url, Vec::new()))),
-        NetworkPlan::Tailscale {
-            client,
-            tag,
-            binary,
-            api_url,
-        } => {
-            let base = api_url.unwrap_or_else(|| API_BASE.to_owned());
-            let api = match TailscaleApi::new(&base, "-", client, clock, API_TIMEOUT) {
-                Ok(api) => api,
-                Err(err) => {
-                    let place = format!("pool {pool:?}: network.api_url");
-                    return Err(StartupError::at(place, err));
-                }
-            };
-            let binary = binary.unwrap_or_else(unpinned);
-            let settings = TailscaleSettings { tag, binary };
-            Ok(Box::new(TailscaleMode::unchecked(api, settings)))
+    built: Result<Arc<dyn NetworkMode>, NetworkError>,
+    plan: &ElasticPlan,
+) -> Result<Arc<dyn NetworkMode>, StartupError> {
+    match (built, plan.launch) {
+        (Ok(mode), _) => Ok(mode),
+        (Err(_), Launch::Plan) => Ok(Arc::new(DefaultMode::new("", Vec::new()))),
+        (Err(err), Launch::Live) => {
+            let place = format!("pool {:?}: network", plan.name);
+            Err(StartupError::at(place, err))
         }
     }
 }
@@ -93,49 +84,38 @@ fn settings(plan: &ElasticPlan) -> Settings {
 ///
 /// # Errors
 ///
-/// [`StartupError`] when the records file cannot be read, or the Tailscale API address is
-/// not usable.
-pub(crate) fn build(plan: ElasticPlan, parts: Parts<'_>) -> Result<Scaler, StartupError> {
+/// [`StartupError`] when the records file cannot be read, or a live pool's network mode
+/// could not be built.
+pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, StartupError> {
     let file = RecordsFile::new(state_path(parts.state_file, ".scaler"));
     let records = file.load()?;
-    let settings = settings(&plan);
-    let ElasticPlan {
-        name,
-        exec,
-        network,
-        agent,
-        scheduler,
-        id,
-        provider,
-        ..
-    } = plan;
+    let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
-    let mode = network_mode(network, &name, parts.clock.clone(), url)?;
-    let provider: Arc<dyn ElasticProvider> = Arc::from(provider);
-    let agent = agent.unwrap_or_else(unpinned);
+    let agent = plan.agent.clone().unwrap_or_else(unpinned);
     let launcher = Launcher::new(
-        Arc::clone(&provider),
+        Arc::clone(&plan.provider),
         mode,
-        scheduler.clone(),
+        plan.scheduler.clone(),
         url.to_owned(),
         agent,
     );
     let registry = parts.agents.registry.clone();
     let live = Live::new(
-        (parts.agents, id, scheduler.clone()),
-        provider,
+        (parts.agents, plan.id.clone(), plan.scheduler.clone()),
+        Arc::clone(&plan.provider),
         launcher,
-        file,
+        (file, parts.health),
     );
-    let exec = exec.unwrap_or(ExecMode::Container);
-    let entropy = Box::new(OsSessions);
-    let wiring = (scheduler, exec);
+    let wiring = (
+        plan.scheduler.clone(),
+        plan.exec.unwrap_or(ExecMode::Container),
+    );
     let scaler = Scaler::new(
         Box::new(live),
         parts.clock,
-        entropy,
+        Box::new(OsSessions),
         wiring,
-        settings,
+        settings(plan),
         records,
     );
     registry.set_launchable(Some(scaler.launchable()));

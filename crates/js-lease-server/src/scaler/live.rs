@@ -1,20 +1,21 @@
 //! The real [`Effects`]: the server's registry and join tokens, the pool's provider and
 //! network mode, and the records file.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    Acquired, ElasticProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
+    AcquireId, Acquired, ElasticProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
     SchedulerId, Secret,
 };
 use js_registry::{HostView, Waiting};
-use js_scaler::{AcquirePlan, Records};
+use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::{debug, warn};
 
 use super::{Call, Effects, Launcher, RecordsFile};
 use crate::agents::Agents;
+use crate::checks::Health as Checks;
 
 /// The pool's side of the server, as the shell uses it.
 pub(crate) struct Live {
@@ -24,17 +25,18 @@ pub(crate) struct Live {
     provider: Arc<dyn ElasticProvider>,
     launcher: Launcher,
     file: RecordsFile,
+    checks: Arc<Mutex<Checks>>,
 }
 
 impl Live {
     /// The effects for the pool `pool` of `scheduler`: its machines are launched and
-    /// released through `provider` and `launcher`, its tokens and hosts are `agents`', and
-    /// its records are kept in `file`.
+    /// released through `provider` and `launcher`, its tokens and hosts are `agents`', its
+    /// records are kept in `file`, and its health and offers are what its `checks` found.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
         provider: Arc<dyn ElasticProvider>,
         launcher: Launcher,
-        file: RecordsFile,
+        (file, checks): (RecordsFile, Arc<Mutex<Checks>>),
     ) -> Self {
         Self {
             agents,
@@ -43,6 +45,7 @@ impl Live {
             provider,
             launcher,
             file,
+            checks,
         }
     }
 
@@ -61,12 +64,21 @@ impl Effects for Live {
         self.agents.registry.hosts()
     }
 
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-        self.provider.catalog()
+    fn checks(&self) -> (Health, Vec<Offer>) {
+        let seen = self.checks.lock().unwrap_or_else(PoisonError::into_inner);
+        (seen.for_scaler(), seen.offers.clone())
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
         self.provider.list()
+    }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        self.provider.unresolved()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        self.provider.is_gone(id)
     }
 
     fn save(&self, records: &Records) -> Result<(), String> {
@@ -157,7 +169,7 @@ mod tests {
 
     impl ElasticProvider for Stub {
         fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
-            Err(ProviderError::new("the catalog is down"))
+            Err(ProviderError::new("the catalog is not read here"))
         }
 
         fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -178,6 +190,14 @@ mod tests {
 
         fn release(&self, _id: &HostRef) -> Released {
             Released::Terminating(HostStatus::Terminating)
+        }
+
+        fn unresolved(&self) -> Vec<AcquireId> {
+            vec![AcquireId::new("u1").unwrap()]
+        }
+
+        fn is_gone(&self, id: &HostRef) -> bool {
+            id.as_str() == "i-gone"
         }
     }
 
@@ -223,7 +243,7 @@ mod tests {
         let agents = Arc::new(Agents::over(registry, &shared, &dir));
         let launcher = Launcher::new(
             Arc::new(Stub),
-            Box::new(DefaultMode::new(
+            Arc::new(DefaultMode::new(
                 "https://sched.example.org:7301",
                 Vec::new(),
             )),
@@ -235,7 +255,13 @@ mod tests {
             },
         );
         let file = RecordsFile::new(dir.join("records"));
-        let live = Live::new((agents, pool, scheduler()), Arc::new(Stub), launcher, file);
+        let checks = Arc::new(Mutex::new(Checks::default()));
+        let live = Live::new(
+            (agents, pool, scheduler()),
+            Arc::new(Stub),
+            launcher,
+            (file, checks),
+        );
         (live, dir)
     }
 
@@ -258,8 +284,9 @@ mod tests {
     }
 
     /// Asserts that the reads and the provider's calls pass through: no waiting request and
-    /// no host in a new registry, the provider's catalog error, list, release and acquire
-    /// as the provider answers them. It catches a method wired to the wrong call.
+    /// no host in a new registry, a pool not yet checked with no offers, the provider's
+    /// list, release, acquire, unresolved acquire ids and by-id read as the provider answers
+    /// them. It catches a method wired to the wrong call.
     #[test]
     fn the_reads_and_the_providers_calls_pass_through() {
         let (live, _dir) = live("pass");
@@ -275,9 +302,10 @@ mod tests {
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
         assert!(live.waiting().is_empty());
         assert!(live.hosts().is_empty());
-        assert_eq!(
-            live.catalog().unwrap_err(),
-            ProviderError::new("the catalog is down")
+        assert_eq!(live.checks(), (Health::Checking, Vec::new()));
+        assert!(
+            live.provider.catalog().is_err(),
+            "the checks read the catalog"
         );
         assert_eq!(live.list(), Ok(Vec::new()));
         let id = HostRef("i-1".to_owned());
@@ -285,6 +313,9 @@ mod tests {
             live.release(&id),
             Released::Terminating(HostStatus::Terminating)
         );
+        assert_eq!(live.unresolved(), [AcquireId::new("u1").unwrap()]);
+        assert!(live.is_gone(&HostRef("i-gone".to_owned())));
+        assert!(!live.is_gone(&id));
     }
 
     /// Asserts that the records are written whole to their file and that a file that

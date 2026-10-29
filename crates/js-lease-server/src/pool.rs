@@ -102,7 +102,12 @@ fn build_mode(
                     .to_owned(),
             )),
         },
-        NetworkPlan::Tailscale { client, tag } => tailscale(client, tag, setup),
+        NetworkPlan::Tailscale {
+            client,
+            tag,
+            binary,
+            api_url,
+        } => tailscale((client, tag, binary), api_url, setup),
     }
 }
 
@@ -114,15 +119,17 @@ fn tls_paths(tls: Option<&TlsFiles>) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The `tailscale` mode, when a static build is pinned to fetch.
+/// The `tailscale` mode, when a static build is pinned to fetch: the pool's own
+/// `network.binary`, else the one the embedder gives.
 fn tailscale(
-    client: OAuthClient,
-    tag: String,
+    (client, tag, binary): (OAuthClient, String, Option<Artifact>),
+    api_url: Option<String>,
     setup: &mut Setup,
 ) -> Result<Arc<dyn NetworkMode>, NetworkError> {
-    match setup.inputs.tailscale.take() {
+    match binary.or_else(|| setup.inputs.tailscale.take()) {
         Some(binary) => {
-            let mode = TailscaleMode::for_client(client, tag, binary, setup.clock.clone())?;
+            let clock = setup.clock.clone();
+            let mode = TailscaleMode::for_client(client, tag, binary, api_url.as_deref(), clock)?;
             Ok(Arc::new(mode))
         }
         None => Err(NetworkError::Misconfigured(
@@ -132,25 +139,34 @@ fn tailscale(
 }
 
 impl Pool {
-    pub(crate) fn new(plan: ElasticPlan, mut setup: Setup) -> Self {
-        let network_kind = plan.network.kind();
-        let mode = build_mode(plan.network, &mut setup);
+    /// The pool of `plan`. The network mode is built from the plan's `network`, which this
+    /// takes out of it ([`ElasticPlan::take_network`]): the scaler shares the mode built
+    /// here, so there is one token cache and one set of checks for the one network.
+    pub(crate) fn new(plan: &mut ElasticPlan, mut setup: Setup) -> Self {
+        let network = plan.take_network();
+        let network_kind = network.kind();
+        let mode = build_mode(network, &mut setup);
         Self {
             network_kind,
             mode,
             launch: plan.launch.as_str(),
-            name: plan.name,
-            kind: plan.kind,
+            name: plan.name.clone(),
+            kind: plan.kind.clone(),
             exec: plan.exec,
             max_instances: plan.max_instances,
             max_spend_per_hour_cents: plan.max_spend_per_hour_cents,
             health: Arc::new(Mutex::new(Health::default())),
-            provider: plan.provider,
-            floor: plan.floor,
-            floor_demand: plan.floor_demand,
+            provider: plan.provider.clone(),
+            floor: plan.floor.clone(),
+            floor_demand: plan.floor_demand.clone(),
             advertise: setup.advertise,
             agent_sha256: setup.inputs.agent_sha256,
         }
+    }
+
+    /// The network mode the pool launches with, or why it cannot be built.
+    pub(crate) fn mode(&self) -> Result<Arc<dyn NetworkMode>, NetworkError> {
+        self.mode.clone()
     }
 
     /// The check loop of this pool.

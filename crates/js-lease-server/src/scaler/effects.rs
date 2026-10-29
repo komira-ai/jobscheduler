@@ -5,9 +5,9 @@
 
 use std::time::Duration;
 
-use js_elastic::{Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
+use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
 use js_registry::{HostView, Waiting};
-use js_scaler::{AcquirePlan, Records};
+use js_scaler::{AcquirePlan, Health, Records};
 
 /// A call on the registry that names one host. None of them returns anything the scaler
 /// acts on: it reads the registry's marks back at its next step.
@@ -35,12 +35,9 @@ pub trait Effects: Send + Sync {
     /// The hosts the registry holds.
     fn hosts(&self) -> Vec<HostView>;
 
-    /// What the provider could launch now.
-    ///
-    /// # Errors
-    ///
-    /// [`ProviderError`] when the catalog cannot be had whole.
-    fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;
+    /// What the pool's checks say, and the offers they read: the scaler launches only while
+    /// the checks pass, and only from these offers.
+    fn checks(&self) -> (Health, Vec<Offer>);
 
     /// The machines the provider lists as ours.
     ///
@@ -48,6 +45,12 @@ pub trait Effects: Send + Sync {
     ///
     /// [`ProviderError`] when the list cannot be had whole; it is never read as empty.
     fn list(&self) -> Result<Vec<Held>, ProviderError>;
+
+    /// The acquire ids the provider holds an unresolved call for.
+    fn unresolved(&self) -> Vec<AcquireId>;
+
+    /// Whether a read of the machine `id` by id says the provider no longer has it.
+    fn is_gone(&self, id: &HostRef) -> bool;
 
     /// Writes `records`, all of them, so that they survive a crash.
     ///

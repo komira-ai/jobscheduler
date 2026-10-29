@@ -5,11 +5,11 @@
 use std::time::Duration;
 
 use js_elastic::HostStatus;
-use js_lease_server::{CATALOG_EVERY, RETRY_AFTER};
+use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
-use js_scaler::{Blocked, LaunchMode, Phase, Records, Settings, State};
+use js_scaler::{Blocked, Health, LaunchMode, Phase, Records, Settings, State};
 
-use crate::fakes::{live, offer, record, records, request, rig, view};
+use crate::fakes::{live, record, records, request, rig, view};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -195,42 +195,35 @@ async fn a_restart_marks_what_was_being_released_before_anything_else() {
     assert!(!log.iter().any(|entry| entry.contains("UNSAFE")), "{log:?}");
 }
 
-/// Asserts that a pool whose catalog or list cannot be read launches nothing and says why,
-/// that the catalog is read again on every tick after a failure and kept for
-/// [`CATALOG_EVERY`] after a success, and that the list is read on every tick. It catches
-/// a failed list read as an empty one (which would launch without seeing what exists) and
-/// a catalog read on every tick (the API allows a request a second).
+/// Asserts that a pool whose checks do not pass, or whose list cannot be read, launches
+/// nothing and says why: while the checks have not finished (`Checking`) and while one
+/// fails, and while the provider's list fails, though the checks pass. The offers are the
+/// checks' and the shell asks the provider for none. It catches a failed list read as an
+/// empty one (which would launch without seeing what exists), and a launch while the
+/// checks fail.
 #[tokio::test]
-async fn an_unreadable_catalog_or_list_launches_nothing() {
+async fn a_pool_whose_checks_or_list_fail_launches_nothing() {
     let rig = rig(Records::default(), live());
     rig.world().waiting = vec![request("r1")];
-    rig.world().catalog = Err(js_elastic::ProviderError::new("the catalog is down"));
+    rig.world().health = Health::Checking;
     rig.scaler.tick().await;
+    assert!(rig.log().is_empty());
+    assert_eq!(rig.scaler.state().blocked["gpu"], Blocked::Checking);
+
+    rig.world().health = Health::Failing;
     rig.scaler.tick().await;
-    assert_eq!(rig.world().catalog_reads, 2);
     assert!(rig.log().is_empty());
     assert_eq!(rig.scaler.state().blocked["gpu"], Blocked::Unavailable);
 
-    rig.world().catalog = Ok(vec![offer()]);
+    rig.world().health = Health::Available;
     rig.world().list_fails = true;
     rig.scaler.tick().await;
-    assert_eq!(rig.world().catalog_reads, 3);
     assert!(rig.log().is_empty());
     assert_eq!(rig.scaler.state().blocked["gpu"], Blocked::ListFailed);
 
     rig.world().list_fails = false;
-    rig.advance(CATALOG_EVERY - secs(1));
     rig.scaler.tick().await;
-    assert_eq!(
-        rig.world().catalog_reads,
-        3,
-        "the catalog was read again too soon"
-    );
     assert_eq!(rig.log().len(), 3);
-
-    rig.advance(secs(2));
-    rig.scaler.tick().await;
-    assert_eq!(rig.world().catalog_reads, 4);
 }
 
 /// Asserts that a pool in `plan` mode calls nothing and writes nothing however long it
@@ -384,12 +377,13 @@ async fn the_providers_list_reaches_the_step() {
 
 /// Asserts that hosts the scaler must leave alone are left alone, whatever the registry
 /// says of them: two machines of the pool whose hosts are silent (lost, and waiting to say
-/// hello again after a restart) are held and never released on their silence, however
-/// long, and hosts it did not launch (set aside for a request, held by a whole-node lease,
-/// finishing runs) are not drained or released. It catches a release on silence alone,
-/// which would terminate a machine that may hold work the registry cannot see.
+/// hello again after a restart) and still hold a lease are held and never released on their
+/// silence, however long, and hosts it did not launch (set aside for a request, held by a
+/// whole-node lease, finishing runs) are not drained or released. It catches a release on
+/// silence alone, which would terminate a machine that may hold work the registry cannot
+/// see.
 #[tokio::test]
-async fn silent_hosts_and_hosts_it_did_not_launch_are_left_alone() {
+async fn silent_hosts_that_hold_leases_and_hosts_it_did_not_launch_are_left_alone() {
     let each = vec![
         record("js-lost", Phase::Registered),
         record("js-waiting", Phase::Registered),
@@ -397,8 +391,10 @@ async fn silent_hosts_and_hosts_it_did_not_launch_are_left_alone() {
     let rig = rig(records(each), live());
     let mut lost = view("js-lost");
     lost.state = HostState::Lost;
+    lost.lease = Some(js_types::LeaseId::new(1, 1));
     let mut awaiting = view("js-waiting");
     awaiting.state = HostState::Awaiting;
+    awaiting.lease = Some(js_types::LeaseId::new(1, 2));
     let mut reserved = view("other-1");
     reserved.mark = Some(HostMark::Reserved);
     let mut held = view("other-2");
