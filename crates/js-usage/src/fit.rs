@@ -9,7 +9,7 @@
 //! is then dilated by [`DILATE_MINUTES`] on both sides, so a busy phase that starts a
 //! little early or late is still covered.
 //!
-//! A run flagged as under node pressure ([`RunSeries::NODE_PRESSURE`]) showed less CPU
+//! A run flagged as under node pressure ([`crate::ring::RunSeries::NODE_PRESSURE`]) showed less CPU
 //! than it needed, so it does not shape the cores: they come from the other runs, and a
 //! key with fewer than [`MIN_RUNS_FOR_CURVE`] of those has no curve. Its working set is
 //! still real (memory does not shrink under CPU pressure), so it counts toward the
@@ -22,7 +22,7 @@
 
 use js_types::sched::usage::MinutePoint;
 
-use crate::ring::{BUCKETS, Ring, RunSeries};
+use crate::ring::{BUCKETS, Ring};
 
 /// The fewest runs, not under node pressure, in the ring for a curve: with fewer, the key
 /// is charged flat.
@@ -118,7 +118,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ring::tests::series;
+    use crate::ring::{RunSeries, tests::series};
 
     fn pressured(minutes: &[(u32, u64)]) -> crate::ring::RunSeries {
         let mut s = series(minutes);
