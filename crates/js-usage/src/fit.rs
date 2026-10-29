@@ -16,6 +16,9 @@
 //! memory maximum, the reach of a minute, and the wall minutes. The censored bit is not
 //! read.
 //!
+//! A minute at the start that no clean run recorded takes the first clean value; later
+//! ones hold the previous minute.
+//!
 //! A minute reached by fewer than a quarter of the runs, and every later one, is not
 //! emitted: [`js_types::sched::usage::Curve`] charges its last point to every later
 //! minute, which is the "holds the previous value" tail. All arithmetic is integer.
@@ -61,6 +64,8 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         return None;
     }
     let mut raw: Vec<MinutePoint> = Vec::new();
+    // Leading minutes no clean run recorded: they take the first clean value below.
+    let mut lead = 0;
     for t in 0..BUCKETS {
         let reached = ring.runs().filter(|r| r.buckets.len() > t).count();
         if reached * 4 < runs {
@@ -89,7 +94,16 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
             },
             working_set_bytes,
         };
+        if cores.is_empty() && lead == raw.len() {
+            lead += 1;
+        }
         raw.push(point);
+    }
+    // Nothing earlier to hold: the start of the curve is the first clean value, not 0.
+    if let Some(first) = raw.get(lead).map(|p| p.cores_milli) {
+        for p in &mut raw[..lead] {
+            p.cores_milli = first;
+        }
     }
     let points = (0..raw.len())
         .map(|t| {
