@@ -62,7 +62,9 @@ fn the_runtime_is_an_absolute_path_to_an_executable_file() {
     assert_eq!(ok.chown_scratch(), None);
 }
 
-/// Asserts that `host` is refused as a network in every spelling, that text which is
+/// Asserts that `host` is refused as a network in every spelling, that the modes whose
+/// traffic the host's forward chain does not see (`slirp4netns`, `pasta`, `macvlan`,
+/// `ipvlan`) are refused, that text which is
 /// not a name is refused (`container:<id>` would join another container's network, a
 /// leading `-` would read as an option), and that ordinary user-defined network names
 /// are taken. It catches a job placed on the machine's own network.
@@ -73,6 +75,11 @@ fn the_host_network_and_non_names_are_refused() {
         "host",
         "Host",
         "HOST",
+        "slirp4netns",
+        "pasta",
+        "Pasta",
+        "macvlan",
+        "IPVLAN",
         "",
         "container:abc",
         "ns:/proc/1/ns/net",
@@ -85,7 +92,15 @@ fn the_host_network_and_non_names_are_refused() {
         let said = Settings::new(bin(), Some(name), None);
         assert_eq!(said, Err(SettingsError::Network), "{name:?}");
     }
-    for name in ["jobs", "job-net_0.1", "none", "0net", &long[1..]] {
+    for name in [
+        "jobs",
+        "job-net_0.1",
+        "none",
+        "0net",
+        "macvlan0",
+        "my-pasta",
+        &long[1..],
+    ] {
         let ok = Settings::new(bin(), Some(name), None).unwrap();
         assert_eq!(ok.network(), name);
     }
