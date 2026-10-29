@@ -243,5 +243,11 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
     assert_eq!(phase(&h), Phase::Gone);
     assert!(registry.hosts().is_empty());
     assert_eq!(hello(&h, &token, &name).await.status, 401);
-    assert_eq!(account.count(Call::Launch), 0);
+
+    // The request that could not be placed on the releasing host is served by a machine of
+    // its own, and the releasing machine is not launched again.
+    assert_eq!(account.launched(), 1);
+    let state = h.running.scaler().unwrap().state();
+    assert_eq!(state.records.instances.len(), 2);
+    assert_ne!(state.records.instances[1].name, name);
 }
