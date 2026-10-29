@@ -115,3 +115,55 @@ fn the_agent_unit_names_its_roots_and_requires_the_scratch_mount() {
         .unwrap();
     assert!(made < script.find("[Unit]").unwrap());
 }
+
+/// The masked tailscale script as lines.
+fn tailscale_lines() -> Vec<String> {
+    let host = host();
+    let fake = Fake::empty();
+    let (_, shared) = clock();
+    let mut plan = plan(&host);
+    plan.network = mode(&fake, shared).describe(&ctx(&host, TEN_MINUTES));
+    masked(&plan).lines().map(str::to_owned).collect()
+}
+
+/// Asserts that the wait for the daemon's socket comes after the daemon is started and
+/// before `tailscale up`, that it is a loop of at most 30 one-second checks, and that
+/// it ends in a `logger` line and a non-zero exit. A wait moved, widened to no bound,
+/// or without its log line fails here.
+#[test]
+fn the_socket_wait_follows_the_daemon_and_precedes_up_and_is_bounded() {
+    let lines = tailscale_lines();
+    let at = |prefix: &str| {
+        let found: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i].starts_with(prefix))
+            .collect();
+        assert_eq!(found.len(), 1, "{prefix}");
+        found[0]
+    };
+    let daemon = at("systemd-run --unit=tailscaled ");
+    let wait = at("sh -c 'i=0; until [ -S ");
+    let up = at("/usr/local/bin/tailscale up ");
+    assert!(daemon < wait && wait < up, "{daemon} {wait} {up}");
+    let line = &lines[wait];
+    assert!(line.contains(r#"[ "$i" -gt 30 ]"#), "{line}");
+    assert!(line.contains("sleep 1"), "{line}");
+    assert!(line.contains("logger -t jobscheduler"), "{line}");
+    assert!(line.contains("exit 1"), "{line}");
+    assert!(
+        line.ends_with(" sh /var/run/tailscale/tailscaled.sock"),
+        "the socket is an argument, not part of the program: {line}"
+    );
+}
+
+/// Asserts that `tailscale up` accepts the tailnet's DNS, so the host resolves the
+/// MagicDNS name of the server's advertised URL, and never turns it off.
+#[test]
+fn tailscale_up_accepts_dns() {
+    let lines = tailscale_lines();
+    let up = lines
+        .iter()
+        .find(|l| l.starts_with("/usr/local/bin/tailscale up "))
+        .unwrap();
+    assert!(up.ends_with(" --accept-dns=true"), "{up}");
+    assert!(!up.contains("--accept-dns=false"), "{up}");
+}

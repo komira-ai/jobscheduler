@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
-use js_types::{ClassId, LeaseId, Request, Resources};
+use js_types::{ClassId, LeaseId, Request, Requirements, RequirementsError, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
@@ -47,7 +47,8 @@ struct ResourcesBody {
 
 impl AcquireBody {
     /// The request and the ttl asked for, or the 400 for a body that names an id or a
-    /// GPU class the types refuse.
+    /// GPU class the types refuse, or a `disk-gib` or `exec` capability that is not a
+    /// requirement (the registry and the scaler read them as the job's disk and mode).
     pub(crate) fn into_parts(self) -> Result<(Request, Option<Duration>), ApiError> {
         let class = ClassId::new(&self.class)
             .map_err(|_| ApiError::bad_request("class is not a valid class id"))?;
@@ -65,6 +66,14 @@ impl AcquireBody {
             labels: self.labels,
             validation_run: self.validation_run,
         };
+        Requirements::try_from_request(&request).map_err(|why| {
+            ApiError::bad_request(match why {
+                RequirementsError::BadDisk(_) => {
+                    "disk-gib must be a whole number of GiB below 2^34"
+                }
+                RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+            })
+        })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
     }
 }
@@ -282,6 +291,49 @@ pub(crate) fn parse_id(text: &str) -> Option<LeaseId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use js_types::ExecMode;
+
+    fn body(capabilities: &str) -> AcquireBody {
+        let text = format!(
+            r#"{{"class":"whole-node","resources":{{"cpu_millis":1000}},"capabilities":{capabilities},"max_wall_seconds":60}}"#
+        );
+        parse(text.as_bytes()).unwrap()
+    }
+
+    /// Asserts that a request body with `disk-gib` and `exec` capabilities reaches the
+    /// job's requirements as bytes and a mode, and that a body without them still asks
+    /// for any disk and either mode.
+    #[test]
+    fn disk_and_exec_reach_the_requirements() {
+        let (request, _) = body(r#"{"disk-gib":"40","exec":"sandbox-exec","os":"macos"}"#)
+            .into_parts()
+            .unwrap();
+        let wanted = Requirements::from_request(&request);
+        assert_eq!(wanted.disk_bytes, Some(40 << 30));
+        assert_eq!(wanted.exec, Some(ExecMode::SandboxExec));
+        assert_eq!(wanted.os.as_deref(), Some("macos"));
+        let (request, _) = body(r#"{"os":"macos"}"#).into_parts().unwrap();
+        let wanted = Requirements::from_request(&request);
+        assert_eq!((wanted.disk_bytes, wanted.exec), (None, None));
+    }
+
+    /// Asserts that a disk or mode that is not a requirement is a 400 that says which
+    /// capability is at fault, before the request reaches the table.
+    #[test]
+    fn a_bad_disk_or_exec_is_a_400() {
+        for (caps, said) in [
+            (r#"{"disk-gib":"lots"}"#, "disk-gib"),
+            (r#"{"disk-gib":"-1"}"#, "disk-gib"),
+            (r#"{"exec":"vm"}"#, "exec"),
+        ] {
+            let err = body(caps).into_parts().unwrap_err();
+            assert_eq!(err.status, StatusCode::BAD_REQUEST);
+            let reason = err.reason.as_deref().unwrap();
+            assert!(reason.starts_with(said), "{caps}");
+            assert!(!reason.contains("lots"), "{reason}");
+            assert!(!reason.contains("vm"), "{reason}");
+        }
+    }
 
     /// Asserts the renewal body: without a reservation it is the old body byte for byte,
     /// with one it adds `host_reserved`, and a client that reads only `expires_at_ms`

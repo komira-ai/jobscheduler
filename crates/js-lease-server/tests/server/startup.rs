@@ -5,7 +5,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
-use clap::Parser;
 use js_lease_server::{SharedClock, channel_ticker, parse_duration, run, start};
 
 use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, replace, request};

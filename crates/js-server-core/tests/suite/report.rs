@@ -420,3 +420,43 @@ fn the_line_of_a_finishing_report_names_the_operation_it_finished() {
     let named = core.with(|_, rig| rig.named.lock().expect("named").clone());
     assert_eq!(named, ["operations/0"]);
 }
+
+/// Catches: the `lease finished` line written inside the core, before the adapter's
+/// `after_report` (so it cannot follow what that hook logs), or not handed to the adapter at
+/// all (so it cannot add a field of its own), or written twice for one report; and a copy of
+/// a result the core refuses getting no line, or one that says `accepted=true`.
+#[test]
+fn each_report_gives_the_adapter_one_finished_line_to_write_after_its_hook() {
+    let core = core();
+    up(&core, 0, "node-a", "d1");
+    let admitted = submit(&core, 1, 1);
+    let report = Report {
+        operation: admitted.operation,
+        lease: lease(1, 0),
+        outcome: done(),
+    };
+    let mut taken = Vec::new();
+    let log = crate::common::logged(|| {
+        for at_secs in [2, 3] {
+            taken.push(block_on(core.report(
+                at(at_secs),
+                &worker("node-a"),
+                report,
+                |_| {},
+            )));
+        }
+    });
+    assert_eq!(taken[0], Taken::Accepted);
+    assert_ne!(taken[1], Taken::Accepted);
+    let finished = core.with(|_, rig| rig.finished.clone());
+    assert_eq!(finished.len(), 2);
+    assert_eq!(finished[0], ("operations/0".to_owned(), taken[0], true));
+    assert_eq!((finished[1].1, finished[1].2), (taken[1], true));
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("lease finished ok"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].contains("accepted=true"), "{}", lines[0]);
+    assert!(lines[1].contains("accepted=false"), "{}", lines[1]);
+}
