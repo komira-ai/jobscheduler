@@ -3,12 +3,12 @@
 use std::ffi::{CStr, CString};
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
-    AtFlags, CWD, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat,
+    AtFlags, CWD, Dev, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat,
 };
 use rustix::io::Errno;
 
@@ -157,6 +157,9 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
+/// How a directory entry is opened before its mode is known: on Linux without needing any
+/// permission on it (`O_PATH`).
+#[cfg(target_os = "linux")]
 const PATH_FLAGS: OFlags = OFlags::PATH
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -169,7 +172,7 @@ fn is_dir(dir: &OwnedFd, name: &CStr) -> rustix::io::Result<bool> {
 }
 
 /// A directory on another device than the one the removal started on is a mount.
-fn same_device(root: u64, found: u64) -> rustix::io::Result<()> {
+fn same_device(root: Dev, found: Dev) -> rustix::io::Result<()> {
     match root == found {
         true => Ok(()),
         false => Err(Errno::XDEV),
@@ -177,7 +180,7 @@ fn same_device(root: u64, found: u64) -> rustix::io::Result<()> {
 }
 
 /// `..` must lead back to the directory the walk left (device and inode).
-fn same_place(seen: (u64, u64), want: (u64, u64)) -> rustix::io::Result<()> {
+fn same_place(seen: (Dev, u64), want: (Dev, u64)) -> rustix::io::Result<()> {
     match seen == want {
         true => Ok(()),
         false => Err(Errno::STALE),
@@ -186,10 +189,12 @@ fn same_place(seen: (u64, u64), want: (u64, u64)) -> rustix::io::Result<()> {
 
 /// Opens the directory `name` of `parent`, which must be a directory and not a link, on
 /// the device `dev`, first giving its owner read, write and search permission when it
-/// lacks any. The entry is opened once, without following a link and without needing
-/// any permission on it (`O_PATH`); the mode is then changed through that open file, by
-/// its `/proc/self/fd` name, so no name that could be swapped is resolved again.
-fn open_dir(parent: &OwnedFd, name: &CStr, dev: u64) -> rustix::io::Result<OwnedFd> {
+/// lacks any. On Linux the entry is opened once, without following a link and without
+/// needing any permission on it (`O_PATH`); the mode is then changed through that open
+/// file, by its `/proc/self/fd` name, so no name that could be swapped is resolved again.
+#[cfg(target_os = "linux")]
+fn open_dir(parent: &OwnedFd, name: &CStr, dev: Dev) -> rustix::io::Result<OwnedFd> {
+    use std::os::fd::AsRawFd;
     let entry = openat(parent, name, PATH_FLAGS, Mode::empty())?;
     let meta = fstat(&entry)?;
     same_device(dev, meta.st_dev)?;
@@ -198,6 +203,24 @@ fn open_dir(parent: &OwnedFd, name: &CStr, dev: u64) -> rustix::io::Result<Owned
         chmodat(CWD, via.as_str(), Mode::RWXU, AtFlags::empty())?;
     }
     openat(&entry, c".", DIR_FLAGS, Mode::empty())
+}
+
+/// [`open_dir`] where there is no `O_PATH` and no `/proc/self/fd` (macOS): the entry is
+/// looked at without following a link, its mode is changed by name without following a
+/// link (`AT_SYMLINK_NOFOLLOW`), and it is opened with `O_NOFOLLOW|O_DIRECTORY`, so a link
+/// swapped in between is never followed: it fails the open. Container jobs, the reason
+/// for the Linux form, run only on Linux.
+#[cfg(not(target_os = "linux"))]
+fn open_dir(parent: &OwnedFd, name: &CStr, dev: Dev) -> rustix::io::Result<OwnedFd> {
+    let meta = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(meta.st_mode) != FileType::Directory {
+        return Err(Errno::NOTDIR);
+    }
+    same_device(dev, meta.st_dev)?;
+    if meta.st_mode & 0o700 != 0o700 {
+        chmodat(parent, name, Mode::RWXU, AtFlags::SYMLINK_NOFOLLOW)?;
+    }
+    openat(parent, name, DIR_FLAGS, Mode::empty())
 }
 
 /// Removes the files in `dir` and returns the name of one of its subdirectories, if any.
@@ -230,7 +253,7 @@ fn clear_files(dir: &OwnedFd) -> rustix::io::Result<Option<CString>> {
 fn remove_tree(parent: &OwnedFd, name: &CStr) -> rustix::io::Result<()> {
     let dev = fstat(parent)?.st_dev;
     let mut cur = open_dir(parent, name, dev)?;
-    let mut trail: Vec<(CString, u64, u64)> = Vec::new();
+    let mut trail: Vec<(CString, Dev, u64)> = Vec::new();
     loop {
         if let Some(sub) = clear_files(&cur)? {
             let here = fstat(&cur)?;
