@@ -23,6 +23,18 @@
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
+//! - **A whole-node lease is prepared on the worker's thread.** The post-job checks and the
+//!   readiness hook block, so the session asks through [`WorkerHost`]: it sends a prepare or
+//!   restore order without waiting and reads the last answer the worker published, which
+//!   is tagged with the lease it is about. An answer for another lease is never handed
+//!   back; the worker drops its answers when its lifecycle follows a different lease. The
+//!   hook runs here, once for each lease.
+//!   Because the hook runs on the worker's thread it holds the worker for as long as it
+//!   runs, up to its bound (twice `prepare_timeout`): no reply is applied meanwhile, so
+//!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
+//!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
+//!   Heartbeats go on. The watchdog allows the worker that long for the hook, and no longer
+//!   for anything else.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
@@ -75,7 +87,13 @@ use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
 use crate::lifecycle::{Config, Event, Lifecycle, Status};
+use crate::readiness::WorkerHook;
+
+mod quiesce;
+
 use crate::system::{Machine, RuntimeBuild, SharedClock};
+use quiesce::take_asked;
+pub use quiesce::{LeaseAnswers, WorkerHost};
 
 /// How many orders wait for the worker. Replies beyond it are dropped, see the module.
 pub const QUEUE: usize = 16;
@@ -122,6 +140,9 @@ pub struct Plan {
     pub step_every: Duration,
     /// The bound of the [`Rescue`] in place of [`RESCUE_BOUND`]: for a test.
     pub rescue_bound: Option<Duration>,
+    /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
+    /// none when the operator gave no `--readiness-hook`.
+    pub readiness: Option<WorkerHook>,
 }
 
 /// The most containers [`Rescue::stop_all`] stops; the rest are reported as not tried. It
@@ -296,12 +317,20 @@ enum Order {
     Nudge,
     /// Answer on `0` once every order before this one is done and one step more is.
     Settle(SyncSender<()>),
+    /// Find out whether the host is quiet for the lease asked about last (the order names
+    /// none: see `Shared::asked_prepare`), run the readiness hook if there is one, and
+    /// publish the answer.
+    Prepare,
+    /// Run the clean-up check of the lease asked about last (`Shared::asked_restore`), and
+    /// publish the answer.
+    Restore,
 }
 
 /// The worker's side of the lock: what it published.
 #[derive(Default)]
 struct Published {
     snapshot: Snapshot,
+    answers: LeaseAnswers,
     lines: VecDeque<String>,
     lost: u64,
 }
@@ -315,6 +344,16 @@ struct Shared {
     closed: AtomicBool,
     /// Stop every run the agent holds, once.
     stop_all: AtomicBool,
+    /// A prepare order waits in the queue: set by [`WorkerHost`] when it sends one, cleared
+    /// by the worker when it takes the order, so questions never crowd replies out.
+    prepare_queued: AtomicBool,
+    /// The same for a restore order.
+    restore_queued: AtomicBool,
+    /// The lease the latest prepare question was about. The order carries none, so the one
+    /// that waits in the queue is always about the lease asked most recently.
+    asked_prepare: Mutex<Option<String>>,
+    /// The same for restore.
+    asked_restore: Mutex<Option<String>>,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
@@ -344,9 +383,10 @@ impl Shared {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn publish(&self, snapshot: Snapshot, lines: Vec<String>) {
+    fn publish(&self, snapshot: Snapshot, answers: &LeaseAnswers, lines: Vec<String>) {
         let mut published = self.lock();
         published.snapshot = snapshot;
+        published.answers = answers.clone();
         for line in lines {
             match published.lines.len() < LINES_CAP {
                 true => published.lines.push_back(line),
@@ -425,11 +465,12 @@ impl Worker {
     /// The runtime or the checks cannot be made, the runtime cannot list its containers
     /// (the agent must not say hello with a held list it does not know), or the thread
     /// died while it built them. The text says why.
-    pub fn start(plan: Plan) -> Result<Self, String> {
+    pub fn start(mut plan: Plan) -> Result<Self, String> {
         let (orders, inbox) = sync_channel(QUEUE);
         let (ready, built) = sync_channel(1);
         let shared = Arc::new(Shared::default());
         let clock = plan.machine.clock();
+        let hook = plan.readiness.take();
         let (own, step_every, thread_clock) = (shared.clone(), plan.step_every, clock.clone());
         let stop_grace = plan.config.stop_grace;
         let rescue = Rescue::new(
@@ -453,9 +494,10 @@ impl Worker {
                     let _ = ready.send(Err(why));
                 }
                 Ok((life, lines)) => {
-                    own.publish(Snapshot::of(&life), lines);
+                    own.publish(Snapshot::of(&life), &LeaseAnswers::default(), lines);
                     let _ = ready.send(Ok(()));
-                    work(life, &inbox, &own, &thread_clock, (step_every, stop_grace));
+                    let seams = (step_every, stop_grace);
+                    work(life, hook, (&inbox, &own, &thread_clock), seams);
                 }
             }
         });
@@ -468,6 +510,12 @@ impl Worker {
             clock,
             rescue,
         })
+    }
+
+    /// The lifecycle's clock, which a session that follows a whole-node lease counts its
+    /// deadline on.
+    pub fn clock(&self) -> SharedClock {
+        self.clock.clone()
     }
 
     /// A copy of the handle, for waiting on the worker.
@@ -626,11 +674,20 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(
     mut life: Lifecycle,
-    inbox: &Receiver<Order>,
-    shared: &Shared,
-    clock: &SharedClock,
+    hook: Option<WorkerHook>,
+    (inbox, shared, clock): (&Receiver<Order>, &Shared, &SharedClock),
     (step_every, stop_grace): (Duration, Duration),
 ) {
+    let mut answers = LeaseAnswers::default();
+    // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
+    // limit grows by the hook's bound when (and only when) a hook starts.
+    let extend = |bound: Duration| {
+        let ms = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
+        let due = shared.busy_until.load(Ordering::SeqCst);
+        shared
+            .busy_until
+            .store(due.saturating_add(ms), Ordering::SeqCst);
+    };
     loop {
         let mut lines = Vec::new();
         let mut settle = None;
@@ -642,8 +699,8 @@ fn work(
         // A run held may cost three calls (a stop, then an inspect, the read of its log
         // and a remove).
         let calls = life.held().len().saturating_mul(3).saturating_add(asked);
-        let bound = stall_bound(stop_grace, calls).as_millis();
-        let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+        let bound = stall_bound(stop_grace, calls);
+        let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
         shared.busy_until.store(due, Ordering::SeqCst);
         match order {
@@ -657,6 +714,26 @@ fn work(
                 lines.extend(describe(&life.apply_at(&reply, received_ms)));
             }
             Ok(Order::Settle(done)) => settle = Some(done),
+            Ok(Order::Prepare) => {
+                shared.prepare_queued.store(false, Ordering::SeqCst);
+                // A second order whose lease the first took does nothing.
+                let asked = take_asked(&shared.asked_prepare);
+                let mut events = Vec::new();
+                asked.into_iter().for_each(|lease| {
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events, &extend);
+                });
+                lines.extend(describe(&events));
+            }
+            Ok(Order::Restore) => {
+                shared.restore_queued.store(false, Ordering::SeqCst);
+                // A second order whose lease the first took does nothing.
+                let asked = take_asked(&shared.asked_restore);
+                let mut events = Vec::new();
+                asked.into_iter().for_each(|lease| {
+                    answers.restore(&mut life, lease, &mut events);
+                });
+                lines.extend(describe(&events));
+            }
             Ok(Order::Nudge) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -664,7 +741,8 @@ fn work(
             lines.extend(describe(&life.apply(&stops(&life))));
         }
         lines.extend(describe(&life.step()));
-        shared.publish(Snapshot::of(&life), lines);
+        answers.follow(life.exclusive());
+        shared.publish(Snapshot::of(&life), &answers, lines);
         shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {
             let _ = done.send(());
