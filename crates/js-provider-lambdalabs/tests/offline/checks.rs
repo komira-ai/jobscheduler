@@ -91,11 +91,22 @@ fn a_typod_types_row_is_named() {
     );
 
     let rig = self::rig(config(5));
+    rig.fake.add_firewall_ruleset(RULESET, "region-z", 2);
     rig.fake.fail_next(Call::InstanceTypes, api_error());
-    let result = named(&rig.provider.checks(), "types");
+    let results = rig.provider.checks();
     assert_eq!(
-        result,
+        named(&results, "types"),
         failed("types", &format!("catalog: {}", api_error()))
+    );
+    // With the catalog unread the regions are not known, so a ruleset in any region counts.
+    assert_eq!(
+        named(&results, "firewall"),
+        failed(
+            "firewall",
+            &format!(
+                "firewall: the ruleset {RULESET} holds 2 rules; it must hold none (region region-z)"
+            )
+        )
     );
 }
 
