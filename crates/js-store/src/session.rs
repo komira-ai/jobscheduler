@@ -11,7 +11,7 @@ use std::sync::PoisonError;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::Request;
+use js_sched::{MemoryPercent, Request};
 use js_state::{Cond, Txn};
 use js_types::sched::fence::{LEADER_LEASE_MARGIN, LEASE_GRACE, SELF_FENCE};
 use js_types::sched::{Resources, WorkerId};
@@ -106,14 +106,20 @@ impl Rows {
     /// Whether a daemon session in the store, of any frontend, could run `request`: the
     /// session rows hold each connected daemon's capabilities and capacity, written by the
     /// frontend it is connected to, and expire unless that frontend renews them. An
-    /// operation is unservable only if none could.
+    /// operation is unservable only if none could. Each capacity is cut to `percent` first,
+    /// as the scheduler judges its own daemons, so a request above the cut is not one a row
+    /// "could run".
     ///
     /// # Errors
     /// The store cannot be read, or a session row is not a daemon's registration.
-    pub fn session_could_run(&self, request: &Request) -> Result<bool, StateError> {
+    pub fn session_could_run(
+        &self,
+        request: &Request,
+        percent: MemoryPercent,
+    ) -> Result<bool, StateError> {
         for (key, row) in self.store.scan_prefix(keys::SESSION)? {
             let up = self.session_row(&key, &row)?;
-            if request.runnable_on(&up.caps, &up.capacity) {
+            if percent.runnable_on(request, &up.caps, &up.capacity) {
                 return Ok(true);
             }
         }
