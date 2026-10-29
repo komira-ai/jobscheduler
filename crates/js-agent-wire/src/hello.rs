@@ -273,6 +273,18 @@ impl Hello {
 }
 
 impl InstanceIdentity {
+    /// Checks the identity by the rules a hello applies to its `instance`: the provider
+    /// is a provider id and the instance id is an id of the id alphabet. A server that
+    /// names an instance (to bind a join token to it) uses this, so that it never binds
+    /// to an identity no hello could carry.
+    ///
+    /// # Errors
+    ///
+    /// The field and the rule that failed.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check(At::new("hello", refusal::INVALID_HELLO))
+    }
+
     fn check(&self, at: At) -> Result<(), ValidationError> {
         let provider = at.field("instance.provider");
         check::ident(provider, &self.provider)?;
