@@ -211,3 +211,14 @@ fn restart_keeps_the_scratch_of_a_container_it_could_not_remove() {
     h.restart().unwrap();
     assert!(!root.join("odd").exists());
 }
+
+/// Asserts that a sweep of a root that is gone removes nothing, reports 0 and makes
+/// nothing. It catches a sweep that fails or creates the root.
+#[test]
+fn sweep_of_a_missing_root_does_nothing() {
+    let h = Harness::new("sweep-missing");
+    let root = h.config.scratch.path().to_owned();
+    fs::remove_dir(&root).unwrap();
+    assert_eq!(h.config.scratch.sweep(["r1"]), 0);
+    assert!(!root.exists());
+}

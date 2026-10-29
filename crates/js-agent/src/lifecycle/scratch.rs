@@ -118,12 +118,16 @@ impl ScratchRoot {
     /// is made again, which fails the start of that run.
     pub fn sweep<'a>(&self, kept: impl IntoIterator<Item = &'a str>) -> usize {
         let kept: Vec<&str> = kept.into_iter().collect();
-        let Ok(root) = self.open_root() else {
-            return 0;
-        };
-        let Ok(entries) = Dir::read_from(&root) else {
-            return 0;
-        };
+        self.sweep_except(&kept).unwrap_or_default()
+    }
+
+    /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
+    fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
+        let (root, entries) = self.open_root().and_then(|root| {
+            Dir::read_from(&root)
+                .map(|entries| (root, entries))
+                .map_err(io::Error::from)
+        })?;
         let orphans: Vec<CString> = entries
             .flatten()
             .map(|entry| entry.file_name().to_owned())
@@ -132,14 +136,15 @@ impl ScratchRoot {
                 bytes != b"." && bytes != b".." && !kept.iter().any(|run| run.as_bytes() == bytes)
             })
             .collect();
-        orphans
+        // An entry that cannot be examined is unlinked like a file: if it vanished, the
+        // unlink fails and it is not counted.
+        Ok(orphans
             .iter()
             .filter(|name| match is_dir(&root, name) {
                 Ok(true) => remove_tree(&root, name).is_ok(),
-                Ok(false) => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
-                Err(_) => false,
+                _ => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
             })
-            .count()
+            .count())
     }
 
     fn open_root(&self) -> io::Result<OwnedFd> {
@@ -171,6 +176,14 @@ fn same_device(root: u64, found: u64) -> rustix::io::Result<()> {
     }
 }
 
+/// `..` must lead back to the directory the walk left (device and inode).
+fn same_place(seen: (u64, u64), want: (u64, u64)) -> rustix::io::Result<()> {
+    match seen == want {
+        true => Ok(()),
+        false => Err(Errno::STALE),
+    }
+}
+
 /// Opens the directory `name` of `parent`, which must be a directory and not a link, on
 /// the device `dev`, first giving its owner read, write and search permission when it
 /// lacks any. The entry is opened once, without following a link and without needing
@@ -189,9 +202,12 @@ fn open_dir(parent: &OwnedFd, name: &CStr, dev: u64) -> rustix::io::Result<Owned
 
 /// Removes the files in `dir` and returns the name of one of its subdirectories, if any.
 fn clear_files(dir: &OwnedFd) -> rustix::io::Result<Option<CString>> {
+    // An entry that cannot be read is skipped. It is then still in the directory, so the
+    // removal of the directory fails (not empty) and the removal as a whole fails safe.
     let names: Vec<CString> = Dir::read_from(dir)?
-        .map(|entry| entry.map(|entry| entry.file_name().to_owned()))
-        .collect::<Result<_, _>>()?;
+        .flatten()
+        .map(|entry| entry.file_name().to_owned())
+        .collect();
     let mut subdir = None;
     for name in names {
         let bytes = name.to_bytes();
@@ -228,9 +244,7 @@ fn remove_tree(parent: &OwnedFd, name: &CStr) -> rustix::io::Result<()> {
         };
         let up = openat(&cur, c"..", DIR_FLAGS, Mode::empty())?;
         let seen = fstat(&up)?;
-        if (seen.st_dev, seen.st_ino) != (up_dev, up_ino) {
-            return Err(Errno::STALE);
-        }
+        same_place((seen.st_dev, seen.st_ino), (up_dev, up_ino))?;
         unlinkat(&up, done.as_c_str(), AtFlags::REMOVEDIR)?;
         cur = up;
     }
@@ -246,5 +260,14 @@ mod tests {
     fn a_directory_on_another_device_is_refused() {
         assert_eq!(same_device(7, 7), Ok(()));
         assert_eq!(same_device(7, 8), Err(Errno::XDEV));
+    }
+
+    /// `..` that leads to the directory the walk left is accepted; one that leads
+    /// anywhere else (another inode, or another device) is stale.
+    #[test]
+    fn dot_dot_must_lead_back_to_the_directory_left() {
+        assert_eq!(same_place((1, 2), (1, 2)), Ok(()));
+        assert_eq!(same_place((1, 3), (1, 2)), Err(Errno::STALE));
+        assert_eq!(same_place((2, 2), (1, 2)), Err(Errno::STALE));
     }
 }
