@@ -96,6 +96,10 @@ pub trait FileReader {
     /// The device number of the file system that holds `path` (`st_dev`; a link is
     /// followed), or the system's reason it cannot be looked at.
     fn device(&self, path: &Path) -> Result<u64, String>;
+
+    /// Whether `path` is on a `tmpfs` (Linux; anywhere else, no), or the system's reason it
+    /// cannot be looked at.
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
 }
 
 /// How long a helper may take to print its output, and again to exit once it has.
@@ -329,6 +333,20 @@ impl FileReader for SystemFiles {
         std::fs::metadata(path)
             .map(|meta| meta.dev())
             .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        /// `TMPFS_MAGIC` of `statfs(2)`.
+        const TMPFS_MAGIC: u64 = 0x0102_1994;
+        rustix::fs::statfs(path)
+            .map(|found| u64::try_from(found.f_type).ok() == Some(TMPFS_MAGIC))
+            .map_err(|err| format!("{}: {err}", path.display()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn is_tmpfs(&self, _path: &Path) -> Result<bool, String> {
+        Ok(false)
     }
 }
 

@@ -30,6 +30,7 @@
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
+//! | `--run-files-root <path>` | where each run's files (the `files` of a start: a URL or a token the task reads) are written, in a directory of their own per run, `0555` with `0444` files, mounted read-only at `/run/js-files`. Made `0700` when missing; it must be on a `tmpfs` (the secrets never reach a disk) and the agent refuses to start when it is not. A reboot clears it, which is fine: a run does not survive one. Default `/run/js-agent/files` when that can be made; otherwise the agent runs without run files and does not report the `run-files` capability. tmpfs pages can be swapped to disk when the host has swap: run hosts that handle these secrets with swap off or encrypted. Needs `--container-bin` |
 //! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; a named network needs at least one `--container-egress-allow` (the agent does not start without it), and before every contained job is created the agent checks that the network is a bridge with DNS and IPv6 off and that the host's nftables table `inet js_egress` limits it to those endpoints, or refuses the job (`egress-unchecked`); Podman only; docs/egress.md sets the network up; needs `--container-bin` |
 //! | `--container-user <uid:gid>` | the base of the users containers run as, container ids both above zero; by default `1000:1000`. Every run holds a slot, numbered from 0, and runs as the base plus its slot number, uid and gid (`1000:1000`, `1001:1001`, ...), so two runs held at once never share a host uid; the slot is given again only after its last run's cleanup passed (container and scratch gone, no process left), and never if a check found something. Each of the 4096 slots needs an id, so both numbers of the base are at most 61440 (the agent refuses to start otherwise). The agent gives each run's scratch directory to the host ids of its slot's user (the start of the `--container-subuid` range plus each id); needs `--container-bin` |
@@ -413,6 +414,9 @@ fn execute(
     // The job flags are checked now so a wrong one stops the agent before it registers;
     // the worker is built from them below, before the first hello.
     let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    if let Some(why) = &local.files_warning {
+        let _ = writeln!(err, "js-agent: warning: {why}");
+    }
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
@@ -430,7 +434,12 @@ fn execute(
     // job half below has started, and that ends the agent first if the program does not
     // run, so no hello that names a runtime is sent for one that was not found.
     if local.container.is_some() {
-        let found = contract::report(&mut offer.hello, toolkit.as_ref(), commands);
+        let found = contract::report(
+            &mut offer.hello,
+            toolkit.as_ref(),
+            commands,
+            local.files.is_some(),
+        );
         found.iter().for_each(|warning| {
             let _ = writeln!(err, "js-agent: warning: {warning}");
         });
