@@ -1,12 +1,15 @@
-//! A job can pin a bundle by digest: the same pin table as an image, the exclusion with
-//! `image`, and the old-agent behaviour. Each test says the defect it catches.
+//! A job can pin a bundle by digest: the same pin table as an image, the refusal of every
+//! bundle until a runtime can unpack one, and the old-agent behaviour. Each test says the
+//! defect it catches.
 
 mod common;
 
 use std::collections::BTreeMap;
 
 use common::{expect, job};
-use js_agent_wire::{Command, Isolation, JobSpec, Limits, Mount, Rule, ValidationError, refusal};
+use js_agent_wire::{
+    Command, Isolation, JobSpec, Limits, Mount, NativeSpec, Rule, ValidationError, refusal,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -35,11 +38,26 @@ fn image_verdict(image: &str) -> Verdict {
     }
 }
 
-/// A start whose bundle is `bundle`, beside a good image. `validate` refuses the pair, so
-/// the grammar is read from its rule (anything but the exclusion is the grammar) and the
-/// pin from `require_pinned`, which `validate` does not stop.
-fn bundle_verdict(bundle: &str) -> Verdict {
+/// A native start with no image and no arguments, mounts or GPUs: the only kind of job a
+/// bundle is for.
+fn native_job() -> JobSpec {
     let mut spec = job();
+    spec.image = String::new();
+    spec.args = Vec::new();
+    spec.gpu_indices = Vec::new();
+    spec.mounts = Vec::new();
+    spec.isolation = Isolation::Contained;
+    spec.native =
+        Some(serde_json::from_value::<NativeSpec>(json!({"program": "/bin/echo"})).unwrap());
+    spec
+}
+
+/// A native start whose bundle is `bundle`. `validate` refuses the pair until a runtime
+/// can unpack a bundle, so the grammar is read from its rule (anything but the pair's
+/// refusal is the grammar) and the pin from `require_pinned`, which `validate` does not
+/// stop.
+fn bundle_verdict(bundle: &str) -> Verdict {
+    let mut spec = native_job();
     spec.bundle = Some(bundle.into());
     if let Err(err) = spec.validate()
         && err.rule() != Rule::Inconsistent
@@ -75,7 +93,11 @@ fn images_and_bundles_accept_and_refuse_the_same_pins() {
     let upper_name = format!("A@sha256:{HEX}");
     let transport = format!("oci:foo@sha256:{HEX}");
     let nul = format!("a\0b@sha256:{HEX}");
-    let table: [(String, Verdict); 18] = [
+    let overlong = format!(
+        "{}@sha256:{HEX}",
+        "x".repeat(js_agent_wire::limits::MAX_IMAGE_LEN)
+    );
+    let table: [(String, Verdict); 19] = [
         (format!("a@sha256:{HEX}"), Verdict::Accepted),
         (format!("ghcr.io/o/i:v1@sha256:{HEX}"), Verdict::Accepted),
         (
@@ -97,6 +119,7 @@ fn images_and_bundles_accept_and_refuse_the_same_pins() {
         (transport, Verdict::Malformed),
         (nul, Verdict::Malformed),
         ("two words".into(), Verdict::Malformed),
+        (overlong, Verdict::Malformed),
     ];
     for (text, want) in &table {
         assert_eq!(image_verdict(text), *want, "image {text:?}");
@@ -142,19 +165,48 @@ fn an_unpinned_bundle_is_refused_by_its_own_code() {
     );
 }
 
-/// A bundle beside a non-empty image is refused `invalid-bundle`, by `validate`, by the
+/// A bundle without a native body is refused `invalid-bundle` with the rule that says a
+/// bundle needs a native job, whether the image is set or empty, by `validate`, by the
 /// start command and inside a reply (which drops only that start). It catches a job that
-/// an agent from before the field would run as a plain image job, without its tools.
+/// an agent from before the field would run as a plain image job without its tools, and
+/// an empty-image job refused under a code that does not mention the bundle.
 #[test]
-fn a_bundle_beside_an_image_is_refused() {
-    let mut spec = job();
+fn a_bundle_without_native_is_refused_as_needing_native() {
+    for image in [job().image, String::new()] {
+        let mut spec = job();
+        spec.image = image;
+        spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
+        let err = spec.validate().unwrap_err();
+        expect(err, "bundle", Rule::NeedsNative, refusal::INVALID_BUNDLE);
+        let err = Command::Start(Box::new(spec.clone()))
+            .validate()
+            .unwrap_err();
+        expect(err, "bundle", Rule::NeedsNative, refusal::INVALID_BUNDLE);
+        assert_only_the_start_is_dropped(spec);
+    }
+}
+
+/// A native job with a pinned bundle is refused `invalid-bundle`, rule `Inconsistent`,
+/// by `validate`, by the start command and inside a reply (which drops only that start),
+/// until a runtime can unpack a bundle. It catches an agent that runs the program with
+/// the host's tools while the job asked for a toolchain.
+#[test]
+fn a_native_job_with_a_bundle_is_refused() {
+    let mut spec = native_job();
+    assert_eq!(spec.validate(), Ok(()));
     spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
     let err = spec.validate().unwrap_err();
     expect(err, "bundle", Rule::Inconsistent, refusal::INVALID_BUNDLE);
     let err = Command::Start(Box::new(spec.clone()))
         .validate()
         .unwrap_err();
-    assert_eq!(err.code(), refusal::INVALID_BUNDLE);
+    expect(err, "bundle", Rule::Inconsistent, refusal::INVALID_BUNDLE);
+    assert_only_the_start_is_dropped(spec);
+}
+
+/// A reply with the start and a stop: the start is refused as `invalid-bundle` and the
+/// stop is kept.
+fn assert_only_the_start_is_dropped(spec: JobSpec) {
     let reply = js_agent_wire::HeartbeatReply {
         commands: vec![
             Command::Start(Box::new(spec)),
@@ -168,19 +220,19 @@ fn a_bundle_beside_an_image_is_refused() {
     assert_eq!(checked.commands.len(), 1);
 }
 
-/// Today every job needs an image, so a bundle with none is refused as the image is: the
-/// bundle alone does not make a job runnable. It catches a bundle that slips past the
-/// image rule before a runtime exists to run it.
+/// A native job with a tag-only bundle is refused `bundle-digest-required`: the pin is
+/// checked before the native job's early return. It catches a bundle that escapes the
+/// pin check because the job has no image.
 #[test]
-fn a_bundle_without_an_image_is_refused_as_an_empty_image() {
-    let mut spec = job();
-    spec.image = String::new();
-    spec.bundle = Some(format!("toolchain@sha256:{HEX}"));
+fn a_native_job_with_a_tag_only_bundle_is_not_pinned() {
+    let mut spec = native_job();
+    assert_eq!(spec.require_pinned(), Ok(()));
+    spec.bundle = Some("toolchain:latest".into());
     expect(
-        spec.validate().unwrap_err(),
-        "image",
-        Rule::Empty,
-        refusal::INVALID_IMAGE,
+        spec.require_pinned().unwrap_err(),
+        "bundle",
+        Rule::NotPinned,
+        refusal::BUNDLE_DIGEST_REQUIRED,
     );
 }
 
