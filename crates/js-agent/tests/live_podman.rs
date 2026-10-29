@@ -34,8 +34,9 @@ use js_testkit::dir::TestDir;
 
 const PODMAN: &str = "/usr/bin/podman";
 
-/// The user and group the agent runs jobs as by default, in the job's namespace.
-const JOB_ID: u32 = 65534;
+/// The user and group the job in slot 0 runs as under the default `--container-user` base
+/// (`1000:1000`; slot k runs as base + k), in the job's namespace.
+const JOB_ID: u32 = 1000;
 
 /// The length of a mapped range.
 const RANGE_LEN: u64 = 65536;
@@ -279,9 +280,10 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
         assert_eq!(value, 0, "{set} is not empty:\n{status}");
     }
 
-    // The job runs as the default job user, not as the container's root.
+    // The job runs as its slot's user, not as the container's root.
     let uids: Vec<&str> = status_field(status, "Uid").split_whitespace().collect();
-    assert_eq!(uids, vec!["65534"; 4], "{status}");
+    let job_id = JOB_ID.to_string();
+    assert_eq!(uids, vec![job_id.as_str(); 4], "{status}");
 
     // `--uidmap`/`--gidmap`: container ids 0 to 65535 are the range of the subid files,
     // and not the identity map of the host's namespace (`0 0 4294967295`).
@@ -336,7 +338,7 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
     }
 
     // The files the job wrote, and the directory, belong on the host to the mapped ids of
-    // the job's user: range start plus 65534. (They are not root's, and not the range
+    // the job's user: range start plus its slot's id. (They are not root's, and not the range
     // start itself, which is the container's root.)
     let (want_uid, want_gid) = (
         u32::try_from(uid_start).unwrap() + JOB_ID,
