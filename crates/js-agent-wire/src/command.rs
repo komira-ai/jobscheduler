@@ -211,12 +211,11 @@ impl JobSpec {
     /// before it queues a start and the agent before it acts on one, so no host pulls an
     /// image whose content can move.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
-        // The bundle first: a native job returns early below and must not skip it.
-        if let Some(bundle) = &self.bundle {
-            image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)?;
-        }
         if self.native.is_some() {
             return Ok(());
+        }
+        if let Some(bundle) = &self.bundle {
+            image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)?;
         }
         image::pinned(
             At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
