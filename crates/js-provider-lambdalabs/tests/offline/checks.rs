@@ -90,7 +90,7 @@ fn a_typod_types_row_is_named() {
         )
     );
 
-    let rig = rig(config(5));
+    let rig = self::rig(config(5));
     rig.fake.fail_next(Call::InstanceTypes, api_error());
     let result = named(&rig.provider.checks(), "types");
     assert_eq!(
