@@ -17,16 +17,26 @@
 //! agent's unit. The first command is a `trap` on `EXIT` that removes the secret files
 //! the steps wrote and the traces cloud-init leaves of the script.
 //!
-//! Not rendered here: the container binary and state-root steps of the stock image (the
-//! provider's, with the live run that shows what the image lacks) and the host contract
-//! check, which the agent's own report makes at admission.
+//! The unit names the container program, the state root and the scratch root
+//! ([`CONTAINER_BIN`], [`STATE_ROOT`], [`SCRATCH_ROOT`] of `js-elastic`), and requires the
+//! scratch root's mount (`RequiresMountsFor=`), so a machine whose provider did not mount
+//! it does not start the agent. The script makes the two roots' directories; what puts a
+//! file system of its own under the scratch root, and what checks the driver and the
+//! container program, is the provider's `host_prep`. The unit restarts the agent always
+//! and never lists an exit status that stops the restart: the agent exits with a status
+//! on purpose and is to be started again.
+//!
+//! Not rendered here: the host contract check of what the agent finds, which the agent's
+//! own report makes at admission.
 
 mod shell;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use js_elastic::{BootPayload, BootPlan, BootStep, Secret, SlotName};
+use js_elastic::{
+    BootPayload, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, Secret, SlotName,
+};
 use shell::{hex, single_quoted, unit_quoted, word};
 
 /// What a secret prints as in a masked render.
@@ -268,6 +278,9 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
         w.step(step)?;
     }
     w.line("# agent");
+    w.line(&format!(
+        "install -d -m 0700 -- {STATE_ROOT} {SCRATCH_ROOT}"
+    ));
     w.fetch(&plan.agent.url, &plan.agent.sha256, AGENT_PATH);
     w.line(&format!("chmod 0755 {AGENT_PATH}"));
     w.line("cat > /etc/systemd/system/js-agent.service <<'UNIT'");
@@ -275,11 +288,12 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("Description=jobscheduler agent");
     w.line("After=network-online.target");
     w.line("Wants=network-online.target");
+    w.line(&format!("RequiresMountsFor={SCRATCH_ROOT}"));
     w.line("");
     w.line("[Service]");
     let _ = writeln!(
         w.out,
-        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {}",
+        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --container-bin {CONTAINER_BIN} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
         unit_quoted(&plan.scheduler_url),
         unit_quoted(&plan.pool)
     );

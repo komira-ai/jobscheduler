@@ -6,6 +6,7 @@
 mod default_mode;
 mod fake;
 mod golden;
+mod lambda_host;
 mod oauth_file;
 mod one_layer;
 mod render;

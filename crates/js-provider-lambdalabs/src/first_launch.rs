@@ -1,9 +1,9 @@
 //! The first live launch as a program: one instance, launched through [`LambdaProvider`],
-//! waited for, optionally asked a question over ssh, and terminated, under hard limits.
+//! waited for until it is active, and terminated, under hard limits.
 //!
 //! It is a library module so that every branch runs in a test against [`FakeLambda`] with
-//! a [`ManualClock`]; the example `first_launch` only wires the real client, clock, sleep
-//! and ssh into [`run`]. Nothing here makes an HTTP request of its own.
+//! a [`ManualClock`]; the example `first_launch` only wires the real client, clock and
+//! sleep into [`run`]. Nothing here makes an HTTP request of its own.
 //!
 //! - A dry run (the default) reads the instance types, picks the cheapest x86_64 GPU
 //!   type with capacity (or the one named by flag), prints the plan with the price the
@@ -19,6 +19,11 @@
 //! - A boot deadline, a wall-clock cap and a spend cap (the API's hourly price times the
 //!   time since the launch) each force teardown. Termination is tried a bounded number
 //!   of times and each try reads the instance back.
+//!
+//! The launch goes through [`LambdaProvider::acquire`], so the instance carries the
+//! no-inbound firewall ruleset that every launch carries: nothing can connect to it, so
+//! the runner takes no ssh flag (`--ssh-key`, `--ssh-user` and `--ssh-command` are
+//! refused) and checks nothing on the instance: it waits for the API to report it active.
 
 mod args;
 mod state;
@@ -43,12 +48,11 @@ use crate::clock::Clock;
 use crate::config::ElasticConfig;
 use crate::http::SetupError;
 use crate::key::ApiKey;
-use crate::model::InstanceId;
 use crate::options::OptionTable;
 use crate::own::Owner;
 use crate::provider::LambdaProvider;
 
-use args::{Args, Mode, Ssh};
+use args::{Args, Mode};
 use state::State;
 
 pub use state::sync_dir;
@@ -71,14 +75,10 @@ const POLL: Duration = Duration::from_secs(10);
 pub const TERMINATE_ATTEMPTS: u32 = 5;
 /// The pause between two tries to terminate.
 const TERMINATE_PAUSE: Duration = Duration::from_secs(10);
-/// The longest the remote command may run.
-const SSH_LIMIT: Duration = Duration::from_secs(120);
-/// The most of the remote command's output printed.
-const SSH_OUTPUT: usize = 4000;
 /// What to paste back after a run that did what was asked.
 const STOP_DONE: &str = "paste back everything printed above, from the plan line to here.";
 /// What to paste back after a run whose check failed but whose instance is gone.
-const STOP_CHECK_FAILED: &str = "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
+const STOP_CHECK_FAILED: &str = "the run did not reach active; the instance is terminated. Paste back everything printed above.";
 /// Why a run stopped because the operator or the system asked it to (a signal, in the
 /// example).
 const INTERRUPTED: &str = "interrupted: a stop was requested (SIGINT, SIGTERM or SIGHUP)";
@@ -89,26 +89,6 @@ const ANY_GPU: &str = "any";
 pub trait Sleeper {
     /// Blocks for `how_long`.
     fn sleep(&self, how_long: Duration);
-}
-
-/// Running a command on the instance.
-pub trait Remote {
-    /// Runs `command` as `user` at `host`, with the private key in `identity`, and
-    /// gives up after `limit` or as soon as `stop` answers true. The output, or why it
-    /// failed.
-    ///
-    /// # Errors
-    ///
-    /// A sentence for the operator.
-    fn run(
-        &self,
-        host: &str,
-        user: &str,
-        identity: &Path,
-        command: &str,
-        limit: Duration,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<String, String>;
 }
 
 /// Builds the client for a base URL, a key and an optional CA bundle.
@@ -124,8 +104,6 @@ pub struct Seams<'a> {
     pub clock: Arc<dyn Clock>,
     /// Waits between polls and tries.
     pub sleeper: &'a dyn Sleeper,
-    /// Runs the ssh command.
-    pub remote: &'a dyn Remote,
     /// Seconds since the Unix epoch, for the state file.
     pub wall_unix: &'a dyn Fn() -> u64,
     /// Syncs the directory of the state file after the file was created or renamed into
@@ -134,7 +112,7 @@ pub struct Seams<'a> {
     /// Builds the API client.
     pub connect: &'a Connect<'a>,
     /// True once a stop was requested (the example sets it from a signal handler). Read
-    /// before the launch, on every wait iteration and around the ssh step; once a launch
+    /// before the launch, on every wait iteration; once a launch
     /// has happened it sends the run straight to teardown.
     pub stop: &'a dyn Fn() -> bool,
 }
@@ -224,10 +202,6 @@ impl Caps {
             (false, true) => Some("the wall-clock cap is reached"),
             (false, false) => None,
         }
-    }
-
-    fn left(&self, elapsed: Duration) -> Duration {
-        self.wall.min(self.spend_after).saturating_sub(elapsed)
     }
 }
 
@@ -356,12 +330,8 @@ impl Runner<'_, '_> {
             (None, None) => "the cheapest x86_64 GPU type with capacity",
             _ => "named by flag, with capacity",
         };
-        let ssh = match &args.ssh {
-            None => "none".to_owned(),
-            Some(ssh) => format!("{}@instance: {}", ssh.user, ssh.command),
-        };
         let text = format!(
-            "first launch plan\n  api: {}\n  choice: {how}\n  instance type: {}\n  region: {}\n  gpus: {}\n  price: {} cents per hour (from the API)\n  ssh key name on the account: {key_name}\n  state file: {}\n  boot deadline: {} s\n  wall-clock cap: {} s\n  spend cap: {} cents, reached {} s after the launch at this price\n  ssh check: {ssh}\n  instances launched: 1\n",
+            "first launch plan\n  api: {}\n  choice: {how}\n  instance type: {}\n  region: {}\n  gpus: {}\n  price: {} cents per hour (from the API)\n  ssh key name on the account: {key_name}\n  state file: {}\n  boot deadline: {} s\n  wall-clock cap: {} s\n  spend cap: {} cents, reached {} s after the launch at this price\n  instances launched: 1\n",
             args.base_url,
             offer.id,
             offer.zone.as_deref().unwrap_or_default(),
@@ -546,15 +516,14 @@ impl Runner<'_, '_> {
         self.say(format_args!("launched: {}", names.join(" ")));
         self.say(format_args!("state file: {}", plan.state_file.display()));
         let caps = Caps::new(self.args, plan.price_cents_per_hour);
-        let mut ok = true;
         let reason = match recorded {
             Err(why) => Some(format!("the state file could not be updated: {why}")),
-            Ok(()) => self.wait_and_ask(provider, &ids, launched_at, &caps, &mut ok),
+            Ok(()) => self.wait_for_active(provider, &ids, launched_at, &caps),
         };
         if let Some(reason) = &reason {
             self.say(format_args!("teardown forced: {reason}"));
-            ok = false;
         }
+        let ok = reason.is_none();
         let torn = self.terminate_all(provider, &ids);
         let spent = (u128::from(plan.price_cents_per_hour)
             * self
@@ -590,16 +559,14 @@ impl Runner<'_, '_> {
         i32::from(!ok)
     }
 
-    /// Waits for active within the limits and runs the ssh check. Returns why the run
-    /// must be torn down early, or `None` when it reached active and was asked what it
-    /// was meant to be asked (`ok` is cleared when the ssh check failed).
-    fn wait_and_ask(
+    /// Waits for active within the limits. Returns why the run must be torn down early,
+    /// or `None` when it reached active.
+    fn wait_for_active(
         &mut self,
         provider: &LambdaProvider,
         ids: &[HostRef],
         launched_at: Duration,
         caps: &Caps,
-        ok: &mut bool,
     ) -> Option<String> {
         let clock = self.seams.clock.clone();
         let mut shown: Option<HostStatus> = None;
@@ -654,47 +621,7 @@ impl Runner<'_, '_> {
         if self.stop_requested() {
             return Some(INTERRUPTED.to_owned());
         }
-        if let Some(ssh) = &self.args.ssh {
-            *ok = self.ask(ssh, &ids[0], caps.left(elapsed));
-            if self.stop_requested() {
-                return Some(INTERRUPTED.to_owned());
-            }
-        }
         None
-    }
-
-    fn ask(&mut self, ssh: &Ssh, id: &HostRef, left: Duration) -> bool {
-        let host = InstanceId::new(id.as_str())
-            .ok()
-            .and_then(|valid| self.api.get_instance(&valid).ok())
-            .and_then(|i| i.ip);
-        let Some(host) = host else {
-            self.say("ssh check failed: the instance has no public address");
-            return false;
-        };
-        let limit = left.min(SSH_LIMIT);
-        match self.seams.remote.run(
-            &host,
-            &ssh.user,
-            &ssh.identity,
-            &ssh.command,
-            limit,
-            self.seams.stop,
-        ) {
-            Ok(output) => {
-                let shown: String = output.chars().take(SSH_OUTPUT).collect();
-                self.say(format_args!(
-                    "ssh output of {}:\n{}",
-                    ssh.command,
-                    shown.trim_end()
-                ));
-                true
-            }
-            Err(why) => {
-                self.say(format_args!("ssh check failed: {why}"));
-                false
-            }
-        }
     }
 
     /// Terminates every instance of `ids`, a bounded number of tries each, reading each

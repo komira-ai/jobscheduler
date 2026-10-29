@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use js_elastic::{Acquired, ElasticProvider, HostStatus, Reason, Released};
 use js_provider_lambdalabs::{
-    ApiError, Call, FakeLambda, Instance, InstanceId, InstanceTypeOffer, LambdaApi, LambdaProvider,
-    LaunchRequest, ManualClock, OptionTable,
+    ApiError, Call, FakeLambda, FirewallRuleset, Instance, InstanceId, InstanceTypeOffer,
+    LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, SshKey,
 };
 
 use crate::rig::{INTERVAL, TABLE, ask, host, id, live, offer};
@@ -43,6 +43,22 @@ impl LambdaApi for Lagging {
             Some(other) => Ok(vec![other]),
             None => self.fake.terminate(id),
         }
+    }
+    fn list_firewall_rulesets(&self) -> Result<Vec<FirewallRuleset>, ApiError> {
+        self.fake.list_firewall_rulesets()
+    }
+    fn create_firewall_ruleset(
+        &self,
+        region: &str,
+        name: &str,
+    ) -> Result<FirewallRuleset, ApiError> {
+        self.fake.create_firewall_ruleset(region, name)
+    }
+    fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError> {
+        self.fake.list_ssh_keys()
+    }
+    fn create_ssh_key(&self, name: &str) -> Result<SshKey, ApiError> {
+        self.fake.create_ssh_key(name)
     }
 }
 

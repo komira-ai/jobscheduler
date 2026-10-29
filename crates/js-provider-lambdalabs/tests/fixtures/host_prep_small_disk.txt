@@ -1,0 +1,2 @@
+["logger", "-p", "user.err", "-t", "js-bootstrap", "the disk is 240 GiB; the scratch image needs 200 GiB and 50 GiB must stay free"]
+["false"]

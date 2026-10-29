@@ -119,6 +119,12 @@ pub enum Reason {
     },
     /// A label or the pool name cannot become a mark; the provider's words for why.
     Label(String),
+    /// The machine cannot get the firewall every launch needs; the provider's words for
+    /// why (no secret in them). Nothing was launched.
+    Firewall(String),
+    /// The machine cannot get an ssh key to be launched with; the provider's words for
+    /// why (no secret in them). Nothing was launched.
+    SshKey(String),
     /// Machines with some of this scheduler's marks, not all, exist: launching more
     /// could exceed the cap unseen. An operator clears them.
     HalfMarked {

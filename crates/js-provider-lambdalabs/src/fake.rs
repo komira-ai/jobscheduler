@@ -8,7 +8,9 @@ use js_elastic::HostStatus;
 
 use crate::api::LambdaApi;
 use crate::error::{ApiError, ErrorCode};
-use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest};
+use crate::model::{
+    FirewallRuleset, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, SshKey,
+};
 
 /// One of the calls of [`LambdaApi`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +25,52 @@ pub enum Call {
     Launch,
     /// [`LambdaApi::terminate`].
     Terminate,
+    /// [`LambdaApi::list_firewall_rulesets`].
+    ListFirewallRulesets,
+    /// [`LambdaApi::create_firewall_ruleset`].
+    CreateFirewallRuleset,
+    /// [`LambdaApi::list_ssh_keys`].
+    ListSshKeys,
+    /// [`LambdaApi::create_ssh_key`].
+    CreateSshKey,
+}
+
+/// What one launch call asked for, as the account saw it. Its `Debug` and the call log say
+/// that user data was sent and how long it was, never what it said; the text comes out only
+/// through [`LaunchRecord::user_data`], for a test that checks what the machine receives.
+#[derive(Clone)]
+pub struct LaunchRecord {
+    /// The region's code.
+    pub region: String,
+    /// The instance type's name.
+    pub instance_type: String,
+    /// The name of the ssh key.
+    pub ssh_key: String,
+    /// The instance's name.
+    pub name: String,
+    /// The ids of the firewall rulesets asked for.
+    pub firewall_ruleset_ids: Vec<String>,
+    user_data: Option<String>,
+}
+
+impl LaunchRecord {
+    /// The user data the launch carried, if any. Call it only to check delivery.
+    pub fn user_data(&self) -> Option<&str> {
+        self.user_data.as_deref()
+    }
+}
+
+impl std::fmt::Debug for LaunchRecord {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("LaunchRecord")
+            .field("region", &self.region)
+            .field("instance_type", &self.instance_type)
+            .field("ssh_key", &self.ssh_key)
+            .field("name", &self.name)
+            .field("firewall_ruleset_ids", &self.firewall_ruleset_ids)
+            .field("user_data_bytes", &self.user_data.as_ref().map(String::len))
+            .finish()
+    }
 }
 
 /// What a terminate call does to the instance it is given.
@@ -46,9 +94,15 @@ struct State {
     terminate_effect: Option<TerminateEffect>,
     launched: usize,
     calls: Vec<Call>,
+    rulesets: Vec<FirewallRuleset>,
+    ssh_keys: Vec<SshKey>,
+    launches: Vec<LaunchRecord>,
+    made: usize,
 }
 
-/// An account in memory. A read of an instance it does not hold fails as the real API
+/// An account in memory. It holds firewall rulesets and ssh keys too: a ruleset is made
+/// with no rules and a key with an id, and a launch that names a ruleset the region does
+/// not hold fails as the 404 below. A read of an instance it does not hold fails as the real API
 /// does: 404 with `global/object-does-not-exist`. A launch of a type it does not offer
 /// fails as that 404, one into a region without capacity as
 /// `instance-operations/launch/insufficient-capacity`, and one with a name over 64
@@ -66,6 +120,55 @@ impl FakeLambda {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Adds a firewall ruleset named `name` in `region` holding `rules` rules, and returns
+    /// its id.
+    pub fn add_firewall_ruleset(&self, name: &str, region: &str, rules: usize) -> String {
+        let mut state = self.state();
+        let id = Self::made_id(&mut state, "ruleset");
+        state.rulesets.push(FirewallRuleset {
+            id: id.clone(),
+            name: name.to_owned(),
+            region: region.to_owned(),
+            rules,
+        });
+        id
+    }
+
+    /// Sets the number of rules the ruleset `id` holds, as if a rule were added to it
+    /// (or removed) after it was made. An id the account does not hold changes nothing.
+    pub fn set_firewall_rules(&self, id: &str, rules: usize) {
+        for ruleset in &mut self.state().rulesets {
+            if ruleset.id == id {
+                ruleset.rules = rules;
+            }
+        }
+    }
+
+    /// The firewall rulesets held now.
+    pub fn firewall_rulesets(&self) -> Vec<FirewallRuleset> {
+        self.state().rulesets.clone()
+    }
+
+    /// Adds an ssh key named `name`.
+    pub fn add_ssh_key(&self, name: &str) {
+        let mut state = self.state();
+        let id = Self::made_id(&mut state, "key");
+        state.ssh_keys.push(SshKey {
+            id,
+            name: name.to_owned(),
+        });
+    }
+
+    /// The ssh keys held now.
+    pub fn ssh_keys(&self) -> Vec<SshKey> {
+        self.state().ssh_keys.clone()
+    }
+
+    /// The launch calls that took effect so far, in order, with what each asked for.
+    pub fn launches(&self) -> Vec<LaunchRecord> {
+        self.state().launches.clone()
     }
 
     /// Replaces the instance types the account offers.
@@ -195,6 +298,23 @@ impl LambdaApi for FakeLambda {
         if request.name.is_empty() || request.name.len() > 64 {
             return Err(refusal(400, ErrorCode::InvalidParameters));
         }
+        let unknown_ruleset = request.firewall_ruleset_ids.iter().any(|id| {
+            !state
+                .rulesets
+                .iter()
+                .any(|ruleset| ruleset.id == *id && ruleset.region == request.region)
+        });
+        if unknown_ruleset {
+            return Err(missing());
+        }
+        state.launches.push(LaunchRecord {
+            region: request.region.clone(),
+            instance_type: request.instance_type.clone(),
+            ssh_key: request.ssh_key.clone(),
+            name: request.name.clone(),
+            firewall_ruleset_ids: request.firewall_ruleset_ids.clone(),
+            user_data: request.user_data.as_ref().map(|d| d.expose().to_owned()),
+        });
         let count = state.launch_counts.pop_front().unwrap_or(1);
         let mut ids = Vec::new();
         for _ in 0..count {
@@ -245,6 +365,60 @@ impl LambdaApi for FakeLambda {
             Some(error) => Err(error),
             None => Ok(vec![id.clone()]),
         }
+    }
+
+    fn list_firewall_rulesets(&self) -> Result<Vec<FirewallRuleset>, ApiError> {
+        Ok(self.enter(Call::ListFirewallRulesets)?.rulesets.clone())
+    }
+
+    fn create_firewall_ruleset(
+        &self,
+        region: &str,
+        name: &str,
+    ) -> Result<FirewallRuleset, ApiError> {
+        let mut state = self.enter(Call::CreateFirewallRuleset)?;
+        let taken = state
+            .rulesets
+            .iter()
+            .any(|ruleset| ruleset.name == name && ruleset.region == region);
+        if taken || name.is_empty() || name.len() > 64 {
+            return Err(refusal(
+                if taken { 409 } else { 400 },
+                ErrorCode::InvalidParameters,
+            ));
+        }
+        let ruleset = FirewallRuleset {
+            id: Self::made_id(&mut state, "ruleset"),
+            name: name.to_owned(),
+            region: region.to_owned(),
+            rules: 0,
+        };
+        state.rulesets.push(ruleset.clone());
+        Ok(ruleset)
+    }
+
+    fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError> {
+        Ok(self.enter(Call::ListSshKeys)?.ssh_keys.clone())
+    }
+
+    fn create_ssh_key(&self, name: &str) -> Result<SshKey, ApiError> {
+        let mut state = self.enter(Call::CreateSshKey)?;
+        if name.is_empty() || name.len() > 64 || state.ssh_keys.iter().any(|key| key.name == name) {
+            return Err(refusal(400, ErrorCode::InvalidParameters));
+        }
+        let key = SshKey {
+            id: Self::made_id(&mut state, "key"),
+            name: name.to_owned(),
+        };
+        state.ssh_keys.push(key.clone());
+        Ok(key)
+    }
+}
+
+impl FakeLambda {
+    fn made_id(state: &mut State, prefix: &str) -> String {
+        state.made += 1;
+        format!("{prefix}{:04}", state.made)
     }
 }
 

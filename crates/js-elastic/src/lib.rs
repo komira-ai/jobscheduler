@@ -32,7 +32,7 @@ mod secret;
 pub use answer::{
     Acquired, Claim, Extra, Held, HostStatus, Reason, Refusal, RefusalCode, Released,
 };
-pub use boot::{Artifact, BootPlan, BootStep, SlotName};
+pub use boot::{Artifact, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, SlotName};
 pub use ids::{AcquireId, HostName, HostRef, InvalidId, SchedulerId};
 pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
 pub use provider::{AcquireRequest, ElasticProvider, ProviderError};

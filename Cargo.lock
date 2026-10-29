@@ -1113,6 +1113,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-provider-lambdalabs",
  "js-registry",
  "js-sched",
  "js-testkit",
@@ -1204,6 +1205,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]

@@ -15,30 +15,30 @@
 //! --boot-deadline-secs N    give up waiting for active after N seconds (900)
 //! --wall-cap-secs N         tear down N seconds after the launch (1800)
 //! --spend-cap-cents N       tear down when the price times the time reaches N (100)
-//! --ssh-key PATH --ssh-user USER [--ssh-command CMD]
-//!                           run CMD (nvidia-smi) over ssh once active
 //! --go --plan-hash HASH     launch the plan the dry run printed
 //! --teardown-only FILE      terminate what a state file names
 //! ```
 //!
+//! The launch carries the firewall ruleset that lets nothing in, so there is no ssh check:
+//! `--ssh-key`, `--ssh-user` and `--ssh-command` are refused with a message saying so.
+//!
 //! SIGINT, SIGTERM and SIGHUP do not kill the process: they set a flag the runner reads on
-//! every wait iteration and around the ssh step. After a launch it then terminates the
+//! every wait iteration. After a launch it then terminates the
 //! instance (bounded tries, read back) and exits 1; before a launch it launches nothing.
 //! Only SIGKILL leaves an instance behind, which is why the teardown command is printed
 //! as soon as the state file exists.
 //!
-//! This file only wires the real client, clock, sleep and ssh into the library module,
+//! This file only wires the real client, clock and sleep into the library module,
 //! where the behaviour is tested against an in-memory account.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run, sync_dir};
+use js_provider_lambdalabs::first_launch::{Seams, Sleeper, run, sync_dir};
 use js_provider_lambdalabs::{ApiKey, HttpApi, LambdaApi, SystemClock};
 
 /// Each API call is answered or fails within this long.
@@ -72,101 +72,11 @@ fn install_handlers() -> Result<(), String> {
     Ok(())
 }
 
-/// Sleeps `total` in short steps, ending early once a stop is requested.
-fn nap(total: Duration, stop: &dyn Fn() -> bool) {
-    let step = Duration::from_millis(200);
-    let started = Instant::now();
-    while started.elapsed() < total && !stop() {
-        thread::sleep(step.min(total));
-    }
-}
-
 struct RealSleep;
 
 impl Sleeper for RealSleep {
     fn sleep(&self, how_long: Duration) {
         thread::sleep(how_long);
-    }
-}
-
-struct Ssh;
-
-impl Ssh {
-    /// One attempt: the exit code (None when it ran out of time) and the output.
-    fn once(
-        host: &str,
-        user: &str,
-        identity: &Path,
-        command: &str,
-        limit: Duration,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<(Option<i32>, String), String> {
-        let mut child = Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"])
-            .args(["-o", "StrictHostKeyChecking=accept-new"])
-            .args(["-o", "ConnectTimeout=20"])
-            .arg("-i")
-            .arg(identity)
-            .arg(format!("{user}@{host}"))
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| format!("ssh cannot start: {}", err.kind()))?;
-        let stdout = child.stdout.take();
-        let reader = thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(out) = stdout {
-                let _ = out.take(64 * 1024).read_to_string(&mut text);
-            }
-            text
-        });
-        let started = Instant::now();
-        let code = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status.code(),
-                Ok(None) if !stop() && started.elapsed() < limit => {
-                    thread::sleep(Duration::from_millis(200));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
-        let text = reader.join().unwrap_or_default();
-        Ok((code, text))
-    }
-}
-
-impl Remote for Ssh {
-    fn run(
-        &self,
-        host: &str,
-        user: &str,
-        identity: &Path,
-        command: &str,
-        limit: Duration,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<String, String> {
-        let started = Instant::now();
-        loop {
-            let left = limit.saturating_sub(started.elapsed());
-            let (code, text) = Self::once(host, user, identity, command, left, stop)?;
-            match code {
-                Some(0) => return Ok(text),
-                // 255 is ssh's own failure, such as sshd not up yet: try again while
-                // there is time.
-                Some(255) if !stop() && started.elapsed() + Duration::from_secs(30) < limit => {
-                    nap(Duration::from_secs(10), stop);
-                }
-                Some(code) => return Err(format!("the command ended with status {code}")),
-                None if stop() => return Err("the command was stopped".to_owned()),
-                None => return Err("the command ran out of time".to_owned()),
-            }
-        }
     }
 }
 
@@ -189,7 +99,6 @@ fn main() {
     let seams = Seams {
         clock: Arc::new(SystemClock::new()),
         sleeper: &RealSleep,
-        remote: &Ssh,
         wall_unix: &wall,
         sync_dir: &sync_dir,
         connect: &connect,
