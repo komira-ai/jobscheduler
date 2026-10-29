@@ -1,10 +1,11 @@
-//! The bytes of the `op/`, `queue/`, `inflight/` and `opkey/` rows a frontend writes when it
+//! The bytes of the `op/`, `queue/`, `inflight/`, `opkey/` and `opwall/` rows a frontend writes when it
 //! queues operations, as a file (`tests/golden/submit-rows.txt`), and the bytes of the
 //! `loss/` and `fate/` rows a start reads (`tests/golden/load-rows.txt`).
 //!
 //! The first file holds, for one store a frontend opened and queued two operations in (each
-//! with a size key), and one of which it then took out of the queue, the rows of those four
-//! kinds: key, expiry and value as hex. Its `inflight/`, `opkey/` and `queue/` lines are those
+//! with a size key, the second also with a longest run), and one of which it then took out of
+//! the queue, the rows of those five kinds: key, expiry and value as hex. Its `inflight/`,
+//! `opkey/`, `opwall/` and `queue/` lines are those
 //! of the farm server's golden file of scheduler rows, so a store written by either is read
 //! by the other; the `op/` lines have that file's keys and the value of the test codec. The
 //! second file holds rows copied from the same file, which a start reads back as the values
@@ -14,6 +15,7 @@ mod common;
 
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 
 use js_sched::{Fate, Request};
 use js_state::{Cond, Store, Txn};
@@ -83,22 +85,28 @@ fn opened(store: &Arc<Racing>) -> Rows {
 
 /// Asserts that a frontend which queues operation 4 and operation 8, each with the size key
 /// 7, and takes the second out of the queue (a grant's part of the rows), leaves exactly the
-/// `op/`, `queue/`, `inflight/` and `opkey/` rows of the golden file, byte for byte: the
-/// in-flight rows holding the operation's id, the size key rows holding a version byte and the
-/// key, and an empty queue row.
+/// `op/`, `queue/`, `inflight/`, `opkey/` and `opwall/` rows of the golden file, byte for
+/// byte: the in-flight rows holding the operation's id, the size key rows holding a version
+/// byte and the key, the one wall time row (operation 8's, 3600.25 seconds) holding a version
+/// byte, the seconds and the nanoseconds, and an empty queue row.
 #[test]
-fn the_op_queue_inflight_and_opkey_rows_are_the_rows_of_the_golden_file() {
+fn the_op_queue_inflight_opkey_and_opwall_rows_are_the_rows_of_the_golden_file() {
     let store = Racing::new();
     let rows = opened(&store);
-    for (id, tag) in [(4, 1), (8, 9)] {
+    for (id, tag, wall) in [
+        (4, 1, None),
+        (8, 9, Some(Duration::new(3_600, 250_000_000))),
+    ] {
         let id = rows.reserve_operation(OperationId(id)).expect("an id");
-        let queued = rows.submit(id, &action(tag), &[], Some(7)).expect("submit");
+        let queued = rows
+            .submit_walled(id, &action(tag), &[], Some(7), wall)
+            .expect("submit");
         assert!(matches!(queued, Submitted::Queued(queued) if queued == id));
     }
     let taken = Txn::new().delete(keys::queue(OperationId(8)), Cond::Any);
     store.txn(taken).expect("store").expect("the grant's part");
 
-    let kinds = ["op/", "queue/", "inflight/", "opkey/"];
+    let kinds = ["op/", "queue/", "inflight/", "opkey/", "opwall/"];
     assert_eq!(dump(&store, &kinds), rows_of(SUBMITTED));
 }
 

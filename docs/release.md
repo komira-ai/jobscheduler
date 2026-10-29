@@ -12,8 +12,8 @@ changes code that ships is released as the next version, after `ci` has passed o
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the three binaries for
-   `x86_64-unknown-linux-musl`, checks that they are static and that `--version` prints the
-   release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
+   `x86_64-unknown-linux-musl` and `js` and `js-agent` for `aarch64-apple-darwin`, checks that
+   the Linux ones are static and that `--version` prints the release version, and packages them. `sums` writes one `SHA256SUMS` over the archives.
 5. `attest` attests every archive with build provenance (`actions/attest-build-provenance`);
    `verify` then checks the attestations the way a user does (below).
 6. `publish` creates the GitHub release for `vX.Y.Z` as a draft (its tag name `vX.Y.Z`, its target the
@@ -107,11 +107,15 @@ For version `X.Y.Z`:
 | `js-lease-server-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-lease-server` binary and `LICENSE` |
 | `js-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js` binary and `LICENSE` |
 | `js-agent-X.Y.Z-x86_64-unknown-linux-musl.tar.gz` | the `js-agent` binary and `LICENSE` |
-| `SHA256SUMS` | SHA-256 of the three archives |
+| `js-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js` binary for Apple silicon Macs and `LICENSE` |
+| `js-agent-X.Y.Z-aarch64-apple-darwin.tar.gz` | the `js-agent` binary for Apple silicon Macs and `LICENSE` |
+| `SHA256SUMS` | SHA-256 of the five archives |
 
 Each archive unpacks to a directory named like the archive without `.tar.gz`.
 
-The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; no crate code changes were needed. There is no macOS asset yet: `js` does not build for macOS because `js-cli` draws its run label with the Linux-only `getrandom` of rustix. Add `aarch64-apple-darwin` to the build matrix when it does.
+The Linux binaries are statically linked against musl, so they run on any Linux host of that architecture, including `gcr.io/distroless/cc-debian12`. The TLS stack (rustls with ring) needs a C compiler for ring, which the workflow gets from `musl-tools`; musl itself needed no crate code change (the Mac build needed one: `js` draws its run label and `js-agent` its retry jitter through the `getrandom` crate, which both targets share). The macOS assets (`aarch64-apple-darwin`) are built on a `macos-14` runner and are dynamically linked against the system libraries, as every Mac binary is; there is no macOS `js-lease-server`. The Mac agent refuses `--container-bin`, whose post-job checks read `/proc`.
+
+Not yet proven: that the Mac archives come out byte-identical when a partly published release is re-run. The Linux archives are held to this by the comparison in `publish`; for the Mac ones it is watched on the first real release.
 
 ## Downloading and verifying
 

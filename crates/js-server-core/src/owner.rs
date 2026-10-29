@@ -119,12 +119,17 @@ impl Engine {
     /// acknowledged nor a reason to renew the node's session row. A core with no state
     /// store, or one that handed its work over, owns every node it hears from.
     pub(crate) fn owns_worker(&mut self, now: FarmTime, worker: &WorkerId) -> bool {
+        self.owner_look(now, worker).unwrap_or(false)
+    }
+
+    /// [`Engine::owns_worker`], or `None` when the store could not be read.
+    pub(crate) fn owner_look(&mut self, now: FarmTime, worker: &WorkerId) -> Option<bool> {
         if self.fenced || self.rows.is_none() {
-            return true;
+            return Some(true);
         }
-        let mut owns = false;
+        let mut owns = None;
         self.attempt("an owner check", &mut |rows| {
-            owns = rows.owns(worker, now)?;
+            owns = Some(rows.owns(worker, now)?);
             Ok(())
         });
         owns
