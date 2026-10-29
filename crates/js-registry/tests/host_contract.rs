@@ -4,9 +4,9 @@
 
 mod support;
 
-use js_agent_wire::refusal;
+use js_agent_wire::{Taint, refusal};
 use js_caps::Breach;
-use js_registry::{PoolConfig, Refusal};
+use js_registry::{Binding, PoolConfig, Refusal};
 use js_types::{ExecMode, Resources, Shape};
 use support::*;
 
@@ -166,4 +166,53 @@ fn breaches_become_refusals() {
         config(1).with_exec(ExecMode::SandboxExec).exec(),
         Some(ExecMode::SandboxExec)
     );
+}
+
+/// Whether `host` reads as heard since its hello.
+fn heard(fx: &Fixture, host_name: &str) -> bool {
+    let hosts = fx.registry.hosts();
+    hosts
+        .iter()
+        .find(|h| h.id == host(host_name))
+        .unwrap()
+        .heard_since_hello
+}
+
+/// Asserts the listing's `heard_since_hello`: false for a host that only said hello, true
+/// once it heartbeats, and false again after a re-hello (once the host has lapsed) until
+/// its next heartbeat. It catches a count that survives a new session, and one that never
+/// starts.
+#[test]
+fn a_host_is_heard_since_hello_only_after_a_heartbeat() {
+    let fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    assert!(!heard(&fx, "a"));
+    fx.beat("a", epoch);
+    assert!(heard(&fx, "a"));
+    fx.pass_grace();
+    let epoch = fx.join("a", "t");
+    assert!(!heard(&fx, "a"));
+    fx.beat("a", epoch);
+    assert!(heard(&fx, "a"));
+}
+
+/// Asserts that a host put back after a restart reads as heard before it says hello (the
+/// scaler never releases a host the registry has no session for at its boot timeout), reads
+/// as not heard once it says hello, and as heard again after a heartbeat. It catches a
+/// restored host that reads not heard, which the scaler would release as a failed boot.
+#[test]
+fn a_restored_host_reads_as_heard_until_it_says_hello() {
+    let taint = Taint {
+        reason: "residue".into(),
+        run_id: None,
+        check: None,
+    };
+    let fx = fixture(2);
+    let binding = Binding::new(cred("t"), None).with_taint(Some(taint));
+    fx.registry.restore_tainted(&host("a"), binding);
+    assert!(heard(&fx, "a"));
+    let epoch = fx.join("a", "t");
+    assert!(!heard(&fx, "a"));
+    fx.beat("a", epoch);
+    assert!(heard(&fx, "a"));
 }

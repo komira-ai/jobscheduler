@@ -24,8 +24,10 @@
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
-//!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m --ulimit core=0 --ipc private
-//!   [--pid private] --pull never --user 65534:65534
+//!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
+//!   [--tmpfs /var/tmp:rw,noexec,nosuid,nodev,size=64m --tmpfs /run:rw,noexec,nosuid,nodev,size=64m] (Podman)
+//!   --ulimit core=0 --ipc private
+//!   [--pid private] --pull never --user <base uid + slot>:<base gid + slot>
 //!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
 //! <bin> volume inspect --format "{{json .Options}}" -- <scratch volume>   (Docker)
@@ -107,6 +109,8 @@
 //! `.Mounts`) and requires that every bind has the source the agent resolved (the
 //! scratch path is canonical, see `ScratchRoot`), the destination and the access it asked
 //! for, and that there is no other bind; the tmpfs and other volumes are not looked at. On
+//! Podman every bind must also list `nosuid` and `nodev` in its `Options`, so the two
+//! options are read back, not assumed. On
 //! Docker the scratch directory is not a bind but a volume of the local driver that
 //! binds it `nosuid,nodev`, so the read-back also requires that volume at `/scratch`
 //! (local driver, writable) and, from `volume inspect`, exactly the options that bind the
@@ -157,11 +161,15 @@
 //!
 //! # The scratch directory and the user
 //!
-//! A run's scratch directory is `0700` and the agent's. The container runs as a user that
-//! is not root (`--container-user`, `65534:65534` by default; a container id, below
-//! 65536), so the directory has to be made writable for it: an agent that runs as root
-//! gives the directory before `create` ([`hand_over`]) to the host ids that user's ids are
-//! mapped onto (the start of the range plus the id, for the uid and the gid). Any other
+//! A run's scratch directory is `0700` and the agent's. Every run holds a slot (see
+//! [`crate::lifecycle::Slots`]) and its container runs as the user of that slot, which is
+//! not root: the base of `--container-user` (`1000:1000` by default) plus the slot number,
+//! for the uid and the gid ([`Settings::slot_ids`]). The base must leave room for every
+//! slot below 65536 ([`Settings::with_subuid`]). The directory has to be made writable for
+//! that user: an agent that runs as root gives the directory before `create`
+//! ([`hand_over`]) to the host ids that user's ids are mapped onto (the start of the range
+//! plus the slot's id, for the uid and the gid). Files a job receives under the directory
+//! are not touched by that. Any other
 //! agent cannot give a file away: it refuses to start unless the container user is its own
 //! `uid:gid` ([`Settings::with_agent`]), and then a mapped job is a host user the agent is
 //! not, so [`CliRuntime::open_in`] refuses it. Nothing else of the agent's is owned by the range.
@@ -261,6 +269,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::Isolation;
 use serde_json::Value;
 
+use args::user_args;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
     label_args, limits_to_args, scratch_volume_options,
@@ -752,6 +761,7 @@ impl CliRuntime {
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
+        args.extend(user_args(&self.settings, spec.slot));
         // Podman maps each container; Docker's daemon maps them all (see `open_in`).
         let maps = self.mapping.filter(|_| self.engine == Engine::Podman);
         args.extend(maps.into_iter().flat_map(Mapping::podman_args));
@@ -865,7 +875,11 @@ impl CliRuntime {
             (self.chown)(&spec.scratch, uid_base + uid, gid_base + gid)
                 .map_err(|why| CliError::Scratch(why.to_string()))
         };
-        self.settings.chown_scratch().map_or(Ok(()), give)
+        let slot = self.settings.slot_ids(spec.slot);
+        self.settings
+            .chown_scratch()
+            .map(|_| slot)
+            .map_or(Ok(()), give)
     }
 
     /// Reads the binds of the container back and compares them with what `spec` asked
@@ -889,7 +903,10 @@ impl CliRuntime {
             .then_some(())
             .ok_or(CliError::MountsDiffer)?;
         match self.engine {
-            Engine::Podman => Ok(()),
+            Engine::Podman => unprivileged_binds(&text)
+                .ok_or_else(unreadable)?
+                .then_some(())
+                .ok_or(CliError::MountsDiffer),
             Engine::Docker => self.verify_scratch_volume(&text, spec),
         }
     }
@@ -1151,7 +1168,9 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     let [pid, state] = text.split_whitespace().collect::<Vec<_>>()[..] else {
         return None;
     };
-    let ended = matches!(state, "exited" | "stopped" | "dead");
+    // `removing` is a container on its way out (no process to look for); `initialized`,
+    // `stopping` and `paused` are Podman states in which the container still exists.
+    let ended = matches!(state, "exited" | "stopped" | "dead" | "removing");
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
@@ -1172,6 +1191,28 @@ fn binds_read(text: &str) -> Option<Vec<Bind>> {
     let each = entries.iter().map(bind_of);
     each.collect::<Option<Vec<_>>>()
         .map(|binds| binds.into_iter().flatten().collect())
+}
+
+/// Whether every bind in the JSON `.Mounts` of a Podman `inspect` lists `nosuid` and
+/// `nodev` in its `Options`. A bind without `Options`, or with one that is not a list of
+/// strings, does not. `None` when the text is not a list of mounts.
+fn unprivileged_binds(text: &str) -> Option<bool> {
+    let options = |entry: &Value| -> Vec<String> {
+        let list = entry.get("Options").and_then(Value::as_array);
+        let strings = list.map(|list| list.iter().map(|o| o.as_str().map(str::to_owned)));
+        strings
+            .and_then(|each| each.collect::<Option<Vec<_>>>())
+            .unwrap_or_default()
+    };
+    let entries = mount_entries(text)?;
+    let binds = entries
+        .iter()
+        .filter(|entry| entry.get("Type").and_then(Value::as_str) == Some("bind"));
+    Some(binds.map(options).all(|options| {
+        ["nosuid", "nodev"]
+            .iter()
+            .all(|wanted| options.iter().any(|o| o == wanted))
+    }))
 }
 
 /// One entry of `.Mounts`: `Some(None)` for a kind other than a bind, `None` for an entry
@@ -1240,9 +1281,12 @@ fn parse_status(text: &str) -> Option<Status> {
         })
     };
     match state {
-        "running" | "paused" | "restarting" | "removing" | "created" | "configured" => {
-            Some(Status::Running)
-        }
+        // Podman 4.9 also prints `initialized` and `stopping`: both still exist, so both
+        // are running. `removing` is not over yet: the container is gone on a later poll.
+        // `unknown` (Podman's state for a container it cannot read) is no answer, so it
+        // stays unreadable like any other word the agent has no meaning for.
+        "running" | "paused" | "restarting" | "removing" | "created" | "configured"
+        | "initialized" | "stopping" => Some(Status::Running),
         "exited" | "stopped" => exit().map(Status::Exited),
         // A container the engine could not remove after it stopped. Its code may be 0
         // however the job ended, so it is a success only if nothing says otherwise, and
