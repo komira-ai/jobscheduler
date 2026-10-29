@@ -111,7 +111,6 @@ fn job(image: &str, scratch: &Path) -> RunSpec {
         gpu_indices: Vec::new(),
         mounts: Vec::new(),
         scratch: scratch.to_path_buf(),
-        slot: 0,
         isolation: Isolation::Contained,
         labels,
         slot: 0,
