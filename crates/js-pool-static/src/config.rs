@@ -191,4 +191,23 @@ mod tests {
         assert!(matches!(parse(""), Err(ConfigError::NoHosts)));
         assert!(parse(ONE).is_ok());
     }
+
+    /// Asserts that `memory_schedulable_percent` is read: 90 comes back as 90, no key is
+    /// all of the memory, and 0 and 101 are refused with the key named. It is asserted
+    /// here as well as through the pool so that the unit-test build of the reader runs
+    /// every arm of it.
+    #[test]
+    fn the_memory_percent_is_read_and_bounded() {
+        let with = |line: &str| format!("{line}\n{ONE}");
+        let given = parse(&with("memory_schedulable_percent = 90"))
+            .ok()
+            .unwrap();
+        assert_eq!(given.memory_percent.get(), 90);
+        assert_eq!(parse(ONE).ok().unwrap().memory_percent, MemoryPercent::FULL);
+        for bad in ["0", "101"] {
+            let err = parse(&with(&format!("memory_schedulable_percent = {bad}")));
+            let said = err.err().unwrap().to_string();
+            assert_eq!(said, "memory_schedulable_percent must be from 1 to 100");
+        }
+    }
 }
