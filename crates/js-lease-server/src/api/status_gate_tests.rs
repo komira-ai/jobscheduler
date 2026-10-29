@@ -1,6 +1,5 @@
 //! A status route that is not served is a route that does not exist.
 
-
 use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::StatusCode;

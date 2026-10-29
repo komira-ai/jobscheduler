@@ -97,15 +97,14 @@ async fn no_offer_names_the_dimension_that_fails() {
     }
 }
 
-/// The wait list gets a whole-node request for `gpus` A10s, with a launchable that says
-/// yes, and returns its id.
-async fn wait_for(rig: &Rig, gpus: u64) -> String {
+/// The wait list gets a whole-node request for one A10 and a few bytes of memory, with a
+/// launchable that says yes, and returns its id.
+async fn wait_for_small(rig: &Rig) -> String {
     let registry = rig.running.registry().unwrap();
     registry.set_launchable(Some(Launchable::new(|_| true)));
     let mut body = lease_body();
     body["class"] = json!("whole-node");
     body["capabilities"] = json!({});
-    body["resources"]["gpus"] = json!(gpus);
     body["resources"]["gpu_class"] = json!("nvidia-a10");
     let bytes = body.to_string().into_bytes();
     let addr = rig.running.addr();
@@ -116,28 +115,20 @@ async fn wait_for(rig: &Rig, gpus: u64) -> String {
     waiting[0].id.to_string()
 }
 
-/// Asserts that the head of the wait list sets the next launch: a request for two A10s is
-/// served by the two-GPU offer though the floor would take the cheaper one, and a request
-/// for four, which no offer serves, is named in `no_offer` by its id with the dimension.
+/// Asserts that the head of the wait list sets the next launch: with nothing waiting the
+/// pool floor (1 GiB) takes the offer that has the memory; once a request for a few bytes
+/// waits, the cheaper small offer serves it. It catches a plan made for the floor while a
+/// request waits.
 #[tokio::test]
 async fn the_head_of_the_wait_list_sets_the_next_launch() {
-    let offers = vec![a10("gpu_1x_a10", 1, 129), a10("gpu_2x_a10", 2, 258)];
-    let rig = Rig::start("status_waiting_2", offers.clone(), Options::default()).await;
+    let mut tiny = a10("gpu_tiny", 1, 50);
+    tiny.memory_bytes = 512 << 20;
+    let offers = vec![a10("gpu_big", 1, 129), tiny];
+    let rig = Rig::start("status_waiting", offers, Options::default()).await;
     rig.step().await;
-    assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_1x_a10");
-    wait_for(&rig, 2).await;
-    assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_2x_a10");
-    rig.assert_clean();
-
-    let rig = Rig::start("status_waiting_4", offers, Options::default()).await;
-    rig.step().await;
-    let id = wait_for(&rig, 4).await;
-    let pool = rig.pool().await;
-    assert_eq!(
-        pool["no_offer"],
-        json!({ "request": id, "dimension": "gpus" })
-    );
-    assert_eq!(pool["next_launch"], Value::Null);
+    assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_big");
+    wait_for_small(&rig).await;
+    assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_tiny");
     rig.assert_clean();
 }
 
