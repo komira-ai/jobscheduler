@@ -656,7 +656,7 @@ fails fast with the existing code instead of waiting on a dead cloud.
 // crates/js-scaler/src/lib.rs
 pub struct Input { pub scheduler: SchedulerId /* names the hosts it launches */,
     pub pools: Vec<PoolInput> /* the order requests fall through */, pub waiting: Vec<Waiting>,
-    pub hosts: Vec<HostFacts> /* id, pool, state (Live, Lost, Awaiting), shape, mark, busy, lease_given_up */,
+    pub hosts: Vec<HostFacts> /* id, pool, state (Live, Lost, Awaiting), shape: Option<Offer>, mark, busy, lease_given_up */,
     pub registry_complete: bool /* hosts is the registry's whole, settled view */,
     pub acquired: Vec<AcquireResult> /* answers to acquires, with the attempt they answer */,
     pub released: Vec<ReleaseResult> /* answers to releases, read back */,
@@ -674,6 +674,31 @@ pub enum Action { Save(Box<Records>) /* the whole records, written first when a 
     Release { host: String, id: HostRef }, ForgetNetwork(String), RemoveHost(String) }
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>);
 ```
+
+What the shell owes the host facts, because the step cannot tell otherwise:
+
+- `shape` is `Some` only for a host that announced one (the registry's `claim`), and `None`
+  for a host that has not since the registry was put back after a restart (`Awaiting`). The
+  shell never fills it with a stand-in such as the pool floor or the shape a record stored:
+  the first hello is compared with the offer, and a floor below the offer would condemn a
+  healthy machine and start the boot cooldown. A host with no shape covers no request.
+- `busy` for a host that is not `Live` is a booked lease, read from the lease table. It is
+  not the runs the host last listed: the registry keeps that listing until it forgets the
+  host, so a host that went lost in the middle of a job would look busy for a day. So for a
+  silent host `busy` and `lease_given_up` never hold together: the first says a lease is
+  booked, the second says none is. A `Held` or `Reserved` mark still keeps the host. For a
+  `Live` host `busy` is leases, runs and streams.
+- `registry_complete` means settled, not only loaded. The registry keeps no idle or booting
+  host in memory across a restart, so every one is absent until its agent says hello, which
+  takes the agent's longest retry wait (two minutes) and longer when many agents share a
+  hello limit. The step does not lean on the shell's settle alone (6.2, Booting to
+  Releasing and Lost), but the shell should not report a view complete before the agents
+  have had that wait.
+- A price of zero in the catalog is no price: the step never launches it. A request that
+  fits only an offer with no price, or a price of zero, shows the pool as `blocked: unpriced`
+  in the state, so the operator sees it before the shell's catalog check exists.
+- The records carry the first-seen times of silent and missing hosts (6.2, Lost), so the
+  shell writes and reads them like the rest of the records file.
 
 ### 6.2 State machine of one instance
 
@@ -722,7 +747,10 @@ Rules, each tied to a requirement or to existing behaviour:
   below `max_instances`; the sum of stored prices of those machines plus the candidate's is
   at or below `max_spend_per_hour`; the day total (below) plus the candidate's minimum cost
   is at or below `max_spend_per_day`; the candidate has a price in the pool's unit. An offer
-  without a price is not launchable when a cap is set, and a cap is always set. The price is
+  without a price is not launchable when a cap is set, and a cap is always set. A price of
+  zero is no price: it would pass every cap for any number of machines, so such an offer is
+  never chosen, and a machine found at the provider whose offer the catalog prices at zero
+  is counted at the whole hourly cap, as one the catalog does not know is. The price is
   stored in the record at launch, so a later catalog change cannot hide a held machine from
   the sum. A machine in Unresolved counts at its offer's price until a list settles it. When
   caps fail, the pool shows `blocked: max_instances`, `blocked: max_spend` or
@@ -809,7 +837,19 @@ Rules, each tied to a requirement or to existing behaviour:
   that has not been heard from since its hello and books nothing (a lost Welcome, 7.2) is released at `boot_timeout`
   from the launch, with the same cooldown. Only a complete
   registry view gives up on a machine: on an incomplete one its host may have said hello and be
-  missing from the part that was read, so the machine is held and counted. The instance is released. Any boot failure blocks new
+  missing from the part that was read, so the machine is held and counted. Even on a complete
+  view the machine is given up on only once its host has been missing from complete views for
+  the boot hold, a third of `boot_timeout` (5 min by default, never more than
+  `unknown_hold`). The registry keeps no booting host in memory across a restart, and an agent
+  that was waiting to retry says hello again within its longest wait (2 min) plus the time to
+  be admitted; without the hold, a machine launched before a restart would be past
+  `boot_timeout` at the very first complete view and released seconds before its hello. The
+  count begins at the first complete view that lacks the host and an incomplete view neither
+  adds to it nor resets it. In steady state it has run since the launch, so the machine is
+  still given up on at `boot_timeout`; after a restart it starts again, deliberately: it is
+  not written to the records. A third of `boot_timeout` was chosen over `unknown_hold` (30 min)
+  because a failed boot is billed for the whole wait and this one is only about the agent's
+  retry. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
   14 Q14) and shows `blocked: boot_failed`. The billed minutes of the failed boot stay in the
   day total. Counting failures, doubling the cooldown and suppressing a single offer are
@@ -847,7 +887,30 @@ Rules, each tied to a requirement or to existing behaviour:
   and read back to Gone once the registry shows the mark. A silent host the scaler had already
   marked `Releasing` needs no flag. The step names each machine it releases this way for the
   shell to log. A host that shows a lease, a run or a stream, or a `Held` or `Reserved` mark, is
-  never released, whatever the flag says. A registered host that said hello and has not been heard from since
+  never released, whatever the flag says, with one exception: once `lease_given_up` is true the
+  runs and streams a silent host lists are stale (the job cannot report, and the registry
+  keeps the listing until it forgets the host), so they do not keep it; a `Held` or `Reserved`
+  mark still does. Release then waits for the registry to accept `release_host`, which is its
+  own check under its lock. Today `js_registry`'s `quiet()` counts the stale listing of a
+  silent host with no lease, so the registry answers `Busy` to `Drain` and `ReleaseHost` and
+  the step asks again every tick, with no log line, until the registry forgets the host.
+  `quiet()` must stop counting a silent host's stale listing; once it does, that refusal is
+  gone and the hold (`unknown_hold` of silence, no booked lease, no `Held` or `Reserved`
+  mark) is the only guard against releasing a host that is alive. The time a host was first
+  seen silent is kept in the records (`silent_since`), with the time of the step that wrote
+  them (`last_step`). A scaler whose restarts are further apart than the save interval
+  below still reaches the hold, because the time it observed before and after adds up. A
+  crash loop faster than that interval loses each run's observed time, so the host stays
+  held and counted and is never released on silence: the safe direction. The time it was down does
+  not count: no host could say hello meanwhile, so the first step after a restart moves
+  every saved silent and missing time forward by the span since `last_step`, and records
+  with no `last_step` begin the counts again at that step. `last_step` is written only with
+  the records, never alone, so it is a lower bound on the last step the old process ran,
+  and a restart errs toward counting less. While a silent or missing time is pending, the
+  step saves the records at least every `min(unknown_hold / 6, 5 minutes)` of observed time
+  (derived, not a setting), so a restart loses at most that much; with none pending it
+  writes nothing for `last_step`.
+  A registered host that said hello and has not been heard from since
   (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
   heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
   cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
@@ -856,9 +919,13 @@ Rules, each tied to a requirement or to existing behaviour:
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
   way, but only on a complete, settled registry view (the shell says so in the input; a view
   read while the registry is loading, or in part, is incomplete and holds everything) and when
-  the machine has been missing on two steps at least `unknown_hold` apart, with no step between
-  that showed it or had an incomplete view. Releasing on a view that merely lacks hosts would
-  cut work after a registry restart.
+  the machine has been missing on two complete steps at least `unknown_hold` apart, with no step
+  between that showed it. An incomplete view neither releases nor resets the count: it says
+  nothing about the host either way, and the next complete view must still show it missing.
+  The time of the first complete view that lacked it is kept in the records
+  (`missing_since`), so a restart of the scaler, which is followed by incomplete views while
+  the registry settles, does not start the hold again. Releasing on a view that merely lacks
+  hosts would cut work after a registry restart.
 - Orphans: an instance in `list` with our marks and no record (a lost state file). Policy
   is in 6.4.
 

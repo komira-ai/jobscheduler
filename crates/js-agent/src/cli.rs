@@ -189,6 +189,38 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// A static host entry for every container, `<dns-name>:<ip>` (IPv4 or IPv6); repeatable,
+    /// at most 16; passed at create as `--add-host`. A network made without DNS resolves
+    /// nothing, and a presigned URL names its host (the signature covers it), so each
+    /// endpoint a job may reach is given here. `host-gateway` and anything that is not an
+    /// address are refused. Needs `--container-bin`.
+    #[arg(long, value_name = "NAME:IP")]
+    pub container_add_host: Vec<String>,
+    /// An endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (a prefix of 24
+    /// to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16.
+    /// Required with a named `--container-network`. Before every job is created the agent
+    /// reads back the network (a bridge, DNS off, no IPv6) and the nftables table
+    /// `inet js_egress` that `deploy/js-agent/egress-network.sh` installs, and refuses the
+    /// job (`egress-unchecked`) unless the table holds exactly the rules for these
+    /// endpoints. Podman only; `br_netfilter` must be active.
+    #[arg(long, value_name = "IP:PORT")]
+    pub container_egress_allow: Vec<String>,
+    /// The absolute path of the `nft` program the egress check runs, by default
+    /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
+    #[arg(long, value_name = "PATH")]
+    pub container_nft: Option<String>,
+    /// The control group that holds every container the agent starts, as a directory of
+    /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
+    /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The
+    /// agent starts each container in it (`--cgroup-parent`: the slice name for a
+    /// one-component path that ends in `.slice`, which the systemd cgroup driver takes,
+    /// and the path below `/sys/fs/cgroup` with a leading `/` otherwise, for the cgroupfs
+    /// driver) and reads the CPU and memory of the directory and of each container's
+    /// control group to send what each lease costs on the heartbeat. Without it containers
+    /// land where the engine puts them and the heartbeat carries no load. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub actions_cgroup: Option<PathBuf>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe

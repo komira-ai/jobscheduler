@@ -18,6 +18,9 @@ use crate::fakes::{Handle, Rig, live, record, records, rig, view};
 /// The time between two ticks.
 const STEP: Duration = Duration::from_secs(5);
 
+/// The boot hold of the test pool: a third of its boot timeout of 15 minutes.
+const BOOT_HOLD: Duration = Duration::from_secs(5 * 60);
+
 /// A scaler over the rig's world and clock, started now over `records`, with the lease
 /// file naming `leased`: what a restarted server builds, and then tells that it listens.
 fn restart(rig: &Rig, records: Records, leased: &[&str]) -> Scaler {
@@ -107,9 +110,12 @@ async fn a_hello_just_before_the_floor_registers_a_machine_past_its_boot_timeout
     );
 }
 
-/// Asserts (a), no hello at all: the same machine is released the first tick after the
-/// quiet time and not before. It catches a view that never completes (a dead machine
-/// would be paid for for ever) and one that completes at the floor with the host unheard.
+/// Asserts (a), no hello at all: the same machine is not released before the quiet time,
+/// and then only once its host has also been missing from complete views for the boot hold
+/// (a third of the boot timeout, five minutes), counted from the first complete view. It
+/// catches a view that never completes (a dead machine would be paid for for ever), one
+/// that completes at the floor with the host unheard, and a release at the first complete
+/// view.
 #[tokio::test]
 async fn a_machine_nobody_hears_from_is_released_once_the_quiet_time_has_passed() {
     let rig = rig(Records::default(), live());
@@ -122,6 +128,11 @@ async fn a_machine_nobody_hears_from_is_released_once_the_quiet_time_has_passed(
 
     run_for(&rig, &scaler, STEP).await;
     assert!(scaler.registry_complete());
+    assert_eq!(first_phase(&scaler), Phase::Booting);
+
+    run_for(&rig, &scaler, BOOT_HOLD - STEP).await;
+    assert_eq!(first_phase(&scaler), Phase::Booting);
+    run_for(&rig, &scaler, STEP).await;
     assert_eq!(first_phase(&scaler), Phase::Releasing);
 }
 

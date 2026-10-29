@@ -5,6 +5,7 @@
 //! docker and podman themselves are never run.
 
 mod args;
+mod egress;
 mod lifecycle;
 mod runtime;
 mod scripted;
