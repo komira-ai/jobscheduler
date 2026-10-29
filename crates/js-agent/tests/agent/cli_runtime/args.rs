@@ -125,7 +125,9 @@ fn a_limit_of_zero_is_refused() {
 /// Asserts that every contained job gets the hardening whatever it asked for: all
 /// capabilities dropped, no new privileges, no network by default, a read-only root
 /// with a `/tmp` that is a tmpfs which cannot run programs or hold devices or set-uid
-/// files and is limited in size, no core dumps, a private IPC namespace (and for Podman,
+/// files and is limited in size, no core dumps, a private IPC namespace, a private control
+/// group namespace (which the integrity checks rely on: a job sees only its own group, and
+/// cannot move a process out of it), (and for Podman,
 /// the only one of the two that takes the value, a private PID namespace), no pull, a
 /// user that is not root, and no `--rm` (the lifecycle removes the container after it
 /// has read the result). It catches a flag dropped from the list, a default network that
@@ -150,8 +152,10 @@ fn hardening_flags_always_present() {
         "core=0",
         "--ipc",
         "private",
+        "--cgroupns",
+        "private",
     ];
-    let tail = ["--pull", "never", "--user", "65534:65534"];
+    let tail = ["--pull", "never"];
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
@@ -250,8 +254,8 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
     }
 }
 
-/// Asserts that the settings reach the hardening list: the network, the user, the pull
-/// policy and the size of `/tmp`. It catches a flag that is checked and not used.
+/// Asserts that the settings reach the hardening list: the network, the pull policy and
+/// the size of `/tmp`; the user is not in it (it is the slot's, see `create.rs`). It catches a flag that is checked and not used.
 #[test]
 fn hardening_follows_the_settings() {
     let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
@@ -263,7 +267,6 @@ fn hardening_follows_the_settings() {
     let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
-    assert_eq!(value("--user"), "5:6");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }

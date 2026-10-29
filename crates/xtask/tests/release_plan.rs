@@ -280,30 +280,10 @@ fn a_rerun_of_a_started_release_keeps_its_tag() {
     );
 }
 
-/// Catches a build attested as the wrong commit: the attestation names the commit the run
-/// is at (the tip of main), so when main has moved past the commit that passed `ci`, that
-/// commit is not released and the newer push releases its change.
-#[test]
-fn a_commit_main_has_moved_past_is_not_released() {
-    let repo = released("moved");
-    repo.write("crates/app/src/lib.rs", "// code\n");
-    let head = repo.commit("code");
-    let mut args = repo.plan();
-    args.tip = "0".repeat(40);
-    let said = plan::run(&args).expect("plan");
-    assert_eq!(field(&said, "release"), "false");
-    assert_eq!(
-        field(&said, "reason"),
-        format!(
-            "main is at {} now, past {head}: the push that moved it releases this change",
-            "0".repeat(40)
-        )
-    );
-}
-
 /// Catches a re-run of an old release run that publishes an old commit as the newest
 /// version: a commit that a later release tag is at or above is not released, whether or
-/// not that commit has its own tag, even when the tip it is told is the commit itself.
+/// not that commit has its own tag. This is the rule that keeps the version monotonic when
+/// the runs of several pushes finish out of order.
 #[test]
 fn a_commit_below_a_later_release_is_not_released() {
     for (name, tag_old) in [("below-untagged", false), ("below-tagged", true)] {
@@ -327,26 +307,22 @@ fn a_commit_below_a_later_release_is_not_released() {
     }
 }
 
-/// Catches a re-run of an old release run when the live tip is told truthfully: main is
-/// at the newer commit, so the old commit is not released.
+/// Catches a release of a commit that main has already moved past with a release: a head
+/// that is an ancestor of the latest tag releases nothing, and a head that is behind main
+/// but has no tag above it still releases (the run is at that commit, which is what the
+/// attestation records), counting the version from the latest tag.
 #[test]
-fn a_rerun_of_an_old_release_run_finds_main_moved() {
-    let repo = released("old-run");
+fn a_head_behind_main_is_released_unless_a_later_tag_is_past_it() {
+    let repo = released("behind");
     repo.write("crates/app/src/lib.rs", "// first\n");
-    let old = repo.commit("first");
-    repo.tag("v0.1.1");
+    let first = repo.commit("first");
     repo.write("crates/app/src/lib.rs", "// second\n");
-    let newer = repo.commit("second");
-    repo.tag("v0.1.2");
-    repo.git(&["checkout", "--quiet", &old]);
-    let mut args = repo.plan();
-    args.tip = newer.clone();
-    let said = plan::run(&args).expect("plan");
-    assert_eq!(field(&said, "release"), "false");
-    assert_eq!(
-        field(&said, "reason"),
-        format!("main is at {newer} now, past {old}: the push that moved it releases this change")
-    );
+    repo.commit("second");
+    repo.git(&["checkout", "--quiet", &first]);
+    let said = plan::run(&repo.plan()).expect("plan");
+    assert_eq!(field(&said, "release"), "true");
+    assert_eq!(field(&said, "version"), "0.1.1");
+    assert_eq!(field(&said, "tag_exists"), "false");
 }
 
 /// Catches the range starting at a tag the commit does not contain: a higher tag on a
@@ -517,8 +493,6 @@ fn the_command_line_runs_plan_and_stamp() {
         "plan",
         "--head",
         &head,
-        "--tip",
-        &head,
         "--repo-dir",
         dir,
         "--ship",
@@ -531,7 +505,7 @@ fn the_command_line_runs_plan_and_stamp() {
     let said = String::from_utf8(out.stdout).expect("utf-8");
     assert_eq!(field(&said, "release"), "true");
 
-    // The default shipped crates are this project's, which the fixture does not have.
+    // The tip is not an argument: the run is at the commit it releases.
     let out = xtask(&[
         "release",
         "plan",
@@ -542,6 +516,11 @@ fn the_command_line_runs_plan_and_stamp() {
         "--repo-dir",
         dir,
     ]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--tip"));
+
+    // The default shipped crates are this project's, which the fixture does not have.
+    let out = xtask(&["release", "plan", "--head", &head, "--repo-dir", dir]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     assert!(
         String::from_utf8_lossy(&out.stderr)

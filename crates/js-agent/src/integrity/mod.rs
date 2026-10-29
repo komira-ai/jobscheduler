@@ -21,7 +21,7 @@
 //!
 //! | code | what | kind |
 //! |---|---|---|
-//! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs | residue |
+//! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs and not of the uid of a slot whose job is still running; one of the finished job's own slot's uid is named as that slot's leftover | residue |
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs: what a child that outlived its parent looks like | residue |
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
@@ -125,7 +125,10 @@
 //!   the unified hierarchy is read; a path that names a container (`libpod-<id>`,
 //!   `docker-<id>`, `crio-`, `cri-containerd-`, `/docker/`, `libpod_parent`,
 //!   `machine.slice`) always counts, wherever it is, and so does a scope under a system
-//!   service. A job's process left in its own container's control group counts.
+//!   service. A job's process left in its own container's control group counts, and so
+//!   does a process in the agent's own control group (read from `/proc/self/cgroup` when
+//!   the agent starts; an agent that cannot read it does not start) or below it, other than
+//!   a Podman monitor's scope there.
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
@@ -371,19 +374,32 @@ fn is_live(job: &Finished<'_>, text: &str) -> bool {
 /// move a process out of it: the control group file system is read-only in the container.
 /// A path that holds such a name is never the host's, wherever it is, so a container placed
 /// under the system or the user slice still counts.
-fn hosts_own_process(cgroup: &str) -> bool {
-    let Some(path) = cgroup
-        .split_whitespace()
-        .find_map(|line| line.strip_prefix("0::"))
-    else {
+///
+/// The agent's own control group (`own`, its unified path) and every group below it are
+/// not the host's: a child of the agent that outlives it is in the agent's service, and is
+/// judged like any other process. A Podman monitor's scope is the host's even there.
+fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
+    let Some(path) = unified(cgroup) else {
         return false;
     };
     let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
+    // A Podman monitor's scope is the host's wherever it is, the agent's own group included
+    // (containers parented under the agent's group put their monitors there too): a job
+    // cannot place a process in it.
     let monitor = units
         .last()
         .is_some_and(|unit| unit.starts_with("libpod-conmon-") && unit.ends_with(".scope"));
     if monitor {
         return true;
+    }
+    let agents = own.is_some_and(|own| {
+        path == own
+            || path
+                .strip_prefix(own)
+                .is_some_and(|rest| rest.starts_with('/'))
+    });
+    if agents {
+        return false;
     }
     if units.iter().any(|unit| names_a_container(unit)) {
         return false;
@@ -395,6 +411,14 @@ fn hosts_own_process(cgroup: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The path of the unified hierarchy (`0::`) in the control groups `cgroup` (the lines of
+/// `/proc/<pid>/cgroup`), if there is one.
+fn unified(cgroup: &str) -> Option<&str> {
+    cgroup
+        .split_whitespace()
+        .find_map(|line| line.strip_prefix("0::"))
 }
 
 /// Whether the control group `unit` is one a container engine makes for a container.
@@ -432,8 +456,12 @@ fn hosts_own_mount(mount: &Mount) -> bool {
 pub struct Integrity {
     view: Box<dyn HostView>,
     users: IdRange,
+    /// The container uid of slot 0, when the containers run as the slots' users.
+    first_slot_uid: Option<u32>,
     watch: Vec<PathBuf>,
     baseline: Snapshot,
+    /// The agent's own control group (its unified path), which is never the host's.
+    own: Option<String>,
 }
 
 impl Integrity {
@@ -442,9 +470,9 @@ impl Integrity {
     ///
     /// # Errors
     ///
-    /// The host cannot be read whole, so there is nothing to compare with later: the text
-    /// says which input failed. A mapped range that `view` shows is not acceptable is one
-    /// too.
+    /// The host cannot be read whole, so there is nothing to compare with later, or the
+    /// agent's own control group (`/proc/self/cgroup`) cannot be read: the text says which
+    /// input failed. A mapped range that `view` shows is not acceptable is one too.
     pub fn start(
         view: Box<dyn HostView>,
         users: JobUsers,
@@ -452,11 +480,19 @@ impl Integrity {
     ) -> Result<Self, String> {
         require_host_namespaces(&|path| view.link(path), &|path| view.file(path))?;
         let users = users.range().map_err(|why| why.to_string())?;
+        let own = view
+            .file("/proc/self/cgroup")
+            .map_err(|why| format!("cannot read the agent's own control group: {why}"))?;
+        let own = unified(&own)
+            .filter(|path| !path.trim_matches('/').is_empty())
+            .map(|path| path.trim_end_matches('/').to_owned());
         let mut this = Self {
             view,
             users,
+            first_slot_uid: None,
             watch,
             baseline: Snapshot::default(),
+            own,
         };
         this.baseline = this.observe().map_err(|problems| {
             format!(
@@ -465,6 +501,31 @@ impl Integrity {
             )
         })?;
         Ok(this)
+    }
+
+    /// Tells the checks that the containers run as the slots' users, the container uid of
+    /// slot `k` being `first_uid + k` (see
+    /// [`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)), mapped onto the
+    /// host uid `start + first_uid + k` of the range. After a run in slot `k`, a leftover
+    /// at that host uid is named as the slot's leftover; a leftover at the uid of another
+    /// slot is a finding like any other, unless that slot's run is live
+    /// ([`Finished::live_slots`]).
+    #[must_use]
+    pub fn with_slots(self, first_uid: u32) -> Self {
+        Self {
+            first_slot_uid: Some(first_uid),
+            ..self
+        }
+    }
+
+    /// The host uid of slot `slot`, when the checks know the slots' users.
+    fn slot_host_uid(&self, slot: u32) -> Option<u32> {
+        self.first_slot_uid.map(|first| {
+            self.users
+                .start()
+                .saturating_add(first)
+                .saturating_add(slot)
+        })
     }
 
     /// The host now, or why it cannot be read whole: every input is tried, so the reasons
@@ -517,10 +578,18 @@ impl Integrity {
             .filter(|process| {
                 !known.contains(&process.key())
                     && !mine(&process.cgroup)
-                    && !hosts_own_process(&process.cgroup)
+                    && !hosts_own_process(&process.cgroup, self.own.as_deref())
             })
             .collect();
-        let as_job = strays.iter().filter(|stray| self.users.contains(stray.uid));
+        let own = job.slot.and_then(|slot| self.slot_host_uid(slot));
+        let live_uids: BTreeSet<u32> = job
+            .live_slots
+            .iter()
+            .filter_map(|slot| self.slot_host_uid(*slot))
+            .collect();
+        let as_job = strays
+            .iter()
+            .filter(|stray| self.users.contains(stray.uid) && !live_uids.contains(&stray.uid));
         let daemonised = strays.iter().filter(|stray| stray.ppid == 1);
         let new_mounts = now
             .mounts
@@ -539,8 +608,12 @@ impl Integrity {
             group(
                 code::PROCESS_AS_JOB_USER,
                 as_job.map(|stray| {
+                    let slot = job
+                        .slot
+                        .filter(|_| own == Some(stray.uid))
+                        .map_or(String::new(), |slot| format!(" (leftover of slot {slot})"));
                     format!(
-                        "pid {} of user {} is running after job {}",
+                        "pid {} of user {} is running after job {}{slot}",
                         stray.pid, stray.uid, job.run_id
                     )
                 }),
