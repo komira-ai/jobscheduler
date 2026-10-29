@@ -1078,6 +1078,15 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    a small ext4 image file attached with `losetup` and mounted as the state root, which has
    its own `st_dev`. A tmpfs is wrong: the agent says a taint on a tmpfs is lost at reboot.
    Needs one live test (Open questions 5).
+5a. Make the jobs' user namespace. The agent refuses to start with `--container-bin` and
+   without `--container-subuid <user>`, and checks that `/etc/subuid` and `/etc/subgid` give
+   the user one entry of exactly 65536 ids, not from 0, overlapping no host id, and that the
+   Docker daemon runs `userns-remap` set to that user. The renderer (`bootstrap/userns.rs`)
+   makes a system user `js-jobs`, appends `js-jobs:1000000:65536` to both id files, writes a
+   drop-in of `docker.service` that repeats the daemon's command line with
+   `--userns-remap=js-jobs` (so the image's `daemon.json` is not edited), restarts the
+   daemon, and the agent's unit passes `--container-subuid js-jobs`. The daemon's stock
+   command line is not verified for the stock image (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
    a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
@@ -1106,17 +1115,25 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    image; the script checks the program with `test -x` and stops if it is missing, so the
    agent never starts without the block. The table `inet js_metadata` has two chains at
    priority -10 (ahead of the container engine's own rules; both accept by default):
-   `forward` drops traffic to `169.254.169.254`, which covers a container on any network the
-   engine makes, and `output` drops the same for every uid but 0. Root keeps the address: the
+   `forward` drops traffic to `169.254.169.254`, which covers a container on a bridge network
+   (the engine's NAT forwards its packets through the host), and `output` drops the same for every uid but 0. Root keeps the address: the
    agent and the bootstrap run as root, and no step after boot needs it, so a blanket drop
    would also work; the rule exempts root so that a later step that does need it fails
    in one place, not everywhere. The unit
-   is ordered `Before=network-pre.target js-agent.service`, the file is reloaded at every
+   is ordered `After=nftables.service` (the image's own service, when enabled, flushes the whole
+   ruleset as it starts) and `Before=network-pre.target js-agent.service`, the file is reloaded at every
    boot (the table is deleted and made again, so a second load changes nothing), and the
    agent's unit has `Requires=` and `After=` on it. The script reads the loaded table back
-   before it goes on. The agent is started without `--container-network`, so containers get
-   the agent's default, no network at all; a pool that later gives jobs egress names a
-   bridge there, and the rule covers it with no change. `host` is refused by the agent. The
+   before it goes on: `nft` lists the table and the script fails unless exactly two lines drop
+   (the two rules), so a table that lost a chain does not pass. The agent is started without
+   `--container-network`, so containers get the agent's default, no network at all; a pool
+   that later gives jobs egress names a bridge there, and the rule covers it with no change.
+   The rule does not cover every network an engine can make: a rootful `slirp4netns` or
+   `pasta` network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
+   or `ipvlan` network never passes the host's forward hook. The agent refuses `host`,
+   `slirp4netns`, `pasta`, `macvlan` and `ipvlan` as `--container-network` names, but it
+   cannot know the driver behind a differently named network, so a pool that names one
+   must be a bridge network. The
    address is not verified for Lambda (Open questions 5) and is one named constant; the
    IPv6 address of the service is not blocked, because this design does not name one. The
    live checklist (13.4) tests that a container cannot read user data. No job runs before
@@ -1525,7 +1542,11 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    secret type next to the token? Recommendation: yes.
 5. The stock Lambda image: driver, runtime, toolkit, and a state root on its own device (loop
    image). Not verified. Recommendation: the install table starts empty, the live run fills it, and
-   the bootstrap fails visibly rather than guessing.
+   the bootstrap fails visibly rather than guessing. Also to check live: that the metadata
+   address is `169.254.169.254` on this image, whether the service also answers on its IPv6
+   address (the block drops IPv4 only, and no IPv6 address is named here), that `nft` is on
+   the image, that `docker.service` starts with the command line the `userns-remap` drop-in
+   repeats, and that the NVIDIA runtime works under the remap.
 6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
    (`agent` in the pool, 7.3), checksummed; the service serves no download.
 7. Provider hierarchy (`providers.md`). Recommendation: one provider per pool, pools chosen by
