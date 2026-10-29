@@ -363,7 +363,7 @@ fn resolve(from: &str, location: &str) -> Result<String, Error> {
     let location = location.split('#').next().unwrap_or_default();
     let uri: Uri = from.parse().map_err(|e| Error::Transport {
         what: text::url(from),
-        why: text::escape(&e.to_string()),
+        why: text::escape(&format!("{e}")),
     })?;
     let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
         return Err(Error::Transport {
