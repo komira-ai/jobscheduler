@@ -30,9 +30,10 @@
 //! | `--watch-dir <path>` | a directory the post-job checks list (its own entries: names, sizes, modification and status change times, inodes, owners, modes; a write to an existing file inside a subdirectory is not seen) and compare with the listing taken when the host was last known clean; one level deep: a name added to a subdirectory is seen, a write to a file in it is not, so watch the subdirectory itself; repeatable; needs `--container-bin`; may not hold, or lie in, a mount root, the scratch root or the state root; more than 4096 entries cannot be checked and taint the host. With none, only `/etc/passwd`, `/etc/group`, the processes, the mounts and the kernel modules are checked, and the agent warns at start; suggested: `/etc`, `/etc/cron.d`, `/etc/sudoers.d`, `/etc/systemd/system`, `/etc/ld.so.conf.d`, `/root/.ssh`, `/usr/local/bin`, `/usr/local/sbin`. What a job leaves in a read-write `--mount-root` is never examined |
 //! | `--mount-root <name>=<path>` | a directory jobs may mount from, by name; repeatable; canonicalised when the agent starts; no root, no mount |
 //! | `--scratch-root <path>` | where each run's private (`0700`) scratch directory goes; owned by the agent's user, no permission for group or others; required with `--container-bin` |
-//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); `userns-remap` is not supported either (the container user shows as another uid on the host); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
+//! | `--container-bin <path>` | the absolute path of the `docker` or `podman` program that runs container jobs; never looked up on the `PATH`; started with an environment of its own (a fixed `PATH` and `--container-host`, nothing inherited); without it no container runs; a job that names a GPU needs the NVIDIA container toolkit with Docker and, with Podman, a CDI specification (`nvidia.com/gpu=<index>`) the operator has generated; rootless engines are not supported (the engine gets no `XDG_RUNTIME_DIR`, `HOME` or D-Bus session, and a rootless Podman may then run containers without their limits); every job runs in a user namespace mapped onto the `--container-subuid` range (Podman is given the maps for each container; a Docker daemon must run with `userns-remap` set to that user, or the agent does not start); the agent must share the pid and mount namespaces of `init` and be able to read `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start |
 //! | `--container-network <name>` | the user-defined network containers join; by default none at all; `host` is refused; any named network gives a job egress to whatever it reaches, the host's metadata endpoint included, and the agent warns at start; needs `--container-bin` |
-//! | `--container-user <uid:gid>` | the user containers run as, both above zero; by default `65534:65534`; an agent that runs as root gives each run's scratch directory to this user, any other agent refuses to start unless this is its own `uid:gid`; needs `--container-bin` |
+//! | `--container-user <uid:gid>` | the user containers run as, container ids both above zero and below 65536; by default `65534:65534`; the agent gives each run's scratch directory to the host ids this user is mapped onto (the start of the `--container-subuid` range plus each id); needs `--container-bin` |
+//! | `--container-subuid <user>` | required with `--container-bin`: the user whose range in `/etc/subuid` and `/etc/subgid` every job's user namespace (container ids 0 to 65535) is mapped onto, so no container id is a host id. The agent refuses to start unless both files give the user at least 65536 ids, not from 0, holding no id of `/etc/passwd` or `/etc/group`; Podman gets `--uidmap` and `--gidmap` for every container, a Docker daemon must run with `userns-remap` set to the user and onto that range; a second agent on the host with an overlapping range is refused (a lock under `/run/js-agent/subid`); the agent must run as root |
 //! | `--container-host <uri>` | the engine to talk to: a socket on this machine, `unix:///<path>`, passed as `DOCKER_HOST` and `CONTAINER_HOST` to the engine's calls only; by default the engine's own default; `tcp://` and `ssh://` are refused (the post-job checks read this machine, and a job on another one would pass them all); needs `--container-bin` |
 //! | `--container-pull <never\|missing>` | when a job's image is pulled; by default `never`, so a job cannot make the host reach a registry of its choosing: the operator puts an image on the host first (`docker pull`, or `docker load` from an archive), and a job whose image is not there ends as `failed_to_start`; needs `--container-bin` |
 //! | `--container-tmp-size <size>` | the size of each container's `/tmp` (`noexec,nosuid,nodev`), such as `64m` (the default) or `1g`; needs `--container-bin` |
@@ -395,21 +396,22 @@ fn execute(
         WorkerHook::new(hook, runner, PREPARE_TIMEOUT.saturating_mul(2))
     });
     let toolkit = ToolkitHook::from_cli(&cli).map_err(Failure::Usage)?;
-    // The job flags are checked now so a wrong one stops the agent before it registers;
-    // the worker is built from them below, before the first hello.
-    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
-    local
-        .check_filesystems(services.files)
-        .map_err(Failure::Usage)?;
     // The post-job checks read /proc, which a Mac does not have: a container job there
-    // would run unchecked, so none is accepted (see `integrity`).
-    if platform.is_macos() && local.container.is_some() {
+    // would run unchecked, so none is accepted (see `integrity`). This comes before the
+    // container flags are read, so a Mac is told this rather than what a Linux host needs.
+    if platform.is_macos() && cli.container_bin.is_some() {
         return Err(Failure::Usage(
             "--container-bin: container jobs are Linux-only: the post-job checks read /proc, \
              which a Mac does not have"
                 .to_owned(),
         ));
     }
+    // The job flags are checked now so a wrong one stops the agent before it registers;
+    // the worker is built from them below, before the first hello.
+    let local = Local::from_cli(&cli).map_err(Failure::Usage)?;
+    local
+        .check_filesystems(services.files)
+        .map_err(Failure::Usage)?;
     // The agent must see what its jobs do: a container job runs where the agent's own
     // `/proc` and mounts show it.
     if local.container.is_some() {

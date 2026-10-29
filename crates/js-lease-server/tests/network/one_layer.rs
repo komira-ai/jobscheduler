@@ -230,8 +230,16 @@ fn no_provider_crate_names_a_network_type() {
 
 /// The files of `js-lease-server/src` that name the path `network::` besides the module
 /// itself: the per-pool check calls a mode, the reader of the file builds the OAuth
-/// client of a pool's `network` table, and the launch inputs hold a mode.
-const MAY_NAME_NETWORK: [&str; 3] = ["checks.rs", "file.rs", "pool.rs"];
+/// client of a pool's `network` table, the launch inputs hold a mode, and the scaler
+/// builds a mode for a pool and calls it around a launch.
+const MAY_NAME_NETWORK: [&str; 6] = [
+    "checks.rs",
+    "file.rs",
+    "pool.rs",
+    "scaler/build.rs",
+    "scaler/launch.rs",
+    "scaler/live.rs",
+];
 
 /// The sources (path under `src`, text) that name the path `network::` and are neither in
 /// `network/` nor in `allowed`.
