@@ -5,6 +5,7 @@
 //! runs a lease holder queues on a registered host.
 
 mod agents;
+mod agents_no_shared_token;
 mod agents_restart;
 mod agents_support;
 mod agents_tokens;

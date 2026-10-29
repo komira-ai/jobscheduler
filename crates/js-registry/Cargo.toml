@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 js-agent-wire = { path = "../js-agent-wire" }
+js-elastic = { path = "../js-elastic" }
 js-lease = { path = "../js-lease" }
 js-pool-static = { path = "../js-pool-static" }
 js-provider = { path = "../js-provider" }
