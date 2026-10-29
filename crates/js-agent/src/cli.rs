@@ -24,10 +24,11 @@ pub struct Cli {
     /// so the agent leaves the file in place: it reads it again at every start. With a
     /// state root, the first hello of a host that joins with a one-time token is answered
     /// with a host credential that replaces the token (the server retires it): the agent
-    /// keeps the credential in the state root, sends it from then on, and still reads this
-    /// file at start.
+    /// keeps the credential in the state root and sends it from then on. Required unless
+    /// `--state-root` holds a usable `host-credential` file, which the agent then sends in
+    /// place of a token; a token file given beside it is read as before.
     #[arg(long, value_name = "PATH")]
-    pub token_file: PathBuf,
+    pub token_file: Option<PathBuf>,
     /// A file holding the instance this machine runs on, as one line `PROVIDER:INSTANCE_ID`
     /// (`lambdalabs:0920582c...`), read when the agent starts. The hello names the
     /// instance, which a one-time join token minted for that instance requires: the server

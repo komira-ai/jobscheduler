@@ -118,9 +118,16 @@ async fn hello(
     Extension(who): Extension<Credential>,
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
-) -> Result<Json<Welcome>, Refused> {
+) -> Result<Response, Refused> {
     let presented = one_time.map(|Extension(OneTime(presented))| presented);
-    serve_hello(&agents, who, presented, body, &|| ()).await
+    let welcome = serve_hello(&agents, who, presented, body, &|| ()).await?;
+    // The Welcome can carry the host credential, so no cache may keep it (as for a token
+    // response in RFC 6749, section 5.1).
+    let headers = [
+        (header::CACHE_CONTROL, "no-store"),
+        (header::PRAGMA, "no-cache"),
+    ];
+    Ok((headers, welcome).into_response())
 }
 
 /// The hello route. `between` runs after a one-time token was admitted and before the
@@ -414,6 +421,11 @@ mod tests {
             (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
             (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
             (JoinRefusal::Unavailable, 503, "join-token-unavailable"),
+            (
+                JoinRefusal::CredentialRequired,
+                403,
+                "join-token-credential-required",
+            ),
         ];
         for (refusal, status, code) in cases {
             let answer = Refused::join(refusal);
