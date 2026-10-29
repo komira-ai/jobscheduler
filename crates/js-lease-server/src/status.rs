@@ -86,8 +86,7 @@ struct CheckView {
 #[derive(Debug, Serialize)]
 struct LaunchView {
     at_ms: u64,
-    /// `accepted`, or the phase of a launch that is not settled: `planned`, `launching`,
-    /// `unresolved` or `failed`.
+    /// `accepted` once the provider has given an id for the machine, `pending` before.
     outcome: &'static str,
     host: String,
 }
@@ -152,12 +151,9 @@ fn exec_name(exec: Option<ExecMode>) -> String {
 
 /// The launch `record` made, as the status shows it.
 fn launch_view(record: &Record) -> LaunchView {
-    let outcome = match record.phase {
-        Phase::Planned => "planned",
-        Phase::Launching => "launching",
-        Phase::Unresolved => "unresolved",
-        Phase::Failed => "failed",
-        _ => "accepted",
+    let outcome = match record.cloud_id {
+        Some(_) => "accepted",
+        None => "pending",
     };
     LaunchView {
         at_ms: record.launched_at.as_millis(),

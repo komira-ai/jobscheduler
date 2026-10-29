@@ -68,6 +68,7 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
         .provider()
         .start(spec(1, "r1"));
     h.ticks.step().await;
+    h.ticks.step().await;
     let held = h.running.scaler().unwrap().state().records.instances[0].clone();
     let (after, body) = pool(&h).await;
     let machine = json!({
