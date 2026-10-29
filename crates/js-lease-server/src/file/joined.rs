@@ -463,7 +463,7 @@ mod tests {
                 "pool \"Nodes\": name: must be 1 to 63",
             ),
             (
-                "name = \"nodes\"\nclass = \"X\"\n",
+                "name = \"nodes\"\nclass = \"X\"\nmax_machines = 3\n",
                 "shape = { cpu_millis = 1, memory_bytes = 1 }\n",
                 "pool \"nodes\": class: must be 1 to 63",
             ),
