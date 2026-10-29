@@ -39,7 +39,7 @@ pub mod prune;
 pub mod recorder;
 pub mod store;
 
-pub use error::{CodecError, UsageError};
+pub use error::{CodecError, MinuteTooLarge, UsageError};
 pub use input::{ClockIn, LoadIn, MinuteIn, TAIL_MINUTE};
 pub use minute::NodeMinute;
 pub use prune::{NODE_RETENTION_MINUTES, PruneStats};
