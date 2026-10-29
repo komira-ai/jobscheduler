@@ -9,7 +9,7 @@ mod support;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use js_provider_lambdalabs::{ApiKey, HttpApi, InstanceId, LambdaApi};
+use js_provider_lambdalabs::{ApiKey, HttpApi, InstanceId, LambdaApi, LaunchRequest};
 use support::{PATIENT, Reply, Scratch, Server, fixture};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -79,6 +79,14 @@ fn the_key_is_in_no_log_line() {
         "GET /api/v1/instances/a1b2c3d4e5f60718293a4b5c6d7e8f90",
         Reply::json(404, &fixture("error_object_does_not_exist.json")),
     );
+    server.on(
+        "POST /api/v1/instance-operations/launch",
+        Reply::json(200, &fixture("launch.json")),
+    );
+    server.on(
+        "POST /api/v1/instance-operations/terminate",
+        Reply::json(400, &fixture("error_insufficient_capacity.json")),
+    );
     let scratch = Scratch::new("logging");
     let key = ApiKey::from_file(&scratch.key_file(KEY)).unwrap();
     let mut shown = format!("{key:?}");
@@ -89,17 +97,38 @@ fn the_key_is_in_no_log_line() {
         shown.push_str(&format!("{:?}", api.list_instances().map(|l| l.len())));
         let id = InstanceId::new("a1b2c3d4e5f60718293a4b5c6d7e8f90").unwrap();
         shown.push_str(&format!("{:?}", api.get_instance(&id).map(|i| i.status)));
+        let launch = LaunchRequest {
+            region: "region-a".to_owned(),
+            instance_type: "gpu_1x_sample".to_owned(),
+            ssh_key: "fixture-key".to_owned(),
+            name: "js-0123456789ab-000000000001".to_owned(),
+            tags: Vec::new(),
+        };
+        shown.push_str(&format!("{:?}", api.launch(&launch)));
+        shown.push_str(&format!("{:?}", api.terminate(&id)));
     });
 
-    // The request did carry the key; the logs did not.
-    assert_eq!(
-        server.seen()[0].header("authorization"),
-        Some(format!("Bearer {KEY}").as_str())
-    );
+    // Every request did carry the key, the posts too; the logs did not.
+    let seen = server.seen();
+    assert_eq!(seen.len(), 5);
+    for request in &seen {
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {KEY}").as_str())
+        );
+    }
     let ours = String::from_utf8(traced.0.lock().unwrap().clone()).unwrap();
     let theirs = LINES.lock().unwrap().join("\n");
     // The capture works: this crate's lines and the HTTP client's both arrived.
     assert!(ours.contains("path=\"/instance-types\""), "{ours}");
+    assert!(
+        ours.contains("path=\"/instance-operations/launch\""),
+        "{ours}"
+    );
+    assert!(
+        ours.contains("path=\"/instance-operations/terminate\""),
+        "{ours}"
+    );
     assert!(
         theirs.lines().any(|line| line.starts_with("ureq")),
         "{theirs}"
