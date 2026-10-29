@@ -212,23 +212,26 @@ impl From<BootMode> for Boot {
     }
 }
 
-/// A duration in whole seconds: `90`, `90s`, `15m` or `2h`. Zero is refused.
+/// A duration: a whole count with an optional unit, `90`, `90s`, `250ms`, `15m` or `2h`.
+/// A bare count is seconds. Zero is refused.
 pub fn parse_duration(text: &str) -> Result<Duration, String> {
     let digits = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
     let (count, unit) = text.split_at(digits);
-    let factor = ["", "s", "m", "h"].iter().position(|known| *known == unit);
-    let factor = factor.map(|at| [1u64, 1, 60, 3600][at]);
-    let seconds = count
+    let millis_per_unit = ["", "ms", "s", "m", "h"]
+        .iter()
+        .position(|known| *known == unit)
+        .map(|at| [1000u64, 1, 1000, 60_000, 3_600_000][at]);
+    let millis = count
         .parse::<u64>()
         .ok()
-        .zip(factor)
+        .zip(millis_per_unit)
         .and_then(|(count, factor)| count.checked_mul(factor));
-    match seconds {
-        Some(seconds) if seconds > 0 => Ok(Duration::from_secs(seconds)),
+    match millis {
+        Some(millis) if millis > 0 => Ok(Duration::from_millis(millis)),
         _ => Err(format!(
-            "{text:?} is not a positive duration such as 600, 600s, 10m or 1h"
+            "{text:?} is not a positive duration such as 600, 600s, 250ms, 10m or 1h"
         )),
     }
 }

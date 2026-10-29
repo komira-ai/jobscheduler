@@ -106,6 +106,15 @@ fn durations_parse_and_settings_are_checked() {
     for (text, seconds) in cases {
         assert_eq!(parse_duration(text).unwrap().as_secs(), seconds, "{text}");
     }
+    let millis = [
+        ("1ms", 1),
+        ("250ms", 250),
+        ("1500ms", 1500),
+        ("90000ms", 90_000),
+    ];
+    for (text, count) in millis {
+        assert_eq!(parse_duration(text).unwrap().as_millis(), count, "{text}");
+    }
     let refused = [
         "",
         "0",
@@ -114,6 +123,12 @@ fn durations_parse_and_settings_are_checked() {
         "-5",
         "1.5s",
         "5d",
+        "0ms",
+        "ms",
+        "1.5ms",
+        "5mss",
+        "18446744073709551615ms0",
+        "18446744073709551615m",
         "5 s",
         "99999999999999999999",
         "18446744073709551615h",
