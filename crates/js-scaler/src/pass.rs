@@ -545,7 +545,6 @@ impl<'a> Pass<'a> {
         let record = &self.records.instances[i];
         let failed_boot = [
             !host.heard_since_hello,
-            !record.seen_live,
             record.phase == Phase::Registered,
             self.now.since(record.launched_at) >= pool.settings.boot_timeout,
             idle,
