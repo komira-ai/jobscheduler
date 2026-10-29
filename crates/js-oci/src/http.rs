@@ -332,4 +332,28 @@ mod tests {
         assert!(resolve("not a url", "/x").is_err());
         assert!(resolve("/relative", "/x").is_err());
     }
+
+    /// Catches a `Location` resolved by string tricks instead of RFC 3986: a `://` inside
+    /// a query is still a path, `//host/path` is a network-path reference, `?query` keeps
+    /// the base path, fragments are dropped, and dot segments are removed.
+    #[test]
+    fn locations_resolve_as_uri_references() {
+        let from = "https://r.example:5000/v2/a/b/blobs/sha256:x?old=1";
+        for (location, want) in [
+            ("/r?u=https://x", "https://r.example:5000/r?u=https://x"),
+            ("//cdn.test/x?y=1", "https://cdn.test/x?y=1"),
+            ("?q=2", "https://r.example:5000/v2/a/b/blobs/sha256:x?q=2"),
+            ("", "https://r.example:5000/v2/a/b/blobs/sha256:x?old=1"),
+            ("../c", "https://r.example:5000/v2/a/b/c"),
+            ("./c", "https://r.example:5000/v2/a/b/blobs/c"),
+            ("../../../../../c", "https://r.example:5000/c"),
+            ("/a/./b/../c", "https://r.example:5000/a/c"),
+            ("/a/b/..", "https://r.example:5000/a/"),
+            ("/a/.", "https://r.example:5000/a/"),
+            ("/x#frag", "https://r.example:5000/x"),
+            ("https://cdn.test/y#frag", "https://cdn.test/y"),
+        ] {
+            assert_eq!(resolve(from, location).unwrap(), want, "{location:?}");
+        }
+    }
 }

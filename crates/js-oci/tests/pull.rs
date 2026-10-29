@@ -904,3 +904,224 @@ async fn a_refused_connection_and_an_unsendable_token_are_errors() {
     let err = manifest_error(&fx, &artifact, &Kind::bundle()).await;
     assert!(matches!(err, Error::Transport { .. }), "{err}");
 }
+
+/// Proves nothing secret in a URL reaches an error: a redirect target's query (a signed
+/// CDN link) and userinfo, the query of a plain-http target, and the query of a token
+/// endpoint are all absent from the text of the error and from its `Debug` form.
+#[tokio::test]
+async fn urls_in_errors_carry_no_query_or_credentials() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    let port = fx.port;
+    for to in [
+        format!("https://registry.test:{port}/cdn/{{digest}}?sig=SECRET"),
+        format!("https://user:PASSWORD@registry.test:{port}/cdn/{{digest}}?sig=SECRET"),
+    ] {
+        fx.behave(|b| {
+            b.redirect_blobs = Some(to.clone());
+            b.hang_up_cdn = true;
+        });
+        let mut sink = Recording::default();
+        let err = first_layer(&fx, &artifact, &mut sink).await.expect_err(&to);
+        let text = format!("{err} {err:?}");
+        assert!(matches!(err, Error::Transport { .. }), "{text}");
+        assert!(!text.contains("SECRET"), "{text}");
+        assert!(!text.contains("PASSWORD"), "{text}");
+        assert!(
+            fx.requests().iter().any(|r| r.contains("/cdn/")),
+            "the redirect was not followed: {:?}",
+            fx.requests()
+        );
+    }
+    fx.behave(|b| b.redirect_blobs = Some("http://registry.test/x?q=SECRET".to_owned()));
+    let err = first_layer(&fx, &artifact, &mut Recording::default())
+        .await
+        .expect_err("http target");
+    let text = format!("{err} {err:?}");
+    assert!(matches!(err, Error::Insecure(_)), "{text}");
+    assert!(!text.contains("SECRET"), "{text}");
+
+    let fx = started(&artifact).await;
+    fx.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.realm = Some(format!(
+            "https://registry.test:{}/token?key=SECRET",
+            fx.port
+        ));
+        b.token_status = Some(500);
+    });
+    let err = manifest_error(&fx, &artifact, &Kind::bundle()).await;
+    let text = format!("{err} {err:?}");
+    assert!(matches!(err, Error::Status { status: 500, .. }), "{text}");
+    assert!(!text.contains("SECRET"), "{text}");
+}
+
+/// A manifest document with these two fields hostile.
+fn hostile_manifest(media_type: &str, layer_digest: &str) -> Vec<u8> {
+    format!(
+        r#"{{"schemaVersion":2,"mediaType":"{media_type}","artifactType":"application/vnd.komira.js.bundle.v1","config":{{"mediaType":"application/vnd.komira.js.bundle.config.v1+json","digest":"sha256:{zeros}","size":1}},"layers":[{{"mediaType":"application/vnd.komira.js.bundle.layer.v1.tar+zstd","digest":"{layer_digest}","size":1}}]}}"#,
+        zeros = "0".repeat(64)
+    )
+    .into_bytes()
+}
+
+/// Proves text a registry supplies is escaped and cut before it is echoed: control
+/// bytes (escape, CR, LF) in a manifest's media type, a 64 KiB digest, a 64 KiB
+/// redirect target and a 64 KiB token realm give single-line errors of bounded size.
+#[tokio::test]
+async fn hostile_text_is_escaped_and_truncated_in_errors() {
+    let artifact = bundle();
+    let kind = Kind::bundle();
+    let long = "z".repeat(64 << 10);
+    let fx = started(&artifact).await;
+
+    let evil = hostile_manifest(r"application/x\u001b[31m\r\nINJECTED", "sha256:00");
+    let pin = Digest::of(&evil);
+    fx.publish_manifest_as(&pin, &evil);
+    let client = fx.client();
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let err = repo.fetch_manifest(&pin, &kind).await.expect_err("media");
+    let text = format!("{err} {err:?}");
+    assert!(text.contains("INJECTED"), "{text}");
+    assert!(!text.contains(['\u{1b}', '\r', '\n']), "{text:?}");
+
+    let big = hostile_manifest("application/vnd.oci.image.manifest.v1+json", &long);
+    let pin = Digest::of(&big);
+    fx.publish_manifest_as(&pin, &big);
+    let err = repo.fetch_manifest(&pin, &kind).await.expect_err("digest");
+    assert!(matches!(err, Error::Digest(_)), "{err}");
+    assert!(
+        format!("{err} {err:?}").len() < 1024,
+        "{}",
+        err.to_string().len()
+    );
+
+    fx.behave(|b| b.redirect_blobs = Some(format!("https://exa mple/{long}")));
+    let manifest = repo
+        .fetch_manifest(&artifact.digest, &kind)
+        .await
+        .expect("manifest");
+    let err = repo
+        .fetch_blob(&manifest.layers[0], &mut Recording::default())
+        .await
+        .expect_err("target");
+    assert!(
+        format!("{err} {err:?}").len() < 1024,
+        "{}",
+        err.to_string().len()
+    );
+
+    let fx = started(&artifact).await;
+    fx.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.realm = Some(format!("https://evil.test/{long}"));
+    });
+    let err = manifest_error(&fx, &artifact, &kind).await;
+    assert!(matches!(err, Error::Realm(_)), "{err}");
+    assert!(
+        format!("{err} {err:?}").len() < 1024,
+        "{}",
+        err.to_string().len()
+    );
+}
+
+/// Proves a redirect cannot probe other ports: a target on any port but 443 or the
+/// registry's own is refused before a connection, with an error that says why.
+#[tokio::test]
+async fn redirects_may_only_use_port_443_or_the_registrys_own() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    for port in [22u16, 8443, 65535] {
+        fx.behave(|b| {
+            b.redirect_blobs = Some(format!("https://registry.test:{port}/cdn/{{digest}}"));
+        });
+        let err = first_layer(&fx, &artifact, &mut Recording::default())
+            .await
+            .expect_err("port");
+        assert!(err.to_string().contains("only port 443"), "{port}: {err}");
+    }
+    assert!(fx.requests().iter().all(|r| !r.contains("/cdn/")));
+    fx.behave(|b| {
+        b.redirect_blobs = Some(format!("https://registry.test:{}/cdn/{{digest}}", fx.port));
+    });
+    first_layer(&fx, &artifact, &mut Recording::default())
+        .await
+        .expect("the registry's own port");
+    fx.behave(|b| b.redirect_blobs = Some("https://registry.test/cdn/{digest}".to_owned()));
+    let err = first_layer(&fx, &artifact, &mut Recording::default())
+        .await
+        .expect_err("443 is dialled, nothing listens");
+    assert!(!err.to_string().contains("only port 443"), "{err}");
+}
+
+/// Proves a `Location` is resolved as RFC 3986 says: a `://` inside a query is part of a
+/// path on the same host, `//host/path` is a network-path reference to another host, and
+/// dot segments of a relative reference are removed.
+#[tokio::test]
+async fn a_location_is_resolved_as_a_uri_reference() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    let port = fx.port;
+    let client = fx.client_for(
+        &[
+            &format!("{}/team", fx.at(REGISTRY)),
+            &format!("{}/team", fx.at(OTHER)),
+        ],
+        true,
+    );
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let manifest = repo
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    for (to, want) in [
+        (
+            "/cdn/{digest}?u=https://x".to_owned(),
+            format!("registry.test:{port} GET /cdn/"),
+        ),
+        (
+            format!("//other.test:{port}/cdn/{{digest}}"),
+            format!("other.test:{port} GET /cdn/"),
+        ),
+        (
+            "../../../../cdn/{digest}".to_owned(),
+            format!("registry.test:{port} GET /cdn/"),
+        ),
+    ] {
+        fx.behave(|b| b.redirect_blobs = Some(to.clone()));
+        let mut sink = Recording::default();
+        repo.fetch_blob(&manifest.layers[0], &mut sink)
+            .await
+            .unwrap_or_else(|e| panic!("{to}: {e}"));
+        assert_eq!(sink.bytes, layers()[0], "{to}");
+        let seen = fx.requests();
+        let last = seen.last().expect("request");
+        assert!(last.starts_with(&want), "{to}: {last}");
+    }
+}
+
+/// Proves a `#` in a token realm cannot swallow the scope: the fragment is dropped, and
+/// the token request carries the service and scope.
+#[tokio::test]
+async fn a_fragment_in_the_realm_does_not_swallow_the_scope() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    fx.behave(|b| {
+        b.token = Some("tok".to_owned());
+        b.realm = Some(format!("https://registry.test:{}/token#frag", fx.port));
+    });
+    let client = fx.client();
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    repo.fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    let request = fx
+        .requests()
+        .into_iter()
+        .find(|r| r.contains("GET /token"))
+        .expect("token request");
+    assert!(
+        request.contains("scope=repository:team/bundle:pull"),
+        "{request}"
+    );
+}

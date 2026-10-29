@@ -278,6 +278,111 @@ mod tests {
         assert_eq!(class("64:ff9b:0:0:1::7f00:1"), None);
     }
 
+    fn class_name(text: &str) -> Option<String> {
+        class(text).map(|c| c.to_string())
+    }
+
+    /// Catches a hardened range left connectable: the cloud metadata addresses, the
+    /// benchmarking and IETF-protocol blocks, site-local, 6to4, Teredo and the local-use
+    /// NAT64 prefix, at both ends of each range, with the public neighbours that must
+    /// stay reachable.
+    #[test]
+    fn the_hardened_ranges_are_refused_with_their_public_neighbours() {
+        let reserved = "multicast or reserved";
+        for (text, want) in [
+            ("168.63.129.16", "cloud-metadata"),
+            ("169.254.169.254", "cloud-metadata"),
+            ("fd00:ec2::254", "cloud-metadata"),
+            ("::ffff:168.63.129.16", "cloud-metadata"),
+            ("64:ff9b::a83f:8110", "cloud-metadata"),
+            ("2002:a83f:8110::1", "cloud-metadata"),
+            ("198.18.0.0", reserved),
+            ("198.19.255.255", reserved),
+            ("192.0.0.0", reserved),
+            ("192.0.0.255", reserved),
+            ("64:ff9b:1::", reserved),
+            ("64:ff9b:1:ffff:ffff:ffff:ffff:ffff", reserved),
+            ("fec0::", "site-local"),
+            ("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "site-local"),
+            ("2002::", "unspecified"),
+            ("2002:7f00:1::1", "loopback"),
+            ("2002:a00:1::1", "private"),
+            ("2002:ac1f:ffff::1", "private"),
+            ("2002:ffff:ffff::1", reserved),
+            ("2001:0:4136:e378:8000:63bf:80ff:fffe", "loopback"),
+            ("2001:0:1:2:3:4:f5ff:fffe", "private"),
+            ("2001::ffff:ffff", "unspecified"),
+        ] {
+            assert_eq!(class_name(text).as_deref(), Some(want), "{text}");
+        }
+        for public in [
+            "168.63.129.15",
+            "168.63.129.17",
+            "168.63.128.16",
+            "169.253.255.255",
+            "198.17.255.255",
+            "198.20.0.0",
+            "192.0.1.0",
+            "191.255.255.255",
+            "64:ff9b:2::1",
+            "64:ff9b:0:1::1",
+            "fe7f:ffff::1",
+            "2001:ffff::1",
+            "2001:1::7f00:1",
+            "2003::1",
+            "2002:808:808::1",
+            "2001:0:1:2:3:4:f7f7:f7f7",
+            "fd00:ec2::255",
+            "fd00:ec3::254",
+        ] {
+            assert_eq!(class_name(public), None, "{public}");
+        }
+    }
+
+    /// Catches a private entry that exempts more than the private classes: loopback,
+    /// link-local, the metadata addresses, unspecified and multicast stay refused, in
+    /// IPv6 and IPv4-mapped forms too, while the private classes pass for the listed host.
+    #[test]
+    fn a_private_entry_never_exempts_loopback_link_local_or_metadata() {
+        let policy = Policy::new(vec![
+            Allow::parse("farm.example:5000/team")
+                .expect("entry")
+                .private(),
+        ]);
+        let host = Authority::parse("farm.example:5000").expect("authority");
+        for refused in [
+            "127.0.0.1",
+            "::1",
+            "::ffff:127.0.0.1",
+            "169.254.1.1",
+            "169.254.169.254",
+            "fe80::1",
+            "fd00:ec2::254",
+            "168.63.129.16",
+            "::ffff:169.254.169.254",
+            "0.0.0.0",
+            "::",
+            "224.0.0.1",
+            "ff02::1",
+        ] {
+            let ip: IpAddr = refused.parse().expect("ip");
+            assert!(
+                matches!(policy.address_ok(&host, ip), Err(Error::Address { .. })),
+                "{refused}"
+            );
+        }
+        for exempt in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "fd12::1",
+        ] {
+            let ip: IpAddr = exempt.parse().expect("ip");
+            policy.address_ok(&host, ip).expect(exempt);
+        }
+    }
+
     /// Catches an address class that reads wrongly in the error that names it.
     #[test]
     fn every_class_names_itself() {

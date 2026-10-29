@@ -138,6 +138,8 @@ pub struct Behaviour {
     pub short_body: bool,
     /// Send manifests and blobs chunked, with a trailer after the last chunk.
     pub trailers: bool,
+    /// Read a request for a redirect target (`/cdn/...`) and close without answering.
+    pub hang_up_cdn: bool,
 }
 
 #[derive(Default)]
@@ -404,7 +406,7 @@ fn answer(s: &State, request: &Request) -> Answer {
     if b.stall_head {
         return Answer::StallHead;
     }
-    if b.hang_up {
+    if b.hang_up || (b.hang_up_cdn && path.starts_with("/cdn/")) {
         return Answer::HangUp;
     }
     if let Some(status) = b.status {
@@ -426,7 +428,8 @@ fn answer(s: &State, request: &Request) -> Answer {
             .unwrap_or_else(|| format!(r#"{{"token":"{}"}}"#, b.token.clone().unwrap_or_default()));
         return Answer::Bytes(response(200, &[], body.as_bytes()));
     }
-    if let Some(digest) = path.strip_prefix("/cdn/") {
+    if let Some(target) = path.strip_prefix("/cdn/") {
+        let digest = target.split('?').next().unwrap_or_default();
         return Answer::Bytes(match s.blobs.get(digest) {
             Some(bytes) => response(200, &[], bytes),
             None => response(404, &[], b""),
