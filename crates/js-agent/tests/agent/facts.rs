@@ -524,3 +524,18 @@ fn the_current_platform_is_named() {
     assert!(!here.os.is_empty() && !here.arch.is_empty());
     assert_eq!(platform("linux", "x86_64").os, "linux");
 }
+
+/// Asserts the real tmpfs probe: `/proc` (procfs) is not a tmpfs, and a path that does not
+/// exist is an error naming it. It catches a probe that answers "yes" for any file system
+/// (secrets on a disk) and one that swallows a failure. The tmpfs-yes answer is not
+/// asserted: no tmpfs path is guaranteed in CI.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_real_tmpfs_probe_says_no_for_procfs_and_errs_for_a_missing_path() {
+    use js_agent::{FileReader, SystemFiles};
+    assert_eq!(SystemFiles.is_tmpfs(Path::new("/proc")), Ok(false));
+    let why = SystemFiles
+        .is_tmpfs(Path::new("/no/such/path-for-js-agent"))
+        .unwrap_err();
+    assert!(why.starts_with("/no/such/path-for-js-agent: "), "{why}");
+}

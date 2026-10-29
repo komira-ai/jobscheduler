@@ -305,6 +305,56 @@ fn the_scratch_volume_goes_with_the_container() {
     assert!(world.calls_of("volume").len() == 1, "no `volume rm`");
 }
 
+/// Asserts that the files mount is read back like a job's mount: the container is
+/// accepted when the engine reports it read-only at `/run/js-files` from the directory
+/// asked for, and refused (removed, `start` not called) when it reads back writable, from
+/// another source, at another target, or missing. It catches a files mount that escapes
+/// the read-back, which would let a job rewrite its own secrets or have a directory
+/// swapped under the daemon go unnoticed.
+#[test]
+fn the_files_mount_is_read_back_like_a_job_mount() {
+    let mut job = spec("r1");
+    job.files = Some("/work/scratch/r1@files".into());
+    let world = docker();
+    let mut rt = open(&world);
+    rt.create_and_start(&job).unwrap();
+    assert_eq!(world.calls_of("start").len(), 1);
+
+    let swap = |change: fn(&mut Bind)| {
+        move |binds: &mut Vec<Bind>| {
+            let files = binds.iter_mut().find(|b| b.1 == "/run/js-files").unwrap();
+            change(files);
+        }
+    };
+    let cases: Vec<(&str, Change)> = vec![
+        ("read back writable", Box::new(swap(|b| b.2 = true))),
+        (
+            "source swapped",
+            Box::new(swap(|b| b.0 = "/etc".to_owned())),
+        ),
+        (
+            "other target",
+            Box::new(swap(|b| b.1 = "/run/x".to_owned())),
+        ),
+        (
+            "missing",
+            Box::new(|binds: &mut Vec<Bind>| binds.retain(|b| b.1 != "/run/js-files")),
+        ),
+    ];
+    for (name, change) in cases {
+        let world = docker();
+        let mut rt = open(&world);
+        world.tamper(change);
+        let said = rt.create_and_start(&job).unwrap_err();
+        assert_eq!(
+            said.0, "the mounts of the container are not the ones the agent resolved",
+            "{name}"
+        );
+        assert!(world.calls_of("start").is_empty(), "{name}");
+        assert_eq!(world.calls_of("rm").len(), 1, "{name}");
+    }
+}
+
 /// Asserts that on Podman the options of every bind are read back too: the scratch bind
 /// and each job mount were asked `nosuid,nodev`, and `.Mounts[].Options` must name both.
 /// A bind that lacks either one, that has no `Options` at all, or whose `Options` is not
@@ -315,13 +365,20 @@ fn the_scratch_volume_goes_with_the_container() {
 #[test]
 fn podman_binds_are_read_back_with_nosuid_and_nodev() {
     type Case = (&'static str, fn(&mut Vec<Vec<String>>));
-    let cases: [Case; 4] = [
+    let cases: [Case; 6] = [
         ("scratch without nosuid", |o| o[0].retain(|x| x != "nosuid")),
         ("scratch without nodev", |o| o[0].retain(|x| x != "nodev")),
         ("job bind without nosuid", |o| {
             o[1].retain(|x| x != "nosuid")
         }),
         ("job bind without nodev", |o| o[1].retain(|x| x != "nodev")),
+        // The run files bind is the last one asked for; it is read back like the others.
+        ("files bind without nosuid", |o| {
+            o[2].retain(|x| x != "nosuid")
+        }),
+        ("files bind without nodev", |o| {
+            o[2].retain(|x| x != "nodev")
+        }),
     ];
     for (name, change) in cases {
         let world = Scripted::new("podman version 5.2.1");
@@ -330,6 +387,7 @@ fn podman_binds_are_read_back_with_nosuid_and_nodev() {
         world.tamper_options(change);
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        job.files = Some("/work/scratch/r1-files".into());
         let said = rt.create_and_start(&job).unwrap_err();
         assert_eq!(
             said.0, "the mounts of the container are not the ones the agent resolved",
