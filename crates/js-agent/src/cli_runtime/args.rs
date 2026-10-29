@@ -35,6 +35,12 @@ pub enum ArgsError {
         "a read-only mount holds another mount, which this engine would leave writable: use Docker 25 or later, or mount a directory without mount points"
     )]
     NestedMount,
+    /// A read-only mount on an engine without recursive read-only, and no way to see
+    /// whether it holds another mount.
+    #[error(
+        "/proc/self/mountinfo cannot be read, so a read-only mount cannot be checked for mounts below it"
+    )]
+    MountinfoUnreadable,
     /// A label whose key is empty or holds `=`.
     #[error("a label key must not be empty or hold '='")]
     LabelKey,
@@ -129,32 +135,70 @@ fn gpu_args(engine: Engine, indices: &[u32]) -> Vec<String> {
     }
 }
 
+/// `field` of a `/proc/self/mountinfo` line with every `\NNN` octal escape (a space, tab,
+/// newline, `#` or backslash in a path) turned back into its byte; an escape that is not
+/// one byte, and a backslash that starts none, stay as written.
+fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let digits = (bytes[at] == b'\\')
+            .then(|| bytes.get(at + 1..at + 4))
+            .flatten()
+            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)));
+        let byte = digits.and_then(|digits| {
+            let value = digits
+                .iter()
+                .fold(0_u32, |sum, digit| sum * 8 + u32::from(digit - b'0'));
+            u8::try_from(value).ok()
+        });
+        match byte {
+            Some(byte) => {
+                out.push(byte);
+                at += 4;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Whether a mount point other than `host` itself is below it, in the text of a
-/// `/proc/self/mountinfo` (the mount point is the fifth field, a space written `\040` and
-/// a backslash `\134`).
+/// `/proc/self/mountinfo` (the mount point is the fifth field).
 pub fn has_submount(mountinfo: &str, host: &Path) -> bool {
     mountinfo
         .lines()
         .filter_map(|line| line.split(' ').nth(4))
-        .map(|point| point.replace("\\040", " ").replace("\\134", "\\"))
+        .map(unescape)
         .any(|point| Path::new(&point) != host && Path::new(&point).starts_with(host))
 }
 
-/// Refuses a read-only mount of `spec` that holds a mount point (per `mountinfo`), for an
-/// engine that cannot make the mounts below it read-only too.
+/// Refuses a read-only mount of `spec` that holds a mount point, for an engine that
+/// cannot make the mounts below it read-only too. `mountinfo` is the agent's
+/// `/proc/self/mountinfo`, `None` when it could not be read: then a read-only mount is
+/// refused, because the check could not look (a job without one does not need the file).
+///
+/// It sees the mounts of the agent's own mount namespace, as they are when it looks: an
+/// engine in another mount namespace is not covered (the agent supports only a local
+/// rootful engine), and a mount added below the directory afterwards (only root can add
+/// one) is not seen.
 ///
 /// # Errors
 ///
-/// [`ArgsError::NestedMount`].
-pub fn check_submounts(spec: &ContainerSpec, mountinfo: &str) -> Result<(), ArgsError> {
-    let nested = spec
-        .mounts
-        .iter()
-        .filter(|mount| mount.ro)
-        .any(|mount| has_submount(mountinfo, &mount.host));
-    match nested {
-        true => Err(ArgsError::NestedMount),
-        false => Ok(()),
+/// [`ArgsError::NestedMount`], or [`ArgsError::MountinfoUnreadable`].
+pub fn check_submounts(spec: &ContainerSpec, mountinfo: Option<&str>) -> Result<(), ArgsError> {
+    let mut read_only = spec.mounts.iter().filter(|mount| mount.ro).peekable();
+    match (read_only.peek().is_some(), mountinfo) {
+        (false, _) => Ok(()),
+        (true, None) => Err(ArgsError::MountinfoUnreadable),
+        (true, Some(text)) => match read_only.any(|mount| has_submount(text, &mount.host)) {
+            true => Err(ArgsError::NestedMount),
+            false => Ok(()),
+        },
     }
 }
 

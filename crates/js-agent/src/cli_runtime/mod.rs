@@ -427,6 +427,9 @@ pub struct CliRuntime {
     settings: Settings,
     engine: Engine,
     recursive_ro: bool,
+    /// Whether the agent's own mounts are the ones the containers see (not on macOS,
+    /// where the engine runs in a VM): the submount check applies only then.
+    host_mounts: bool,
     host_id: String,
     gpus: bool,
     now_ms: fn() -> u64,
@@ -467,6 +470,7 @@ impl CliRuntime {
             recursive_ro: docker_major.is_some_and(|major| major >= RECURSIVE_RO_DOCKER),
             host_id: host_id.to_owned(),
             gpus: platform.os != "macos",
+            host_mounts: platform.os != "macos",
             now_ms,
             runner,
             chown: hand_over,
@@ -543,10 +547,9 @@ impl CliRuntime {
         labels.insert(label::CREATED_MS.to_owned(), created_ms.to_string());
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
         args.extend(label_args(&labels)?);
-        if !self.recursive_ro
-            && let Some(mountinfo) = (self.proc_read)("/proc/self/mountinfo")
-        {
-            check_submounts(spec, &mountinfo)?;
+        if !self.recursive_ro && self.host_mounts {
+            let mountinfo = (self.proc_read)("/proc/self/mountinfo");
+            check_submounts(spec, mountinfo.as_deref())?;
         }
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         args.extend(hardening_args(&self.settings, self.engine));
