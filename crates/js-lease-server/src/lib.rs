@@ -22,8 +22,9 @@
 //!
 //! # Flags
 //!
-//! Configuration is flags only; the one secret, the bearer token, is read from a file
-//! that only its owner can use.
+//! Configuration is these flags, or one file (`--config`, below), never both: every flag
+//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
+//! the bearer token, is read from a file that only its owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
@@ -47,18 +48,22 @@
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //!
-//! A start that is refused prints the flag at fault and exits with status 2.
+//! A start that is refused prints the flag at fault and exits with status 2. The
+//! hello limit flags and `--require-host-credential` need `--agent-pool-config`, and are
+//! refused without it.
 //!
 //! # The configuration file
 //!
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
-//! above. Every table refuses a field it does not know, and the file holds no secret: a
+//! above, and no flag may be given beside it: the first one on the command line is refused,
+//! such as `--listen: not allowed with --config; set server.listen`, before the file is read
+//! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
+//! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
+//! `join_token_file`, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
 //! value of the file; a syntax error says the line. Nothing is checked over the network
 //! at start.
-//!
-//! Until the flags are refused beside `--config`, a flag given with it has no effect.
 //!
 //! ```toml
 //! [server]
@@ -72,6 +77,8 @@
 //! tls_key           = "/run/credentials/js/tls-key"
 //! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
+//! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
+//! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //!
 //! [[pool]]
 //! name     = "gpu-static"
@@ -376,6 +383,7 @@ mod checks;
 mod config;
 mod error;
 mod file;
+mod flags;
 mod hosts;
 mod io_timeout;
 mod join_api;
@@ -399,7 +407,6 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::Parser;
 use js_lease::SystemClock;
 use tokio::runtime::Builder;
 use tokio::signal::unix::{SignalKind, signal};
