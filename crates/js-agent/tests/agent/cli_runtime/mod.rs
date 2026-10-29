@@ -24,6 +24,12 @@ use scripted::{DOCKER, Scripted};
 /// The host id the runtimes of these tests register under.
 pub const HOST: &str = "h-0123456789abcdef";
 
+/// The `--mount` value of the scratch directory `/work/scratch/r1` on Docker: a volume
+/// of the local driver that binds the directory `nosuid,nodev` (Docker's `--mount
+/// type=bind` takes neither), with no copy of the image's `/scratch` into it. The option
+/// list holds commas, so that field is quoted, as the engine reads the value as CSV.
+pub const DOCKER_SCRATCH: &str = r#"type=volume,dst=/scratch,volume-driver=local,volume-nocopy,volume-opt=type=none,volume-opt=device=/work/scratch/r1,"volume-opt=o=bind,nosuid,nodev""#;
+
 /// The wall clock of a runtime that made its containers.
 pub fn made_at() -> u64 {
     1_000_000

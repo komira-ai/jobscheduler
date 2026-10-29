@@ -8,8 +8,8 @@ use js_agent_wire::Isolation;
 
 use super::super::scripted::Scripted;
 use super::super::{
-    HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount, open, open_at,
-    open_with, platform, settings, spec,
+    DOCKER_SCRATCH, HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount, open,
+    open_at, open_with, platform, settings, spec,
 };
 use super::cleanup::other_agent;
 use super::{start, strings, subs};
@@ -106,7 +106,7 @@ fn create_builds_the_documented_argv() {
         "--gpus",
         "\"device=0,1\"",
         "--mount",
-        "type=bind,src=/work/scratch/r1,dst=/scratch",
+        DOCKER_SCRATCH,
         "--mount",
         "type=bind,src=/srv/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
         "--cap-drop",
@@ -135,7 +135,15 @@ fn create_builds_the_documented_argv() {
     assert_eq!(world.calls_of("create"), [expected]);
     assert_eq!(
         subs(&world),
-        ["--version", "info", "create", "inspect", "start", "inspect"]
+        [
+            "--version",
+            "info",
+            "create",
+            "inspect",
+            "volume",
+            "start",
+            "inspect"
+        ]
     );
 }
 
@@ -165,6 +173,7 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
         subs(&podman),
         ["--version", "create", "inspect", "start", "inspect"]
     );
+    assert!(podman.volumes().is_empty(), "Podman's scratch stays a bind");
 }
 
 /// Asserts that the recursive read-only option is passed only to a Docker that takes it
