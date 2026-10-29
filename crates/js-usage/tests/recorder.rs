@@ -7,7 +7,8 @@ mod common;
 
 use common::{host, lease};
 use js_usage::recorder::{
-    IMPLAUSIBLE_FACTOR, MAX_CLOCKS_PER_HOST, MAX_SEEN_PER_HOST, MINUTE_USEC, SEEN_RETENTION_MINUTES,
+    IMPLAUSIBLE_FACTOR, MAX_CLOCKS_PER_HOST, MAX_ENDED_LEASES, MAX_SEEN_PER_HOST, MINUTE_USEC,
+    SEEN_RETENTION_MINUTES,
 };
 use js_usage::{
     ClockIn, DropReason, Limits, LoadIn, MinuteIn, NodeMinute, Observed, Recorder, TAIL_MINUTE,
@@ -742,4 +743,118 @@ fn leases_only_holds_no_node_minute_state() {
     feed(&mut lean, 200);
     assert_eq!(normal.held_node_minutes(), 200);
     assert_eq!(lean.held_node_minutes(), 0);
+}
+
+/// Both kinds of recorder, with node `h` based, for the lease-ended tests.
+fn both() -> [Recorder; 2] {
+    let mut lean = Recorder::leases_only();
+    lean.observe(&host("h"), 7, &load(1, 100 * SEC, 0, 0), BIG, 500);
+    [based(), lean]
+}
+
+/// Feeds node `h` reading `seq` (mono 100 s + 10 s per seq) carrying `minutes`.
+fn give(r: &mut Recorder, seq: u64, minutes: Vec<MinuteIn>) -> Vec<MinuteIn> {
+    let l = with_minutes(load(seq, 100 * SEC + seq * 10 * SEC, 0, 0), minutes);
+    r.observe(&host("h"), 7, &l, BIG, 500).1
+}
+
+// Asserts ending a lease drops its remembered minutes at once and leaves the other
+// leases' minutes remembered and still deduplicating; catches an end that clears too much
+// or nothing.
+#[test]
+fn an_ended_lease_forgets_its_minutes_and_others_keep_theirs() {
+    for mut r in both() {
+        give(
+            &mut r,
+            2,
+            vec![minute_in(1, 3, 1, 2, 3), minute_in(1, 4, 1, 2, 3)],
+        );
+        give(&mut r, 3, vec![minute_in(2, 3, 1, 2, 3)]);
+        assert_eq!(r.remembered_minutes(&lease(1, 1)), 2);
+        r.lease_ended(&lease(1, 1));
+        assert_eq!(r.remembered_minutes(&lease(1, 1)), 0);
+        assert_eq!(r.remembered_minutes(&lease(1, 2)), 1);
+        assert!(give(&mut r, 4, vec![minute_in(2, 3, 1, 2, 3)]).is_empty());
+        assert_eq!(r.counters().minutes_deduped, 1);
+    }
+}
+
+// Asserts ending a lease forgets its minutes on every node; catches an end that only
+// reaches one host.
+#[test]
+fn an_ended_lease_is_forgotten_on_every_host() {
+    let mut r = based();
+    let other = host("g");
+    r.observe(&other, 7, &load(1, 100 * SEC, 0, 0), BIG, 500);
+    give(&mut r, 2, vec![minute_in(1, 3, 1, 2, 3)]);
+    let l = with_minutes(load(2, 110 * SEC, 0, 0), vec![minute_in(1, 3, 1, 2, 3)]);
+    r.observe(&other, 7, &l, BIG, 500);
+    assert_eq!(r.remembered_minutes(&lease(1, 1)), 2);
+    r.lease_ended(&lease(1, 1));
+    assert_eq!(r.remembered_minutes(&lease(1, 1)), 0);
+}
+
+// Asserts a late reading naming an ended lease adds no minute and is counted, while the
+// same reading's minutes of other leases pass; catches a late repeat counted as new.
+#[test]
+fn a_late_minute_of_an_ended_lease_is_refused_and_counted() {
+    for mut r in both() {
+        give(&mut r, 2, vec![minute_in(1, 3, 1, 2, 3)]);
+        r.lease_ended(&lease(1, 1));
+        let late = give(
+            &mut r,
+            3,
+            vec![
+                minute_in(1, 3, 1, 2, 3),
+                minute_in(1, 9, 1, 2, 3),
+                minute_in(2, 3, 1, 2, 3),
+            ],
+        );
+        assert_eq!(late, vec![minute_in(2, 3, 1, 2, 3)]);
+        assert_eq!(r.counters().minutes_after_end, 2);
+        assert_eq!(r.remembered_minutes(&lease(1, 1)), 0);
+    }
+}
+
+// Asserts ending a lease the recorder holds nothing for forgets nothing and disturbs no
+// other lease; catches a panic or a stray removal.
+#[test]
+fn ending_an_unknown_lease_changes_nothing_else() {
+    for mut r in both() {
+        give(&mut r, 2, vec![minute_in(2, 3, 1, 2, 3)]);
+        r.lease_ended(&lease(9, 9));
+        assert_eq!(r.remembered_minutes(&lease(1, 2)), 1);
+        assert_eq!(r.counters().seen_evicted, 0);
+        assert_eq!(r.counters().minutes_after_end, 0);
+        assert!(give(&mut r, 3, vec![minute_in(2, 3, 1, 2, 3)]).is_empty());
+    }
+}
+
+// Asserts the ended-lease memory is bounded: ending more leases than the bound keeps the
+// bound, ending one twice does not take a second place, and the oldest ended lease is the
+// one forgotten (its minute counts as new again; the next oldest and the newest are still refused); catches an
+// unbounded set or the wrong end forgotten.
+#[test]
+fn the_ended_lease_memory_is_bounded_oldest_first() {
+    let mut r = based();
+    let max = u64::try_from(MAX_ENDED_LEASES).unwrap();
+    for n in 0..max + 3 {
+        r.lease_ended(&lease(1, n + 1000));
+        r.lease_ended(&lease(1, n + 1000));
+    }
+    assert_eq!(r.remembered_ended(), MAX_ENDED_LEASES);
+    let probe = |l: u64| MinuteIn {
+        lease: lease(1, l),
+        minute: 1,
+        mean_cores_milli: 1,
+        peak_window_milli: 2,
+        working_set_max_bytes: 3,
+    };
+    let out = give(
+        &mut r,
+        2,
+        vec![probe(1000), probe(1003), probe(1000 + max + 2)],
+    );
+    assert_eq!(out, vec![probe(1000)]);
+    assert_eq!(r.counters().minutes_after_end, 2);
 }

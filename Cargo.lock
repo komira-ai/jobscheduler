@@ -966,6 +966,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-bundle"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
