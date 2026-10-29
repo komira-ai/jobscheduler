@@ -5,9 +5,9 @@
 
 use std::time::Duration;
 
-use js_sched::{DaemonInstance, NodePhase, OpState, Request, Requeue};
+use js_sched::{DaemonInstance, KeyFloor, NodePhase, OpState, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Config, Core, Delivery, Lowered, Report, Stage, Stream, View,
+    Adapter, Admitted, Config, Core, Delivery, Lowered, OpenError, Report, Stage, Stream, View,
 };
 use js_store::{Ending, StateError, keys};
 use js_types::sched::{
@@ -256,7 +256,10 @@ fn a_restart_with_size_keys_on_refuses_a_bad_opkey_row() {
 
     let opened = Core::open(&on(), Rig::default(), setup.storage(), at(5));
 
-    assert!(matches!(opened.err(), Some(StateError::Corrupt { .. })));
+    assert!(matches!(
+        opened.err(),
+        Some(OpenError::State(StateError::Corrupt { .. }))
+    ));
 }
 
 /// Asserts that `adopted` is told the size key of a stored operation when size keys are on,
@@ -669,4 +672,78 @@ fn an_adapter_with_the_default_hooks_has_its_floors_written_without_a_name() {
         .expect("raised");
     assert_eq!(floor_rows(&setup), [(K, raised)]);
     assert!(setup.rows(9).load().expect("loaded").key_names.is_empty());
+}
+
+/// Asserts that a lowering does not overwrite a key floor row another frontend raised after
+/// this one's kill: the scheduler here is lowered, and the row keeps the higher floor.
+/// Catches: a lowered row written without regard to the row in the store (the other
+/// frontend's raise is lost, and the next start books the lower floor and is killed again).
+#[test]
+fn a_lowering_does_not_overwrite_a_floor_another_frontend_raised() {
+    let setup = Setup::new();
+    let core = setup.core_with(&on(), Rig::default(), 0);
+    up(&core, 0, "node-a", "d1");
+    let killed = keyed(&core, 1, 1, K);
+    let first = submit(&core, 2, 2);
+    kill(&core, 5, killed.operation);
+    let raised = floor(&core, K).expect("raised");
+    let higher = KeyFloor {
+        key: K,
+        ask: 2 * raised,
+        stamp: 1 << 40,
+    };
+    setup
+        .rows(9)
+        .put_key_floor(&higher, None)
+        .expect("written by the other frontend");
+
+    core.with(|_, rig| rig.to_lower.push(Lowered::new(K, raised, 2 * GIB)));
+    complete(&core, 6, first.operation);
+
+    assert_eq!(floor(&core, K), Some(2 * GIB), "lowered here");
+    assert_eq!(floor_rows(&setup), [(K, 2 * raised)], "the higher row kept");
+}
+
+/// Asserts that a start with size keys on is refused over a `keyfloor/` row that is not one,
+/// and that a start with them off ignores the row and books no floor. Catches: a bad floor
+/// row read as none with size keys on (the damage hidden), and a start with size keys off
+/// that is stopped by a row it never reads (a rollback would not start).
+#[test]
+fn a_bad_keyfloor_row_refuses_a_start_with_size_keys_on_and_is_ignored_with_them_off() {
+    let setup = Setup::new();
+    setup.store.put(&keys::key_floor(K), vec![9, 9, 9]);
+
+    let opened = Core::open(&on(), Rig::default(), setup.storage(), at(5));
+    assert!(matches!(
+        opened.err(),
+        Some(OpenError::State(StateError::Corrupt { .. }))
+    ));
+
+    let ignoring = setup.core_with(&Config::new(1), Rig::default(), 6);
+    assert_eq!(floor(&ignoring, K), None);
+}
+
+/// Asserts that a core with size keys off never calls `learned_requeue` or `lowered` on the
+/// adapter, through a give-up and a report, while one with them on calls both. Catches: the
+/// hooks called on every give-up and report of a core that has no key floors.
+#[test]
+fn size_keys_off_never_asks_the_adapter_to_learn_or_lower() {
+    let counts = |config: &Config| {
+        let setup = Setup::new();
+        let core = setup.core_with(config, Rig::default(), 0);
+        up(&core, 0, "node-a", "d1");
+        let killed = keyed(&core, 1, 1, K);
+        let first = submit(&core, 2, 2);
+        kill(&core, 5, killed.operation);
+        complete(&core, 6, first.operation);
+        core.with(|_, rig| (rig.learned.len(), rig.lowered_asked))
+    };
+
+    assert_eq!(counts(&Config::new(1)), (0, 0));
+    let (learned, asked) = counts(&on());
+    assert_eq!(learned, 1);
+    assert!(
+        asked >= 2,
+        "asked after the give-up and the report: {asked}"
+    );
 }

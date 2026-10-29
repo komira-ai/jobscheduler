@@ -187,6 +187,7 @@ pub struct CurveTooLong {
 pub struct Curve {
     points: Vec<MinutePoint>,
     runs: u16,
+    cores_known: bool,
 }
 
 impl Curve {
@@ -198,7 +199,29 @@ impl Curve {
         if points.len() > MAX_CURVE_POINTS {
             return Err(CurveTooLong { len: points.len() });
         }
-        Ok(Self { points, runs })
+        Ok(Self {
+            points,
+            runs,
+            cores_known: true,
+        })
+    }
+
+    /// A curve of `points` whose cores are unknown: only the working sets are learned, and
+    /// the cores of every point are to be ignored (the caller charges the request's own).
+    ///
+    /// # Errors
+    /// [`CurveTooLong`] when there are more than [`MAX_CURVE_POINTS`] points.
+    pub fn memory_only(points: Vec<MinutePoint>, runs: u16) -> Result<Self, CurveTooLong> {
+        Self::new(points, runs).map(|c| Self {
+            cores_known: false,
+            ..c
+        })
+    }
+
+    /// Whether the cores of the points were learned; false for a [`Curve::memory_only`].
+    #[must_use]
+    pub const fn cores_known(&self) -> bool {
+        self.cores_known
     }
 
     /// The points, minute 0 first.
@@ -361,6 +384,21 @@ mod tests {
     fn curve(points: &[(u32, u64)]) -> Curve {
         let points = points.iter().map(|&(c, w)| pt(c, w)).collect();
         Curve::new(points, 5).unwrap()
+    }
+
+    /// Catches: a memory-only curve claiming known cores, a plain curve claiming unknown
+    /// ones, and the points, runs or length limit not carried over.
+    #[test]
+    fn a_memory_only_curve_says_its_cores_are_unknown() {
+        let points = vec![pt(0, 5), pt(0, 6)];
+        let full = Curve::new(points.clone(), 4).unwrap();
+        let mem = Curve::memory_only(points.clone(), 4).unwrap();
+        assert!(full.cores_known());
+        assert!(!mem.cores_known());
+        assert_eq!((mem.points(), mem.runs()), (points.as_slice(), 4));
+        assert_ne!(full, mem);
+        let over = vec![MinutePoint::default(); MAX_CURVE_POINTS + 1];
+        assert!(Curve::memory_only(over, 4).is_err());
     }
 
     #[test]

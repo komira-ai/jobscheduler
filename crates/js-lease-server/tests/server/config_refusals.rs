@@ -64,7 +64,7 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     assert_eq!(
         refused_server("config_unknown_server", "status_token_file = \"/x\""),
         "server.status_token_file: unknown field; known: listen, agent_listen, advertise_url, \
-         state_file, boot, client_token_file, tls_cert, tls_key, tick, default_ttl, max_ttl, \
+         scheduler_id, state_file, boot, client_token_file, tls_cert, tls_key, tick, default_ttl, max_ttl, \
          max_connections, handshake_timeout, header_timeout, read_timeout, write_timeout, \
          max_requests, drain_timeout, agent_hello_burst, agent_hello_interval, \
          require_host_credential, usage_db, usage_off, profile_store_bytes"
@@ -73,8 +73,8 @@ fn an_unknown_table_or_field_is_refused_with_the_known_ones() {
     assert_eq!(
         refusal(&scratch, &text),
         "pool \"hosts\": colour: unknown field; known: name, class, exec, max_instances, \
-         max_spend_per_hour, max_spend_per_day, idle, boot_timeout, launch, join_token_file, \
-         provider, network"
+         max_spend_per_hour, max_spend_per_day, idle, boot_timeout, launch, agent, \
+         join_token_file, provider, network"
     );
 }
 

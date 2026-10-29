@@ -10,6 +10,7 @@ mod runtime;
 mod scripted;
 mod settings;
 mod stub;
+mod subid;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -27,6 +28,12 @@ use crate::support::Scratch;
 
 /// The host id the runtimes of these tests register under.
 pub const HOST: &str = "h-0123456789abcdef";
+
+/// The `--mount` value of the scratch directory `/work/scratch/r1` on Docker: a volume
+/// of the local driver that binds the directory `nosuid,nodev` (Docker's `--mount
+/// type=bind` takes neither), with no copy of the image's `/scratch` into it. The option
+/// list holds commas, so that field is quoted, as the engine reads the value as CSV.
+pub const DOCKER_SCRATCH: &str = r#"type=volume,dst=/scratch,volume-driver=local,volume-nocopy,volume-opt=type=none,volume-opt=device=/work/scratch/r1,"volume-opt=o=bind,nosuid,nodev""#;
 
 /// The wall clock of a runtime that made its containers.
 pub fn made_at() -> u64 {
@@ -150,6 +157,7 @@ pub fn spec(run_id: &str) -> ContainerSpec {
         gpu_indices: Vec::new(),
         mounts: Vec::new(),
         scratch: PathBuf::from("/work/scratch").join(run_id),
+        slot: 0,
         isolation: Isolation::Contained,
         labels,
     }

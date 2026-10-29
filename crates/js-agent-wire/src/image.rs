@@ -5,7 +5,7 @@
 //! characters, yet a tool such as podman or skopeo reads them as a local transport and a
 //! host path, not as a registry reference. The grammar below has no place for either.
 
-use js_types::ImageDigestRef;
+use js_types::{BundleRef, ImageDigestRef};
 
 use crate::check::{At, lower_alnum};
 use crate::error::{Rule, ValidationError};
@@ -54,6 +54,20 @@ pub(crate) fn image(at: At, value: &str) -> Result<(), ValidationError> {
 /// the name holds; a reference this refuses may still be a valid tag-only one.
 pub(crate) fn pinned(at: At, value: &str) -> Result<(), ValidationError> {
     ImageDigestRef::parse(value)
+        .map(|_| ())
+        .map_err(|_| at.fail(Rule::NotPinned))
+}
+
+/// The bundle's name and digest follow the grammar an image reference does, so a bundle
+/// is held to the same text rules; this is [`image`] under the bundle's own field and code.
+pub(crate) fn bundle(at: At, value: &str) -> Result<(), ValidationError> {
+    image(at, value)
+}
+
+/// The bundle pins its content, checked by [`js_types::BundleRef`] (the parser behind
+/// [`pinned`] too). The caller has already run [`bundle`].
+pub(crate) fn bundle_pinned(at: At, value: &str) -> Result<(), ValidationError> {
+    BundleRef::parse(value)
         .map(|_| ())
         .map_err(|_| at.fail(Rule::NotPinned))
 }

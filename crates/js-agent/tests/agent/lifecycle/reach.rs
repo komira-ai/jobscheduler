@@ -44,6 +44,8 @@ fn containers(dir: &Scratch, state: &std::path::Path) -> Vec<String> {
         exec.display().to_string(),
         "--container-user".to_owned(),
         container_user(),
+        "--container-subuid".to_owned(),
+        "jobmap".to_owned(),
         "--state-root".to_owned(),
         state.display().to_string(),
     ]

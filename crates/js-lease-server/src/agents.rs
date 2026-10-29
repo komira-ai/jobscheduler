@@ -47,7 +47,7 @@ pub(crate) struct Agents {
 
 /// Where a file of the agent side is kept: beside the lease file at `state_file`, with
 /// `suffix` added to its name.
-fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn state_path(state_file: &Path, suffix: &str) -> PathBuf {
     let mut name = state_file.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
     state_file.with_file_name(name)
@@ -195,8 +195,6 @@ impl Agents {
     /// # Errors
     ///
     /// [`MintError`] as for the route.
-    // The scaler of a later change is the caller.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn mint_for(
         &self,
         pool: &ProviderId,
@@ -214,7 +212,6 @@ impl Agents {
     /// # Errors
     ///
     /// [`RevokeError::Unsaved`] when the file could not be written; nothing was dropped.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn revoke_for(
         &self,
         pool: &ProviderId,
