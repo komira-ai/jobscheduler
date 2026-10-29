@@ -7,13 +7,13 @@ use std::time::Duration;
 use js_lease::Clock;
 use serde_json::{Value, json};
 
-use js_lease_server::{SharedClock, channel_ticker, start};
+use js_lease_server::{SharedClock, channel_ticker};
 
 use crate::agents_support::{
     JOIN, Session, agent_args, hello_body, hello_with, hosts, listed, post, restarted, session,
     start_agents,
 };
-use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request};
+use crate::support::{Harness, LogCapture, Reply, TOKEN, config, replace, request, start};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)

@@ -12,6 +12,9 @@
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
+//! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
+//!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
+//!   whose binary is not a static x86-64 Linux executable.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!
@@ -27,6 +30,7 @@ use clap::{Parser, Subcommand};
 pub mod deploy;
 pub mod fetch;
 pub mod layering;
+pub mod pkg;
 pub mod release;
 
 /// Why a verb failed.
@@ -41,6 +45,9 @@ pub enum Error {
     /// The fetch verb failed.
     #[error(transparent)]
     Fetch(#[from] fetch::Error),
+    /// A package check failed.
+    #[error(transparent)]
+    Pkg(#[from] pkg::Error),
     /// Flags that do not fit together (exit status 2, like a clap error).
     #[error("{0}")]
     Usage(String),
@@ -77,12 +84,25 @@ enum Verb {
     },
     /// Set the release's version for services on the update coordinator and wait for them.
     Deploy(deploy::Args),
+    /// The js-agent Linux package.
+    Pkg {
+        /// Which step.
+        #[command(subcommand)]
+        verb: PkgVerb,
+    },
     /// The continuous release's decisions.
     Release {
         /// Which one.
         #[command(subcommand)]
         verb: ReleaseVerb,
     },
+}
+
+/// The `pkg` verbs.
+#[derive(Subcommand)]
+enum PkgVerb {
+    /// Refuse a deb that is not exactly the js-agent package.
+    CheckDeb(pkg::CheckArgs),
 }
 
 /// The `release` verbs.
@@ -109,6 +129,9 @@ fn run(cli: Cli) -> Result<String, Error> {
             Ok(fetch::fetch(&url, &sha256, &unpack, &out, &roots)?)
         }
         Verb::Deploy(args) => Ok(deploy::run(&args)?),
+        Verb::Pkg { verb } => Ok(match verb {
+            PkgVerb::CheckDeb(args) => pkg::check(&args)?,
+        }),
         Verb::Release { verb } => Ok(match verb {
             ReleaseVerb::Plan(args) => release::plan::run(&args)?,
             ReleaseVerb::Stamp(args) => release::stamp::run(&args)?,

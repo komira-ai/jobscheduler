@@ -171,6 +171,19 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     assert_eq!(args[at + 1], "nvidia.com/gpu=3");
     assert!(!args.contains(&"--gpus".to_owned()));
     assert!(args.contains(&"--read-only".to_owned()));
+    let tmpfs: Vec<&String> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "--tmpfs")
+        .map(|pair| &pair[1])
+        .collect();
+    assert_eq!(
+        tmpfs,
+        [
+            TMPFS,
+            "/var/tmp:rw,noexec,nosuid,nodev,size=64m",
+            "/run:rw,noexec,nosuid,nodev,size=64m"
+        ]
+    );
     let at = args.iter().position(|a| a == "--pid").unwrap();
     assert_eq!(args[at + 1], "private");
     assert!(
@@ -522,7 +535,7 @@ fn mountinfo_below_srv_in(path: &str) -> Option<String> {
     }
 }
 
-fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
+pub(super) fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
     match path {
         "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in", "/srv/input", "/srv"]),
         _ => None,

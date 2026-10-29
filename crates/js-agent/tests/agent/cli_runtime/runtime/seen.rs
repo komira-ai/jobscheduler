@@ -116,12 +116,12 @@ fn a_look_at_the_process_that_cannot_be_used_fails_the_start() {
 }
 
 /// Asserts that a container that is over when the agent looks (it exited at once: pid 0,
-/// state `exited`, `stopped` or `dead`) is let through, and kept for the lifecycle to find
+/// state `exited`, `stopped`, `dead` or `removing`) is let through, and kept for the lifecycle to find
 /// its exit, since there is no process left to look for. It catches a job that fails fast
 /// (a wrong command, an instant exit) tainting a host that is as visible as any other.
 #[test]
 fn a_container_that_is_over_when_the_agent_looks_is_started() {
-    for printed in ["0 exited\n", "0 stopped\n", "0 dead\n"] {
+    for printed in ["0 exited\n", "0 stopped\n", "0 dead\n", "0 removing\n"] {
         let world = docker();
         let mut rt = open(&world).with_pid_seen(|_| false);
         world.pid_says(printed);
@@ -129,6 +129,26 @@ fn a_container_that_is_over_when_the_agent_looks_is_started() {
         assert_eq!(world.ids(), [id.0], "{printed:?}: kept");
         assert!(world.calls_of("rm").is_empty(), "{printed:?}");
     }
+}
+
+/// Asserts that a container Podman 4.9 reports as `initialized` or `stopping` (states
+/// Docker does not have) is one that is not over: its process is looked for in `/proc`
+/// like a running one's, and a start whose process is seen succeeds. It catches a state
+/// the agent has no word for failing a start that is going well.
+#[test]
+fn podman_states_that_are_not_over_are_looked_at_like_running() {
+    for printed in ["4000 initialized\n", "4000 stopping\n", "4000 paused\n"] {
+        let world = docker();
+        let mut rt = open(&world);
+        world.pid_says(printed);
+        let id = rt.create_and_start(&spec("r1")).unwrap();
+        assert_eq!(world.ids(), [id.0], "{printed:?}");
+    }
+    let world = docker();
+    let mut rt = open(&world).with_pid_seen(|_| false);
+    world.pid_says("4000 stopping\n");
+    let said = rt.create_and_start(&spec("r2")).unwrap_err();
+    assert!(said.is_blind(), "a `stopping` container is not over");
 }
 
 /// The calls that ask for the process and state of a container.

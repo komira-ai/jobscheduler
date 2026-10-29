@@ -9,6 +9,7 @@ use crate::error::{Rule, ValidationError};
 use crate::hello::WireShape;
 use crate::image;
 use crate::limits;
+use crate::native::{self, NativeSpec};
 use crate::refusal;
 
 /// Whether a job is confined to a container or may change the machine (design 5.12).
@@ -150,7 +151,8 @@ pub struct JobSpec {
     pub run_id: String,
     /// The lease the run belongs to.
     pub lease_id: String,
-    /// The container image; the agent holds no registry credential, so it must be
+    /// The container image, empty for a native job (see [`JobSpec::native`]); a decoded start
+    /// may leave it out. The agent holds no registry credential, so it must be
     /// present on the host or pullable without one. A registry reference
     /// `name[:tag][@digest]` as the OCI distribution grammar defines it (a domain with an
     /// optional port only in the first component, lower-case path components, a tag of
@@ -158,7 +160,15 @@ pub struct JobSpec {
     /// `dir:`, `docker-archive:`, `containers-storage:` or `docker://` is refused, and a
     /// reference starts with a letter or digit, so it is never read as an option. A
     /// start must also pin the image: [`JobSpec::require_pinned`].
+    #[serde(default)]
     pub image: String,
+    /// What to run on the host instead of a container. A start has exactly one of a
+    /// non-empty `image` and this body; `image` is empty (and still sent) for a native job,
+    /// so an agent that predates the body refuses the start as `invalid-image` and never
+    /// runs it as a container. A native job is contained, and its `args`, `gpu_indices`
+    /// and `mounts` are empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeSpec>,
     /// The command line after the image: at most [`limits::MAX_ARGS`] entries, no NUL.
     #[serde(default)]
     pub args: Vec<String>,
@@ -184,19 +194,48 @@ pub struct JobSpec {
     /// on the agent's clock alone; 0 means no bound.
     #[serde(default)]
     pub valid_for_ms: u64,
+    /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one.
+    /// It is checked like `image` (same alphabet and length) and must be pinned
+    /// ([`JobSpec::require_pinned`]). Every bundle is refused today: without `native` an
+    /// agent from before this field ignores it and would run the job without the tools,
+    /// and with `native` no agent can unpack one yet (a later change allows the pair).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
 }
 
 impl JobSpec {
     /// Checks that the image is pinned by a `sha256:` digest, after [`JobSpec::validate`]
     /// has passed. A tag-only image is refused with [`refusal::IMAGE_DIGEST_REQUIRED`]
-    /// naming `image`; `name:tag@sha256:...` passes. The server calls it with `validate`
+    /// naming `image`, and a tag-only bundle with [`refusal::BUNDLE_DIGEST_REQUIRED`]
+    /// naming `bundle`; `name:tag@sha256:...` passes. The server calls it with `validate`
     /// before it queues a start and the agent before it acts on one, so no host pulls an
     /// image whose content can move.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
+        // The bundle first: a native job returns early below and must not skip it.
+        if let Some(bundle) = &self.bundle {
+            image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)?;
+        }
+        if self.native.is_some() {
+            return Ok(());
+        }
         image::pinned(
             At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
             &self.image,
         )
+    }
+
+    /// Exactly one of the image and the native body names what runs; a native job also
+    /// leaves the container-only fields unused.
+    fn check_body(&self) -> Result<(), ValidationError> {
+        let at = At::new("image", refusal::INVALID_IMAGE);
+        let Some(native) = &self.native else {
+            return image::image(at, &self.image);
+        };
+        if !self.image.is_empty() {
+            return Err(at.fail(Rule::Inconsistent));
+        }
+        native.validate()?;
+        native::check_job(self)
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
@@ -206,8 +245,9 @@ impl JobSpec {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
         check::ident(at.field("lease_id"), &self.lease_id)?;
-        image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
-        self.check_args(at.field("args"))?;
+        self.check_bundle()?;
+        self.check_body()?;
+        check::args(at.field("args"), &self.args)?;
         self.limits.check(at)?;
         let gpus = at.field("gpu_indices");
         check::count(gpus, self.gpu_indices.len(), limits::MAX_GPUS as usize)?;
@@ -235,22 +275,21 @@ impl JobSpec {
         )
     }
 
-    fn check_args(&self, at: At) -> Result<(), ValidationError> {
-        check::count(at, self.args.len(), limits::MAX_ARGS)?;
-        let mut total = 0usize;
-        for arg in &self.args {
-            if arg.len() > limits::MAX_ARG_LEN {
-                return Err(at.fail(Rule::TooLong));
-            }
-            if arg.contains('\0') {
-                return Err(at.fail(Rule::BadChars));
-            }
-            total += arg.len();
+    /// A bundle is the toolchain of a native job, and no runtime can fetch one yet, so
+    /// every bundle is refused: without a native body the job is a container (or empty)
+    /// job that an agent from before the field would run without the tools, and beside a
+    /// native body the agent would run the program with the host's tools. The grammar is
+    /// checked first so a malformed name reads as such.
+    fn check_bundle(&self) -> Result<(), ValidationError> {
+        let Some(bundle) = &self.bundle else {
+            return Ok(());
+        };
+        let at = At::new("bundle", refusal::INVALID_BUNDLE);
+        image::bundle(at, bundle)?;
+        if self.native.is_some() {
+            return Err(at.fail(Rule::Inconsistent));
         }
-        if total > limits::MAX_ARGS_TOTAL_BYTES {
-            return Err(at.fail(Rule::TooLong));
-        }
-        Ok(())
+        Err(at.fail(Rule::NeedsNative))
     }
 
     /// Whether the job's limits and the number of its GPU indices fit one host's offered

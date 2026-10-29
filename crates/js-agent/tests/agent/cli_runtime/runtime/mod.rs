@@ -10,6 +10,7 @@ mod list;
 mod mounts;
 mod poll;
 mod seen;
+mod userns;
 
 use js_agent::cli_runtime::CliRuntime;
 use js_agent::lifecycle::{RunHandle, Runtime};

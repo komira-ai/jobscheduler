@@ -4,7 +4,7 @@
 
 use js_agent::integrity::{FakeHost, Integrity, Mount, code};
 
-use super::{JOB_UID, after, beside, process, said, started};
+use super::{JOB_USERS, after, beside, process, said, started};
 
 /// Asserts that a user line removed from the database and one changed in place (the same
 /// name with another shell) are each a finding under the user code, and so are the same two
@@ -100,7 +100,13 @@ fn a_new_kernel_thread_is_not_a_daemonised_child() {
         after(&mut checks, "r1").is_ok(),
         "a thread of kthreadd is the kernel's"
     );
-    host.start_process(process(901, 1, 0, 5001, "0::/system.slice/x.service"));
+    host.start_process(process(
+        901,
+        1,
+        0,
+        5001,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after(&mut checks, "r2").unwrap_err();
     assert_eq!(found.code(), code::DAEMONISED_CHILD);
     assert!(found.detail().contains("pid 901"), "{found:?}");
@@ -155,12 +161,12 @@ fn a_neighbours_mount_is_kept_out_of_the_baseline_by_its_source() {
 #[test]
 fn the_checks_need_the_pid_and_mount_namespaces_of_init() {
     let host = FakeHost::quiet();
-    assert!(Integrity::start(Box::new(host.clone()), JOB_UID, vec![]).is_ok());
+    assert!(Integrity::start(Box::new(host.clone()), JOB_USERS, vec![]).is_ok());
 
     for (who, kind) in [("self", "pid"), ("1", "pid"), ("self", "mnt"), ("1", "mnt")] {
         let host = FakeHost::quiet();
         host.move_to_namespace(who, kind, &format!("{kind}:[4026532999]"));
-        let why = Integrity::start(Box::new(host), JOB_UID, vec![])
+        let why = Integrity::start(Box::new(host), JOB_USERS, vec![])
             .err()
             .unwrap();
         assert!(
@@ -172,7 +178,7 @@ fn the_checks_need_the_pid_and_mount_namespaces_of_init() {
 
         let host = FakeHost::quiet();
         host.remove_link(&format!("/proc/{who}/ns/{kind}"));
-        let why = Integrity::start(Box::new(host), JOB_UID, vec![])
+        let why = Integrity::start(Box::new(host), JOB_USERS, vec![])
             .err()
             .unwrap();
         assert!(
@@ -185,7 +191,7 @@ fn the_checks_need_the_pid_and_mount_namespaces_of_init() {
 
 /// The text of the refusal when `host` is started on.
 fn refusal(host: &FakeHost) -> String {
-    Integrity::start(Box::new(host.clone()), JOB_UID, vec![])
+    Integrity::start(Box::new(host.clone()), JOB_USERS, vec![])
         .err()
         .unwrap()
 }
@@ -265,7 +271,7 @@ fn a_container_cgroup_for_pid_1_is_not_the_hosts() {
         let host = FakeHost::quiet();
         host.set_file("/proc/1/cgroup", text);
         assert!(
-            Integrity::start(Box::new(host), JOB_UID, vec![]).is_ok(),
+            Integrity::start(Box::new(host), JOB_USERS, vec![]).is_ok(),
             "{text:?}"
         );
     }
