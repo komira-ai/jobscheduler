@@ -46,7 +46,10 @@ fn the_agent_unit_passes_the_subuid_user() {
 fn the_entry_is_one_range_of_65536_in_both_files() {
     let script = script();
     assert_eq!(SUBID_COUNT, 65_536);
-    assert!(SUBID_START >= 750_000, "inside the login users' ranges");
+    assert!(
+        std::hint::black_box(SUBID_START) >= 750_000,
+        "inside the login users' ranges"
+    );
     assert!(u64::from(SUBID_START) + u64::from(SUBID_COUNT) < u64::from(u32::MAX));
     for file in ["/etc/subuid", "/etc/subgid"] {
         let line = format!("printf '%s\\n' {SUBID_USER}:{SUBID_START}:{SUBID_COUNT} >> {file}\n");
