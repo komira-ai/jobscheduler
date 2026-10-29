@@ -465,7 +465,7 @@ impl<'a> Pass<'a> {
     fn on_held(&mut self, pool: &PoolInput, i: usize, host: Option<&HostFacts>) {
         let name = self.records.instances[i].name.clone();
         let not_found = self.input.not_found.contains(&name);
-        let given_up = host.is_some_and(|host| host.lease_given_up);
+        let given_up = host.is_some();
         let hold = pool.settings.unknown_hold;
         match (host.map(|host| (host.state, host.mark)), not_found) {
             (Some((HostState::Live, mark)), _) => self.on_mark(i, mark),
