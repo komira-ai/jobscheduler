@@ -16,6 +16,7 @@ fn job_with_files(run: &str, files: Vec<RunFile>) -> JobSpec {
         lease_id: String::new(),
         image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .into(),
+        native: None,
         args: Vec::new(),
         limits: Limits {
             cpu_millis: 1000,
