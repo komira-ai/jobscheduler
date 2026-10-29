@@ -120,6 +120,9 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         Some(agent) => Some(bind(agent, "server.agent_listen").await?),
         None => None,
     };
+    if let Some(scaler) = &scaler {
+        scaler.listening(bookings.iter().map(|booking| booking.host.to_string()));
+    }
     let table = LeaseTable::open(
         BoxedProvider(provider),
         clock.clone(),

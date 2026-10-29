@@ -7,11 +7,12 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use js_lease_server::REGISTRY_SETTLE;
+use js_lease_server::REGISTRY_QUIET;
 use js_registry::{HostState, SessionSource};
 use js_scaler::{Blocked, Millis, Phase, Record, Records};
 use js_types::LeaseId;
 
+use crate::complete::run_for;
 use crate::fakes::{live, logged, record, records, request, rig, rig_with, view};
 
 fn mins(n: u64) -> Duration {
@@ -118,12 +119,10 @@ async fn a_step_gets_one_fresh_value_for_each_launch_it_may_make() {
 async fn a_machine_missing_from_the_registry_is_released_only_on_a_view_the_shell_vouches_for() {
     let rig = rig(records(vec![registered("js-missing", "i-m")]), live());
     rig.scaler.tick().await;
-    rig.advance(REGISTRY_SETTLE - Duration::from_secs(1));
-    rig.scaler.tick().await;
+    run_for(&rig, &rig.scaler, REGISTRY_QUIET - Duration::from_secs(5)).await;
     assert!(rig.log().is_empty(), "{:?}", rig.log());
 
-    rig.advance(Duration::from_secs(1));
-    rig.scaler.tick().await;
+    run_for(&rig, &rig.scaler, Duration::from_secs(5)).await;
     assert!(
         rig.log().is_empty(),
         "the first complete view only starts the count"
@@ -159,8 +158,8 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_books_a_lease
     leased.state = HostState::Awaiting;
     leased.lease = Some(LeaseId::new(1, 7));
     rig.world().hosts = vec![free, leased];
-    rig.advance(REGISTRY_SETTLE);
     rig.scaler.tick().await;
+    run_for(&rig, &rig.scaler, REGISTRY_QUIET).await;
     rig.advance(mins(30) - Duration::from_secs(1));
     rig.scaler.tick().await;
     assert!(rig.log().is_empty(), "{:?}", rig.log());

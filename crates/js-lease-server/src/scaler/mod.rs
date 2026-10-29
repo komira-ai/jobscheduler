@@ -32,11 +32,11 @@
 //!   ([`Scaler::new`]), so a host whose release was under way and that says hello again
 //!   cannot be booked before its machine is gone.
 //! - The shell vouches for what the step cannot know: a registry view is complete only
-//!   once the server has been up for [`REGISTRY_SETTLE`] (a host registered before a restart
-//!   needs that long to say hello again); a silent host books nothing when the registry
-//!   shows no lease on it; a machine is "not found" when a read by id says the provider no
-//!   longer has it; the acquire ids the provider has an unresolved call for are the
-//!   provider's own.
+//!   once the server has been listening for [`REGISTRY_FLOOR`] and every host it knows of
+//!   has said hello again or [`REGISTRY_QUIET`] has passed (the `complete` module); a
+//!   silent host books nothing when the registry shows no lease on it; a machine is "not
+//!   found" when a read by id says the provider no longer has it; the acquire ids the
+//!   provider has an unresolved call for are the provider's own.
 //! - It says what an operator must act on, once while it holds: an orphan, a record of a
 //!   pool the server no longer has, a silent host that books nothing and is still not
 //!   marked long past `unknown_hold`; and it logs each machine released on a host's silence.
@@ -45,6 +45,7 @@
 
 mod alert;
 mod build;
+mod complete;
 mod effects;
 mod launch;
 mod live;
@@ -53,7 +54,6 @@ mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
 use js_elastic::{Acquired, HostRef, SchedulerId, Secret};
 use js_lease::Clock;
@@ -69,17 +69,11 @@ use crate::adapt::SharedClock;
 use crate::util::blocking;
 
 pub(crate) use build::{Parts, build};
+pub use complete::{REGISTRY_FLOOR, REGISTRY_QUIET};
 pub use effects::{Call, Effects};
 pub use launch::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
 pub(crate) use live::Live;
 pub use store::RecordsFile;
-
-/// How long after the server starts the shell does not vouch for the registry's view of
-/// its hosts. A host registered before a restart is missing from the registry until its
-/// agent says hello again (the agent beats every few seconds, and the registry's grace is
-/// 15 s unless the file says more); until then the step must not read a missing host as
-/// gone.
-pub const REGISTRY_SETTLE: Duration = Duration::from_secs(120);
 
 /// What the last tick saw, kept for the registry's question "could a launch serve this
 /// request".
@@ -113,7 +107,7 @@ struct Core {
     scheduler: SchedulerId,
     exec: ExecMode,
     settings: Settings,
-    started: Millis,
+    gate: Mutex<complete::Gate>,
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
 }
@@ -161,7 +155,7 @@ impl Scaler {
             alerted: BTreeSet::new(),
             save_errors: 0,
         };
-        let started = Millis::new(clock.now().millis());
+        let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
         let core = Core {
             effects,
             clock,
@@ -169,13 +163,37 @@ impl Scaler {
             scheduler,
             exec,
             settings,
-            started,
+            gate: Mutex::new(gate),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
         };
         Self {
             core: Arc::new(core),
         }
+    }
+
+    /// The server's listeners are bound: the time before the scaler vouches for the
+    /// registry's view counts from now, and `leased`, the hosts of the lease file at start
+    /// (refused seats included), are hosts it waits to hear from first.
+    pub fn listening<I: IntoIterator<Item = String>>(&self, leased: I) {
+        let now = Millis::new(self.core.clock.now().millis());
+        let mut gate = self
+            .core
+            .gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        gate.bound(now, leased);
+    }
+
+    /// Whether the last tick vouched for the registry's view; false before the first.
+    pub fn registry_complete(&self) -> bool {
+        let seen = self
+            .core
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        seen.as_ref()
+            .is_some_and(|seen| seen.input.registry_complete)
     }
 
     /// The registry's question "could a launch serve this request", answered from what the
@@ -296,6 +314,7 @@ impl Core {
         };
         let pool = &self.settings.pool;
         let views = self.effects.hosts();
+        let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
         let hosts = views
             .into_iter()
@@ -317,7 +336,7 @@ impl Core {
                 .map(view::waiting)
                 .collect(),
             hosts: hosts.collect(),
-            registry_complete: now.since(self.started) >= REGISTRY_SETTLE,
+            registry_complete: complete,
             acquired: memory.acquired.clone(),
             released: memory.released.clone(),
             not_found,
