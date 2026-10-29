@@ -266,9 +266,6 @@ fn env_name(at: At, key: &str) -> Result<(), ValidationError> {
     if ![leads, inside].into_iter().all(|ok| ok) {
         return Err(at.fail(Rule::BadChars));
     }
-    if js_types::env::env_name_reserved(key) {
-        return Err(at.fail(Rule::Reserved));
-    }
     Ok(())
 }
 
