@@ -136,7 +136,13 @@ fn started_slots(host: &FakeHost) -> Integrity {
 fn a_leftover_at_the_finished_slots_uid_is_named_as_the_slots() {
     let host = host();
     let mut checks = started_slots(&host);
-    host.start_process(process(700, 100, START + 1001, 900, "0::/user.slice"));
+    host.start_process(process(
+        700,
+        100,
+        START + 1001,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after_slot(&mut checks, "r1", 1, &[]).unwrap_err();
     assert_eq!(
         said(&found),
@@ -157,7 +163,13 @@ fn a_leftover_at_the_finished_slots_uid_is_named_as_the_slots() {
 fn a_leftover_at_an_idle_slots_uid_is_still_found() {
     let host = host();
     let mut checks = started_slots(&host);
-    host.start_process(process(701, 100, START + 1000, 900, "0::/user.slice"));
+    host.start_process(process(
+        701,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after_slot(&mut checks, "r1", 1, &[]).unwrap_err();
     assert_eq!(
         said(&found),
@@ -178,17 +190,35 @@ fn a_leftover_at_an_idle_slots_uid_is_still_found() {
 fn a_live_slots_processes_are_not_the_finished_runs() {
     let host = host();
     let mut checks = started_slots(&host);
-    host.start_process(process(702, 100, START + 1000, 900, "0::/user.slice"));
+    host.start_process(process(
+        702,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     assert!(after_slot(&mut checks, "r2", 1, &[0]).is_ok());
 
     let host = self::host();
     let mut checks = started_slots(&host);
-    host.start_process(process(703, 100, START + 1000, 900, "0::/user.slice"));
+    host.start_process(process(
+        703,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     assert!(after_slot(&mut checks, "r2", 1, &[]).is_err());
 
     let host = self::host();
     let mut checks = started_slots(&host);
-    host.start_process(process(704, 100, START + 1002, 900, "0::/user.slice"));
+    host.start_process(process(
+        704,
+        100,
+        START + 1002,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     assert!(after_slot(&mut checks, "r2", 1, &[0]).is_err());
 }
 
@@ -199,7 +229,13 @@ fn a_live_slots_processes_are_not_the_finished_runs() {
 fn without_slots_a_run_s_slot_changes_nothing() {
     let host = host();
     let mut checks = started(&host);
-    host.start_process(process(705, 100, START + 1001, 900, "0::/user.slice"));
+    host.start_process(process(
+        705,
+        100,
+        START + 1001,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after_slot(&mut checks, "r1", 1, &[1]).unwrap_err();
     assert_eq!(
         said(&found).2,
