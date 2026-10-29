@@ -91,6 +91,7 @@ fn minimal_hello_takes_defaults() {
     assert_eq!(hello.shape.max_leases, None);
     assert_eq!(hello.instance, None);
     assert_eq!(hello.protocol, ProtocolRange { min: 1, max: 1 });
+    assert!(!hello.accepts_host_credential);
     assert_eq!(hello.validate(), Ok(()));
 }
 
@@ -108,6 +109,7 @@ fn minimal_welcome_heartbeat_and_reply_take_defaults() {
     .unwrap();
     assert_eq!(welcome.protocol, 1);
     assert_eq!(welcome.session, "");
+    assert_eq!(welcome.host_credential, None);
     let beat: Heartbeat =
         serde_json::from_value(json!({"host_id": "a", "epoch": 1, "phase": "serving"})).unwrap();
     assert!(beat.held.is_empty() && beat.results.is_empty() && beat.taint.is_none());

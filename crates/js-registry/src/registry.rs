@@ -579,6 +579,7 @@ impl Registry {
             grace_ms: config.grace_ms(),
             pool: config.name().to_string(),
             session: secret,
+            host_credential: None,
         })
     }
 

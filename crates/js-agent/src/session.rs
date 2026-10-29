@@ -46,6 +46,19 @@
 //! The session secret is held in memory, goes into the body of every heartbeat and into
 //! nothing else: it is in no log line, no [`Note`] and no `Debug` output.
 //!
+//! # The host credential
+//!
+//! A session given a [`CredentialStore`] ([`Session::with_credential_store`]) keeps the host
+//! credential a welcome may carry. The server issues one only to a hello that says the agent
+//! keeps it (the agent says so when it has a state root), and retires the one-time token in
+//! the same step, so the credential is written to the store first and only then made the
+//! bearer of every later call ([`Transport::adopt_credential`]). A write that fails does not
+//! stop the session: the credential serves this process, and the note says that a restart
+//! could not register the host again ([`CredentialState::Unsaved`]). A welcome without a
+//! credential changes nothing, so an agent that meets an older server, or a pool's shared
+//! token, goes on with the token it has. A session with no store ignores a credential it is
+//! sent.
+//!
 //! # Jobs
 //!
 //! A session given a [`Worker`] ([`Session::with_jobs`]) carries what the worker holds. It
@@ -84,12 +97,13 @@ use std::time::Duration;
 
 use js_agent_wire::refusal;
 use js_agent_wire::{
-    Heartbeat, HeartbeatReply, Hello, Phase, ProtocolRange, RefusalReason, Refused,
+    Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, RefusalReason, Refused,
     ValidationError, Welcome,
 };
 use serde_json::Value;
 
 use crate::backoff::{Backoff, Jitter};
+use crate::credential::CredentialStore;
 use crate::exclusive::{Fields, Hold, PREPARE_TIMEOUT, Quiesce};
 use crate::lifecycle::Clock;
 use crate::transport::{Answer, Transport};
@@ -169,6 +183,38 @@ impl fmt::Display for Reason {
     }
 }
 
+/// What became of the host credential a welcome carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialState {
+    /// The welcome carried none, or the session has nowhere to keep one: the host goes on
+    /// with its token.
+    None,
+    /// It is on disk and authenticates every later call.
+    Saved,
+    /// It could not be written. It authenticates this process's calls, but a restart cannot
+    /// register the host again: the token it was issued for is dead.
+    Unsaved,
+    /// The transport would not use it. The token is dead, so the next call is refused.
+    Refused,
+}
+
+/// The text a [`Note::Registered`] adds for the credential: nothing, or a clause that starts
+/// with a semicolon.
+impl fmt::Display for CredentialState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "",
+            Self::Saved => "; the host credential is saved",
+            Self::Unsaved => {
+                "; the host credential could not be saved: a restart cannot register this host again"
+            }
+            Self::Refused => {
+                "; the transport refused the host credential: this host can no longer authenticate"
+            }
+        })
+    }
+}
+
 /// Something the operator may want to read in the log. None of them holds a token or a
 /// session secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,6 +225,8 @@ pub enum Note {
         epoch: u64,
         /// How often the host heartbeats.
         interval: Duration,
+        /// What became of the host credential the welcome carried, if it carried one.
+        credential: CredentialState,
     },
     /// The server no longer holds the session; the agent says hello again.
     Lost {
@@ -223,9 +271,13 @@ pub enum Note {
 impl fmt::Display for Note {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Registered { epoch, interval } => write!(
+            Self::Registered {
+                epoch,
+                interval,
+                credential,
+            } => write!(
                 f,
-                "registered, epoch {epoch}, heartbeat every {}ms",
+                "registered, epoch {epoch}, heartbeat every {}ms{credential}",
                 interval.as_millis()
             ),
             Self::Lost { code } => write!(f, "the server lost the session ({code})"),
@@ -365,6 +417,8 @@ pub struct Session<'a> {
     lost_young: bool,
     hold: Option<Hold<'a>>,
     jobs: Option<Jobs<'a>>,
+    /// Where the host credential of a welcome is kept, when the agent has a place for it.
+    store: Option<&'a dyn CredentialStore>,
     /// The last heartbeat sent carried the taint: only an answer to it can acknowledge it.
     carried: bool,
     /// The worker's queue had no reader when a reply was handed to it.
@@ -388,6 +442,7 @@ impl<'a> Session<'a> {
             lost_young: false,
             hold: None,
             jobs: None,
+            store: None,
             carried: false,
             worker_gone: false,
         }
@@ -399,6 +454,16 @@ impl<'a> Session<'a> {
     pub fn with_jobs(self, worker: &'a Worker, drain: Drain) -> Self {
         Self {
             jobs: Some(Jobs { worker, drain }),
+            ..self
+        }
+    }
+
+    /// The same session keeping the host credential a welcome carries in `store` (see the
+    /// module documentation).
+    #[must_use]
+    pub fn with_credential_store(self, store: &'a dyn CredentialStore) -> Self {
+        Self {
+            store: Some(store),
             ..self
         }
     }
@@ -593,7 +658,22 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Keeps the credential a welcome carried: written to the store first, then made the
+    /// bearer of every later call. The credential is sent nowhere else and printed nowhere.
+    fn keep_credential(&mut self, credential: Option<&HostCredential>) -> CredentialState {
+        let (Some(credential), Some(store)) = (credential, self.store) else {
+            return CredentialState::None;
+        };
+        let saved = store.save(credential).is_ok();
+        match (self.transport.adopt_credential(credential.expose()), saved) {
+            (Err(_), _) => CredentialState::Refused,
+            (Ok(()), true) => CredentialState::Saved,
+            (Ok(()), false) => CredentialState::Unsaved,
+        }
+    }
+
     fn registered(&mut self, welcome: &Welcome) -> Step {
+        let credential = self.keep_credential(welcome.host_credential.as_ref());
         let interval = Duration::from_millis(welcome.heartbeat_interval_ms);
         self.live = Some(Live {
             epoch: welcome.epoch,
@@ -609,6 +689,7 @@ impl<'a> Session<'a> {
             note: Some(Note::Registered {
                 epoch: welcome.epoch,
                 interval,
+                credential,
             }),
         }
     }

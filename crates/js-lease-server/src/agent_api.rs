@@ -40,16 +40,19 @@ pub(crate) fn router(agents: Arc<Agents>) -> Router {
         .with_state(agents)
 }
 
-/// Marks a request that was authenticated with a one-time token (see
-/// [`crate::join_tokens`]) and not with one of the pool's join tokens: the routes then
-/// hold it to the host the token registered.
+/// Marks a request that was authenticated with a one-time token or a host credential (see
+/// [`crate::join_tokens`]) and not with one of the pool's join tokens: the routes then hold
+/// it to the host that secret registered. It holds the digest of the secret the request
+/// carried, which is the key of its row; the [`Credential`] the registry sees is the one
+/// the host was registered under (the same for a token, the token's for a host credential).
 #[derive(Clone)]
-struct OneTime;
+struct OneTime(Credential);
 
-/// Refuses a request that does not carry one of the join tokens or a one-time token, with
-/// a 401 that says nothing else, and passes the credential of the token on (and the mark
-/// [`OneTime`] when it is a one-time token). The client token of the lease routes is
-/// neither and gets the same 401.
+/// Refuses a request that does not carry one of the join tokens, a one-time token or a host
+/// credential, with a 401 that says nothing else, and passes the credential the registry
+/// knows the host by on (and the mark [`OneTime`] when it is a one-time token or a host
+/// credential). A retired token is not known, so it gets the same 401, as does the client
+/// token of the lease routes.
 async fn authenticate(
     State(agents): State<Arc<Agents>>,
     mut request: Request,
@@ -67,9 +70,10 @@ async fn authenticate(
             request.extensions_mut().insert(credential);
             next.run(request).await
         }
-        (None, Some(credential)) => {
-            request.extensions_mut().insert(credential);
-            request.extensions_mut().insert(OneTime);
+        (None, Some(presented)) => {
+            let registered = agents.joins.registered_as(&presented);
+            request.extensions_mut().insert(registered);
+            request.extensions_mut().insert(OneTime(presented));
             next.run(request).await
         }
         (None, None) => StatusCode::UNAUTHORIZED.into_response(),
@@ -115,17 +119,20 @@ async fn hello(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Welcome>, Refused> {
-    serve_hello(&agents, who, one_time.is_some(), body, &|| ()).await
+    let presented = one_time.map(|Extension(OneTime(presented))| presented);
+    serve_hello(&agents, who, presented, body, &|| ()).await
 }
 
 /// The hello route. `between` runs after a one-time token was admitted and before the
 /// registry is asked: the point at which another hello can get in. Production passes a
 /// function that does nothing; a test passes the other hello, so the interleaving is
-/// exact and no thread races on timing.
+/// exact and no thread races on timing. `who` is the credential the registry knows the host
+/// by; `one_time` is the digest of the one-time token or host credential the request
+/// carried, when it carried one.
 async fn serve_hello(
     agents: &Arc<Agents>,
     who: Credential,
-    one_time: bool,
+    one_time: Option<Credential>,
     body: Result<Bytes, BytesRejection>,
     between: &(dyn Fn() + Sync),
 ) -> Result<Json<Welcome>, Refused> {
@@ -139,31 +146,44 @@ async fn serve_hello(
     // is bound to another credential) gives the use back, and the token stays unused for
     // its instance. Not when a later hello of the same host was admitted meanwhile: the
     // registry may have accepted that one, and the token then stays the host's.
-    let mut fresh = false;
-    if one_time {
+    //
+    // A hello that says it keeps a host credential, and registers its host with an unused
+    // token, retires the token in the same step and is answered with the credential: the
+    // token alone opens nothing from then on. When the registry refuses that hello the
+    // credential goes back with the use, since the answer that carries it is not sent.
+    let mut fresh_use = None;
+    let mut issued = None;
+    if let Some(presented) = &one_time {
         let instance = hello.instance.clone();
+        let host = hello.host_id.clone();
+        let asked = hello.accepts_host_credential;
         let admitted = agents
-            .admit_join(who.clone(), hello.host_id.clone(), instance)
+            .admit_join(presented.clone(), host, instance, asked)
             .await;
-        let admission = admitted.map_err(|refusal| {
+        let admitted = admitted.map_err(|refusal| {
             warn!(code = refusal.code(), host = %hello.host_id, "agent hello refused: join token");
             Refused::join(refusal)
         })?;
-        fresh = admission == Admission::Fresh;
+        if admitted.admission == Admission::Fresh {
+            fresh_use = Some(presented.clone());
+        }
+        issued = admitted.issued;
     }
     between();
-    let welcome = match agents.registry.hello(&hello, &who) {
+    let mut welcome = match agents.registry.hello(&hello, &who) {
         Ok(welcome) => welcome,
         Err(refusal) => {
-            if fresh {
-                agents.release_join(who, hello.host_id.clone()).await;
+            if let Some(presented) = fresh_use {
+                agents.release_join(presented, hello.host_id.clone()).await;
             }
             warn!(code = refusal.code(), "agent hello refused");
             return Err(Refused::of(&refusal));
         }
     };
+    let credential_issued = issued.is_some();
+    welcome.host_credential = issued;
     agents.save_bindings().await;
-    info!(host = %hello.host_id, epoch = welcome.epoch, "agent admitted");
+    info!(host = %hello.host_id, epoch = welcome.epoch, credential_issued, "agent admitted");
     Ok(Json(welcome))
 }
 
@@ -180,9 +200,9 @@ async fn heartbeat(
     heartbeat
         .validate()
         .map_err(|err| Refused::of(&Refusal::Invalid(err)))?;
-    if one_time.is_some() {
+    if let Some(Extension(OneTime(presented))) = one_time {
         let served = agents
-            .serve_join(who.clone(), heartbeat.host_id.clone())
+            .serve_join(presented, heartbeat.host_id.clone())
             .await;
         served.map_err(Refused::join)?;
     }
@@ -245,11 +265,12 @@ impl Refused {
         }
     }
 
-    /// The answer to a refused one-time token: 503 when the use could not be written down,
-    /// 403 otherwise. The code names the fault and nothing of the token.
+    /// The answer to a refused one-time token: 503 when the use could not be written down or
+    /// the credential could not be made, 403 otherwise. The code names the fault and
+    /// nothing of the token.
     fn join(refusal: JoinRefusal) -> Self {
         let status = match refusal {
-            JoinRefusal::Unsaved => StatusCode::SERVICE_UNAVAILABLE,
+            JoinRefusal::Unsaved | JoinRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::FORBIDDEN,
         };
         Self::new(status, refusal.code())
@@ -374,6 +395,7 @@ mod tests {
             (JoinRefusal::WrongInstance, 403, "join-token-instance"),
             (JoinRefusal::NotAdmitted, 403, "join-token-not-admitted"),
             (JoinRefusal::Unsaved, 503, "join-token-unsaved"),
+            (JoinRefusal::Unavailable, 503, "join-token-unavailable"),
         ];
         for (refusal, status, code) in cases {
             let answer = Refused::join(refusal);
