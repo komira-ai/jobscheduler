@@ -36,6 +36,7 @@ mod runs_routes;
 mod runs_support;
 mod scaler_network;
 mod scaler_start;
+mod scaler_status;
 mod scaler_support;
 mod startup;
 mod support;
