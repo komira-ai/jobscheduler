@@ -47,6 +47,8 @@ async fn a_failed_save_carries_out_no_later_action() {
         live(),
     );
     rig.advance(mins(16));
+    rig.scaler.tick().await;
+    rig.advance(mins(5));
     rig.world().save_ok = false;
     rig.scaler.tick().await;
     assert_eq!(rig.log(), ["save"]);
@@ -360,6 +362,8 @@ async fn a_machine_is_not_released_while_its_host_holds_a_lease() {
         live(),
     );
     rig.advance(mins(16));
+    rig.scaler.tick().await;
+    rig.advance(mins(5));
     let said = times("the registry books a lease on the host");
     let mut booked = view("js-leased-late");
     booked.lease = Some(LeaseId::new(1, 4));

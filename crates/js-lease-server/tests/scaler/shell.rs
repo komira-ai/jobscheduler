@@ -121,10 +121,15 @@ async fn a_token_that_cannot_be_minted_defers_the_launch() {
 }
 
 /// A rig whose one machine, `js-booting`, was launched at the start of the clock and has
-/// never said hello, with the clock moved past `boot_timeout` (15 minutes).
-fn timed_out() -> crate::fakes::Rig {
+/// never said hello, with the clock moved past `boot_timeout` (15 minutes) and its host
+/// missing from complete views for the boot hold (5 minutes), counted from a first tick
+/// that does nothing: the next tick may give up on the machine.
+async fn timed_out() -> crate::fakes::Rig {
     let rig = rig(records(vec![record("js-booting", Phase::Booting)]), live());
     rig.advance(mins(16));
+    rig.scaler.tick().await;
+    assert!(rig.log().is_empty(), "{:?}", rig.log());
+    rig.advance(mins(5));
     rig
 }
 
@@ -135,7 +140,7 @@ fn timed_out() -> crate::fakes::Rig {
 /// that nobody tries again.
 #[tokio::test]
 async fn a_revoke_that_fails_holds_the_release_back() {
-    let rig = timed_out();
+    let rig = timed_out().await;
     rig.world().revoke_ok = false;
     rig.scaler.tick().await;
     assert_eq!(
@@ -429,6 +434,8 @@ async fn a_revoke_that_keeps_failing_is_said_once() {
         live(),
     );
     rig.advance(mins(16));
+    rig.scaler.tick().await;
+    rig.advance(mins(5));
     rig.world().revoke_ok = false;
     for _ in 0..4 {
         rig.scaler.tick().await;
