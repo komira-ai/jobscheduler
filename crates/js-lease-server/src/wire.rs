@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use js_lease::{AcquireError, LeaseInfo, ReleaseError, RenewError};
 use js_provider::RefusalCode;
-use js_types::{ClassId, LeaseId, Request, Requirements, Resources};
+use js_types::{ClassId, LeaseId, Request, Requirements, RequirementsError, Resources};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::error::Category;
@@ -66,8 +66,14 @@ impl AcquireBody {
             labels: self.labels,
             validation_run: self.validation_run,
         };
-        Requirements::try_from_request(&request)
-            .map_err(|why| ApiError::bad_request(format!("capabilities: {why}")))?;
+        Requirements::try_from_request(&request).map_err(|why| {
+            ApiError::bad_request(match why {
+                RequirementsError::BadDisk(_) => {
+                    "disk-gib must be a whole number of GiB below 2^34"
+                }
+                RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+            })
+        })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
     }
 }
@@ -322,7 +328,12 @@ mod tests {
         ] {
             let err = body(caps).into_parts().unwrap_err();
             assert_eq!(err.status, StatusCode::BAD_REQUEST);
-            assert!(err.reason.as_deref().unwrap().contains(said), "{caps}");
+            let reason = err.reason.as_deref().unwrap();
+            assert!(reason.starts_with(said), "{caps}");
+            assert!(
+                !reason.contains("lots") && !reason.contains("vm"),
+                "{reason}"
+            );
         }
     }
 
