@@ -229,7 +229,7 @@ impl Profile {
     /// CPU is charged by the curve: not by one whose cores are unknown, which leaves the
     /// request's own cores booked.
     pub(crate) fn cpu_by_curve(&self) -> bool {
-        self.cpu && self.curve.as_deref().is_some_and(Curve::cores_known)
+        self.cpu && self.curve.is_some()
     }
 
     /// Memory is charged by the curve.
