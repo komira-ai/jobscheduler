@@ -83,7 +83,7 @@ fn every_launch_attaches_the_no_inbound_ruleset_of_its_own_region() {
 }
 
 #[test]
-fn a_ruleset_is_found_before_one_is_made_and_settled_once_per_region() {
+fn a_ruleset_is_found_before_one_is_made_and_read_again_before_each_launch() {
     let rig = rig(live(5));
     let ours = rig
         .fake
@@ -99,7 +99,58 @@ fn a_ruleset_is_found_before_one_is_made_and_settled_once_per_region() {
         assert_eq!(sent.firewall_ruleset_ids, std::slice::from_ref(&ours));
     }
     assert_eq!(rig.fake.count(Call::CreateFirewallRuleset), 0);
-    assert_eq!(rig.fake.count(Call::ListFirewallRulesets), 1);
+    assert_eq!(rig.fake.count(Call::ListFirewallRulesets), 2);
+}
+
+#[test]
+fn a_rule_added_after_the_first_launch_refuses_the_next_and_sends_no_launch() {
+    let rig = rig(live(5));
+    // A decoy that the change must not touch.
+    rig.fake.add_firewall_ruleset("web", "region-a", 0);
+    assert!(accepted(&rig.provider.acquire(&ask("a"))));
+    assert_eq!(rig.fake.count(Call::Launch), 1);
+    let id = rig
+        .fake
+        .firewall_rulesets()
+        .into_iter()
+        .find(|set| set.name == ruleset_name())
+        .unwrap()
+        .id;
+    rig.fake.set_firewall_rules(&id, 1);
+    rig.clock.advance(INTERVAL);
+    let text = format!(
+        "firewall: the ruleset {} holds 1 rules; it must hold none",
+        ruleset_name()
+    );
+    assert_eq!(
+        rig.provider.acquire(&ask("b")),
+        refused(RefusalCode::Denied, Reason::Firewall(text))
+    );
+    assert_eq!(rig.fake.count(Call::Launch), 1);
+    // Taking the rule away lets the next launch through: nothing was remembered.
+    rig.fake.set_firewall_rules(&id, 0);
+    assert!(accepted(&rig.provider.acquire(&ask("b"))));
+    assert_eq!(rig.fake.count(Call::Launch), 2);
+    let decoy = rig
+        .fake
+        .firewall_rulesets()
+        .into_iter()
+        .find(|set| set.name == "web")
+        .unwrap();
+    assert_eq!(decoy.rules, 0);
+}
+
+#[test]
+fn a_failed_recheck_after_the_first_launch_is_deferred_and_sends_no_launch() {
+    let rig = rig(live(5));
+    assert!(accepted(&rig.provider.acquire(&ask("a"))));
+    rig.clock.advance(INTERVAL);
+    rig.fake.fail_next(Call::ListFirewallRulesets, down());
+    assert_eq!(
+        rig.provider.acquire(&ask("b")),
+        Acquired::Deferred { wait: INTERVAL }
+    );
+    assert_eq!(rig.fake.count(Call::Launch), 1);
 }
 
 #[test]

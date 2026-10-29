@@ -40,8 +40,8 @@
 //!   [`PAYLOAD_LIMIT`] is the size the provider accepts, and a larger payload is refused
 //!   before any call;
 //! - the id of a firewall ruleset named `js-<scheduler>-noinbound` that holds no rule, found
-//!   or created once per region ([`LambdaProvider::ensure_firewall`]) and attached to every
-//!   launch, because a ruleset can only be attached at launch. A launch without one is
+//!   or created ([`LambdaProvider::ensure_firewall`], read again before every launch, so a
+//!   rule added later refuses the next launch) and attached to every launch, because a ruleset can only be attached at launch. A launch without one is
 //!   refused as a shape error and never sent;
 //! - one ssh key name, which the API requires and nothing uses: the configured name, else
 //!   the account's key `js-<scheduler>`, else its only key, else a key made under that

@@ -138,8 +138,6 @@ pub struct LambdaProvider {
     /// Whether a list has succeeded: a 404 on a read by id is trusted only after one.
     probed: AtomicBool,
     dry_run_logged: AtomicBool,
-    /// The id of the no-inbound ruleset, by region, once settled.
-    rulesets: Mutex<BTreeMap<String, String>>,
     /// The name of the ssh key every launch holds, once settled.
     key: Mutex<Option<String>>,
 }
@@ -163,7 +161,6 @@ impl LambdaProvider {
             launching: Mutex::new(Launching::default()),
             probed: AtomicBool::new(false),
             dry_run_logged: AtomicBool::new(false),
-            rulesets: Mutex::new(BTreeMap::new()),
             key: Mutex::new(None),
         }
     }
@@ -190,19 +187,16 @@ impl LambdaProvider {
 
     /// The id of this scheduler's ruleset that lets nothing in, in `region`: found by the
     /// name `js-<scheduler>-noinbound`, or created with no rules when the region has none.
-    /// Settled once per region and kept; every launch attaches it, because a ruleset can
-    /// only be attached at launch. A ruleset of that name that holds rules is refused,
-    /// never used.
+    /// Read again before every launch, never remembered: a rule added since the last
+    /// launch must not ride along on the next one, and one list call is cheap next to a
+    /// launch. Every launch attaches it, because a ruleset can only be attached at launch.
+    /// A ruleset of that name that holds rules is refused, never used.
     ///
     /// # Errors
     ///
     /// [`PrepareError`] when the scheduler id is too long for the name, a call fails, or
     /// the ruleset holds rules.
     pub fn ensure_firewall(&self, region: &str) -> Result<String, PrepareError> {
-        let mut settled = self.rulesets.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(id) = settled.get(region) {
-            return Ok(id.clone());
-        }
         let name = format!("js-{}-noinbound", self.config.scheduler.as_str());
         if name.len() > 64 {
             return Err(PrepareError::FirewallName);
@@ -222,7 +216,6 @@ impl LambdaProvider {
                 rules: ruleset.rules,
             });
         }
-        settled.insert(region.to_owned(), ruleset.id.clone());
         Ok(ruleset.id)
     }
 

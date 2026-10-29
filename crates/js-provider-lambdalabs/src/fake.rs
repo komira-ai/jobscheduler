@@ -136,6 +136,16 @@ impl FakeLambda {
         id
     }
 
+    /// Sets the number of rules the ruleset `id` holds, as if a rule were added to it
+    /// (or removed) after it was made. An id the account does not hold changes nothing.
+    pub fn set_firewall_rules(&self, id: &str, rules: usize) {
+        for ruleset in &mut self.state().rulesets {
+            if ruleset.id == id {
+                ruleset.rules = rules;
+            }
+        }
+    }
+
     /// The firewall rulesets held now.
     pub fn firewall_rulesets(&self) -> Vec<FirewallRuleset> {
         self.state().rulesets.clone()
