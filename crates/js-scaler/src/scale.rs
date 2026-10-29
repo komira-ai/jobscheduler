@@ -381,11 +381,7 @@ impl Pass<'_> {
             self.blocked.insert(settings.pool.clone(), blocked);
             return uncovered;
         }
-        let retried = if live {
-            self.retry_planned(settings)
-        } else {
-            0
-        };
+        let retried = self.retry_planned(settings);
         if self.deferred(&settings.pool) {
             self.blocked
                 .insert(settings.pool.clone(), Blocked::Deferred);
