@@ -570,4 +570,8 @@ impl Transport for Recording {
         }
         self.inner.post(path, body)
     }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
 }
