@@ -93,7 +93,7 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     report.push(describe(entry_probe, "", &entry));
     let _ = std::fs::remove_file(&entry_file);
 
-    // Reported: process visibility. `ps` (and `true`, to tell a refused exec from a refused
+    // Reported: process visibility. `pgrep` (and `true`, to tell a refused exec from a refused
     // listing) under the design's process-info rule and two narrower ones.
     let variants: [(&str, &str); 4] = [
         ("none", ""),
@@ -107,14 +107,15 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         ),
         ("listpids", "(deny process-info-listpids)"),
     ];
-    let ps_args = [OsStr::new("-axo"), OsStr::new("pid=")];
+    // /bin/ps is setuid and cannot be started under a profile at all; pgrep lists by sysctl.
+    let ps_args = [OsStr::new(".")];
     let count = |out: &Outcome| out.stdout.lines().count();
-    let control = run(places.command(&Mode::Control, OsStr::new("/bin/ps"), &ps_args));
+    let control = run(places.command(&Mode::Control, OsStr::new("/usr/bin/pgrep"), &ps_args));
     let mut probe =
         Probe::info("sandbox/process-info-others").fact("control_ps_processes", count(&control));
     for (name, rules) in variants {
         let mode = Mode::Sandboxed(&off, rules);
-        let ps = run(places.command(&mode, OsStr::new("/bin/ps"), &ps_args));
+        let ps = run(places.command(&mode, OsStr::new("/usr/bin/pgrep"), &ps_args));
         let true_ = run(places.command(&mode, OsStr::new("/usr/bin/true"), &[]));
         probe = probe
             .fact(&format!("{name}_ps_processes"), count(&ps))
