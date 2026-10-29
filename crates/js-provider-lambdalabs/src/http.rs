@@ -15,7 +15,9 @@ use ureq::{Agent, Error as TransportError};
 use crate::api::LambdaApi;
 use crate::error::{ApiError, cut};
 use crate::key::ApiKey;
-use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest};
+use crate::model::{
+    FirewallRuleset, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, SshKey,
+};
 use crate::wire;
 
 /// The path every call lives under.
@@ -38,10 +40,6 @@ pub enum SetupError {
     /// the key would cross the network unencrypted.
     #[error("plain http is accepted for a loopback address only, not {0}")]
     PlainHttpNotLoopback(String),
-    /// An `https://` base URL needs the PEM file of the roots to trust: the platform's
-    /// roots are found through the environment and are not read.
-    #[error("an https base URL needs a CA bundle")]
-    CaBundleRequired,
     /// The CA bundle cannot be used.
     #[error("{path}: {why}")]
     CaBundle {
@@ -71,9 +69,11 @@ impl fmt::Debug for HttpApi {
 
 impl HttpApi {
     /// Builds the client. There is no default address: `base_url` is the caller's, as
-    /// `https://host` (with `ca_bundle`, the PEM file of the roots to trust) or, for a
-    /// local test server, `http://127.0.0.1:port`. Every request is answered or fails
-    /// within `limit`, connect and TLS included.
+    /// `https://host` or, for a local test server, `http://127.0.0.1:port`. For `https`
+    /// the roots trusted are the public roots bundled in the `webpki-roots` crate (pinned
+    /// by `Cargo.lock`), or, when `ca_bundle` names a PEM file, only the certificates in
+    /// it: a bundle replaces the public roots. The platform's own store is never read.
+    /// Every request is answered or fails within `limit`, connect and TLS included.
     ///
     /// # Errors
     ///
@@ -85,14 +85,9 @@ impl HttpApi {
         limit: Duration,
     ) -> Result<Self, SetupError> {
         let (https, base) = parse_base(base_url)?;
-        let roots = match (https, ca_bundle) {
-            (false, _) => Vec::new(),
-            (true, Some(path)) => pem_roots(path)?,
-            (true, None) => return Err(SetupError::CaBundleRequired),
-        };
         let tls = TlsConfig::builder()
             .provider(TlsProvider::Rustls)
-            .root_certs(RootCerts::Specific(Arc::new(roots)))
+            .root_certs(roots(https, ca_bundle)?)
             .unversioned_rustls_crypto_provider(Arc::new(default_provider()))
             .build();
         let agent: Agent = Agent::config_builder()
@@ -203,6 +198,26 @@ impl LambdaApi for HttpApi {
     fn terminate(&self, id: &InstanceId) -> Result<Vec<InstanceId>, ApiError> {
         wire::terminated(&self.post("/instance-operations/terminate", &wire::terminate_body(id))?)
     }
+
+    fn list_firewall_rulesets(&self) -> Result<Vec<FirewallRuleset>, ApiError> {
+        wire::rulesets(&self.get("/firewall-rulesets")?)
+    }
+
+    fn create_firewall_ruleset(
+        &self,
+        region: &str,
+        name: &str,
+    ) -> Result<FirewallRuleset, ApiError> {
+        wire::one_ruleset(&self.post("/firewall-rulesets", &wire::ruleset_body(region, name))?)
+    }
+
+    fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError> {
+        wire::keys(&self.get("/ssh-keys")?)
+    }
+
+    fn create_ssh_key(&self, name: &str) -> Result<SshKey, ApiError> {
+        wire::one_key(&self.post("/ssh-keys", &wire::key_body(name))?)
+    }
 }
 
 /// Whether the URL is https, and the base to build request URLs on (no trailing slash).
@@ -233,6 +248,19 @@ fn loopback(authority: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// The roots to trust: none for plain http; for `https://`, the certificates of the PEM
+/// file when one is given and only those, and otherwise the public roots bundled in the
+/// `webpki-roots` crate. The platform's store is never read: the loaders find it through
+/// environment variables, so what is trusted would depend on the process's surroundings.
+fn roots(https: bool, ca_bundle: Option<&Path>) -> Result<RootCerts, SetupError> {
+    let certs = match (https, ca_bundle) {
+        (false, _) => Vec::new(),
+        (true, Some(path)) => pem_roots(path)?,
+        (true, None) => return Ok(RootCerts::WebPki),
+    };
+    Ok(RootCerts::Specific(Arc::new(certs)))
+}
+
 /// The certificates in a PEM file; a file without one is refused.
 fn pem_roots(path: &Path) -> Result<Vec<Certificate<'static>>, SetupError> {
     let refuse = |why: String| SetupError::CaBundle {
@@ -248,5 +276,27 @@ fn pem_roots(path: &Path) -> Result<Vec<Certificate<'static>>, SetupError> {
             .iter()
             .map(|cert| Certificate::from_der(cert.as_ref()).to_owned())
             .collect()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that without a bundle an `https://` client is set to trust the bundled
+    /// `webpki-roots` set, not a file and not the platform's store, and that plain http
+    /// names no root at all. It catches a change of the default to an empty, a system or a
+    /// trust-everything store.
+    #[test]
+    fn no_bundle_means_the_bundled_public_roots() {
+        // Compared as text: a `matches!` arm that never fails is a branch no test takes.
+        assert_eq!(format!("{:?}", roots(true, None).unwrap()), "WebPki");
+        assert_eq!(format!("{:?}", roots(false, None).unwrap()), "Specific([])");
+        // What `RootCerts::WebPki` means in ureq: exactly this crate's anchors.
+        let bundled = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        assert!(!bundled.is_empty());
+        assert_eq!(bundled.len(), webpki_roots::TLS_SERVER_ROOTS.len());
     }
 }

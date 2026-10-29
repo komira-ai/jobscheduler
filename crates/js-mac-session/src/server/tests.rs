@@ -632,7 +632,9 @@ fn a_caller_that_sends_nothing_is_dropped() {
 /// sends the 24 bytes of a frame, and each byte moves the connection's clock on by
 /// 100 ms; the request is due 400 ms after the hello, so it is refused at the deadline
 /// however the bytes and the reads interleave, and a per-read timeout would instead
-/// read the whole frame and answer "bad request".
+/// read the whole frame and answer "bad request". The socket read still carries a real
+/// timeout of the time left; a stall of 400 ms or more of real time would make that
+/// timeout fire first, which is also answered "the deadline passed".
 #[test]
 fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
     use std::io::Write as _;
@@ -645,8 +647,9 @@ fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
     let check = Scripted::fixed(Ok(()));
     let clock = Arc::new(AtomicU64::new(0));
     let helper_clock = clock.clone();
-    // Told at the helper's first reading of the clock, which starts the 400 ms: the
-    // caller sends nothing before that, so the deadline cannot start late.
+    // Told after the helper's first reading of the clock, which starts the 400 ms: the
+    // caller moves the clock and sends nothing before that, so the deadline cannot
+    // start late, however the two threads are scheduled.
     let (started, started_rx) = std::sync::mpsc::channel();
     let served = std::thread::spawn(move || {
         connection_on(
@@ -655,8 +658,9 @@ fn a_caller_that_drips_its_request_is_dropped_at_the_deadline() {
             check.as_ref(),
             Duration::from_millis(400),
             &|| {
+                let reading = Duration::from_millis(helper_clock.load(Ordering::SeqCst));
                 let _ = started.send(());
-                Duration::from_millis(helper_clock.load(Ordering::SeqCst))
+                reading
             },
         );
     });

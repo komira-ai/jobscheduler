@@ -1,7 +1,8 @@
 //! Reading the three endpoints: what the client sends and what it makes of the answers.
 
+use js_elastic::HostStatus;
 use js_provider_lambdalabs::{
-    ApiError, ApiKey, Architecture, ErrorCode, HttpApi, InstanceId, LambdaApi, Status,
+    ApiError, ApiKey, Architecture, ErrorCode, HttpApi, InstanceId, LambdaApi,
 };
 
 use crate::support::{PATIENT, Reply, Scratch, Server, fixture};
@@ -105,17 +106,17 @@ fn the_instance_list_keeps_every_row_in_the_order_given() {
     let server = Server::plain();
     server.on(LIST, Reply::json(200, &fixture("instances.json")));
     let list = client(&server, "key-one").list_instances().unwrap();
-    let statuses: Vec<Status> = list.iter().map(|i| i.status.clone()).collect();
+    let statuses: Vec<HostStatus> = list.iter().map(|i| i.status.clone()).collect();
     assert_eq!(
         statuses,
         [
-            Status::Active,
-            Status::Booting,
-            Status::Terminated,
-            Status::Unknown("paused-for-review".to_owned()),
-            Status::Preempted,
-            Status::Unhealthy,
-            Status::Terminating,
+            HostStatus::Active,
+            HostStatus::Booting,
+            HostStatus::Terminated,
+            HostStatus::Unknown("paused-for-review".to_owned()),
+            HostStatus::Preempted,
+            HostStatus::Unhealthy,
+            HostStatus::Terminating,
         ]
     );
     let first = &list[0];
@@ -164,7 +165,7 @@ fn optional_fields_may_be_missing_and_a_bad_timestamp_reads_as_none() {
     // "not a time" does not fail the list.
     assert_eq!(
         list[3].status,
-        Status::Unknown("paused-for-review".to_owned())
+        HostStatus::Unknown("paused-for-review".to_owned())
     );
     assert!(list[3].first_healthy.is_none());
 }
@@ -214,7 +215,7 @@ fn one_instance_is_read_by_id() {
     let found = client(&server, "key-one")
         .get_instance(&id("a1b2c3d4e5f60718293a4b5c6d7e8f90"))
         .unwrap();
-    assert_eq!(found.status, Status::Active);
+    assert_eq!(found.status, HostStatus::Active);
     assert_eq!(found.tags.len(), 1);
 }
 

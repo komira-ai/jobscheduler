@@ -7,9 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use js_lease_server::{Cli, DropReason, NodeRow, RunMinute, UsageCounters};
+use js_lease_server::{Cli, DropReason, KeySource, NodeRow, ProfileKey, RunMinute, UsageCounters};
 use js_types::LeaseId;
-use serde_json::json;
+use js_types::sched::WorkKey;
+use js_types::sched::usage::CurveSource;
+use serde_json::{Value, json};
 
 use crate::agents_support::{JOIN, Session, agent_args, join, post};
 use crate::runs_support::{beat, held, lease, queued, result, verdicts};
@@ -485,4 +487,85 @@ async fn the_started_server_keeps_a_usage_file_and_offers_curves() {
     let fake = Arc::new(Fake::default());
     let other = start_usage("usage_no_curves", &fake, &[]).await;
     assert!(other.running.usage_curves().is_none());
+}
+
+/// A key source that gives every run the profile it was built with, as a caller does that
+/// supplies one name for all the runs of a kind of work.
+struct Named(ProfileKey);
+
+impl KeySource for Named {
+    fn key_of(&self, _: &str) -> Option<ProfileKey> {
+        Some(self.0.clone())
+    }
+}
+
+/// A load of the wire that carries minute 0 of `lease`, the `seq`th the host sent.
+fn load_of(lease: &str, seq: u64) -> Value {
+    json!({
+        "seq": seq,
+        "mono_usec": seq * 5_000_000,
+        "cpu_usage_usec": seq * 1_000_000,
+        "working_set_bytes": 1_000_000,
+        "covered": [lease],
+        "minutes": [{
+            "lease_id": lease, "minute": 0, "cpu_mean_millis": 1500,
+            "cpu_peak_window_millis": 2500, "ws_max_bytes": 4096,
+        }],
+    })
+}
+
+/// Drives one run on a fresh lease of the host of `me` to a clean end through the real
+/// routes, as `finish_run` does, and releases the lease. `seq` counts the loads the host
+/// has sent; it is advanced.
+async fn finish_run_on_a_fresh_lease(h: &Harness, me: &Session, seq: &mut u64) {
+    beat(h, me, &[], &[]).await;
+    let lease = lease(h).await;
+    let run = queued(h, &lease, 1000).await;
+    beat(h, me, &[], &[]).await;
+    *seq += 1;
+    let mut running = me.beat();
+    running["held"] = json!([held(&run, "running")]);
+    running["load"] = load_of(&lease, *seq);
+    let sent = post(h, "/v1/agent/heartbeat", Some(JOIN), &running).await;
+    assert_eq!(sent.status, 200, "{}", sent.body);
+    let exited = [held(&run, "exited_unacked")];
+    let reply = beat(h, me, &exited, &[result(&run, &lease)]).await;
+    assert_eq!(verdicts(&reply), [format!("{run} ACCEPTED")]);
+    beat(h, me, &[], &[]).await;
+    beat(h, me, &[], &[]).await;
+    let released = h.call("DELETE", &format!("/v1/leases/{lease}"), None).await;
+    assert_eq!(released.status, 200, "{}", released.body);
+    beat(h, me, &[], &[]).await;
+}
+
+/// Asserts that the server keeps a run's profile under the name the caller supplied and
+/// that admission reads it through the names the caller gave (`with_curve_names`): after
+/// two clean runs named `est.row-1` there is no curve, after the third both work keys the
+/// caller maps to that name have one (so two different work keys share one profile), and a
+/// work key the caller maps to no name has none. It catches a server that drops the
+/// caller's names, keeps the profile under a name of its own, or keys it by the work key.
+#[tokio::test]
+async fn a_profile_is_kept_under_the_supplied_name_and_read_through_the_callers_names() {
+    let scratch = Scratch::new("usage_names");
+    let args = agent_args(&scratch, false);
+    let name = ProfileKey::parse("est.row-1").unwrap();
+    let config = config(args)
+        .unwrap()
+        .with_key_source(Arc::new(Named(name.clone())))
+        .with_curve_names(move |key| (key.class == "Build/Pool-1").then(|| name.clone()));
+    let h = Harness::over(scratch, config).await;
+    let me = join(&h, "burst-1").await;
+    let curves = h.running.usage_curves().unwrap();
+    let first = WorkKey::new("Build/Pool-1", "aaaa/1");
+    let second = WorkKey::new("Build/Pool-1", "bbbb/2");
+    let mut seq = 0;
+    for _ in 0..2 {
+        finish_run_on_a_fresh_lease(&h, &me, &mut seq).await;
+    }
+    assert!(curves.curve(&first).is_none());
+    finish_run_on_a_fresh_lease(&h, &me, &mut seq).await;
+    assert!(curves.curve(&first).is_some());
+    assert!(curves.curve(&second).is_some());
+    assert!(curves.curve(&WorkKey::new("Other", "aaaa/1")).is_none());
+    assert_eq!(h.running.usage_counters().runs_learned, 3);
 }

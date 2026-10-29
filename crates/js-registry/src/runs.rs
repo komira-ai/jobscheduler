@@ -119,7 +119,8 @@ pub enum RunRefusal {
     #[error("host jobs are not allowed")]
     HostJobsNotAllowed,
     /// The run does not fit what is left of the lease's budget, the host takes no new
-    /// work in its phase, or it holds as many live runs as [`MAX_LIVE_RUNS`] allows.
+    /// work (out of the serving phase, or marked draining or releasing), or it holds as
+    /// many live runs as [`MAX_LIVE_RUNS`] allows.
     #[error("the run does not fit the lease's capacity")]
     NoCapacity,
     /// The host reported that it can no longer be trusted clean, so it takes no new run.
