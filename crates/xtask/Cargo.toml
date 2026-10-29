@@ -22,6 +22,11 @@ toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+# The paths the elastic boot payload gives its agent, the flags the agent's command line
+# accepts and the server addresses the client refuses (tests/js_agent_package.rs).
+js-agent = { path = "../js-agent" }
+js-client = { path = "../js-client" }
+js-elastic = { path = "../js-elastic" }
 rcgen.workspace = true
 
 [lints]
