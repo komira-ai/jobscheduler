@@ -16,6 +16,7 @@ hex.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+libc.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
