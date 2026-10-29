@@ -29,7 +29,8 @@
       "registered": false,
       "condemned": false,
       "clean_lists": 0,
-      "last_clean": null
+      "last_clean": null,
+      "seen_live": false
     },
     {
       "pool": "gpu",
@@ -59,7 +60,8 @@
       "registered": true,
       "condemned": true,
       "clean_lists": 2,
-      "last_clean": 1000000180000
+      "last_clean": 1000000180000,
+      "seen_live": true
     }
   ],
   "cooldowns": {
