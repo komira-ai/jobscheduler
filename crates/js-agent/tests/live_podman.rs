@@ -2,7 +2,9 @@
 //! Podman, and what the job sees of its own sandbox. Every other container test of this
 //! crate answers through a scripted engine, so it proves the arguments the agent builds and
 //! never that an engine honours them; this one reads the properties from inside the
-//! running container.
+//! running container. The create path reads the mounts back before `start`, and on Podman
+//! requires every bind's `.Mounts[].Options` to list `nosuid` and `nodev`: a job that starts
+//! here shows that a real Podman reports them.
 //!
 //! The test is `#[ignore]`d, so `cargo test` is unchanged. It needs root, a `podman`, an
 //! image already pulled (the agent pulls nothing) and a subordinate id range for a user,
@@ -313,6 +315,15 @@ fn a_job_in_real_podman_sees_the_sandbox_the_flags_describe() {
         "{}",
         seen["tmp_exec.err"]
     );
+
+    // Podman's `--read-only` also mounts writable tmpfs on `/var/tmp` and `/run`; the agent
+    // names both, so they are `noexec,nosuid,nodev` like `/tmp` and not Podman's defaults.
+    for point in ["/var/tmp", "/run"] {
+        let options = mount_options(mountinfo, point);
+        for flag in ["noexec", "nosuid", "nodev"] {
+            assert!(has(&options, flag), "{point} lacks {flag}: {options:?}");
+        }
+    }
 
     // The scratch bind mount is `nosuid,nodev` (and writable: the job wrote it).
     let scratch_mount = mount_options(mountinfo, "/scratch");
