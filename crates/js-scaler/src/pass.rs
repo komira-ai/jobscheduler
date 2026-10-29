@@ -500,7 +500,7 @@ impl<'a> Pass<'a> {
             .get(&name)
             .is_some_and(|since| self.now.since(*since) >= hold);
         let working = [
-            false,
+            host.busy,
             matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
         ];
         let due = [ripe, !working.into_iter().any(|work| work)];
