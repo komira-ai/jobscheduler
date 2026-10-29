@@ -16,9 +16,6 @@
 //! memory maximum, the reach of a minute, and the wall minutes. The censored bit is not
 //! read.
 //!
-//! A minute at the start that no clean run recorded takes the first clean value; later
-//! ones hold the previous minute.
-//!
 //! A minute reached by fewer than a quarter of the runs, and every later one, is not
 //! emitted: [`js_types::sched::usage::Curve`] charges its last point to every later
 //! minute, which is the "holds the previous value" tail. All arithmetic is integer.
@@ -64,8 +61,6 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         return None;
     }
     let mut raw: Vec<MinutePoint> = Vec::new();
-    // Leading minutes no clean run recorded: they take the first clean value below.
-    let mut lead = 0;
     for t in 0..BUCKETS {
         let reached = ring.runs().filter(|r| r.buckets.len() > t).count();
         if reached * 4 < runs {
@@ -94,16 +89,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
             },
             working_set_bytes,
         };
-        if cores.is_empty() && lead == raw.len() {
-            lead += 1;
-        }
         raw.push(point);
-    }
-    // Nothing earlier to hold: the start of the curve is the first clean value, not 0.
-    if let Some(first) = raw.get(lead).map(|p| p.cores_milli) {
-        for p in &mut raw[..lead] {
-            p.cores_milli = first;
-        }
     }
     let points = (0..raw.len())
         .map(|t| {
@@ -291,18 +277,20 @@ mod tests {
 
     /// Catches: a curve that starts at 0 cores when the first clean value comes after the
     /// dilation reach: minutes 0 to 2 are recorded by no clean run (a pressured run reached
-    /// them), so the start is the first clean value, not the default.
+    /// them), so the start is the first clean value, not the default. Three missing minutes
+    /// of 15 is the most a run may lack (a fifth) and still be admitted.
     #[test]
     fn a_start_no_clean_run_recorded_takes_the_first_clean_value() {
         let mut ring = Ring::new();
         for _ in 0..3 {
-            let mut s = series(&[(0, 0), (0, 0), (0, 0), (400, 4), (400, 4), (400, 4)]);
+            let mut s = series(&[(400, 4); 15]);
             s.minutes.retain(|m| m.minute >= 3);
             ring.push(&s);
         }
-        ring.push(&pressured(&[(900, 9); 6]));
+        ring.push(&pressured(&[(900, 9); 15]));
         let f = fit(&ring).unwrap();
-        assert_eq!(cores(&f), vec![400; 6]);
+        assert_eq!(f.points.len(), 15);
+        assert_eq!(cores(&f), vec![400; 15]);
     }
 
     /// Catches: the life being a mean or a floor P90, and a life under a minute.
