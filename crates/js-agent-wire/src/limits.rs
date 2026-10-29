@@ -12,6 +12,7 @@
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
+//! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
 //! | native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
@@ -43,7 +44,7 @@ pub const MAX_PROGRAM_LEN: usize = 4096;
 /// Most environment entries on a native job.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
-pub const MAX_ENV_KEY_LEN: usize = 128;
+pub const MAX_ENV_KEY_LEN: usize = js_types::env::MAX_ENV_NAME_LEN;
 /// Longest environment variable value, in bytes.
 pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
 /// Most bytes the names and values of one native job's environment may hold together.

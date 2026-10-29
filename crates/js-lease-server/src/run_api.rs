@@ -236,6 +236,7 @@ async fn start(
         labels: body.labels,
         heartbeat_seq: 0,
         valid_for_ms: left.min(limits::MAX_VALID_FOR_MS),
+        bundle: None,
         native: None,
     };
     let queued = api

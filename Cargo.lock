@@ -966,6 +966,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-bundle"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
@@ -1118,6 +1128,7 @@ dependencies = [
  "js-provider-fake",
  "js-provider-lambdalabs",
  "js-registry",
+ "js-scaler",
  "js-sched",
  "js-state",
  "js-testkit",
@@ -1235,6 +1246,7 @@ dependencies = [
  "js-lease",
  "js-pool-static",
  "js-provider",
+ "js-sim",
  "js-types",
  "js-usage",
  "js-whole",
@@ -3056,6 +3068,9 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "js-agent",
+ "js-client",
+ "js-elastic",
  "rcgen",
  "rustls",
  "rustls-native-certs",

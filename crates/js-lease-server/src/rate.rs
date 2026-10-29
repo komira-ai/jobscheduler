@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use js_agent_wire::{DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL};
 use js_lease::Clock;
 use js_registry::Credential;
 
@@ -21,8 +22,8 @@ impl Default for HelloLimit {
     /// What the flags default to: a burst of 60, then one hello a second.
     fn default() -> Self {
         Self {
-            burst: 60,
-            interval: Duration::from_secs(1),
+            burst: DEFAULT_HELLO_BURST,
+            interval: DEFAULT_HELLO_INTERVAL,
         }
     }
 }

@@ -5,10 +5,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use js_lease::{LeaseTable, read_bookings};
+use js_lease::{Boot, LeaseTable, read_bookings};
 use js_provider::Provider;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -20,11 +20,13 @@ use crate::config::Config;
 use crate::error::StartupError;
 use crate::listener::{Slots, serve};
 use crate::pool::{Pool, Setup};
+use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
-use crate::ticker::{IntervalTicker, Ticker};
+use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
 use crate::usage::ProfileCurves;
 use crate::usage_hub::UsageCounters;
+use crate::util::or_pending;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -38,6 +40,7 @@ pub struct Running {
     serving: JoinHandle<()>,
     ticking: Ticking,
     _checking: Checking,
+    scaler: Option<Scaler>,
 }
 
 /// The listener that serves the agent routes alone (`server.agent_listen`).
@@ -84,9 +87,37 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     ticker: T,
     checks: C,
 ) -> Result<Running, StartupError> {
+    let tick = config.tick_period();
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(config.hosts, config.usage, &clock, &config.state_file)?;
+    let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let elastic = config.elastic.take().map(|mut plan| {
+        let setup = Setup {
+            advertise: config.advertise_url.clone(),
+            tls: config.tls.clone(),
+            inputs: std::mem::take(&mut config.launch_inputs),
+            clock: clock.clone(),
+        };
+        (Pool::new(&mut plan, setup), plan)
+    });
+    // Before anything is served: the scaler marks the machines its records show as being
+    // released, so a host of theirs that says hello again is admitted already marked.
+    let scaler = match (&elastic, agents.clone()) {
+        (Some((pool, plan)), Some(agents)) => {
+            let parts = Parts {
+                agents,
+                clock: clock.clone(),
+                state_file: &config.state_file,
+                advertise_url: config.advertise_url.as_deref(),
+                first_start: config.boot == Boot::Initialise,
+                health: pool.health.clone(),
+                mode: pool.mode(),
+            };
+            Some(build(plan, parts)?)
+        }
+        _ => None,
+    };
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
     let (listener, addr) = bind(config.listen, config.listen_flag).await?;
@@ -94,6 +125,9 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         Some(agent) => Some(bind(agent, "server.agent_listen").await?),
         None => None,
     };
+    if let Some(scaler) = &scaler {
+        scaler.listening(Some(2 * tick), &bookings);
+    }
     let table = LeaseTable::open(
         BoxedProvider(provider),
         clock.clone(),
@@ -124,18 +158,15 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     for warning in &config.warnings {
         warn!("{warning}");
     }
-    let registry = agents.as_ref().map(|agents| agents.registry.clone());
-    let pool = config.elastic.take().map(|plan| {
-        let setup = Setup {
-            advertise: config.advertise_url.clone(),
-            tls: config.tls.clone(),
-            inputs: std::mem::take(&mut config.launch_inputs),
-            clock: clock.clone(),
-        };
-        Pool::new(plan, setup)
-    });
+    let pool = elastic.map(|(pool, _)| pool);
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(pool, registry, config.warnings.clone(), clock.clone());
+    let status = Status::new(
+        pool,
+        registry,
+        scaler.clone(),
+        config.warnings.clone(),
+        clock.clone(),
+    );
     let status = config.status.then(|| Arc::new(status));
     let shared = Arc::new(Shared::new(table, config.token, agents).with_status(status));
     let split = agent_listener.is_some();
@@ -161,7 +192,11 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
             serving: tokio::spawn(serving),
         }
     });
-    let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
+    let ticking = Ticking(tokio::spawn(tick_loop(
+        shared.clone(),
+        ticker,
+        scaler.clone(),
+    )));
     let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
@@ -173,6 +208,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         serving: tokio::spawn(serving),
         ticking,
         _checking: checking,
+        scaler,
     })
 }
 
@@ -205,13 +241,68 @@ impl Drop for Alive {
     }
 }
 
-/// Ticks the table at every tick of `ticker`, forever; the caller aborts it.
-async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T) {
+/// Ticks the table at every tick of `ticker`, and hands each tick to the scaler of the
+/// elastic pool when the server has one, forever; the caller aborts it. The scaler ticks on
+/// a task of its own (a provider's slow call must not hold back the table's lease expiry),
+/// so a tick is finished when both are done, or at once when the scaler is still busy with
+/// an earlier tick, which skips this one for it.
+///
+/// A panic in the scaler ends its task, as one in the table ends this loop: `/healthz` then
+/// answers that the server is not ticking, and the supervisor of the process must restart
+/// it. The records are on disk before any call they describe, so a restart launches nothing
+/// twice.
+async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T, scaler: Option<Scaler>) {
     let _alive = Alive(shared.clone());
+    let side = scaler.map(|scaler| ScalerLoop::spawn(shared.clone(), scaler));
     loop {
         let tick = ticker.next().await;
-        shared.tick().await;
-        tick.finish();
+        tick_once(&shared, side.as_ref(), tick).await;
+    }
+}
+
+/// One tick: the table, and then the scaler's turn when there is one. Not generic, so that
+/// every kind of ticker runs the same code.
+async fn tick_once(shared: &Shared, side: Option<&ScalerLoop>, tick: Tick) {
+    shared.tick().await;
+    match side {
+        Some(side) => side.offer(tick),
+        None => tick.finish(),
+    }
+}
+
+/// The task that ticks the scaler, ended when it is dropped.
+struct ScalerLoop {
+    ticks: mpsc::Sender<Tick>,
+    task: JoinHandle<()>,
+}
+
+impl ScalerLoop {
+    fn spawn(shared: Arc<Shared>, scaler: Scaler) -> Self {
+        let (ticks, mut due) = mpsc::channel::<Tick>(1);
+        let task = tokio::spawn(async move {
+            let _alive = Alive(shared);
+            loop {
+                let tick = or_pending(due.recv().await).await;
+                scaler.tick().await;
+                tick.finish();
+            }
+        });
+        Self { ticks, task }
+    }
+
+    /// Hands `tick` to the scaler, which finishes it after its own tick. When the scaler is
+    /// still at an earlier tick (or has ended), `tick` is finished here and the scaler goes
+    /// without it.
+    fn offer(&self, tick: Tick) {
+        if let Err(refused) = self.ticks.try_send(tick) {
+            refused.into_inner().finish();
+        }
+    }
+}
+
+impl Drop for ScalerLoop {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -232,6 +323,12 @@ impl Running {
     /// `None` without agent flags.
     pub fn registry(&self) -> Option<js_registry::Registry> {
         self.shared.registry()
+    }
+
+    /// The scaler of the elastic pool of the configuration file; `None` without one. A test
+    /// reads what it decided through [`Scaler::state`].
+    pub fn scaler(&self) -> Option<&Scaler> {
+        self.scaler.as_ref()
     }
 
     /// How many ticks failed to write the lease file since the server started.
