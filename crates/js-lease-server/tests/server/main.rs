@@ -24,6 +24,9 @@ mod gpu_path_pin;
 mod joins;
 mod joins_credential;
 mod joins_revoke;
+mod lambda_e2e;
+mod lambda_e2e_failures;
+mod lambda_e2e_support;
 mod limits;
 mod pools_checks;
 mod pools_policy;
@@ -44,5 +47,8 @@ mod scaler_support;
 mod scaler_unremoved;
 mod startup;
 mod support;
+#[allow(dead_code)]
+#[path = "../network/fake.rs"]
+mod tailnet;
 mod ticks;
 mod tls;
