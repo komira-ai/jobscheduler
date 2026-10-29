@@ -43,6 +43,7 @@ impl Shape {
                     .and_then(|have| have.parse::<u64>().ok())
                     .zip(value.parse::<u64>().ok())
                     .is_some_and(|(have, want)| want <= have),
+                crate::EXEC_KEY => true,
                 _ => have == Some(value),
             }
         });
