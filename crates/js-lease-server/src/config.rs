@@ -369,19 +369,18 @@ pub(crate) struct UsageSetup {
 }
 
 /// The default of `--profile-store-bytes`.
-const DEFAULT_PROFILE_STORE_BYTES: u64 = 268_435_456;
+pub(crate) const DEFAULT_PROFILE_STORE_BYTES: u64 = 268_435_456;
 
 /// Milliseconds in a day.
 const MILLIS_PER_DAY: u64 = 86_400_000;
 
 impl UsageSetup {
-    /// Usage on, beside the lease file at `state_file`, with the default store size: what
-    /// a configuration file gives, since it has no usage keys; `--usage-db`, `--usage-off`
-    /// and `--profile-store-bytes` are refused beside `--config` like every other flag.
-    fn unconfigured(state_file: &Path) -> Self {
+    /// The usage side as `db` (`None` for usage off) and `profile_store_bytes` say, with
+    /// no seam filled.
+    fn new(db: Option<PathBuf>, profile_store_bytes: u64) -> Self {
         Self {
-            db: Some(state_file.with_file_name("usage.db")),
-            profile_store_bytes: DEFAULT_PROFILE_STORE_BYTES,
+            db,
+            profile_store_bytes,
             sink: None,
             keys: Arc::new(NoKeys),
             names: None,
@@ -449,10 +448,7 @@ impl Config {
                 return Err(flags::beside_config(flag));
             }
             let clock = SharedClock::new(SystemClock);
-            let mut config =
-                Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
-            config.usage = usage_setup(&cli, &config.state_file);
-            return Ok(config);
+            return Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock);
         }
         flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
@@ -464,7 +460,12 @@ impl Config {
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
         let state_file = required(cli.state_file.clone(), "--state-file")?;
-        let usage = usage_setup(&cli, &state_file);
+        let usage = usage_setup(
+            cli.usage_off,
+            cli.usage_db.clone(),
+            cli.profile_store_bytes,
+            &state_file,
+        );
         let mut warnings = Vec::new();
         let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
@@ -536,7 +537,8 @@ impl Config {
             }
         };
         let state_file = server.state_file;
-        let usage = UsageSetup::unconfigured(&state_file);
+        let keys = server.usage;
+        let usage = usage_setup(keys.off, keys.db, keys.profile_store_bytes, &state_file);
         let settings = with_pool_settings(server.settings, &hosts)?;
         let status = status_policy("server.listen", server.listen, &mut warnings);
         Ok(Self {
@@ -671,22 +673,21 @@ impl Config {
     }
 }
 
-/// The usage file the flags name: none for `--usage-off`, else `--usage-db` or `usage.db`
-/// in the directory of the lease file.
-fn usage_db(cli: &Cli, state_file: &Path) -> Option<PathBuf> {
+/// The usage file `--usage-db`, `--usage-off` or the file's keys name: none when usage is
+/// off, else `db` or `usage.db` in the directory of the lease file.
+fn usage_db(off: bool, db: Option<PathBuf>, state_file: &Path) -> Option<PathBuf> {
     let beside = || state_file.with_file_name("usage.db");
-    (!cli.usage_off).then(|| cli.usage_db.clone().unwrap_or_else(beside))
+    (!off).then(|| db.unwrap_or_else(beside))
 }
 
-/// What the usage flags decide, for the lease file at `state_file`.
-fn usage_setup(cli: &Cli, state_file: &Path) -> UsageSetup {
-    UsageSetup {
-        db: usage_db(cli, state_file),
-        profile_store_bytes: cli.profile_store_bytes,
-        sink: None,
-        keys: Arc::new(NoKeys),
-        names: None,
-    }
+/// What the usage settings decide, for the lease file at `state_file`.
+fn usage_setup(
+    off: bool,
+    db: Option<PathBuf>,
+    profile_store_bytes: u64,
+    state_file: &Path,
+) -> UsageSetup {
+    UsageSetup::new(usage_db(off, db, state_file), profile_store_bytes)
 }
 
 /// `settings` with what the registered pool's file decides about whole-node leases: the

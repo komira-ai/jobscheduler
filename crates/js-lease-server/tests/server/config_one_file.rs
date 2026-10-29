@@ -200,21 +200,18 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--write-timeout", "6s"),
         key("--max-requests", "9"),
         key("--drain-timeout", "7s"),
+        key("--usage-db", "/usage.db"),
+        key("--profile-store-bytes", "5"),
     ];
+    rows.push((
+        vec!["--usage-off"],
+        "--usage-off: not allowed with --config; set server.usage_off".to_owned(),
+    ));
     rows.push((
         vec!["--require-host-credential"],
         "--require-host-credential: not allowed with --config; set server.require_host_credential"
             .to_owned(),
     ));
-    let usage = "the file has no usage keys; usage is on, beside the lease file";
-    for (flag, value) in [
-        ("--usage-db", Some("/usage.db")),
-        ("--usage-off", None),
-        ("--profile-store-bytes", Some("1024")),
-    ] {
-        let said = format!("{flag}: not allowed with --config; {usage}");
-        rows.push((std::iter::once(flag).chain(value).collect(), said));
-    }
     let moved = [
         ("--token-file", "set server.client_token_file"),
         ("--pool-config", "add a [[pool]] with provider kind static"),
