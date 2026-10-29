@@ -431,6 +431,30 @@ fn a_table_that_differs_refuses() {
     }
 }
 
+/// Asserts that the input chain must accept every allowed endpoint, the same set as the
+/// forward chain: a job reaches the store front on its OWN node (one of the allowed
+/// addresses is the host's) through the input hook, not forward, so a table whose input
+/// chain lacks that endpoint is refused even though forward accepts it, and the table that
+/// accepts every endpoint in both chains passes. The endpoint at 198.51.100.10:443 stands
+/// for the node's own front. It catches an input chain that only opens the host to the
+/// established half, which would leave every job unable to reach its own node's store.
+#[test]
+fn the_input_chain_accepts_every_endpoint_so_a_job_reaches_its_own_nodes_front() {
+    let world = world();
+    let rt = runtime(&world);
+    let own_front = 2;
+    assert_eq!(input()[own_front], accept("input", "198.51.100.10", 443));
+    let mut without_own_front = input();
+    without_own_front.remove(own_front);
+    world.say("-j", &listing(&forward(), &without_own_front, -10));
+    match rt.egress_enforced() {
+        Err(CliError::Egress(EgressError::Chain { chain })) => assert_eq!(chain, "input"),
+        other => panic!("an input chain without the node's own front passed: {other:?}"),
+    }
+    world.say("-j", &listing(&forward(), &input(), -10));
+    rt.egress_enforced().unwrap();
+}
+
 /// Asserts the table-level failures: a chain that is not on its hook (a regular chain
 /// is never evaluated), a table that is not in the listing, a rule in a chain the agent
 /// does not know, output that is not nft's JSON, and nft failing (which is what a missing
