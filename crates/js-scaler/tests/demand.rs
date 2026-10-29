@@ -274,7 +274,7 @@ fn the_cheapest_fitting_offer_is_chosen_then_gpus_id_and_zone() {
 }
 
 /// Asserts that offers that are only unavailable or unpriced leave the request waiting
-/// with no launch and no `no_offer`, since they fit.
+/// with no launch and no `no_offer`, since they fit; the unpriced one shows the pool blocked.
 #[test]
 fn offers_that_fit_but_cannot_be_chosen_leave_the_request_waiting() {
     let mut rig = Rig::new(settings("gpu"));
@@ -291,7 +291,7 @@ fn offers_that_fit_but_cannot_be_chosen_leave_the_request_waiting() {
     rig.input.waiting = vec![request("r1")];
     assert!(rig.tick(at(0)).is_empty());
     assert!(rig.state.no_offer.is_empty());
-    assert!(rig.state.blocked.is_empty());
+    assert_eq!(rig.state.blocked["gpu"], js_scaler::Blocked::Unpriced);
 }
 
 /// Asserts that an offer of another operating system or architecture is never launched
