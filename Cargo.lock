@@ -1115,6 +1115,7 @@ dependencies = [
  "js-provider-fake",
  "js-provider-lambdalabs",
  "js-registry",
+ "js-scaler",
  "js-sched",
  "js-testkit",
  "js-types",

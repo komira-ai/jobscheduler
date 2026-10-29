@@ -69,12 +69,18 @@ impl TailscaleMode {
     /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
     pub fn new(api: TailscaleApi, settings: TailscaleSettings) -> Result<Self, NetworkError> {
         match valid_tag(&settings.tag) {
-            true => Ok(Self { api, settings }),
+            true => Ok(Self::unchecked(api, settings)),
             false => Err(NetworkError::Misconfigured(format!(
                 "tailscale tag {:?} must be \"tag:\" and letters, digits or '-'",
                 settings.tag
             ))),
         }
+    }
+
+    /// The mode over `api` for a `settings` whose tag is known to pass [`valid_tag`], as
+    /// the configuration file's reader has already checked it.
+    pub(crate) fn unchecked(api: TailscaleApi, settings: TailscaleSettings) -> Self {
+        Self { api, settings }
     }
 
     /// The steps of one launch, with the auth key named by its slot.

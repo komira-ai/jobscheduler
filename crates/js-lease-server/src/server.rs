@@ -19,6 +19,7 @@ use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
 use crate::listener::{Slots, serve};
+use crate::scaler::{Parts, Scaler, build};
 use crate::ticker::Ticker;
 use crate::tls;
 
@@ -33,6 +34,7 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    scaler: Option<Scaler>,
 }
 
 /// The listener that serves the agent routes alone (`server.agent_listen`).
@@ -66,6 +68,21 @@ pub async fn start<T: Ticker>(
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
     let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
+    // Before anything is served: the scaler marks the machines its records show as being
+    // released, so a host of theirs that says hello again is admitted already marked.
+    let scaler = match (config.elastic, agents.clone()) {
+        (Some(plan), Some(agents)) => {
+            let advertise_url = config.advertise_url.as_deref();
+            let parts = Parts {
+                agents,
+                clock: clock.clone(),
+                state_file: &config.state_file,
+                advertise_url,
+            };
+            Some(build(plan, parts)?)
+        }
+        _ => None,
+    };
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
     let (listener, addr) = bind(config.listen, config.listen_flag).await?;
@@ -127,7 +144,11 @@ pub async fn start<T: Ticker>(
             serving: tokio::spawn(serving),
         }
     });
-    let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
+    let ticking = Ticking(tokio::spawn(tick_loop(
+        shared.clone(),
+        ticker,
+        scaler.clone(),
+    )));
     Ok(Running {
         addr,
         agent,
@@ -137,6 +158,7 @@ pub async fn start<T: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        scaler,
     })
 }
 
@@ -160,12 +182,16 @@ impl Drop for Alive {
     }
 }
 
-/// Ticks the table at every tick of `ticker`, forever; the caller aborts it.
-async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T) {
+/// Ticks the table at every tick of `ticker`, and then the scaler when the server has an
+/// elastic pool, forever; the caller aborts it. A tick is finished when both are done.
+async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T, scaler: Option<Scaler>) {
     let _alive = Alive(shared.clone());
     loop {
         let tick = ticker.next().await;
         shared.tick().await;
+        if let Some(scaler) = &scaler {
+            scaler.tick().await;
+        }
         tick.finish();
     }
 }
@@ -187,6 +213,12 @@ impl Running {
     /// `None` without agent flags.
     pub fn registry(&self) -> Option<js_registry::Registry> {
         self.shared.registry()
+    }
+
+    /// The scaler of the elastic pool of the configuration file; `None` without one. A test
+    /// reads what it decided through [`Scaler::state`].
+    pub fn scaler(&self) -> Option<&Scaler> {
+        self.scaler.as_ref()
     }
 
     /// How many ticks failed to write the lease file since the server started.
