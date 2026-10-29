@@ -255,7 +255,7 @@ impl Pass<'_> {
             .records
             .cooldowns
             .get(&pool.settings.pool)
-            .filter(|cooldown| cooldown.until > self.now)
+            .filter(|cooldown| cooldown.until >= self.now)
             .map(|cooldown| match cooldown.reason {
                 CooldownReason::BootFailed => Blocked::BootFailed,
                 CooldownReason::Quota => Blocked::Quota,
