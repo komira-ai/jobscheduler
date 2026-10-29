@@ -25,7 +25,10 @@ fn a_taken_back_host_whose_undrain_was_lost_is_not_stuck() {
     for n in 2..=240 {
         seen += rig.tick(at(now + n * MINUTE)).len();
     }
-    assert!(seen > 0, "four hours later the host is still marked and nothing is asked");
+    assert!(
+        seen > 0,
+        "four hours later the host is still marked and nothing is asked"
+    );
 }
 
 /// An orphan the list stops showing once, then shows again, is counted again.
@@ -38,7 +41,7 @@ fn an_orphan_that_reappears_is_counted_again() {
         name: None,
         offer: "a10".to_owned(),
         zone: Some("z1".to_owned()),
-        status: HostStatus::Running,
+        status: HostStatus::Active,
     };
     rig.pool().held = Some(vec![stray.clone()]);
     rig.tick(at(0));
@@ -48,8 +51,17 @@ fn an_orphan_that_reappears_is_counted_again() {
     assert_eq!(rig.phase(0), Phase::Gone);
     rig.pool().held = Some(vec![stray]);
     rig.tick(at(2 * MINUTE));
-    let counted = rig.state.records.instances.iter().filter(|r| r.counts()).count();
-    assert_eq!(counted, 1, "a running machine the list shows is not counted");
+    let counted = rig
+        .state
+        .records
+        .instances
+        .iter()
+        .filter(|r| r.counts())
+        .count();
+    assert_eq!(
+        counted, 1,
+        "a running machine the list shows is not counted"
+    );
 }
 
 /// A machine whose host said hello and is silent past grace, and holds work, is not
