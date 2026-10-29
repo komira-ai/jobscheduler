@@ -278,7 +278,7 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth",
              tag = "tag:js-agent" }
-agent    = { x86_64 = { url = "https://pkgs.example.org/js-agent-x86_64", sha256 = "<64 hex digits>" } }
+agent    = { x86_64 = { url = "https://pkgs.example.org/js-agent-x86_64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
 ```
 
 That is the whole pool (twelve lines with the two spend keys; `agent` is needed once the pool is
@@ -339,8 +339,8 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
              types = [{ name = "gpu_1x_a10", gpu = "nvidia-a10", gpus = 1 },
                       { name = "gpu_2x_a10", gpu = "nvidia-a10", gpus = 2 }] }
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth", tag = "tag:js-agent" }
-agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "<64 hex digits>" },
-             aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "<64 hex digits>" } }
+agent    = { x86_64  = { url = "https://pkgs.example.org/js-agent-x86_64",  sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+             aarch64 = { url = "https://pkgs.example.org/js-agent-aarch64", sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" } }
 ```
 
 A pool whose hosts already have a route to the scheduler omits `network` (mode `default`). The

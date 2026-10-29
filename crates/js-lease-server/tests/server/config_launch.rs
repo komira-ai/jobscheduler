@@ -221,7 +221,7 @@ fn a_live_pool_needs_the_pins_and_the_address_a_plan_pool_does_not() {
     let binary = format!(
         "{{ kind = \"tailscale\", oauth_client_file = {oauth}, tag = \"tag:js-agent\", \
            api_url = \"http://127.0.0.1:9\", binary = {} }}",
-        agent("https://pkgs.example.org/tailscale.tgz", SHA)
+        pin("https://pkgs.example.org/tailscale.tgz", SHA)
     );
     let pinned = unpinned.set("network", &binary);
     let config = load(&scratch, &file(&dialable(&scratch), &[&pinned])).unwrap();
