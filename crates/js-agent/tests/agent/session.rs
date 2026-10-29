@@ -24,6 +24,7 @@ fn wait(step: &Step) -> Duration {
     match step {
         Step::Wait { after, .. } => *after,
         Step::Fatal(fatal) => panic!("fatal: {fatal}"),
+        Step::Failed(why) => panic!("failed: {why}"),
     }
 }
 
@@ -32,6 +33,7 @@ fn note(step: &Step) -> Option<Note> {
     match step {
         Step::Wait { note, .. } => note.clone(),
         Step::Fatal(fatal) => panic!("fatal: {fatal}"),
+        Step::Failed(why) => panic!("failed: {why}"),
     }
 }
 
@@ -650,7 +652,11 @@ fn notes_read_as_plain_sentences() {
         ),
         (
             Note::Ignored { commands: 2 },
-            "ignoring 2 command(s): not handled yet",
+            "ignoring 2 command(s): this agent runs no jobs",
+        ),
+        (
+            Note::Busy,
+            "the job worker is busy: an answer was dropped and will be sent again",
         ),
         (
             Note::Draining { told: true },

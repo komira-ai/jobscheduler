@@ -2,7 +2,8 @@
 //! into per-lease minutes, ready to be sent to the server.
 //!
 //! The module is pure. [`Sampler`] reads cgroup files through a [`FileReader`](crate::FileReader)
-//! and takes the time from a [`UsageClock`]; [`Binner`] takes [`Sample`]s as values and reads
+//! and takes the time from a [`UsageClock`]; [`Binner`] (defined in the `js-agent-usage`
+//! crate, with [`Sample`], and re-exported here) takes [`Sample`]s as values and reads
 //! nothing. No wall time enters anywhere, so a step of the machine's clock cannot move a
 //! minute.
 //!

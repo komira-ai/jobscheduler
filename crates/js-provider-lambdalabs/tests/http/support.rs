@@ -156,6 +156,8 @@ pub struct Seen {
     pub target: String,
     /// The headers, names in lower case.
     pub headers: Vec<(String, String)>,
+    /// The body, as many bytes as `content-length` said.
+    pub body: Vec<u8>,
 }
 
 impl Seen {
@@ -291,15 +293,25 @@ fn exchange(stream: &mut dyn Duplex, shared: &Shared) -> bool {
     let mut first = lines.next().unwrap_or_default().split(' ');
     let method = first.next().unwrap_or_default().to_owned();
     let target = first.next().unwrap_or_default().to_owned();
-    let headers = lines
+    let headers: Vec<(String, String)> = lines
         .filter_map(|line| line.split_once(':'))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
         .collect();
+    let length = headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = vec![0_u8; length];
+    if stream.read_exact(&mut body).is_err() {
+        return false;
+    }
     let route = format!("{method} {target}");
     shared.seen.lock().unwrap().push(Seen {
         method,
         target,
         headers,
+        body,
     });
     let reply = {
         let mut routes = shared.routes.lock().unwrap();

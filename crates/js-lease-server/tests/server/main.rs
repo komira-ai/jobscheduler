@@ -12,6 +12,8 @@ mod agents_whole;
 mod auth;
 mod binary;
 mod gpu_path_pin;
+mod joins;
+mod joins_revoke;
 mod layering;
 mod limits;
 mod restart;

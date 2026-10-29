@@ -190,6 +190,8 @@ pub struct Raw {
     pub body: String,
 }
 
+/// Half-closes the write side after the body, and hyper's http1 without half_close can then drop
+/// the connection before a slow handler answers (status 0): use it only for fast refusals.
 /// POSTs `body` and returns the whole answer. `declared` is the Content-Length to claim
 /// (the body's own length when `None`). The sending side is shut after the body, so a
 /// declared length longer than the body ends the request mid-body.

@@ -32,6 +32,11 @@ impl InstanceId {
         }
     }
 
+    /// An id the crate made itself from letters and digits.
+    pub(crate) fn made(text: String) -> Self {
+        Self(text)
+    }
+
     /// The id as text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -170,5 +175,20 @@ pub struct Instance {
     /// time.
     pub first_healthy: Option<OffsetDateTime>,
     /// The tags.
+    pub tags: Vec<Tag>,
+}
+
+/// What one launch asks for. The ssh key is one name: Lambda takes exactly one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRequest {
+    /// The region's code.
+    pub region: String,
+    /// The instance type's name.
+    pub instance_type: String,
+    /// The name of the ssh key the account holds, to put on the instance.
+    pub ssh_key: String,
+    /// The name to give the instance (1 to 64 characters).
+    pub name: String,
+    /// The tags to put on the instance.
     pub tags: Vec<Tag>,
 }

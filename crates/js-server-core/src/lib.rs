@@ -59,7 +59,7 @@ mod write;
 pub use self::core::{
     Admitted, Config, Core, Held, NodeAction, NodeUnread, NotQueued, PlaceError, UnknownNode,
 };
-pub use adapter::{Adapter, Delivery, Link, Stage, View};
+pub use adapter::{Adapter, Delivery, Link, Lowered, Stage, View};
 pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
 pub use handover::{FLUSH_LOOK, FOLLOW_EVERY};
