@@ -686,7 +686,7 @@ mod tests {
             contents: "x".into(),
         }];
         let mut runs = Runs::default();
-        runs.admit(&host, &LeaseId::new(1, 1), spec.clone(), &shape, (0, 0))
+        runs.admit(&host, &LeaseId::new(1, 1), (spec.clone(), None), &shape, (0, 0))
             .unwrap();
         let open = Standing {
             gap: false,
@@ -728,7 +728,7 @@ mod tests {
         }];
         let lease = LeaseId::new(1, 1);
         let mut runs = Runs::default();
-        runs.admit(&host, &lease, spec, &shape, (0, 0)).unwrap();
+        runs.admit(&host, &lease, (spec, None), &shape, (0, 0)).unwrap();
         runs.stop_run(&lease, "r1").unwrap();
         assert!(runs.map["r1"].spec.files.is_empty());
         let open = Standing {
