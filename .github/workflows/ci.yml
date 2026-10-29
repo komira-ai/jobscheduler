@@ -134,6 +134,7 @@ jobs:
             crates/js-elastic/
             crates/js-lease/
             crates/js-lease-server/
+            crates/js-mac-pool/
             crates/js-pool-static/
             crates/js-provider/
             crates/js-provider-fake/

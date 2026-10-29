@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// The packages the macos job builds and tests (`-p` in its cargo steps).
-const BUILT: [&str; 2] = ["js-agent", "js-cli"];
+const BUILT: [&str; 3] = ["js-agent", "js-cli", "js-mac-pool"];
 
 fn root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
