@@ -12,9 +12,10 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use js_elastic::{AcquireId, HostRef};
+
 use super::DirSync;
 use crate::model::InstanceId;
-use crate::own::AcquireId;
 
 /// Makes the directory entries of `dir` durable. The seam of the runner takes this as a
 /// function so that a test can count the calls.
@@ -44,7 +45,7 @@ pub(super) struct State {
     pub region: String,
     pub price_cents_per_hour: u64,
     /// The instances the launch answered with; empty until it does.
-    pub instances: Vec<InstanceId>,
+    pub instances: Vec<HostRef>,
 }
 
 /// Why a state file could not be used.
@@ -65,7 +66,7 @@ fn io(path: &Path) -> impl Fn(std::io::Error) -> StateError + '_ {
 
 impl State {
     fn text(&self) -> String {
-        let ids: Vec<&str> = self.instances.iter().map(InstanceId::as_str).collect();
+        let ids: Vec<&str> = self.instances.iter().map(HostRef::as_str).collect();
         format!(
             "first-launch-state=1\nacquire={}\nlaunched_unix={}\nkey_name={}\ninstance_type={}\nregion={}\nprice_cents_per_hour={}\ninstances={}\n",
             self.acquire,
@@ -130,7 +131,11 @@ impl State {
         let instances = ids
             .split(',')
             .filter(|id| !id.is_empty())
-            .map(|id| InstanceId::new(id).map_err(|_| bad()))
+            .map(|id| {
+                InstanceId::new(id)
+                    .map(|valid| valid.host_ref())
+                    .map_err(|_| bad())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             acquire,

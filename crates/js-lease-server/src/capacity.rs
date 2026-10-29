@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use js_lease::Booking;
 use js_pool_static::StaticPool;
 use js_provider::Provider;
-use js_types::ProviderId;
+use js_types::{ProviderId, ResourceClass};
 
 use crate::error::StartupError;
 
@@ -75,20 +75,35 @@ pub trait CapacitySource {
 #[derive(Debug, Clone)]
 pub struct StaticPoolSource {
     path: PathBuf,
+    classes: Option<Vec<ResourceClass>>,
 }
 
 impl StaticPoolSource {
     /// A source over the pool configuration file at `path`.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            classes: None,
+        }
+    }
+
+    /// The same source serving `classes` instead of the class the pool serves by default.
+    #[must_use]
+    pub fn with_classes(mut self, classes: Vec<ResourceClass>) -> Self {
+        self.classes = Some(classes);
+        self
     }
 }
 
 impl CapacitySource for StaticPoolSource {
     fn provider(&self, bookings: &[Booking]) -> Result<Seated, StartupError> {
         let id = ProviderId::new("static-pool").map_err(StartupError::because("--pool-config"))?;
-        let mut pool = StaticPool::from_config_file(id, &self.path)
+        let pool = StaticPool::from_config_file(id, &self.path)
             .map_err(StartupError::because("--pool-config"))?;
+        let mut pool = match &self.classes {
+            Some(classes) => pool.with_classes(classes.clone()),
+            None => pool,
+        };
         let unseated = bookings
             .iter()
             .filter_map(|booking| {

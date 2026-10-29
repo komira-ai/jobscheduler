@@ -44,6 +44,21 @@ pub fn bearer(path: &Path) -> Result<String, ClientError> {
     Ok(format!("Bearer {token}"))
 }
 
+/// The `Authorization` header value for `secret`, a credential the caller holds in memory
+/// (the host credential a welcome carried). It must be one run of printable ASCII, as the
+/// content of a token file must.
+///
+/// # Errors
+///
+/// [`ClientError::Flag`] naming `--token-file`, the flag the bearer is otherwise read for,
+/// when `secret` is empty or holds a space, a control character or a byte above 127. The
+/// text says what is wrong and never holds the secret.
+pub fn bearer_of(secret: &str) -> Result<String, ClientError> {
+    token(secret.as_bytes())
+        .map(|token| format!("Bearer {token}"))
+        .map_err(|why| ClientError::flag("--token-file", format!("the credential {why}")))
+}
+
 /// Opens `path` without blocking, so a named pipe is refused instead of waited on (a
 /// symbolic link is followed: secret mounts are links), and reads it only when the open
 /// file passes the checks.

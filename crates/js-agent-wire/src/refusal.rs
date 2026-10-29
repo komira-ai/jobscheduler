@@ -67,6 +67,14 @@ pub const HOST_BOUND: &str = "host-bound";
 /// A heartbeat that does not carry the session secret issued at the host's last hello:
 /// absent, or not the one issued. Nothing about the host changes.
 pub const SESSION_MISMATCH: &str = "session-mismatch";
+/// A hello from a host that lacks what the pool requires of every host: no `runtime`
+/// capability, or no `gpu-toolkit` in a pool with GPUs. The refusal's `field` names the
+/// capability. Only the operator can change it, so the agent does not ask again.
+pub const HOST_CONTRACT: &str = "host-contract";
+/// A hello from a host that reports another execution mode than the pool's `exec`: its
+/// `exec` or its `runtime` names a different mode. The refusal's `field` names the
+/// capability. Only the operator can change it, so the agent does not ask again.
+pub const EXECUTION_MISMATCH: &str = "execution-mismatch";
 /// A hello the server cannot answer because it could not make a session secret.
 pub const SESSION_UNAVAILABLE: &str = "session-unavailable";
 /// A hello for a host id the operator lists in a static pool: an id belongs to one

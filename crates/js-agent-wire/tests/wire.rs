@@ -39,6 +39,8 @@ fn refusal_codes_snapshot() {
         refusal::INVALID_REPLY,
         refusal::UNKNOWN_POOL,
         refusal::SHAPE_NOT_ACCEPTED,
+        refusal::HOST_CONTRACT,
+        refusal::EXECUTION_MISMATCH,
         refusal::POOL_FULL,
         refusal::HOST_BOUND,
         refusal::SESSION_MISMATCH,
@@ -57,7 +59,7 @@ fn refusal_codes_snapshot() {
          invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
-         shape-not-accepted pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
+         shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
          body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready"
     );
 }
@@ -163,6 +165,7 @@ fn round_trip_of_every_message() {
     round_trip(&HelloReply::Refused(Refused {
         code: "host-live".into(),
         supported: Some(ProtocolRange { min: 1, max: 2 }),
+        field: Some("gpu-toolkit".into()),
     }));
     let mut bare = heartbeat();
     bare.taint = None;

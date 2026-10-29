@@ -283,7 +283,6 @@ impl Admission {
     }
 
     /// Whether a prediction is held for `operation`.
-    #[cfg(test)]
     pub(crate) fn hinted(&self, operation: OperationId) -> bool {
         self.hints.contains_key(&operation)
     }

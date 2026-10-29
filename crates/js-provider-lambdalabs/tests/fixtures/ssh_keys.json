@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"id": "k1", "name": "alpha", "public_key": "ssh-ed25519 AAAAC3Nza alpha"},
+    {"id": "k2", "name": "beta", "public_key": "ssh-ed25519 AAAAC3Nzb beta"}
+  ]
+}

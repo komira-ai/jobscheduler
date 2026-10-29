@@ -12,7 +12,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{DaemonInstance, NodePhase, OpState, Request, Requeue};
+use js_sched::{DaemonInstance, NodePhase, OpState, Prediction, Request, Requeue};
 use js_server_core::{
     Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, Lowered, NotQueued, Report,
     Reported, Settles, Stage, Stream, Taken, View, Writer,
@@ -139,6 +139,10 @@ pub struct Rig {
     pub learned: Vec<LeaseId>,
     /// The floors the next poll of `lowered` hands to the core.
     pub to_lower: Vec<Lowered>,
+    /// The prediction the rig answers `predicted` with for each action it has one for.
+    pub predictions: BTreeMap<WorkKey, Prediction>,
+    /// The operations `predicted` was asked about, in order.
+    pub predicted_for: Vec<OperationId>,
 }
 
 impl Rig {
@@ -339,6 +343,16 @@ impl Adapter for Rig {
         });
         let parcel = parcel.map(<[u8]>::to_vec);
         self.calls.push(Call::Adopted(operation, waiter, parcel));
+    }
+
+    fn predicted(
+        &mut self,
+        operation: OperationId,
+        request: &Request,
+        _: Option<u64>,
+    ) -> Option<Prediction> {
+        self.predicted_for.push(operation);
+        self.predictions.get(&request.key).copied()
     }
 
     fn waiting_among(&self, callers: &[WaiterId]) -> Vec<WaiterId> {

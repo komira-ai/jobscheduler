@@ -3,9 +3,8 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    Clock, ConfigError, ElasticConfig, ManualClock, SchedulerId, SystemClock,
-};
+use js_elastic::SchedulerId;
+use js_provider_lambdalabs::{Clock, ConfigError, ElasticConfig, ManualClock, SystemClock};
 
 fn config(key: &str) -> Result<ElasticConfig, ConfigError> {
     ElasticConfig::new(
@@ -48,12 +47,11 @@ fn an_ssh_key_name_is_one_to_sixty_four_printable_characters() {
 
 #[test]
 fn the_default_launch_interval_is_the_apis_twelve_seconds() {
-    use js_provider_lambdalabs::{
-        Acquired, Architecture, Elastic, FakeLambda, LambdaProvider, OptionTable,
-    };
+    use js_elastic::{Acquired, ElasticProvider};
+    use js_provider_lambdalabs::{Architecture, FakeLambda, LambdaProvider, OptionTable};
     use std::sync::Arc;
 
-    use crate::rig::{TABLE, ask, offer};
+    use crate::rig::{TABLE, ask_as, offer};
 
     let fake = Arc::new(FakeLambda::new());
     fake.set_offers(vec![offer(
@@ -80,19 +78,19 @@ fn the_default_launch_interval_is_the_apis_twelve_seconds() {
         config,
     );
     assert!(matches!(
-        provider.acquire(&ask("a")),
+        provider.acquire(&ask_as("s", "a")),
         Acquired::Accepted { .. }
     ));
     clock.advance(Duration::from_secs(11));
     assert_eq!(
-        provider.acquire(&ask("b")),
+        provider.acquire(&ask_as("s", "b")),
         Acquired::Deferred {
             wait: Duration::from_secs(1)
         }
     );
     clock.advance(Duration::from_secs(1));
     assert!(matches!(
-        provider.acquire(&ask("b")),
+        provider.acquire(&ask_as("s", "b")),
         Acquired::Accepted { .. }
     ));
 }

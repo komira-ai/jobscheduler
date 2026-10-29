@@ -18,14 +18,14 @@ use crate::support::{
 use js_lease_server::{Limits, SharedClock, channel_ticker, start};
 
 /// A certificate for 127.0.0.1 and its key, as PEM text.
-fn test_identity() -> (String, String) {
+pub fn test_identity() -> (String, String) {
     let names = vec!["127.0.0.1".to_string(), "localhost".to_string()];
     let made = rcgen::generate_simple_self_signed(names).unwrap();
     (made.cert.pem(), made.signing_key.serialize_pem())
 }
 
 /// A client that trusts exactly `cert_pem`.
-fn connector(cert_pem: &str) -> TlsConnector {
+pub fn connector(cert_pem: &str) -> TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     roots
         .add(CertificateDer::from_pem_slice(cert_pem.as_bytes()).unwrap())
@@ -38,7 +38,7 @@ fn connector(cert_pem: &str) -> TlsConnector {
     TlsConnector::from(Arc::new(config))
 }
 
-async fn tls_request(
+pub async fn tls_request(
     addr: std::net::SocketAddr,
     connector: &TlsConnector,
     method: &str,

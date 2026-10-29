@@ -1,11 +1,13 @@
 //! The routes, the authentication in front of them, and the state they share.
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -20,10 +22,11 @@ use tracing::{error, info};
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agent_api;
 use crate::agents::Agents;
-use crate::config::Token;
+use crate::config::{Token, is_private_address};
 use crate::hosts::HostList;
 use crate::join_api;
 use crate::run_api;
+use crate::status::{self, Status};
 use crate::usage::ProfileCurves;
 use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
@@ -45,6 +48,10 @@ pub(crate) struct Shared {
     table: Mutex<Table>,
     token: Token,
     agents: Option<Arc<Agents>>,
+    /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
+    /// private one and the routes answer as if they did not exist. A request whose peer
+    /// is not a private address is answered so too.
+    status: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
     /// The whole-node counts the last tick logged.
@@ -57,10 +64,18 @@ impl Shared {
             table: Mutex::new(table),
             token,
             agents,
+            status: None,
             save_errors: AtomicU64::new(0),
             ticking: AtomicBool::new(true),
             counted: std::sync::Mutex::new(WholeCounts::default()),
         }
+    }
+
+    /// The same state serving the status routes from `status`.
+    #[must_use]
+    pub(crate) fn with_status(mut self, status: Option<Arc<Status>>) -> Self {
+        self.status = status;
+        self
     }
 
     /// The lease table behind its lock. A handler that also needs the registry takes this
@@ -159,8 +174,11 @@ impl Shared {
     }
 }
 
-/// The router: `/healthz` open, everything else behind the bearer token.
-pub(crate) fn router(shared: Arc<Shared>) -> Router {
+/// The router of the client, operator and status routes: `/healthz` open, everything else
+/// behind the bearer token. With `with_agents` the agent routes are served too (one port
+/// for everything, as without `server.agent_listen`); without it they are served by
+/// [`agent_router`] on a port of their own and answer 404 here.
+pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
     let guarded = Router::new()
         .route("/v1/leases", post(acquire).get(list))
         .route("/v1/leases/{id}/renew", post(renew))
@@ -172,18 +190,35 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
         .with_state(shared.clone());
     let open = Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/pools", get(pools))
+        .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
     let app = match &shared.agents {
-        Some(agents) => app
-            .merge(agent_api::router(agents.clone()))
-            .merge(join_api::router(shared.clone(), agents.clone()))
-            .merge(run_api::router(shared.clone(), agents.clone())),
+        Some(agents) => {
+            let app = app
+                .merge(join_api::router(shared.clone(), agents.clone()))
+                .merge(run_api::router(shared.clone(), agents.clone()));
+            match with_agents {
+                true => app.merge(agent_api::router(agents.clone())),
+                false => app,
+            }
+        }
         None => app,
     };
     match shared.usage() {
         Some(usage) => app.merge(usage_api::router(shared.clone(), usage.clone())),
         None => app,
+    }
+}
+
+/// The router of the agent routes alone, for the port `server.agent_listen` names. It
+/// serves nothing else: a client or operator route answers 404 here. Without agent
+/// registration it serves nothing at all.
+pub(crate) fn agent_router(shared: &Shared) -> Router {
+    match &shared.agents {
+        Some(agents) => agent_api::router(agents.clone()),
+        None => Router::new(),
     }
 }
 
@@ -219,6 +254,58 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
         true => "ok".into_response(),
         false => (StatusCode::SERVICE_UNAVAILABLE, "tick loop stopped").into_response(),
     }
+}
+
+/// The peer of the connection a request came in on, as the listener sets it. Absent when
+/// the listener could not name the peer; a status route then refuses.
+type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+
+/// Whether a peer may read the status pages, which take no token: only a private address
+/// ([`is_private_address`]; an IPv4-mapped IPv6 address counts as its IPv4 form). An
+/// unknown peer may not.
+pub(crate) fn peer_may_read_status(peer: &Peer) -> bool {
+    peer.as_ref()
+        .is_some_and(|Extension(ConnectInfo(addr))| is_private_address(addr.ip()))
+}
+
+impl Shared {
+    /// What the status routes read for `peer`: `None` when the listen address is not a
+    /// private one or the peer is not.
+    fn status_for(&self, peer: &Peer) -> Option<&Arc<Status>> {
+        self.status.as_ref().filter(|_| peer_may_read_status(peer))
+    }
+}
+
+/// `GET /v1/pools`: the elastic pools as JSON. No token: who may reach it is the
+/// network's to say (see [`crate::status`]). Not served, and a 404 like any unknown route,
+/// when the server listens on an address that is not private or the peer is not a
+/// private address.
+async fn pools(State(shared): State<Arc<Shared>>, peer: Peer) -> Response {
+    let served = |status: &Arc<Status>| json(StatusCode::OK, &status.view());
+    shared.status_for(&peer).map_or_else(not_found, served)
+}
+
+/// `GET /status`: the same data as a page.
+async fn status_page(State(shared): State<Arc<Shared>>, peer: Peer) -> Response {
+    shared
+        .status_for(&peer)
+        .map_or_else(not_found, page_response)
+}
+
+fn page_response(status: &Arc<Status>) -> Response {
+    let page = status::page(&status.view(), status.now());
+    let headers = [
+        (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+        (header::CACHE_CONTROL, "no-store"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (header::CONTENT_SECURITY_POLICY, "default-src 'none'"),
+    ];
+    (StatusCode::OK, headers, page).into_response()
+}
+
+/// The answer of a status route that is not served: that of a route that does not exist.
+fn not_found() -> Response {
+    ApiError::no_route().into_response()
 }
 
 async fn no_route() -> ApiError {
@@ -311,6 +398,8 @@ async fn hosts(State(shared): State<Arc<Shared>>) -> Response {
     json(StatusCode::OK, &list)
 }
 
+#[cfg(test)]
+mod status_gate_tests;
 #[cfg(test)]
 mod whole_view_tests;
 

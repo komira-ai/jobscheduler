@@ -63,6 +63,10 @@ impl Store for Flaky {
 }
 
 fn sink() -> (NodeUsage, Arc<AtomicBool>) {
+    sink_named(no_names())
+}
+
+fn sink_named(names: NameMap) -> (NodeUsage, Arc<AtomicBool>) {
     let clock = Arc::new(ManualClock::default());
     let fail = Arc::new(AtomicBool::new(false));
     let inner = Fake::with_flaw(clock, Flaw::None);
@@ -71,7 +75,10 @@ fn sink() -> (NodeUsage, Arc<AtomicBool>) {
         fail: fail.clone(),
         scan_fails: false,
     };
-    (NodeUsage::over(Arc::new(store), 1 << 20, 0).unwrap(), fail)
+    (
+        NodeUsage::over(Arc::new(store), 1 << 20, 0, names).unwrap(),
+        fail,
+    )
 }
 
 fn limits() -> HostLimits {
@@ -184,21 +191,47 @@ fn finished(sink: &NodeUsage, key: &ProfileKey, minute: u64) {
     sink.run_ended(&end, minute).unwrap();
 }
 
-/// Asserts that the profile name admission looks a curve up by is the pinned name of the
-/// action key, and that three clean runs of a key give it a curve admission can read
-/// while two do not. It catches a mapping that differs between the writer and the reader
-/// of curves, and a curve offered too early.
+/// A map that gives every work key of class `class` the profile `name`, as a caller who
+/// supplied that name for the runs of the work would.
+fn named(class: &'static str, name: &'static str) -> NameMap {
+    Arc::new(move |key| (key.class == class).then(|| ProfileKey::parse(name).unwrap()))
+}
+
+/// Asserts that the profile of a run is the name the caller supplied for it: three clean
+/// runs ended under the supplied name give the work keys that name stands for a curve
+/// admission can read (two runs do not), and a work key the name does not stand for has
+/// none. It catches a server that files the runs under a hash of the work key, so that the
+/// supplied name never finds them.
 #[test]
-fn three_clean_runs_give_the_action_key_a_curve() {
-    let (sink, _) = sink();
-    let key = key_map(&work()).unwrap();
-    assert_eq!(key.as_str(), profile_key(&work()));
+fn three_clean_runs_under_a_supplied_name_give_its_work_keys_a_curve() {
+    let (sink, _) = sink_named(named("Build/Pool-1", "est.row-1"));
+    let key = ProfileKey::parse("est.row-1").unwrap();
     let curves = sink.curves().unwrap();
     finished(&sink, &key, 10);
     finished(&sink, &key, 11);
     assert!(curves.curve(&work()).is_none());
     finished(&sink, &key, 12);
     assert!(curves.curve(&work()).is_some());
+    assert!(curves.curve(&WorkKey::new("Other", "ab12/34")).is_none());
+}
+
+/// Asserts that two different work keys with one supplied name share one profile: runs
+/// of either, ended under that name, teach both. The action digest changes with every
+/// input, so a profile that followed the work key would stay cold. It catches a name
+/// derived from the whole work key.
+#[test]
+fn two_work_keys_with_one_supplied_name_share_one_profile() {
+    let names: NameMap = Arc::new(|_| Some(ProfileKey::parse("est.row-1").unwrap()));
+    let (sink, _) = sink_named(names);
+    let key = ProfileKey::parse("est.row-1").unwrap();
+    let first = WorkKey::new("Build/Pool-1", "aaaa/1");
+    let second = WorkKey::new("Build/Pool-1", "bbbb/2");
+    for minute in 0..3 {
+        finished(&sink, &key, minute);
+    }
+    let curves = sink.curves().unwrap();
+    assert!(curves.curve(&first).is_some());
+    assert!(curves.curve(&second).is_some());
 }
 
 /// Asserts that the daily prune tells the curves the day: a key idle for more than the
@@ -206,8 +239,8 @@ fn three_clean_runs_give_the_action_key_a_curve() {
 /// and so never go stale.
 #[test]
 fn the_prune_moves_the_curves_to_the_day() {
-    let (sink, _) = sink();
-    let key = key_map(&work()).unwrap();
+    let (sink, _) = sink_named(named("Build/Pool-1", "est.row-1"));
+    let key = ProfileKey::parse("est.row-1").unwrap();
     for minute in 0..3 {
         finished(&sink, &key, minute);
     }
@@ -275,6 +308,7 @@ fn a_store_that_cannot_be_opened_or_read_refuses_the_start() {
     let setup = StoreSetup {
         db: dir,
         profile_store_bytes: 1 << 20,
+        names: no_names(),
     };
     let err = open(&setup, 0)
         .err()

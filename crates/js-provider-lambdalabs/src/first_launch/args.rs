@@ -16,16 +16,7 @@ pub(super) struct Args {
     pub boot_deadline: Duration,
     pub wall_cap: Duration,
     pub spend_cap_cents: u64,
-    pub ssh: Option<Ssh>,
     pub mode: Mode,
-}
-
-/// The remote command to run once the instance is active.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Ssh {
-    pub identity: PathBuf,
-    pub user: String,
-    pub command: String,
 }
 
 /// What to do.
@@ -42,7 +33,8 @@ pub(super) enum Mode {
 const DEFAULT_BOOT_SECS: u64 = 15 * 60;
 const DEFAULT_WALL_SECS: u64 = 30 * 60;
 const DEFAULT_SPEND_CENTS: u64 = 100;
-const DEFAULT_COMMAND: &str = "nvidia-smi";
+/// Why the ssh flags are refused: the launch carries the ruleset that lets nothing in.
+const NO_SSH: &str = "has no effect and is refused: the launch has no inbound access, so nothing can connect over ssh";
 
 /// Reads `args` (without the program name). The error is a sentence for the operator;
 /// it never quotes an argument that is not a flag name.
@@ -53,6 +45,9 @@ pub(super) fn parse(args: &[String]) -> Result<Args, String> {
         let name = flag.strip_prefix("--").ok_or("unexpected argument")?;
         match name {
             "go" => found.go = true,
+            "ssh-key" | "ssh-user" | "ssh-command" => {
+                return Err(format!("--{name} {NO_SSH}"));
+            }
             _ => {
                 let value = rest
                     .next()
@@ -77,9 +72,6 @@ struct Found {
     boot: Option<u64>,
     wall: Option<u64>,
     spend: Option<u64>,
-    ssh_key: Option<PathBuf>,
-    ssh_user: Option<String>,
-    ssh_command: Option<String>,
     plan_hash: Option<String>,
     teardown_only: Option<PathBuf>,
 }
@@ -106,9 +98,6 @@ impl Found {
             "boot-deadline-secs" => self.boot = Some(number(name, value)?),
             "wall-cap-secs" => self.wall = Some(number(name, value)?),
             "spend-cap-cents" => self.spend = Some(number(name, value)?),
-            "ssh-key" => self.ssh_key = Some(path()),
-            "ssh-user" => self.ssh_user = Some(text()),
-            "ssh-command" => self.ssh_command = Some(text()),
             "plan-hash" => self.plan_hash = Some(text()),
             "teardown-only" => self.teardown_only = Some(path()),
             _ => return Err(format!("unknown flag --{name}")),
@@ -119,22 +108,6 @@ impl Found {
     fn finish(self) -> Result<Args, String> {
         let base_url = self.base_url.ok_or("--base-url is required")?;
         let key_file = self.key_file.ok_or("--key-file is required")?;
-        let ssh = match (self.ssh_key, self.ssh_user, self.ssh_command.is_some()) {
-            (Some(identity), Some(user), _) => Some(Ssh {
-                identity,
-                user,
-                command: self
-                    .ssh_command
-                    .unwrap_or_else(|| DEFAULT_COMMAND.to_owned()),
-            }),
-            (None, None, false) => None,
-            _ => {
-                return Err(
-                    "--ssh-key and --ssh-user are given together, and --ssh-command needs both"
-                        .to_owned(),
-                );
-            }
-        };
         let mode = match (self.teardown_only, self.go, self.plan_hash) {
             (Some(state_file), false, None) => Mode::Teardown { state_file },
             (Some(_), _, _) => return Err("--teardown-only stands alone".to_owned()),
@@ -153,7 +126,6 @@ impl Found {
             boot_deadline: Duration::from_secs(self.boot.unwrap_or(DEFAULT_BOOT_SECS)),
             wall_cap: Duration::from_secs(self.wall.unwrap_or(DEFAULT_WALL_SECS)),
             spend_cap_cents: self.spend.unwrap_or(DEFAULT_SPEND_CENTS),
-            ssh,
             mode,
         })
     }
