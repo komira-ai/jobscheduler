@@ -4,7 +4,7 @@
 (deny job-creation)
 (deny lsopen)
 (deny user-preference-write)
-(allow file-write* (subpath (param "RUN")) (subpath "/dev"))
+(allow file-write* (subpath (param "RUN")) (literal "/dev/null") (subpath "/dev/fd"))
 (deny network*)
 (allow network-outbound (literal "/private/var/run/syslog"))
 (deny process-info* (target others))

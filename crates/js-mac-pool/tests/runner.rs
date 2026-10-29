@@ -6,6 +6,7 @@
 
 use std::ffi::OsString;
 use std::net::TcpListener;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -51,11 +52,19 @@ impl Scene {
     }
 
     fn policy(&self, net: Net) -> Policy {
+        self.policy_denying(net, &[])
+    }
+
+    /// The policy of `net` that also denies reads of `denies`.
+    fn policy_denying(&self, net: Net, denies: &[&Path]) -> Policy {
         let layout = SlotLayout {
             run: AbsPath::new(&self.run).expect("run path"),
             uid_entry: AbsPath::new(&self.uid_entry).expect("entry path"),
             inputs: vec![AbsPath::new(&self.input).expect("input path")],
-            read_denies: vec![],
+            read_denies: denies
+                .iter()
+                .map(|path| AbsPath::new(path).expect("read-denied path"))
+                .collect(),
         };
         Policy::base(
             layout,
@@ -313,4 +322,282 @@ fn the_profile_compiler_refuses_a_literal_address_in_a_remote_ip_filter() {
     assert!(!out.status.success(), "compiled: {}", describe(&out));
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(stderr.contains("host must be * or localhost"), "{stderr}");
+}
+
+/// Perl one-liners: the runner has `/usr/bin/perl`, and each prints nothing and reports
+/// by exit status.
+const LISTEN: &str = r#"use IO::Socket::INET; exit(IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1", LocalPort => 0) ? 0 : 1)"#;
+const RESOLVE: &str = r#"exit(gethostbyname("example.com") ? 0 : 1)"#;
+const UNIX_CONNECT: &str =
+    r#"use IO::Socket::UNIX; exit(IO::Socket::UNIX->new(Peer => $ARGV[0]) ? 0 : 1)"#;
+
+fn perl(script: &str, rest: &[OsString]) -> Vec<OsString> {
+    let mut all = vec![OsString::from("-e"), OsString::from(script)];
+    all.extend(rest.iter().cloned());
+    all
+}
+
+fn listens_under(scene: &Scene, net: Net) -> bool {
+    scene
+        .sandboxed(net, "/usr/bin/perl", &perl(LISTEN, &[]))
+        .status
+        .success()
+}
+
+fn resolves_under(scene: &Scene, net: Net) -> bool {
+    scene
+        .sandboxed(net, "/usr/bin/perl", &perl(RESOLVE, &[]))
+        .status
+        .success()
+}
+
+#[test]
+fn listeners_are_allowed_on_loopback_only() {
+    let scene = Scene::new("listen", "run");
+    let free = control("/usr/bin/perl", &perl(LISTEN, &[]));
+    assert!(free.status.success(), "control listen: {}", describe(&free));
+    assert!(listens_under(&scene, Net::Loopback), "Loopback listens");
+    assert!(!listens_under(&scene, Net::Off), "Off refuses a listener");
+    let ports = Net::Ports(Ports::new(&[9]).expect("ports"));
+    assert!(!listens_under(&scene, ports), "Ports refuses a listener");
+}
+
+#[test]
+fn names_resolve_under_on_only() {
+    let scene = Scene::new("dns", "run");
+    let free = control("/usr/bin/perl", &perl(RESOLVE, &[]));
+    assert!(
+        free.status.success(),
+        "control resolve: {}",
+        describe(&free)
+    );
+    assert!(resolves_under(&scene, Net::On), "On resolves");
+    assert!(!resolves_under(&scene, Net::Off), "Off refuses DNS");
+    assert!(
+        !resolves_under(&scene, Net::Loopback),
+        "Loopback refuses DNS"
+    );
+}
+
+#[test]
+fn a_unix_socket_in_a_read_denied_directory_is_refused_under_on() {
+    let scene = Scene::new("unix", "run");
+    let socket = scene.outside.join("sock");
+    let _listener = UnixListener::bind(&socket).expect("bind");
+    let connect = perl(UNIX_CONNECT, &[os(&socket)]);
+
+    let free = control("/usr/bin/perl", &connect);
+    assert!(
+        free.status.success(),
+        "control connect: {}",
+        describe(&free)
+    );
+    // The same profile without the read deny connects: the refusal below is the deny's.
+    let granted = scene.sandboxed(Net::On, "/usr/bin/perl", &connect);
+    assert!(
+        granted.status.success(),
+        "Net::On without a deny: {}",
+        describe(&granted)
+    );
+
+    let policy = scene.policy_denying(Net::On, &[&scene.outside]);
+    let denied = scene.sandboxed_with(&policy, "/usr/bin/perl", &connect);
+    assert!(!denied.status.success(), "connected under On");
+}
+
+#[test]
+fn a_read_denied_path_inside_the_run_directory_is_not_writable() {
+    let scene = Scene::new("rdwrite", "run");
+    let secret = scene.run.join("secret");
+    std::fs::create_dir_all(&secret).expect("secret");
+    let target = secret.join("written");
+
+    let granted = scene.sandboxed(Net::Off, "/usr/bin/touch", &touch(&target));
+    assert!(
+        granted.status.success(),
+        "without the read deny the run directory is writable: {}",
+        describe(&granted)
+    );
+    std::fs::remove_file(&target).expect("remove the granted file");
+
+    let policy = scene.policy_denying(Net::Off, &[&secret]);
+    let denied = scene.sandboxed_with(&policy, "/usr/bin/touch", &touch(&target));
+    assert!(!denied.status.success(), "write into a read-denied path");
+    assert!(!target.exists(), "{target:?} was created");
+}
+
+#[test]
+fn launchctl_submit_is_refused_and_works_without_the_sandbox() {
+    let scene = Scene::new("launchctl", "run");
+    let label = format!("js.mac.pool.test.{}", std::process::id());
+    let submit = args(&["submit", "-l", &label, "--", "/usr/bin/true"]);
+    let remove = args(&["remove", &label]);
+
+    let refused = scene.sandboxed(Net::Off, "/bin/launchctl", &submit);
+    let leaked = control("/bin/launchctl", &args(&["list", &label]))
+        .status
+        .success();
+    // Clean up before asserting, so a failure leaves no job behind.
+    let _ = control("/bin/launchctl", &remove);
+
+    let free = control("/bin/launchctl", &submit);
+    let landed = control("/bin/launchctl", &args(&["list", &label]))
+        .status
+        .success();
+    let _ = control("/bin/launchctl", &remove);
+
+    assert!(free.status.success(), "control submit: {}", describe(&free));
+    assert!(landed, "the control's job exists");
+    assert!(
+        !refused.status.success(),
+        "sandboxed submit: {}",
+        describe(&refused)
+    );
+    assert!(!leaked, "the sandboxed submit created no job");
+}
+
+/// The text of `profile` without its floor: the floor starts at `(deny mach-register)`.
+fn without_floor(profile: &Profile) -> String {
+    let text = profile.text();
+    let cut = text.find("(deny mach-register)").expect("the floor");
+    text[..cut].to_owned()
+}
+
+/// A floor rule beats an earlier grant: with a write grant over the protected store's
+/// parent, the floor still refuses the write, and the same profile cut before the floor
+/// leaves the outcome to the operating system. The two outcomes must differ, or the
+/// test could not tell a floor that works from one that is not there.
+#[test]
+fn a_floor_deny_beats_an_earlier_grant() {
+    let scene = Scene::new("floor", "run");
+    let protected = Path::new("/private/var/protected");
+    let target = protected
+        .join("sfanalytics")
+        .join(format!("js-mac-pool-{}", std::process::id()));
+    let layout = SlotLayout {
+        run: AbsPath::new(protected).expect("run path"),
+        uid_entry: AbsPath::new(&scene.uid_entry).expect("entry path"),
+        inputs: vec![],
+        read_denies: vec![],
+    };
+    let caps = Caps {
+        net: Net::Off,
+        read_model: ReadModel::Open,
+    };
+    let profile =
+        Profile::for_policy(&Policy::base(layout, caps).expect("policy")).expect("profile");
+    let program = AbsPath::parse("/usr/bin/touch").expect("program");
+    let run = |profile_text: &str, params: &Profile| {
+        let mut argv = params.argv(&program, &touch(&target));
+        let at = argv.iter().position(|a| a == "-p").expect("-p") + 1;
+        argv[at] = OsString::from(profile_text);
+        Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .expect("sandbox-exec starts")
+    };
+    let with_floor = run(profile.text(), &profile);
+    let cut = without_floor(&profile);
+    let os_only = run(&cut, &profile);
+    assert!(
+        !with_floor.status.success(),
+        "write refused: {}",
+        describe(&with_floor)
+    );
+    assert!(!target.exists(), "{target:?} was created");
+    assert_ne!(
+        String::from_utf8_lossy(&with_floor.stderr),
+        String::from_utf8_lossy(&os_only.stderr),
+        "the floor's refusal is the sandbox's, not the system's (cut profile: {})",
+        describe(&os_only)
+    );
+}
+
+/// What `bootstrap_check_in` of a name nobody owns returns: the sandbox's refusal of
+/// `mach-register` and launchd's answer differ.
+const CHECK_IN_C: &str = r#"#include <mach/mach.h>
+#include <servers/bootstrap.h>
+#include <stdio.h>
+int main(void) {
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = bootstrap_check_in(bootstrap_port, "com.komira.js-mac-pool.test", &port);
+    printf("%d\n", (int)kr);
+    return 0;
+}
+"#;
+
+#[test]
+fn registering_a_mach_service_is_refused() {
+    let scene = Scene::new("mach", "run");
+    let source = scene.run.join("checkin.c");
+    let exe = scene.run.join("checkin");
+    std::fs::write(&source, CHECK_IN_C).expect("source");
+    let built = control("/usr/bin/clang", &[os(&source), "-o".into(), os(&exe)]);
+    assert!(built.status.success(), "clang: {}", describe(&built));
+    let exe_text = exe.to_str().expect("utf8");
+
+    let free = control(exe_text, &[]);
+    let refused = scene.sandboxed(Net::Off, exe_text, &[]);
+    let free_code = String::from_utf8_lossy(&free.stdout).trim().to_owned();
+    let refused_code = String::from_utf8_lossy(&refused.stdout).trim().to_owned();
+    assert!(!free_code.is_empty(), "control ran: {}", describe(&free));
+    assert!(
+        !refused_code.is_empty(),
+        "sandboxed ran: {}",
+        describe(&refused)
+    );
+    assert_ne!(free_code, "0", "the control's check-in does not register");
+    assert_ne!(
+        refused_code, free_code,
+        "the sandbox changes the answer to a registration"
+    );
+}
+
+#[test]
+fn mounting_is_refused() {
+    let scene = Scene::new("mount", "run");
+    let sudo = control("/usr/bin/sudo", &args(&["-n", "true"]));
+    assert!(
+        sudo.status.success(),
+        "the runner has passwordless sudo: {}",
+        describe(&sudo)
+    );
+    let source = scene.run.join("source");
+    let mountpoint = scene.run.join("mountpoint");
+    std::fs::create_dir_all(&source).expect("source");
+    std::fs::create_dir_all(&mountpoint).expect("mountpoint");
+    let mount = [
+        OsString::from("-n"),
+        OsString::from("/sbin/mount_nullfs"),
+        os(&source),
+        os(&mountpoint),
+    ];
+    let unmount = [
+        OsString::from("-n"),
+        OsString::from("/sbin/umount"),
+        os(&mountpoint),
+    ];
+
+    let refused = scene.sandboxed(Net::Off, "/usr/bin/sudo", &mount);
+    let mounted_sandboxed = control("/sbin/mount", &[]).stdout;
+    let leaked =
+        String::from_utf8_lossy(&mounted_sandboxed).contains(mountpoint.to_str().expect("utf8"));
+    if leaked {
+        let _ = control("/usr/bin/sudo", &unmount);
+    }
+
+    let free = control("/usr/bin/sudo", &mount);
+    let mounted_free = control("/sbin/mount", &[]).stdout;
+    let landed =
+        String::from_utf8_lossy(&mounted_free).contains(mountpoint.to_str().expect("utf8"));
+    let _ = control("/usr/bin/sudo", &unmount);
+
+    assert!(free.status.success(), "control mount: {}", describe(&free));
+    assert!(landed, "the control's mount is listed");
+    assert!(
+        !refused.status.success(),
+        "sandboxed mount: {}",
+        describe(&refused)
+    );
+    assert!(!leaked, "the sandboxed mount is not listed");
 }

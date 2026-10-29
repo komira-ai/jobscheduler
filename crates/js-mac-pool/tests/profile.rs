@@ -279,7 +279,7 @@ fn dropping_the_user_folder_grant_leaves_the_run_directory_and_dev() {
         })
         .unwrap();
     let text = text_of(&dropped);
-    assert!(text.contains("(allow file-write* (subpath (param \"RUN\")) (subpath \"/dev\"))"));
+    assert!(text.contains("(allow file-write* (subpath (param \"RUN\")) (literal \"/dev/null\") (subpath \"/dev/fd\"))"));
     assert!(!text.contains("UENTRY"));
 }
 
