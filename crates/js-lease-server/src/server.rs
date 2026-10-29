@@ -35,7 +35,7 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
-    checking: Checking,
+    _checking: Checking,
 }
 
 /// The listener that serves the agent routes alone (`server.agent_listen`).
@@ -170,7 +170,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
-        checking,
+        _checking: checking,
     })
 }
 
