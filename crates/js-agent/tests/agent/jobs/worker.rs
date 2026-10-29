@@ -137,6 +137,14 @@ fn a_worker_that_cannot_start_says_why() {
     let why = js_agent::Worker::start(plan(&dir, &machine, STEP_NEVER)).err();
     let why = why.expect("the worker must not start");
     assert!(why.contains("cannot list the containers"), "{why}");
+
+    // The egress check at start: a worker over a network that is not limited as the flags
+    // say does not start. It catches an agent that starts and refuses every job instead.
+    let machine = FakeMachine::new();
+    machine.world.fail("egress", 1);
+    let why = js_agent::Worker::start(plan(&dir, &machine, STEP_NEVER)).err();
+    let why = why.expect("the worker must not start");
+    assert!(why.contains("egress failed"), "{why}");
 }
 
 /// Asserts that a worker started over an engine that holds a container of an earlier
