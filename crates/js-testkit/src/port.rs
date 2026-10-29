@@ -345,4 +345,16 @@ mod tests {
         let _thief = TcpListener::bind((Ipv4Addr::LOCALHOST, a.port()));
         TcpListener::bind(a).expect("our address is still free");
     }
+
+    /// Shows the race of `an_own_address_is_not_the_usual_loopback_and_is_stable`: the
+    /// probed port is free on the address only until some other socket takes it. Here
+    /// a wildcard listener (another test binding `0.0.0.0:0`) holds that number, and
+    /// the old assertion that the address is still bindable fails.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_wildcard_listener_on_the_probed_port_blocks_the_address() {
+        let a = own_loopback_port();
+        let _other = TcpListener::bind((Ipv4Addr::UNSPECIFIED, a.port())).expect("wildcard");
+        TcpListener::bind(a).expect("our address is still free");
+    }
 }
