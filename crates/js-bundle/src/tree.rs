@@ -357,7 +357,7 @@ impl Tree {
         budget: &mut u64,
     ) -> Result<(), LinkDefect> {
         let mut here: Vec<&str> = at.split('/').collect();
-        here.pop().ok_or(LinkDefect::Escapes)?;
+        here.pop();
         let mut todo: VecDeque<&str> = target.split('/').collect();
         let mut hops = 0;
         while let Some(part) = todo.pop_front() {
