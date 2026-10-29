@@ -159,7 +159,7 @@ pub(crate) fn range(at: At, value: u64, min: u64, max: u64) -> Result<(), Valida
 /// The arguments of a job: [`limits::MAX_ARGS`] entries of [`limits::MAX_ARG_LEN`] bytes,
 /// [`limits::MAX_ARGS_TOTAL_BYTES`] in all, no NUL.
 pub(crate) fn args(at: At, args: &[String]) -> Result<(), ValidationError> {
-    check::count(at, args.len(), limits::MAX_ARGS)?;
+    count(at, args.len(), limits::MAX_ARGS)?;
     let mut total = 0usize;
     for arg in args {
         if arg.len() > limits::MAX_ARG_LEN {
