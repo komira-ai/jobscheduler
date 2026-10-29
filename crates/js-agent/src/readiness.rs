@@ -266,15 +266,11 @@ impl WorkerHook {
         }
     }
 
-    /// The longest a run of the hook can take.
-    pub fn bound(&self) -> Duration {
-        self.bound
-    }
-
     /// `found`, the lifecycle's answer: when it is [`Quiet::Ready`] the hook runs and its
     /// verdict is the answer; any other answer is returned as it is and the hook does not
-    /// run. Blocks as long as the hook runs, up to [`WorkerHook::bound`]; `before_run` is
-    /// told that bound just before the hook starts (the worker extends its watchdog by it).
+    /// run. Blocks as long as the hook runs, up to the bound given to [`WorkerHook::new`];
+    /// `before_run` is told that bound just before the hook starts (the worker extends its
+    /// watchdog by it).
     pub fn vet(&self, found: Quiet, before_run: &dyn Fn(Duration)) -> Quiet {
         match found {
             Quiet::Ready => {
