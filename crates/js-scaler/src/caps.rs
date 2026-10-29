@@ -44,6 +44,16 @@ pub(crate) fn nearest_miss<'a>(
     misses.and_then(|all| all.into_iter().max_by_key(|each| depth(*each)))
 }
 
+/// Whether `offer` fits `demand`.
+pub(crate) fn fits(offer: &Offer, demand: &Demand) -> bool {
+    let relaxed = Demand {
+        os: None,
+        arch: None,
+        ..demand.clone()
+    };
+    offer.fit(&relaxed).is_ok()
+}
+
 /// The offer a launch for `demand` takes: available, priced, fitting, and not refused
 /// this step; the cheapest, then the one with fewest gpus, then by id, then by zone.
 pub(crate) fn choose<'a>(
@@ -66,7 +76,7 @@ pub(crate) fn choose<'a>(
             [
                 offer.available,
                 offer.price_cents_per_hour.is_some(),
-                offer.fit(demand).is_ok(),
+                fits(offer, demand),
                 !lately,
             ]
             .into_iter()

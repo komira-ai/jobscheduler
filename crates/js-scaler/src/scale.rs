@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{check, choose, nearest_miss};
+use crate::caps::{check, choose, fits, nearest_miss};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record};
@@ -86,7 +86,7 @@ impl Pass<'_> {
                     !host.busy,
                     !condemned,
                     !claims.hosts.contains(host.id.as_str()),
-                    host.shape.fit(&request.demand).is_ok(),
+                    fits(&host.shape, &request.demand),
                 ]
                 .into_iter()
                 .all(|ok| ok)
@@ -105,7 +105,7 @@ impl Pass<'_> {
                         record.pool == name,
                         COMING.contains(&record.phase),
                         !claims.records.contains(&i),
-                        record.offer.to_offer(0).fit(&request.demand).is_ok(),
+                        fits(&record.offer.to_offer(0), &request.demand),
                     ]
                     .into_iter()
                     .all(|ok| ok)
@@ -135,7 +135,7 @@ impl Pass<'_> {
                     [
                         host.state == HostState::Live,
                         host.mark == Some(Mark::Draining),
-                        host.shape.fit(&request.demand).is_ok(),
+                        fits(&host.shape, &request.demand),
                     ]
                     .into_iter()
                     .all(|ok| ok)
