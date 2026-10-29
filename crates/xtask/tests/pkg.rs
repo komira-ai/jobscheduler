@@ -483,6 +483,25 @@ fn a_path_twice_in_the_data_archive_is_malformed() {
     }
 }
 
+/// The same path twice in the control archive is refused as the data archive's is: dpkg takes
+/// the last, so a second `control` would hide the one that was checked.
+#[test]
+fn a_path_twice_in_the_control_archive_is_malformed() {
+    let mut spec = good();
+    spec.control_extra.push("md5sums");
+    spec.control_extra.push("md5sums");
+    match parse_deb(&deb(&spec)) {
+        Err(e @ Error::Malformed(_)) => {
+            assert!(
+                e.to_string()
+                    .contains("md5sums is in the control archive twice"),
+                "{e}"
+            );
+        }
+        _ => panic!("not refused as malformed"),
+    }
+}
+
 /// What cannot be read as a deb says what is wrong with it.
 #[test]
 fn a_file_that_is_not_a_deb_is_malformed() {

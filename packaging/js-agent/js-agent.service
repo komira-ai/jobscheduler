@@ -1,15 +1,20 @@
 # js-agent on a Linux host, installed by the js-agent deb (packaging/js-agent). Read it on the
-# host with `systemctl cat js-agent`; crates/xtask/tests/js_agent_package.rs pins what is said here.
+# host with `systemctl cat js-agent`; crates/xtask/tests/js_agent_package.rs pins the settings described here.
 #
 # The package has no maintainer script: `dpkg --install` only unpacks files, and nothing
 # starts or configures the agent. The sequence, as root:
 #   1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 #        makes the directories below (dpkg does not run systemd-tmpfiles; a reboot would)
 #   2. write the pool's join token to /etc/js-agent/token, mode 0600
-#   3. mount a disk of its own at /var/lib/js-agent/scratch (an /etc/fstab line, then `mount`)
+#   3. mount a disk of its own at /var/lib/js-agent/scratch (an /etc/fstab line, then
+#        `systemctl daemon-reload`, then `mount`)
 #   4. systemctl edit js-agent: clear ExecStart= and set the whole line again with this
 #        host's --server and --pool (the shipped --server is a placeholder the agent refuses)
 #   5. systemctl enable --now js-agent
+#        With the mount of step 3 missing this exits 0 and starts nothing, silently:
+#        `systemctl status js-agent` shows the unmet ConditionPathIsMountPoint.
+# Upgrade: there is no maintainer script, so after installing a newer deb run
+# `systemctl daemon-reload && systemctl restart js-agent`.
 # The container engine (the program at --container-bin, docker by default) is assumed to be
 # installed and running: the unit is ordered after docker.service and containerd.service and
 # does not pull them in, because podman is a valid engine and the agent exits 2 when the
@@ -79,6 +84,8 @@ ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
 # plus the time of the engine calls. The defaults, 10 + 10 + 30 s, leave 70 s of the 120 s. A host
 # that sets either flag (each at most 3600) sets TimeoutStopSec in the same drop-in; a SIGKILL at
 # the timeout loses no container (the next start adopts them) but leaves results unacknowledged.
+# The bound covers the normal drain, not the rescue path after the job worker failed (the agent
+# bounds that separately); a SIGKILL there leaves containers for the next start to adopt.
 # KillMode=control-group and KillSignal=SIGTERM, the defaults, stay unset: the agent starts
 # containers detached under the engine's own cgroup, so KillMode=process would save none of
 # them and would orphan the agent's readiness and GPU hook processes.

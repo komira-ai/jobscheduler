@@ -222,7 +222,8 @@ fn wrong_members(names: &[&str]) -> Error {
 ///
 /// # Errors
 /// [`Error::Malformed`] when it is not an `ar` archive of exactly `debian-binary` (`2.0`), a
-/// gzip `control.tar.gz` holding `control`, and a gzip `data.tar.gz` that lists no path twice.
+/// gzip `control.tar.gz` holding `control`, and a gzip `data.tar.gz`, neither archive listing a
+/// path twice.
 pub fn parse_deb(bytes: &[u8]) -> Result<Deb, Error> {
     let members = ar_members(bytes)?;
     let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
@@ -236,6 +237,14 @@ pub fn parse_deb(bytes: &[u8]) -> Result<Deb, Error> {
         return Err(malformed("debian-binary is not 2.0"));
     }
     let control_entries = tar_entries(control_gz)?;
+    let mut seen = std::collections::BTreeSet::new();
+    for (path, _, _) in &control_entries {
+        if !seen.insert(path.as_str()) {
+            return Err(Error::Malformed(format!(
+                "{path} is in the control archive twice"
+            )));
+        }
+    }
     let control = control_entries
         .iter()
         .find(|(path, _, _)| path == "control")

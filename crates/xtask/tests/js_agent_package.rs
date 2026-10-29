@@ -357,6 +357,13 @@ fn the_nfpm_configuration_lists_the_files_of_the_checker() {
     let target = workflow_target();
     let mut listed = Vec::new();
     let (mut src, mut dst) = (String::new(), String::new());
+    // An entry without its file_info adds no row to `listed`, so count the entries too.
+    let entries = lines.iter().filter(|l| l.starts_with("- src: ")).count();
+    assert_eq!(
+        entries,
+        FILES.len(),
+        "entries of nfpm.yaml, files of the checker"
+    );
     for line in &lines {
         if let Some(s) = line.strip_prefix("- src: ") {
             src = s.to_owned();
@@ -744,4 +751,67 @@ fn the_verification_is_of_this_repository_workflow_ref_and_commit() {
     ] {
         assert!(verify.contains(pinned), "{pinned} in {verify}");
     }
+}
+
+/// What the attestation covers is what the verify job checks: both jobs use the artifact the
+/// build job uploaded, the attested subject is the file downloaded to `dist`, and `REPO` of the
+/// verify step is this repository.
+#[test]
+fn the_attested_file_is_the_one_downloaded_and_verified() {
+    let text = read(WORKFLOW);
+    let lines: Vec<String> = text.lines().map(normal).collect();
+    let values = |key: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter_map(|l| l.strip_prefix(key).map(str::to_owned))
+            .collect()
+    };
+    // The `name:` and `path:` of the `with:` block that follows each artifact step.
+    let with_of = |action: &str| -> Vec<(String, String)> {
+        let uses = format!("- uses: actions/{action}-artifact@");
+        let mut found = Vec::new();
+        for (at, line) in lines.iter().enumerate() {
+            if line.starts_with(&uses) {
+                let block = &lines[at + 1..(at + 5).min(lines.len())];
+                let get = |key: &str| {
+                    block
+                        .iter()
+                        .find_map(|l| l.strip_prefix(key))
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                found.push((get("name: "), get("path: ")));
+            }
+        }
+        found
+    };
+    let uploads = with_of("upload");
+    let downloads = with_of("download");
+    // One upload and two downloads (attest, verify) share the one artifact name, and both
+    // downloads put the deb in dist, where the attested subject and the verified file are.
+    assert_eq!(uploads.len(), 1, "{uploads:?}");
+    assert_eq!(downloads.len(), 2, "{downloads:?}");
+    for (name, _) in uploads.iter().chain(&downloads) {
+        assert_eq!(name, "js-agent-deb");
+    }
+    for (_, path) in &downloads {
+        assert_eq!(path, "dist");
+    }
+    assert_eq!(
+        values("subject-path: "),
+        ["dist/js-agent_${{ env.VERSION }}_amd64.deb"]
+    );
+    assert_eq!(
+        values("REPO: "),
+        ["${{ github.repository }}"],
+        "REPO of the verify step"
+    );
+    let verify = run_lines(&text)
+        .into_iter()
+        .find(|l| l.starts_with("gh attestation verify"))
+        .expect("the verification");
+    assert!(
+        verify.contains("\"dist/js-agent_${VERSION}_amd64.deb\""),
+        "{verify}"
+    );
 }
