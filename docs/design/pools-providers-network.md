@@ -232,7 +232,8 @@ named narrowing of requirement 13. Two guards keep it honest:
 - A row that disagrees with the catalog on gpu count is skipped with a log line, as
   `select.rs` does.
 - The first hello is compared with the offer (6.2, Booting): a host that reports a
-  different class or less than its offer is rejected and released.
+  different class or less than its offer starts the boot-failure cooldown, and is drained
+  and then released once it is quiet.
 
 If Lambda's catalog ever gives a machine-readable class, the `gpu` field becomes optional
 and the rest of the design is unchanged.
@@ -455,7 +456,8 @@ impl Offer { pub fn fit(&self, demand: &Demand) -> Result<(), Dimension>; }  // 
 
 /// Chosen before launch, derived from scheduler id and acquire id; same `js-<hash>-`
 /// prefix as the Lambda ownership marks, so `Owner::claim` works unchanged. The acquire id is
-/// 128 random bits drawn at Planned and written in the record, so a name is never reused
+/// 128 random bits taken from the scaler's input (the shell draws them; the pure step has no randomness)
+/// when the Launching record is made, and written in the record, so a name is never reused
 /// (not after a restart, not after a lost state file; see 6.3).
 pub struct HostName(String);
 pub struct HostRef(pub String);      // the provider's own id for a machine
@@ -467,6 +469,11 @@ pub struct BootPayload(Secret);
 
 pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal), Unknown,
     Deferred { wait: Duration } }                                  // unchanged; Deferred = nothing sent
+/// `Deferred` means no call went out: the provider sent nothing to the cloud, so nothing can
+/// exist for the acquire id. The one case where an earlier launch of the same acquire id
+/// may have landed is an unresolved call (an earlier call got no answer). A provider in that
+/// case may answer `Deferred` for the retry, and then reports the acquire id as unresolved
+/// (`PoolInput::unresolved`, 6.1) until a call for it is answered.
 pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   // unchanged
 
 pub trait ElasticProvider: Send + Sync {
@@ -585,9 +592,9 @@ neither knows the other. The renderer quotes every argv element, so no step can 
 
 ### 6.1 Where it runs and what it reads
 
-Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes `Input` and returns
-`Vec<Action>`. The shell lives in `crates/js-lease-server/src/scaler.rs` and runs on the
-existing tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots, calls
+Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes the previous `State`, one
+`Input` and the time now, and returns the next `State` and the `Vec<Action>`. The shell lives in
+`crates/js-lease-server/src/scaler.rs` and runs on the existing tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots, calls
 `step`, runs the actions on a `blocking()` task (`util.rs`), and feeds the answers into the
 next step. No lock is held across a provider call. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
@@ -613,15 +620,25 @@ fails fast with the existing code instead of waiting on a dead cloud.
 
 ```rust
 // crates/js-scaler/src/lib.rs
-pub struct Input<'a> { pub now: Instant /* injected */, pub pool: &'a PoolSettings,
-    pub health: &'a PoolHealth, pub offers: &'a [Offer],
-    pub waiting: &'a [Waiting], pub hosts: &'a [HostFacts],
-    pub held: Option<&'a [Held]> /* None if list failed */, pub records: &'a Records }
-pub enum Action { Record(Record) /* written first */, Mint { host: HostName, valid_for: Duration },
-    Acquire(AcquireRequest) /* payload already rendered by the shell */, Drain(HostName), Undrain(HostName),
-    ReleaseHost(HostName) /* registry mark, only if still quiet */, Revoke(HostName),
-    Release { host: HostName, id: HostRef }, ForgetNetwork(HostName), RemoveHost(HostName) }
-pub fn step(input: &Input<'_>) -> Vec<Action>;
+pub struct Input { pub scheduler: SchedulerId /* names the hosts it launches */,
+    pub pools: Vec<PoolInput> /* the order requests fall through */, pub waiting: Vec<Waiting>,
+    pub hosts: Vec<HostFacts> /* id, pool, state (Live, Lost, Awaiting), shape, mark, busy, lease_given_up */,
+    pub registry_complete: bool /* hosts is the registry's whole, settled view */,
+    pub acquired: Vec<AcquireResult> /* answers to acquires, with the attempt they answer */,
+    pub released: Vec<ReleaseResult> /* answers to releases, read back */,
+    pub not_found: Vec<String> /* machines a read by id found the provider no longer has */,
+    pub entropy: Vec<[u8; 16]> /* random values for this step's acquire ids; never repeated */ }
+pub struct PoolInput { pub settings: Settings, pub health: Health, pub offers: Vec<Offer>,
+    pub held: Option<Vec<Held>> /* None if list failed */,
+    pub unresolved: Vec<AcquireId> /* acquire ids the provider holds an unresolved call for */ }
+pub struct State { pub records: Records /* the only part written to disk */, /* and what the last step found:
+    blocked, plan, no_offer, refused, silent, silent_released, ... */ }
+pub enum Action { Save(Box<Records>) /* the whole records, written first when a step changed them */,
+    Mint { host: String, valid_for: Duration },
+    Acquire(Box<AcquirePlan>) /* the shell renders the payload */, Drain(String), Undrain(String),
+    ReleaseHost(String) /* registry mark, only if still quiet */, Revoke(String),
+    Release { host: String, id: HostRef }, ForgetNetwork(String), RemoveHost(String) }
+pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>);
 ```
 
 ### 6.2 State machine of one instance
@@ -633,10 +650,12 @@ check pass succeeds (10.1).
 
 ```
 Planned -> Launching -> Booting -> Registered -> Draining -> Releasing -> Gone
-              |  \-> Failed (Refused)    \-> Releasing (boot_timeout, hello below offer, host-contract)
+              |  \-> Refused (dropped at the end of the step)    \-> Releasing (boot_timeout: no hello, host-contract)
               \-> Unresolved (Unknown) -> Booting (list shows it) | Failed (list lacks it after hold)
 Failed (from Unresolved) stays counted until two clean lists (below).
 Registered/Draining -> Releasing -> Gone also when the provider says the host is gone (Lost).
+A hello below the offer: Registered -> Draining -> Releasing (the cooldown starts at the hello; the
+host is drained and released once it is quiet).
 ```
 
 Rules, each tied to a requirement or to existing behaviour:
@@ -644,7 +663,7 @@ Rules, each tied to a requirement or to existing behaviour:
 - Planned: the scaler found `waiting` demand not covered. A waiting request is covered when
   any of these holds: it has `reserved = Some(host)` (a host is set aside for it, free or
   busy); or a registered host that is free and fits is not set aside for another request; or a
-  record in Launching, Unresolved or Booting whose offer fits has no request matched to it.
+  record in Planned, Launching, Unresolved or Booting whose offer fits has no request matched to it.
   Matching is greedy in queue order, one request to one host or record. With a whole-host
   class one uncovered request needs one machine: uncovered = waiting requests with no match.
   At most `max_step` (default 1) launches per tick. Registered capacity is tried first: that
@@ -668,13 +687,18 @@ Rules, each tied to a requirement or to existing behaviour:
   caps fail, the pool shows `blocked: max_instances`, `blocked: max_spend` or
   `blocked: max_spend_day` and the request keeps waiting. `held == None` (the list failed)
   blocks launches the same way.
-  The day total (requirement 15, a hard bound on spend over time) is the sum, over every record
-  launched in the last 24 hours on the injected clock, of its stored price times its billed
-  time: from launch to Gone (or to now, if not Gone), never less than one minute, and for a
-  boot that failed or was never seen, never less than `boot_timeout`. The billing granule is
+  The day total (requirement 15, a hard bound on spend over time) is the sum, over every record,
+  of its stored price times the part of its billed time that lies in the last 24 hours on the
+  injected clock: the billed time runs from launch to Gone (or to now, if not Gone), never less
+  than one minute, and for a boot that failed or was never seen, never less than `boot_timeout`.
+  A record that ended more than a day ago costs nothing and is dropped; one that still runs
+  costs the 24 hours it has run. A launch waiting for its time (`Deferred`) counts its least
+  cost, and its retry is checked against every cap again. The billing granule is
   not verified (the Lambda crate and docs do not state it; Open questions 2): the design
   rounds each record up to whole minutes and counts failed boots in full, which can only
-  overstate. The candidate's minimum cost is its price times `boot_timeout`. A record
+  overstate. The candidate's minimum cost is its price times `boot_timeout` (at least a
+  minute): a launch that never boots costs that much. The one-minute floor on the billed time is
+  for a record whose host said hello and for an orphan, which did not fail a boot. A record
   that is not yet Gone keeps accruing, so a stuck drain eats the day cap and stops launches
   instead of growing without bound. The day cap is a rate over a window, not a lifetime
   total; the lifetime bound is `max_instances` times the day cap times days run, and the
@@ -696,9 +720,11 @@ Rules, each tied to a requirement or to existing behaviour:
   new token is minted only for `Deferred` (nothing was sent) and for a new acquire id.
 - Launching to Booting on `Accepted`: record the cloud id. Extras (`Accepted { extras }`)
   are already released by the provider and recorded as such.
-- Launching to Failed on `Refused`: revoke the token, forget the network key; no machine
-  exists. `Capacity` marks that offer unavailable for the tick and tries the next on the
-  next tick. `Quota` and `Denied` mark the pool blocked with the reason.
+- Launching to Refused on `Refused`: revoke the token, forget the network key; no machine
+  exists. `Capacity` marks that offer unavailable for the step and tries the next
+  offer in the same step; with no other offer that fits, the request waits and the offer is tried
+  again on the next step. A refused record is billed nothing and is dropped at the end of the step
+  that learns of the refusal, so a pool refused over and over does not grow its records. `Quota` and `Denied` mark the pool blocked with the reason.
 - Launching to Unresolved on `Unknown`: never launch again with a new acquire id for this
   demand until `list` has settled it. Next ticks call `list`; a held instance with this
   acquire id moves the record to Booting. The Lambda crate says `list` can lag a write
@@ -715,14 +741,32 @@ Rules, each tied to a requirement or to existing behaviour:
   list can no longer put two machines on one request without both being counted. Test in
   13.2.
 - `Deferred { wait }`: nothing was sent. The record stays Planned (not yet Launching), the
-  token is re-minted at the retry.
+  token is re-minted at the retry. A Planned record covers the request it was made for. When
+  no waiting request is matched to it any more (the request went away, or a host covers it), the
+  record is forgotten and its token revoked; in a pool that only plans it would otherwise stay
+  counted for good.
+  `Deferred` holds only while no call went out. If the provider holds an unresolved call for
+  the record's acquire id (an earlier launch of it got no answer and may have landed; the
+  Lambda provider's answer for an acquire with an open call is of this kind), the shell lists
+  that id in `PoolInput::unresolved`, and the step keeps the Planned record even when no
+  request waits for it: it stays counted, and its retry (the same acquire id) settles the
+  call, after which the machine is Booting and is released at `boot_timeout` if nobody
+  wanted it. The shell's duty is to keep that list true for as long as the provider holds the
+  call; dropping the record while it does would leave the machine to turn up as an orphan,
+  which is never released (6.4).
 - Booting to Registered: the first hello whose `instance.instance_id` equals the name is
   admitted by the registry. The hello's shape is compared with the offer. A host that
-  reports less than its offer (cpu, memory, gpus, gpu class) is rejected, moves to
-  Releasing, and starts the boot-failure cooldown below. Otherwise the real shape is the capacity, and the pending request
+  reports less than its offer (cpu, memory, gpus, gpu class) is admitted but condemned: the
+  boot-failure cooldown below starts at once, and the host is drained and then released as soon as it is
+  quiet (`drain` and `release_host` are each checked under the registry's lock, so no work is
+  cut; a host that already has work is left until it is quiet; it is never taken back for a
+  request). Otherwise the real shape is the capacity, and the pending request
   is placed by the registry's normal path on the consumer's next poll.
-- Booting to Releasing on `boot_timeout` (default 15 min): the agent never said hello (or
-  was refused `host-contract`). The instance is released. Any boot failure blocks new
+- Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
+  token's life is): the agent never said hello (or was refused `host-contract`). A host the
+  registry shows has said hello, so a silent one is not released by this. Only a complete
+  registry view gives up on a machine: on an incomplete one its host may have said hello and be
+  missing from the part that was read, so the machine is held and counted. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
   14 Q14) and shows `blocked: boot_failed`. The billed minutes of the failed boot stay in the
   day total. Counting failures, doubling the cooldown and suppressing a single offer are
@@ -749,9 +793,26 @@ Rules, each tied to a requirement or to existing behaviour:
   `Gone` (a 404 by id after a successful list, `provider.rs::trust_absent`) moves to Gone
   and calls `Registry::remove`. Release keeps retrying until a read by id says Gone.
 - Lost: a registered host silent past grace is not released on silence alone (silence is
-  Unknown, `registration.md` Lifecycle). If the provider reports `terminated` or
-  `preempted`, or `get_instance` answers not-found, the scaler revokes, forgets the device
-  and removes the host so its slot is free. Until then it counts toward the caps.
+  Unknown, `registration.md` Lifecycle), and not while the registry still holds its leases.
+  If the provider reports `terminated` or `preempted`, or `get_instance` answers not-found
+  (the input names the machine), the scaler revokes, forgets the device and removes the host so
+  its slot is free. A silent machine the scaler launched also costs money, so once the host books nothing
+  (the lease grace has given up its leases, or it held none; the shell says so in the host facts,
+  `lease_given_up`, and sets it for every silent host that has no bookings) and it has stayed
+  silent for `unknown_hold`, it is released the way an idle one is: drained and marked for
+  release, which the registry checks is quiet when it runs those calls, then revoked, released
+  and read back to Gone once the registry shows the mark. A silent host the scaler had already
+  marked `Releasing` needs no flag. The step names each machine it releases this way for the
+  shell to log. A host that shows a lease, a run or a stream, or a `Held` or `Reserved` mark, is
+  never released, whatever the flag says. Hosts of a static pool are never released by the
+  scaler. Until then the machine counts toward the caps and the state shows the age of its
+  silence.
+- A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
+  way, but only on a complete, settled registry view (the shell says so in the input; a view
+  read while the registry is loading, or in part, is incomplete and holds everything) and when
+  the machine has been missing on two steps at least `unknown_hold` apart, with no step between
+  that showed it or had an incomplete view. Releasing on a view that merely lacks hosts would
+  cut work after a registry restart.
 - Orphans: an instance in `list` with our marks and no record (a lost state file). Policy
   is in 6.4.
 
@@ -781,10 +842,10 @@ Rules, each tied to a requirement or to existing behaviour:
   scaler's call after a read-back `Gone`; `remove` on a host already forgotten is a no-op
   `Ok`; the scaler counts machines by its records and the provider's `list`, never by the
   registry, so a forgotten host that still exists in the cloud is still counted and still
-  released. `forget_lost` drops a forgotten host's binding too (`registry.rs`: the binding
+  released (on a complete registry view, missing twice; 6.2 Lost). `forget_lost` drops a forgotten host's binding too (`registry.rs`: the binding
   file is rewritten from live records only), so nothing on the scheduler side remembers a
   forgotten host. That is safe here because every launch has a fresh `HostName` (the
-  acquire id is random and unique per acquire, 5.2), so a name is never reused, even after
+  acquire id is the pool and 128 random bits from the input, unique per acquire, 5.2), so a name is never reused, even after
   a lost state file; and a forgotten host's token is already spent and its credential is
   revoked at release (7.2), so it cannot re-register under the old name. Only a hand-joined
   host that reuses an old name meets `host-bound`, which is the existing behaviour.
@@ -802,7 +863,14 @@ Rules, each tied to a requirement or to existing behaviour:
   start. This makes a lost file visible and cannot double-launch.
 - Orphans are reported, not terminated, by default (as the crate's `sweep` is
   report-only). Auto-release would delete instances the scheduler has no record of, and a
-  second scheduler on one account looks the same. Open questions 8.
+  second scheduler on one account looks the same. Open questions 8. So the scaler never
+  releases an orphan, including a machine a launch answer named and the provider could not
+  confirm released, or one it learned is a duplicate: the shell's duty is to alert on every
+  Orphan record in status, and the operator releases the machine at the provider. The same
+  holds for a record whose pool is no longer in the config: the records keep it and it counts,
+  but no pass reconciles or releases it, so the shell alerts on a record of an unknown pool and
+  the operator releases it at the provider and removes the record. `release_orphans` stays
+  Later (section 12).
 - `max_spend_per_hour` caps the rate. `max_spend_per_day` is in the first slice (6.2 Caps)
   and bounds spend over time even when a stuck or Lost machine is counted forever. A Lost
   host that the provider still lists keeps accruing in the day total until released; status
@@ -870,7 +938,7 @@ nothing else. It is chosen over first-use binding because it needs no change to
 
 The real defences against a stolen token, in the order they act:
 
-1. Expiry: the token is minted with ttl `boot_timeout` plus a margin (default 20 min), under
+1. Expiry: the token is minted with ttl `boot_timeout` plus a margin (default 5 min, so 20 min), counted from the launch, under
    `MAX_TTL` (24 h). An unused token is dead after that.
 2. The host credential (below), issued at the first hello. After it, the token is dead.
 3. Revoke at release, before terminate (6.2), and at Failed.
@@ -1169,7 +1237,7 @@ and `launch_name`.
 | F3 | `list` fails | `held == None` blocks launches; never read as empty | 6.2 |
 | F4 | lost state file | adopt orphans, count them, pause until a `list` succeeds | 6.4 |
 | F5 | host never says hello | `boot_timeout`, release, `boot_fail_cooldown` | 6.2 |
-| F6 | host reports less than its offer or lacks runtime/toolkit | rejected (`host-contract`), released, cooldown | 3.6, 6.2 |
+| F6 | host reports less than its offer, or lacks runtime/toolkit | a short hello: cooldown, drained, released once quiet; a missing runtime or toolkit: refused `host-contract` | 3.6, 6.2 |
 | F7 | terminate fails or is slow | revoke first; retry until read-back `Gone`; `Unknown` is not `Gone` | 6.2 |
 | F8 | catalog price moves | stored price in the record, summed for the caps | 6.2 |
 | F9 | stuck drain or Lost host accrues forever | `max_spend_per_day` on billed time stops launches; status shows age | 6.2, 6.4 |
@@ -1289,9 +1357,12 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `max_spend_per_hour` just under sum-plus-candidate blocks; the stored price is summed, not the
   current catalog price; an unpriced offer is never chosen. `max_spend_per_day`: a failed boot counts
   for `boot_timeout`; a record that never reaches Gone keeps accruing and blocks the next launch;
-  records older than 24 hours leave the window.
-- Choice: cheaper first, then fewer gpus, id, zone. A hello below its offer is released and starts
-  `boot_fail_cooldown`. No fitting offer: no launch, `Launchable` false, `no_offer` names the dimension.
+  a record leaves the window when it ended more than 24 hours ago, and one that still runs counts
+  the part of its run inside the window. A machine launched 30 hours ago and still running costs
+  its last 24 hours, not its 30.
+- Choice: cheaper first, then fewer gpus, id, zone. A hello below its offer starts
+  `boot_fail_cooldown` and the host is drained and then released once it is quiet (a host with work is
+  left until it is). No fitting offer: no launch, `Launchable` false, `no_offer` names the dimension.
 - Idle and drain: a quiet host is drained; a request arriving meanwhile is not booked on it, and the
   next tick emits `Undrain` (not `Acquire`). A host with a running job is never released;
   `drain` and `release_host` fail `Busy` with a lease, run or stream. `js-sim` interleavings:
@@ -1300,7 +1371,9 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   runs and the host is kept, or the host is released and the work is refused.
 - Release: `Revoke` precedes `Release` and follows `ReleaseHost`; `Released::Unknown` retries every
   tick and never removes; `Gone` removes and revokes once. Booting past `boot_timeout` is released and
-  starts `boot_fail_cooldown`. A Lost host the provider calls `terminated` is removed. Failing health
+  starts `boot_fail_cooldown`; on an incomplete registry view it is held. A Lost host the provider
+  calls `terminated` is removed. A silent host that books nothing is drained and released after
+  `unknown_hold`; one that shows work is never released. Failing health
   or `Checking`: no launch, running hosts still released.
 
 ### 13.3 End to end (PR 9), in process, with fakes
