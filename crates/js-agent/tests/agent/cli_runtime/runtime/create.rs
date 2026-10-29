@@ -607,3 +607,24 @@ fn a_profile_directory_that_is_not_text_is_refused() {
     let said = js_agent::cli_runtime::install_profile(dir).unwrap_err();
     assert_eq!(said.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+/// Asserts that a profile directory whose path holds a comma is refused, by
+/// `install_profile` itself (nothing is written there) and by a create (the engine is
+/// never called): Docker splits a `--security-opt` value on commas, so the path would be
+/// read as a profile and an option of the job's host. It catches a profile named by a
+/// path that changes the meaning of the option.
+#[test]
+fn a_profile_directory_with_a_comma_is_refused() {
+    let root = Scratch::new("seccomp-comma");
+    let dir = root.path("a,b");
+    fs::create_dir(&dir).unwrap();
+    let said = js_agent::cli_runtime::install_profile(&dir).unwrap_err();
+    assert_eq!(said.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!dir.join(PROFILE_FILE).exists());
+
+    let world = docker();
+    let mut rt = open(&world).with_profile_dir(&dir);
+    let said = rt.create_and_start(&spec("r1")).err().unwrap().to_string();
+    assert!(said.starts_with("scratch: seccomp profile"), "{said}");
+    assert!(world.calls_of("create").is_empty());
+}
