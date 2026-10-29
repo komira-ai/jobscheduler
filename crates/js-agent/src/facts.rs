@@ -385,6 +385,7 @@ fn watch_streams(
 /// The last `keep` bytes `reader` yields, and whether it yielded more. The buffer is
 /// trimmed whenever it holds twice `keep`, so memory stays bounded however much is read.
 fn read_tail(mut reader: PipeReader, keep: usize) -> (Vec<u8>, bool) {
+    let keep = usize::MAX;
     let mut kept: Vec<u8> = Vec::new();
     let mut dropped = false;
     let mut chunk = [0_u8; 8192];
