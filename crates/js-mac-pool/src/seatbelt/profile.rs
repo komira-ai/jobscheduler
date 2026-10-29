@@ -87,6 +87,7 @@ impl Profile {
         let mut lines: Vec<String> = Vec::new();
         let mut params: Vec<(String, String)> = Vec::new();
         push_all(&mut lines, &HEAD);
+        push_all(&mut lines, &FLOOR);
 
         let mut grant = String::from("(allow file-write* (subpath (param \"RUN\"))");
         params.push(("RUN".to_owned(), policy.run().as_str().to_owned()));
@@ -108,7 +109,6 @@ impl Profile {
 
         net_rules(policy, &mut lines);
         push_all(&mut lines, &PROCESS_INFO);
-        push_all(&mut lines, &FLOOR);
 
         let mut text = lines.join("\n");
         text.push('\n');
