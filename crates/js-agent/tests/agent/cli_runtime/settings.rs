@@ -511,14 +511,18 @@ fn container_flags_are_checked_when_the_agent_starts() {
             "{err}"
         );
 
-        let (status, err, sent) = start(&["--container-bin", exec, "--container-subuid", "jobmap"]);
-        assert_eq!(
-            status,
-            code(2),
-            "the default user is not the agent's: {err}"
-        );
-        assert!(err.contains("--container-user: must be"), "{err}");
-        assert_eq!(sent, 0);
+        // The default base is 1000:1000: an agent that is that user takes it.
+        if (uid, gid) != (1000, 1000) {
+            let (status, err, sent) =
+                start(&["--container-bin", exec, "--container-subuid", "jobmap"]);
+            assert_eq!(
+                status,
+                code(2),
+                "the default user is not the agent's: {err}"
+            );
+            assert!(err.contains("--container-user: must be"), "{err}");
+            assert_eq!(sent, 0);
+        }
     }
 
     let cases: [(&[&str], &str); 13] = [

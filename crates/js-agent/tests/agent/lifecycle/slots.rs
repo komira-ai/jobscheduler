@@ -1,7 +1,7 @@
 //! The slots: every run holds one slot, a slot has one container user, and a slot is given
 //! to a new run only after the cleanup of its last run passed.
 
-use js_agent::lifecycle::{CheckFinding, SLOTS, Slots, label};
+use js_agent::lifecycle::{CheckFinding, Lifecycle, SLOTS, Slots, label};
 
 use super::{Harness, Options, job, names};
 
@@ -142,21 +142,46 @@ fn adopted_runs_keep_their_slots() {
     h.fake.leak(&labelled("big", Some(&too_big)), 0);
     h.fake.leak(&labelled("twice", Some("1")), 0);
     h.fake.leak(&labelled("legacy", None), 0);
-    let events = names(&h.restart().unwrap());
+    h.fake.leak(&labelled("legacy-bad", None), 0);
+    // A restart whose checks find a leftover after `legacy-bad`.
+    let findings = [(
+        "legacy-bad",
+        CheckFinding::residue("process-as-job-user", "pid 41 of user 232072"),
+    )];
+    let scratch = h.dir.path("scratch");
+    let checks = super::hook(&h.log, &h.fake, &scratch, &findings);
+    let (life, events) = Lifecycle::adopt(
+        h.config.clone(),
+        Box::new(h.fake.clone()),
+        checks,
+        Box::new(h.clock.clone()),
+    )
+    .unwrap();
+    h.life = life;
     assert_eq!(
-        events,
+        names(&events),
         [
             "adopted good",
             "finding - unadoptable-container",
             "finding - unadoptable-container",
             "finding - unadoptable-container",
             "adopted legacy",
+            "adopted legacy-bad",
         ]
     );
-    assert_eq!(h.held(), ["good", "legacy"]);
-    assert_eq!(h.life.busy_slots(), [1], "the legacy run holds no slot");
+    assert_eq!(h.held(), ["good", "legacy", "legacy-bad"]);
+    assert_eq!(h.life.busy_slots(), [1], "the legacy runs hold no slot");
     h.start(job("r1"));
     assert_eq!(created_slots(&h), [0]);
+
+    h.fake.exit("legacy", 0);
+    h.fake.exit("legacy-bad", 0);
+    h.life.step();
+    assert_eq!(h.life.busy_slots(), [0, 1], "a run with no slot frees none");
+    assert!(
+        h.life.quarantined_slots().is_empty(),
+        "and quarantines none"
+    );
 }
 
 /// Asserts that a container the agent cannot remove after a restart, whose labels name a
@@ -174,12 +199,20 @@ fn a_container_that_cannot_be_removed_quarantines_its_slot() {
         })
         .collect();
     h.fake.leak(&broken, 0);
+    h.fake.leak(&labelled("r1", Some("1")), 0);
     h.fake.fail("remove", 1);
     h.restart().unwrap();
     assert_eq!(h.life.quarantined_slots(), [3]);
+    assert_eq!(h.life.busy_slots(), [1]);
+    h.fake.exit("r1", 0);
     h.life.step();
-    assert!(h.fake.existing().is_empty(), "removed on the step");
-    assert_eq!(h.life.quarantined_slots(), [3]);
+    assert!(h.life.busy_slots().is_empty(), "r1's own cleanup passed");
+    assert_eq!(h.fake.existing(), Vec::<String>::new(), "both are gone");
+    assert_eq!(
+        h.life.quarantined_slots(),
+        [3],
+        "the stuck one never frees its slot"
+    );
 }
 
 /// Asserts the slot table by itself: the lowest free slot first, none beyond the count, a

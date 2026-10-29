@@ -143,8 +143,9 @@ fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<S
 /// gain, the network the agent was configured with (none by default), a read-only root
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
 /// files, and limited in size: Podman does not default to `noexec`), no core dumps, a
-/// private IPC namespace against a daemon whose default is to share it, the pull policy
-/// the agent was configured with (never by default), and a user that is not root. For
+/// private IPC namespace against a daemon whose default is to share it, and the pull policy
+/// the agent was configured with (never by default). The user is not here: it is the run's
+/// slot's (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
@@ -173,16 +174,14 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     if engine == Engine::Podman {
         args.extend(["--pid", "private"].map(str::to_owned));
     }
-    args.extend(
-        [
-            "--pull",
-            settings.pull().as_str(),
-            "--user",
-            settings.user(),
-        ]
-        .map(str::to_owned),
-    );
+    args.extend(["--pull", settings.pull().as_str()].map(str::to_owned));
     args
+}
+
+/// The user of a run: `--user <uid>:<gid>` of its slot, one for each slot (see
+/// [`Settings::slot_user`]), so two runs held at once never share a user.
+pub(super) fn user_args(settings: &Settings, slot: u32) -> Vec<String> {
+    vec!["--user".to_owned(), settings.slot_user(slot)]
 }
 
 /// One `--label key=value` for each label, in key order.

@@ -115,6 +115,15 @@
 //!   says). The scheduler reruns a lease the agent no longer reports.
 //! - **A `Stop` or `Cancel` of a run the agent does not hold retires the run id on
 //!   purpose**, so that a `Start` that arrives after it never runs.
+//! - **Each run has a slot, and each slot a user of its own.** A run in slot `k` (the lowest
+//!   free one, from 0) runs as the base of `--container-user` plus `k`, so runs held at once
+//!   never share a host uid. A slot is free again only when the cleanup of its last run
+//!   passed (container and scratch gone, the post-job check clean); when the check finds
+//!   something, or a container cannot be removed, the slot is quarantined and takes no run
+//!   for as long as the agent lives (the host is tainted then, and refuses starts, as
+//!   before). A restart reads a run's slot from its container's label; a container
+//!   without the label (an earlier agent made it) is taken over holding no slot, so its
+//!   uid is not protected. See [`Slots`].
 //! - **Cgroup emptiness is not checked.** A container is removed, and nothing reads its
 //!   control group to see that no process of the job is left in it.
 //! - **A user-namespace remapping engine is not supported.** The container user would be
