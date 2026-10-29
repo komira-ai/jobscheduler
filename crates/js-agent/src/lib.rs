@@ -214,7 +214,7 @@ pub use credential::{CREDENTIAL_FILE, CREDENTIAL_TEMP_FILE, CredentialFile, Cred
 pub use exclusive::{PREPARE_TIMEOUT, Quiesce};
 pub use facts::{
     APPLE_GPU_CLASS, CommandRunner, Detected, FileReader, Gpus, PROBE_LIMIT, PROBE_OUTPUT_CAP,
-    Platform, Ran, SystemCommands, SystemFiles, detect, host_id, machine_id,
+    Platform, Ran, Streams, SystemCommands, SystemFiles, detect, host_id, machine_id,
 };
 pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
