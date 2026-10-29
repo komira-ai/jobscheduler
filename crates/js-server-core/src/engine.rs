@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Request, Requeue,
-    Scheduler,
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, MemoryPercent, OpState, Request,
+    Requeue, Scheduler,
 };
 use js_store::Rows;
 use js_types::sched::{
@@ -141,7 +141,8 @@ pub(crate) struct Lowering {
 impl Engine {
     /// An engine over a new scheduler, whose writer takes everything.
     pub(crate) fn new(config: &Config) -> Self {
-        let mut sched = Scheduler::new(config.term);
+        let mut sched = Scheduler::new(config.term)
+            .with_memory_percent(MemoryPercent::clamped(config.memory_schedulable_percent));
         if let Some(load) = config.load {
             sched = sched.with_load_config(load);
         }
@@ -400,9 +401,10 @@ impl Engine {
     /// queued operations it did not enqueue.
     fn runnable_elsewhere(&self, operation: OperationId) -> bool {
         self.sched.request(operation).is_some_and(|request| {
+            let percent = self.sched.memory_percent();
             self.remote
                 .iter()
-                .any(|(caps, capacity)| request.runnable_on(caps, capacity))
+                .any(|(caps, capacity)| percent.runnable_on(request, caps, capacity))
         })
     }
 

@@ -28,6 +28,7 @@ mod marks;
 mod provider_side;
 mod start;
 
+use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use marks::Busy;
 
@@ -60,6 +61,10 @@ pub struct HostView {
     /// The memory the pool lists for the host, the percent of it that is booked and what
     /// that comes to (the memory of `shape`).
     pub memory: MemoryHeadroom,
+    /// The shape the host announced at its last hello, which the registry checked against
+    /// the pool's floor; `None` for a host that has not said hello since a restart. A
+    /// scaler compares it with the machine it launched.
+    pub claim: Option<Shape>,
     /// The labels the host announced.
     pub labels: BTreeMap<String, String>,
     /// The agent version the host announced, once it has.
@@ -142,6 +147,8 @@ struct Record {
     /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
     /// session and is held in memory only.
     leaving: Option<marks::Leaving>,
+    /// The shape the host announced at its last hello.
+    claim: Option<Shape>,
 }
 
 impl Record {
@@ -164,6 +171,7 @@ impl Record {
             exclusive: Exclusive::Free,
             bound: None,
             leaving: None,
+            claim: None,
         }
     }
 
@@ -229,6 +237,9 @@ struct State {
     marks: Marks,
     /// Whether a request that finds no host could be served by a launch.
     launchable: Option<Launchable>,
+    /// Hosts that are being given back and are to be marked releasing from their first
+    /// hello, whether or not the registry holds them yet ([`Registry::mark_ending`]).
+    ending: BTreeSet<HostId>,
 }
 
 impl State {
@@ -310,6 +321,7 @@ impl Registry {
             waiting: WaitList::default(),
             marks: Marks::default(),
             launchable: None,
+            ending: BTreeSet::new(),
         };
         Self {
             shared: Arc::new(Shared {
@@ -544,6 +556,10 @@ impl Registry {
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let kept_bound = known.and_then(|record| record.bound);
         let kept_leaving = known.and_then(|record| record.leaving);
+        let kept_leaving = match state.ending.contains(&host) {
+            true => Some(marks::Leaving::Releasing),
+            false => kept_leaving,
+        };
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -562,9 +578,9 @@ impl Registry {
             let contract = HostContract::new(exec, floor.resources().gpus() > 0);
             contract.check(&hello.capabilities)?;
         }
-        let offers_floor = hello
-            .to_shape()
-            .ok()
+        let claim = hello.to_shape().ok();
+        let offers_floor = claim
+            .as_ref()
             .is_some_and(|claim| claim.satisfies(floor.resources(), floor.capabilities()));
         if !offers_floor {
             return Err(Refusal::ShapeNotAccepted);
@@ -602,6 +618,7 @@ impl Registry {
                 exclusive: kept_exclusive,
                 bound: kept_bound,
                 leaving: kept_leaving,
+                claim,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -892,6 +909,19 @@ impl Registry {
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
+        self.host_views(&state, now)
+    }
+
+    /// The hosts ([`Registry::hosts`]) and the wait list ([`Registry::waiting`]) as of one
+    /// moment, read under one lock: a request is not shown as reserved on a host that the
+    /// hosts do not show as set aside, nor the other way round.
+    pub fn snapshot(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
+        (self.host_views(&state, now), waiting_rows(&state))
+    }
+
+    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let booked = state.book.booked();
         let shape = self.shared.config.booked();
         let memory = self.shared.config.memory_headroom();
@@ -904,6 +934,7 @@ impl Registry {
             lease: booked.get(id).copied(),
             shape: shape.clone(),
             memory,
+            claim: record.claim.clone(),
             labels: record.labels.clone(),
             agent_version: record.agent_version.clone(),
             epoch: record.epoch,

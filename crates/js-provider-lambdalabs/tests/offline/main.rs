@@ -8,6 +8,7 @@ mod fake;
 mod host_prep;
 mod inputs;
 mod key;
+mod kind;
 mod lagging;
 mod model;
 mod options;
