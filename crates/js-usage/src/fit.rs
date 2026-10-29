@@ -289,22 +289,53 @@ mod tests {
         assert_eq!(f.points.len(), 5);
     }
 
+    /// A 15-minute run whose first three minutes were never recorded: `first` at minute 3,
+    /// `later` from minute 4 on. Three missing minutes of 15 is the most a run may lack (a
+    /// fifth) and still be admitted.
+    fn run_from_minute_3(first: u32, later: u32) -> RunSeries {
+        let mut v = vec![(later, 6); 15];
+        v[3] = (first, 4);
+        let mut s = series(&v);
+        s.minutes.retain(|m| m.minute >= 3);
+        s
+    }
+
     /// Catches: a curve that starts at 0 cores when the first clean value comes after the
-    /// dilation reach: minutes 0 to 2 are recorded by no clean run (a pressured run reached
-    /// them), so the start is the first clean value, not the default. Three missing minutes
-    /// of 15 is the most a run may lack (a fifth) and still be admitted.
+    /// dilation reach, and a start seeded from the last clean value instead of the first.
+    /// Minutes 0 to 2 are recorded by no clean run (a pressured run reached them). The clean
+    /// runs have 400 at minute 3 and 600 from minute 4. The raw start is 400 (the first
+    /// clean value) at minutes 0 to 3, then 600. Dilation of 2 each side: minutes 0 and 1
+    /// see raw minutes up to 2 and 3, all 400; minute 2 sees raw minute 4, which is 600; from
+    /// there on 600. Seeded from the last value (600) minute 0 would be 600; unseeded, 0.
     #[test]
     fn a_start_no_clean_run_recorded_takes_the_first_clean_value() {
         let mut ring = Ring::new();
         for _ in 0..3 {
-            let mut s = series(&[(400, 4); 15]);
-            s.minutes.retain(|m| m.minute >= 3);
-            ring.push(&s);
+            ring.push(&run_from_minute_3(400, 600));
         }
         ring.push(&pressured(&[(900, 9); 15]));
         let f = fit(&ring).unwrap();
         assert_eq!(f.points.len(), 15);
-        assert_eq!(cores(&f), vec![400; 15]);
+        let mut want = vec![400, 400];
+        want.extend([600; 13]);
+        assert_eq!(cores(&f), want);
+    }
+
+    /// Catches: the first-clean-value start applying only beside pressured runs. With no
+    /// pressured run at all, clean runs whose first minutes were never recorded start at
+    /// their first clean value (300 at minute 3, 500 from minute 4), not at 0: the same
+    /// dilation arithmetic gives 300, 300, then 500 for the other 13 minutes.
+    #[test]
+    fn clean_runs_that_never_recorded_their_first_minutes_start_at_the_first_clean_value() {
+        let mut ring = Ring::new();
+        for _ in 0..3 {
+            ring.push(&run_from_minute_3(300, 500));
+        }
+        let f = fit(&ring).unwrap();
+        assert_eq!(f.runs, 3);
+        let mut want = vec![300, 300];
+        want.extend([500; 13]);
+        assert_eq!(cores(&f), want);
     }
 
     /// Catches: the life being a mean or a floor P90, and a life under a minute.
