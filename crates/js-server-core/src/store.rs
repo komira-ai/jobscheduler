@@ -214,6 +214,7 @@ impl Engine {
         let none = self.sched.apply(Input::new(now, Event::Tick));
         debug_assert!(none.is_empty(), "a tick of an empty scheduler: {none:?}");
         let mut keyed = Vec::new();
+        let mut walled = Vec::new();
         let mut costed = Vec::new();
         let mut recovered: Vec<Recovered> = Vec::new();
         for op in stored
@@ -225,6 +226,9 @@ impl Engine {
                 keyed.push((op.operation, size_key));
             }
             let operation = op.operation;
+            if let Some(wall) = op.max_wall {
+                walled.push((operation, wall));
+            }
             let prediction = Self::predict_stored(a, &op);
             recovered.push(self.take_stored(a, op));
             if let Some(prediction) = prediction {
@@ -242,6 +246,11 @@ impl Engine {
         // queued after it; a recovered lease keeps the request the store holds.
         for (operation, size_key) in keyed {
             self.sched.set_size_key(operation, size_key);
+        }
+        // The longest each operation may run, from its row, before the first placement round:
+        // the whole-node drain order and deadlines read it.
+        for (operation, wall) in walled {
+            let _ = (operation, wall);
         }
         for (operation, prediction) in costed {
             self.sched.set_cost(operation, prediction);
@@ -291,7 +300,7 @@ impl Engine {
     /// Takes `op`, which the store holds and the scheduler neither holds nor has finished
     /// (the caller checked), into the scheduler.
     pub(crate) fn take_in_stored(&mut self, a: &mut dyn Adapter, op: StoredOperation) {
-        let (operation, size_key) = (op.operation, op.size_key);
+        let (operation, size_key, max_wall) = (op.operation, op.size_key, op.max_wall);
         let prediction = Self::predict_stored(a, &op);
         let recovered = self.take_stored(a, op);
         // The operation is neither in the scheduler nor finished, so `take_in` has nothing
@@ -301,6 +310,10 @@ impl Engine {
         // The key its `opkey/` row names (none unless size keys are read).
         if let Some(size_key) = size_key {
             self.sched.set_size_key(operation, size_key);
+        }
+        // The longest it may run, which its `opwall/` row names (whatever the settings).
+        if let Some(wall) = max_wall {
+            let _ = (operation, wall);
         }
         if let Some(prediction) = prediction {
             self.sched.set_cost(operation, prediction);
@@ -542,6 +555,7 @@ impl Engine {
         request: &Request,
         parcel: &[u8],
         size_key: Option<u64>,
+        max_wall: Option<Duration>,
         now: FarmTime,
     ) -> Result<Held, NotQueued> {
         if self.rows.is_none() || self.sched.twin(request).is_some() {
@@ -553,7 +567,7 @@ impl Engine {
             // The id comes from the block this frontend reserved: the operation's row is
             // put under an id no other frontend takes.
             let id = rows.reserve_operation(wanted)?;
-            submitted = Some(rows.submit(id, request, parcel, size_key)?);
+            submitted = Some(rows.submit_walled(id, request, parcel, size_key, max_wall)?);
             Ok(())
         });
         if attempt != Attempt::Taken {
