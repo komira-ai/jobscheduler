@@ -469,6 +469,11 @@ pub struct BootPayload(Secret);
 
 pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal), Unknown,
     Deferred { wait: Duration } }                                  // unchanged; Deferred = nothing sent
+/// `Deferred` means no call went out: the provider sent nothing to the cloud, so nothing can
+/// exist for the acquire id. The one case where an earlier launch of the same acquire id
+/// may have landed is an unresolved call (an earlier call got no answer). A provider in that
+/// case may answer `Deferred` for the retry, and then reports the acquire id as unresolved
+/// (`PoolInput::unresolved`, 6.1) until a call for it is answered.
 pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   // unchanged
 
 pub trait ElasticProvider: Send + Sync {
@@ -624,7 +629,8 @@ pub struct Input { pub scheduler: SchedulerId /* names the hosts it launches */,
     pub not_found: Vec<String> /* machines a read by id found the provider no longer has */,
     pub entropy: Vec<[u8; 16]> /* random values for this step's acquire ids; never repeated */ }
 pub struct PoolInput { pub settings: Settings, pub health: Health, pub offers: Vec<Offer>,
-    pub held: Option<Vec<Held>> /* None if list failed */ }
+    pub held: Option<Vec<Held>> /* None if list failed */,
+    pub unresolved: Vec<AcquireId> /* acquire ids the provider holds an unresolved call for */ }
 pub struct State { pub records: Records /* the only part written to disk */, /* and what the last step found:
     blocked, plan, no_offer, refused, silent, silent_released, ... */ }
 pub enum Action { Save(Box<Records>) /* the whole records, written first when a step changed them */,
@@ -739,6 +745,15 @@ Rules, each tied to a requirement or to existing behaviour:
   no waiting request is matched to it any more (the request went away, or a host covers it), the
   record is forgotten and its token revoked; in a pool that only plans it would otherwise stay
   counted for good.
+  `Deferred` holds only while no call went out. If the provider holds an unresolved call for
+  the record's acquire id (an earlier launch of it got no answer and may have landed; the
+  Lambda provider's answer for an acquire with an open call is of this kind), the shell lists
+  that id in `PoolInput::unresolved`, and the step keeps the Planned record even when no
+  request waits for it: it stays counted, and its retry (the same acquire id) settles the
+  call, after which the machine is Booting and is released at `boot_timeout` if nobody
+  wanted it. The shell's duty is to keep that list true for as long as the provider holds the
+  call; dropping the record while it does would leave the machine to turn up as an orphan,
+  which is never released (6.4).
 - Booting to Registered: the first hello whose `instance.instance_id` equals the name is
   admitted by the registry. The hello's shape is compared with the offer. A host that
   reports less than its offer (cpu, memory, gpus, gpu class) is admitted but condemned: the

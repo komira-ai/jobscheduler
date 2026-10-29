@@ -198,6 +198,43 @@ fn a_planned_launch_no_request_waits_for_is_forgotten() {
     }
 }
 
+/// Asserts that a launch the provider told to wait is kept, with no request waiting, while
+/// the provider holds an unresolved call for its acquire id (an earlier call of it may have
+/// landed): nothing is revoked or forgotten, it still counts, and its retry goes out with
+/// the same acquire id when its time comes. A call for another acquire id keeps nothing.
+#[test]
+fn a_planned_launch_with_an_unresolved_call_is_kept_and_retried() {
+    let (mut rig, plan) = launched(settings("gpu"));
+    rig.input.acquired = vec![answered(&plan, deferred(10))];
+    rig.tick(at(SECOND));
+    rig.input.waiting = Vec::new();
+    rig.pool().unresolved = vec![plan.acquire.clone()];
+
+    assert!(rig.tick(at(2 * SECOND)).is_empty());
+    assert_eq!(rig.phase(0), Phase::Planned);
+    assert_eq!(rig.state.records.instances.len(), 1);
+
+    let retried = acquires(&rig.tick(at(20 * SECOND)));
+    assert_eq!(retried.len(), 1);
+    assert_eq!(retried[0].acquire, plan.acquire);
+    assert_eq!(rig.phase(0), Phase::Launching);
+}
+
+/// Asserts that a call the provider holds unresolved for some other acquire id keeps no
+/// launch that waits for nobody.
+#[test]
+fn a_planned_launch_is_forgotten_when_the_unresolved_call_is_another_acquire() {
+    let (mut rig, plan) = launched(settings("gpu"));
+    rig.input.acquired = vec![answered(&plan, deferred(10))];
+    rig.tick(at(SECOND));
+    rig.input.waiting = Vec::new();
+    rig.pool().unresolved = vec![js_elastic::AcquireId::new("another-1").unwrap()];
+
+    let actions = rig.tick(at(2 * SECOND));
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+    assert!(rig.state.records.instances.is_empty());
+}
+
 /// Asserts that a launch the provider told to wait is kept while a request that fits waits
 /// for it, and forgotten once a free host covers that request instead.
 #[test]

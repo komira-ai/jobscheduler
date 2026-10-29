@@ -120,14 +120,35 @@ impl Pass<'_> {
     /// no waiting request was matched to them. Nothing was sent for one, so its token is
     /// revoked and its network key forgotten and the record simply goes; kept, it would be
     /// retried at its time and launch a machine for nobody, or, in a pool that does not
-    /// launch, stay counted for good. Runs once every request has been matched, before any
-    /// record is added or removed, so the positions in `claims` still hold.
+    /// launch, stay counted for good.
+    ///
+    /// A record whose acquire id the provider holds an unresolved call for
+    /// ([`PoolInput::unresolved`]) is kept even when nobody waits for it: an earlier call
+    /// of the same acquire may have landed, so a machine may exist, and the retry at the
+    /// record's time (the same acquire id, which the provider answers for what it
+    /// launched) is what settles it. Dropped, the machine would show up later as an orphan.
+    ///
+    /// Runs once every request has been matched, before any record is added or removed, so
+    /// the positions in `claims` still hold.
     pub(crate) fn drop_unwanted(&mut self, claims: &Claims) {
         let unwanted: Vec<usize> = (0..self.records.instances.len())
             .filter(|i| {
+                let record = &self.records.instances[*i];
+                let unresolved = self.input.pools.iter().any(|pool| {
+                    [
+                        pool.settings.pool == record.pool,
+                        record
+                            .acquire
+                            .iter()
+                            .any(|acquire| pool.unresolved.contains(acquire)),
+                    ]
+                    .into_iter()
+                    .all(|ok| ok)
+                });
                 [
-                    self.records.instances[*i].phase == Phase::Planned,
+                    record.phase == Phase::Planned,
                     !claims.records.contains(i),
+                    !unresolved,
                 ]
                 .into_iter()
                 .all(|ok| ok)

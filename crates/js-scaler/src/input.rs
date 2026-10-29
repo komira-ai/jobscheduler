@@ -90,6 +90,12 @@ pub struct PoolInput {
     /// The machines the provider lists. `None` when the list failed: that is never read as
     /// an empty list.
     pub held: Option<Vec<Held>>,
+    /// The acquire ids the provider holds an unresolved call for: an earlier call of the
+    /// acquire got no answer and may have landed (a provider that answers `Deferred` for
+    /// such an acquire does so with this set). The shell fills it from the provider; a
+    /// `Planned` record with one of these ids is kept when no request waits for it, so its
+    /// retry settles the call instead of leaving a machine nobody counts.
+    pub unresolved: Vec<AcquireId>,
 }
 
 /// The provider's answer to an acquire the caller ran for an earlier step.

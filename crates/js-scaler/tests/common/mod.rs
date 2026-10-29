@@ -93,6 +93,7 @@ pub fn pool(settings: Settings) -> PoolInput {
         health: Health::Available,
         offers: vec![offer("a10", 60)],
         held: Some(Vec::new()),
+        unresolved: Vec::new(),
     }
 }
 
