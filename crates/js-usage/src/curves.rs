@@ -135,6 +135,7 @@ mod tests {
                 cores_milli: cores,
                 working_set_bytes: 5,
             }],
+            cores_learned: true,
             runs: 4,
             wall_minutes_p90: life,
         }
@@ -157,6 +158,21 @@ mod tests {
         );
         assert!(c.curve(&wk("c", "A B")).is_none(), "not a profile key");
         assert_eq!(c.wall_minutes_p90(&wk("c", "b")), None);
+    }
+
+    /// Catches: the memory-only mark of a fit lost on the way to admission, which would
+    /// charge the zero cores of a key whose cores were never learned.
+    #[test]
+    fn a_fit_without_cores_is_served_as_a_memory_only_curve() {
+        let c = curves();
+        c.put(&pk("a"), 10, Some(&fit(700, 3)));
+        assert!(c.curve(&wk("c", "a")).unwrap().cores_known());
+        let mut f = fit(0, 3);
+        f.cores_learned = false;
+        c.put(&pk("a"), 10, Some(&f));
+        let got = c.curve(&wk("c", "a")).unwrap();
+        assert!(!got.cores_known());
+        assert_eq!(got.points()[0].working_set_bytes, 5);
     }
 
     /// Catches: staleness `>=` vs `>` (idle exactly 60 days is still fresh, 61 is not), a
