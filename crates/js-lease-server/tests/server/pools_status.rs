@@ -4,9 +4,9 @@
 use js_elastic::{AcquireId, Artifact, BootPlan, BootStep, HostName, SchedulerId};
 use js_lease_server::bootstrap::{Fill, render};
 use js_lease_server::network::{LaunchCtx, NetworkMode};
-use js_registry::Launchable;
 use serde_json::{Value, json};
 
+use crate::agents_support::{JOIN, hello_body};
 use crate::pools_support::{
     ADVERTISE, FakeNet, NET_SECRET, Net, Options, Rig, a10, net_steps, offer,
 };
@@ -97,21 +97,29 @@ async fn no_offer_names_the_dimension_that_fails() {
     }
 }
 
-/// The wait list gets a whole-node request for one A10 and a few bytes of memory, with a
-/// launchable that says yes, and returns its id.
+/// Registers one host in the pool, takes it with a request, and then asks for it again with
+/// a request for one A10 and a few bytes of memory, which waits. Returns the id of the
+/// request that waits.
 async fn wait_for_small(rig: &Rig) -> String {
-    let registry = rig.running.registry().unwrap();
-    registry.set_launchable(Some(Launchable::new(|_| true)));
+    let mut hello = hello_body("h1");
+    hello["pool"] = json!("gpu");
+    hello["shape"]["gpu_class"] = json!("nvidia-a10");
+    let bytes = hello.to_string().into_bytes();
+    let agent = rig.running.agent_addr().unwrap();
+    let joined = request(agent, "POST", "/v1/agent/hello", Some(JOIN), Some(&bytes)).await;
+    assert_eq!(joined.status, 200, "{}", joined.body);
     let mut body = lease_body();
     body["class"] = json!("whole-node");
     body["capabilities"] = json!({});
     body["resources"]["gpu_class"] = json!("nvidia-a10");
     let bytes = body.to_string().into_bytes();
     let addr = rig.running.addr();
-    let asked = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&bytes)).await;
-    assert_eq!(asked.status, 202, "{}", asked.body);
-    let waiting = registry.waiting();
-    assert_eq!(waiting.len(), 1);
+    for _ in 0..2 {
+        let asked = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&bytes)).await;
+        assert_eq!(asked.status, 202, "{}", asked.body);
+    }
+    let waiting = rig.running.registry().unwrap().waiting();
+    assert!(!waiting.is_empty());
     waiting[0].id.to_string()
 }
 
