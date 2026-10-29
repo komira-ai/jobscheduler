@@ -33,6 +33,8 @@ impl LayerEncoding {
         match media_type {
             LAYER_TAR_ZSTD => Some(LayerEncoding::TarZstd),
             LAYER_TAR => Some(LayerEncoding::Tar),
+            "application/vnd.oci.image.layer.v1.tar+zstd" => Some(LayerEncoding::TarZstd),
+            "application/vnd.oci.image.layer.v1.tar" => Some(LayerEncoding::Tar),
             _ => None,
         }
     }
