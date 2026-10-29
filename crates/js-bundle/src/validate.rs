@@ -181,7 +181,11 @@ fn check_env(config: &BundleConfig, trees: &BTreeSet<&TreeName>) -> Result<(), C
         for (position, value) in rule.values.iter().enumerate() {
             let field = format!("{at}.values[{position}]");
             declared(&field, value, trees)?;
-            if joined && value.as_str().contains(':') {
+            let colon = value
+                .segments()
+                .iter()
+                .any(|segment| matches!(segment, Segment::Lit(lit) if lit.contains(':')));
+            if joined && colon {
                 return Err(bad(
                     field,
                     Defect::Malformed {
