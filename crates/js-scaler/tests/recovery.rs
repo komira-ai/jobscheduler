@@ -109,8 +109,9 @@ fn an_unresolved_acquire_fails_after_the_hold_counted_from_the_answer() {
 
 /// Asserts that a machine listed after its acquire failed is released and never
 /// uncounted until a read by id says it is gone: its token is revoked on the way into
-/// release too (a restart may have lost the revoke made when it failed), it holds the cap of one machine throughout, and the request gets a machine only once
-/// it is confirmed gone.
+/// release too (a restart may have lost the revoke made when it failed; a second revoke
+/// of a missing token is a no-op), it holds the cap of one machine throughout, and the
+/// request gets a machine only once it is confirmed gone.
 #[test]
 fn a_machine_listed_after_failing_is_released_and_stays_counted() {
     let (mut rig, plan) = launched(one_machine(settings("gpu")));

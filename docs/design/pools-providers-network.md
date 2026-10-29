@@ -973,7 +973,12 @@ launch, not as an option:
 - Failure case: the `Welcome` is lost on the wire after the registry retired the token. The
   host cannot re-register; the registry shows the host (its hello was admitted) and it never heartbeats, so the scaler releases it at `boot_timeout`
   from the launch (`heard_since_hello`, 6.2 Lost), not at `unknown_hold`.
-  Tested in 13.3.
+  The exception is a host that was seen live and heard from on an earlier step
+  (`Record::seen_live`, kept in the records): a long-running host whose agent restarts and
+  says hello again reads `heard_since_hello` false until its next heartbeat, is not a lost
+  Welcome, and keeps the `unknown_hold` rules. Tested in 13.2 (`js-scaler`: the rule at
+  `boot_timeout` to the millisecond, the re-hello exception, a draining record); the
+  registry, agent and wire halves are not tested there.
 - The Welcome that can carry the credential is sent with `Cache-Control: no-store` and
   `Pragma: no-cache`.
 - An agent that is given no `--token-file` uses the `host-credential` file of its `--state-root`
@@ -1381,10 +1386,14 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `release_host`; (d) a run started by a lease booked before the mark. In every order either the work
   runs and the host is kept, or the host is released and the work is refused.
 - Release: `Revoke` precedes `Release` and follows `ReleaseHost`; `Released::Unknown` retries every
-  tick and never removes; `Gone` removes and revokes once. Booting past `boot_timeout` is released and
-  starts `boot_fail_cooldown`; on an incomplete registry view it is held. A Lost host the provider
-  calls `terminated` is removed. A silent host that books nothing is drained and released after
-  `unknown_hold`; one that shows work is never released. Failing health
+  tick and never removes; `Gone` removes and revokes. A `Failed` record was revoked when it failed
+  and may be revoked again on entering release; that is harmless, for revoking a missing token is a
+  no-op. Booting past `boot_timeout` is released and starts `boot_fail_cooldown`; on an incomplete
+  registry view it is held. A registered host that said hello, was never heard from since and was
+  never seen live and heard from, and books nothing (a lost Welcome), is released at `boot_timeout`
+  from the launch with the same cooldown, not at `unknown_hold`. A Lost host the provider calls
+  `terminated` is removed. Any other silent host that books nothing is drained and released after
+  `unknown_hold` (so is a draining lost-Welcome one); one that shows work is never released. Failing health
   or `Checking`: no launch, running hosts still released.
 
 ### 13.3 End to end (PR 9), in process, with fakes

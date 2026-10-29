@@ -41,7 +41,9 @@
 //!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
 //!   mark is never released. A registered host never heard from since its hello
 //!   ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books nothing is a
-//!   failed boot, released at `boot_timeout` after its launch with the boot-failure cooldown.
+//!   failed boot, released at `boot_timeout` after its launch with the boot-failure cooldown,
+//!   unless it was seen live and heard from on an earlier step ([`Record::seen_live`]): a
+//!   host whose agent restarted and said hello again is not a lost Welcome.
 //!   Hosts the scaler did not launch are never released. One the
 //!   registry no longer shows is released too, but only on a complete registry view
 //!   ([`Input::registry_complete`], the shell's duty to vouch for) with the machine missing

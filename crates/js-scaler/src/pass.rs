@@ -119,8 +119,10 @@ impl<'a> Pass<'a> {
     }
 
     /// Starts the release of a machine: its join token is revoked, and from now on every
-    /// step asks the provider to release it. Each machine enters `Releasing` once, so
-    /// its token is revoked once.
+    /// step asks the provider to release it. Each machine enters `Releasing` once. A
+    /// `Failed` record was already revoked by `clean_up` when it failed, so it is revoked
+    /// again on entering `Releasing`: that is harmless, for revoking a name that has no
+    /// token is a no-op that succeeds, and it keeps a restart from losing the first revoke.
     fn start_release(&mut self, i: usize) -> bool {
         let moved = self.go(i, Phase::Releasing);
         let name = self.records.instances[i].name.clone();
@@ -422,7 +424,14 @@ impl<'a> Pass<'a> {
         for i in self.indices(&pool.settings.pool) {
             let record = &self.records.instances[i];
             let host = host_named(input, &record.name);
-            match (record.phase, host) {
+            let heard = host.is_some_and(|each| {
+                [each.state == HostState::Live, each.heard_since_hello]
+                    .into_iter()
+                    .all(|ok| ok)
+            });
+            let phase = record.phase;
+            self.records.instances[i].seen_live |= heard;
+            match (phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
                 (Phase::Booting, None) => self.on_boot_wait(pool, i),
                 (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
@@ -495,8 +504,19 @@ impl<'a> Pass<'a> {
     ///
     /// * a registered host that has not been heard from since its hello
     ///   ([`HostFacts::heard_since_hello`] false: its Welcome was lost, so it cannot
-    ///   heartbeat) is a failed boot: it is released `boot_timeout` after the launch and the
-    ///   boot-failure cooldown starts, as for a boot that never said hello;
+    ///   heartbeat) and was never seen live and heard from on any step
+    ///   ([`Record::seen_live`]) is a failed boot: it is released `boot_timeout` after the
+    ///   launch and the boot-failure cooldown starts, as for a boot that never said hello.
+    ///   A host that was heard from once booted, so a re-hello after an agent restart (the
+    ///   registry starts its heartbeat count over) does not make it a failed boot. The rule
+    ///   reads `busy`, the mark and the waiting requests, and not
+    ///   [`HostFacts::lease_given_up`]: it relies on `busy` reflecting the lease the
+    ///   registry booked on the host. For a silent host `lease_given_up` is true when the
+    ///   host holds no lease, which is what `!busy` already says, so reading it as well would
+    ///   add no case and would make the rule wait for the lease grace it is meant to skip;
+    ///   the unknown-hold rules below are what read it. A draining host is not caught by this
+    ///   rule: it falls back to those rules, which wait for `unknown_hold`, the safe
+    ///   direction;
     /// * the registry marks the host `Releasing` (it booked nothing when it did): the
     ///   machine is released and named in `silent_released` for the shell to log;
     /// * the registry's lease grace has given up the leases
@@ -525,6 +545,7 @@ impl<'a> Pass<'a> {
         let record = &self.records.instances[i];
         let failed_boot = [
             !host.heard_since_hello,
+            !record.seen_live,
             record.phase == Phase::Registered,
             self.now.since(record.launched_at) >= pool.settings.boot_timeout,
             idle,
