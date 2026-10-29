@@ -22,6 +22,7 @@ use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 
 use crate::adapt::SharedClock;
+use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{BootMode, Limits, TlsFiles, Token, parse_duration, parse_token};
@@ -192,9 +193,6 @@ pub(crate) struct Load<'a> {
     pub(crate) kinds: &'a Kinds,
     pub(crate) files: &'a dyn SecretFiles,
     pub(crate) clock: SharedClock,
-    /// The class a name stands for; a seam, so a test can offer a class no name stands
-    /// for today.
-    pub(crate) classes: fn(ClassId) -> ResourceClass,
 }
 
 /// One table of the file, and where it is, for the messages.
@@ -211,6 +209,14 @@ impl Section {
     /// A refusal of `key` of this table.
     fn fail(&self, key: &str, reason: &str) -> StartupError {
         StartupError::at(format!("{}{key}", self.head), reason)
+    }
+
+    /// Refuses a class that books part of a host: this server serves whole hosts only.
+    fn class_served(&self, class: &ResourceClass) -> Result<(), StartupError> {
+        match class.admission() {
+            Admission::Book(_) => Err(self.fail("class", MIXED_UNSERVED)),
+            _ => Ok(()),
+        }
     }
 
     /// Refuses the first field that is not one of `known`.
@@ -650,10 +656,8 @@ fn read_pool(
         Ok(class) => class,
         Err(_) => return Err(s.fail("class", "must be 1 to 63 characters of [a-z0-9._-]")),
     };
-    let class = (ld.classes)(class);
-    if matches!(class.admission(), Admission::Book(_)) {
-        return Err(s.fail("class", crate::agent_pool::MIXED_UNSERVED));
-    }
+    let class = shipped_class(class);
+    s.class_served(&class)?;
     let keys = ElasticKeys {
         exec: s.string("exec")?,
         max_instances: s.integer("max_instances")?,
@@ -867,67 +871,60 @@ fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan,
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
-    use js_lease::SystemClock;
-    use js_testkit::dir::TestDir;
     use js_types::Dims;
 
     use super::*;
-    use crate::kinds::OwnerOnlyFiles;
 
-    /// Asserts that a whole-node pool of no machines is refused naming the pool and
-    /// `class`, with the registry's own reason, and that a pool of machines is built. It
-    /// catches a dedicated pool whose settings are dropped when the registry refuses them.
-    #[test]
-    fn a_dedicated_pool_of_no_machines_is_refused_naming_the_class() {
-        let section = Section::open(toml::Table::new(), "pool \"x\": ".to_owned());
+    fn section() -> Section {
+        Section::open(toml::Table::new(), "pool \"x\": ".to_owned())
+    }
+
+    fn floor() -> Shape {
         let floor = Resources::new(1000, 1 << 30, 0, None).unwrap();
-        let shape = Shape::new(floor, BTreeMap::new());
+        Shape::new(floor, BTreeMap::new())
+    }
+
+    /// Asserts that a class that books part of a host is refused naming the pool and
+    /// `class`, with the reason the pool file of the flags gives, and that a class that
+    /// books whole hosts is served. No class a file can name books part of a host today,
+    /// so the check is tried on a class built here. It catches a mixed pool that is served
+    /// as if it booked whole hosts.
+    #[test]
+    fn a_class_that_books_part_of_a_host_is_refused() {
+        let mixed = ResourceClass::new(
+            ClassId::new("mixed").unwrap(),
+            Admission::Book(Dims::new()),
+            0,
+        );
+        let refused = section().class_served(&mixed).err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "pool \"x\": class: a mixed pool (a class that books part of a host) is not served by this server yet"
+        );
+        assert!(section().class_served(&ResourceClass::whole_node()).is_ok());
+        assert!(section().class_served(&ResourceClass::gpu_host()).is_ok());
+    }
+
+    /// Asserts how the registry's pool is built: a whole-node pool of no machines is
+    /// refused naming the pool and `class` with the registry's own reason; a whole-node
+    /// pool of machines gets the dedicated settings; a pool of another class gets none; and
+    /// the host contract is set when asked for and absent when not. It catches a dedicated
+    /// pool whose settings are dropped when the registry refuses them.
+    #[test]
+    fn the_registry_pool_takes_the_class_and_the_contract() {
         let id = ProviderId::new("x").unwrap();
         let whole = ResourceClass::whole_node();
-        let refused = registry_pool(&section, id.clone(), &whole, shape.clone(), 0, None);
+        let refused = registry_pool(&section(), id.clone(), &whole, floor(), 0, None);
         let said = refused.err().unwrap().to_string();
         assert!(said.starts_with("pool \"x\": class: "), "{said}");
         assert!(said.ends_with("must be at least 1"), "{said}");
-        let built = registry_pool(&section, id, &whole, shape, 2, None).unwrap();
+        let exec = Some(ExecMode::Container);
+        let built = registry_pool(&section(), id.clone(), &whole, floor(), 2, exec).unwrap();
         assert_eq!(built.whole_node().unwrap().max_whole_node, 2);
-    }
-
-    /// A class that books part of a host, which no name stands for today.
-    fn mixed(id: ClassId) -> ResourceClass {
-        ResourceClass::new(id, Admission::Book(Dims::new()), 0)
-    }
-
-    /// Asserts that a pool whose class books part of a host is refused naming the pool
-    /// and `class`, with the reason the pool file of the flags gives. No class a file can
-    /// name does this today, so the test offers one through the class seam. It catches a
-    /// mixed pool that is served as if it booked whole hosts.
-    #[test]
-    fn a_class_that_books_part_of_a_host_is_refused() {
-        let dir = TestDir::under(std::env::temp_dir(), "js-file-book");
-        let token = dir.path().join("token");
-        std::fs::write(&token, "t".repeat(40)).unwrap();
-        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let text = format!(
-            "[server]\nstate_file = \"s\"\nboot = \"resume\"\nclient_token_file = {:?}\n\
-             [[pool]]\nname = \"b\"\nclass = \"mixed\"\n\
-             provider = {{ kind = \"static\", hosts_file = \"/x\" }}\n",
-            token.display().to_string()
-        );
-        let path = dir.path().join("js.toml");
-        std::fs::write(&path, text).unwrap();
-        let kinds = Kinds::standard();
-        let load_with = Load {
-            kinds: &kinds,
-            files: &OwnerOnlyFiles,
-            clock: SharedClock::new(SystemClock),
-            classes: mixed,
-        };
-        let refused = load(&path, &load_with).err().unwrap();
-        assert_eq!(
-            refused.to_string(),
-            "pool \"b\": class: a mixed pool (a class that books part of a host) is not served by this server yet"
-        );
+        assert_eq!(built.exec(), exec);
+        let gpu = ResourceClass::gpu_host();
+        let plain = registry_pool(&section(), id, &gpu, floor(), 2, None).unwrap();
+        assert!(plain.whole_node().is_none());
+        assert_eq!(plain.exec(), None);
     }
 }

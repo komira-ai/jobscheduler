@@ -362,7 +362,6 @@ impl Config {
             kinds,
             files,
             clock,
-            classes: agent_pool::shipped_class,
         };
         let Loaded {
             server,
