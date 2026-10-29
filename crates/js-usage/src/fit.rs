@@ -400,7 +400,8 @@ mod tests {
             ring.push(&pressured(r));
         }
         let pressed = fit(&ring).unwrap();
-        assert!(clean.cores_learned && !pressed.cores_learned);
+        assert!(clean.cores_learned);
+        assert!(!pressed.cores_learned);
         assert_eq!(mem(&pressed), mem(&clean));
         assert_eq!(pressed.wall_minutes_p90, clean.wall_minutes_p90);
         assert_eq!(pressed.runs, clean.runs);
