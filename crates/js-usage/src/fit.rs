@@ -76,7 +76,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
             .collect();
         cores.sort_unstable();
         let working_set_bytes = ring
-            .runs()
+            .runs().filter(|r| !r.under_node_pressure())
             .filter_map(|r| r.buckets.get(t).copied().flatten())
             .map(|b| b.ws_bytes)
             .max()
