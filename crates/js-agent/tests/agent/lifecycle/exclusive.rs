@@ -50,7 +50,8 @@ fn ack_under(h: &mut Harness, run_id: &str) {
 
 fn prepare(h: &mut Harness) -> (Quiet, Vec<Event>) {
     let mut events = Vec::new();
-    (h.life.prepare(LEASE, &mut events), events)
+    let lease = h.life.exclusive().unwrap_or(LEASE).to_owned();
+    (h.life.prepare(&lease, &mut events), events)
 }
 
 fn restore(h: &mut Harness) -> (Restored, Vec<Event>) {

@@ -307,11 +307,13 @@ enum Order {
     Nudge,
     /// Answer on `0` once every order before this one is done and one step more is.
     Settle(SyncSender<()>),
-    /// Find out whether the host is quiet for `lease` (and run the readiness hook if there
-    /// is one), and publish the answer.
-    Prepare { lease: String },
-    /// Run the clean-up check of the lease that ended, and publish the answer.
-    Restore { lease: String },
+    /// Find out whether the host is quiet for the lease asked about last (the order names
+    /// none: see `Shared::asked_prepare`), run the readiness hook if there is one, and
+    /// publish the answer.
+    Prepare,
+    /// Run the clean-up check of the lease asked about last (`Shared::asked_restore`), and
+    /// publish the answer.
+    Restore,
 }
 
 /// What the worker found about a whole-node lease, each answer tagged with the lease it is
@@ -400,6 +402,11 @@ struct Shared {
     prepare_queued: AtomicBool,
     /// The same for a restore order.
     restore_queued: AtomicBool,
+    /// The lease the latest prepare question was about. The order carries none, so the one
+    /// that waits in the queue is always about the lease asked most recently.
+    asked_prepare: Mutex<Option<String>>,
+    /// The same for restore.
+    asked_restore: Mutex<Option<String>>,
     /// The worker thread has ended: it returned, or it panicked.
     ended: AtomicBool,
     /// When the order or step the worker is inside is due to be done, on the lifecycle's
@@ -737,7 +744,7 @@ fn work(
         let calls = life.held().len().saturating_mul(2).saturating_add(asked);
         // A readiness hook that takes its whole time is not a stuck worker.
         let hooked = match (&order, &hook) {
-            (Ok(Order::Prepare { .. }), Some(hook)) => hook.bound(),
+            (Ok(Order::Prepare), Some(hook)) => hook.bound(),
             _ => Duration::ZERO,
         };
         let bound = stall_bound(stop_grace, calls).saturating_add(hooked);
@@ -755,16 +762,22 @@ fn work(
                 lines.extend(describe(&life.apply_at(&reply, received_ms)));
             }
             Ok(Order::Settle(done)) => settle = Some(done),
-            Ok(Order::Prepare { lease }) => {
+            Ok(Order::Prepare) => {
                 shared.prepare_queued.store(false, Ordering::SeqCst);
+                let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
-                answers.prepare(&mut life, hook.as_ref(), lease, &mut events);
+                if let Some(lease) = asked {
+                    answers.prepare(&mut life, hook.as_ref(), lease, &mut events);
+                }
                 lines.extend(describe(&events));
             }
-            Ok(Order::Restore { lease }) => {
+            Ok(Order::Restore) => {
                 shared.restore_queued.store(false, Ordering::SeqCst);
+                let asked = take_asked(&shared.asked_restore);
                 let mut events = Vec::new();
-                answers.restore(&mut life, lease, &mut events);
+                if let Some(lease) = asked {
+                    answers.restore(&mut life, lease, &mut events);
+                }
                 lines.extend(describe(&events));
             }
             Ok(Order::Nudge) | Err(RecvTimeoutError::Timeout) => {}
@@ -789,7 +802,9 @@ fn work(
 /// heartbeat) and the answer is what the worker last published, if that is about the lease
 /// asked. Any other answer, or none yet, is busy, so an answer for one lease is never taken
 /// for another. A final answer is not asked for twice, and at most one question of each
-/// kind waits in the queue, so questions never crowd heartbeat replies out of it.
+/// kind waits in the queue, so questions never crowd heartbeat replies out of it. The order
+/// names no lease: the host records the lease of each question and the worker answers for
+/// the latest one, so a queued question is never about a lease that has been asked past.
 pub struct WorkerHost {
     handle: Handle,
 }
@@ -800,10 +815,18 @@ impl WorkerHost {
         Self { handle }
     }
 
-    /// Sends `order` unless a question of its kind already waits in the queue (the worker
-    /// clears `queued` when it takes the order, so at most one of each kind is queued and
-    /// questions never crowd replies out), or the queue has no room, which drops it.
-    fn ask(&self, order: Order, queued: &AtomicBool) {
+    /// Records `lease` as the latest asked, then sends `order` (which names no lease)
+    /// unless a question of its kind already waits in the queue: the worker clears `queued`
+    /// when it takes the order and then answers for the latest lease recorded, so at most
+    /// one of each kind is queued, it is about the lease asked last, and questions never
+    /// crowd replies out. A queue with no room drops the order.
+    fn ask(
+        &self,
+        order: Order,
+        lease: &str,
+        (asked, queued): (&Mutex<Option<String>>, &AtomicBool),
+    ) {
+        *asked.lock().unwrap_or_else(PoisonError::into_inner) = Some(lease.to_owned());
         if queued.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -819,10 +842,9 @@ impl Quiesce for WorkerHost {
         match published {
             Some((held, quiet)) if held == lease && quiet != Quiet::Busy => quiet,
             _ => {
-                let order = Order::Prepare {
-                    lease: lease.to_owned(),
-                };
-                self.ask(order, &self.handle.shared.prepare_queued);
+                let shared = &self.handle.shared;
+                let kind = (&shared.asked_prepare, &shared.prepare_queued);
+                self.ask(Order::Prepare, lease, kind);
                 Quiet::Busy
             }
         }
@@ -833,14 +855,18 @@ impl Quiesce for WorkerHost {
         match published {
             Some((held, Restored::Done)) if held == lease => Restored::Done,
             _ => {
-                let order = Order::Restore {
-                    lease: lease.to_owned(),
-                };
-                self.ask(order, &self.handle.shared.restore_queued);
+                let shared = &self.handle.shared;
+                let kind = (&shared.asked_restore, &shared.restore_queued);
+                self.ask(Order::Restore, lease, kind);
                 Restored::Busy
             }
         }
     }
+}
+
+/// The lease the latest question named, taken so the next order finds only a newer one.
+fn take_asked(asked: &Mutex<Option<String>>) -> Option<String> {
+    asked.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 /// A reply that stops every run `life` holds.
