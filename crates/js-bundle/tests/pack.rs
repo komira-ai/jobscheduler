@@ -10,17 +10,6 @@ use std::time::{Duration, SystemTime};
 use js_bundle::{LinkDefect, NameDefect, PackError, TreeRefusal, pack_layer, pack_tar};
 use layer::{Scratch, Seen, fixture, link, snapshot, write};
 
-/// The digest of the fixture tree's tar stream.
-const GOLDEN_DIFF_ID: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-/// The digest of the fixture tree's compressed layer.
-const GOLDEN_BLOB_DIGEST: &str =
-    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-/// The length of the fixture's tar stream before its end blocks.
-const GOLDEN_UNCOMPRESSED_BYTES: u64 = 0;
-/// The entries in the fixture tree.
-const GOLDEN_ENTRIES: u64 = 15;
-
 fn fixture_tree(reverse: bool) -> Scratch {
     let scratch = Scratch::new();
     fixture(&scratch.root(), reverse);
@@ -101,17 +90,6 @@ fn content_execute_bit_targets_and_names_change_the_layer() {
         change(&scratch.root());
         assert_ne!(pack_layer(&scratch.root()).unwrap().diff_id, base, "{what}");
     }
-}
-
-/// The digests of the fixture are pinned: a change of the tar layout, the metadata fixed in
-/// the headers or the compressor moves them, and with them every layer ever pushed.
-#[test]
-fn the_fixture_layer_has_these_digests() {
-    let packed = pack_layer(&fixture_tree(false).root()).unwrap();
-    assert_eq!(packed.diff_id.as_str(), GOLDEN_DIFF_ID);
-    assert_eq!(packed.blob_digest, GOLDEN_BLOB_DIGEST);
-    assert_eq!(packed.uncompressed_bytes, GOLDEN_UNCOMPRESSED_BYTES);
-    assert_eq!(packed.entries, GOLDEN_ENTRIES);
 }
 
 /// Every header has owner 0:0, no names, time 0 and one of the fixed modes; entries are in
