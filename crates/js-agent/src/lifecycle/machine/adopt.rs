@@ -108,6 +108,9 @@ impl Lifecycle {
         // container that runs look like one that does not fit.
         this.stuck = stuck;
         this.adopted_leases = this.jobs.iter().map(|job| job.lease_id.clone()).collect();
+        this.config
+            .scratch
+            .sweep(this.jobs.iter().map(|job| job.run_id.as_str()));
         Ok((this, events))
     }
 
