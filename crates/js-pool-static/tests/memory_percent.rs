@@ -88,7 +88,7 @@ fn zero_and_above_a_hundred_are_refused() {
         ProviderId::new("pool").unwrap(),
         &hosts("memory_schedulable_percent = 0\n"),
     );
-    assert!(matches!(err, Err(ConfigError::MemoryPercent(_))));
+    assert!(matches!(err, Err(ConfigError::Parse(_))));
 }
 
 /// Asserts that the percent a caller passes replaces the one in the file, that it is

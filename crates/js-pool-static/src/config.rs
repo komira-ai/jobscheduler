@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use js_types::{HostId, IdError, MemoryPercent, MemoryPercentError, Resources, Shape, TypeError};
+use js_types::{HostId, IdError, MemoryPercent, Resources, Shape, TypeError};
 use serde::Deserialize;
 
 /// The example configuration shipped with the crate, shown in the crate docs.
@@ -40,9 +40,6 @@ pub enum ConfigError {
     /// The file lists no host.
     #[error("the pool lists no host")]
     NoHosts,
-    /// `memory_schedulable_percent` is not from 1 to 100.
-    #[error(transparent)]
-    MemoryPercent(#[from] MemoryPercentError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,7 +74,9 @@ pub(crate) fn parse(source: &str) -> Result<Parsed, ConfigError> {
     let raw: RawConfig =
         toml::from_str(source).map_err(|err| ConfigError::Parse(err.to_string()))?;
     let memory_percent = match raw.memory_schedulable_percent {
-        Some(percent) => MemoryPercent::new(percent)?,
+        Some(percent) => {
+            MemoryPercent::new(percent).map_err(|err| ConfigError::Parse(err.to_string()))?
+        }
         None => MemoryPercent::FULL,
     };
     let mut hosts: Vec<(HostId, Shape)> = Vec::new();
