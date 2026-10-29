@@ -8,7 +8,7 @@ changes code that ships is released as the next version, after `ci` has passed o
 1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
    starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
    run's own `github.sha`.
-2. `ci-passed` waits for the `ci` run of that commit (it polls every 120 s, for up to four hours)
+2. `ci-passed` waits for the `ci` run of that commit (it polls every 120 s, for up to four hours; ten failed reads of the runs in a row, about twenty minutes, fail it too)
    and passes only when that run succeeded. If it failed, was cancelled, timed out or ended any
    other way, the release fails with an error naming the `ci` run and its conclusion, and nothing
    is released. It holds `actions: read` and nothing else, and checks out no code.
@@ -37,6 +37,12 @@ this again right before the publishing call: the latest `v*` tag, by version, mu
 of the commit (the compare API says `ahead`), or nothing is published. That closes the race where two
 runs finish out of order. Releases are one at a time and none is cancelled: while one runs, GitHub keeps
 one waiting run and a newer push replaces an older waiting one, whose change the newer release covers.
+
+The two checks read tags differently, on purpose. `plan` looks only at `v*` tags merged into the commit;
+`publish` compares against the highest `vX.Y.Z` tag of the whole repository, so it fails closed: a `v` tag
+that is not on `main` (pushed by hand, or left on a side branch) blocks every release until it is removed
+(see Recovery). A push to `main` of a fork runs this workflow in the fork, with the fork's own token, and
+`gamma` stays off there without its variables.
 
 The archives are made to be byte-identical when built again from the same commit: sorted file names,
 the commit's time as modification time, numeric owner 0, `gzip -n`. A full re-run therefore uploads

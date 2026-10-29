@@ -15,9 +15,15 @@
 # the commit that passed. The first job, `ci-passed`, waits for the `ci` run of that
 # commit (a push run; it polls every 120 s, up to four hours) and fails the release, with
 # the run's URL and conclusion, unless it succeeded. Every other job needs it. It holds
-# `actions: read` only and checks out nothing. A re-run keeps the commit and `github.sha`
+# `actions: read` only and checks out nothing; ten reads of the runs in a row that fail
+# (about twenty minutes) fail it too. A re-run keeps the commit and `github.sha`
 # of the run it repeats; a re-run of only the failed jobs keeps the `plan` that succeeded,
 # so `publish` and `verify` check the tag and the attestations.
+#
+# Two tag views differ on purpose. `plan` counts only the `v*` tags merged into the commit;
+# `publish` compares against the highest `vX.Y.Z` tag of the whole repository and refuses
+# unless it is a proper ancestor of the commit, so it fails closed: a `v` tag that is not on
+# main blocks releases until it is removed (docs/release.md, Recovery).
 #
 # Main may move on while a run waits or builds. The run still releases its own commit,
 # since the commit passed `ci`; `plan` refuses it only when a `v*` tag is at a descendant
@@ -93,12 +99,20 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          failed=0
           while true; do
             # The newest run of `ci` for this commit's push: a re-run of it is the same run.
             if ! run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" \
               --jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"')"; then
-              echo "::warning::reading the ci runs failed; trying again"
+              failed=$((failed + 1))
+              if [ "$failed" -ge 10 ]; then
+                echo "::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released"
+                exit 1
+              fi
+              echo "::warning::reading the ci runs failed ($failed in a row); trying again"
               run=""
+            else
+              failed=0
             fi
             if [ -z "$run" ]; then
               echo "no ci run for $COMMIT yet"

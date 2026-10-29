@@ -164,12 +164,54 @@ fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
     assert!(!wait.contains("uses:") && !wait.contains("checkout") && !wait.contains("cargo "));
     assert!(wait.contains("timeout-minutes: 240"));
     assert!(wait.contains("workflows/ci.yml/runs?head_sha=$COMMIT&event=push"));
-    assert!(wait.contains("sleep 120"));
-    assert!(wait.contains("completed)"));
-    assert!(wait.contains(r#"if [ "$conclusion" = success ]"#));
-    assert!(wait.contains("::error::ci did not pass for $COMMIT: conclusion $conclusion, $url"));
+    // The step's environment and strict shell.
+    assert!(wait.contains("        env:\n          GH_TOKEN: ${{ github.token }}\n          REPO: ${{ github.repository }}\n        run: |\n          set -euo pipefail\n          failed=0\n          while true; do\n"));
+    // The newest run is picked by creation time, and an absent run reads as empty.
+    assert!(wait.contains(r#"--jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"'"#));
+    assert!(wait.contains(
+        "      if [ -z \"$run\" ]; then\n              echo \"no ci run for $COMMIT yet\""
+    ));
+    // A finished run passes only on success (exit 0), and any other conclusion names the
+    // run and exits 1 in the same branch.
+    assert!(wait.contains("                completed)\n                  if [ \"$conclusion\" = success ]; then\n                    echo \"ci passed: $url\"\n                    exit 0\n                  fi\n                  echo \"::error::ci did not pass for $COMMIT: conclusion $conclusion, $url; nothing is released\"\n                  exit 1\n                  ;;\n"));
+    // A run that is queued or in progress waits, two minutes at a time.
+    assert!(wait.contains(
+        "                *)\n                  echo \"ci is $status: $url\"\n                  ;;\n"
+    ));
+    assert!(wait.contains("            sleep 120\n          done"));
+    // Ten failed reads in a row fail the job; a good read starts the count again.
+    assert!(wait.contains("failed=$((failed + 1))\n              if [ \"$failed\" -ge 10 ]; then\n                echo \"::error::reading the ci runs of $COMMIT failed $failed times in a row; nothing is released\"\n                exit 1\n              fi\n"));
+    assert!(wait.contains(
+        "              run=\"\"\n            else\n              failed=0\n            fi\n"
+    ));
     // Nothing is planned before the wait has passed.
     assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
+}
+
+/// Asserts that attest, verify, publish, deploy-tool and gamma run only on the plan's word
+/// that a release is made, and never with a status function that would run them after a
+/// failed or skipped job.
+#[test]
+fn the_release_jobs_need_the_plans_release_and_no_status_function() {
+    let text = workflow();
+    let all = jobs(&text);
+    for name in ["attest", "verify", "publish", "deploy-tool", "gamma"] {
+        let ifs: Vec<&String> = job(&all, name)
+            .iter()
+            .filter(|l| l.starts_with("    if:"))
+            .collect();
+        assert_eq!(ifs.len(), 1, "{name}");
+        assert!(
+            ifs[0].contains("needs.plan.outputs.release == 'true'"),
+            "{name}: {}",
+            ifs[0]
+        );
+        assert!(
+            !ifs[0].contains("!cancelled()") && !ifs[0].contains("always()"),
+            "{name}: {}",
+            ifs[0]
+        );
+    }
 }
 
 /// Asserts that only `publish` holds `contents: write`, and that it checks the latest
