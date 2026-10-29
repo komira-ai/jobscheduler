@@ -1,4 +1,3 @@
-#![allow(unused)]
 //! The profile text and the `sandbox-exec` argument vector.
 
 use std::collections::BTreeSet;
@@ -83,10 +82,38 @@ impl Profile {
     /// # Errors
     /// [`BuildError::ReadModelUnavailable`] for [`ReadModel::Allow`].
     pub fn for_policy(policy: &Policy) -> Result<Self, BuildError> {
-        Ok(Self {
-            text: String::new(),
-            params: Vec::new(),
-        })
+        if policy.read_model() == ReadModel::Allow {
+            return Err(BuildError::ReadModelUnavailable);
+        }
+        let mut lines: Vec<String> = Vec::new();
+        let mut params: Vec<(String, String)> = Vec::new();
+        push_all(&mut lines, &HEAD);
+
+        let mut grant = String::from("(allow file-write* (subpath (param \"RUN\"))");
+        params.push(("RUN".to_owned(), policy.run().as_str().to_owned()));
+        if let Some(entry) = policy.uid_entry() {
+            grant.push_str(" (subpath (param \"UENTRY\"))");
+            params.push(("UENTRY".to_owned(), entry.as_str().to_owned()));
+        }
+        grant.push_str(" (subpath \"/dev\"))");
+        lines.push(grant);
+
+        for (i, path) in policy.read_denies().iter().enumerate() {
+            lines.push(format!("(deny file-read* (subpath (param \"RD_{i}\")))"));
+            params.push((format!("RD_{i}"), path.as_str().to_owned()));
+        }
+        for (i, path) in policy.inputs().iter().enumerate() {
+            lines.push(format!("(deny file-write* (subpath (param \"IN_{i}\")))"));
+            params.push((format!("IN_{i}"), path.as_str().to_owned()));
+        }
+
+        net_rules(policy, &mut lines);
+        push_all(&mut lines, &PROCESS_INFO);
+        push_all(&mut lines, &FLOOR);
+
+        let mut text = lines.join("\n");
+        text.push('\n');
+        Ok(Self { text, params })
     }
 
     /// The profile text.
@@ -106,7 +133,16 @@ impl Profile {
     /// `sandbox-exec` does not search `PATH`.
     #[must_use]
     pub fn argv(&self, program: &AbsPath, args: &[OsString]) -> Vec<OsString> {
-        vec![OsString::from(SANDBOX_EXEC)]
+        let mut argv = vec![OsString::from(SANDBOX_EXEC)];
+        for (name, value) in &self.params {
+            argv.push(OsString::from("-D"));
+            argv.push(OsString::from(format!("{name}={value}")));
+        }
+        argv.push(OsString::from("-p"));
+        argv.push(OsString::from(self.text.as_str()));
+        argv.push(OsString::from(program.as_str()));
+        argv.extend(args.iter().cloned());
+        argv
     }
 }
 

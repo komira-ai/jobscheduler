@@ -1,4 +1,3 @@
-#![allow(unused)]
 //! The typed policy of one run, and the only ways to change it.
 
 use std::collections::BTreeSet;
@@ -124,7 +123,9 @@ impl Policy {
     }
 
     fn check(&self) -> Result<(), PolicyError> {
-        Ok(())
+        bounded(self.inputs.len(), "inputs")?;
+        bounded(self.read_denies.len(), "read denies")?;
+        bounded(self.egress.len(), "denied egress")
     }
 
     pub(super) fn run(&self) -> &AbsPath {

@@ -1,4 +1,3 @@
-#![allow(unused)]
 //! The network levels of a run.
 
 use std::collections::BTreeSet;
@@ -33,6 +32,15 @@ impl Ports {
     /// ports.
     pub fn new(ports: impl IntoIterator<Item = u16>) -> Result<Self, PortsError> {
         let set: BTreeSet<u16> = ports.into_iter().collect();
+        if set.is_empty() {
+            return Err(PortsError::Empty);
+        }
+        if set.contains(&0) {
+            return Err(PortsError::Zero);
+        }
+        if set.len() > MAX_PORTS {
+            return Err(PortsError::TooMany);
+        }
         Ok(Self(set))
     }
 
@@ -69,7 +77,14 @@ impl Net {
     /// port is `Off`.
     #[must_use]
     pub fn narrow(self, other: Self) -> Self {
-        other
+        match (self, other) {
+            (Self::Ports(a), Self::Ports(b)) => {
+                let shared: BTreeSet<u16> = a.0.intersection(&b.0).copied().collect();
+                Ports::new(shared).map_or(Self::Off, Self::Ports)
+            }
+            (a, b) if a.rank() <= b.rank() => a,
+            (_, b) => b,
+        }
     }
 
     fn rank(&self) -> u8 {

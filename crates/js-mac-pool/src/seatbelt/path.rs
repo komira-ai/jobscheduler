@@ -1,4 +1,3 @@
-#![allow(unused)]
 //! The one type a path takes on its way into a profile.
 
 use std::path::Path;
@@ -55,7 +54,25 @@ impl AbsPath {
     /// A [`PathError`] naming the first rule the path breaks.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, PathError> {
         let text = path.as_ref().to_str().ok_or(PathError::NotUtf8)?;
-        text.strip_prefix('/').ok_or(PathError::NotAbsolute)?;
+        if text.len() > MAX_PATH_BYTES {
+            return Err(PathError::TooLong);
+        }
+        let rest = text.strip_prefix('/').ok_or(PathError::NotAbsolute)?;
+        if text.chars().any(char::is_control) {
+            return Err(PathError::Control);
+        }
+        if rest.is_empty() {
+            return Err(PathError::Root);
+        }
+        for component in rest.split('/') {
+            if matches!(component, "" | "." | "..") {
+                return Err(PathError::NotNormal);
+            }
+        }
+        let first = rest.split('/').next().unwrap_or_default();
+        if LINKED_ROOTS.contains(&first) {
+            return Err(PathError::Linked(first.to_owned()));
+        }
         Ok(Self(text.to_owned()))
     }
 
