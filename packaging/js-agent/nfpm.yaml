@@ -1,9 +1,11 @@
 # The js-agent deb, built by nfpm (pinned by SHA-256 in .github/workflows/js-agent-deb.yml)
 # from the statically linked musl binary, then checked by `cargo xtask pkg check-deb`
 # (crates/xtask/src/pkg.rs), which holds the list of what the package may contain. No
-# maintainer script, no dependency: the directories come from tmpfiles.d, and the package
-# manager installs it with a plain `dpkg --install`. Every file is root's. VERSION is the
-# release version, set by the workflow; SOURCE_DATE_EPOCH is the time of every file.
+# maintainer script, no dependency: the directories come from tmpfiles.d (made by the unit
+# before every start, and by hand on a first install: the unit's header has the sequence),
+# and the package manager installs it with a plain `dpkg --install`. Every file is root's.
+# VERSION is the release version, set by the workflow; SOURCE_DATE_EPOCH is the time of every
+# file. The copyright file is the repository's LICENSE (checked by `pkg check-deb --license`).
 name: js-agent
 arch: amd64
 platform: linux

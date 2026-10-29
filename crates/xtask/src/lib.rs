@@ -12,8 +12,9 @@
 //! - `deploy --service NAME... --version X.Y.Z --url <coordinator>` ([`deploy`]): the gamma
 //!   step of a release, setting the version of each service on the update coordinator in
 //!   order and waiting for it to converge (docs/release.md).
-//! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR` ([`pkg`]): refuses a
-//!   js-agent deb that is not exactly the package `packaging/js-agent` describes.
+//! - `pkg check-deb --deb F --version X.Y.Z --binary B --packaging DIR --license F` ([`pkg`]):
+//!   refuses a js-agent deb that is not exactly the package `packaging/js-agent` describes, or
+//!   whose binary is not a static x86-64 Linux executable.
 //! - [`layering`]: the workspace's layer rules (`layers.toml`), used by the `layering`
 //!   test rather than a verb: `cargo test -p xtask --test layering`.
 //!

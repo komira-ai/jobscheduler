@@ -3041,6 +3041,8 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "js-agent",
+ "js-client",
  "js-elastic",
  "rcgen",
  "rustls",

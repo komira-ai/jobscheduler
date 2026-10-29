@@ -4,10 +4,22 @@
 # bucket. The deb is a workflow artifact for seven days, and its provenance attestation is
 # stored by GitHub; getting it anywhere else is a separate, deliberate step.
 #
-# A pull request that changes the package builds and checks it as version 0.0.0 and attests
-# nothing. A manual run on main with a version builds and checks the deb of that version, then
-# attests it and verifies the attestation as a host would (`gh attestation verify`). Only the
-# `attest` job holds id-token and attestations write, and it runs no repository code.
+# A pull request that changes the package, its checker or the agent builds and checks it as
+# version 0.0.0 and attests nothing. The filter lists what the package and its checker are made
+# of (the workflow, packaging/js-agent, js-agent, xtask, Cargo.lock, LICENSE); a change to a
+# crate that js-agent depends on is built into the deb at the next manual run, which is
+# deliberate. A manual run on main with a version builds and checks the deb of that version,
+# then attests it and verifies the attestation as a host would (`gh attestation verify`). Only
+# the `attest` job holds id-token and attestations write, and it runs no repository code.
+#
+# What a manual run attests is the tip of main when it starts, built here, as the version typed:
+# the typed version goes through `cargo xtask release stamp` (MAJOR.MINOR.PATCH only) before
+# anything uses it, and into the deb's control file, which the attestation covers by digest. The
+# run is not tied to a passing `ci` run, to a tag or to the workspace version (release.yml ties
+# a release to those), and it has no `environment:` gate: the person who dispatches it picks the
+# version and answers for it. The attest and verify jobs cannot run on a pull request, so the
+# first manual run on main is their first run; read its verify job before relying on the
+# attestation.
 # crates/xtask/tests/js_agent_package.rs pins these rules.
 name: js-agent-deb
 
@@ -16,7 +28,10 @@ on:
     paths:
       - '.github/workflows/js-agent-deb.yml'
       - 'packaging/js-agent/**'
-      - 'crates/xtask/src/pkg.rs'
+      - 'crates/js-agent/**'
+      - 'crates/xtask/**'
+      - 'Cargo.lock'
+      - 'LICENSE'
   workflow_dispatch:
     inputs:
       version:
@@ -26,8 +41,9 @@ on:
 
 permissions: {}
 
+# Two manual runs of different versions on main do not replace one another while pending.
 concurrency:
-  group: js-agent-deb-${{ github.ref }}
+  group: js-agent-deb-${{ github.ref }}-${{ inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -66,11 +82,11 @@ jobs:
           SOURCE_DATE_EPOCH: '1790000000'
         run: $RUNNER_TEMP/tools/nfpm package --config packaging/js-agent/nfpm.yaml --packager deb --target "js-agent_${VERSION}_amd64.deb"
       - name: The deb holds exactly the package, with the binary and the unit of this commit
-        run: cargo xtask pkg check-deb --deb "js-agent_${VERSION}_amd64.deb" --version "$VERSION" --binary "target/$TARGET/release/js-agent" --packaging packaging/js-agent
+        run: cargo xtask pkg check-deb --deb "js-agent_${VERSION}_amd64.deb" --version "$VERSION" --binary "target/$TARGET/release/js-agent" --packaging packaging/js-agent --license LICENSE
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: js-agent-deb
-          path: js-agent_*_amd64.deb
+          path: js-agent_${{ env.VERSION }}_amd64.deb
           if-no-files-found: error
           retention-days: 7
 
@@ -90,7 +106,7 @@ jobs:
           path: dist
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/js-agent_*_amd64.deb
+          subject-path: dist/js-agent_${{ env.VERSION }}_amd64.deb
 
   # The attestation as a host checks it: made by this workflow, from main, for this commit.
   verify:
@@ -109,4 +125,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-        run: gh attestation verify "dist/js-agent_${VERSION}_amd64.deb" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/js-agent-deb.yml" --source-ref refs/heads/main --source-digest "$GITHUB_SHA"
+        run: gh attestation verify "dist/js-agent_${VERSION}_amd64.deb" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/js-agent-deb.yml" --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
