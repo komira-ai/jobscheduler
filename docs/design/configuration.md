@@ -31,6 +31,7 @@ name  = "nodes"                       # the `pool` of a hello, and the `provider
 class = "whole-node"
 exec  = "container"                   # optional; absent or "none": no host contract
 shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
+capabilities = { os = "linux", arch = "x86_64" }               # optional; as the agent pool file's [capabilities]
 max_machines    = 6                   # required; from 1 to 262144, as in the agent pool file
 join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
@@ -38,7 +39,7 @@ heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_r
 
 A node joins with a one-time token: `POST /v1/agent/join-tokens` with the client token and `{"provider": "nodes", "instance_id": "node-1"}`
 mints it, and the node's `--instance-file` holds `nodes:node-1`. The first hello swaps the token for a host credential. What the old
-`--agent-pool-config` file had and this kind lacks: `[capabilities]` and the whole-node keys (`max_whole_node`, `drain_after`, ...).
+`--agent-pool-config` file had and this kind lacks: the whole-node keys (`max_whole_node`, `drain_after`, ...).
 
 The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
 

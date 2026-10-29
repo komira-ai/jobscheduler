@@ -15,7 +15,13 @@
 //! grace              = "1m"              # optional
 //! lost_retention     = "24h"             # optional
 //! shape = { cpu_millis = 16000, memory_bytes = 68719476736 }
+//! capabilities = { os = "linux", arch = "x86_64" }   # optional; what every host offers
 //! ```
+//!
+//! A lease request is matched against the pool's shape, `capabilities` included (the
+//! registry books every host as that shape), and a host is admitted only if its hello
+//! reports every capability of the pool with the same value. A request that requires
+//! `os=linux` therefore finds a place on a joined pool only if the pool names `os`.
 //!
 //! # Building one without the server's configuration file
 //!
@@ -39,7 +45,7 @@ use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig};
 use js_types::{ClassId, ExecMode, ProviderId, Resources, Shape};
 
 use super::{Pool, Read, Registering, Section, registry_pool};
-use crate::agent_pool::{MAX_MACHINES, shipped_class};
+use crate::agent_pool::{MAX_MACHINES, capabilities_fit, shipped_class};
 use crate::agent_tokens::AgentTokens;
 use crate::config::Token;
 use crate::error::StartupError;
@@ -49,6 +55,7 @@ const KEYS: &[&str] = &[
     "name",
     "class",
     "shape",
+    "capabilities",
     "exec",
     "max_machines",
     "heartbeat_interval",
@@ -94,6 +101,9 @@ pub struct JoinedPool {
     pub gpus: u64,
     /// The class of those GPUs; present exactly when `gpus` is above zero.
     pub gpu_class: Option<String>,
+    /// What every host offers besides its size: the capabilities a lease request is
+    /// matched against, which each host's hello must report with the same values.
+    pub capabilities: BTreeMap<String, String>,
     /// The execution mode the hosts must report, or `None` for no host contract.
     pub exec: Option<ExecMode>,
     /// How often a host heartbeats.
@@ -146,6 +156,7 @@ impl JoinedPool {
         let memory_bytes = needed(&mut sh, "memory_bytes")?;
         let gpus = sh.integer("gpus")?.unwrap_or(0);
         let gpu_class = sh.string("gpu_class")?;
+        let capabilities = capabilities_of(&mut s)?;
         let max_machines = match s.integer("max_machines")? {
             Some(most) => usize::try_from(most).unwrap_or(usize::MAX),
             None => return Err(s.fail("max_machines", "required")),
@@ -165,6 +176,7 @@ impl JoinedPool {
             memory_bytes,
             gpus,
             gpu_class,
+            capabilities,
             exec,
             heartbeat_interval: s.duration_or(
                 "heartbeat_interval",
@@ -223,7 +235,10 @@ impl JoinedPool {
             Ok(booked) => booked,
             Err(err) => return Err(place.fail("shape", &err.to_string())),
         };
-        let shape = Shape::new(booked, BTreeMap::new());
+        if let Err(reason) = capabilities_fit(&self.capabilities) {
+            return Err(place.fail("capabilities", &reason));
+        }
+        let shape = Shape::new(booked, self.capabilities.clone());
         let pool = registry_pool(&place, id, &class, shape, self.max_machines, self.exec)?;
         let pool = match pool.with_timing(millis(self.heartbeat_interval), millis(self.grace)) {
             Ok(pool) => pool,
@@ -238,6 +253,23 @@ impl JoinedPool {
 
 fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The `capabilities` table: text values, as the agent pool file's `[capabilities]`.
+fn capabilities_of(s: &mut Section) -> Result<BTreeMap<String, String>, StartupError> {
+    let Some(table) = s.table("capabilities")? else {
+        return Ok(BTreeMap::new());
+    };
+    let mut found = BTreeMap::new();
+    for (key, value) in table {
+        match value {
+            toml::Value::String(text) => {
+                found.insert(key, text);
+            }
+            _ => return Err(s.fail(&format!("capabilities.{key}"), "must be a string")),
+        }
+    }
+    Ok(found)
 }
 
 /// The integer `key` of the shape, which the shape must give.
@@ -305,16 +337,23 @@ mod tests {
         let small = JoinedPool::from_table(with("kind = \"joined\"")).unwrap();
         assert_eq!(small.max_machines, 3);
         assert_eq!(small.exec, None);
+        assert!(small.capabilities.is_empty());
         assert_eq!(small.grace, Duration::from_millis(DEFAULT_GRACE_MS));
         assert_eq!(small.join_token_file, None);
         let full = JoinedPool::from_table(table(
             "name = \"gpus\"\nclass = \"gpu-host\"\nexec = \"container\"\nmax_machines = 6\n\
              heartbeat_interval = \"10s\"\ngrace = \"1m\"\nlost_retention = \"2h\"\n\
              join_token_file = \"/etc/js/token\"\n\
+             capabilities = { os = \"linux\", arch = \"x86_64\" }\n\
              shape = { cpu_millis = 8000, memory_bytes = 1024, gpus = 2, gpu_class = \"nvidia-a100\" }\n",
         ))
         .unwrap();
         assert_eq!(full.max_machines, 6);
+        assert_eq!(full.capabilities.len(), 2);
+        assert_eq!(full.capabilities["os"], "linux");
+        let mut bare = full.clone();
+        bare.capabilities.clear();
+        assert_ne!(full.validate().unwrap(), bare.validate().unwrap());
         assert_eq!(full.exec, Some(ExecMode::Container));
         assert_eq!(full.gpus, 2);
         assert_eq!(full.gpu_class.as_deref(), Some("nvidia-a100"));
@@ -340,6 +379,11 @@ mod tests {
             said,
             format!("pool \"nodes\": max_machines: must be from 1 to {MAX_MACHINES}")
         );
+        pool.max_machines = 1;
+        let long = "k".repeat(limits::MAX_CAPABILITY_KEY_LEN + 1);
+        pool.capabilities.insert(long, "v".to_owned());
+        let said = pool.validate().unwrap_err().to_string();
+        assert!(said.starts_with("pool \"nodes\": capabilities: "), "{said}");
     }
 
     /// Each key of a pool that launches is refused by name with the reason that the pool
@@ -393,6 +437,14 @@ mod tests {
                 "pool \"nodes\": heartbeat_interval: must be a positive duration",
             ),
             ("kind = 3\n", "pool \"nodes\": kind: must be a string"),
+            (
+                "capabilities = { os = 1 }\n",
+                "pool \"nodes\": capabilities.os: must be a string",
+            ),
+            (
+                "capabilities = \"linux\"\n",
+                "pool \"nodes\": capabilities: must be a table",
+            ),
         ];
         for (extra, said) in cases {
             let got = refused(with(extra));

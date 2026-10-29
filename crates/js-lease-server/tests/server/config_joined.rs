@@ -232,3 +232,103 @@ async fn a_joined_pool_launches_nothing() {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.json()["pools"], json!([]));
 }
+
+/// The hello of a Linux x86-64 node `host`, which names its instance.
+fn linux_hello(host: &str) -> Value {
+    let mut body = hello(host, Some(host));
+    body["capabilities"] = json!({ "os": "linux", "arch": "x86_64" });
+    body
+}
+
+/// A whole-node lease request that requires `os`.
+fn needing(os: &str) -> Value {
+    json!({
+        "class": "whole-node",
+        "resources": { "cpu_millis": 1000, "memory_bytes": 1024 },
+        "capabilities": { "os": os },
+        "max_wall_seconds": 3600,
+    })
+}
+
+/// A joined pool that offers `os=linux` and `arch=x86_64` on every host.
+fn linux() -> PoolText {
+    joined().set("capabilities", "{ os = \"linux\", arch = \"x86_64\" }")
+}
+
+/// Asserts that a joined pool with a `capabilities` table places a lease that requires one:
+/// the request for `os=linux` is accepted, is handed to the node once its agent reports it
+/// ready, and the lease lands on that node; a request for another `os` fits nothing. The
+/// request is matched against the pool's shape, so this catches a table that is read and
+/// dropped before the registry's pool is built.
+#[tokio::test]
+async fn a_lease_that_requires_a_capability_is_placed_on_a_joined_host() {
+    let h = serving("joined_caps", |_| linux()).await;
+    let token = mint(&h, "node-1").await;
+    let welcome = agent_call(&h, "/v1/agent/hello", &token, &linux_hello("node-1")).await;
+    let held = session(&welcome, "node-1");
+    let credential = welcome.json()["host_credential"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = h
+        .call("POST", "/v1/leases", Some(&needing("windows")))
+        .await;
+    assert_eq!(other.status, 409, "{}", other.body);
+    assert_eq!(other.json(), json!({ "error": "no-fit" }));
+    let asked = h.call("POST", "/v1/leases", Some(&needing("linux"))).await;
+    assert_eq!(asked.status, 202, "{}", asked.body);
+    let id = asked.json()["id"].as_str().unwrap().to_owned();
+    let mut ready = held.beat();
+    ready["exclusive_ready"] = json!(id);
+    let beat = agent_call(&h, "/v1/agent/heartbeat", &credential, &ready).await;
+    assert_eq!(beat.status, 200, "{}", beat.body);
+    h.ticks.step().await;
+    let listed = h.call("GET", "/v1/leases", None).await.json();
+    assert_eq!(listed["leases"][0]["host"], "node-1", "{listed}");
+}
+
+/// Asserts what the table is for: on a joined pool with no `capabilities`, the same request
+/// for `os=linux` fits nothing, because requests are matched against the pool's shape and
+/// not against what a host reports; and with the table, a host that does not report the
+/// pool's capabilities is refused 403 `shape-not-accepted`. It catches a joined pool whose
+/// booked shape drifts from the capabilities it admits hosts by.
+#[tokio::test]
+async fn capabilities_decide_both_the_fit_and_the_admission() {
+    let bare = serving("joined_bare", |_| joined()).await;
+    let token = mint(&bare, "node-1").await;
+    let welcome = agent_call(&bare, "/v1/agent/hello", &token, &linux_hello("node-1")).await;
+    session(&welcome, "node-1");
+    let asked = bare
+        .call("POST", "/v1/leases", Some(&needing("linux")))
+        .await;
+    assert_eq!(asked.status, 409, "{}", asked.body);
+    assert_eq!(asked.json(), json!({ "error": "no-fit" }));
+
+    let h = serving("joined_caps_admit", |_| linux()).await;
+    let token = mint(&h, "node-1").await;
+    let mut body = linux_hello("node-1");
+    body["capabilities"] = json!({ "os": "linux" });
+    let refused = agent_call(&h, "/v1/agent/hello", &token, &body).await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    assert_eq!(refused.json()["error"], "shape-not-accepted");
+}
+
+/// Asserts that a bad `capabilities` table is refused naming it: a value that is not text,
+/// and more entries than the wire carries.
+#[test]
+fn a_bad_capabilities_table_is_refused() {
+    let scratch = Scratch::new("joined_caps_refused");
+    let server = server_with_agents(&scratch);
+    let number = joined().set("capabilities", "{ os = 1 }");
+    let said = refusal(&scratch, &file(&server, &[&number]));
+    assert_eq!(said, "pool \"burst\": capabilities.os: must be a string");
+    let many: Vec<String> = (0..=js_agent_wire::limits::MAX_CAPABILITIES)
+        .map(|n| format!("k{n} = \"v\""))
+        .collect();
+    let table = format!("{{ {} }}", many.join(", "));
+    let said = refusal(
+        &scratch,
+        &file(&server, &[&joined().set("capabilities", &table)]),
+    );
+    assert!(said.starts_with("pool \"burst\": capabilities: "), "{said}");
+}

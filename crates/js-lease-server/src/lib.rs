@@ -99,16 +99,18 @@
 //!
 //! A pool of machines that run `js-agent` and are started by hand has `kind = "joined"`
 //! and no `provider`. Its keys are `name`, `class`, `shape` (`{ cpu_millis, memory_bytes }`
-//! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as in
-//! the agent pool file), and optionally `exec` (as above, but absent is `none`),
-//! `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the shared pool
-//! token). It launches nothing:
-//! `launch`, `network`, `provider`, `max_instances`, `max_spend_per_hour`,
-//! `max_spend_per_day`, `idle` and `boot_timeout` are each refused naming the key. It is
-//! the pool that registers agents, so it excludes an elastic pool, and `server.agent_listen`
-//! is required. One-time tokens for its nodes come from `POST /v1/agent/join-tokens` with
-//! `provider` the pool's name and `instance_id` the node's. An embedder builds the pool
-//! from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
+//! and optionally `gpus` and `gpu_class`), `max_machines` (from 1 to 262144; required, as
+//! in the agent pool file), and optionally `capabilities` (a table of text values, as the
+//! agent pool file's `[capabilities]`: a lease request is matched against them, and a
+//! host is admitted only if its hello reports each with the same value; a pool without
+//! them fits no request that requires a capability), `exec` (as above, but absent is
+//! `none`), `heartbeat_interval`, `grace`, `lost_retention` and `join_token_file` (the
+//! shared pool token). It launches nothing: `launch`, `network`, `provider`,
+//! `max_instances`, `max_spend_per_hour`, `max_spend_per_day`, `idle` and `boot_timeout`
+//! are each refused naming the key. It is the pool that registers agents, so it excludes
+//! an elastic pool, and `server.agent_listen` is required. One-time tokens for its nodes
+//! come from `POST /v1/agent/join-tokens` with `provider` the pool's name and
+//! `instance_id` the node's. An embedder builds the pool from its own settings with [`JoinedPool`] and [`JoinedPool::validate`].
 //!
 //! # API
 //!
