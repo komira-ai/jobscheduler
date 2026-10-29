@@ -275,6 +275,22 @@ mod tests {
         assert_eq!(f.points.len(), 5);
     }
 
+    /// Catches: a curve that starts at 0 cores when the first clean value comes after the
+    /// dilation reach: minutes 0 to 2 are recorded by no clean run (a pressured run reached
+    /// them), so the start is the first clean value, not the default.
+    #[test]
+    fn a_start_no_clean_run_recorded_takes_the_first_clean_value() {
+        let mut ring = Ring::new();
+        for _ in 0..3 {
+            let mut s = series(&[(0, 0), (0, 0), (0, 0), (400, 4), (400, 4), (400, 4)]);
+            s.minutes.retain(|m| m.minute >= 3);
+            ring.push(&s);
+        }
+        ring.push(&pressured(&[(900, 9); 6]));
+        let f = fit(&ring).unwrap();
+        assert_eq!(cores(&f), vec![400; 6]);
+    }
+
     /// Catches: the life being a mean or a floor P90, and a life under a minute.
     #[test]
     fn the_life_is_the_p90_of_the_wall_minutes() {
@@ -300,14 +316,17 @@ mod tests {
         assert_eq!(f.wall_minutes_p90, 100);
     }
 
-    /// Catches: a run under node pressure pulling the cores down (or up), or the minimum
-    /// run count being met by such runs.
+    /// Catches: a run under node pressure pulling the cores down, or the minimum run count
+    /// being met by such runs.
     #[test]
     fn runs_under_node_pressure_do_not_shape_the_cores() {
         let clean: &[(u32, u64)] = &[(800, 8), (800, 8)];
         let mut with = ring_of(&[clean, clean, clean]);
         let alone = fit(&with).unwrap();
-        for _ in 0..5 {
+        // 3 clean at 800 plus 27 pressured at 100 are 30 values, so the P90 rank is
+        // ceil(0.9 * 30) = 27: the 27th smallest. Were the pressured runs read, the 27
+        // values of 100 sort first and the P90 is 100; without them it is 800.
+        for _ in 0..27 {
             with.push(&pressured(&[(100, 8), (100, 8)]));
         }
         let f = fit(&with).unwrap();
