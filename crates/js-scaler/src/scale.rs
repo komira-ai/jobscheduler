@@ -128,6 +128,7 @@ impl Pass<'_> {
                 [
                     self.records.instances[*i].phase == Phase::Planned,
                     !claims.records.contains(i),
+                    false,
                 ]
                 .into_iter()
                 .all(|ok| ok)
