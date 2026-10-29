@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::adapt::SharedClock;
 use crate::checks::{State, Verdict};
-use crate::pool::{Next, NextLaunch, NoOffer, Pool};
+use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 
 /// What the status routes read.
 pub(crate) struct Status {
@@ -80,12 +80,25 @@ struct Instances {
     max_spend_cents_per_hour: u64,
 }
 
-/// The first request on the wait list, as its id and what it needs.
-fn waiting_head(registry: Option<&Registry>) -> Option<(String, Demand)> {
-    let registry = registry?;
+/// What the next launch is for: the first request on the wait list, else a request for
+/// the pool floor.
+pub(crate) fn wanted(registry: Option<&Registry>, floor: &Demand) -> Wanted {
+    let Some(registry) = registry else {
+        return floor_wanted(floor);
+    };
     match registry.waiting().into_iter().next() {
-        Some(waiting) => Some((waiting.id.to_string(), waiting.demand)),
-        None => None,
+        Some(waiting) => Wanted {
+            request: waiting.id.to_string(),
+            demand: waiting.demand,
+        },
+        None => floor_wanted(floor),
+    }
+}
+
+fn floor_wanted(floor: &Demand) -> Wanted {
+    Wanted {
+        request: "floor".to_owned(),
+        demand: floor.clone(),
     }
 }
 
@@ -136,10 +149,10 @@ impl Status {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         let state = health.state();
-        let waiting = waiting_head(self.registry.as_ref());
+        let wanted = wanted(self.registry.as_ref(), &pool.floor_demand);
         let (next_launch, no_offer) = match state {
             State::Checking => (None, None),
-            _ => match pool.next_launch(&pool.wanted(waiting), &health.offers) {
+            _ => match pool.next_launch(&wanted, &health.offers) {
                 Next::Planned(next) => (Some(next), None),
                 Next::NoOffer(none) => (None, Some(none)),
             },

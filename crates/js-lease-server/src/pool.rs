@@ -77,7 +77,7 @@ pub(crate) struct Pool {
     provider: Arc<dyn ElasticProvider>,
     mode: Result<Arc<dyn NetworkMode>, NetworkError>,
     floor: Floor,
-    floor_demand: Demand,
+    pub(crate) floor_demand: Demand,
     advertise: Option<String>,
     agent_sha256: BTreeMap<String, [u8; 32]>,
 }
@@ -162,18 +162,6 @@ impl Pool {
             floor: self.floor.clone(),
             clock,
             health: self.health.clone(),
-        }
-    }
-
-    /// What the next launch is for: the head of the wait list, else a request for the pool
-    /// floor.
-    pub(crate) fn wanted(&self, waiting: Option<(String, Demand)>) -> Wanted {
-        match waiting {
-            Some((request, demand)) => Wanted { request, demand },
-            None => Wanted {
-                request: "floor".to_owned(),
-                demand: self.floor_demand.clone(),
-            },
         }
     }
 

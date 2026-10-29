@@ -6,11 +6,9 @@ use js_lease_server::bootstrap::{Fill, render};
 use js_lease_server::network::{LaunchCtx, NetworkMode};
 use serde_json::{Value, json};
 
-use crate::agents_support::{JOIN, hello_body};
 use crate::pools_support::{
     ADVERTISE, FakeNet, NET_SECRET, Net, Options, Rig, a10, net_steps, offer,
 };
-use crate::support::{TOKEN, lease_body, request};
 
 /// Asserts the next launch: the cheapest offer that has capacity and fits (an unavailable
 /// cheaper one and a dearer one are passed over), and a plan that is exactly the masked
@@ -97,46 +95,17 @@ async fn no_offer_names_the_dimension_that_fails() {
     }
 }
 
-/// Registers one host in the pool, takes it with a request, and then asks for it again with
-/// a request for one A10 and a few bytes of memory, which waits. Returns the id of the
-/// request that waits.
-async fn wait_for_small(rig: &Rig) -> String {
-    let mut hello = hello_body("h1");
-    hello["pool"] = json!("gpu");
-    hello["shape"]["gpu_class"] = json!("nvidia-a10");
-    let bytes = hello.to_string().into_bytes();
-    let agent = rig.running.agent_addr().unwrap();
-    let joined = request(agent, "POST", "/v1/agent/hello", Some(JOIN), Some(&bytes)).await;
-    assert_eq!(joined.status, 200, "{}", joined.body);
-    let mut body = lease_body();
-    body["class"] = json!("whole-node");
-    body["capabilities"] = json!({});
-    body["resources"]["gpu_class"] = json!("nvidia-a10");
-    let bytes = body.to_string().into_bytes();
-    let addr = rig.running.addr();
-    for _ in 0..2 {
-        let asked = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&bytes)).await;
-        assert_eq!(asked.status, 202, "{}", asked.body);
-    }
-    let waiting = rig.running.registry().unwrap().waiting();
-    assert!(!waiting.is_empty());
-    waiting[0].id.to_string()
-}
-
-/// Asserts that the head of the wait list sets the next launch: with nothing waiting the
-/// pool floor (1 GiB) takes the offer that has the memory; once a request for a few bytes
-/// waits, the cheaper small offer serves it. It catches a plan made for the floor while a
-/// request waits.
+/// Asserts that with nothing waiting the next launch is planned for the pool floor (1 GiB):
+/// the offer that has the memory is chosen though a cheaper one is smaller. It catches a
+/// floor that is not the pool's.
 #[tokio::test]
-async fn the_head_of_the_wait_list_sets_the_next_launch() {
+async fn with_nothing_waiting_the_next_launch_is_for_the_pool_floor() {
     let mut tiny = a10("gpu_tiny", 1, 50);
     tiny.memory_bytes = 512 << 20;
     let offers = vec![a10("gpu_big", 1, 129), tiny];
-    let rig = Rig::start("status_waiting", offers, Options::default()).await;
+    let rig = Rig::start("status_floor", offers, Options::default()).await;
     rig.step().await;
     assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_big");
-    wait_for_small(&rig).await;
-    assert_eq!(rig.pool().await["next_launch"]["offer"], "gpu_tiny");
     rig.assert_clean();
 }
 

@@ -57,7 +57,7 @@ pub(super) struct Rig {
     pub(super) shared: Arc<Shared>,
     clock: ManualClock,
     asker: js_registry::RegisteredProvider,
-    registry: Registry,
+    pub(super) registry: Registry,
 }
 
 impl Rig {
@@ -134,7 +134,7 @@ impl Rig {
     }
 
     /// Takes a share lease on the host; its id.
-    async fn lease(&self) -> String {
+    pub(super) async fn lease(&self) -> String {
         let mut table = self.shared.table.lock().await;
         table
             .acquire(request("share", 600), None)
@@ -144,7 +144,7 @@ impl Rig {
     }
 
     /// Polls whole-node request `name`, as its consumer would.
-    fn ask(&mut self, name: &str) {
+    pub(super) fn ask(&mut self, name: &str) {
         let classes = [ResourceClass::whole_node()];
         let spec = StartSpec::new(
             js_types::LeaseId::new(9, 1),
