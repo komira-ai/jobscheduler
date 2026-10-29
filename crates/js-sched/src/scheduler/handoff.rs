@@ -38,3 +38,50 @@ impl Scheduler {
         Some(op.waiters)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use js_types::sched::{FarmTime, LeaseKind, Qos, Resources, StateMachine};
+
+    use super::*;
+    use crate::{Event, Input, Prediction, Request};
+
+    /// Catches: `forget_queued` leaving the operation's cost hint ([`Scheduler::set_cost`])
+    /// in admission: the hint of a forgotten operation is gone, and another operation's stays.
+    #[test]
+    fn forgetting_a_queued_operation_drops_its_cost_hint() {
+        let mut s = Scheduler::new(1);
+        let mut submit = |waiter: u64, tag: u8| {
+            let request = Request {
+                key: js_types::sched::WorkKey::new("main", format!("action-{tag}")),
+                qos: Qos::Ci,
+                kind: LeaseKind::Action,
+                resources: Resources::new(1_000, 1 << 30),
+                hermetic: true,
+                do_not_cache: false,
+                needs: js_caps::Request::default(),
+            };
+            let event = Event::Submit {
+                waiter: WaiterId(waiter),
+                request,
+            };
+            s.apply(Input::new(FarmTime::default(), event));
+        };
+        submit(1, 1);
+        submit(2, 2);
+        let hint = Prediction {
+            cpu_millis: 500,
+            memory_bytes: 1 << 20,
+            cold: false,
+            life_minutes: 3,
+        };
+        s.set_cost(OperationId(0), hint);
+        s.set_cost(OperationId(1), hint);
+        assert!(s.admission.hinted(OperationId(0)));
+
+        assert_eq!(s.forget_queued(OperationId(0)), Some(vec![WaiterId(1)]));
+
+        assert!(!s.admission.hinted(OperationId(0)));
+        assert!(s.admission.hinted(OperationId(1)));
+    }
+}
