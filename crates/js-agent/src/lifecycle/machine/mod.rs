@@ -329,11 +329,20 @@ impl Lifecycle {
                 "the job does not fit what is free",
             ));
         }
-        spec.mounts
+        let mounts = spec
+            .mounts
             .iter()
             .map(|mount| self.config.mounts.resolve(mount))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))
+            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
+        // Last, so that a job refused for another reason costs no call. Before every
+        // contained create: the firewall can change between two jobs.
+        if spec.isolation == Isolation::Contained {
+            self.runtime
+                .check_egress()
+                .map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
+        }
+        Ok(mounts)
     }
 
     /// Taints the host for a job that may change it, and writes the marker.

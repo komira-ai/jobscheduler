@@ -113,6 +113,10 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
 
+/// The calls a start is counted as: the create, and the egress check's `network inspect`
+/// and `nft` before it (the other calls of a start are inside the margin, as before).
+pub const CALLS_PER_START: usize = 3;
+
 /// The most calls [`stall_bound`] allows time for.
 pub const STALL_CALLS_MAX: usize = 64;
 
@@ -664,6 +668,9 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         stop_grace,
     };
     let (runtime, mut lines) = machine.runtime(&wanted)?;
+    // At start only: the rescue at the agent's end builds its runtime by `machine.runtime`
+    // alone, so a firewall that has gone never keeps it from stopping the containers.
+    runtime.check_egress().map_err(|why| why.to_string())?;
     let checks =
         Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
@@ -694,7 +701,7 @@ fn work(
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
         let asked = order.as_ref().map_or(0, |order| match order {
-            Order::Reply { reply, .. } => reply.commands.len(),
+            Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
         // A run held may cost three calls (a stop, then an inspect, the read of its log

@@ -189,6 +189,10 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The network the job would get is not limited as the agent was told
+    /// (`--container-egress-allow`): the firewall table or the network is missing or
+    /// changed. Nothing is created.
+    pub const EGRESS_UNCHECKED: &str = "egress-unchecked";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
     pub const TAINT_FAILED: &str = "taint-failed";
@@ -555,6 +559,9 @@ impl Local {
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
+                add_hosts: &cli.container_add_host,
+                egress_allow: &cli.container_egress_allow,
+                nft: cli.container_nft.as_deref(),
                 actions_cgroup: cli.actions_cgroup.as_deref(),
                 subuid: cli.container_subuid.as_deref(),
             },

@@ -156,6 +156,8 @@ fn cli_runtime_argv_snapshot() {
             "private",
             "--cgroupns",
             "private",
+            "--sysctl",
+            "net.ipv6.conf.all.disable_ipv6=1",
             "--log-driver",
             "json-file",
             "--log-opt",

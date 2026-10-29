@@ -246,6 +246,17 @@ pub trait ContainerRuntime {
         true
     }
 
+    /// Whether the network a contained job gets is limited as the agent was told. Called
+    /// before every contained start; a start whose check fails is refused
+    /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the network or the firewall; the text stays on the host.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     /// The control group directory (an absolute path of the cgroup version 2 file system)
     /// of a container that runs, or `None` when the runtime cannot say: the container is
     /// not in the agent's `/proc`, its control group is not the unified one, or it lies

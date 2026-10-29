@@ -7,7 +7,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use js_agent::cli_runtime::{
-    DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, JobUsers, Pull, Settings, SettingsError,
+    ADD_HOST_MAX, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, JobUsers, Pull, Settings,
+    SettingsError,
 };
 use js_agent::lifecycle::SLOTS;
 
@@ -278,20 +279,6 @@ fn the_pull_policy_and_the_tmp_size() {
     assert_eq!(set().with_tmp_size(None).unwrap().tmp_size(), "64m");
 }
 
-/// Asserts the warning an operator gets for a network: none for the default, one naming
-/// the flag and the egress for any network. It catches a network configured without the
-/// operator being told it gives the job a way out.
-#[test]
-fn a_network_is_warned_about() {
-    let none = Settings::new(bin(), None, None).unwrap();
-    assert!(none.warnings().is_empty());
-    let named = Settings::new(bin(), Some("jobs"), None).unwrap();
-    let warnings = named.warnings();
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].starts_with("--container-network jobs: a job can reach"));
-    assert!(warnings[0].contains("metadata endpoint"));
-}
-
 /// Asserts that without `--container-bin` there are no container settings, and that any
 /// container flag given alone is an error and not silently ignored; and that all the
 /// flags given with it make the settings. It catches a hardening flag that is accepted
@@ -321,7 +308,22 @@ fn network_and_user_need_the_runtime() {
             ..Flags::default()
         },
         Flags {
+            add_hosts: &["store.example:192.0.2.10".to_owned()],
+            ..Flags::default()
+        },
+        Flags {
+            egress_allow: &["198.51.100.10:443".to_owned()],
+            ..Flags::default()
+        },
+        Flags {
+            nft: Some("/bin/sh"),
+            ..Flags::default()
+        },
+        Flags {
             actions_cgroup: Some(Path::new("/sys/fs/cgroup/jobs.slice")),
+            ..Flags::default()
+        },
+        Flags {
             subuid: Some("jobmap"),
             ..Flags::default()
         },
@@ -338,6 +340,9 @@ fn network_and_user_need_the_runtime() {
             host: Some("unix:///run/engine.sock"),
             pull: Some("missing"),
             tmp_size: Some("128m"),
+            add_hosts: &["store.example:192.0.2.10".to_owned()],
+            egress_allow: &["198.51.100.10:443".to_owned()],
+            nft: Some("/bin/sh"),
             actions_cgroup: None,
             subuid: Some("jobmap"),
         },
@@ -348,6 +353,10 @@ fn network_and_user_need_the_runtime() {
     assert_eq!((on.network(), on.user()), ("jobs", "1000:1000"));
     assert_eq!(on.host(), Some("unix:///run/engine.sock"));
     assert_eq!((on.pull(), on.tmp_size()), (Pull::Missing, "128m"));
+    assert_eq!(on.add_hosts(), ["store.example:192.0.2.10"]);
+    let egress = on.egress().unwrap();
+    assert_eq!(egress.allow().len(), 1);
+    assert_eq!(egress.nft(), "/bin/sh");
     assert_eq!(on.chown_scratch(), None);
     assert_eq!(on.subuid(), Some("jobmap"));
     assert!(matches!(on.uid(), JobUsers::Mapped(_)));
@@ -447,6 +456,13 @@ fn errors_name_their_flag() {
     starts(SettingsError::NoSubuid, "--container-subuid");
     starts(SettingsError::Pull, "--container-pull");
     starts(SettingsError::TmpSize, "--container-tmp-size");
+    starts(SettingsError::AddHost, "--container-add-host");
+    starts(SettingsError::AddHostCount, "--container-add-host");
+    starts(SettingsError::EgressAllow, "--container-egress-allow");
+    starts(SettingsError::EgressCount, "--container-egress-allow");
+    starts(SettingsError::EgressMissing, "--container-network");
+    starts(SettingsError::EgressNoNetwork, "--container-egress-allow");
+    starts(SettingsError::Nft, "--container-nft");
     starts(SettingsError::ActionsCgroup, "--actions-cgroup");
     assert!(
         SettingsError::NoBin
@@ -496,6 +512,10 @@ fn container_flags_are_checked_when_the_agent_starts() {
             exec,
             "--container-network",
             "jobs",
+            "--container-egress-allow",
+            "198.51.100.10:443",
+            "--container-nft",
+            exec,
             "--container-user",
             &own,
             "--container-subuid",
@@ -509,10 +529,6 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ]);
         assert_eq!(status, code(0), "{err}");
         assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
-        assert!(
-            err.contains("js-agent: warning: --container-network jobs: a job can reach"),
-            "{err}"
-        );
 
         // The default base is 1000:1000: an agent that is that user takes it.
         if (uid, gid) != (1000, 1000) {
@@ -528,7 +544,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         }
     }
 
-    let cases: [(&[&str], &str); 15] = [
+    let cases: [(&[&str], &str); 17] = [
         (
             &["--container-bin", "docker"],
             "--container-bin: not an absolute",
@@ -577,6 +593,28 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ),
         (&["--container-network", "jobs"], "need --container-bin"),
         (
+            &[
+                "--container-bin",
+                exec,
+                "--container-subuid",
+                "jobmap",
+                "--container-network",
+                "jobs",
+            ],
+            "a named network needs at least one --container-egress-allow",
+        ),
+        (
+            &[
+                "--container-bin",
+                exec,
+                "--container-subuid",
+                "jobmap",
+                "--container-egress-allow",
+                "198.51.100.10:443",
+            ],
+            "need a named --container-network",
+        ),
+        (
             &["--container-bin", exec, "--actions-cgroup", "/etc"],
             "--actions-cgroup: not an absolute path",
         ),
@@ -599,6 +637,146 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert_eq!(status, code(2), "{extra:?}");
         assert!(err.contains(text), "{extra:?}: {err}");
         assert_eq!(sent, 0, "{extra:?}");
+    }
+}
+
+/// Asserts the `--container-add-host` rules: DNS names (any case, lower-cased) with an
+/// IPv4 or IPv6 address are kept in the canonical form, in the order given; `host-gateway`
+/// and every other non-address, a missing colon, a bad name (empty, underscore, leading or
+/// trailing hyphen, empty label, over 253 bytes or a 64-byte label), a name twice and more
+/// than the maximum are refused. It catches an entry that lets the engine resolve a magic
+/// word (`host-gateway` reaches the host) or smuggle an option, and an unbounded list.
+#[test]
+fn add_host_entries_are_checked() {
+    let set = |entries: &[&str]| {
+        let entries: Vec<String> = entries.iter().map(|e| (*e).to_owned()).collect();
+        Settings::new(bin(), None, None)
+            .unwrap()
+            .with_add_hosts(&entries)
+    };
+    let kept = set(&["Store.Example:192.0.2.10", "kbf:2001:DB8:0:0:0:0:0:1"]).unwrap();
+    assert_eq!(
+        kept.add_hosts(),
+        ["store.example:192.0.2.10", "kbf:2001:db8::1"]
+    );
+    assert!(set(&[]).unwrap().add_hosts().is_empty());
+    let long_name = format!("{}.example:192.0.2.1", "a".repeat(250));
+    let long_label = format!("{}:192.0.2.1", "a".repeat(64));
+    for bad in [
+        "store:host-gateway",
+        "host-gateway:192.0.2.1",
+        "store:example.com",
+        "store:192.0.2.0/24",
+        "store:[2001:db8::1]",
+        "store",
+        ":192.0.2.1",
+        "a_b:192.0.2.1",
+        "-a:192.0.2.1",
+        "a-:192.0.2.1",
+        "a..b:192.0.2.1",
+        "a b:192.0.2.1",
+        "a:192.0.2.1:80",
+        &long_name,
+        &long_label,
+    ] {
+        assert_eq!(set(&[bad]), Err(SettingsError::AddHost), "{bad}");
+    }
+    assert_eq!(
+        set(&["a:192.0.2.1", "A:192.0.2.2"]),
+        Err(SettingsError::AddHost)
+    );
+    let many: Vec<String> = (0..=ADD_HOST_MAX)
+        .map(|n| format!("h{n}:192.0.2.1"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(set(&many[..ADD_HOST_MAX]).is_ok());
+    assert_eq!(set(&many), Err(SettingsError::AddHostCount));
+}
+
+/// Asserts the egress flags of `Settings`: a named network without an endpoint is refused
+/// (so it can never run unchecked), endpoints without a named network are refused, each
+/// endpoint is checked (prefix, port, host bits, 169.254/16), at most 16 are taken, the
+/// `nft` program must be an executable absolute path, and the endpoints are kept sorted
+/// and once. It catches a named network that starts without the check, an allowlist
+/// entry that is wider than the script accepts, and a metadata address allowed.
+#[test]
+fn egress_flags_are_checked() {
+    let with = |network: Option<&str>, allow: &[&str], nft: Option<&str>| {
+        let allow: Vec<String> = allow.iter().map(|a| (*a).to_owned()).collect();
+        Settings::new(bin(), network, None)
+            .unwrap()
+            .with_egress(&allow, nft)
+    };
+    let ok = [
+        "198.51.100.20:8443",
+        "198.51.100.10:443",
+        "198.51.100.10:0443",
+    ];
+    let kept = with(Some("jobs"), &ok, Some("/bin/sh")).unwrap();
+    let shown: Vec<String> = kept
+        .egress()
+        .unwrap()
+        .allow()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(shown, ["198.51.100.10:443", "198.51.100.20:8443"]);
+    assert_eq!(
+        with(Some("jobs"), &[], None),
+        Err(SettingsError::EgressMissing)
+    );
+    assert_eq!(
+        with(Some("jobs"), &[], Some("/bin/sh")),
+        Err(SettingsError::EgressMissing)
+    );
+    assert_eq!(with(None, &ok, None), Err(SettingsError::EgressNoNetwork));
+    assert_eq!(
+        with(None, &[], Some("/bin/sh")),
+        Err(SettingsError::EgressNoNetwork)
+    );
+    assert!(with(None, &[], None).unwrap().egress().is_none());
+    for bad in [
+        "198.51.100.10",
+        "198.51.100.10:0",
+        "198.51.100.10:65536",
+        "198.51.100.10:x",
+        "198.51.100.0/23:443",
+        "198.51.100.1/24:443",
+        "198.51.100.10/33:443",
+        "169.254.169.254:80",
+        "169.254.0.0/24:80",
+        "0.0.0.0/0:80",
+        "[2001:db8::1]:443",
+        "2001:db8::1:443",
+        "host.example:443",
+    ] {
+        assert_eq!(
+            with(Some("jobs"), &[bad], Some("/bin/sh")),
+            Err(SettingsError::EgressAllow),
+            "{bad}"
+        );
+    }
+    assert!(
+        with(
+            Some("jobs"),
+            &["198.51.100.0/24:443", "198.51.100.7/32:22"],
+            Some("/bin/sh")
+        )
+        .is_ok()
+    );
+    let many: Vec<String> = (1..=17).map(|n| format!("198.51.100.{n}:443")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(with(Some("jobs"), &many[..16], Some("/bin/sh")).is_ok());
+    assert_eq!(
+        with(Some("jobs"), &many, Some("/bin/sh")),
+        Err(SettingsError::EgressCount)
+    );
+    for nft in ["nft", ".", "/no/such/nft", "/etc"] {
+        assert_eq!(
+            with(Some("jobs"), &ok, Some(nft)),
+            Err(SettingsError::Nft),
+            "{nft}"
+        );
     }
 }
 
