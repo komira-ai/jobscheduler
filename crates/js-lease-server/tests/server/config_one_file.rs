@@ -326,3 +326,22 @@ async fn the_program_refuses_a_flag_beside_config_and_flags_alone_still_start() 
     let reply = h.call("GET", "/v1/leases", None).await;
     assert_eq!(reply.status, 200);
 }
+
+/// Asserts that a `Cli` made any way but `Cli::try_parse_from` (here clap's own
+/// `Parser::try_parse_from`, which is what `parse` and `parse_from` call) is refused by
+/// `Config::from_cli`, with and without `--config`, rather than let a flag beside `--config`
+/// pass unseen. It catches a refusal that fails open.
+#[test]
+fn a_cli_parsed_another_way_is_refused() {
+    let scratch = Scratch::new("one_file_other_parse");
+    let mut args = with_file(&scratch);
+    args.extend(["--listen", "127.0.0.1:0"].map(OsString::from));
+    for args in [args, crate::support::base_args(&scratch)] {
+        let cli = <Cli as clap::Parser>::try_parse_from(args).unwrap();
+        let said = Config::from_cli(cli).err().unwrap().to_string();
+        assert!(
+            said.starts_with("--config: the command line was parsed without recording its flags"),
+            "{said}"
+        );
+    }
+}

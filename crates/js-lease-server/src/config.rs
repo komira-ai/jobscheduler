@@ -42,9 +42,10 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     /// The flags the command line gave besides `--config`, in command-line order, with
     /// their dashes. [`Cli::try_parse_from`] fills it; a flag left at its default is not
-    /// in it.
+    /// in it. `None` for a `Cli` made any other way (`Parser::parse`, `parse_from`), which
+    /// [`Config::from_cli`] refuses: it cannot tell which flags were given.
     #[arg(skip)]
-    pub(crate) given: Vec<String>,
+    pub(crate) given: Option<Vec<String>>,
     /// The address to listen on. Anything but a loopback address needs --tls-cert and
     /// --tls-key: a bearer token never crosses a network in clear.
     #[arg(long, default_value = "127.0.0.1:7300")]
@@ -360,8 +361,9 @@ impl Config {
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
     /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
-            if let Some(flag) = cli.given.first() {
+            if let Some(flag) = given.first() {
                 return Err(flags::beside_config(flag));
             }
             let clock = SharedClock::new(SystemClock);

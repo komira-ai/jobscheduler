@@ -33,7 +33,7 @@ impl Cli {
     {
         let matches = Self::command().try_get_matches_from(args)?;
         let mut cli = Self::from_arg_matches(&matches)?;
-        cli.given = given(&Self::command(), &matches);
+        cli.given = Some(given(&Self::command(), &matches));
         Ok(cli)
     }
 }
@@ -75,12 +75,25 @@ pub(crate) fn beside_config(flag: &str) -> StartupError {
     StartupError::at(flag, format!("not allowed with --config; {instead}"))
 }
 
+/// The flags `cli` recorded, or the refusal of a `Cli` parsed any way but
+/// [`Cli::try_parse_from`], which would let a flag beside `--config` pass unseen.
+pub(crate) fn recorded(cli: &Cli) -> Result<&[String], StartupError> {
+    match &cli.given {
+        Some(given) => Ok(given),
+        None => Err(StartupError::new(
+            "--config",
+            "the command line was parsed without recording its flags; parse it with Cli::try_parse_from",
+        )),
+    }
+}
+
 /// Refuses an agent registration flag given without `--agent-pool-config`, which alone
 /// turns registration on: the flag would do nothing.
 pub(crate) fn need_agent_pool(cli: &Cli) -> Result<(), StartupError> {
     let stray = cli
         .given
         .iter()
+        .flatten()
         .find(|flag| NEED_AGENT_POOL.contains(&flag.as_str()));
     match (stray, &cli.agent_pool_config) {
         (Some(flag), None) => Err(StartupError::at(flag, "requires --agent-pool-config")),
