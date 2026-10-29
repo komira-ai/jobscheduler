@@ -1552,9 +1552,9 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    the image, and that `python3` is on the image. GPU containers under `userns-remap` are an open live
    question (reports say they can break under a remap). The live checks, on a launched host:
    `docker info` lists `name=userns` in `SecurityOptions` and shows the remapped
-   `DockerRootDir`; a `docker run --gpus device=0` container runs `nvidia-smi`; the scratch
+   `DockerRootDir`; a real `--gpus device=0` job runs a CUDA device query and a small kernel (not `nvidia-smi` alone), on the first live run before any scale-up; the scratch
    directory is writable by container uid 65534 (host uid 2000065534 under the remap); and `/etc/docker/daemon.json`
-   still holds the toolkit's `runtimes` beside `userns-remap`. If the Docker daemon is
+   still holds the toolkit's `runtimes` beside `userns-remap`. If the GPU job fails under the remap, the fallback is Podman on launched hosts: the same engine and `--uidmap` path used elsewhere, so one engine serves Linux everywhere. It is not a change to the agent's Docker rule. If the Docker daemon is
    instead configured by a unit that overrides `daemon.json`, `systemctl show -p ExecStart
    docker.service` shows it.
 6. Where the host gets the agent binary. Decided: from the operator's pin per architecture
