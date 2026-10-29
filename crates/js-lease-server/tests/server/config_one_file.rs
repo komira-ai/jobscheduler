@@ -284,6 +284,38 @@ fn the_refused_flags_are_every_flag() {
     assert_eq!(tried, asked);
 }
 
+/// Asserts that the three usage flags are not refused beside `--config` (the file has no
+/// usage keys, so they are how usage is set on a server that reads a file): without them
+/// usage is on in `usage.db` beside the lease file with the default store size, and
+/// `--usage-off`, `--usage-db` and `--profile-store-bytes` each apply on top of the file.
+/// It catches a refusal of them (the file path would then have no way to turn usage off or
+/// move its file) and a flag that is read and ignored.
+#[test]
+fn the_usage_flags_apply_on_top_of_the_file() {
+    let scratch = Scratch::new("one_file_usage");
+    let base = with_file(&scratch);
+    let with = |extra: &[&str]| {
+        let mut args = base.clone();
+        args.extend(extra.iter().map(OsString::from));
+        Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
+    };
+    let plain = with(&[]);
+    assert_eq!(plain.usage_db().unwrap().file_name().unwrap(), "usage.db");
+    assert_eq!(plain.profile_store_bytes(), 268_435_456);
+    assert!(with(&["--usage-off"]).usage_db().is_none());
+    let moved = with(&[
+        "--usage-db",
+        "/elsewhere/u.db",
+        "--profile-store-bytes",
+        "4096",
+    ]);
+    assert_eq!(
+        moved.usage_db().unwrap(),
+        std::path::Path::new("/elsewhere/u.db")
+    );
+    assert_eq!(moved.profile_store_bytes(), 4096);
+}
+
 /// Asserts that the first conflicting flag on the command line is the one named: with
 /// two flags given, whichever was written first, wherever `--config` is.
 #[test]
