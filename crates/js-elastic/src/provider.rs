@@ -107,6 +107,37 @@ mod tests {
     use crate::ids::SchedulerId;
     use crate::offer::{GpuClass, PriceUnit};
 
+    fn offer() -> Offer {
+        Offer {
+            id: "type".to_owned(),
+            zone: None,
+            cpu_millis: 1,
+            memory_bytes: 1,
+            disk_bytes: 1,
+            gpus: 1,
+            gpu_class: Some(GpuClass::parse("x").unwrap()),
+            os: "linux".to_owned(),
+            arch: "x86_64".to_owned(),
+            exec: ExecMode::Container,
+            price_cents_per_hour: None,
+            price_unit: PriceUnit::UsCents,
+            available: true,
+        }
+    }
+
+    fn request() -> AcquireRequest {
+        let scheduler = SchedulerId::new("s").unwrap();
+        let acquire = AcquireId::new("a").unwrap();
+        AcquireRequest {
+            name: HostName::derive(&scheduler, &acquire),
+            acquire,
+            pool: "gpu".to_owned(),
+            offer: offer(),
+            labels: Vec::new(),
+            payload: BootPayload::new("join-token-MARKER".to_owned()),
+        }
+    }
+
     /// Asserts that an error reads as the provider's words and compares by them, and
     /// that a request prints its payload as `***` and not as text.
     #[test]
@@ -118,30 +149,7 @@ mod tests {
             ProviderError::new(String::from("the list is not complete"))
         );
 
-        let scheduler = SchedulerId::new("s").unwrap();
-        let acquire = AcquireId::new("a").unwrap();
-        let request = AcquireRequest {
-            name: HostName::derive(&scheduler, &acquire),
-            acquire,
-            pool: "gpu".to_owned(),
-            offer: Offer {
-                id: "type".to_owned(),
-                zone: None,
-                cpu_millis: 1,
-                memory_bytes: 1,
-                disk_bytes: 1,
-                gpus: 1,
-                gpu_class: Some(GpuClass::parse("x").unwrap()),
-                os: "linux".to_owned(),
-                arch: "x86_64".to_owned(),
-                exec: ExecMode::Container,
-                price_cents_per_hour: None,
-                price_unit: PriceUnit::UsCents,
-                available: true,
-            },
-            labels: Vec::new(),
-            payload: BootPayload::new("join-token-MARKER".to_owned()),
-        };
+        let request = request();
         let shown = format!("{request:?}");
         assert!(!shown.contains("MARKER"), "{shown}");
         assert!(shown.contains("***"), "{shown}");
@@ -183,7 +191,15 @@ mod tests {
     /// have the scheduler settle a machine that may exist.
     #[test]
     fn a_provider_that_says_nothing_has_no_unresolved_call_and_finds_nothing_gone() {
+        let id = HostRef("i-1".to_owned());
         assert!(Bare.unresolved().is_empty());
-        assert!(!Bare.is_gone(&HostRef("i-1".to_owned())));
+        assert!(!Bare.is_gone(&id));
+        // The required calls of the stand-in, so that it is whole.
+        assert_eq!(Bare.catalog(), Ok(Vec::new()));
+        assert!(Bare.host_prep(&offer()).is_empty());
+        assert_eq!(Bare.payload_limit(), 0);
+        assert_eq!(Bare.list(), Ok(Vec::new()));
+        assert_eq!(Bare.release(&id), Released::Unknown);
+        assert_eq!(Bare.acquire(&request()), Acquired::Unknown);
     }
 }

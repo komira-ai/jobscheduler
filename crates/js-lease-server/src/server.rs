@@ -233,11 +233,17 @@ async fn tick_loop<T: Ticker>(shared: Arc<Shared>, mut ticker: T, scaler: Option
     let _alive = Alive(shared.clone());
     loop {
         let tick = ticker.next().await;
-        shared.tick().await;
-        if let Some(scaler) = &scaler {
-            scaler.tick().await;
-        }
+        tick_once(&shared, scaler.as_ref()).await;
         tick.finish();
+    }
+}
+
+/// One tick: the table, and then the scaler of the elastic pool when there is one. Not
+/// generic, so that every kind of ticker runs the same code.
+async fn tick_once(shared: &Shared, scaler: Option<&Scaler>) {
+    shared.tick().await;
+    if let Some(scaler) = scaler {
+        scaler.tick().await;
     }
 }
 
