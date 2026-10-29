@@ -25,6 +25,7 @@ mod flags;
 mod integrity;
 mod jobs;
 mod lifecycle;
+mod load;
 mod readiness;
 mod server;
 mod session;

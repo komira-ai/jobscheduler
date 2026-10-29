@@ -465,6 +465,7 @@ pub fn view(name: &str) -> HostView {
         mark: None,
         reserved_for: None,
         drain_deadline: None,
+        load: None,
     }
 }
 

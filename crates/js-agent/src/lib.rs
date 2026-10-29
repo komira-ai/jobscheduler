@@ -189,6 +189,7 @@ mod host;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+mod load;
 mod readiness;
 mod run;
 mod session;
@@ -221,6 +222,7 @@ pub use host::{Offer, offer};
 pub use jobs::DRAIN_SETTLE;
 use jobs::Seams;
 use lifecycle::{Local, StateRoot};
+pub use load::LoadReader;
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner,
     HookWindow, Hooked, ReadinessHook, Verdict, WorkerHook, hook_runner,
@@ -484,6 +486,12 @@ fn execute(
         rescue_bound: services.rescue_bound,
         readiness,
     };
+    // Where the load of the heartbeat is read from: only with `--actions-cgroup`.
+    let actions = local
+        .container
+        .as_ref()
+        .and_then(|settings| settings.actions_cgroup())
+        .map(str::to_owned);
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
     // The session asks the worker about a whole-node lease; the worker answers on its own
@@ -498,6 +506,9 @@ fn execute(
     }
     if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
         session = session.with_default_quiesce(host, clock);
+    }
+    if let (Some(dir), Some(clock)) = (&actions, clock.as_ref()) {
+        session = session.with_load(LoadReader::new(services.files, dir, clock.clone()));
     }
     if let Some(file) = &credentials {
         session = session.with_credential_store(file);

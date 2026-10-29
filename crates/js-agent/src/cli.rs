@@ -227,9 +227,11 @@ pub struct Cli {
     /// one-component path that ends in `.slice`, which the systemd cgroup driver takes,
     /// and the path below `/sys/fs/cgroup` with a leading `/` otherwise, for the cgroupfs
     /// driver) and reads the CPU and memory of the directory and of each container's
-    /// control group to send what each lease costs on the heartbeat. Without it containers
-    /// land where the engine puts them and the heartbeat carries no load. Needs
-    /// `--container-bin`.
+    /// control group to send what each lease costs on the heartbeat (CPU time in
+    /// microseconds, memory in bytes, per-lease CPU in thousandths of a core). Without it
+    /// containers land where the engine puts them and the heartbeat carries no load; nor
+    /// does a heartbeat whose reading failed (the log says why), since the agent never sends
+    /// zeros it did not measure. Needs `--container-bin`.
     #[arg(long, value_name = "PATH")]
     pub actions_cgroup: Option<PathBuf>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run

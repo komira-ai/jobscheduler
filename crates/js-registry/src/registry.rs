@@ -7,10 +7,12 @@ use js_caps::{FLAG_SET, HostContract, RUN_FILES};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
+use js_types::sched::usage::NodeLoad;
 use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
+use crate::load;
 use crate::refusal::Refusal;
 use crate::runs::{RunRefusal, RunView, Runs, Standing, vet};
 use crate::session::{OsSessions, SessionDigest, SessionSource, secret_text};
@@ -90,6 +92,10 @@ pub struct HostView {
     /// When a reservation that drains a busy host is given up if the host is still not
     /// quiet; `None` unless the host is reserved and was busy when it was set aside.
     pub drain_deadline: Option<Timestamp>,
+    /// The latest load the host reported (in the units of [`NodeLoad`]); `None` when the
+    /// host has not reported one in this session, when its latest heartbeat carried none
+    /// (the agent could not measure), and while the host is lost. A new hello clears it.
+    pub load: Option<NodeLoad>,
 }
 
 /// How a host is set aside: for whole-node use, or to be scaled away.
@@ -154,6 +160,8 @@ struct Record {
     leaving: Option<marks::Leaving>,
     /// The shape the host announced at its last hello.
     claim: Option<Shape>,
+    /// The load of the host's latest accepted reading, see [`HostView::load`].
+    load: Option<NodeLoad>,
 }
 
 impl Record {
@@ -178,6 +186,7 @@ impl Record {
             bound: None,
             leaving: None,
             claim: None,
+            load: None,
         }
     }
 
@@ -628,6 +637,7 @@ impl Registry {
                 bound: kept_bound,
                 leaving: kept_leaving,
                 claim,
+                load: None,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -727,6 +737,7 @@ impl Registry {
         record.heard = Some(now);
         record.phase = heartbeat.phase;
         record.beats = record.beats.saturating_add(1);
+        record.load = load::after_beat(record.load.take(), heartbeat.load.as_ref());
         record.held = heartbeat
             .held
             .iter()
@@ -943,6 +954,10 @@ impl Registry {
         let views = state.records.iter().map(|(id, record)| HostView {
             id: id.clone(),
             state: record.state(now, self.grace_ms()),
+            load: record
+                .load
+                .clone()
+                .filter(|_| record.state(now, self.grace_ms()) != HostState::Lost),
             phase: record.phase,
             lease: booked.get(id).copied(),
             shape: shape.clone(),

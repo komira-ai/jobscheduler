@@ -91,7 +91,7 @@ use js_agent_wire::{Command, HeartbeatReply, HeldRun, HeldState, RunResult, Tain
 use crate::cli_runtime::{CALL_LIMIT, Settings};
 use crate::facts::Platform;
 use crate::integrity::Integrity;
-use crate::lifecycle::{Config, Event, Lifecycle, Status};
+use crate::lifecycle::{Config, Event, Lifecycle, RunningLease, Status};
 use crate::readiness::{HookWindow, WorkerHook};
 
 mod quiesce;
@@ -292,6 +292,9 @@ pub struct Snapshot {
     pub results: Vec<RunResult>,
     /// The taint to report, until the server acknowledges it.
     pub taint: Option<Taint>,
+    /// The leases that are running, with the control group each one's usage is read from
+    /// (see [`Lifecycle::running`]).
+    pub leases: Vec<RunningLease>,
 }
 
 impl Snapshot {
@@ -300,6 +303,7 @@ impl Snapshot {
             held: life.held(),
             results: life.results(),
             taint: life.pending_taint(),
+            leases: life.running(),
         }
     }
 
