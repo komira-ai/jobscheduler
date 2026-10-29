@@ -410,7 +410,7 @@
 //! | request | answers |
 //! |---|---|
 //! | `GET /v1/usage/nodes/{id}?from=<minute>&to=<minute>` | 200 `{host, from, to, rows: [{minute, cpu_millis, ws_bytes, leases}], next}`; minutes are wall minutes since the Unix epoch, default the last 60 minutes up to now, at most 1,440 rows, and `next` is the minute to ask from for the rest (else `null`); a node with no rows is 200 with none, so an unknown node and a quiet one look alike; 400 for an id that is not exactly an id (capitals, escapes, slashes, dot-only segments, over 63 bytes), a query that is not `from` and `to` once each in digits, or `to` before `from`; 503 `usage-unavailable` |
-//! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]`; 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
+//! | `GET /v1/usage/keys/{key}` | 200 `{key, runs, curve, last_used_day, stale}`, `curve` being `null` until there are enough runs, else `[{minute, cores_milli, ws_bytes}]` (`cores_milli` is `null` when the fit did not learn cores: too few runs outside node pressure, a memory-only curve); 404 `unknown-key`; 400 for a key that is not 1 to 128 characters of `[0-9a-z._-]` starting with a letter or digit; 503 `usage-unavailable` |
 //!
 //! Both are behind the client token (a join token is a 401), exist only when usage is on,
 //! and never echo the request in an answer or a log line.
