@@ -91,12 +91,13 @@ mod tests {
             .map(|_| RunTag::fresh().unwrap().value().to_owned())
             .collect();
         assert_eq!(tags.len(), 64);
-        assert!(tags.iter().all(|tag| {
-            tag.len() == 32
-                && tag
-                    .bytes()
+        for tag in &tags {
+            assert_eq!(tag.len(), 32);
+            assert!(
+                tag.bytes()
                     .all(|b| b.is_ascii_digit() | (b'a'..=b'f').contains(&b))
-        }));
+            );
+        }
     }
 
     /// Asserts that a random source that fails is a failure naming it, not a tag of
