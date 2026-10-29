@@ -9,6 +9,7 @@ use std::path::Path;
 use js_agent::cli_runtime::{
     DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, JobUsers, Pull, Settings, SettingsError,
 };
+use js_agent::lifecycle::SLOTS;
 
 use super::BIN;
 use crate::support::{Scratch, code, linux_host, run_scripted, welcome};
@@ -133,18 +134,18 @@ fn the_scratch_must_be_writable_by_the_container_user() {
     let root = user(Some("2000:3000")).with_agent(0, 0).unwrap();
     assert_eq!(root.chown_scratch(), Some((2000, 3000)));
     let root_default = user(None).with_agent(0, 0).unwrap();
-    assert_eq!(root_default.chown_scratch(), Some((65534, 65534)));
+    assert_eq!(root_default.chown_scratch(), Some((1000, 1000)));
 
     let own = user(Some("1000:1000")).with_agent(1000, 1000).unwrap();
     assert_eq!(own.chown_scratch(), None, "nothing to give away");
-    let default_own = user(None).with_agent(65534, 65534).unwrap();
+    let default_own = user(None).with_agent(1000, 1000).unwrap();
     assert_eq!(default_own.chown_scratch(), None);
 
     for (flag, uid, gid) in [
         (Some("1000:2000"), 1000, 1000),
         (Some("2000:1000"), 1000, 1000),
         (Some("1000:1000"), 1001, 1000),
-        (None, 1000, 1000),
+        (None, 1001, 1000),
     ] {
         let said = user(flag).with_agent(uid, gid);
         let agent = format!("{uid}:{gid}");
@@ -158,6 +159,45 @@ fn the_scratch_must_be_writable_by_the_container_user() {
         text,
         "--container-user: must be 1000:1000 (the agent's own uid:gid) unless the agent runs as root"
     );
+}
+
+/// Asserts the user of each slot: the container ids of slot `k` are the base ids plus `k`
+/// (the default base is `1000:1000`; a base with a different gid keeps the difference),
+/// the last slot is still a container id, and a base that leaves no room for all the slots
+/// below 65536 is refused when the jobs are mapped. It catches two slots with one user and a
+/// slot whose id a job's user namespace does not have.
+#[test]
+fn each_slot_has_its_own_ids_and_all_of_them_fit() {
+    assert_eq!(DEFAULT_USER, "1000:1000");
+    let set = Settings::new(bin(), None, None).unwrap();
+    assert_eq!(set.slot_ids(0), (1000, 1000));
+    assert_eq!(set.slot_user(0), "1000:1000");
+    assert_eq!(set.slot_ids(1), (1001, 1001));
+    assert_eq!(set.slot_user(2), "1002:1002");
+    let last = SLOTS - 1;
+    assert_eq!(set.slot_ids(last), (1000 + last, 1000 + last));
+    assert!(set.slot_ids(last).0 < 65_536);
+
+    let other = Settings::new(bin(), None, Some("2000:3000")).unwrap();
+    assert_eq!(other.slot_ids(5), (2005, 3005));
+    assert_eq!(other.slot_user(5), "2005:3005");
+
+    let top = 65_536 - SLOTS;
+    for (base, fits) in [
+        (format!("{top}:1"), true),
+        (format!("1:{top}"), true),
+        (format!("{}:1", top + 1), false),
+        (format!("1:{}", top + 1), false),
+    ] {
+        let set = Settings::new(bin(), None, Some(&base)).unwrap();
+        let said = set.with_subuid("jobmap").map(|_| ());
+        let want = if fits {
+            Ok(())
+        } else {
+            Err(SettingsError::UserOutsideMap)
+        };
+        assert_eq!(said, want, "{base}");
+    }
 }
 
 /// Asserts the engine host: a socket on this host (`unix:///<path>`) is taken and kept as
@@ -368,14 +408,14 @@ fn the_containers_need_a_subordinate_user() {
         let said = Settings::from_flags(&flags(Some(name), None), (0, 0));
         assert_eq!(said, Err(SettingsError::Subuid), "{name:?}");
     }
-    for user in ["65536:1", "1:65536"] {
+    for user in ["65536:1", "1:65536", "61441:1", "1:61441", "65535:65535"] {
         let said = Settings::from_flags(&flags(Some("jobmap"), Some(user)), (0, 0));
         assert_eq!(said, Err(SettingsError::UserOutsideMap), "{user}");
     }
-    let edge = Settings::from_flags(&flags(Some("jobmap"), Some("65535:65535")), (0, 0));
-    assert_eq!(edge.unwrap().unwrap().chown_scratch(), Some((65535, 65535)));
+    let edge = Settings::from_flags(&flags(Some("jobmap"), Some("61440:61440")), (0, 0));
+    assert_eq!(edge.unwrap().unwrap().chown_scratch(), Some((61440, 61440)));
     let plain = Settings::new(bin(), None, None).unwrap();
-    assert_eq!((plain.subuid(), plain.uid()), (None, JobUsers::Uid(65534)));
+    assert_eq!((plain.subuid(), plain.uid()), (None, JobUsers::Uid(1000)));
     for (why, flag) in [
         (SettingsError::NoSubuid, "--container-subuid"),
         (SettingsError::Subuid, "--container-subuid"),
@@ -471,14 +511,18 @@ fn container_flags_are_checked_when_the_agent_starts() {
             "{err}"
         );
 
-        let (status, err, sent) = start(&["--container-bin", exec, "--container-subuid", "jobmap"]);
-        assert_eq!(
-            status,
-            code(2),
-            "the default user is not the agent's: {err}"
-        );
-        assert!(err.contains("--container-user: must be"), "{err}");
-        assert_eq!(sent, 0);
+        // The default base is 1000:1000: an agent that is that user takes it.
+        if (uid, gid) != (1000, 1000) {
+            let (status, err, sent) =
+                start(&["--container-bin", exec, "--container-subuid", "jobmap"]);
+            assert_eq!(
+                status,
+                code(2),
+                "the default user is not the agent's: {err}"
+            );
+            assert!(err.contains("--container-user: must be"), "{err}");
+            assert_eq!(sent, 0);
+        }
     }
 
     let cases: [(&[&str], &str); 13] = [

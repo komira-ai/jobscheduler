@@ -101,10 +101,86 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # Whether a pull request touches what the macos job builds, so a PR that does not skips
+  # that job (macOS runners are scarce) and a push to main always runs it. The paths are
+  # the workspace crates in the dependency closure of js-agent and js-cli (normal, build
+  # and dev dependencies, from `cargo metadata --format-version 1 --no-deps`), the
+  # lockfile, the workspace manifest, the toolchain pin and this file. A path ending in `/`
+  # matches everything under it. crates/xtask/tests/macos_filter.rs fails when a crate of
+  # the closure is missing here. The macos job builds and tests only js-agent and js-cli.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      macos: ${{ steps.filter.outputs.macos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          PATHS: |
+            crates/js-agent/
+            crates/js-agent-usage/
+            crates/js-agent-wire/
+            crates/js-caps/
+            crates/js-cli/
+            crates/js-client/
+            crates/js-elastic/
+            crates/js-lease/
+            crates/js-lease-server/
+            crates/js-pool-static/
+            crates/js-provider/
+            crates/js-provider-fake/
+            crates/js-provider-lambdalabs/
+            crates/js-registry/
+            crates/js-scaler/
+            crates/js-sched/
+            crates/js-sim/
+            crates/js-sizing/
+            crates/js-testkit/
+            crates/js-types/
+            crates/js-whole/
+            Cargo.lock
+            Cargo.toml
+            rust-toolchain.toml
+            .github/workflows/ci.yml
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: if the diff cannot be computed, run the macOS job. Renames count as
+          # both the old and the new path, and names are not quoted.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "origin/$BASE...HEAD"); then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          macos=false
+          while IFS= read -r file; do
+            while IFS= read -r path; do
+              if [ "${path%/}" != "$path" ]; then
+                if [ "${file#"$path"}" != "$file" ]; then macos=true; fi
+              elif [ "$file" = "$path" ]; then
+                macos=true
+              fi
+            done <<< "$PATHS"
+          done <<< "$files"
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+
   # js-agent and js-cli (with the crates their tests start) build and pass their tests on
   # Apple silicon. Tests that need Linux (pidfds, /proc) are cfg-gated, not removed; the
   # coverage and the Postgres tests stay on Linux.
   macos:
+    needs: changes
+    # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
+    # run cancelled by a newer push to the same pull request does not.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-14
     timeout-minutes: 45
     permissions:

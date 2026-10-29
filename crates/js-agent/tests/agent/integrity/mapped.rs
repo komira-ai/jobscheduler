@@ -4,7 +4,7 @@
 use js_agent::cli_runtime::{JobUsers, Mapping, Settings};
 use js_agent::integrity::{FakeHost, Integrity, code};
 
-use super::{after, beside, process, said};
+use super::{after, after_slot, beside, process, said};
 
 /// The first uid of the range of `jobmap` in these tests.
 const START: u32 = 231_072;
@@ -119,4 +119,126 @@ fn the_checks_use_the_resolved_range_and_never_read_the_id_files() {
         "0::/machine.slice/libpod-9e1.scope",
     ));
     assert!(after(&mut checks, "r2").is_err(), "the resolved range is");
+}
+
+/// The container uid of slot 0 in the slot tests.
+const FIRST: u32 = 1000;
+
+/// The checks of a host whose containers run as the slots' users.
+fn started_slots(host: &FakeHost) -> Integrity {
+    started(host).with_slots(FIRST)
+}
+
+/// Asserts that after a run in slot 1 a new process with the host uid of slot 1
+/// (`START + 1000 + 1`) is that slot's leftover, and the finding says so. It catches a
+/// check that cannot tell whose uid a leftover has.
+#[test]
+fn a_leftover_at_the_finished_slots_uid_is_named_as_the_slots() {
+    let host = host();
+    let mut checks = started_slots(&host);
+    host.start_process(process(
+        700,
+        100,
+        START + 1001,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    let found = after_slot(&mut checks, "r1", 1, &[]).unwrap_err();
+    assert_eq!(
+        said(&found),
+        (
+            true,
+            code::PROCESS_AS_JOB_USER,
+            "process-as-job-user: pid 700 of user 232073 is running after job r1 (leftover of slot 1)"
+                .to_owned()
+        )
+    );
+}
+
+/// Asserts that a new process at the uid of another slot that has no live run is still a
+/// finding after a run in slot 1, and is not called that run's slot's leftover. It catches
+/// a check that looks only at the finished slot's uid and lets a leftover of an idle slot
+/// pass until that slot is used again.
+#[test]
+fn a_leftover_at_an_idle_slots_uid_is_still_found() {
+    let host = host();
+    let mut checks = started_slots(&host);
+    host.start_process(process(
+        701,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    let found = after_slot(&mut checks, "r1", 1, &[]).unwrap_err();
+    assert_eq!(
+        said(&found),
+        (
+            true,
+            code::PROCESS_AS_JOB_USER,
+            "process-as-job-user: pid 701 of user 232072 is running after job r1".to_owned()
+        )
+    );
+}
+
+/// Asserts that a new process at the uid of a slot whose run is live is not counted against
+/// the run that finished, while the same process is a finding when that slot is not live
+/// and so is one at the uid of a slot that is not in the live list. It catches a neighbour
+/// run's helper, started outside its container's control group, tainting every other run's
+/// end; and a live list that lets any slot's leftover through.
+#[test]
+fn a_live_slots_processes_are_not_the_finished_runs() {
+    let host = host();
+    let mut checks = started_slots(&host);
+    host.start_process(process(
+        702,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    assert!(after_slot(&mut checks, "r2", 1, &[0]).is_ok());
+
+    let host = self::host();
+    let mut checks = started_slots(&host);
+    host.start_process(process(
+        703,
+        100,
+        START + 1000,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    assert!(after_slot(&mut checks, "r2", 1, &[]).is_err());
+
+    let host = self::host();
+    let mut checks = started_slots(&host);
+    host.start_process(process(
+        704,
+        100,
+        START + 1002,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    assert!(after_slot(&mut checks, "r2", 1, &[0]).is_err());
+}
+
+/// Asserts that a check that was not told about slots reads a finished run's slot as
+/// nothing: the old behaviour, every uid of the range a finding with no slot named. It
+/// catches a slot number that changes what an agent without slots reports.
+#[test]
+fn without_slots_a_run_s_slot_changes_nothing() {
+    let host = host();
+    let mut checks = started(&host);
+    host.start_process(process(
+        705,
+        100,
+        START + 1001,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
+    let found = after_slot(&mut checks, "r1", 1, &[1]).unwrap_err();
+    assert_eq!(
+        said(&found).2,
+        "process-as-job-user: pid 705 of user 232073 is running after job r1"
+    );
 }

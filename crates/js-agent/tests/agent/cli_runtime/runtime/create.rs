@@ -132,7 +132,7 @@ fn create_builds_the_documented_argv() {
         "--pull",
         "never",
         "--user",
-        "65534:65534",
+        "1000:1000",
         "--",
         "registry.example/job:1",
         "--go",
@@ -283,7 +283,7 @@ fn the_job_cannot_reach_the_runtimes_options() {
             ("--ulimit", "core=0"),
             ("--ipc", "private"),
             ("--pull", "never"),
-            ("--user", "65534:65534"),
+            ("--user", "1000:1000"),
         ];
         for (flag, value) in pairs {
             let at = before.iter().position(|a| a == flag).unwrap();
@@ -297,6 +297,33 @@ fn the_job_cannot_reach_the_runtimes_options() {
         assert!(before.contains(&"--read-only".to_owned()), "{run}");
         assert!(before.contains(&"--pids-limit".to_owned()), "{run}");
     }
+}
+
+/// Asserts that a container runs as the user of its slot: `--user` is the slot's uid and
+/// gid (1000 plus the slot by default), one flag, for the first slot, the next and a later
+/// one. It catches runs in different slots that share a user, and a user that is not the
+/// slot's.
+#[test]
+fn each_slot_runs_as_its_own_user() {
+    let world = docker();
+    let mut rt = open(&world);
+    for (run, slot) in [("r1", 0), ("r2", 1), ("r3", 7)] {
+        let mut job = spec(run);
+        job.slot = slot;
+        rt.create_and_start(&job).unwrap();
+    }
+    let users = |run: &str| -> Vec<String> {
+        let args = created(&world, run);
+        let before = &args[..args.iter().position(|arg| arg == "--").unwrap()];
+        before
+            .windows(2)
+            .filter(|pair| pair[0] == "--user")
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    assert_eq!(users("r1"), ["1000:1000"]);
+    assert_eq!(users("r2"), ["1001:1001"]);
+    assert_eq!(users("r3"), ["1007:1007"]);
 }
 
 /// Asserts that the agent's labels are the agent's: a job label that tries to name
