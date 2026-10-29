@@ -328,8 +328,8 @@ impl Scheduler {
             .count()
     }
 
-    /// What `worker` reported it can run at once, if it is registered: its newest
-    /// `Hello`'s capacity. [`Scheduler::booked`] is what its leases hold of it.
+    /// What `worker` can run at once, if it is registered: its newest `Hello`'s capacity,
+    /// its memory cut to the share this scheduler books ([`Scheduler::with_memory_percent`]). [`Scheduler::booked`] is what its leases hold of it.
     #[must_use]
     pub fn capacity(&self, worker: &WorkerId) -> Option<Resources> {
         self.workers.get(worker).map(|w| w.capacity)
