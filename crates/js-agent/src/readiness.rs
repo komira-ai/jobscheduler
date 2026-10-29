@@ -41,7 +41,13 @@
 //! That line goes to the scheduler verbatim (cut to the byte bound), so a hook must not
 //! print a secret, a token or anything else that must not leave the host. The hook runs
 //! only for a host the agent's own checks found quiet and clean ([`Hooked`]), once per
-//! `exclusive` grant.
+//! `exclusive` grant, and not for a lease taken over after a restart (the consumer is
+//! already using that host).
+//!
+//! The job worker runs the hook on its own thread, so while it runs (up to twice
+//! `prepare_timeout`) the worker applies no reply: starts, stops and acknowledgements wait
+//! in the queue, a start may go stale there, and replies beyond the queue are dropped and
+//! sent again. Heartbeats are not delayed.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -219,17 +225,59 @@ impl<'a> Hooked<'a> {
 }
 
 impl Quiesce for Hooked<'_> {
-    fn prepare(&mut self) -> Quiet {
-        match self.host.prepare() {
-            Quiet::Ready => match self.hook.run(self.runner) {
-                Verdict::Ready => Quiet::Ready,
-                Verdict::Refused { code, detail } => Quiet::Refused { code, detail },
-            },
+    fn prepare(&mut self, lease: &str) -> Quiet {
+        match self.host.prepare(lease) {
+            Quiet::Ready => vetted(self.hook.run(self.runner)),
             other => other,
         }
     }
 
-    fn restore(&mut self) -> Restored {
-        self.host.restore()
+    fn restore(&mut self, lease: &str) -> Restored {
+        self.host.restore(lease)
+    }
+}
+
+/// What the session is told of the hook's verdict.
+fn vetted(verdict: Verdict) -> Quiet {
+    match verdict {
+        Verdict::Ready => Quiet::Ready,
+        Verdict::Refused { code, detail } => Quiet::Refused { code, detail },
+    }
+}
+
+/// The hook as the job worker owns it: the checked command, the runner that starts it and
+/// the longest a run of it can take, which the worker's watchdog is told of so a hook that
+/// takes its full time is not taken for a stuck worker. The worker runs it, on its own
+/// thread, once for each lease its lifecycle found quiet.
+pub struct WorkerHook {
+    hook: ReadinessHook,
+    runner: Box<dyn HookRunner + Send>,
+    bound: Duration,
+}
+
+impl WorkerHook {
+    /// `hook` started by `runner`, which takes at most `bound` ([`hook_runner`] takes twice
+    /// its `prepare_timeout`).
+    pub fn new(hook: ReadinessHook, runner: Box<dyn HookRunner + Send>, bound: Duration) -> Self {
+        Self {
+            hook,
+            runner,
+            bound,
+        }
+    }
+
+    /// `found`, the lifecycle's answer: when it is [`Quiet::Ready`] the hook runs and its
+    /// verdict is the answer; any other answer is returned as it is and the hook does not
+    /// run. Blocks as long as the hook runs, up to the bound given to [`WorkerHook::new`];
+    /// `before_run` is told that bound just before the hook starts (the worker extends its
+    /// watchdog by it).
+    pub fn vet(&self, found: Quiet, before_run: &dyn Fn(Duration)) -> Quiet {
+        match found {
+            Quiet::Ready => {
+                before_run(self.bound);
+                vetted(self.hook.run(self.runner.as_ref()))
+            }
+            other => other,
+        }
     }
 }
