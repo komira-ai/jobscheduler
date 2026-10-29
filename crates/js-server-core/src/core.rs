@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
-    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
-    Request, UNSERVABLE_WAIT,
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder,
+    MemoryPercent, PercentError, Prediction, Request, UNSERVABLE_WAIT,
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
@@ -80,6 +80,18 @@ pub struct Config {
     /// Where the scheduler finds the learned curves of action keys
     /// ([`Config::with_curves`]); `None` is the scheduler's default, no curves.
     pub(crate) curves: Option<Curves>,
+    /// `memory_schedulable_percent`: the whole percent, 1 to 100, of the memory a worker
+    /// reports that admission books against; the rest is headroom. The scheduler takes
+    /// `floor(memory * percent / 100)` bytes as the worker's capacity wherever it enters
+    /// booking: the load predicate, the flat-memory guard, VM booking, the memory
+    /// ladder's cap, the whole-host and whole-machine tests, and the unservable check
+    /// (and a remote frontend's session, when this core looks for a host that could run
+    /// stuck work). The capacity the scheduler shows is the cut one. Cores, GPUs, VM
+    /// slots and the lease cap are not cut, and neither is any figure an agent measures
+    /// or a job's learned memory. Defaults to 100, which leaves admission unchanged.
+    /// [`Config::validate`] refuses 0 and anything above 100; a core built from a value
+    /// outside the range (it cannot fail) holds it to 1 to 100.
+    pub memory_schedulable_percent: u32,
 }
 
 impl Config {
@@ -98,7 +110,31 @@ impl Config {
             whole_node: None,
             size_keys: false,
             curves: None,
+            memory_schedulable_percent: 100,
         }
+    }
+
+    /// Whether this configuration can build a core: `memory_schedulable_percent` must be
+    /// an integer from 1 to 100. The error names the field. A server calls this before
+    /// [`Core::new`], which cannot fail.
+    ///
+    /// # Errors
+    ///
+    /// [`PercentError`] when `memory_schedulable_percent` is 0 or above 100.
+    pub fn validate(&self) -> Result<(), PercentError> {
+        MemoryPercent::new(self.memory_schedulable_percent).map(|_| ())
+    }
+
+    /// This configuration, booking `percent` of each worker's reported memory
+    /// ([`Config::memory_schedulable_percent`]).
+    ///
+    /// # Errors
+    ///
+    /// [`PercentError`] when `percent` is 0 or above 100.
+    pub fn with_memory_schedulable_percent(mut self, percent: u32) -> Result<Self, PercentError> {
+        MemoryPercent::new(percent)?;
+        self.memory_schedulable_percent = percent;
+        Ok(self)
     }
 
     /// This configuration, reading and writing size keys when `on` ([`Config::size_keys`]).

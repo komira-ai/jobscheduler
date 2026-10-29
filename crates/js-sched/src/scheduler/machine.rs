@@ -68,6 +68,7 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                let capacity = self.memory_percent.of_capacity(capacity);
                 let now = self.now;
                 match self.workers.get_mut(&worker) {
                     Some(w) => {
@@ -124,6 +125,7 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                let capacity = self.memory_percent.of_capacity(capacity);
                 if let Some(w) = self.workers.get_mut(&worker) {
                     w.capacity = capacity;
                     w.caps = caps;

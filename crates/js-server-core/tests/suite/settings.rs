@@ -6,12 +6,12 @@
 
 use js_caps::NodeCaps;
 use js_sched::MemoryLadder;
-use js_server_core::{Config, Core, Report, Reported, WholeNodeConfig};
+use js_server_core::{Config, Core, PercentError, Report, Reported, WholeNodeConfig};
 use js_types::sched::{Failure, LeaseId, LeaseKind, OperationId, Outcome, Resources, WorkKey};
 
 use crate::common::{
-    Call, GIB, Rig, at, beat, block_on, calls, core_by, lease, request, submit, submit_request, up,
-    up_after, worker,
+    Call, GIB, Rig, at, beat, block_on, calls, core_by, lease, reported, request, resend, submit,
+    submit_request, up, up_after, worker,
 };
 
 fn key(n: u64) -> WorkKey {
@@ -159,5 +159,72 @@ fn a_whole_machine_request_holds_a_busy_node_as_the_whole_node_setting_says() {
         // A hold under whole-node settings carries a mark; one without them has none.
         let marked = core.with(|view, _| view.sched().whole_mark(admitted.operation).is_some());
         assert_eq!(marked, held_at > 0, "{config:?}");
+    }
+}
+
+/// Catches: `memory_schedulable_percent` ignored by the core, or the status showing the
+/// reported memory. A host that reports 64 GiB and 8 cores is shown at the floor of the
+/// share in memory and at its cores as reported, at its registration and after a resent
+/// report; the default leaves the report as it was.
+#[test]
+fn the_scheduler_shows_the_cut_capacity_of_a_host() {
+    let shown = |core: &Core<Rig>| core.with(|view, _| view.sched().capacity(&worker("node-a")));
+    for (config, memory) in [
+        (
+            Config::new(1)
+                .with_memory_schedulable_percent(90)
+                .expect("in range"),
+            u64::try_from(u128::from(64 * GIB) * 90 / 100).expect("fits"),
+        ),
+        (Config::new(1), 64 * GIB),
+    ] {
+        let core = core_by(&config);
+        let stream = up(&core, 0, "node-a", "d1");
+        let want = Some(Resources::new(8_000, memory));
+        assert_eq!(shown(&core), want, "at registration: {config:?}");
+        resend(&core, 1, ("node-a", stream), reported(8)).expect("heard");
+        assert_eq!(shown(&core), want, "after a resent report: {config:?}");
+    }
+}
+
+/// Catches: a percent outside 1 to 100 accepted by `Config`, by `validate` or by the
+/// builder, and an error that does not name the field.
+#[test]
+fn a_percent_of_zero_or_above_a_hundred_is_refused_naming_the_field() {
+    assert_eq!(Config::new(1).memory_schedulable_percent, 100);
+    assert_eq!(Config::new(1).validate(), Ok(()));
+    for bad in [0, 101, 1_000] {
+        let mut config = Config::new(1);
+        config.memory_schedulable_percent = bad;
+        let err = config.validate().expect_err("refused");
+        assert_eq!(err, PercentError(bad));
+        assert!(
+            err.to_string().contains("memory_schedulable_percent"),
+            "{err}"
+        );
+        let built = Config::new(1).with_memory_schedulable_percent(bad);
+        assert_eq!(built, Err(PercentError(bad)));
+    }
+    for good in [1, 90, 100] {
+        let config = Config::new(1)
+            .with_memory_schedulable_percent(good)
+            .expect("in range");
+        assert_eq!(config.memory_schedulable_percent, good);
+        assert_eq!(config.validate(), Ok(()));
+    }
+}
+
+/// Catches: a core built from an out-of-range value (which a server that skipped
+/// `validate` could hand it) booking all of the host at 0, or more than it reports above
+/// 100.
+#[test]
+fn a_core_built_from_an_out_of_range_percent_holds_it_to_the_range() {
+    for (bad, memory) in [(0, 64 * GIB / 100), (500, 64 * GIB)] {
+        let mut config = Config::new(1);
+        config.memory_schedulable_percent = bad;
+        let core = core_by(&config);
+        up(&core, 0, "node-a", "d1");
+        let shown = core.with(|view, _| view.sched().capacity(&worker("node-a")));
+        assert_eq!(shown.map(|c| c.memory_bytes), Some(memory), "{bad}");
     }
 }
