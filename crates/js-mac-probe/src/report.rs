@@ -145,7 +145,7 @@ mod tests {
   "probes": [
     {
       "name": "sandbox/allow-default",
-      "verdict": "pass",
+      "result": "pass",
       "facts": {
         "status": "0"
       }
