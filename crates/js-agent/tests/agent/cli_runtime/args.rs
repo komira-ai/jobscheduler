@@ -224,14 +224,14 @@ fn the_actions_cgroup_becomes_the_cgroup_parent() {
     ];
     for (dir, parent) in rows {
         for engine in [Engine::Docker, Engine::Podman] {
-            let args = hardening_args(&with(dir), engine);
+            let args = hardening_args(&with(dir), engine, PROFILE);
             assert_eq!(
                 args[args.len() - 2..],
                 strings(&["--cgroup-parent", parent])
             );
         }
     }
-    let plain = hardening_args(&settings(), Engine::Docker);
+    let plain = hardening_args(&settings(), Engine::Docker, PROFILE);
     assert!(!plain.iter().any(|arg| arg == "--cgroup-parent"));
 }
 
