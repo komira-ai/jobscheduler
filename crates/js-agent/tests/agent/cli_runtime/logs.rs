@@ -116,3 +116,53 @@ fn a_failing_logs_call_is_an_error_naming_the_call() {
     assert!(err.starts_with("logs"), "{err}");
     assert!(!err.contains("secret"), "{err}");
 }
+
+/// Asserts the boundary of the byte cap: one invalid byte and `cap - 2` valid ones become
+/// `cap + 1` bytes of text (the bad byte turns into a three-byte U+FFFD), exactly one over,
+/// and the tail is cut to fit while the log that is exactly at the cap is not. It catches
+/// an off-by-one in the cap check (`>` for `>=`, or a slack of one byte), which would send
+/// a tail the wire refuses.
+#[test]
+fn text_one_byte_over_the_cap_is_cut_and_at_the_cap_is_kept() {
+    let body = format!(
+        "printf '\\377'; head -c {} /dev/zero | tr '\\0' 'a'",
+        MAX_LOG_STREAM_LEN - 2
+    );
+    let (mut rt, _dir) = over("logs-one-over", &body);
+    let tail = tail_of(&mut rt).unwrap().unwrap();
+    assert!(
+        tail.stdout.len() <= MAX_LOG_STREAM_LEN,
+        "{}",
+        tail.stdout.len()
+    );
+    assert_eq!(tail.stdout, "a".repeat(MAX_LOG_STREAM_LEN - 2));
+    assert!(tail.truncated);
+
+    let body = format!("head -c {MAX_LOG_STREAM_LEN} /dev/zero | tr '\\0' 'a'");
+    let (mut rt, _dir) = over("logs-at-cap", &body);
+    let tail = tail_of(&mut rt).unwrap().unwrap();
+    assert_eq!(tail.stdout.len(), MAX_LOG_STREAM_LEN);
+    assert!(!tail.truncated, "exactly the cap is not cut");
+}
+
+/// Asserts that a `logs` call that never exits is ended at its limit: the call is an error
+/// that says it timed out (so the lifecycle notes `logs-failed` and sends the result with
+/// no tail, as `a_failed_logs_call_still_yields_the_result_without_a_tail` shows), and the
+/// stub process is gone, not left running. The limit is passed in, so the test does not
+/// wait the production 30 s and asserts nothing about elapsed time. It catches a stuck
+/// engine holding up a finished job's result, and a child left behind by the kill.
+#[test]
+fn a_logs_call_that_never_exits_is_killed_at_its_limit() {
+    let (rt, dir) = over("logs-stuck", "echo $$ > \"$0.pid\"; exec sleep 600");
+    let mut rt = rt.with_logs_limit(Duration::from_millis(500));
+    let err = tail_of(&mut rt).unwrap_err();
+    assert!(err.starts_with("logs"), "{err}");
+    assert!(err.contains("timed out"), "{err}");
+    let pid = std::fs::read_to_string(dir.path("docker.pid")).unwrap();
+    let pid = pid.trim();
+    assert!(!pid.is_empty());
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "the stub (pid {pid}) is still there"
+    );
+}

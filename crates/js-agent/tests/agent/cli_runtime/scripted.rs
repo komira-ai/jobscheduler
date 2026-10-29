@@ -557,6 +557,8 @@ impl Scripted {
                 _ => failed(program),
             },
             ("info", _) => Ok("true\n".to_owned()),
+            // The log of a container the world knows: empty unless a test `say`s it.
+            ("logs", true) => Ok(String::new()),
             ("start", true) => {
                 state.containers.get_mut(&id).unwrap().started = true;
                 Ok(format!("{id}\n"))
@@ -593,5 +595,26 @@ impl CommandRunner for Scripted {
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         self.exec(program, args, Some(env))
+    }
+
+    /// Only `logs` is read this way: what the world prints is its standard output, and its
+    /// standard error is empty.
+    fn run_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        _keep: usize,
+        _limit: std::time::Duration,
+    ) -> Result<js_agent::Streams, String> {
+        let env = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        self.exec(program, args, Some(env))
+            .map(|text| js_agent::Streams {
+                stdout: text.into_bytes(),
+                ..js_agent::Streams::default()
+            })
     }
 }

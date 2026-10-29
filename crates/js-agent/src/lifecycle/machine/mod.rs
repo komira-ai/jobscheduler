@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod tails;
 
 use std::collections::BTreeSet;
 
@@ -129,6 +130,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.fit_log_tails(tails::RESULTS_BUDGET, &mut events);
         self.sweep();
         events
     }

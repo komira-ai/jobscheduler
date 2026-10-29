@@ -227,6 +227,7 @@
 
 mod args;
 mod logs;
+pub use logs::LOGS_LIMIT;
 mod seccomp;
 mod settings;
 
@@ -458,6 +459,7 @@ pub struct CliRuntime {
     proc_read: ProcRead,
     proc_link: ProcLink,
     profile_dir: Option<PathBuf>,
+    logs_limit: Duration,
     warnings: Vec<String>,
 }
 
@@ -498,6 +500,7 @@ impl CliRuntime {
             proc_read: read_proc,
             proc_link: read_proc_link,
             profile_dir: None,
+            logs_limit: LOGS_LIMIT,
             warnings: Vec::new(),
         };
         runtime.warnings = runtime.swap_warning().into_iter().collect();

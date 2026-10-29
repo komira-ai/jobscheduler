@@ -26,9 +26,11 @@ additive fields (step 6).
 A contained run that exited returns the end of what it wrote: the agent reads the last 8 KiB of the job's standard output and of its standard
 error, apart, with the runtime's `logs` call, before it removes the container, and the result carries them as `log_tail {stdout, stderr,
 truncated}` (`truncated`: the job printed more than is kept). The container's log on the host is bounded at creation (1 MiB, Podman `k8s-file`,
-Docker `json-file` with two files), so a tail read soon after a rotation can be short. A log that cannot be read leaves the result without a tail
+Docker `json-file` with two files), so a tail read soon after a rotation can be short. A log that cannot be read (the call is held to 30 s) leaves the result without a tail
 and notes a `logs-failed` finding; it never changes the outcome. The server keeps the tail with the run's result (in memory, so bounded) and
 `GET /v1/leases/{id}/runs/{run_id}` returns it; the list of runs leaves it out. Runs with host isolation have no tail: the agent does not
 collect their output.
 
-**The tail is the job's own text, returned as written to whoever can read the run. A task must not print secrets.**
+**The tail is the job's own text, returned as written to whoever can read the run. A task must not print secrets.** It is also untrusted bytes (it may hold ANSI escapes, U+202E or NUL): a consumer that prints it to a terminal must strip control characters.
+
+The agent keeps the held results within the heartbeat body (a job that prints control characters serialises six times as large): it halves the largest tails again and again, keeping the end and setting `truncated`; a tail that is empty and still does not fit is left out and the run notes a `log-tail-shed` finding.

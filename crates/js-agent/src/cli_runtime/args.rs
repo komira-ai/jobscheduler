@@ -268,8 +268,8 @@ fn mount_value(
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
 /// files, and limited in size: Podman does not default to `noexec`), no core dumps, a
 /// private IPC namespace against a daemon whose default is to share it, the pull policy
-/// the agent was configured with (never by default), and a user that is not root, and a bounded log ([`log_args`]). For
-/// Podman the PID namespace is named private too; Docker takes only `host` or another
+/// the agent was configured with (never by default), a user that is not root, and a log
+/// of bounded size ([`log_args`]). For Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {

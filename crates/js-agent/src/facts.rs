@@ -364,8 +364,8 @@ fn watch_streams(
     keep: usize,
 ) -> (Streams, Status) {
     let err_reader = thread::spawn(move || read_tail(err, keep));
-    let (stdout, cut_out) = read_tail(out, keep);
-    let (stderr, cut_err) = err_reader.join().unwrap_or_default();
+    let (stdout, cut_out, _) = read_tail(out, keep);
+    let (stderr, cut_err, _) = err_reader.join().unwrap_or_default();
     let lost = Status {
         code: None,
         text: "could not be collected".to_owned(),
@@ -382,11 +382,13 @@ fn watch_streams(
     (streams, status)
 }
 
-/// The last `keep` bytes `reader` yields, and whether it yielded more. The buffer is
-/// trimmed whenever it holds twice `keep`, so memory stays bounded however much is read.
-fn read_tail(mut reader: PipeReader, keep: usize) -> (Vec<u8>, bool) {
+/// The last `keep` bytes `reader` yields, whether it yielded more, and the most the buffer
+/// held at any moment. The buffer is trimmed whenever it holds twice `keep` (and one read
+/// is at most 8 KiB), so memory stays bounded however much is read.
+fn read_tail<R: Read>(mut reader: R, keep: usize) -> (Vec<u8>, bool, usize) {
     let mut kept: Vec<u8> = Vec::new();
     let mut dropped = false;
+    let mut peak = 0;
     let mut chunk = [0_u8; 8192];
     loop {
         let n = match reader.read(&mut chunk) {
@@ -394,6 +396,7 @@ fn read_tail(mut reader: PipeReader, keep: usize) -> (Vec<u8>, bool) {
             Ok(n) => n,
         };
         kept.extend_from_slice(&chunk[..n]);
+        peak = peak.max(kept.len());
         if kept.len() >= keep.saturating_mul(2).max(chunk.len()) {
             kept.drain(..kept.len() - keep);
             dropped = true;
@@ -403,7 +406,7 @@ fn read_tail(mut reader: PipeReader, keep: usize) -> (Vec<u8>, bool) {
         kept.drain(..kept.len() - keep);
         dropped = true;
     }
-    (kept, dropped)
+    (kept, dropped, peak)
 }
 
 /// How a started program ended, as `watch` reports it.
@@ -835,6 +838,47 @@ pub fn host_id(machine_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader that yields `total` bytes of a counting pattern, 8 KiB at a time.
+    struct Counting {
+        at: usize,
+        total: usize,
+    }
+
+    impl Read for Counting {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = buf.len().min(self.total - self.at);
+            for byte in &mut buf[..n] {
+                *byte = u8::try_from(self.at % 251).unwrap();
+                self.at += 1;
+            }
+            Ok(n)
+        }
+    }
+
+    /// Asserts that the reader of a stream that prints far more than it keeps holds at
+    /// most twice `keep` plus one read at any moment, returns exactly the last `keep`
+    /// bytes, and says it dropped some; and that a stream that fits is kept whole and not
+    /// marked. It catches a buffer that grows with the output (a job's log is read into
+    /// the agent's memory) and a window that keeps the head or the wrong end.
+    #[test]
+    fn the_stream_reader_keeps_the_end_in_bounded_memory() {
+        let (keep, total) = (1000, 5_000_000);
+        let (bytes, dropped, peak) = read_tail(Counting { at: 0, total }, keep);
+        assert!(dropped);
+        assert!(peak <= 2 * keep + 8192, "{peak}");
+        assert_eq!(bytes.len(), keep);
+        let first = total - keep;
+        assert!(
+            bytes
+                .iter()
+                .enumerate()
+                .all(|(i, b)| usize::from(*b) == (first + i) % 251)
+        );
+
+        let (bytes, dropped, _) = read_tail(Counting { at: 0, total: keep }, keep);
+        assert_eq!((bytes.len(), dropped), (keep, false));
+    }
 
     struct Absent;
 

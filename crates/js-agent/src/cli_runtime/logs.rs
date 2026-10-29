@@ -25,10 +25,14 @@ use crate::lifecycle::ContainerId;
 /// plain number of bytes; this is 1 MiB, far above what a tail holds.
 pub const LOG_MAX_SIZE: &str = "1048576";
 
-/// How long the `logs` call may take. It reads a file of at most [`LOG_MAX_SIZE`] (twice
+/// How long the `logs` call may take (a runtime's own is set by
+/// [`CliRuntime::with_logs_limit`]). It reads a file of at most [`LOG_MAX_SIZE`] (twice
 /// that for Docker), so it is quick; a daemon that does not answer must not hold up the
 /// result of a job that has already ended.
 pub const LOGS_LIMIT: Duration = Duration::from_secs(30);
+
+// The worker's bound for a call is CALL_LIMIT and more: the `logs` call is inside it.
+const _: () = assert!(LOGS_LIMIT.as_secs() < super::CALL_LIMIT.as_secs());
 
 /// The flags of `create` that choose the log driver and bound the log: Podman's
 /// `k8s-file` driver (its default, `journald`, is unbounded here and needs a journal to
@@ -90,6 +94,16 @@ fn text_of(bytes: &[u8], started_inside: bool) -> (String, bool) {
 }
 
 impl CliRuntime {
+    /// The same runtime giving the `logs` call `limit` instead of [`LOGS_LIMIT`]: a test's
+    /// seam.
+    #[must_use]
+    pub fn with_logs_limit(self, limit: Duration) -> Self {
+        Self {
+            logs_limit: limit,
+            ..self
+        }
+    }
+
     /// The tail of the log of the container `id`, which has exited and is not removed yet.
     pub(super) fn read_logs(&self, id: &ContainerId) -> Result<Option<LogTail>, CliError> {
         check(id)?;
@@ -101,7 +115,7 @@ impl CliRuntime {
                 &args,
                 &engine_env(&self.settings),
                 MAX_LOG_STREAM_LEN,
-                LOGS_LIMIT,
+                self.logs_limit,
             )
             .map_err(|why| CliError::Call { call: "logs", why })?;
         Ok(Some(tail_of(&streams)))

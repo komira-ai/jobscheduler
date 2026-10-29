@@ -3,9 +3,10 @@
 
 use std::time::Duration;
 
+use js_agent::cli_runtime::{CALL_LIMIT, LOGS_LIMIT};
 use js_agent::{
-    Answer, CredentialState, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE, Session,
-    Snapshot, Step, Transport, Worker,
+    Answer, CredentialState, Delivery, Drain, HEARTBEAT_PATH, HELLO_PATH, Note, QUEUE,
+    STALL_MARGIN, Session, Snapshot, Step, Transport, Worker,
 };
 use serde_json::{Value, json};
 
@@ -337,8 +338,8 @@ fn stuck(
 /// Asserts the progress watchdog. A worker stuck in one create is not stalled at exactly
 /// the bound of its plan on the lifecycle's clock and is stalled one millisecond later:
 /// 661 s for a stop grace of one second (a call may take 600 s, a stop the grace on top, and
-/// 60 s are allowed besides), 4260 s for the longest grace (3600 s), 1863 s when a run is
-/// already held (it counts two calls and the start one), and 38,524 s when the reply starts
+/// 60 s are allowed besides), 4260 s for the longest grace (3600 s), 2464 s when a run is
+/// already held (it counts three calls and the start one), and 38,524 s when the reply starts
 /// 70 runs (the count stops at 64). The session fails on the stall. A worker that waits
 /// for an order is never stalled, however far the clock has moved. It catches a bound that
 /// ends a healthy drain, one that is the same whatever the grace and the runs held, one that
@@ -368,10 +369,19 @@ fn a_worker_that_makes_no_progress_for_long_ends_the_session() {
     machine.world.release();
 
     let (_dir, machine, worker) = stuck("jobs-stall-held", Duration::from_secs(1), &["r1"], 1);
-    machine.clock.advance(1_863_000);
+    // A held run costs three calls (a stop, an inspect with the read of its log, a
+    // remove), the start one: four calls of CALL_LIMIT and the grace, and the margin.
+    // The `logs` call is held to LOGS_LIMIT, which is under CALL_LIMIT, so a healthy
+    // worker inside a slow one is within its call.
+    assert!(LOGS_LIMIT < CALL_LIMIT);
+    let four = (CALL_LIMIT + Duration::from_secs(1)) * 4 + STALL_MARGIN;
+    assert_eq!(four.as_millis(), 2_464_000);
+    machine
+        .clock
+        .advance(u64::try_from(four.as_millis()).unwrap());
     assert!(
         !worker.stalled(),
-        "a held run costs two calls, the start one"
+        "a held run costs three calls, the start one"
     );
     machine.clock.advance(1);
     assert!(worker.stalled());
