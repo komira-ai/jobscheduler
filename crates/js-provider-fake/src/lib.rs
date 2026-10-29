@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use js_provider::{
     Call, Flavour, HostCapacity, Observed, Provider, RefusalCode, StartAck, StartSpec, StopAck,
 };
-use js_types::{HostId, LeaseId, ProviderId, ResourceClass, Shape};
+use js_types::{HostId, LeaseId, MemoryHeadroom, ProviderId, ResourceClass, Shape};
 
 /// Which free fitting host the fake picks first (design 6.1: rank is the provider's).
 /// An option, not a defect: both orders are conformant.
@@ -288,6 +288,7 @@ impl Provider for FakeProvider {
         let listed = self.hosts.iter().map(|(id, host)| HostCapacity {
             host: id.clone(),
             shape: host.shape.clone(),
+            memory: MemoryHeadroom::full(host.shape.resources().memory_bytes()),
             leased_to: host.lease,
         });
         listed.collect()

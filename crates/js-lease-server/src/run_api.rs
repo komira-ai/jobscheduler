@@ -26,7 +26,7 @@ use axum::http::StatusCode;
 use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
+use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, RunFile, limits, validate_files};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
@@ -71,6 +71,9 @@ struct RunBody {
     gpu_indices: Vec<u32>,
     #[serde(default)]
     mounts: Vec<Mount>,
+    /// Secret files the job reads at `/run/js-files/<name>` (see [`RunFile`]).
+    #[serde(default)]
+    files: Vec<RunFile>,
     #[serde(default)]
     isolation: Isolation,
     #[serde(default)]
@@ -108,6 +111,9 @@ struct RunEntry {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// The labels the client sent when it queued the run; left out when there are none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 impl From<RunView> for RunEntry {
@@ -119,6 +125,7 @@ impl From<RunView> for RunEntry {
             outcome: result.as_ref().map(|result| result.outcome),
             exit_code: result.as_ref().and_then(|result| result.exit_code),
             detail: result.and_then(|result| result.detail),
+            labels: run.labels,
         }
     }
 }
@@ -145,6 +152,7 @@ impl From<RunRefusal> for ApiError {
             | RunRefusal::HostTainted
             | RunRefusal::NotReady
             | RunRefusal::NoCapacity
+            | RunRefusal::FilesUnsupported
             | RunRefusal::RunExists => StatusCode::CONFLICT,
         };
         ApiError::coded(status, refusal.code())
@@ -188,6 +196,10 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    // A bad file is the body's fault, whatever the lease or the host: answered before any
+    // state is read. The error names the rule and never repeats a name or contents.
+    validate_files(&body.files)
+        .map_err(|err| ApiError::coded(StatusCode::BAD_REQUEST, err.code()))?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -212,6 +224,7 @@ async fn start(
         },
         gpu_indices: body.gpu_indices,
         mounts: body.mounts,
+        files: body.files,
         isolation: body.isolation,
         labels: body.labels,
         heartbeat_seq: 0,
