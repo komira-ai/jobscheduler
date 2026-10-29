@@ -37,7 +37,7 @@ fn stray(id: &str) -> Held {
 /// A host too small to cover the waiting request, so it only counts.
 fn small_host(name: &str) -> js_scaler::HostFacts {
     let mut small = host(name, "gpu");
-    small.shape.cpu_millis = 1000;
+    shape(&mut small).cpu_millis = 1000;
     small
 }
 
