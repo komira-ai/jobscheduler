@@ -219,9 +219,6 @@ impl JobSpec {
         let Some(native) = &self.native else {
             return image::image(at, &self.image);
         };
-        if !self.image.is_empty() {
-            return Err(at.fail(Rule::Inconsistent));
-        }
         native.validate()?;
         native::check_job(self)
     }
