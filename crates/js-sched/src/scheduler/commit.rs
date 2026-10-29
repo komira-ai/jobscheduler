@@ -47,11 +47,7 @@ impl Scheduler {
         // Only the operation's current lease is its committed one: lease numbers come in
         // blocks per frontend, so a larger one is not a later one, and a grant that is no
         // longer current must not shadow the current lease's result.
-        if let OpState::Leased { lease, .. } = &op.state
-            && *lease == grant.lease
-        {
-            op.committed_lease = Some(grant.lease);
-        }
+        op.committed_lease = Some(grant.lease);
         if let OpState::Leased {
             lease,
             worker,
