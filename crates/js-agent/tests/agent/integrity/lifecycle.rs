@@ -1,7 +1,7 @@
 //! The checks as the lifecycle runs them: the real [`Integrity`] over the in-memory host,
 //! after the container and scratch of each job are gone.
 
-use js_agent::integrity::{FakeHost, Integrity};
+use js_agent::integrity::{FakeHost, Integrity, input};
 
 use super::{JOB_UID, mount, process, started};
 use crate::lifecycle::{Harness, Options, cleanup, job, names};
@@ -174,6 +174,26 @@ fn a_job_that_starts_beside_another_keeps_the_baseline() {
     assert_eq!(
         events.last().unwrap(),
         "finding r1 kernel-module-changed",
+        "{events:?}"
+    );
+    assert!(h.life.is_tainted());
+}
+
+/// Asserts that a host that cannot be read when a job starts on it idle keeps the baseline
+/// it had, and that the check after the job finds it unreadable and taints the host. It
+/// catches a baseline replaced by an empty or partial reading, which would hide whatever
+/// the job then left.
+#[test]
+fn an_unreadable_host_at_an_idle_start_is_found_by_the_check() {
+    let host = FakeHost::quiet();
+    let mut h = checked("idle-unreadable", &host);
+    host.fail(input::MODULES);
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(
+        events.last().unwrap(),
+        "finding r1 modules-unreadable",
         "{events:?}"
     );
     assert!(h.life.is_tainted());
