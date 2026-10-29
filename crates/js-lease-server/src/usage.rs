@@ -14,7 +14,7 @@ pub use js_usage::Limits as HostLimits;
 /// One closed wall minute of one node.
 pub use js_usage::NodeMinute as NodeRow;
 pub use js_usage::{
-    BadKey, ClockIn, DropReason, KeySource, LoadIn, MAX_KEY_LEN, MinuteIn, NoKeys, NoUsage,
-    Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute, RunSeries, SinkCounters,
-    UsageFault, UsageSink, drop_name,
+    BadKey, ClockIn, DropReason, Fit, KeyProfile, KeySource, LoadIn, MAX_KEY_LEN, MinuteIn, NoKeys,
+    NoUsage, Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute, RunSeries,
+    SinkCounters, UsageFault, UsageSink, drop_name,
 };

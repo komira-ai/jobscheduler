@@ -28,6 +28,7 @@ use crate::join_api;
 use crate::run_api;
 use crate::status::{self, Status};
 use crate::usage::ProfileCurves;
+use crate::usage_api;
 use crate::usage_hub::{Usage, UsageCounters};
 use crate::wire::{
     AcquireBody, ApiError, Granted, LeaseList, Pending, Released, RenewBody, Renewed, parse,
@@ -209,7 +210,7 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
         .route("/status", get(status_page))
         .with_state(shared.clone());
     let app = open.merge(guarded);
-    match &shared.agents {
+    let app = match &shared.agents {
         Some(agents) => {
             let app = app
                 .merge(join_api::router(shared.clone(), agents.clone()))
@@ -219,6 +220,10 @@ pub(crate) fn router(shared: Arc<Shared>, with_agents: bool) -> Router {
                 false => app,
             }
         }
+        None => app,
+    };
+    match shared.usage() {
+        Some(usage) => app.merge(usage_api::router(shared.clone(), usage.clone())),
         None => app,
     }
 }

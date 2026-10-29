@@ -5,6 +5,7 @@
 //! blocking calls and the log.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +14,9 @@ use js_lease::{ManualClock, Timestamp};
 use js_usage::GRACE_BEATS;
 
 use super::*;
-use crate::usage::{DropReason, Observation, Observed, ProfileKey, RunEnd, SinkCounters};
+use crate::usage::{
+    DropReason, KeyProfile, Observation, Observed, ProfileKey, RunEnd, SinkCounters,
+};
 use crate::usage::{LoadIn, UsageFault};
 
 /// Milliseconds of the clock at the start of every test: wall minute 16.
@@ -103,6 +106,22 @@ impl UsageSink for Fake {
     fn prune(&self, _: u64) -> Result<(), UsageFault> {
         self.prunes.fetch_add(1, Ordering::SeqCst);
         self.down()
+    }
+
+    fn node_rows(
+        &self,
+        _: &HostId,
+        from: u64,
+        _: u64,
+        _: NonZeroUsize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        self.down()?;
+        Ok(vec![row(from)])
+    }
+
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.down()?;
+        Ok(None)
     }
 
     fn counters(&self) -> SinkCounters {
@@ -697,4 +716,24 @@ async fn a_flush_logs_the_dropped_readings_and_the_failures() {
     usage.tick().await;
     assert_eq!(log.lines_with("cannot write the usage rows"), 1);
     assert_eq!(log.lines_with("cannot prune the usage store"), 1);
+}
+
+/// Asserts that the server's reads of rows and of a key's profile pass the sink's answer
+/// and its failure on, the failure counted. It catches a wrapper that answers from
+/// somewhere else or loses a failure.
+#[test]
+fn reads_pass_the_sinks_answer_and_failure_on() {
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[]);
+    let host = HostId::new("h1").unwrap();
+    let key = ProfileKey::parse("k").unwrap();
+    assert_eq!(
+        usage.node_rows(&host, 5, 9, NonZeroUsize::MIN),
+        Ok(vec![row(5)])
+    );
+    assert_eq!(usage.key_profile(&key), Ok(None));
+    fake.fail.store(true, Ordering::SeqCst);
+    assert!(usage.node_rows(&host, 5, 9, NonZeroUsize::MIN).is_err());
+    assert!(usage.key_profile(&key).is_err());
+    assert_eq!(usage.counters().faults, 2);
 }

@@ -17,6 +17,7 @@
 //! per node) and never happens on an async worker, since the server calls the sink on the
 //! pool for blocking calls.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -26,8 +27,8 @@ use js_state::{Store, SystemClock};
 use js_types::HostId;
 use js_types::sched::WorkKey;
 use js_usage::{
-    NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder,
-    RunSeries,
+    KeyProfile, NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore,
+    Recorder, RunSeries,
 };
 use tracing::info;
 
@@ -139,15 +140,6 @@ impl NodeUsage {
     fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
-
-    /// The stored rows of `host` from minute `from` to `to`, at most `limit`.
-    #[cfg(test)]
-    fn range(&self, host: &HostId, from: u64, to: u64) -> Vec<NodeRow> {
-        let limit = std::num::NonZeroUsize::new(100).unwrap();
-        NodeSeries::new(&*self.store)
-            .range(host, from, to, limit)
-            .unwrap()
-    }
 }
 
 impl UsageSink for NodeUsage {
@@ -197,6 +189,22 @@ impl UsageSink for NodeUsage {
             .curves()
             .set_today(now_minute / MINUTES_PER_DAY);
         inner.profiles.persist_touches().map(drop).map_err(fault)
+    }
+
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        NodeSeries::new(&*self.store)
+            .range(host, from, to, limit)
+            .map_err(fault)
+    }
+
+    fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.inner().profiles.profile(key).map_err(fault)
     }
 
     fn curves(&self) -> Option<Arc<ProfileCurves>> {

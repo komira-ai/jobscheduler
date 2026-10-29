@@ -45,14 +45,15 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_types::{HostId, LeaseId};
 
 use crate::sink::{KeySource, RunEnd, SinkCounters, UsageFault, UsageSink};
 use crate::{
-    DropReason, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves, ProfileKey,
-    RunMinute, RunSeries,
+    DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
+    ProfileKey, RunMinute, RunSeries,
 };
 
 /// Heartbeats of a host after the one that carried a run's acknowledgement, at which the
@@ -533,6 +534,24 @@ impl UsageHub {
             })
             .collect();
         Flushed { closed, dropped }
+    }
+
+    /// The rows of `host` from minute `from` to minute `to`, at most `limit`, oldest
+    /// first. A failure is counted and returned. Blocks on the sink.
+    pub fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<NodeMinute>, UsageFault> {
+        self.guard(self.sink.node_rows(host, from, to, limit))
+    }
+
+    /// What is stored for `key`, or `None` for a key never seen. A failure is counted
+    /// and returned. Blocks on the sink.
+    pub fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.guard(self.sink.key_profile(key))
     }
 }
 

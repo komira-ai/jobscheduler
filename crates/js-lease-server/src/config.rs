@@ -155,7 +155,7 @@ pub struct Cli {
     /// reports usage.
     #[arg(long, conflicts_with = "usage_off")]
     pub usage_db: Option<PathBuf>,
-    /// Turns the recording of usage off. For an emergency: usage
+    /// Turns the recording of usage, and its read routes, off. For an emergency: usage
     /// is on by default and the per-minute series is meant to be always collected.
     #[arg(long)]
     pub usage_off: bool,

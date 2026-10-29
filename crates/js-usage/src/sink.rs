@@ -14,13 +14,14 @@
 //! [`NoKeys`] the key source that knows no run's key.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use js_types::{HostId, LeaseId};
 
 use crate::{
-    DropReason, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves, ProfileKey,
-    RunSeries,
+    DropReason, KeyProfile, Limits, LoadIn, MinuteIn, NodeMinute, Observed, ProfileCurves,
+    ProfileKey, RunSeries,
 };
 
 /// A short fixed name for a drop reason, for logs.
@@ -100,6 +101,20 @@ pub trait UsageSink: Send + Sync {
     /// Removes what is past its retention at `now_minute`.
     fn prune(&self, now_minute: u64) -> Result<(), UsageFault>;
 
+    /// At most `limit` rows of `host` for the minutes `from` to `to` inclusive, oldest
+    /// first.
+    fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<NodeMinute>, UsageFault>;
+
+    /// What is stored for `key` (its run count, its fit once there are enough runs, the
+    /// day it was last used), or `None` for a key never seen.
+    fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault>;
+
     /// The learned curves, for admission to read as its `CurveSource`; `None` for a sink
     /// that learns none.
     fn curves(&self) -> Option<Arc<ProfileCurves>> {
@@ -132,6 +147,20 @@ impl UsageSink for NoUsage {
 
     fn prune(&self, _: u64) -> Result<(), UsageFault> {
         Ok(())
+    }
+
+    fn node_rows(
+        &self,
+        _: &HostId,
+        _: u64,
+        _: u64,
+        _: NonZeroUsize,
+    ) -> Result<Vec<NodeMinute>, UsageFault> {
+        Ok(Vec::new())
+    }
+
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        Ok(None)
     }
 
     fn counters(&self) -> SinkCounters {
@@ -196,6 +225,11 @@ mod tests {
         assert_eq!(sink.run_ended(&end, 0), Ok(()));
         assert_eq!(sink.flush(0), Ok(Vec::new()));
         assert_eq!(sink.prune(0), Ok(()));
+        assert_eq!(
+            sink.node_rows(&host, 0, 9, NonZeroUsize::MIN),
+            Ok(Vec::new())
+        );
+        assert_eq!(sink.key_profile(&end.key), Ok(None));
         assert!(sink.curves().is_none());
         assert_eq!(sink.counters(), SinkCounters::default());
         assert_eq!(NoKeys.key_of("run-1-1"), None);

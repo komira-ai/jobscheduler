@@ -85,6 +85,22 @@ impl UsageSink for Fake {
         Ok(std::mem::take(&mut *self.closed.lock().unwrap()))
     }
 
+    fn node_rows(
+        &self,
+        _: &HostId,
+        from: u64,
+        _: u64,
+        _: NonZeroUsize,
+    ) -> Result<Vec<NodeMinute>, UsageFault> {
+        self.down()?;
+        Ok(vec![row(from)])
+    }
+
+    fn key_profile(&self, _: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.down()?;
+        Ok(None)
+    }
+
     fn prune(&self, _: u64) -> Result<(), UsageFault> {
         self.prunes.fetch_add(1, Ordering::SeqCst);
         self.down()
@@ -672,4 +688,27 @@ fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
     quiet_beats(&hub, "h1", grace());
     let counts = hub.counters();
     assert_eq!((counts.faults, counts.runs_learned), (1, 0));
+}
+
+/// Asserts that the reads pass the sink's answer and its failure on, the failure counted,
+/// with the sink's own counters in the total. It catches a read failure that vanishes
+/// and a read that is not counted.
+#[test]
+fn faults_on_reads_are_counted() {
+    let fake = Arc::new(Fake::default());
+    let hub = usage(&fake, &[]);
+    let host = host("h1");
+    let key = ProfileKey::parse("k").unwrap();
+    assert_eq!(
+        hub.node_rows(&host, 5, 9, NonZeroUsize::MIN),
+        Ok(vec![row(5)])
+    );
+    assert_eq!(hub.key_profile(&key), Ok(None));
+    assert_eq!(hub.counters().faults, 0);
+    fake.fail.store(true, Ordering::SeqCst);
+    assert!(hub.node_rows(&host, 5, 9, NonZeroUsize::MIN).is_err());
+    assert!(hub.key_profile(&key).is_err());
+    let counts = hub.counters();
+    assert_eq!(counts.faults, 2);
+    assert_eq!(counts.sink.minutes_deduped, 7);
 }

@@ -16,6 +16,7 @@
 //!
 //! The registry's lock is not held when these methods run.
 
+use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -27,7 +28,9 @@ use js_usage::{AcceptedResult, Beat, BeatLoad, DroppedReadings, Finish, Flushed,
 use tracing::{error, info, warn};
 
 use crate::adapt::SharedClock;
-use crate::usage::{HostLimits, KeySource, NodeRow, ProfileCurves, UsageSink};
+use crate::usage::{
+    HostLimits, KeyProfile, KeySource, NodeRow, ProfileCurves, ProfileKey, UsageFault, UsageSink,
+};
 use crate::usage_map::{host_of, lease_of, load_in};
 use crate::util::blocking;
 
@@ -157,6 +160,22 @@ impl Usage {
     pub(crate) async fn finish(&self) {
         let (hub, now) = (Arc::clone(&self.hub), self.now_minute());
         report(blocking(move || hub.finish(now)).await);
+    }
+
+    /// The rows of `host` from minute `from` to minute `to`, at most `limit`. Blocks.
+    pub(crate) fn node_rows(
+        &self,
+        host: &HostId,
+        from: u64,
+        to: u64,
+        limit: NonZeroUsize,
+    ) -> Result<Vec<NodeRow>, UsageFault> {
+        self.hub.node_rows(host, from, to, limit)
+    }
+
+    /// What is stored for `key`. Blocks.
+    pub(crate) fn key_profile(&self, key: &ProfileKey) -> Result<Option<KeyProfile>, UsageFault> {
+        self.hub.key_profile(key)
     }
 }
 
