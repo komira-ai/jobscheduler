@@ -429,7 +429,7 @@ impl HostState {
                 counters.minutes_invalid += 1;
                 continue;
             }
-            if ended.contains(&minute.lease) {
+            if ended.contains(&minute.lease) && minute.minute > TAIL_MINUTE {
                 counters.minutes_after_end += 1;
                 continue;
             }
