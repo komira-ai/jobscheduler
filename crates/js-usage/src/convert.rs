@@ -57,10 +57,15 @@ impl From<LoadIn> for NodeLoad {
 impl TryFrom<&Fit> for Curve {
     type Error = CurveTooLong;
 
-    /// The curve of a fit: its points, from its runs. A fit holds at most 64 points by
-    /// construction; the limit is checked anyway and is never cut to fit.
+    /// The curve of a fit: its points, from its runs; one whose cores were not learned
+    /// is a memory-only curve. A fit holds at most 64 points by construction; the limit
+    /// is checked anyway and is never cut to fit.
     fn try_from(fit: &Fit) -> Result<Self, CurveTooLong> {
-        Curve::new(fit.points.clone(), fit.runs)
+        if fit.cores_learned {
+            Curve::new(fit.points.clone(), fit.runs)
+        } else {
+            Curve::memory_only(fit.points.clone(), fit.runs)
+        }
     }
 }
 
@@ -80,15 +85,26 @@ mod tests {
         };
         let fit = Fit {
             points: vec![p(1, 2), p(3, 4)],
+            cores_learned: true,
             runs: 7,
             wall_minutes_p90: 2,
         };
         let curve = Curve::try_from(&fit).unwrap();
         assert_eq!(curve.points(), &[p(1, 2), p(3, 4)]);
         assert_eq!(curve.runs(), 7);
+        assert!(curve.cores_known());
+
+        let memory = Fit {
+            cores_learned: false,
+            ..fit.clone()
+        };
+        let curve = Curve::try_from(&memory).unwrap();
+        assert!(!curve.cores_known(), "a fit without cores says so");
+        assert_eq!(curve.points(), &[p(1, 2), p(3, 4)]);
 
         let long = Fit {
             points: vec![p(0, 0); 65],
+            cores_learned: true,
             runs: 3,
             wall_minutes_p90: 1,
         };
