@@ -179,6 +179,7 @@ fn a_reserved_host_is_held_to_the_cut_memory() {
     };
     let mut exact = World::of(whole_ninety(), &["a"]);
     exact.share(1, HOUR_S);
+    exact.owners.insert(2, "r1".to_string());
     exact.provider.start(ask(2, "r1", NINETY));
     exact.check();
     assert_eq!(exact.reserved_host("r1"), Some("a".to_string()));
