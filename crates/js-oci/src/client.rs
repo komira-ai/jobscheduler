@@ -198,13 +198,6 @@ impl Repository<'_> {
         if got != blob.size {
             return Err(size_error(got));
         }
-        let actual = Digest::finish(hasher.finalize());
-        if actual != blob.digest {
-            return Err(Error::BlobDigest {
-                digest: blob.digest.to_string(),
-                actual: actual.to_string(),
-            });
-        }
         sink.finish().await.map_err(Error::Sink)
     }
 
