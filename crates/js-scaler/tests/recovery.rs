@@ -108,8 +108,8 @@ fn an_unresolved_acquire_fails_after_the_hold_counted_from_the_answer() {
 }
 
 /// Asserts that a machine listed after its acquire failed is released and never
-/// uncounted until a read by id says it is gone: its token is not revoked a second time,
-/// it holds the cap of one machine throughout, and the request gets a machine only once
+/// uncounted until a read by id says it is gone: its token is revoked on the way into
+/// release too (a restart may have lost the revoke made when it failed), it holds the cap of one machine throughout, and the request gets a machine only once
 /// it is confirmed gone.
 #[test]
 fn a_machine_listed_after_failing_is_released_and_stays_counted() {
@@ -119,9 +119,9 @@ fn a_machine_listed_after_failing_is_released_and_stays_counted() {
 
     rig.pool().held = Some(vec![listed(&plan, "i-late", HostStatus::Active)]);
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
     assert_eq!(
-        actions[1],
+        actions[2],
         Action::Release {
             host: plan.name.clone(),
             id: HostRef("i-late".to_owned())
@@ -373,4 +373,33 @@ fn unknown_machines_are_adopted_as_orphans_and_never_released() {
     assert_eq!(rig.phase(1), Phase::Gone);
     assert_eq!(rig.record(1).gone_at, Some(at(20 * SECOND)));
     assert_eq!(count(&actions, "Release"), 0);
+}
+
+/// Asserts that a failed acquire whose machine shows up after a restart from the records
+/// (by a list, or by a late acceptance) has its join token revoked when it goes into
+/// release, before the release, so the revoke made when it failed cannot have been lost.
+#[test]
+fn a_failed_record_restarted_from_records_is_revoked_then_released() {
+    let (mut rig, plan) = launched(one_machine(settings("gpu")));
+    rig.tick(at(30 * MINUTE));
+    assert_eq!(rig.phase(0), Phase::Failed);
+    let text = rig.state.records.encode().unwrap();
+
+    for late in [false, true] {
+        let mut fresh = Rig::new(one_machine(settings("gpu")));
+        fresh.state = State::new(Records::decode(&text).unwrap());
+        if late {
+            fresh.input.acquired = vec![accepted(&plan, "i-late")];
+        } else {
+            fresh.pool().held = Some(vec![listed(&plan, "i-late", HostStatus::Active)]);
+        }
+        let actions = fresh.tick(at(31 * MINUTE));
+        assert_eq!(
+            kinds(&actions),
+            ["Save", "Revoke", "Release"],
+            "late {late}"
+        );
+        assert_eq!(fresh.phase(0), Phase::Releasing);
+        assert_eq!(fresh.state.refused, 0);
+    }
 }
