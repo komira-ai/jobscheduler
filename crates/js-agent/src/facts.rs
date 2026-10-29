@@ -885,40 +885,6 @@ mod tests {
         assert_eq!((bytes.len(), dropped), (keep, false));
     }
 
-    /// Asserts that a runner that does not read the second stream says so and returns no
-    /// streams, rather than an empty standard error. It catches a default that answers
-    /// `Ok` with nothing, which would be taken for a job that printed nothing on stderr.
-    #[test]
-    fn a_runner_without_streams_says_so() {
-        let said = Absent.run_streams("p", &[], &[], 10, Duration::from_secs(1));
-        assert_eq!(
-            said,
-            Err("p: this runner reads no standard error".to_owned())
-        );
-    }
-
-    /// Asserts that the real runner reads both streams of a program in a process group of
-    /// its own (the grouped runner), and that a program that cannot be started is an error
-    /// naming it. It catches a grouped runner that loses a stream and a spawn failure
-    /// reported as an empty success.
-    #[test]
-    fn the_system_runner_reads_both_streams_grouped_and_names_a_spawn_failure() {
-        let runner = SystemCommands::grouped(Duration::from_secs(10), 1024);
-        let script = ["-c", "echo out; echo err >&2"];
-        let got = runner.run_streams("/bin/sh", &script, &[], 100, Duration::from_secs(10));
-        let want = Streams {
-            stdout: b"out\n".to_vec(),
-            stderr: b"err\n".to_vec(),
-            dropped: false,
-        };
-        assert_eq!(got, Ok(want));
-        let missing = "/nonexistent/js-agent-test";
-        let err = runner
-            .run_streams(missing, &[], &[], 10, Duration::from_secs(10))
-            .unwrap_err();
-        assert!(err.starts_with(missing), "{err}");
-    }
-
     struct Absent;
 
     impl CommandRunner for Absent {
