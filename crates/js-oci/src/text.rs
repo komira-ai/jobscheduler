@@ -97,6 +97,8 @@ mod tests {
             ("https://u@v@cdn.test/x", "https://cdn.test/x"),
             ("https://cdn.test#SECRET", "https://cdn.test"),
             ("https://[::1]:5000/x?SECRET", "https://[::1]:5000/x"),
+            ("//u:SECRET@h/x", "//h/x"),
+            ("//u:SECRET@h:8443?q=SECRET", "//h:8443"),
             ("/relative?SECRET", "/relative"),
             ("/r?u=https://x", "/r"),
             ("not a url", "not a url"),

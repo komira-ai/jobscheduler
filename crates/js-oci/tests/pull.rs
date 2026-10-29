@@ -1255,3 +1255,93 @@ async fn unreadable_roots_are_counted_and_no_roots_is_an_error() {
         "{err}"
     );
 }
+
+/// Proves a repository that has exchanged a token prints without it: a caller that logs
+/// `{repo:?}` after the first 401 must not put the bearer token in its log.
+#[tokio::test]
+async fn a_repository_does_not_print_its_token() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    fx.behave(|b| b.token = Some("tok-SECRET-4242".to_owned()));
+    let client = fx.client();
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    repo.fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    assert!(
+        fx.requests()
+            .iter()
+            .any(|r| r.contains("Bearer tok-SECRET-4242")),
+        "no token was exchanged: {:?}",
+        fx.requests()
+    );
+    let shown = format!("{repo:?} {repo:#?} {client:?}");
+    assert!(shown.contains("Repository"), "{shown}");
+    assert!(!shown.contains("SECRET"), "{shown}");
+}
+
+/// Proves the host of a redirect is clipped in the errors that name it: a 60 000 byte
+/// host on a refused port, and the same host resolved to an address the policy refuses.
+#[tokio::test]
+async fn a_huge_redirect_host_gives_a_bounded_error() {
+    let artifact = bundle();
+    let fx = started(&artifact).await;
+    let host = format!("{}.test", "a".repeat(60_000));
+    fx.behave(|b| b.redirect_blobs = Some(format!("https://{host}:22/x")));
+    let err = first_layer(&fx, &artifact, &mut Recording::default())
+        .await
+        .expect_err("port");
+    assert!(
+        matches!(err, Error::Port { .. }),
+        "{}",
+        err.to_string().len()
+    );
+    let text = format!("{err} {err:?}");
+    assert!(text.len() < 2048, "{}", text.len());
+
+    fx.behave(|b| b.redirect_blobs = Some(format!("https://{host}:{}/x", fx.port)));
+    let client = fx.client().with_resolved(&host, support::LOOPBACK);
+    let repo = client.repository(fx.location(REPO)).expect("repository");
+    let manifest = repo
+        .fetch_manifest(&artifact.digest, &Kind::bundle())
+        .await
+        .expect("manifest");
+    let err = repo
+        .fetch_blob(&manifest.layers()[0], &mut Recording::default())
+        .await
+        .expect_err("address");
+    assert!(
+        matches!(err, Error::Address { .. }),
+        "{}",
+        err.to_string().len()
+    );
+    let text = format!("{err} {err:?}");
+    assert!(text.len() < 2048, "{}", text.len());
+}
+
+/// Proves a TLS failure's text is bounded: a certificate with hundreds of names, none
+/// the one asked for, makes the TLS library list them all.
+#[tokio::test]
+async fn a_tls_failure_message_is_bounded() {
+    let mut names = vec!["127.0.0.1".to_owned()];
+    names.extend((0..400).map(|n| format!("name-{n:04}-padding-padding.example.test")));
+    let fx = Fixture::start_named(names).await;
+    let location = Location::parse(&format!("unlisted.test:{}/{REPO}", fx.port)).expect("location");
+    let client = Client::with_roots(
+        Policy::new(vec![
+            Allow::parse(&format!("unlisted.test:{}/team", fx.port))
+                .expect("entry")
+                .private()
+                .loopback(),
+        ]),
+        vec![fx.cert.clone()],
+    )
+    .with_resolved("unlisted.test", support::LOOPBACK);
+    let repo = client.repository(location).expect("repository");
+    let err = repo
+        .fetch_manifest(&bundle().digest, &Kind::bundle())
+        .await
+        .expect_err("the certificate is for other names");
+    assert!(err.to_string().contains("TLS"), "{err}");
+    assert!(err.to_string().len() < 512, "{}", err.to_string().len());
+}

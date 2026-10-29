@@ -166,6 +166,11 @@ impl Drop for Fixture {
 impl Fixture {
     pub async fn start() -> Self {
         let names = [REGISTRY, OTHER, "127.0.0.1"].map(str::to_owned).to_vec();
+        Self::start_named(names).await
+    }
+
+    /// A fixture whose certificate is valid for exactly `names`.
+    pub async fn start_named(names: Vec<String>) -> Self {
         let made = rcgen::generate_simple_self_signed(names).expect("certificate");
         let cert = made.cert.der().clone();
         let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
