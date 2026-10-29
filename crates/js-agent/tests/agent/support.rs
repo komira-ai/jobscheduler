@@ -275,6 +275,9 @@ impl FileReader for FakeFiles {
     }
 
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        if self.unlooked.iter().any(|prefix| path.starts_with(prefix)) {
+            return Err(format!("{}: Permission denied", path.display()));
+        }
         match self
             .disk_under
             .iter()

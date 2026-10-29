@@ -309,3 +309,36 @@ fn a_run_files_root_must_be_on_a_tmpfs() {
     let (_, hello) = container_hello("contract-files-tmpfs", &[], &linux_host());
     assert_eq!(hello["capabilities"]["run-files"], "true");
 }
+
+/// Asserts that a run files root whose file system cannot be looked at stops the agent
+/// with status 2, naming `--run-files-root` and that it cannot tell, and sends nothing. It
+/// catches a probe failure read as "fine", which would let secrets reach a disk.
+#[test]
+fn a_run_files_root_that_cannot_be_looked_at_stops_the_agent() {
+    let dir = Scratch::new("contract-files-unlooked");
+    let owned = container_flags(&dir);
+    let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let root = std::fs::canonicalize(dir.path("run-files")).unwrap();
+    let mut host = linux_host();
+    host.files = host.files.clone().unlooked_under(&root);
+    let (script, sent) = Script::new(vec![no_runtime()]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on(
+        &flags(&all),
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("--run-files-root: cannot tell what file system it is on"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
+}

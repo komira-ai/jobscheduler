@@ -679,10 +679,9 @@ mod tests {
         };
         for _ in 0..2 {
             let reply = runs.answer(&host, &beat(), open, (&book, 0));
-            let [Command::Start(sent)] = &reply.commands[..] else {
-                panic!("{:?}", reply.commands);
-            };
-            assert_eq!(sent.files, spec.files);
+            // The whole command is compared, so no arm exists for a reply that is not
+            // the start.
+            assert_eq!(reply.commands, vec![Command::Start(Box::new(spec.clone()))]);
         }
         assert_eq!(runs.map["r1"].spec.files, spec.files);
         let mut listed = beat();

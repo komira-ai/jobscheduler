@@ -182,10 +182,12 @@ fn a_stale_files_directory_is_replaced() {
 fn write_refuses_a_name_with_a_slash_and_leaves_nothing() {
     let h = Harness::new("files-name");
     let root = files_root(&h);
-    let bad = [file("ok", "x"), file("../x", "x")];
-    let why = root.write("r9", &bad).unwrap_err();
-    assert_eq!(why.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(!root.of("r9").exists(), "the partial directory is removed");
+    for bad in ["", ".", "..", "../x", "a/b", "a\0b"] {
+        let files = [file("ok", "x"), file(bad, "x")];
+        let why = root.write("r9", &files).unwrap_err();
+        assert_eq!(why.kind(), std::io::ErrorKind::InvalidInput, "{bad:?}");
+        assert!(!root.of("r9").exists(), "the partial directory is removed");
+    }
     assert!(!root.path().join("x").exists());
 }
 
