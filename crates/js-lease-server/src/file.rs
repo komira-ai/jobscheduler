@@ -204,15 +204,12 @@ struct Section {
 }
 
 impl Section {
-    fn open(map: toml::Table, head: impl Into<String>) -> Self {
-        Self {
-            map,
-            head: head.into(),
-        }
+    fn open(map: toml::Table, head: String) -> Self {
+        Self { map, head }
     }
 
     /// A refusal of `key` of this table.
-    fn fail(&self, key: &str, reason: impl fmt::Display) -> StartupError {
+    fn fail(&self, key: &str, reason: &str) -> StartupError {
         StartupError::at(format!("{}{key}", self.head), reason)
     }
 
@@ -222,7 +219,7 @@ impl Section {
             None => Ok(()),
             Some(key) => {
                 let reason = format!("unknown field; known: {}", known.join(", "));
-                Err(self.fail(key, reason))
+                Err(self.fail(key, &reason))
             }
         }
     }
@@ -270,7 +267,7 @@ impl Section {
         let number = self.integer(key)?.unwrap_or(default);
         match (low..=high).contains(&number) {
             true => Ok(number),
-            false => Err(self.fail(key, format!("must be from {low} to {high}"))),
+            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
         }
     }
 
@@ -375,7 +372,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         let line = line_of(&text, &err);
         StartupError::at(&place, format!("not valid TOML (line {line})"))
     })?;
-    let mut root = Section::open(document, "");
+    let mut root = Section::open(document, String::new());
     root.only(ROOT_KEYS)?;
     let server = root
         .table("server")?
@@ -487,7 +484,7 @@ fn plain_http(url: &str) -> bool {
 }
 
 fn read_server(table: toml::Table) -> Result<Server, StartupError> {
-    let mut s = Section::open(table, "server.");
+    let mut s = Section::open(table, "server.".to_owned());
     s.only(SERVER_KEYS)?;
     let listen = s.address("listen")?;
     let listen = listen.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 7300)));
@@ -525,7 +522,7 @@ fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     };
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = Settings::new(default_ttl, max_ttl);
-    let settings = settings.map_err(|err| s.fail("default_ttl", err))?;
+    let settings = settings.map_err(|err| s.fail("default_ttl", &err.to_string()))?;
     Ok(Server {
         listen,
         agent_listen,
@@ -647,7 +644,7 @@ fn read_pool(
         };
         ld.kinds.build(&kind, &p.map, &ctx)
     };
-    let built = built.map_err(|err| p.fail(&err.field, err.reason))?;
+    let built = built.map_err(|err| p.fail(&err.field, &err.reason))?;
     let pool = match built {
         Built::Static(source) => {
             if let Some(key) = keys.first_given() {
@@ -704,7 +701,7 @@ impl Elastic<'_> {
         }
         if max_instances > MAX_INSTANCES {
             let reason = format!("{max_instances} exceeds {MAX_INSTANCES}");
-            return Err(s.fail("max_instances", reason));
+            return Err(s.fail("max_instances", &reason));
         }
         let hour = required("max_spend_per_hour", keys.hour)?;
         let day = required("max_spend_per_day", keys.day)?;
@@ -724,7 +721,7 @@ impl Elastic<'_> {
         let unlaunchable = exec.filter(|mode| !built.exec.contains(mode));
         if let Some(mode) = unlaunchable {
             let reason = format!("{mode} hosts cannot be launched by provider kind {kind:?}");
-            return Err(s.fail("exec", reason));
+            return Err(s.fail("exec", &reason));
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
         let tokens = match &keys.join_token_file {
@@ -739,7 +736,7 @@ impl Elastic<'_> {
             built.floor.gpus,
             gpu_class,
         );
-        let resources = resources.map_err(|err| s.fail("provider", err))?;
+        let resources = resources.map_err(|err| s.fail("provider", &err.to_string()))?;
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
         let pool = registry_pool(s, id, &class, shape, max, exec)?;
@@ -778,7 +775,7 @@ fn registry_pool(
     match class.admission() {
         Admission::Whole => {
             let whole = pool.with_whole_node(WholeNodeConfig::dedicated(max));
-            whole.map_err(|err| s.fail("class", err))
+            whole.map_err(|err| s.fail("class", &err.to_string()))
         }
         _ => Ok(pool),
     }
@@ -803,12 +800,12 @@ fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan,
                 return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
             }
             let client = OAuthClient::from_file(&file);
-            let client = client.map_err(|err| s.fail("oauth_client_file", err))?;
+            let client = client.map_err(|err| s.fail("oauth_client_file", &err.to_string()))?;
             Ok(NetworkPlan::Tailscale { client, tag })
         }
         _ => {
             let reason = format!("{kind:?} is not a kind; known: default, tailscale");
-            Err(s.fail("kind", reason))
+            Err(s.fail("kind", &reason))
         }
     }
 }
@@ -829,7 +826,7 @@ mod tests {
     /// catches a dedicated pool whose settings are dropped when the registry refuses them.
     #[test]
     fn a_dedicated_pool_of_no_machines_is_refused_naming_the_class() {
-        let section = Section::open(toml::Table::new(), "pool \"x\": ");
+        let section = Section::open(toml::Table::new(), "pool \"x\": ".to_owned());
         let floor = Resources::new(1000, 1 << 30, 0, None).unwrap();
         let shape = Shape::new(floor, BTreeMap::new());
         let id = || ProviderId::new("x").unwrap();
