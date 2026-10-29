@@ -545,6 +545,7 @@ impl Pass<'_> {
             refused: self.refused,
             quiet,
             silent: self.silent_now,
+            missing: self.missing_now,
         };
         (state, actions)
     }

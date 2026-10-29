@@ -71,13 +71,15 @@ fn a_short_hello_releases_a_quiet_host_at_once_and_waits_for_a_busy_one() {
 }
 
 /// Asserts that a registered or draining machine the registry no longer shows is revoked
-/// and released, and counted until the provider says it is gone: the registry forgot
-/// the host, the cloud still bills the machine.
+/// and released, once the view is complete and it has been missing on two steps
+/// `unknown_hold` apart, and counted throughout: the registry forgot the host, the cloud
+/// still bills the machine.
 #[test]
 fn a_machine_the_registry_forgot_is_released() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
     rig.input.hosts = Vec::new();
-    let actions = rig.tick(at(3 * SECOND));
+    rig.tick(at(3 * SECOND));
+    let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
     assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
@@ -86,7 +88,8 @@ fn a_machine_the_registry_forgot_is_released() {
     let mut held = record(Phase::Draining, 60, 0);
     held.registered = true;
     draining.state.records.instances = vec![held];
-    let actions = draining.tick(at(MINUTE));
+    draining.tick(at(MINUTE));
+    let actions = draining.tick(at(31 * MINUTE));
     assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(draining.phase(0), Phase::Releasing);

@@ -106,6 +106,9 @@ pub struct State {
     /// held and counted, never released on its silence, so this is the age a status page
     /// shows. Not written to disk: after a restart the age counts again from the first step.
     pub silent: BTreeMap<String, Millis>,
+    /// Since when each registered machine has been missing from a complete registry view,
+    /// unbroken. Not written to disk: after a restart the count starts again.
+    pub(crate) missing: BTreeMap<String, Millis>,
 }
 
 impl State {
