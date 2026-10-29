@@ -28,8 +28,11 @@ use crate::tailnet::AUTH_KEY;
 /// marks the host, the credential is revoked and the machine is terminated; while the read
 /// back says Terminating the record stays Releasing and the tailnet device stays; when the
 /// machine is gone the host is removed, the device is deleted and the record is Gone. At
-/// every step neither status route shows a secret. It catches a record written after the
-/// launch, a launch that does not carry the token or the key, a token that outlives the
+/// every step neither status route shows a secret. The order of the record and the launch
+/// is pinned by `nothing_is_launched_while_the_record_cannot_be_written`, and the order of
+/// the revoke and the terminate by `a_machine_is_not_terminated_before_its_token_is_revoked_and_a_restart_finishes_the_release`;
+/// here the credential is already refused when the first terminate is seen. It catches a
+/// launch that does not carry the token or the key, a token that outlives the
 /// first hello, a host released while it holds a lease, a machine terminated while its
 /// credential works, a record that reads Terminating as gone, and a device left behind.
 #[tokio::test]
@@ -327,4 +330,51 @@ async fn the_unit_names_the_host_the_scaler_looks_for() {
     rig.join(&token, &name).await;
     let listing = crate::agents_support::hosts(&rig.h).await;
     assert_eq!(crate::agents_support::listed(&listing), [name.as_str()]);
+}
+
+/// The unit of `script` with `flag` and the word after it removed from the `ExecStart` line.
+fn without_flag(script: &str, flag: &str) -> String {
+    let mut out = Vec::new();
+    for line in script.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        match words.iter().position(|word| *word == flag) {
+            Some(at) if line.trim_start().starts_with("ExecStart=") => {
+                let kept = words.iter().enumerate();
+                let kept = kept.filter(|(i, _)| *i != at && *i != at + 1);
+                out.push(kept.map(|(_, word)| *word).collect::<Vec<_>>().join(" "));
+            }
+            _ => out.push(line.to_owned()),
+        }
+    }
+    out.join("\n")
+}
+
+/// Asserts that the unit the machine boots with gives the agent what a GPU pool in
+/// `container` mode demands of a host: with `--container-bin` removed from the unit the
+/// agent reports no runtime and its hello is refused `host-contract` naming `runtime`; with
+/// `--gpu-toolkit-hook` removed it reports no toolkit and is refused `host-contract` naming
+/// `gpu-toolkit`; the registry holds no host after either, and the unit as rendered is
+/// admitted (the other tests). It catches a unit that drops either flag, which would boot
+/// a machine the pool refuses and release it at `boot_timeout`.
+#[tokio::test]
+async fn a_unit_without_the_container_runtime_or_the_gpu_hook_is_refused_by_the_pool() {
+    for (flag, field) in [
+        ("--container-bin", "runtime"),
+        ("--gpu-toolkit-hook", "gpu-toolkit"),
+    ] {
+        let rig = Rig::start("e2e_unit_contract").await;
+        let (name, token) = rig.launch().await;
+        let script = rig.script(0);
+        assert!(script.contains(flag), "the rendered unit gives {flag}");
+        let edited = without_flag(&script, flag);
+        assert!(!edited.contains(flag));
+        let bytes = rig.hello_from(&edited, &name).to_string().into_bytes();
+        let addr = rig.h.running.agent_addr().unwrap();
+        let path = "/v1/agent/hello";
+        let reply = request(addr, "POST", path, Some(&token), Some(&bytes)).await;
+        assert_eq!(reply.status, 403, "{flag}: {}", reply.body);
+        assert_eq!(code(&reply), "host-contract", "{flag}");
+        assert_eq!(reply.json()["field"], field, "{flag}");
+        assert!(rig.registry().hosts().is_empty());
+    }
 }

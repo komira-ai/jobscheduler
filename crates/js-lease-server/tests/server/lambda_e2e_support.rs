@@ -273,7 +273,11 @@ impl Rig {
     /// given (a runtime and a mode with `--container-bin`, the GPU toolkit only with
     /// `--gpu-toolkit-hook`).
     pub fn agent_hello(&self, n: usize, name: &str) -> serde_json::Value {
-        let script = self.script(n);
+        self.hello_from(&self.script(n), name)
+    }
+
+    /// [`Rig::agent_hello`] for the unit of `script`, which may be edited.
+    pub fn hello_from(&self, script: &str, name: &str) -> serde_json::Value {
         let line = script
             .lines()
             .find_map(|line| line.trim().strip_prefix("ExecStart="))
@@ -283,10 +287,11 @@ impl Rig {
             let at = words.iter().position(|word| *word == wanted);
             at.map(|at| words.get(at + 1).copied().unwrap_or_default())
         };
-        // Without `--host-id` the agent would register under a name of its own; that is
-        // asserted by `the_unit_names_the_host_the_scaler_looks_for`, and the other tests
-        // go on under the record's name.
-        let host = flag("--host-id").map_or(name, |host| host.trim_matches('"'));
+        // Without `--host-id` the agent would register under a name of its own, which the
+        // scaler never sees, so a unit without it fails every test that boots a host.
+        let host = flag("--host-id")
+            .map(|host| host.trim_matches('"'))
+            .expect("the unit gives the agent `--host-id`");
         let mut body = hello_body_of(host);
         body["instance"] = json!({ "provider": "burst", "instance_id": name });
         body["accepts_host_credential"] = json!(true);
