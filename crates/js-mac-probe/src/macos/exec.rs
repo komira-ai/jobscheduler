@@ -24,6 +24,12 @@ impl Outcome {
         self.code == Some(1)
     }
 
+    /// Refused with EPERM, which is how a Seatbelt deny reaches the child (the child modes
+    /// print `errno=N` first). A missing directory or another failure is not a denial.
+    pub fn denied(&self) -> bool {
+        self.refused() && self.stderr.starts_with("errno=1 ")
+    }
+
     /// The last part of stderr, one line, for a report.
     pub fn stderr_tail(&self) -> String {
         let text = self.stderr.trim();

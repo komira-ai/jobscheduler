@@ -13,7 +13,7 @@ use clap::Subcommand;
 const CONNECT_LIMIT: Duration = Duration::from_secs(5);
 
 /// What the child does. Exit status 0 means it was allowed to; 1 that it was refused or
-/// failed, with the reason on stderr.
+/// failed, with `errno=N` and the reason on stderr.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Child {
     /// Connect a TCP socket.
@@ -49,7 +49,7 @@ pub fn run(child: &Child) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("errno={} {err}", err.raw_os_error().unwrap_or(0));
             ExitCode::FAILURE
         }
     }
