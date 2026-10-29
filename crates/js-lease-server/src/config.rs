@@ -15,6 +15,7 @@ use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
 use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
 use crate::agent_pool;
@@ -25,9 +26,9 @@ use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
-use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
+use crate::usage::{HostLimits, KeySource, NoKeys, ProfileKey, UsageSink};
 use crate::usage_hub::Usage;
-use crate::usage_js::{self, StoreSetup};
+use crate::usage_js::{self, NameMap, StoreSetup, no_names};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -357,6 +358,8 @@ pub(crate) struct UsageSetup {
     /// The sink to use in place of the one that opens `db`.
     pub(crate) sink: Option<Arc<dyn UsageSink>>,
     pub(crate) keys: Arc<dyn KeySource>,
+    /// How admission finds the profile name of a work key; `None` leaves every key flat.
+    pub(crate) names: Option<NameMap>,
 }
 
 /// The default of `--profile-store-bytes`.
@@ -375,6 +378,7 @@ impl UsageSetup {
             profile_store_bytes: DEFAULT_PROFILE_STORE_BYTES,
             sink: None,
             keys: Arc::new(NoKeys),
+            names: None,
         }
     }
 
@@ -394,6 +398,7 @@ impl UsageSetup {
                 let setup = StoreSetup {
                     db,
                     profile_store_bytes: self.profile_store_bytes,
+                    names: self.names.unwrap_or_else(no_names),
                 };
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
@@ -644,6 +649,19 @@ impl Config {
         self.usage.keys = keys;
         self
     }
+
+    /// The same configuration telling admission's curve reads (`usage_curves`) which
+    /// profile a work key has. The server never derives a profile name from a work key:
+    /// the name is the one the caller supplied for the run (see [`KeySource`]), so only
+    /// the caller knows which work key has which. Without it every work key is charged
+    /// flat.
+    pub fn with_curve_names(
+        mut self,
+        names: impl Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync + 'static,
+    ) -> Self {
+        self.usage.names = Some(Arc::new(names));
+        self
+    }
 }
 
 /// The usage file the flags name: none for `--usage-off`, else `--usage-db` or `usage.db`
@@ -660,6 +678,7 @@ fn usage_setup(cli: &Cli, state_file: &Path) -> UsageSetup {
         profile_store_bytes: cli.profile_store_bytes,
         sink: None,
         keys: Arc::new(NoKeys),
+        names: None,
     }
 }
 

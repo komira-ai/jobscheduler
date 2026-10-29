@@ -13,6 +13,9 @@ pub enum BadKey {
     /// The string is empty or longer than [`MAX_KEY_LEN`] bytes.
     #[error("a profile key is 1 to {MAX_KEY_LEN} bytes")]
     Length,
+    /// The first byte is not `0-9` or `a-z`.
+    #[error("a profile key starts with 0-9 or a-z")]
+    First,
     /// The string holds a byte outside `0-9`, `a-z`, `.`, `_` and `-`.
     #[error("a profile key holds only 0-9, a-z, '.', '_' and '-'")]
     Byte,
@@ -65,7 +68,7 @@ mod tests {
     /// percent escape through, or one that refuses the legal edge lengths.
     #[test]
     fn the_grammar_admits_only_lowercase_names_of_1_to_128_bytes() {
-        for ok in ["a", "0", "x.y_z-9", "..", &"a".repeat(128)] {
+        for ok in ["a", "0", "x.y_z-9", "a..", &"a".repeat(128)] {
             assert_eq!(ProfileKey::parse(ok).unwrap().as_str(), ok);
         }
         assert_eq!(ProfileKey::parse(""), Err(BadKey::Length));
@@ -73,6 +76,20 @@ mod tests {
         for bad in ["A", "a/b", "a b", "%2e", "é", "a\n", "a:b", "a*"] {
             assert_eq!(ProfileKey::parse(bad), Err(BadKey::Byte), "{bad:?}");
         }
+    }
+
+    /// Asserts that a name starts with a digit or a lower-case letter: `.`, `_` and `-`
+    /// are legal inside a name and refused first, with the error that says so. It catches
+    /// a name such as `..` or `-rf`, which no caller's key needs and a path or a flag
+    /// would misread.
+    #[test]
+    fn a_name_starts_with_a_digit_or_a_lowercase_letter() {
+        for bad in [".", "..", ".a", "_a", "-a", "-"] {
+            assert_eq!(ProfileKey::parse(bad), Err(BadKey::First), "{bad:?}");
+        }
+        assert_eq!(ProfileKey::parse("-A"), Err(BadKey::First));
+        assert_eq!(ProfileKey::parse("aA"), Err(BadKey::Byte));
+        assert!(BadKey::First.to_string().contains("starts"));
     }
 
     #[test]

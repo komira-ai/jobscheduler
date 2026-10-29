@@ -36,11 +36,23 @@ use crate::usage::{
     HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
 };
 
+/// How admission finds the profile name of a work key: the caller supplies it, since the
+/// name is the caller's (a key of its own estimator), not something the server derives from
+/// the work key. `None` charges the key flat.
+pub(crate) type NameMap = Arc<dyn Fn(&WorkKey) -> Option<ProfileKey> + Send + Sync>;
+
+/// The map of a server whose caller has named none: no work key has a profile.
+pub(crate) fn no_names() -> NameMap {
+    Arc::new(|_| None)
+}
+
 /// Where the usage store is and how large the profile part of it may grow.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct StoreSetup {
     pub(crate) db: PathBuf,
     pub(crate) profile_store_bytes: u64,
+    /// How admission's curve reads find the profile of a work key.
+    pub(crate) names: NameMap,
 }
 
 /// The sink over the SQLite file `setup` names. A file that cannot be opened (another
@@ -60,7 +72,7 @@ fn sink_over(
     setup: &StoreSetup,
     today: u64,
 ) -> Result<Arc<dyn UsageSink>, StartupError> {
-    let usage = NodeUsage::over(store, setup.profile_store_bytes, today)
+    let usage = NodeUsage::over(store, setup.profile_store_bytes, today, setup.names.clone())
         .map_err(StartupError::because("--usage-db"))?;
     info!(
         db = %setup.db.display(),
@@ -102,7 +114,9 @@ impl NodeUsage {
         store: Arc<dyn Store>,
         budget_bytes: u64,
         today: u64,
+        names: NameMap,
     ) -> Result<Self, ProfileError> {
+        let _ = names;
         let curves = Arc::new(ProfileCurves::new(Box::new(key_map)));
         let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
         Ok(Self {
