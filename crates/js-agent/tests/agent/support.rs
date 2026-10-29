@@ -212,6 +212,7 @@ pub struct FakeFiles {
     devices: Vec<(PathBuf, u64)>,
     /// Paths under a prefix cannot be looked at.
     unlooked: Vec<PathBuf>,
+    disk_under: Vec<PathBuf>,
 }
 
 impl FakeFiles {
@@ -245,6 +246,12 @@ impl FakeFiles {
         self
     }
 
+    /// Everything under `prefix` is on a disk, not on a tmpfs (every other path is on one).
+    pub fn disk_under(mut self, prefix: &Path) -> Self {
+        self.disk_under.push(prefix.to_path_buf());
+        self
+    }
+
     /// Nothing under `prefix` can be looked at.
     pub fn unlooked_under(mut self, prefix: &Path) -> Self {
         self.unlooked.push(prefix.to_path_buf());
@@ -265,6 +272,20 @@ impl FileReader for FakeFiles {
             .get(path)
             .cloned()
             .ok_or_else(|| format!("{path}: No such file or directory"))
+    }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        if self.unlooked.iter().any(|prefix| path.starts_with(prefix)) {
+            return Err(format!("{}: Permission denied", path.display()));
+        }
+        match self
+            .disk_under
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+        {
+            true => Ok(false),
+            false => Ok(true),
+        }
     }
 
     fn device(&self, path: &Path) -> Result<u64, String> {

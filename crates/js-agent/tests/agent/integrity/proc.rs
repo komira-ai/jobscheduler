@@ -46,6 +46,10 @@ impl FileReader for Host {
     fn device(&self, path: &Path) -> Result<u64, String> {
         Err(format!("{}: not recorded", path.display()))
     }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        Err(format!("{}: not recorded", path.display()))
+    }
 }
 
 impl DirLister for Host {

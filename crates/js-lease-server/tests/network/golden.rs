@@ -49,9 +49,18 @@ fn the_tailscale_script_matches_its_golden_file() {
     assert!(fake.seen().is_empty(), "a masked render calls nothing");
 }
 
-/// The unit section of a masked script: from `[Unit]` to the `UNIT` line.
+/// Where the agent's unit starts in a masked script (the metadata block's unit comes
+/// before it and has a `[Unit]` of its own).
+fn agent_unit_at(script: &str) -> usize {
+    let at = script
+        .find("cat > /etc/systemd/system/js-agent.service <<'UNIT'")
+        .unwrap();
+    at + script[at..].find("[Unit]").unwrap()
+}
+
+/// The agent's unit section of a masked script: from `[Unit]` to the `UNIT` line.
 fn unit_of(script: &str) -> &str {
-    let start = script.find("[Unit]").unwrap();
+    let start = agent_unit_at(script);
     let end = script[start..].find("\nUNIT\n").unwrap();
     &script[start..start + end]
 }
@@ -113,7 +122,7 @@ fn the_agent_unit_names_its_roots_and_requires_the_scratch_mount() {
             js_elastic::SCRATCH_ROOT
         ))
         .unwrap();
-    assert!(made < script.find("[Unit]").unwrap());
+    assert!(made < agent_unit_at(&script));
 }
 
 /// The masked tailscale script as lines.
