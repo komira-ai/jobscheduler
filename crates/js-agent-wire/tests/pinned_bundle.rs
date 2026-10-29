@@ -307,6 +307,7 @@ impl OldJobSpec {
             valid_for_ms: self.valid_for_ms,
             bundle: None,
             native: None,
+            files: Vec::new(),
         };
         Command::Start(Box::new(spec)).validate()
     }

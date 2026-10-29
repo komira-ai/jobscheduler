@@ -8,11 +8,22 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{Engine, Settings};
+use super::{DEFAULT_NETWORK, Engine, Settings};
 use crate::lifecycle::ContainerSpec;
 
 /// Where the run's scratch directory is mounted, read-write, inside the container.
 pub const SCRATCH_TARGET: &str = "/scratch";
+
+/// Where the run's files are mounted, read-only, inside the container.
+///
+/// The container's root is read-only, and an engine puts a tmpfs on `/run` for such a
+/// container (Podman does; an explicit `--tmpfs /run` may be added). The bind sits on top
+/// of that tmpfs: engines order mounts parent first, so `/run` is mounted before
+/// `/run/js-files`, and the engine creates the mount point itself. Nothing here assumes
+/// `/run` exists in the image. The mount is built by the same [`mount_value`] as a job's
+/// mounts (read-only, `nosuid,nodev` on Podman) and is in [`binds_of`], so the read-back
+/// after `create` checks it like them: one that reads back writable is refused.
+pub const FILES_TARGET: &str = "/run/js-files";
 
 /// The most processes a job may hold when its limits name no bound: a fork bomb is
 /// stopped well before it takes the host, and a build with many threads still fits.
@@ -104,10 +115,15 @@ pub fn limits_to_args(
         let value = mount_value(engine, &mount.host, &mount.target, mount.ro, recursive_ro)?;
         args.extend(["--mount".to_owned(), value]);
     }
+    if let Some(files) = &spec.files {
+        let value = mount_value(engine, files, FILES_TARGET, true, recursive_ro)?;
+        args.extend(["--mount".to_owned(), value]);
+    }
     Ok(args)
 }
 
-/// The bind mounts `spec` asks for, the scratch directory first: what the engine must
+/// The bind mounts `spec` asks for, the scratch directory first and the run's files
+/// (read-only) last: what the engine must
 /// report back for the container after `create`.
 pub fn binds_of(spec: &ContainerSpec) -> Vec<Bind> {
     let text = |path: &Path| path.to_string_lossy().into_owned();
@@ -116,7 +132,11 @@ pub fn binds_of(spec: &ContainerSpec) -> Vec<Bind> {
         .mounts
         .iter()
         .map(|mount| (text(&mount.host), mount.target.clone(), !mount.ro));
-    std::iter::once(scratch).chain(jobs).collect()
+    let files = spec
+        .files
+        .iter()
+        .map(|dir| (text(dir), FILES_TARGET.to_owned(), false));
+    std::iter::once(scratch).chain(jobs).chain(files).collect()
 }
 
 fn gpu_args(engine: Engine, indices: &[u32]) -> Vec<String> {
@@ -269,10 +289,13 @@ fn mount_value(
 /// and `/run` are such tmpfs mounts too), no core dumps, a private IPC namespace against a
 /// daemon whose default is to share it, a private control group namespace (both engines
 /// default to it on cgroup v2, but the integrity checks rely on a job seeing only its own
-/// group, so it is named), and the pull policy the agent was configured with (never by
-/// default). The user is not here: it is the run's slot's (`user_args`). For
+/// group, so it is named), the pull policy the agent was configured with (never by
+/// default), and, when `--actions-cgroup` is given, `--cgroup-parent` naming it so the
+/// container's usage is counted in it. The user is not here: it is the run's slot's
+/// (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
-/// container there, and its default is private. There is no `--rm`: the lifecycle
+/// container there, and its default is private. A `--add-host <name>:<ip>` follows the
+/// network for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = |dir: &str| format!("{dir}:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
@@ -298,6 +321,15 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     ]
     .map(str::to_owned)
     .to_vec();
+    // A job on a named network has no IPv6 at all, not even the link-local address of its
+    // veth (the egress rules drop IPv6 too; this removes it at the source). The network
+    // namespace is the container's own, so the engine takes the sysctl.
+    if settings.network() != DEFAULT_NETWORK {
+        args.extend(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"].map(str::to_owned));
+    }
+    for entry in settings.add_hosts() {
+        args.extend(["--add-host".to_owned(), entry.clone()]);
+    }
     if engine == Engine::Podman {
         // Podman's `--read-only` also mounts writable tmpfs at `/var/tmp` and at the
         // image's run path, with neither `noexec` nor a size (`--read-only-tmpfs` is on
@@ -315,6 +347,9 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         args.extend(["--pid", "private"].map(str::to_owned));
     }
     args.extend(["--pull", settings.pull().as_str()].map(str::to_owned));
+    if let Some(parent) = settings.cgroup_parent() {
+        args.extend(["--cgroup-parent", parent].map(str::to_owned));
+    }
     args
 }
 

@@ -6,8 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{
-    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, Settings, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, DEFAULT_PIDS, Engine, FILES_TARGET, SCRATCH_TARGET, Settings, binds_of,
+    hardening_args, label_args, limits_to_args,
 };
 
 use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
@@ -271,6 +271,36 @@ fn hardening_follows_the_settings() {
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }
 
+/// Asserts the golden tail of the hardening list with `--actions-cgroup`: `--cgroup-parent`
+/// comes last with the slice name for a slice and the path with a leading `/` otherwise, on
+/// both engines, and the list without the flag has none. It catches a configured control
+/// group that is checked and never reaches `create`, which leaves the containers outside
+/// the cgroup the node's usage is read from.
+#[test]
+fn the_actions_cgroup_becomes_the_cgroup_parent() {
+    let with = |dir: &str| {
+        Settings::new(Path::new(BIN), None, None)
+            .unwrap()
+            .with_actions_cgroup(Some(Path::new(dir)))
+            .unwrap()
+    };
+    let rows = [
+        ("/sys/fs/cgroup/jobscheduler.slice", "jobscheduler.slice"),
+        ("/sys/fs/cgroup/js/actions", "/js/actions"),
+    ];
+    for (dir, parent) in rows {
+        for engine in [Engine::Docker, Engine::Podman] {
+            let args = hardening_args(&with(dir), engine, PROFILE);
+            assert_eq!(
+                args[args.len() - 2..],
+                strings(&["--cgroup-parent", parent])
+            );
+        }
+    }
+    let plain = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert!(!plain.iter().any(|arg| arg == "--cgroup-parent"));
+}
+
 /// Asserts that the Docker flag names the exact indices and nothing else, that Podman
 /// is given one CDI device for each index, that no job without a GPU gets a GPU flag,
 /// and that no spelling of "all" is ever produced. It catches a job given every GPU of
@@ -408,6 +438,43 @@ fn podman_mounts_are_nosuid_nodev() {
     assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
 }
 
+/// Asserts that the run's files directory is mounted read-only at `/run/js-files` after
+/// the job's own mounts, with the recursive read-only options when the engine takes them
+/// and `nosuid,nodev` on Podman, and that a run without files has no such mount. It
+/// catches a files mount that is writable, one that skips the Podman options every other
+/// mount has, and one added to every run.
+#[test]
+fn the_files_mount_is_read_only_at_the_fixed_path() {
+    let mut job = spec("r1");
+    assert!(
+        !mounts_of(&limits_to_args(Engine::Podman, &job, false).unwrap())
+            .iter()
+            .any(|m| m.contains("/run/js-files"))
+    );
+    job.mounts = vec![mount("/srv/data/in", "/mnt/data/in", true)];
+    job.files = Some("/work/scratch/r1@files".into());
+    assert_eq!(FILES_TARGET, "/run/js-files");
+    let podman = limits_to_args(Engine::Podman, &job, true).unwrap();
+    assert_eq!(
+        mounts_of(&podman).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly,bind-recursive=readonly,bind-propagation=rprivate,nosuid,nodev"
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&docker).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly"
+    );
+    let binds = binds_of(&job);
+    assert_eq!(
+        binds.last().unwrap(),
+        &(
+            "/work/scratch/r1@files".to_owned(),
+            "/run/js-files".to_owned(),
+            false
+        )
+    );
+}
+
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
 /// value is refused, and nothing is built: a comma, a double quote, a colon (the
 /// separator of the short form, which the mount roots refuse too, so the claim that it is
@@ -482,4 +549,31 @@ fn labels_are_pairs_and_keys_are_checked() {
         assert_eq!(label_args(&bad), Err(ArgsError::LabelKey), "{key:?}");
     }
     assert!(label_args(&BTreeMap::new()).unwrap().is_empty());
+}
+
+/// Asserts that each `--container-add-host` entry reaches `create` as its own
+/// `--add-host <name>:<ip>` pair, for both engines, in the order given, and that none is
+/// passed when none is configured. It catches an entry that is checked and dropped, one
+/// merged into another argument, and a stray `--add-host` by default.
+#[test]
+fn add_hosts_reach_create() {
+    let none = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert!(!none.iter().any(|a| a == "--add-host"));
+    let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
+    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+        .unwrap()
+        .with_add_hosts(&entries)
+        .unwrap();
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&set, engine, PROFILE);
+        let pairs: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-host")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            pairs,
+            ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
+        );
+    }
 }

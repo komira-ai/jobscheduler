@@ -3,6 +3,7 @@
 //! spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
@@ -181,7 +182,19 @@ pub(super) struct Job {
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
     pub(super) findings: Vec<Finding>,
+    /// When the container started, on the agent's monotonic clock, in microseconds (the
+    /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
+    /// an adopted job it is when the runtime says the container began; `None` when that was
+    /// before the clock did, which the clock cannot say.
+    pub(super) started_usec: Option<u64>,
+    /// The container's control group directory, asked of the runtime once.
+    pub(super) cgroup: Option<PathBuf>,
+    /// Taken over from an earlier process of the agent: its first minutes were not seen.
+    pub(super) adopted: bool,
 }
+
+/// Microseconds in a millisecond.
+const USEC_PER_MS: u64 = 1000;
 
 impl Job {
     pub(super) fn report(
@@ -293,6 +306,9 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: None,
+            cgroup: None,
+            adopted: false,
         }
     }
 
@@ -319,7 +335,17 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: now
+                .checked_sub(found.running_ms)
+                .map(|started| started.saturating_mul(USEC_PER_MS)),
+            cgroup: None,
+            adopted: true,
         })
+    }
+
+    /// Marks the job as started `now_ms` on the agent's clock.
+    pub(super) fn started_at(&mut self, now_ms: u64) {
+        self.started_usec = Some(now_ms.saturating_mul(USEC_PER_MS));
     }
 }
 
@@ -370,6 +396,7 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
+    files: Option<std::path::PathBuf>,
     slot: u32,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
@@ -401,6 +428,7 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        files,
         slot,
         isolation: spec.isolation,
         labels,
