@@ -292,6 +292,7 @@ impl UsageSink for Fake {
             };
             Fit {
                 points: runs[0].minutes.iter().map(point).collect(),
+                cores_learned: true,
                 runs: u16::try_from(runs.len()).unwrap(),
                 wall_minutes_p90: 1,
             }

@@ -188,7 +188,8 @@ async fn nodes(State(api): State<UsageApi>, uri: Uri) -> Result<Response, ApiErr
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct PointView {
     minute: u16,
-    cores_milli: u32,
+    /// `None` (`null`) when the fit's cores were not learned: a memory-only curve.
+    cores_milli: Option<u32>,
     ws_bytes: u64,
 }
 
@@ -204,20 +205,20 @@ struct KeyBody {
 
 impl KeyBody {
     /// The answer for `profile` on day `today`: the curve is the fit's points, point `i`
-    /// being minute `i` of a run's life.
+    /// being minute `i` of a run's life, with no cores when the fit did not learn them.
     fn of(key: &ProfileKey, profile: &KeyProfile, today: u64) -> Self {
-        let point = |(minute, p): (usize, &MinutePoint)| PointView {
-            minute: u16::try_from(minute).unwrap_or(u16::MAX),
-            cores_milli: p.cores_milli,
-            ws_bytes: p.working_set_bytes,
+        let curve = |fit: &js_usage::Fit| {
+            let point = |(minute, p): (usize, &MinutePoint)| PointView {
+                minute: u16::try_from(minute).unwrap_or(u16::MAX),
+                cores_milli: fit.cores_learned.then_some(p.cores_milli),
+                ws_bytes: p.working_set_bytes,
+            };
+            fit.points.iter().enumerate().map(point).collect()
         };
         Self {
             key: key.to_string(),
             runs: profile.runs,
-            curve: profile
-                .fit
-                .as_ref()
-                .map(|fit| fit.points.iter().enumerate().map(point).collect()),
+            curve: profile.fit.as_ref().map(curve),
             last_used_day: profile.last_used_day,
             stale: profile.is_stale(today),
         }
@@ -408,6 +409,7 @@ mod tests {
             runs: 3,
             fit: Some(Fit {
                 points: vec![point(1500, 4096), point(2000, 8192)],
+                cores_learned: true,
                 runs: 3,
                 wall_minutes_p90: 2,
             }),
@@ -422,6 +424,33 @@ mod tests {
         let idle = 9 + js_usage::STALE_DAYS + 1;
         let body = serde_json::to_value(KeyBody::of(&key, &some, idle)).unwrap();
         assert_eq!(body["stale"], true);
+    }
+
+    /// Asserts that a fit whose cores were not learned (too few runs outside node pressure)
+    /// answers each point's cores as `null` and keeps its bytes. It catches a memory-only
+    /// curve served with cores of 0, which reads as a key that needs no CPU.
+    #[test]
+    fn a_memory_only_curve_has_null_cores() {
+        let key = ProfileKey::parse("act.build").unwrap();
+        let point = |cores_milli, working_set_bytes| MinutePoint {
+            cores_milli,
+            working_set_bytes,
+        };
+        let memory_only = KeyProfile {
+            runs: 3,
+            fit: Some(Fit {
+                points: vec![point(0, 4096), point(0, 8192)],
+                cores_learned: false,
+                runs: 3,
+                wall_minutes_p90: 2,
+            }),
+            last_used_day: 9,
+            bytes: 100,
+        };
+        let body = serde_json::to_value(KeyBody::of(&key, &memory_only, 9)).unwrap();
+        let first = serde_json::json!({ "minute": 0, "cores_milli": null, "ws_bytes": 4096 });
+        let second = serde_json::json!({ "minute": 1, "cores_milli": null, "ws_bytes": 8192 });
+        assert_eq!(body["curve"], serde_json::json!([first, second]));
     }
 
     /// Asserts that a key segment is taken only in its canonical spelling and starts with
