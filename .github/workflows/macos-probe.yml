@@ -40,7 +40,7 @@ jobs:
       - name: Probe
         run: |
           mkdir -p "$RUNNER_TEMP/report"
-          cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json"
+          cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json" --trace-out "$RUNNER_TEMP/report/trace.sb"
       - name: Report
         if: ${{ !cancelled() }}
         run: |
@@ -51,5 +51,7 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: macos-probe-report
-          path: ${{ runner.temp }}/report/report.json
+          path: |
+            ${{ runner.temp }}/report/report.json
+            ${{ runner.temp }}/report/trace.sb
           if-no-files-found: ignore

@@ -69,8 +69,8 @@ pub fn describe(probe: Probe, prefix: &str, outcome: &Outcome) -> Probe {
     }
 }
 
-/// The first line of a command's stdout, or why there is none.
-pub fn first_line(program: &str, args: &[&str]) -> String {
+/// A command's stdout lines, or its stderr lines when it failed.
+pub fn lines(program: &str, args: &[&str]) -> Vec<String> {
     let outcome = run({
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -81,7 +81,12 @@ pub fn first_line(program: &str, args: &[&str]) -> String {
     } else {
         &outcome.stderr
     };
-    text.lines().next().unwrap_or("").to_owned()
+    text.lines().map(str::to_owned).collect()
+}
+
+/// The first line of a command's stdout, or why there is none.
+pub fn first_line(program: &str, args: &[&str]) -> String {
+    lines(program, args).into_iter().next().unwrap_or_default()
 }
 
 /// How the network is cut in a profile.
@@ -154,8 +159,19 @@ pub fn profile(net: &Net, extra: &str) -> String {
     lines.join("\n")
 }
 
+/// A complete profile text with the extra `-D` parameters it uses (besides `RUN`, `UIDENT`
+/// and `IN`, which every sandboxed run gets).
+pub struct Custom {
+    /// The profile.
+    pub text: String,
+    /// Parameter names and the paths they stand for.
+    pub params: Vec<(String, PathBuf)>,
+}
+
 /// With a profile, or the no-sandbox control.
 pub enum Mode<'a> {
+    /// Under a profile written whole by the caller.
+    Custom(&'a Custom),
     /// No `sandbox-exec`.
     Control,
     /// Under the profile for this network level; the text is added before the floor.
@@ -168,19 +184,33 @@ impl Places {
         let mut cmd = match mode {
             Mode::Control => Command::new(program),
             Mode::Sandboxed(net, extra) => {
-                let mut cmd = Command::new("/usr/bin/sandbox-exec");
-                for (name, path) in [
-                    ("RUN", &self.run),
-                    ("UIDENT", &self.uid_entry),
-                    ("IN", &self.input),
-                ] {
-                    cmd.arg("-D").arg(format!("{name}={}", path.display()));
-                }
+                let mut cmd = self.sandbox_exec(&[]);
                 cmd.arg("-p").arg(profile(net, extra)).arg(program);
+                cmd
+            }
+            Mode::Custom(custom) => {
+                let mut cmd = self.sandbox_exec(&custom.params);
+                cmd.arg("-p").arg(&custom.text).arg(program);
                 cmd
             }
         };
         cmd.args(args);
+        cmd
+    }
+
+    /// `sandbox-exec` with the `-D` parameters of every run and `more`.
+    fn sandbox_exec(&self, more: &[(String, PathBuf)]) -> Command {
+        let mut cmd = Command::new("/usr/bin/sandbox-exec");
+        for (name, path) in [
+            ("RUN", &self.run),
+            ("UIDENT", &self.uid_entry),
+            ("IN", &self.input),
+        ] {
+            cmd.arg("-D").arg(format!("{name}={}", path.display()));
+        }
+        for (name, path) in more {
+            cmd.arg("-D").arg(format!("{name}={}", path.display()));
+        }
         cmd
     }
 

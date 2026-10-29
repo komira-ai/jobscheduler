@@ -51,14 +51,8 @@ pub fn run(child: &Child) -> ExitCode {
             std::net::TcpStream::connect_timeout(addr, CONNECT_LIMIT).map(|_| String::new())
         }
         Child::Resolve { host } => resolve(host),
-        Child::Read { path } => {
-            let _ = path;
-            Ok(String::new())
-        }
-        Child::Env { name } => {
-            let _ = name;
-            Ok(String::new())
-        }
+        Child::Read { path } => read_text(path),
+        Child::Env { name } => Ok(env_text(name)),
         Child::Write { path } => std::fs::write(path, b"probe\n").map(|()| String::new()),
     };
     match outcome {
@@ -74,13 +68,14 @@ pub fn run(child: &Child) -> ExitCode {
 }
 
 fn read_text(path: &std::path::Path) -> std::io::Result<String> {
-    let _ = path;
-    Ok(String::new())
+    std::fs::read_to_string(path)
 }
 
 fn env_text(name: &str) -> String {
-    let _ = name;
-    String::new()
+    std::env::var_os(name).map_or_else(
+        || "unset\n".to_owned(),
+        |value| format!("set={}\n", value.to_string_lossy()),
+    )
 }
 
 fn resolve(host: &str) -> std::io::Result<String> {

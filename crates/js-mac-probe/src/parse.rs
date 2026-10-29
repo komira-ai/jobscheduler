@@ -4,45 +4,94 @@
 /// The first double-quoted string on `line`.
 #[must_use]
 pub fn quoted(line: &str) -> Option<&str> {
-    let _ = line;
-    None
+    let start = line.find('"')? + 1;
+    let len = line[start..].find('"')?;
+    Some(&line[start..start + len])
 }
 
 /// The paths a sandbox trace asks to read that no grant covers: a `literal` match or a
 /// `subpath` (the path itself or anything below it). Sorted, without repeats.
 #[must_use]
 pub fn unlisted_reads(trace: &str, subpaths: &[&str], literals: &[&str]) -> Vec<String> {
-    let _ = (trace, subpaths, literals);
-    Vec::new()
+    let mut found = std::collections::BTreeSet::new();
+    for line in trace.lines().map(str::trim) {
+        if !line.starts_with("(allow file-read") {
+            continue;
+        }
+        let Some(path) = quoted(line) else {
+            continue;
+        };
+        let under = |sub: &&str| {
+            path == *sub
+                || path
+                    .strip_prefix(*sub)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        };
+        if !literals.contains(&path) && !subpaths.iter().any(under) {
+            found.insert(path.to_owned());
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// The `<string>` values that directly follow `<key>key</key>` in plist text, in order.
 #[must_use]
 pub fn plist_strings(text: &str, key: &str) -> Vec<String> {
-    let _ = (text, key);
-    Vec::new()
+    let marker = format!("<key>{key}</key>");
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(&marker) {
+        rest = &rest[at + marker.len()..];
+        let value = rest
+            .trim_start()
+            .strip_prefix("<string>")
+            .and_then(|body| body.find("</string>").map(|end| &body[..end]));
+        if let Some(value) = value {
+            found.push(value.to_owned());
+        }
+    }
+    found
 }
 
 /// The first whitespace-separated token that names a `/dev/disk` device.
 #[must_use]
 pub fn first_device(text: &str) -> Option<String> {
-    let _ = text;
-    None
+    let mut tokens = text.split_whitespace();
+    tokens
+        .find(|t| t.starts_with("/dev/disk"))
+        .map(str::to_owned)
 }
 
 /// The paths of the `LC_RPATH` commands in `otool -l` output.
 #[must_use]
 pub fn rpaths(otool_l: &str) -> Vec<String> {
-    let _ = otool_l;
-    Vec::new()
+    let lines: Vec<&str> = otool_l.lines().map(str::trim).collect();
+    let mut found = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        if *line != "cmd LC_RPATH" {
+            continue;
+        }
+        let path = lines.get(at + 2).and_then(|l| l.strip_prefix("path "));
+        if let Some(path) = path {
+            found.push(
+                path.split_once(" (offset")
+                    .map_or(path, |(p, _)| p)
+                    .to_owned(),
+            );
+        }
+    }
+    found
 }
 
 /// The install names in `otool -L` output (the first line names the file and is skipped;
 /// version suffixes are dropped).
 #[must_use]
 pub fn dependents(otool_big_l: &str) -> Vec<String> {
-    let _ = otool_big_l;
-    Vec::new()
+    let lines = otool_big_l.lines().skip(1).map(str::trim);
+    let named = lines.filter(|l| !l.is_empty());
+    named
+        .map(|l| l.split_once(" (").map_or(l, |(name, _)| name).to_owned())
+        .collect()
 }
 
 #[cfg(test)]
