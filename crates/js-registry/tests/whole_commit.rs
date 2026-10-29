@@ -97,6 +97,7 @@ fn job(run: &str) -> JobSpec {
         labels: Default::default(),
         heartbeat_seq: 0,
         valid_for_ms: 0,
+        native: None,
     }
 }
 
