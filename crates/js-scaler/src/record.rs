@@ -248,10 +248,17 @@ pub struct Record {
     /// scaler. It is set once and never cleared. A host that has been heard from has
     /// booted, so the lost-Welcome rule (the host said hello and was never heard from; see
     /// `Pass::on_silent`) never applies to it, even when a later restart of its agent
-    /// says hello again and the heartbeat count starts over. Files written before the
-    /// field existed read it as `false`.
-    #[serde(default)]
+    /// says hello again and the heartbeat count starts over. New records start `false`;
+    /// files written before the field existed read it as `true`, the safe direction: the
+    /// rule stays off for a host that may have been heard from, and the `unknown_hold`
+    /// rules still release a lost Welcome.
+    #[serde(default = "seen_live_default")]
     pub seen_live: bool,
+}
+
+/// The value of [`Record::seen_live`] for a file that has none: `true`.
+fn seen_live_default() -> bool {
+    true
 }
 
 impl Record {
