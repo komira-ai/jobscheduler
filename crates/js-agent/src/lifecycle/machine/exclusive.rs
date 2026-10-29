@@ -143,14 +143,17 @@ impl Lifecycle {
         Err(message)
     }
 
-    /// Whether the host is quiet for the lease the last reply named: the server asks
-    /// this on each heartbeat of `Preparing` until the answer is not [`Quiet::Busy`]. A
-    /// ready answer is kept: the lease may then start runs, and asking again costs
-    /// nothing.
-    pub fn prepare(&mut self, events: &mut Vec<Event>) -> Quiet {
-        let Some(lease) = self.exclusive().map(str::to_owned) else {
+    /// Whether the host is quiet for `lease`, which must be the lease the last reply
+    /// named: the session asks this on each heartbeat of `Preparing` until the answer is
+    /// not [`Quiet::Busy`]. A question about any other lease, or while no lease is held, is
+    /// [`Quiet::Busy`] (a lagging question about a lease that has ended must not be
+    /// answered for the one that replaced it). A ready answer is kept: the lease may then
+    /// start runs, and asking again costs nothing.
+    pub fn prepare(&mut self, lease: &str, events: &mut Vec<Event>) -> Quiet {
+        if self.exclusive() != Some(lease) {
             return Quiet::Busy;
-        };
+        }
+        let lease = lease.to_owned();
         if self.exclusive.as_ref().is_some_and(|hold| hold.ready) {
             return Quiet::Ready;
         }

@@ -11,6 +11,7 @@ mod e2e;
 mod ends;
 mod exclusive;
 pub mod fake;
+mod quiesce;
 mod session;
 mod system;
 mod worker;
@@ -86,6 +87,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         machine: Arc::new(machine.clone()),
         step_every,
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
+        readiness: None,
     }
 }
 

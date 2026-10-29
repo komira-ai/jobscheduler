@@ -32,12 +32,17 @@
 //! Taken-over runs of any other lease prove nothing and the host is prepared as usual,
 //! as is a restart with no taken-over run (it prepares again on a quiet host).
 //!
+//! Which lease a question is about is part of the question: a host that answers later than
+//! it is asked (the job worker's) never lets an answer for one lease pass for another.
+//!
 //! A phase other than `serving` that the agent is in for its own reasons (a drain) is not
 //! overridden. Without a [`Quiesce`] the session ignores `exclusive`.
 //!
 //! The VM check of the design (5.1) is not here: no VM backend exists. The readiness hook
-//! (5.5) is a [`Quiesce`] wrapper (`readiness::Hooked`): it answers [`Quiet::Refused`]
-//! when the hook refuses, and the session refuses the lease with that reason.
+//! (5.5) answers [`Quiet::Refused`] when the hook refuses, and the session refuses the
+//! lease with that reason. The real agent runs the hook on its job worker (see
+//! `worker::WorkerHost`); `readiness::Hooked` is the same rule as a [`Quiesce`] wrapper
+//! for a host driven in-thread.
 
 use std::mem;
 use std::time::Duration;
@@ -60,13 +65,17 @@ const UNSAFE_DETAIL: &str = "the host is not safe to hand over";
 /// The host the session asks. The lifecycle answers (see
 /// [`Lifecycle::prepare`](crate::lifecycle::Lifecycle::prepare)); a test answers from a script.
 /// Every call may block as long as the lifecycle's checks do, so a session that runs jobs
-/// asks through its worker, never from the heartbeat loop itself.
+/// asks through its worker ([`WorkerHost`](crate::worker::WorkerHost), which never blocks),
+/// never from the heartbeat loop itself.
+///
+/// Each call names the lease it is about, so a host that answers later than it is asked
+/// (the worker's) can tell a stale answer from the one wanted.
 pub trait Quiesce {
-    /// Whether the host is quiet for the lease the last reply named.
-    fn prepare(&mut self) -> Quiet;
+    /// Whether the host is quiet for `lease`, the one the last reply named.
+    fn prepare(&mut self, lease: &str) -> Quiet;
 
-    /// Whether the host has been cleaned up after the lease that ended.
-    fn restore(&mut self) -> Restored;
+    /// Whether the host has been cleaned up after `lease`, the one that ended.
+    fn restore(&mut self, lease: &str) -> Restored;
 }
 
 /// Where the agent is in a lease.
@@ -82,6 +91,8 @@ enum Stage {
     },
     Refused(ExclusiveRefusal),
     Restoring {
+        /// The lease that ended.
+        lease: String,
         announced: bool,
     },
 }
@@ -125,8 +136,8 @@ impl<'a> Hold<'a> {
     /// Follows the `exclusive` of an accepted reply.
     pub(crate) fn follow(&mut self, lease: Option<&str>) -> Option<Note> {
         let held = match &self.stage {
-            Stage::Preparing { lease, .. } | Stage::Ready { lease } => Some(lease.as_str()),
-            Stage::Refused(refused) => Some(refused.lease_id.as_str()),
+            Stage::Preparing { lease, .. } | Stage::Ready { lease } => Some(lease.clone()),
+            Stage::Refused(refused) => Some(refused.lease_id.clone()),
             Stage::Idle | Stage::Restoring { .. } => None,
         };
         match (held, lease) {
@@ -142,8 +153,11 @@ impl<'a> Hold<'a> {
                     lease: new.to_owned(),
                 })
             }
-            (Some(_), None) => {
-                self.stage = Stage::Restoring { announced: false };
+            (Some(ended), None) => {
+                self.stage = Stage::Restoring {
+                    lease: ended,
+                    announced: false,
+                };
                 Some(Note::Restoring)
             }
             (None, None) => None,
@@ -190,13 +204,25 @@ impl<'a> Hold<'a> {
             } => self.preparing(lease, deadline_ms),
             Stage::Ready { lease } => self.ready(lease),
             Stage::Refused(refused) => self.refused(refused),
-            Stage::Restoring { announced: false } => {
-                self.stage = Stage::Restoring { announced: true };
+            Stage::Restoring {
+                lease,
+                announced: false,
+            } => {
+                self.stage = Stage::Restoring {
+                    lease,
+                    announced: true,
+                };
                 phase(Phase::Restoring)
             }
-            Stage::Restoring { announced: true } => match self.host.restore() {
+            Stage::Restoring {
+                lease,
+                announced: true,
+            } => match self.host.restore(&lease) {
                 Restored::Busy => {
-                    self.stage = Stage::Restoring { announced: true };
+                    self.stage = Stage::Restoring {
+                        lease,
+                        announced: true,
+                    };
                     phase(Phase::Restoring)
                 }
                 Restored::Done => Fields::default(),
@@ -205,7 +231,7 @@ impl<'a> Hold<'a> {
     }
 
     fn preparing(&mut self, lease: String, deadline_ms: u64) -> Fields {
-        match self.host.prepare() {
+        match self.host.prepare(&lease) {
             Quiet::Ready => self.ready(lease),
             Quiet::Unsafe { detail } => self.refuse(&lease, RefusalReason::HostUnsafe, &detail),
             Quiet::Refused { code, detail } => self.refuse(&lease, code, &detail),

@@ -9,6 +9,7 @@ use js_agent_wire::Hello;
 
 use crate::facts::Platform;
 use crate::lifecycle::{Capacity, Config, Local};
+use crate::readiness::WorkerHook;
 use crate::session::Drain;
 use crate::system::Machine;
 use crate::worker::{Handle, Plan, STEP_EVERY, Worker};
@@ -25,6 +26,9 @@ pub struct Seams<'a> {
     pub hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue in place of [`crate::RESCUE_BOUND`]; `None` outside a test.
     pub rescue_bound: Option<Duration>,
+    /// The readiness hook the worker runs for a whole-node lease; `None` without
+    /// `--readiness-hook`.
+    pub readiness: Option<WorkerHook>,
 }
 
 /// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
@@ -74,6 +78,7 @@ pub fn start(
         machine: seams.machine.clone(),
         step_every: STEP_EVERY,
         rescue_bound: seams.rescue_bound,
+        readiness: seams.readiness,
     })
     .map_err(|why| format!("--container-bin: {why}"))?;
     worker.take_lines().iter().for_each(|line| {

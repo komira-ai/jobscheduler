@@ -219,17 +219,59 @@ impl<'a> Hooked<'a> {
 }
 
 impl Quiesce for Hooked<'_> {
-    fn prepare(&mut self) -> Quiet {
-        match self.host.prepare() {
-            Quiet::Ready => match self.hook.run(self.runner) {
-                Verdict::Ready => Quiet::Ready,
-                Verdict::Refused { code, detail } => Quiet::Refused { code, detail },
-            },
+    fn prepare(&mut self, lease: &str) -> Quiet {
+        match self.host.prepare(lease) {
+            Quiet::Ready => vetted(self.hook.run(self.runner)),
             other => other,
         }
     }
 
-    fn restore(&mut self) -> Restored {
-        self.host.restore()
+    fn restore(&mut self, lease: &str) -> Restored {
+        self.host.restore(lease)
+    }
+}
+
+/// What the session is told of the hook's verdict.
+fn vetted(verdict: Verdict) -> Quiet {
+    match verdict {
+        Verdict::Ready => Quiet::Ready,
+        Verdict::Refused { code, detail } => Quiet::Refused { code, detail },
+    }
+}
+
+/// The hook as the job worker owns it: the checked command, the runner that starts it and
+/// the longest a run of it can take, which the worker's watchdog is told of so a hook that
+/// takes its full time is not taken for a stuck worker. The worker runs it, on its own
+/// thread, once for each lease its lifecycle found quiet.
+pub struct WorkerHook {
+    hook: ReadinessHook,
+    runner: Box<dyn HookRunner + Send>,
+    bound: Duration,
+}
+
+impl WorkerHook {
+    /// `hook` started by `runner`, which takes at most `bound` ([`hook_runner`] takes twice
+    /// its `prepare_timeout`).
+    pub fn new(hook: ReadinessHook, runner: Box<dyn HookRunner + Send>, bound: Duration) -> Self {
+        Self {
+            hook,
+            runner,
+            bound,
+        }
+    }
+
+    /// The longest a [`WorkerHook::vet`] can take.
+    pub fn bound(&self) -> Duration {
+        self.bound
+    }
+
+    /// `found`, the lifecycle's answer: when it is [`Quiet::Ready`] the hook runs and its
+    /// verdict is the answer; any other answer is returned as it is and the hook does not
+    /// run. Blocks as long as the hook runs.
+    pub fn vet(&self, found: Quiet) -> Quiet {
+        match found {
+            Quiet::Ready => vetted(self.hook.run(self.runner.as_ref())),
+            other => other,
+        }
     }
 }

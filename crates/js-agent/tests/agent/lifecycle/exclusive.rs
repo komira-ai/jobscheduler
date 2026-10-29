@@ -50,7 +50,7 @@ fn ack_under(h: &mut Harness, run_id: &str) {
 
 fn prepare(h: &mut Harness) -> (Quiet, Vec<Event>) {
     let mut events = Vec::new();
-    (h.life.prepare(&mut events), events)
+    (h.life.prepare(LEASE, &mut events), events)
 }
 
 fn restore(h: &mut Harness) -> (Restored, Vec<Event>) {
@@ -474,4 +474,24 @@ fn the_restart_rule_applies_to_the_first_named_lease_only() {
     h.life.apply(&reply(Vec::new()));
     h.life.apply(&granting(LEASE, Vec::new()));
     assert_eq!(prepare(&mut h).0, Quiet::Busy);
+}
+
+/// Asserts that the quiet check answers only for the lease the host is held for: asked
+/// about another lease (a lagging question about one that ended, or about one not yet
+/// granted) it is busy and runs no check, and the host is not marked ready by it; asked
+/// about the held lease it still finds the host quiet. It catches a host that answers for
+/// whichever lease is asked, which would report the new lease ready on the old one's
+/// verdict.
+#[test]
+fn the_quiet_check_answers_only_for_the_held_lease() {
+    let mut h = Harness::new("ex-other-lease");
+    h.life.apply(&granting(LEASE, Vec::new()));
+    let (verdict, events) = {
+        let mut events = Vec::new();
+        (h.life.prepare("whole-2", &mut events), events)
+    };
+    assert_eq!(verdict, Quiet::Busy);
+    assert!(events.is_empty());
+    assert_eq!(checks_of(&h, LEASE), 0, "no check ran for another lease");
+    assert_eq!(prepare(&mut h).0, Quiet::Ready);
 }
