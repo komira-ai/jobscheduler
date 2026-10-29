@@ -120,6 +120,25 @@ fn a_key_is_made_by_name_alone_and_the_private_half_the_answer_carries_is_not_re
 }
 
 #[test]
+fn a_key_answer_of_the_wrong_shape_does_not_quote_the_secret_it_holds() {
+    // `data` is a string here, where an object belongs: the parser's own message would
+    // quote the string, and the string holds a private key.
+    let secret = "-----BEGIN PRIVATE KEY-----\nPLANTED-SECRET-5d2f\n-----END PRIVATE KEY-----\n";
+    let answer = json!({ "data": secret }).to_string();
+    let server = Server::plain();
+    server.on(MAKE_KEY, Reply::json(200, &answer));
+    let err = client(&server, "k")
+        .create_ssh_key("js-sched-one")
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Malformed(_)), "{err:?}");
+    for shown in [format!("{err}"), format!("{err:?}")] {
+        assert!(!shown.contains("PLANTED-SECRET"), "{shown}");
+        assert!(!shown.contains("PRIVATE KEY"), "{shown}");
+        assert!(shown.contains("unexpected answer shape"), "{shown}");
+    }
+}
+
+#[test]
 fn a_refused_call_is_the_error_of_the_api_for_each_of_the_four() {
     // A server with no route answers every request 500.
     let server = Server::plain();

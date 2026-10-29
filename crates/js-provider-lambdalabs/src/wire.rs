@@ -10,14 +10,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::error::{ApiError, ErrorCode, cut, plain};
+use crate::error::{ApiError, ErrorCode, plain};
 use crate::model::{
     Architecture, FirewallRuleset, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Region,
     SshKey, Tag,
 };
-
-/// The longest parser message quoted in an error.
-const QUOTED: usize = 160;
 
 /// The longest `request_id` kept.
 const REQUEST_ID: usize = 80;
@@ -107,8 +104,17 @@ struct ErrorBody {
     request_id: Option<String>,
 }
 
+/// Reads a body. The error is fixed text and a position, never the parser's message: a
+/// type error quotes the value it met, and the answer to a key made by the API holds a
+/// private key.
 fn decode<T: DeserializeOwned>(body: &[u8]) -> Result<Envelope<T>, ApiError> {
-    serde_json::from_slice(body).map_err(|err| ApiError::Malformed(cut(&err.to_string(), QUOTED)))
+    serde_json::from_slice(body).map_err(|err| {
+        ApiError::Malformed(format!(
+            "unexpected answer shape (line {}, column {})",
+            err.line(),
+            err.column()
+        ))
+    })
 }
 
 /// The instance types of a `GET /instance-types` body, ordered by name.
