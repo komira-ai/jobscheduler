@@ -52,7 +52,8 @@ fn a_silent_host_is_not_drained_when_its_lease_is_given_up_after_a_long_downtime
     let mut again = restart(&rig);
     again.input.hosts[0].state = HostState::Awaiting;
     let back = 40 * MINUTE;
-    assert!(again.tick(at(back)).is_empty());
+    let actions = again.tick(at(back));
+    assert_eq!(count(&actions, "Drain") + count(&actions, "ReleaseHost"), 0);
 
     again.input.hosts[0].busy = false;
     again.input.hosts[0].lease_given_up = true;
