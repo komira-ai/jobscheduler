@@ -19,7 +19,6 @@ mod class;
 mod ids;
 mod job;
 mod labels;
-pub mod profile_key;
 mod request;
 mod resources;
 pub mod sched;

@@ -23,7 +23,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
-use js_types::profile_key::profile_key;
 use js_types::sched::WorkKey;
 use js_usage::{
     NodeBuffer, NodeSeries, ProfileCurves, ProfileError, ProfileKey, ProfileStore, Recorder,
@@ -88,11 +87,6 @@ struct Inner {
     profiles: ProfileStore,
 }
 
-/// The profile name of an action key (see [`profile_key`]), for admission's curves.
-pub(crate) fn key_map(key: &WorkKey) -> Option<ProfileKey> {
-    ProfileKey::parse(&profile_key(key)).ok()
-}
-
 /// Minutes in a day.
 const MINUTES_PER_DAY: u64 = 1440;
 
@@ -116,8 +110,7 @@ impl NodeUsage {
         today: u64,
         names: NameMap,
     ) -> Result<Self, ProfileError> {
-        let _ = names;
-        let curves = Arc::new(ProfileCurves::new(Box::new(key_map)));
+        let curves = Arc::new(ProfileCurves::new(Box::new(move |key| names(key))));
         let profiles = ProfileStore::open(store.clone(), curves.clone(), budget_bytes, today)?;
         Ok(Self {
             store,

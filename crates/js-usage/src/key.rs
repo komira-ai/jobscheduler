@@ -21,13 +21,15 @@ pub enum BadKey {
     Byte,
 }
 
-/// The name of an action key's profile: 1 to 128 bytes of `0-9`, `a-z`, `.`, `_`, `-`.
+/// The name of an action key's profile: 1 to 128 bytes of `0-9`, `a-z`, `.`, `_`, `-`,
+/// the first of them `0-9` or `a-z`.
 ///
 /// The grammar is strict so that a key is one URL segment and one state-store key
 /// component, and so that nothing a client sends can reach a store key or a log line
-/// unchecked. The mapping from a scheduler's `WorkKey` to this name belongs to the
-/// admission side ([`crate::ProfileCurves::new`] takes it); this crate stores and serves
-/// the string only.
+/// unchecked. The caller supplies the name (it is a key of the caller's own, not a hash of a
+/// scheduler's `WorkKey`, whose action digest changes with every input and would keep every
+/// profile cold). The mapping from a `WorkKey` to the name is the caller's too
+/// ([`crate::ProfileCurves::new`] takes it); this crate stores and serves the string only.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProfileKey(String);
 
@@ -39,6 +41,9 @@ impl ProfileKey {
     pub fn parse(text: &str) -> Result<Self, BadKey> {
         if text.is_empty() || text.len() > MAX_KEY_LEN {
             return Err(BadKey::Length);
+        }
+        if !matches!(text.as_bytes()[0], b'0'..=b'9' | b'a'..=b'z') {
+            return Err(BadKey::First);
         }
         let allowed = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'.' | b'_' | b'-');
         if !text.bytes().all(allowed) {

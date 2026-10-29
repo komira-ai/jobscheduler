@@ -247,7 +247,9 @@ impl Running {
     }
 
     /// The curves learned from runs that ended cleanly, for admission to read as its
-    /// `CurveSource` (they implement it, keyed by `js_types::profile_key::profile_key`).
+    /// `CurveSource`. A curve is kept under the profile name the caller supplied for the runs,
+    /// not under the work key, so admission finds it through the names the caller gave
+    /// (`Config::with_curve_names`); without them every work key is charged flat.
     /// `None` without agent registration, with `--usage-off`, or with a sink that learns
     /// none.
     pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
