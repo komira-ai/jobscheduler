@@ -23,6 +23,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
 use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
@@ -40,10 +41,16 @@ use crate::usage_js::{self, NameMap, StoreSetup, no_names};
 )]
 pub struct Cli {
     /// The configuration file: a `[server]` table and `[[pool]]` tables (see the crate
-    /// docs). With it, the file decides what it names and the flags below are not read;
-    /// until they are refused beside it, a flag given with `--config` has no effect.
+    /// docs). It replaces every flag below: with `--config`, any other flag is refused
+    /// naming the first one given and the key of the file that takes its place.
     #[arg(long)]
     pub config: Option<PathBuf>,
+    /// The flags the command line gave besides `--config`, in command-line order, with
+    /// their dashes. [`Cli::try_parse_from`] fills it; a flag left at its default is not
+    /// in it. `None` for a `Cli` made any other way (`Parser::parse`, `parse_from`), which
+    /// [`Config::from_cli`] refuses: it cannot tell which flags were given.
+    #[arg(skip)]
+    pub(crate) given: Option<Vec<String>>,
     /// The address to listen on. Anything but a loopback address needs --tls-cert and
     /// --tls-key: a bearer token never crosses a network in clear.
     #[arg(long, default_value = "127.0.0.1:7300")]
@@ -75,28 +82,27 @@ pub struct Cli {
     #[arg(long)]
     pub agent_pool_config: Option<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
-    /// `--agent-hello-interval`.
+    /// `--agent-hello-interval`. Needs `--agent-pool-config`.
     #[arg(
         long,
         default_value = "60",
-        value_parser = clap::value_parser!(u32).range(1..),
-        requires = "agent_pool_config"
+        value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub agent_hello_burst: u32,
-    /// How often a join token that spent its burst is allowed one more hello.
+    /// How often a join token that spent its burst is allowed one more hello. Needs
+    /// `--agent-pool-config`.
     #[arg(
         long,
         default_value = "1s",
-        value_parser = parse_duration,
-        requires = "agent_pool_config"
+        value_parser = parse_duration
     )]
     pub agent_hello_interval: Duration,
     /// Refuses the first hello of a one-time join token that does not say the agent keeps
     /// a host credential, so every launched host's token is dead after its first hello.
     /// Turn it on once every agent is new: an agent that predates the host credential
     /// cannot say so and is refused with `join-token-credential-required`. Off by default;
-    /// pool join tokens are not affected.
-    #[arg(long, requires = "agent_pool_config")]
+    /// pool join tokens are not affected. Needs `--agent-pool-config`.
+    #[arg(long)]
     pub require_host_credential: bool,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
@@ -437,13 +443,18 @@ impl Config {
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
     /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        let given = flags::recorded(&cli)?;
         if let Some(path) = &cli.config {
+            if let Some(flag) = given.first() {
+                return Err(flags::beside_config(flag));
+            }
             let clock = SharedClock::new(SystemClock);
             let mut config =
                 Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
             config.usage = usage_setup(&cli, &config.state_file);
             return Ok(config);
         }
+        flags::need_agent_pool(&cli)?;
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
             .map_err(|err| StartupError::new("--default-ttl", err))?;
         let tls = tls_files(&cli)?;
@@ -509,15 +520,11 @@ impl Config {
                 registering,
             } => {
                 let Registering { plan, pool, tokens } = *registering;
-                let hello_limit = HelloLimit {
-                    burst: 60,
-                    interval: Duration::from_secs(1),
-                };
                 let agents = Box::new(AgentSetup {
                     tokens,
                     pool,
-                    hello_limit,
-                    require_host_credential: false,
+                    hello_limit: server.agents.hello_limit(),
+                    require_host_credential: server.agents.require_host_credential(),
                 });
                 (
                     Hosts::Layered {

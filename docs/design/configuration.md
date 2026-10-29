@@ -2,6 +2,26 @@
 
 Companion to [docs/design.md](../design.md), section 5.7. The rules that govern this file are in 5.7; section numbers refer to design.md.
 
+## The server's file today
+
+The server (`js-lease-server`) reads one file, `--config <path>`, in place of its flags: a `[server]` table and `[[pool]]` tables, each
+refusing a field it does not know, with the secrets as paths of owner-only files. The format and every refusal are in
+[pools-providers-network.md](pools-providers-network.md), section 4; the crate docs list the keys. The flags still work when `--config`
+is absent. With it, **any other flag is refused**, naming the first one on the command line and the key that takes its place, with exit
+status 2 and before the file is read: `--listen: not allowed with --config; set server.listen`.
+
+| flag | in the file |
+|---|---|
+| `--listen`, `--state-file`, `--boot`, `--default-ttl`, `--max-ttl`, `--tick`, `--tls-cert`, `--tls-key` | `server.<name>`, the flag's name with `_` for `-` |
+| `--max-connections`, `--handshake-timeout`, `--header-timeout`, `--read-timeout`, `--write-timeout`, `--max-requests`, `--drain-timeout` | `server.<name>`, same defaults |
+| `--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential` | `server.agent_hello_burst`, `server.agent_hello_interval`, `server.require_host_credential`, same defaults; refused unless a pool registers agents |
+| `--token-file` | `server.client_token_file` |
+| `--pool-config` | a `[[pool]]` with `provider = { kind = "static", hosts_file = ... }` |
+| `--agent-pool-config` | a `[[pool]]` with an elastic provider (the pool's shape, caps and timing are its keys) |
+| `--agent-token-file` | `join_token_file` of that pool |
+
+The rest of this page is the example of the scheduler's own configuration of section 5.7, which the server does not read yet.
+
 ```toml
 [[shape]]                                   # what one host offers; pools and providers refer to it by name
 name = "mac-studio-gpu"                     # GPUs exist only on the Mac Studio machines of the GPU pool (D32)
