@@ -3,6 +3,7 @@
 //! tick) are tested with a fake that records every call and the real thing is tested
 //! through a server.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
@@ -72,6 +73,14 @@ pub trait Effects: Send + Sync {
     /// Revokes every join token and credential of the host `host`; whether it did. A
     /// host with none is revoked.
     fn revoke(&self, host: &str) -> bool;
+
+    /// Writes the hosts the registry refused to remove, all of them, so that they survive
+    /// a restart.
+    ///
+    /// # Errors
+    ///
+    /// Why the file could not be written.
+    fn save_unremoved(&self, hosts: &BTreeSet<String>) -> Result<(), String>;
 
     /// Takes the host `host` out of the registry, for a machine that is confirmed gone: the
     /// host is marked ending first, since nothing is left to protect, and then removed.

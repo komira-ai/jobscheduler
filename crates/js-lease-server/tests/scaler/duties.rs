@@ -430,3 +430,176 @@ async fn a_host_that_has_not_announced_itself_again_is_judged_by_its_stored_shap
     assert!(!state.records.instances[0].condemned);
     assert!(state.records.cooldowns.is_empty());
 }
+
+/// Asserts when the hosts the registry refused to remove are written: before the removal
+/// call, with the host in the set (a write-ahead), and not again while the set does not
+/// change, so that a refusal needs no write of its own; and, when the registry takes the
+/// host later and the disk is full, the failure is counted, the file keeps the old set, and
+/// the next tick writes the empty set without a new count. It catches a set written only
+/// after the call (a crash between the refusal and the write loses the host), one written
+/// at every tick, and a failed write that is never tried again, which would leave a removed
+/// host to be retried after a restart or a refused host forgotten.
+#[tokio::test]
+async fn the_hosts_the_registry_refused_are_written_when_they_change_and_a_failure_is_retried() {
+    let rig = rig(
+        records(vec![registered("js-unremoved-file", "i-gone")]),
+        live(),
+    );
+    let mut lost = view("js-unremoved-file");
+    lost.state = HostState::Lost;
+    rig.world().hosts = vec![lost];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    rig.scaler.tick().await;
+    let log = rig.log();
+    let at = |entry: &str| log.iter().position(|each| each == entry).unwrap();
+    assert!(
+        at("save-unremoved") < at("remove:js-unremoved-file"),
+        "{log:?}"
+    );
+    let host = BTreeSet::from(["js-unremoved-file".to_owned()]);
+    assert_eq!(rig.world().unremoved_writes, std::slice::from_ref(&host));
+    assert_eq!(rig.world().saved_unremoved, Some(host.clone()));
+
+    rig.scaler.tick().await;
+    let writes = |rig: &crate::fakes::Rig| {
+        let log = rig.log();
+        log.iter().filter(|each| *each == "save-unremoved").count()
+    };
+    assert_eq!(writes(&rig), 1, "{:?}", rig.log());
+
+    rig.world().remove_ok = true;
+    rig.world().save_unremoved_ok = false;
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, Some(host));
+    rig.world().save_unremoved_ok = true;
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, Some(BTreeSet::new()));
+    assert!(rig.world().hosts.is_empty());
+}
+
+/// Asserts that a refusal survives a crash right after it: the first scaler's file is
+/// written before the registry is asked and holds the host after the refusal, with no
+/// later write; a second scaler built from that file alone (the first is dropped, and
+/// the second starts on no record of the machine) asks the registry to remove the host at
+/// its first tick. It catches a write that follows the refusal and may not happen.
+#[tokio::test]
+async fn a_refusal_is_in_the_file_without_any_later_write() {
+    let rig = rig(
+        records(vec![registered("js-unremoved-crash", "i-gone")]),
+        live(),
+    );
+    let mut lost = view("js-unremoved-crash");
+    lost.state = HostState::Lost;
+    rig.world().hosts = vec![lost];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    rig.scaler.tick().await;
+    let file = rig.world().saved_unremoved.clone().unwrap();
+    assert_eq!(file, BTreeSet::from(["js-unremoved-crash".to_owned()]));
+    assert_eq!(rig.world().unremoved_writes.len(), 1);
+    drop(rig);
+
+    let restarted = crate::fakes::rig(records(Vec::new()), live());
+    restarted.scaler.retry_removals(file);
+    restarted.scaler.tick().await;
+    assert!(
+        restarted
+            .log()
+            .contains(&"remove:js-unremoved-crash".to_owned()),
+        "{:?}",
+        restarted.log()
+    );
+}
+
+/// Asserts that a write-ahead that fails does not stop the removal: the host is removed
+/// and the failure counted once; the empty set, which the next tick writes, is the only
+/// thing left to write. It catches a removal skipped because the file could not be written.
+#[tokio::test]
+async fn a_failed_write_ahead_still_asks_for_the_removal() {
+    let rig = rig(
+        records(vec![registered("js-unremoved-ahead", "i-gone")]),
+        live(),
+    );
+    let mut lost = view("js-unremoved-ahead");
+    lost.state = HostState::Lost;
+    rig.world().hosts = vec![lost];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().save_unremoved_ok = false;
+    rig.scaler.tick().await;
+    assert!(rig.log().contains(&"remove:js-unremoved-ahead".to_owned()));
+    assert!(rig.world().hosts.is_empty());
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, None);
+
+    rig.world().save_unremoved_ok = true;
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, Some(BTreeSet::new()));
+}
+
+/// Asserts that a file that cannot be written is counted once per tick however many
+/// hosts are pending: two hosts the registry refuses, and a disk that is full, make one
+/// error in the tick that adds them and one in each tick after, and the write is not
+/// tried once per host. It catches a write per host, which counts and logs 1 + N errors
+/// a tick.
+#[tokio::test]
+async fn a_file_that_cannot_be_written_is_counted_once_per_tick() {
+    let names = ["js-unremoved-a", "js-unremoved-b"];
+    let rig = rig(
+        records(
+            names
+                .map(|name| registered(name, &format!("i-{name}")))
+                .to_vec(),
+        ),
+        live(),
+    );
+    let lost = names.map(|name| {
+        let mut host = view(name);
+        host.state = HostState::Lost;
+        host
+    });
+    rig.world().hosts = lost.to_vec();
+    rig.world().gone = names.map(|name| format!("i-{name}")).to_vec();
+    rig.world().remove_ok = false;
+    rig.world().save_unremoved_ok = false;
+    rig.scaler.tick().await;
+    for name in names {
+        assert!(
+            rig.log().contains(&format!("remove:{name}")),
+            "{:?}",
+            rig.log()
+        );
+    }
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().unremoved_writes.len(), 1);
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 2);
+    assert_eq!(rig.world().unremoved_writes.len(), 2);
+    for name in names {
+        let asked = rig
+            .log()
+            .iter()
+            .filter(|e| **e == format!("remove:{name}"))
+            .count();
+        assert_eq!(asked, 2, "{name}");
+    }
+}
+
+/// Asserts that calling `retry_removals` again adds to the hosts it was given before:
+/// both sets are asked of the registry, and the file then lists none. It catches a second
+/// call that replaces the first.
+#[tokio::test]
+async fn retry_removals_adds_to_the_hosts_it_has() {
+    let rig = rig(records(Vec::new()), live());
+    rig.scaler
+        .retry_removals(BTreeSet::from(["js-retry-a".to_owned()]));
+    rig.scaler
+        .retry_removals(BTreeSet::from(["js-retry-b".to_owned()]));
+    rig.scaler.tick().await;
+    let log = rig.log();
+    assert!(log.contains(&"remove:js-retry-a".to_owned()), "{log:?}");
+    assert!(log.contains(&"remove:js-retry-b".to_owned()), "{log:?}");
+}
