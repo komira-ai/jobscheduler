@@ -167,3 +167,29 @@ fn breaches_become_refusals() {
         Some(ExecMode::SandboxExec)
     );
 }
+
+/// Whether `host` reads as heard since its hello.
+fn heard(fx: &Fixture, host_name: &str) -> bool {
+    let hosts = fx.registry.hosts();
+    hosts
+        .iter()
+        .find(|h| h.id == host(host_name))
+        .unwrap()
+        .heard_since_hello
+}
+
+/// Asserts the listing's `heard_since_hello`: false for a host that only said hello, true
+/// once it heartbeats, and false again after a re-hello until its next heartbeat. It
+/// catches a count that survives a new session, and one that never starts.
+#[test]
+fn a_host_is_heard_since_hello_only_after_a_heartbeat() {
+    let fx = fixture(2);
+    let epoch = fx.join("a", "t");
+    assert!(!heard(&fx, "a"));
+    fx.beat("a", epoch);
+    assert!(heard(&fx, "a"));
+    let epoch = fx.join("a", "t");
+    assert!(!heard(&fx, "a"));
+    fx.beat("a", epoch);
+    assert!(heard(&fx, "a"));
+}
