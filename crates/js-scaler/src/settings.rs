@@ -104,7 +104,7 @@ impl Settings {
     /// the count has run since the launch, the machine is still given up on at
     /// `boot_timeout`.
     pub(crate) fn boot_hold(&self) -> Duration {
-        (self.boot_timeout / 3).min(self.unknown_hold)
+        (self.boot_timeout / 3).min(self.unknown_hold).min(Duration::ZERO)
     }
 }
 
