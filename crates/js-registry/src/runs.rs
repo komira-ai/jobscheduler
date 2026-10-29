@@ -391,7 +391,7 @@ impl Runs {
             host: host.clone(),
             lease: *lease,
             spec,
-            work_key,
+            work_key: None,
             life: Life::Queued,
             stop: Stop::No,
             result: None,
