@@ -16,7 +16,6 @@
 //!
 //! The registry's lock is not held when these methods run.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use js_agent_wire::{Ack, Heartbeat, NodeLoad, Outcome, ResultAck};
@@ -90,11 +89,7 @@ impl Usage {
         acks: &[ResultAck],
         holds: &dyn Fn(&LeaseId, &HostId) -> bool,
     ) {
-        let ran = catch_unwind(AssertUnwindSafe(|| self.beat(beat, load, acks, holds)));
-        if ran.is_err() {
-            self.hub.note_fault();
-            error!(host = %beat.host_id, "the usage side panicked on a heartbeat; the beat is served");
-        }
+        self.beat(beat, load, acks, holds);
     }
 
     fn beat(
