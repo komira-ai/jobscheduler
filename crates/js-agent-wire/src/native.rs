@@ -28,6 +28,7 @@ pub enum NetworkLevel {
     /// The loopback interface only.
     Loopback,
     /// The network.
+    #[serde(other)]
     On,
 }
 
