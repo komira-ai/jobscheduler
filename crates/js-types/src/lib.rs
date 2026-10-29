@@ -16,6 +16,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod class;
+pub mod env;
 mod ids;
 mod job;
 mod labels;

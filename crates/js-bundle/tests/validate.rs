@@ -5,8 +5,8 @@ mod common;
 
 use common::{TWO_TREE, edited, golden, hex, minimal, set};
 use js_bundle::{
-    BundleConfig, ConfigError, Defect, EnvNameError, MAX_CONFIG_BYTES, MAX_ENV_RULES, MAX_LAYERS,
-    MAX_VALUES_PER_RULE,
+    BundleConfig, ConfigError, Defect, EnvNameError, MAX_CONFIG_BYTES, MAX_ENTRIES, MAX_ENV_RULES,
+    MAX_JSON_ERROR_BYTES, MAX_LAYERS, MAX_TOTAL_BYTES, MAX_VALUES_PER_RULE,
 };
 use serde_json::{Value, json};
 
@@ -625,4 +625,107 @@ fn validate_checks_a_config_built_in_memory() {
 fn errors_name_the_field() {
     let err = edited(|v| set(v, "/layers/0/entries", json!(0))).unwrap_err();
     assert_eq!(err.to_string(), "layers[0].entries: must be at least 1");
+}
+
+/// An entrypoint name that appears twice is refused rather than last-wins: the digest is
+/// over the raw bytes, so a reader that takes the first would see another program.
+#[test]
+fn repeated_entrypoint_name_is_refused() {
+    let text = TWO_TREE.replacen(
+        "\"zig\":{\"path\":\"${tree:zig}/zig\"}",
+        "\"zig\":{\"path\":\"${tree:zig}/zig\"},\"zig\":{\"path\":\"${tree:job}/bin/other\"}",
+        1,
+    );
+    assert_ne!(text, TWO_TREE);
+    let message = json_error(BundleConfig::parse(text.as_bytes()));
+    assert!(message.contains("duplicate entrypoint"), "{message}");
+    assert!(message.contains("zig"), "{message}");
+}
+
+/// Layer sizes and entry counts have ceilings: one layer, and all layers together, may
+/// not declare more than 16 GiB, and a layer has at most 2^24 entries. The ceilings
+/// themselves are accepted.
+#[test]
+fn layer_sizes_and_entry_counts_are_capped() {
+    let layer = |field: &'static str, value: u64| {
+        invalid(edited(|v| {
+            set(v, &format!("/layers/0/{field}"), json!(value))
+        }))
+    };
+    assert_eq!(
+        layer("uncompressed_bytes", MAX_TOTAL_BYTES + 1),
+        (
+            "layers[0].uncompressed_bytes".to_string(),
+            Defect::OverLimit {
+                max: MAX_TOTAL_BYTES
+            }
+        )
+    );
+    assert_eq!(
+        layer("uncompressed_bytes", u64::MAX),
+        (
+            "layers[0].uncompressed_bytes".to_string(),
+            Defect::OverLimit {
+                max: MAX_TOTAL_BYTES
+            }
+        )
+    );
+    assert_eq!(
+        layer("entries", MAX_ENTRIES + 1),
+        (
+            "layers[0].entries".to_string(),
+            Defect::OverLimit { max: MAX_ENTRIES }
+        )
+    );
+    let sized = |first: u64, second: u64, entries: u64| {
+        edited(|v| {
+            set(v, "/layers/0/uncompressed_bytes", json!(first));
+            set(v, "/layers/1/uncompressed_bytes", json!(second));
+            set(v, "/layers/0/entries", json!(entries));
+        })
+    };
+    assert!(sized(MAX_TOTAL_BYTES - 1, 1, MAX_ENTRIES).is_ok());
+    assert!(sized(MAX_TOTAL_BYTES, 0, 1).is_err());
+    assert_eq!(
+        invalid(sized(MAX_TOTAL_BYTES - 1, 2, 1)),
+        (
+            "layers".to_string(),
+            Defect::OverLimit {
+                max: MAX_TOTAL_BYTES
+            }
+        )
+    );
+    assert_eq!(
+        invalid(sized(MAX_TOTAL_BYTES, MAX_TOTAL_BYTES, 1)),
+        (
+            "layers".to_string(),
+            Defect::OverLimit {
+                max: MAX_TOTAL_BYTES
+            }
+        )
+    );
+}
+
+/// What the parser echoes of the document is escaped and bounded: a key with a newline
+/// and an escape character gives one line without control characters, and a 900 kB key
+/// gives a message of at most `MAX_JSON_ERROR_BYTES`, also for multi-byte text.
+#[test]
+fn json_errors_escape_control_characters_and_stay_bounded() {
+    let message = json_error(edited(|v| set(v, "/x\ny\u{1b}[31m\u{202e}z", json!(1))));
+    assert!(message.contains("unknown field"), "{message}");
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert!(!message.contains('\u{202e}'), "{message:?}");
+    assert!(message.contains("x\\ny\\u{1b}"), "{message}");
+
+    for unit in ["k", "\u{e9}", "\u{1f600}"] {
+        let key = unit.repeat(900_000 / unit.len());
+        let message = json_error(edited(|v| set(v, &format!("/{key}"), json!(1))));
+        assert!(message.len() <= MAX_JSON_ERROR_BYTES, "{}", message.len());
+        assert!(message.starts_with("unknown field"), "{unit:?}");
+        assert!(message.ends_with("..."), "{unit:?}");
+    }
+
+    let short = json_error(BundleConfig::parse(b"{"));
+    assert!(short.len() < MAX_JSON_ERROR_BYTES);
+    assert!(!short.ends_with("..."));
 }

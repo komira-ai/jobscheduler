@@ -18,6 +18,11 @@ pub const MAX_ENV_RULES: usize = 64;
 pub const MAX_VALUES_PER_RULE: usize = 64;
 /// The longest placeholder string (an environment value, an argument), in bytes.
 pub const MAX_VALUE_BYTES: usize = 4096;
+/// The most bytes one layer may declare, and the most the layers declare together:
+/// 16 GiB, the same ceiling the registry client puts on a bundle.
+pub const MAX_TOTAL_BYTES: u64 = 16 << 30;
+/// The most entries one layer may declare.
+pub const MAX_ENTRIES: u64 = 1 << 24;
 /// The most entrypoints a config has.
 const MAX_ENTRYPOINTS: usize = 64;
 

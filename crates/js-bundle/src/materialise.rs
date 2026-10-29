@@ -19,6 +19,12 @@ use crate::template::{Template, check_components};
 /// `system_path` is true.
 pub const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
+/// The most bytes the materialised environment may hold: every name and value, with the
+/// `=` and the terminating NUL of each. 256 KiB keeps it far below the 1 MiB that macOS
+/// allows for arguments and environment together, so a program with arguments still
+/// starts; a larger environment is refused here, not by the kernel at exec.
+pub const MAX_ENV_BYTES: usize = 256 * 1024;
+
 /// The directory of a tree in the store: `<store_root>/v1/objects/trees/<hex>`. A
 /// function of the store root and the diff id, so one bundle has one absolute path on
 /// every host that uses the same root.

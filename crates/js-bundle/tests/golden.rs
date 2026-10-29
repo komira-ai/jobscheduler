@@ -3,9 +3,10 @@
 
 mod common;
 
-use common::{MINIMAL, TWO_TREE, TWO_TREE_REORDERED, golden, minimal};
+use common::{MINIMAL, TWO_TREE, TWO_TREE_REORDERED, edited, golden, minimal, set};
 use js_bundle::media::{self, LayerEncoding};
 use js_bundle::{BundleConfig, ReadGrantKind};
+use serde_json::json;
 
 /// The media types are on the wire; each value is pinned.
 #[test]
@@ -91,4 +92,43 @@ fn read_grant_kinds_are_spelled_as_the_format_says() {
         let back: ReadGrantKind = serde_json::from_str(&json).unwrap();
         assert_eq!(back, kind);
     }
+}
+
+/// Two spellings of the same set give the same bytes: `writable_trees` and
+/// `xcode.components` are sets and are written sorted.
+#[test]
+fn set_lists_are_written_sorted() {
+    let spelled = |trees: [&str; 2], components: [&str; 2]| {
+        edited(|v| {
+            set(v, "/writable_trees", json!(trees));
+            set(v, "/xcode/components", json!(components));
+        })
+        .unwrap()
+    };
+    let one = spelled(["job", "zig"], ["clang", "swift"]).to_canonical_json();
+    let two = spelled(["zig", "job"], ["swift", "clang"]).to_canonical_json();
+    assert_eq!(one, two);
+    let text = String::from_utf8(one).unwrap();
+    assert!(
+        text.contains("\"writable_trees\":[\"job\",\"zig\"]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"components\":[\"clang\",\"swift\"]"),
+        "{text}"
+    );
+}
+
+/// `seatbelt.reads` is an ordered list (the profile builder reads it in order), so its
+/// order is part of the bytes and of what materialise hands on.
+#[test]
+fn read_grant_order_is_significant() {
+    let spelled = |reads: [&str; 2]| edited(|v| set(v, "/seatbelt/reads", json!(reads))).unwrap();
+    let one = spelled(["timezone", "locale"]);
+    let two = spelled(["locale", "timezone"]);
+    assert_ne!(one.to_canonical_json(), two.to_canonical_json());
+    assert_eq!(
+        one.seatbelt.reads,
+        [ReadGrantKind::Timezone, ReadGrantKind::Locale]
+    );
 }

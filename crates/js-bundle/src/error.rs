@@ -19,6 +19,13 @@ pub enum TemplateError {
     /// The text holds a line break.
     #[error("value holds a newline")]
     Newline,
+    /// The text holds another control character: a tab, an escape, a bidirectional
+    /// control, a line or paragraph separator.
+    #[error("value holds the control character U+{code:04X}")]
+    Control {
+        /// The character's code point.
+        code: u32,
+    },
     /// A `${` with no closing brace.
     #[error("placeholder is not closed")]
     Unterminated,
@@ -52,7 +59,17 @@ pub enum EnvNameError {
     /// A name the agent owns or the loader or sandbox reads.
     #[error("the name is reserved")]
     Forbidden,
+    /// Longer than [`js_types::env::MAX_ENV_NAME_LEN`] bytes.
+    #[error("the name is longer than {max} bytes")]
+    TooLong {
+        /// The limit.
+        max: usize,
+    },
 }
+
+/// The longest message of [`ConfigError::Json`], in bytes: what the parser echoes of the
+/// document (a key, a value) is escaped and cut to this.
+pub const MAX_JSON_ERROR_BYTES: usize = 512;
 
 /// What is wrong with one field of a config.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -87,6 +104,12 @@ pub enum Defect {
     /// Appears twice.
     #[error("appears twice")]
     Duplicate,
+    /// Over a ceiling the format sets on a number.
+    #[error("over the limit of {max}")]
+    OverLimit {
+        /// The limit.
+        max: u64,
+    },
     /// Zero where at least one is required.
     #[error("must be at least 1")]
     Zero,
@@ -170,6 +193,14 @@ pub enum MaterialiseError {
         name: String,
         /// Why.
         why: EnvNameError,
+    },
+    /// The environment, as it would be handed to the program, is over the limit.
+    #[error("the environment is {len} bytes, over the limit of {max}")]
+    EnvTooLarge {
+        /// The size: every name and value, with the `=` and the terminator of each.
+        len: usize,
+        /// The limit, [`crate::MAX_ENV_BYTES`].
+        max: usize,
     },
     /// The job sets a name the bundle locked.
     #[error("job env {0:?} is locked by the bundle")]

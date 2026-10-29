@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use common::{edited, golden, minimal, set};
 use js_bundle::{
-    BundleConfig, ConfigError, DiffId, EnvNameError, ExpandError, Inputs, MaterialiseError,
-    ReadGrantKind, SYSTEM_PATH, TemplateError, TreeName, materialise, tree_path,
+    BundleConfig, ConfigError, DiffId, EnvNameError, ExpandError, Inputs, MAX_ENV_BYTES,
+    MaterialiseError, ReadGrantKind, SYSTEM_PATH, TemplateError, TreeName, materialise, tree_path,
 };
 use serde_json::{Value, json};
 
@@ -401,4 +401,90 @@ fn errors_read_as_text() {
         MaterialiseError::Locked(s("X")).to_string(),
         "job env \"X\" is locked by the bundle"
     );
+}
+
+/// A colon in a caller path is refused: the paths are joined into `PATH`-like values
+/// with `:`, so a `:` would add a directory. The store root, a writable clone and the
+/// developer directory are all caller paths.
+#[test]
+fn colon_in_a_caller_path_is_refused() {
+    let bad = PathBuf::from("/x:/evil");
+    let mut run = Run::new();
+    run.root = bad.clone();
+    assert_eq!(
+        run.go(&golden()),
+        Err(MaterialiseError::BadPath(bad.clone()))
+    );
+
+    let mut run = Run::new();
+    run.developer_dir = Some(bad.clone());
+    assert_eq!(
+        run.go(&golden()),
+        Err(MaterialiseError::BadPath(bad.clone()))
+    );
+
+    let mut run = Run::new();
+    run.writable
+        .insert(TreeName::parse("tool").unwrap(), bad.clone());
+    assert_eq!(run.go(&minimal()), Err(MaterialiseError::BadPath(bad)));
+}
+
+/// The job's names go through the shared reserved list: allocator, Objective-C runtime,
+/// launchd and agent names are refused, with the name in the error.
+#[test]
+fn job_env_names_use_the_shared_reserved_list() {
+    for name in ["MallocStackLogging", "OBJC_DEBUG", "__XPC_X", "JS_FOO"] {
+        let mut run = Run::new();
+        run.job_env = BTreeMap::from([(s(name), s("1"))]);
+        assert_eq!(
+            run.go(&golden()),
+            Err(MaterialiseError::JobEnvName {
+                name: s(name),
+                why: EnvNameError::Forbidden
+            }),
+            "{name}"
+        );
+    }
+}
+
+/// The environment handed to the program is bounded: exactly `MAX_ENV_BYTES` (names,
+/// values, and an `=` and a NUL for each) is accepted, one byte more is refused with
+/// the size, so the failure is here and not an `E2BIG` at exec.
+#[test]
+fn materialised_environment_is_bounded() {
+    let mut run = Run::new();
+    run.writable
+        .insert(TreeName::parse("tool").unwrap(), PathBuf::from("/run/c"));
+    let mut env: BTreeMap<String, String> = (0..63)
+        .map(|i| (format!("K{i:03}"), "v".repeat(4096)))
+        .collect();
+    let used: usize = env.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
+    let last = MAX_ENV_BYTES - used - 2 - 2;
+    assert!(last <= 4096);
+    env.insert(s("KZ"), "v".repeat(last));
+    run.job_env = env.clone();
+    assert_eq!(run.go(&minimal()).unwrap().env.len(), 64);
+
+    env.insert(s("KZ"), "v".repeat(last + 1));
+    run.job_env = env;
+    assert_eq!(
+        run.go(&minimal()),
+        Err(MaterialiseError::EnvTooLarge {
+            len: MAX_ENV_BYTES + 1,
+            max: MAX_ENV_BYTES
+        })
+    );
+}
+
+/// The agent's own base environment counts toward the same bound.
+#[test]
+fn base_environment_counts_toward_the_bound() {
+    let mut run = Run::new();
+    run.writable
+        .insert(TreeName::parse("tool").unwrap(), PathBuf::from("/run/c"));
+    run.base = vec![(s("BIG"), "b".repeat(MAX_ENV_BYTES))];
+    assert!(matches!(
+        run.go(&minimal()),
+        Err(MaterialiseError::EnvTooLarge { .. })
+    ));
 }

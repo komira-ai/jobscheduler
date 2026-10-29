@@ -129,3 +129,38 @@ fn expansion_substitutes_and_reports_missing_pieces() {
         Err(ExpandError::NoDeveloperDir)
     );
 }
+
+/// Every control character is refused, not only NUL and the line breaks: a tab, an
+/// escape, DEL, the C1 controls, the line and paragraph separators and the
+/// bidirectional controls (which make a path read as another). They would reach a log
+/// line or a terminal as written.
+#[test]
+fn control_characters_are_refused() {
+    let mut codes: Vec<u32> = (0x01..=0x1f).collect();
+    codes.extend(0x7f..=0x9f);
+    codes.extend([0x2028, 0x2029]);
+    codes.extend(0x202a..=0x202e);
+    codes.extend(0x2066..=0x2069);
+    for code in codes {
+        let c = char::from_u32(code).unwrap();
+        let want = match c {
+            '\n' | '\r' => TemplateError::Newline,
+            _ => TemplateError::Control { code },
+        };
+        for text in [format!("a{c}b"), format!("${{tree:a}}/x{c}"), c.to_string()] {
+            assert_eq!(Template::parse(&text), Err(want.clone()), "{text:?}");
+        }
+    }
+    assert_eq!(Template::parse("a\0b"), Err(TemplateError::Nul));
+    for ok in [
+        "caf\u{e9}",
+        "\u{200d}",
+        "\u{2027}",
+        "\u{202f}",
+        "\u{2065}",
+        "\u{206a}",
+        "\u{a0}",
+    ] {
+        assert!(Template::parse(ok).is_ok(), "{ok:?}");
+    }
+}
