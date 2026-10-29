@@ -513,7 +513,7 @@ pub fn free_gib(runner: &dyn CommandRunner, path: &Path) -> Result<u64, String> 
     let kib = (3..words.len())
         .find(|at| words[*at].ends_with('%'))
         .and_then(|at| words[at - 1].parse::<u64>().ok());
-    kib.map(|kib| kib / (1024 * 1024))
+    kib.map(|kib| kib.div_ceil(1024 * 1024))
         .ok_or_else(|| "df printed no free space for the volume".to_owned())
 }
 
