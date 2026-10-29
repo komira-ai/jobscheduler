@@ -284,9 +284,11 @@ pub trait Adapter: Send {
     /// request joins it. The scheduler charges it the prediction at its next placement round;
     /// `None` is the booked cost. `request` and `size_key` are as for [`Adapter::adopted`].
     ///
-    /// Runs under the core lock, after `adopted`, and must not read the store: the server
-    /// predicts outside the lock (as for [`Core::submit_with`](crate::Core::submit_with))
-    /// and answers here from what it has kept. The prediction is not stored with the
+    /// Runs under the core lock, after `adopted`: every other submit, report and tick waits
+    /// for it. It must not read the store and must not block: the server predicts outside
+    /// the lock (as for [`Core::submit_with`](crate::Core::submit_with)) and answers here
+    /// from what it has kept. The type does not enforce this: the adapter is a trait, free
+    /// to hold a store handle or a mutex, and one that does stalls the whole core. The prediction is not stored with the
     /// operation: the stored row is the same with or without one. An operation that holds a
     /// lease keeps the cost it was charged, and is not asked about.
     fn predicted(

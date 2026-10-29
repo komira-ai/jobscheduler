@@ -2,9 +2,9 @@
 //! first placement round, taken from the adapter for an operation the core takes up from the
 //! store, and never written to the store.
 
-use js_sched::Prediction;
 use js_sched::fence::START_GRACE;
-use js_server_core::{Admitted, Config, Core};
+use js_sched::{FINISHED_RETENTION, Prediction};
+use js_server_core::{Admitted, Config, Core, Held};
 use js_types::sched::LeaseId;
 use js_types::sched::usage::LeaseCost;
 
@@ -12,6 +12,7 @@ use crate::common::{
     GIB, Rig, at, beat, block_on, core, enrol, reported, request, started, submit, submit_request,
     up, up_after,
 };
+use crate::recover::finish;
 use crate::stored::Setup;
 
 /// A warm prediction: a quarter core and half a GiB, below what `request` asks for.
@@ -165,9 +166,10 @@ fn a_twin_with_no_prediction_keeps_the_held_one() {
     assert_eq!(charged(&core, last_started(&core)), as_charged(WARM));
 }
 
-/// Asserts that a request joining an operation that holds a lease leaves its cost: the lease
-/// keeps the charge it was granted with, and the operation, given up by its node and placed
-/// again, is charged what it was last given before the lease, not the joiner's prediction.
+/// Asserts that a request joining an operation that holds a lease does not change the cost
+/// the operation is next placed at: once its lease is given up and it is placed again, it is
+/// charged the prediction it had before the lease, not the joiner's. (The lease's own charge
+/// is recorded when it is granted, so it is not what this checks.)
 /// Catches: a prediction replacing the cost of an operation that has a lease.
 #[test]
 fn a_twin_of_a_leased_operation_does_not_change_its_cost() {
@@ -179,7 +181,6 @@ fn a_twin_of_a_leased_operation_does_not_change_its_cost() {
 
     let joined = submit_predicted(&core, 11, 1, Some(NEWER));
     assert!(joined.joined);
-    assert_eq!(charged(&core, first), as_charged(WARM));
 
     // The node never lists the lease: past the start grace it is given up, and the operation
     // goes to the other node.
@@ -286,4 +287,39 @@ fn the_stored_rows_are_the_same_with_and_without_a_prediction() {
     assert!(!without.is_empty());
     assert_eq!(rows_after(Some(WARM)), without);
     assert_eq!(rows_after(Some(COLD)), without);
+}
+
+/// Asserts that a request for an operation another frontend holds sets no cost here: this
+/// scheduler never places the operation, so it keeps no prediction for it. Catches: a
+/// prediction put in the scheduler for an operation it does not hold.
+#[test]
+fn a_submit_for_an_operation_held_elsewhere_sets_no_cost() {
+    let setup = Setup::new();
+    let (a, b) = (setup.core(1), setup.core(2));
+    up(&a, 0, "node-a", "d1");
+    let leased = submit_predicted(&a, 1, 1, None);
+
+    let joined = submit_predicted(&b, 2, 1, Some(WARM));
+
+    assert_eq!(joined.held, Held::Elsewhere(leased.operation));
+    assert!(!b.with(|view, _| view.sched().has_cost(joined.operation)));
+}
+
+/// Asserts that the prediction of a finished operation is kept while the scheduler still
+/// holds the operation and gone once it is retired. Catches: a prediction that outlives its
+/// operation.
+#[test]
+fn a_finished_operations_prediction_is_gone_after_retire() {
+    let core = core();
+    up(&core, 0, "node-a", "d1");
+    let admitted = submit_predicted(&core, 1, 1, Some(WARM));
+    let lease = last_started(&core);
+    assert!(core.with(|view, _| view.sched().has_cost(admitted.operation)));
+
+    finish(&core, 3, "node-a", admitted.operation, lease);
+    assert!(core.with(|view, _| view.sched().has_cost(admitted.operation)));
+
+    let retired = 3 + u64::try_from(FINISHED_RETENTION.as_millis()).expect("millis");
+    block_on(core.tick(at(retired)));
+    assert!(!core.with(|view, _| view.sched().has_cost(admitted.operation)));
 }
