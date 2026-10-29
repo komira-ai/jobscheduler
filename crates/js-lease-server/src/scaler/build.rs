@@ -8,7 +8,7 @@ use js_registry::OsSessions;
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
-use super::{Launcher, Live, RecordsFile, Scaler};
+use super::{Launcher, Live, RecordsFile, Scaler, UnremovedFile};
 use crate::adapt::SharedClock;
 use crate::agents::{Agents, state_path};
 use crate::checks::Health;
@@ -71,7 +71,8 @@ fn settings(plan: &ElasticPlan) -> Settings {
 }
 
 /// The scaler of `plan`, with the records of an earlier run read back, every machine they
-/// show as being released marked in the registry, and the registry's `Launchable` set to
+/// show as being released marked in the registry, the hosts the registry would not remove
+/// then queued to be removed on the first tick, and the registry's `Launchable` set to
 /// answer from it.
 ///
 /// # Errors
@@ -85,6 +86,8 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         (Launch::Live, false) => file.load_existing()?,
         _ => file.load()?,
     };
+    let unremoved_file = UnremovedFile::new(state_path(parts.state_file, ".scaler.unremoved"));
+    let unremoved = unremoved_file.load()?;
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
     let launcher = Launcher::new(
@@ -99,7 +102,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         (parts.agents, plan.id.clone(), plan.scheduler.clone()),
         Arc::clone(&plan.provider),
         launcher,
-        (file, parts.health),
+        (file, unremoved_file, parts.health),
     );
     let wiring = (
         plan.scheduler.clone(),
@@ -113,6 +116,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         settings(plan),
         records,
     );
+    scaler.retry_removals(unremoved);
     registry.set_launchable(Some(scaler.launchable()));
     Ok(scaler)
 }
