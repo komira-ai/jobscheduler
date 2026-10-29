@@ -65,6 +65,7 @@ struct RawHost {
 
 /// What a hosts file lists: the hosts, as the operator wrote them, and the share of their
 /// memory the file books.
+#[derive(Debug)]
 pub(crate) struct Parsed {
     /// The hosts in file order, with the memory as written.
     pub(crate) hosts: Vec<(HostId, Shape)>,
