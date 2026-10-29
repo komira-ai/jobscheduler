@@ -20,7 +20,8 @@
 //!   [--gpus "device=0,1" | --device nvidia.com/gpu=0 --device nvidia.com/gpu=1]
 //!   --mount type=bind,src=<scratch>,dst=/scratch
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
-//!   --cap-drop ALL --security-opt no-new-privileges --network none --read-only
+//!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
+//!   --network none --read-only
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m --ulimit core=0 --ipc private
 //!   [--pid private] --pull never --user 65534:65534
 //!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
@@ -241,12 +242,13 @@
 //! above).
 
 mod args;
+mod seccomp;
 mod settings;
 mod subid;
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use js_agent_wire::Isolation;
@@ -256,6 +258,7 @@ pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, hardening_args, label_args,
     limits_to_args,
 };
+pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
     DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
 };
@@ -508,6 +511,7 @@ pub struct CliRuntime {
     pid_seen: PidSeen,
     proc_read: ProcRead,
     proc_link: ProcLink,
+    profile_dir: Option<PathBuf>,
     warnings: Vec<String>,
     mapping: Option<Mapping>,
     // Held, never read: the claim of the range lasts as long as the runtime.
@@ -586,6 +590,7 @@ impl CliRuntime {
             pid_seen: pid_in_proc,
             proc_read: read_proc,
             proc_link: read_proc_link,
+            profile_dir: None,
             warnings: Vec::new(),
             mapping: None,
             _claim: None,
@@ -632,6 +637,16 @@ impl CliRuntime {
         Self {
             proc_read,
             proc_link,
+            ..self
+        }
+    }
+
+    /// The same runtime keeping the seccomp profile in `dir` instead of the scratch root
+    /// (the directory above each run's scratch directory): a test's seam.
+    #[must_use]
+    pub fn with_profile_dir(self, dir: &Path) -> Self {
+        Self {
+            profile_dir: Some(dir.to_path_buf()),
             ..self
         }
     }
@@ -720,13 +735,26 @@ impl CliRuntime {
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
         args.extend(label_args(&labels)?);
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
-        args.extend(hardening_args(&self.settings, self.engine));
+        let profile = self.profile_file(spec)?;
+        args.extend(hardening_args(&self.settings, self.engine, &profile));
         // Podman maps each container; Docker's daemon maps them all (see `open_in`).
         let maps = self.mapping.filter(|_| self.engine == Engine::Podman);
         args.extend(maps.into_iter().flat_map(Mapping::podman_args));
         args.extend(["--".to_owned(), spec.image.clone()]);
         args.extend(spec.args.iter().cloned());
         Ok(args)
+    }
+
+    /// The path of the pinned seccomp profile, written first: in the directory above the
+    /// run's scratch directory (the scratch root, private to the agent).
+    fn profile_file(&self, spec: &ContainerSpec) -> Result<String, CliError> {
+        let dir = self
+            .profile_dir
+            .as_deref()
+            .or_else(|| spec.scratch.parent());
+        let fail = |why: String| CliError::Scratch(format!("seccomp profile: {why}"));
+        dir.ok_or_else(|| fail("the scratch directory has no parent".to_owned()))
+            .and_then(|dir| install_profile(dir).map_err(|why| fail(why.to_string())))
     }
 
     fn launch(&self, spec: &ContainerSpec) -> Result<ContainerId, CliError> {

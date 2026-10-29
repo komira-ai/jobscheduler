@@ -312,6 +312,49 @@ fn a_state_root_inside_a_directory_a_job_can_write_is_refused() {
     assert_eq!(status, code(0), "a state root may hold a mount root: {err}");
 }
 
+/// Asserts that on a system other than Linux (this test is built only there, so the macOS
+/// job runs it) the agent, with the platform this binary was built for, refuses
+/// `--container-bin` when it starts: status 2, the flag named, the reason given, nothing
+/// sent. It catches a Mac build whose own platform is not what the refusal tests, so that
+/// it would run container jobs where the post-job checks, which read `/proc`, cannot work.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn this_platform_refuses_container_jobs() {
+    let dir = Scratch::new("life-flags-this-platform");
+    let state = dir.path("state");
+    let scratch = dir.path("scratch");
+    for path in [&state, &scratch] {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let (state, exec, user, scratch) = (
+        state.display().to_string(),
+        exec.display().to_string(),
+        container_user(),
+        scratch.display().to_string(),
+    );
+    let mut host = crate::support::mac_host();
+    host.platform = js_agent::Platform::current();
+    let args = [
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--state-root",
+        &state,
+        "--scratch-root",
+        &scratch,
+    ];
+    let (status, err, sent) = start_on(&host, &args);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--container-bin: container jobs are Linux-only"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+}
+
 /// Asserts that a Mac refuses `--container-bin` when it starts, with status 2 and nothing
 /// sent, saying why (the checks read `/proc`), and that the same flags start the agent on a
 /// Linux host. It catches a Mac agent that would run container jobs with no post-job check.

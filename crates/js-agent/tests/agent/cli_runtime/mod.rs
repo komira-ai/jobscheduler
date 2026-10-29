@@ -13,14 +13,18 @@ mod stub;
 mod subid;
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use js_agent::Platform;
-use js_agent::cli_runtime::{CliRuntime, Settings};
+use js_agent::cli_runtime::{CliRuntime, PROFILE_FILE, Settings};
 use js_agent::lifecycle::{ContainerSpec, ResolvedMount, label};
 use js_agent_wire::Isolation;
 
 use scripted::{DOCKER, Scripted};
+
+use crate::support::Scratch;
 
 /// The host id the runtimes of these tests register under.
 pub const HOST: &str = "h-0123456789abcdef";
@@ -67,8 +71,28 @@ pub fn open_with(world: &Scripted, os: &str, set: Settings) -> CliRuntime {
 fn open_as(world: &Scripted, os: &str, set: Settings, now: fn() -> u64) -> CliRuntime {
     CliRuntime::open(set, HOST, &platform(os), now, Box::new(world.clone()))
         .unwrap()
+        .with_profile_dir(profile_dir())
         .with_pid_seen(sees_the_engines_pid)
         .with_proc_files(no_file, in_another_pid_namespace)
+}
+
+/// The directory the scripted runtimes keep the seccomp profile in: their jobs name
+/// scratch directories that do not exist, so the directory above is no place for it.
+/// One for the whole test process; it is removed with the target directory.
+pub fn profile_dir() -> &'static Path {
+    static DIR: OnceLock<(Scratch, PathBuf)> = OnceLock::new();
+    let (_, dir) = DIR.get_or_init(|| {
+        let owner = Scratch::new("profile");
+        let dir = owner.path("profiles");
+        fs::create_dir(&dir).unwrap();
+        (owner, dir)
+    });
+    dir
+}
+
+/// The `--security-opt` value those runtimes give: `seccomp=` and the file.
+pub fn profile_option() -> String {
+    format!("seccomp={}", profile_dir().join(PROFILE_FILE).display())
 }
 
 /// The process id the scripted engine gives a running container.

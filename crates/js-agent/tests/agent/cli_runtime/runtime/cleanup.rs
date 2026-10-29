@@ -6,8 +6,8 @@ use js_agent::lifecycle::{ContainerRuntime, label};
 
 use super::super::scripted::Scripted;
 use super::super::{
-    HOST, docker, in_another_pid_namespace, made_at, no_file, open, platform, sees_the_engines_pid,
-    settings, spec,
+    HOST, docker, in_another_pid_namespace, made_at, no_file, open, platform, profile_dir,
+    sees_the_engines_pid, settings, spec,
 };
 use super::{start, strings};
 
@@ -86,6 +86,7 @@ pub(super) fn other_agent(world: &Scripted) -> CliRuntime {
     let runner = Box::new(world.clone());
     CliRuntime::open(settings(), OTHER, &platform("linux"), made_at, runner)
         .unwrap()
+        .with_profile_dir(profile_dir())
         .with_pid_seen(sees_the_engines_pid)
         .with_proc_files(no_file, in_another_pid_namespace)
 }

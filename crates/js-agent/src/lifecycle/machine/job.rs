@@ -148,6 +148,8 @@ fn label_number(found: &Found, key: &str) -> Option<u64> {
 pub(super) struct Stuck {
     pub(super) id: ContainerId,
     pub(super) booking: Booking,
+    /// The run its labels name, whose scratch directory the container may still use.
+    pub(super) run_id: Option<String>,
 }
 
 pub(super) struct Job {

@@ -18,8 +18,9 @@ js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
 js-types = { path = "../js-types" }
 clap.workspace = true
+getrandom.workspace = true
 hex.workspace = true
-rustix = { workspace = true, features = ["process", "rand"] }
+rustix = { workspace = true, features = ["process"] }
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
