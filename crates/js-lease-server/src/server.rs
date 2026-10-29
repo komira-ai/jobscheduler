@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use js_lease::{LeaseTable, read_bookings};
+use js_lease::{Boot, LeaseTable, read_bookings};
 use js_provider::Provider;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -106,6 +106,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
                 clock: clock.clone(),
                 state_file: &config.state_file,
                 advertise_url: config.advertise_url.as_deref(),
+                first_start: config.boot == Boot::Initialise,
                 health: pool.health.clone(),
                 mode: pool.mode(),
             };
@@ -152,7 +153,13 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     }
     let pool = elastic.map(|(pool, _)| pool);
     let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
-    let status = Status::new(pool, registry, config.warnings.clone(), clock.clone());
+    let status = Status::new(
+        pool,
+        registry,
+        scaler.clone(),
+        config.warnings.clone(),
+        clock.clone(),
+    );
     let status = config.status.then(|| Arc::new(status));
     let shared = Arc::new(Shared::new(table, config.token, agents).with_status(status));
     let split = agent_listener.is_some();

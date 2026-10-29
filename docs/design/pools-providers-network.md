@@ -653,6 +653,13 @@ describes (write-whole-file-and-rename, as `agent_state::replace` does for `join
 and the bindings file). A pool starts in `Checking`: nothing launches before the first full
 check pass succeeds (10.1).
 
+The file is never taken to be empty by default. A pool with `launch = "live"` whose file is
+missing does not start: a start with no records forgets the machines in flight and the day's
+spend, and could launch twice. The operator who says this is the first start does it with the
+flag that already says it for the lease file, `--boot initialise` (`boot = "initialise"`); every
+later start is `--boot resume`, which also refuses a missing records file. A pool in `plan`
+mode starts without the file.
+
 ```
 Planned -> Launching -> Booting -> Registered -> Draining -> Releasing -> Gone
               |  \-> Refused (dropped at the end of the step)    \-> Releasing (boot_timeout: no hello, host-contract)
@@ -879,7 +886,8 @@ Rules, each tied to a requirement or to existing behaviour:
 - `max_spend_per_hour` caps the rate. `max_spend_per_day` is in the first slice (6.2 Caps)
   and bounds spend over time even when a stuck or Lost machine is counted forever. A Lost
   host that the provider still lists keeps accruing in the day total until released; status
-  shows its age. `max_age` is Later.
+  shows its age. `max_age` is Later. The day cap gates new launches only: machines already
+  running when it is reached keep running (and accruing) until they are released.
 
 ### 6.5 What the single-pool slice costs
 
@@ -1129,7 +1137,9 @@ compromised GPU host to the agent port, so the design does not leave it unchecke
 
 After release, `forget(host)` looks up the device by hostname and deletes it. The device is
 ephemeral and drops when offline anyway; the delete frees the name. A failed delete is logged and
-shown and does not block the release.
+shown and does not block the release. It is sent once, after the machine is confirmed gone;
+the keys are single-use, ephemeral and tagged, so a device whose delete failed drops when it
+goes offline.
 
 ### 8.5 Live check
 

@@ -10,6 +10,7 @@ use std::time::Duration;
 use js_elastic::{GpuClass, HostName};
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, Launch, OwnerOnlyFiles,
+    channel_ticker, start_with_checks,
 };
 use js_provider::StartSpec;
 use js_provider_lambdalabs::{
@@ -152,6 +153,18 @@ pub async fn start(scratch: Scratch, text: &str) -> Harness {
     let harness = Harness::over(scratch, config.unwrap()).await;
     harness.checks.step().await;
     harness
+}
+
+/// Starts a server on `text` that must be refused at start, and says why. The tickers are
+/// not stepped.
+pub async fn start_refused(scratch: &Scratch, text: &str) -> String {
+    let path = scratch.write("js.toml", text, 0o644);
+    let clock = crate::config_support::clock();
+    let config = Config::from_config_file(&path, &cloud_kinds(), &OwnerOnlyFiles, clock.clone());
+    let (_ticks, ticker) = channel_ticker();
+    let (_checks, check_ticker) = channel_ticker();
+    let refused = start_with_checks(config.unwrap(), clock, ticker, check_ticker).await;
+    refused.err().unwrap().to_string()
 }
 
 /// The start of a whole-node request `id` for one a100, under the lease `lease`.
