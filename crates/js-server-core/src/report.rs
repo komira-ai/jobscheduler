@@ -179,8 +179,7 @@ impl Engine {
         }
         a.after_report(&self.view(), now, worker, &report, &answers, taken);
         // What the estimator learned from the report may lower a key floor.
-        let lowered = a.lowered();
-        self.lower_key_floors(a, lowered);
+        self.lower_asked_key_floors(a);
         (answers, taken)
     }
 

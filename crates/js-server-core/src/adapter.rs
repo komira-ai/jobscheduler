@@ -227,13 +227,22 @@ pub trait Adapter: Send {
     /// may learn from the attempt. For a kill for memory, the scheduler's key floor of the
     /// operation is already raised ([`View::sched`]). Whatever floors the estimator then
     /// wants lowered it names in [`Adapter::lowered`], which the core asks for right after.
-    /// No I/O: the hook runs under the lock. Does nothing by default.
+    /// No I/O: the hook runs under the lock. Not called when size keys are off. Does nothing
+    /// by default.
     fn learned_requeue(&mut self, _view: &View<'_>, _requeue: &Requeue) {}
 
     /// The key floors the adapter's estimator has decided to lower since the last call;
     /// asked after [`Adapter::learned_requeue`] and after [`Adapter::after_report`]. The core
     /// lowers each in the scheduler (unless a kill raised it above `before`) and writes the
-    /// row, again at a later tick if the store refuses it. Nothing by default.
+    /// row, again at a later tick if the store refuses it; the row is lowered only while it
+    /// holds no more than `before`, so a floor another frontend raised is kept. Not called,
+    /// nor is [`Adapter::learned_requeue`], when size keys are off
+    /// ([`Config::with_size_keys`](crate::Config::with_size_keys)). Nothing by default.
+    ///
+    /// The core does not clamp what it is told: the adapter must never ask below the peaks
+    /// it has seen for the key. A floor lowered beneath a peak makes the next operation of
+    /// the key run too small and be killed again; the estimator owns the floor under which
+    /// that loop cannot start.
     fn lowered(&mut self) -> Vec<Lowered> {
         Vec::new()
     }
