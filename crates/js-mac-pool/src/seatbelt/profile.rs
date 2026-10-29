@@ -154,14 +154,13 @@ fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
 fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
     match policy.net() {
         Net::On => {}
-        Net::Off => push_all(lines, &OFF_RULES),
         Net::Ports(ports) => {
             push_all(lines, &OFF_RULES);
             for port in ports.iter() {
                 lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
             }
         }
-        Net::Loopback => {
+        Net::Off | Net::Loopback => {
             push_all(lines, &OFF_RULES);
             lines.push("(allow network-inbound (local ip \"localhost:*\"))".to_owned());
             lines.push("(allow network* (remote ip \"localhost:*\"))".to_owned());
