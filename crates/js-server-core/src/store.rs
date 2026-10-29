@@ -250,7 +250,7 @@ impl Engine {
         // The longest each operation may run, from its row, before the first placement round:
         // the whole-node drain order and deadlines read it.
         for (operation, wall) in walled {
-            let _ = (operation, wall);
+            self.sched.set_max_wall(operation, wall);
         }
         for (operation, prediction) in costed {
             self.sched.set_cost(operation, prediction);
@@ -313,7 +313,7 @@ impl Engine {
         }
         // The longest it may run, which its `opwall/` row names (whatever the settings).
         if let Some(wall) = max_wall {
-            let _ = (operation, wall);
+            self.sched.set_max_wall(operation, wall);
         }
         if let Some(prediction) = prediction {
             self.sched.set_cost(operation, prediction);

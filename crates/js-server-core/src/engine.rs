@@ -526,7 +526,7 @@ impl Engine {
         // time of the operation it joined (taken from its row when the store's twin was taken
         // in).
         if let Some(wall) = max_wall.filter(|_| !admitted.joined && held == Held::Here) {
-            let _ = (admitted.operation, wall);
+            self.sched.set_max_wall(admitted.operation, wall);
         }
         // The cost likewise: a new operation is charged it from its first round. A twin keeps
         // its cost while it holds a lease; one that still waits takes the newer prediction.
