@@ -156,18 +156,18 @@ pub(crate) fn check(
     let day = ours
         .iter()
         .copied()
-        .filter(|record| now.since(record.launched_at) < DAY)
+        .filter(|record| now.since(record.launched_at) <= DAY)
         .fold(0u64, |sum, record| {
             sum.saturating_add(spent(record, settings, now))
         });
     [
         (held.len() < settings.max_instances, Blocked::MaxInstances),
         (
-            hourly.saturating_add(price) <= settings.max_spend_per_hour,
+            hourly.saturating_add(price) < settings.max_spend_per_hour,
             Blocked::MaxSpend,
         ),
         (
-            day.saturating_add(least_cost(settings, price)) <= settings.max_spend_per_day,
+            day.saturating_add(least_cost(settings, price)) < settings.max_spend_per_day,
             Blocked::MaxSpendDay,
         ),
     ]
