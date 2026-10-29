@@ -89,18 +89,12 @@ impl Health {
     /// Every reason a check of the last pass failed, in the order the checks run, each
     /// once.
     pub(crate) fn reasons(&self) -> Vec<String> {
-        let mut reasons: Vec<String> = Vec::new();
         let failed = |verdict: &Option<Verdict>| verdict.as_ref().and_then(|v| v.reason.clone());
         let all = [failed(&self.credentials)]
             .into_iter()
             .chain(self.notes.iter().cloned().map(Some))
             .chain([failed(&self.network)]);
-        for reason in all.flatten() {
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-        }
-        reasons
+        all.flatten().collect()
     }
 
     /// Takes in a pass made at `at`.

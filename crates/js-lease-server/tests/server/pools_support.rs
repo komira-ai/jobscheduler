@@ -310,6 +310,10 @@ pub struct Options {
     pub net: Net,
     /// Listen on every interface with TLS, as a VPC does.
     pub wildcard: bool,
+    /// `launch = "live"`.
+    pub live: bool,
+    /// The pool's `exec`.
+    pub exec: &'static str,
 }
 
 impl Default for Options {
@@ -319,6 +323,8 @@ impl Default for Options {
             digest: true,
             net: Net::Fake,
             wildcard: false,
+            live: false,
+            exec: "none",
         }
     }
 }
@@ -359,9 +365,13 @@ impl Rig {
             quoted(&key)
         );
         let pool = PoolText::elastic(&scratch)
-            .set("exec", &quote("none"))
+            .set("exec", &quote(options.exec))
             .set("provider", &provider)
             .set("join_token_file", &quoted(&joins));
+        let pool = match options.live {
+            true => pool.set("launch", &quote("live")),
+            false => pool,
+        };
         let pool = match options.net {
             Net::Tailscale { .. } => pool.set(
                 "network",

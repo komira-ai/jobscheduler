@@ -228,3 +228,42 @@ async fn the_page_shows_the_same_data() {
     assert!(page.body.contains("credentials: failed (global/forbidden)"));
     rig.assert_clean();
 }
+
+/// Asserts that the page says why there is no offer and why there is no plan, and that a
+/// pool that asks for the container contract and is set to launch says both. It catches a
+/// page that shows a blank where the JSON gives a reason.
+#[tokio::test]
+async fn the_page_shows_why_there_is_no_offer_or_no_plan() {
+    let none = Rig::start("status_page_none", vec![], Options::default()).await;
+    none.step().await;
+    let page = none.get("/status").await;
+    assert!(page.body.contains("floor: catalog"), "{}", page.body);
+
+    let blind = Options {
+        digest: false,
+        ..Options::default()
+    };
+    let rig = Rig::start("status_page_plan", vec![a10("gpu_1x_a10", 1, 129)], blind).await;
+    rig.step().await;
+    let page = rig.get("/status").await;
+    assert!(
+        page.body
+            .contains("the agent binary for x86_64 is not available"),
+        "{}",
+        page.body
+    );
+
+    let live = Options {
+        live: true,
+        exec: "container",
+        ..Options::default()
+    };
+    let rig = Rig::start("status_live", vec![a10("gpu_1x_a10", 1, 129)], live).await;
+    rig.step().await;
+    let pool = rig.pool().await;
+    assert_eq!(
+        (&pool["launch"], &pool["exec"]),
+        (&json!("live"), &json!("container"))
+    );
+    rig.assert_clean();
+}
