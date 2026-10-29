@@ -410,7 +410,10 @@ async fn a_host_that_has_not_announced_itself_again_is_judged_by_its_stored_shap
     waiting.state = HostState::Awaiting;
     waiting.claim = None;
     waiting.lease = Some(LeaseId::new(1, 5));
-    rig.world().hosts = vec![waiting];
+    let mut unknown = view("js-awaiting-unknown");
+    unknown.state = HostState::Awaiting;
+    unknown.claim = None;
+    rig.world().hosts = vec![waiting, unknown];
     rig.scaler.tick().await;
     let state = rig.scaler.state();
     assert_eq!(state.records.instances[0].phase, Phase::Registered);

@@ -21,7 +21,7 @@ use std::sync::PoisonError;
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{Phase, Record};
+use js_scaler::{Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
@@ -164,14 +164,7 @@ fn launch_view(record: &Record) -> LaunchView {
 
 /// What the scaler's records say of the pool `pool`: its machines, its orphans and its
 /// newest launch.
-fn held(
-    scaler: Option<&Scaler>,
-    pool: &str,
-) -> (Vec<MachineView>, Vec<OrphanView>, Option<LaunchView>) {
-    let Some(scaler) = scaler else {
-        return (Vec::new(), Vec::new(), None);
-    };
-    let records = scaler.state().records;
+fn held(records: &Records, pool: &str) -> (Vec<MachineView>, Vec<OrphanView>, Option<LaunchView>) {
     let ours: Vec<&Record> = records
         .instances
         .iter()
@@ -256,7 +249,8 @@ impl Status {
             State::Available => None,
             _ => Some("unavailable"),
         };
-        let (machines, orphans, last_launch) = held(self.scaler.as_ref(), &pool.name);
+        let records = self.scaler.as_ref().map(|scaler| scaler.state().records);
+        let (machines, orphans, last_launch) = held(&records.unwrap_or_default(), &pool.name);
         let spend = machines
             .iter()
             .map(|machine| machine.price_cents_per_hour)
