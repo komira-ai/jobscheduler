@@ -70,7 +70,7 @@ dependencies on other kbf crates (4.3). Where `SizingPolicy` (resource-vector wi
 20. Define `jobscheduler.agent.v1`. 20a: the proto and the server adapter, no daemon change. 20b: the agent suite and its broken
     providers (13.2) on the fake agent, in `js-conformance`. 20c: the kbf daemon passes the suite through the adapter. *Proves:* the suite is green on
     the daemon and the fake and red on each broken provider.
-21. 21a: split the daemon into `js-agent`, the trusted `kbf-executor` and the kbf extras (9.2) with no wire change; the executor is a
+21. 21a *(superseded by [kbf-on-js-agent.md](kbf-on-js-agent.md): no `kbf-executor`)*: split the daemon into `js-agent`, the trusted `kbf-executor` and the kbf extras (9.2) with no wire change; the executor is a
     module boundary here and becomes a separate process at step 34. 21b: switch the daemon to agent v1 using the negotiation of 10.3; it ships only after the release containing step 20 is the minimum server. *Proves:* the cross-version matrix including the downgrade after the
     switch; the same seeded scenario run through the real daemon on the fake runtime yields the same event trace as the v1 path; a
     soak of real daemons counts explicit events with zero unacknowledged results and asserts no elapsed time.

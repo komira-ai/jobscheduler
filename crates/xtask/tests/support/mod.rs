@@ -100,11 +100,10 @@ impl Repo {
         self.git(&["tag", "-a", name, "-m", name]);
     }
 
-    /// The arguments of a plan for the commit checked out, with main still there.
+    /// The arguments of a plan for the commit checked out.
     pub fn plan(&self) -> PlanArgs {
         let head = self.head();
         PlanArgs {
-            tip: head.clone(),
             head,
             repo_dir: self.dir.clone(),
             ship: vec!["app".to_owned()],

@@ -35,6 +35,8 @@ fn job(run: &str, valid: u64, wall: u64) -> JobSpec {
         labels: Default::default(),
         heartbeat_seq: 0,
         valid_for_ms: valid,
+        bundle: None,
+        native: None,
     }
 }
 

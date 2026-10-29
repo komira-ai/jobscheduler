@@ -122,6 +122,9 @@ pub enum Reason {
     /// The machine cannot get the firewall every launch needs; the provider's words for
     /// why (no secret in them). Nothing was launched.
     Firewall(String),
+    /// The service could not render what the machine boots with; the service's words for
+    /// why (no secret in them). Nothing was sent to the provider.
+    Boot(String),
     /// The machine cannot get an ssh key to be launched with; the provider's words for
     /// why (no secret in them). Nothing was launched.
     SshKey(String),

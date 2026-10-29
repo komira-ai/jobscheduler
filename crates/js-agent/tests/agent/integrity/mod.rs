@@ -4,25 +4,52 @@
 
 mod checks;
 mod lifecycle;
+mod mapped;
+mod noise;
 mod proc;
 mod rules;
 
 use std::path::PathBuf;
 
+use js_agent::cli_runtime::JobUsers;
 use js_agent::integrity::{FakeHost, Integrity, Mount, Process};
 use js_agent::lifecycle::{CheckFinding, CheckHook, ContainerId, Finished};
 
 /// The user the containers run as in these tests.
 pub const JOB_UID: u32 = 65534;
 
+/// The users of the containers in these tests: the one host uid, no mapping.
+pub const JOB_USERS: JobUsers = JobUsers::Uid(JOB_UID);
+
 /// The checks over `host`, with `watch` watched and the baseline taken now.
 pub fn started(host: &FakeHost, watch: Vec<PathBuf>) -> Integrity {
-    Integrity::start(Box::new(host.clone()), JOB_UID, watch).unwrap()
+    Integrity::start(Box::new(host.clone()), JOB_USERS, watch).unwrap()
 }
 
 /// The check after the run `run_id`, with no other container on the host.
 pub fn after(checks: &mut Integrity, run_id: &str) -> Result<(), CheckFinding> {
-    checks.run(&Finished { run_id, live: &[] })
+    checks.run(&Finished {
+        run_id,
+        live: &[],
+        slot: None,
+        live_slots: &[],
+    })
+}
+
+/// The check after the run `run_id` that held `slot`, with the jobs of `live_slots` still
+/// running (their containers are not named, so only their slots tell them from strays).
+pub fn after_slot(
+    checks: &mut Integrity,
+    run_id: &str,
+    slot: u32,
+    live_slots: &[u32],
+) -> Result<(), CheckFinding> {
+    checks.run(&Finished {
+        run_id,
+        live: &[],
+        slot: Some(slot),
+        live_slots,
+    })
 }
 
 /// The check after `run_id`, with the containers `live` still on the host.
@@ -34,6 +61,8 @@ pub fn beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> Result<(),
     checks.run(&Finished {
         run_id,
         live: &live,
+        slot: None,
+        live_slots: &[],
     })
 }
 

@@ -151,14 +151,71 @@ fn hardening_flags_always_present() {
         "--ipc",
         "private",
     ];
-    let tail = ["--pull", "never", "--user", "65534:65534"];
+    let tail = ["--pull", "never"];
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
     let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
+    let at = common.iter().position(|arg| *arg == "--ulimit").unwrap();
+    let (before, after) = common.split_at(at);
+    let tmpfs = [
+        "--tmpfs",
+        "/var/tmp:rw,noexec,nosuid,nodev,size=64m",
+        "--tmpfs",
+        "/run:rw,noexec,nosuid,nodev,size=64m",
+    ];
     assert_eq!(
         podman,
-        strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
+        strings(
+            &[
+                before,
+                &tmpfs[..],
+                after,
+                &["--pid", "private"][..],
+                &tail[..]
+            ]
+            .concat()
+        )
+    );
+}
+
+/// Asserts that on Podman, whose `--read-only` also mounts writable tmpfs mounts at
+/// `/var/tmp` and at the image's run path (4.9.3 sets `--read-only-tmpfs` on by default,
+/// and those mounts have neither `noexec` nor a size), the agent names both itself, with
+/// the options and the size of `/tmp` (so the size setting reaches them), and that
+/// Docker, whose `--read-only` adds no such mounts, is given only `/tmp`. It catches a
+/// writable `/var/tmp` or `/run` where a job can run a program of its own making, or fill
+/// the memory, and a Docker container given writable directories it did not have.
+#[test]
+fn podman_hardens_var_tmp_and_run_like_tmp() {
+    let set = Settings::new(Path::new(BIN), None, None)
+        .unwrap()
+        .with_tmp_size(Some("2g"))
+        .unwrap();
+    let tmpfs_of = |engine| -> Vec<String> {
+        let args = hardening_args(&set, engine, PROFILE);
+        args.windows(2)
+            .filter(|pair| pair[0] == "--tmpfs")
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    assert_eq!(
+        tmpfs_of(Engine::Podman),
+        [
+            "/tmp:rw,noexec,nosuid,nodev,size=2g",
+            "/var/tmp:rw,noexec,nosuid,nodev,size=2g",
+            "/run:rw,noexec,nosuid,nodev,size=2g",
+        ]
+    );
+    assert_eq!(
+        tmpfs_of(Engine::Docker),
+        ["/tmp:rw,noexec,nosuid,nodev,size=2g"]
+    );
+    let podman = hardening_args(&set, Engine::Podman, PROFILE);
+    assert!(
+        !podman
+            .iter()
+            .any(|arg| arg.starts_with("--read-only-tmpfs"))
     );
 }
 
@@ -193,8 +250,8 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
     }
 }
 
-/// Asserts that the settings reach the hardening list: the network, the user, the pull
-/// policy and the size of `/tmp`. It catches a flag that is checked and not used.
+/// Asserts that the settings reach the hardening list: the network, the pull policy and
+/// the size of `/tmp`; the user is not in it (it is the slot's, see `create.rs`). It catches a flag that is checked and not used.
 #[test]
 fn hardening_follows_the_settings() {
     let set = Settings::new(Path::new(BIN), Some("jobs"), Some("5:6"))
@@ -206,7 +263,6 @@ fn hardening_follows_the_settings() {
     let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
-    assert_eq!(value("--user"), "5:6");
     assert_eq!(value("--pull"), "missing");
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }

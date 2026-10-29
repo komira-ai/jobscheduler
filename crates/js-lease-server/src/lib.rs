@@ -8,7 +8,7 @@
 //!   refuse a start (a token file anyone can read, a listen address off the loopback
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
-//!   compiled in (`static` today).
+//!   compiled in (`static` and `lambdalabs`).
 //! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
 //!   operator's pool file. With agent registration on (see "Agents" below), the static
 //!   pool and the hosts agents register are two sources of the same trait, layered
@@ -16,7 +16,12 @@
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
-//!   payload and no network type. Nothing in the server's routes calls either yet.
+//!   payload and no network type. The scaler's launch step ([`Launcher`]) is the one place
+//!   that holds both a mode and a provider.
+//! - [`Scaler`]: the shell that runs [`js_scaler::step`] on the server's tick for an
+//!   elastic pool: it reads the registry and the provider, runs the step's actions in
+//!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
+//!   only and written whole before the call a record describes.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
@@ -72,7 +77,8 @@
 //! [server]
 //! listen            = "100.64.0.1:7300"   # default 127.0.0.1:7300; off the loopback it needs tls_cert and tls_key
 //! agent_listen      = "100.64.0.1:7301"   # agent routes only; required with an elastic pool
-//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool
+//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool; required when a pool is live
+//! scheduler_id      = "js"                               # default "js": marks what this scheduler launches; give each scheduler on one cloud account its own
 //! state_file        = "/var/lib/jobscheduler/state"      # required
 //! boot              = "resume"                           # required: "initialise" or "resume"
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
@@ -94,8 +100,17 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file` and `network`.
-//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing.
+//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
+//! one that is `live` launches machines for requests that wait, within `max_instances`,
+//! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
+//! idle for `idle` (ten minutes unless the file says). A `live` pool also needs `agent =
+//! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
+//! the launched machine downloads and checks, one for each CPU architecture its offers
+//! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale
+//! network it needs `binary = { url = ..., sha256 = ... }` for the Tailscale build too
+//! (`api_url` there names another Tailscale API, for a test). After a boot that fails
+//! the pool launches nothing for ten minutes.
 //! `exec` is `container` unless the file says `sandbox-exec`, or `none` for a pool whose
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
@@ -414,6 +429,7 @@ mod checks;
 mod config;
 mod error;
 mod file;
+mod file_checks;
 mod flags;
 mod hosts;
 mod io_timeout;
@@ -426,6 +442,7 @@ pub mod network;
 mod pool;
 mod rate;
 mod run_api;
+mod scaler;
 mod sched;
 mod server;
 mod status;
@@ -462,6 +479,10 @@ pub use kinds::{
 #[doc(hidden)]
 pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
+pub use scaler::{
+    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    RecordsFile, Scaler,
+};
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 pub use usage::{

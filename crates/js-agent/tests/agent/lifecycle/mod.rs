@@ -15,6 +15,7 @@ mod reach;
 mod results;
 mod rules;
 mod scratch;
+mod slots;
 mod taint;
 
 use std::collections::BTreeSet;
@@ -217,6 +218,8 @@ pub fn job(run_id: &str) -> JobSpec {
         labels: std::collections::BTreeMap::new(),
         heartbeat_seq: 0,
         valid_for_ms: 0,
+        bundle: None,
+        native: None,
     }
 }
 

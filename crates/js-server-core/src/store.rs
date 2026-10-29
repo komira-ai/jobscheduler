@@ -531,11 +531,13 @@ impl Engine {
         let Some(rows) = self.rows.clone() else {
             return false;
         };
+        let percent = self.sched.memory_percent();
         self.sched.hold_refusal(refusal.operation, |request| {
-            rows.session_could_run(request).unwrap_or_else(|error| {
-                tracing::warn!(%error, "the daemon sessions cannot be read: the refusal waits");
-                true
-            })
+            rows.session_could_run(request, percent)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the daemon sessions cannot be read: the refusal waits");
+                    true
+                })
         })
     }
 

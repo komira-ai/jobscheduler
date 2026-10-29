@@ -3,10 +3,19 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-/// The user and group containers run as when `--container-user` is not given: `nobody`
-/// and `nogroup` on the common Linux distributions.
-pub const DEFAULT_USER: &str = "65534:65534";
+use super::subid::{JobUsers, Mapping, RANGE_LEN};
+use crate::lifecycle::SLOTS;
+
+/// The base user and group of the slots when `--container-user` is not given. The user of
+/// slot `k` is this plus `k`, for the uid and the gid: `1000:1000` for slot 0, `1001:1001`
+/// for slot 1. These are ids of the job's user namespace, which the agent maps onto the
+/// subordinate range (`--container-subuid`), not users of the host.
+pub const DEFAULT_USER: &str = "1000:1000";
+
+/// The default base as numbers; [`DEFAULT_USER`] is its text.
+const DEFAULT_IDS: (u32, u32) = (1000, 1000);
 
 /// The network containers get when `--container-network` is not given: none at all.
 pub const DEFAULT_NETWORK: &str = "none";
@@ -65,6 +74,24 @@ pub enum SettingsError {
     /// `--container-tmp-size` is not a number followed by `k`, `m` or `g`.
     #[error("--container-tmp-size: not a size such as 64m")]
     TmpSize,
+    /// `--container-subuid` is missing: every contained job runs in a user namespace mapped
+    /// onto the subordinate range of the user it names.
+    #[error(
+        "--container-subuid: required with --container-bin: every job runs in a user namespace mapped onto that user's subordinate ids"
+    )]
+    NoSubuid,
+    /// `--container-subuid` is not a user name the id files can hold.
+    #[error("--container-subuid: not a user name")]
+    Subuid,
+    /// `--container-user` is a base from which the last slot's ids would leave a job's user
+    /// namespace: a namespace holds the ids 0 to 65535, and the slots take the ids from
+    /// the base up, one for each slot.
+    #[error(
+        "--container-user: the uid and the gid are the first slot's ids, and each of the {slots} slots takes the next ids, so both must be at most {last} to stay below 65536, the ids of a job's user namespace",
+        slots = SLOTS,
+        last = RANGE_LEN - SLOTS
+    )]
+    UserOutsideMap,
     /// A container flag without `--container-bin`: they configure containers, which the
     /// agent runs only with a runtime.
     #[error("the container flags need --container-bin")]
@@ -114,6 +141,8 @@ pub struct Flags<'a> {
     pub pull: Option<&'a str>,
     /// `--container-tmp-size`.
     pub tmp_size: Option<&'a str>,
+    /// `--container-subuid`.
+    pub subuid: Option<&'a str>,
 }
 
 /// The checked container flags: where the runtime is, which network jobs get, which user
@@ -128,6 +157,9 @@ pub struct Settings {
     host: Option<String>,
     pull: Pull,
     tmp_size: String,
+    subuid: Option<String>,
+    /// The mapping the runtime resolved when it opened; shared by the clones.
+    resolved: Arc<OnceLock<Mapping>>,
     chown: Option<(u32, u32)>,
 }
 
@@ -147,6 +179,7 @@ impl Settings {
                 flags.host,
                 flags.pull,
                 flags.tmp_size,
+                flags.subuid,
             ];
             return match others.iter().any(Option::is_some) {
                 true => Err(SettingsError::NoBin),
@@ -157,6 +190,7 @@ impl Settings {
             .with_host(flags.host)?
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
+            .with_subuid(flags.subuid.ok_or(SettingsError::NoSubuid)?)?
             .with_agent(agent.0, agent.1)
             .map(Some)
     }
@@ -183,7 +217,7 @@ impl Settings {
             .filter(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
             .ok_or(SettingsError::BinMissing)?;
         let network = network.map_or(Ok(DEFAULT_NETWORK), network_name)?;
-        let ids = user.map_or(Ok((65534, 65534)), non_root)?;
+        let ids = user.map_or(Ok(DEFAULT_IDS), non_root)?;
         Ok(Self {
             bin: bin.to_owned(),
             network: network.to_owned(),
@@ -192,6 +226,8 @@ impl Settings {
             host: None,
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
+            subuid: None,
+            resolved: Arc::new(OnceLock::new()),
             chown: None,
         })
     }
@@ -226,11 +262,39 @@ impl Settings {
         Ok(Self { tmp_size, ..self })
     }
 
+    /// Runs every job in a user namespace mapped onto the subordinate ids of `user`
+    /// (`--container-subuid`). The range itself is read when the runtime opens
+    /// ([`CliRuntime::open`](super::CliRuntime::open)). Settings built without this call
+    /// run containers in the host's user namespace: only a test does that.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::Subuid`] when `user` cannot be the first field of a line of
+    /// `/etc/subuid`; [`SettingsError::UserOutsideMap`] when the container user has an id
+    /// of 65536 or more.
+    pub fn with_subuid(self, user: &str) -> Result<Self, SettingsError> {
+        let plain = |c: char| c.is_ascii_graphic() && c != ':';
+        let named = !user.is_empty() && user.chars().all(plain);
+        let room = RANGE_LEN - SLOTS;
+        let inside = self.ids.0 <= room && self.ids.1 <= room;
+        match (named, inside) {
+            (false, _) => Err(SettingsError::Subuid),
+            (true, false) => Err(SettingsError::UserOutsideMap),
+            (true, true) => Ok(Self {
+                subuid: Some(user.to_owned()),
+                ..self
+            }),
+        }
+    }
+
     /// Settles who owns the run's scratch directory. It is private to the agent (`0700`),
     /// and the container's user must be able to write it. An agent that runs as root
     /// (`uid` 0) hands the directory to the container's user when it starts a job
     /// ([`Settings::chown_scratch`]); any other agent cannot give a file away, so the
-    /// container's user must be the agent's own.
+    /// container's user must be the agent's own. (Jobs mapped onto a subordinate range, see
+    /// [`Settings::with_subuid`], are host users the agent never is: the runtime refuses
+    /// to open for an agent that is not root, see
+    /// [`CliRuntime::open_in`](super::CliRuntime::open_in).)
     ///
     /// # Errors
     ///
@@ -262,14 +326,47 @@ impl Settings {
         &self.network
     }
 
-    /// The `<uid>:<gid>` the containers run as.
+    /// The `<uid>:<gid>` of the first slot, the base of `--container-user`; see
+    /// [`Settings::slot_user`] for the others.
     pub fn user(&self) -> &str {
         &self.user
     }
 
-    /// The uid the containers run as (the first half of [`Settings::user`]).
-    pub fn uid(&self) -> u32 {
-        self.ids.0
+    /// The container ids `(uid, gid)` of slot `slot`: the base ids plus the slot number.
+    /// The ids of two slots never meet, and below 65536 for every slot when the jobs are
+    /// mapped ([`Settings::with_subuid`] checks the base against [`SLOTS`]).
+    pub fn slot_ids(&self, slot: u32) -> (u32, u32) {
+        (
+            self.ids.0.saturating_add(slot),
+            self.ids.1.saturating_add(slot),
+        )
+    }
+
+    /// The `<uid>:<gid>` containers of slot `slot` run as.
+    pub fn slot_user(&self, slot: u32) -> String {
+        let (uid, gid) = self.slot_ids(slot);
+        format!("{uid}:{gid}")
+    }
+
+    /// Who the processes of the containers are on the host: the range the runtime resolved
+    /// from `--container-subuid` when it opened (not read again), or the one uid of [`Settings::user`] for settings built
+    /// without it. The post-job checks look for leftover processes of these users.
+    pub fn uid(&self) -> JobUsers {
+        self.subuid.as_ref().map_or(JobUsers::Uid(self.ids.0), |_| {
+            JobUsers::Mapped(self.resolved.clone())
+        })
+    }
+
+    /// Records the mapping the runtime resolved, for [`Settings::uid`] (the settings and
+    /// their clones share it; the first one recorded stays).
+    pub fn resolve(&self, mapping: Mapping) {
+        let _ = self.resolved.set(mapping);
+    }
+
+    /// The user whose subordinate ids the jobs are mapped onto (`--container-subuid`), if
+    /// the settings map them.
+    pub fn subuid(&self) -> Option<&str> {
+        self.subuid.as_deref()
     }
 
     /// The engine host (`unix:///<path>`: a socket on this machine) the runtime is told to use,
@@ -288,9 +385,11 @@ impl Settings {
         &self.tmp_size
     }
 
-    /// The `(uid, gid)` to give the scratch directory of a run before its container is
-    /// created: set when the agent runs as root, none when the container's user is the
-    /// agent's own.
+    /// Whether, and with which base ids, the scratch directory of a run is given before its
+    /// container is created: set when the agent runs as root, none when the container's
+    /// user is the agent's own. The ids it names are the first slot's; a run is given its
+    /// own slot's ([`Settings::slot_ids`]) as ids of the container, and a mapped job's host
+    /// ids are the start of the range plus those.
     pub fn chown_scratch(&self) -> Option<(u32, u32)> {
         self.chown
     }
