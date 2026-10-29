@@ -260,12 +260,12 @@ impl Recorder {
             return no_minutes(counters, DropReason::MemoryOverFourXCapacity);
         }
         state.last = reading;
-        let running: BTreeSet<&LeaseId> = load
-            .covered
-            .iter()
-            .chain(load.clocks.iter().map(|clock| &clock.lease))
-            .collect();
         if !leases_only {
+            let running: BTreeSet<&LeaseId> = load
+                .covered
+                .iter()
+                .chain(load.clocks.iter().map(|clock| &clock.lease))
+                .collect();
             let acc = state.minutes.entry(now_wall_minute).or_default();
             acc.cpu_usec += d_cpu;
             acc.mono_usec += d_mono;
