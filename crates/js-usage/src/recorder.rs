@@ -345,10 +345,9 @@ impl Recorder {
         }
         if self.ended.insert(*lease) {
             self.ended_order.push_back(*lease);
-            if self.ended_order.len() > MAX_ENDED_LEASES {
-                if let Some(oldest) = self.ended_order.pop_front() {
-                    self.ended.remove(&oldest);
-                }
+            let excess = self.ended_order.len().saturating_sub(MAX_ENDED_LEASES);
+            for oldest in self.ended_order.drain(..excess) {
+                self.ended.remove(&oldest);
             }
         }
     }
