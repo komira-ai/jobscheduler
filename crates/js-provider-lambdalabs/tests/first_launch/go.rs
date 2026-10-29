@@ -1,17 +1,12 @@
-//! The launch: its guards, the state file, the wait, the ssh check and the result.
+//! The launch: its guards, the state file, the wait and the result.
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::PathBuf;
-use std::time::Duration;
 
-use js_provider_lambdalabs::{ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Tag};
 
-use crate::rig::{FIRST, Rig, TestRemote, activate, id};
-
-fn ssh_flags() -> [&'static str; 4] {
-    ["--ssh-key", "/keys/id", "--ssh-user", "ubuntu"]
-}
+use crate::rig::{FIRST, Rig, activate, id};
 
 #[test]
 fn go_without_a_plan_hash_or_with_another_launches_nothing() {
@@ -64,19 +59,14 @@ fn the_state_file_exists_with_the_instance_before_the_first_wait() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
     let seen = RefCell::new(Vec::new());
-    let remote = TestRemote::answering(Err("not asked".to_owned()));
     let fake = rig.fake.clone();
     let path = rig.state.clone();
-    let (status, out) = rig.exec_with(
-        &args,
-        &|n| {
-            if n == 1 {
-                seen.borrow_mut().push(fs::read_to_string(&path).unwrap());
-                activate(&fake);
-            }
-        },
-        &remote,
-    );
+    let (status, out) = rig.exec_with(&args, &|n| {
+        if n == 1 {
+            seen.borrow_mut().push(fs::read_to_string(&path).unwrap());
+            activate(&fake);
+        }
+    });
     assert_eq!(status, 0, "{out}");
     let seen = seen.into_inner();
     assert_eq!(seen.len(), 1);
@@ -91,7 +81,7 @@ fn the_state_file_exists_with_the_instance_before_the_first_wait() {
 fn the_state_file_is_owner_only_and_names_the_acquire_the_instance_is_tagged_with() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
-    let (status, _) = rig.exec_active(&args, 1, &TestRemote::answering(Ok(String::new())));
+    let (status, _) = rig.exec_active(&args, 1);
     assert_eq!(status, 0);
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
@@ -119,28 +109,12 @@ fn the_state_file_is_owner_only_and_names_the_acquire_the_instance_is_tagged_wit
 }
 
 #[test]
-fn a_launch_goes_active_runs_the_ssh_check_and_terminates() {
+fn a_launch_goes_active_and_terminates() {
     let rig = Rig::new();
-    let mut extra = ssh_flags().to_vec();
-    extra.extend(["--ssh-command", "nvidia-smi -L"]);
-    let args = rig.go_args(&extra);
-    let remote = TestRemote::answering(Ok("GPU 0: Sample\n".to_owned()));
-    let (status, out) = rig.exec_active(&args, 3, &remote);
+    let args = rig.go_args(&[]);
+    let (status, out) = rig.exec_active(&args, 3);
     assert_eq!(status, 0, "{out}");
     assert_eq!(rig.fake.launched(), 1);
-    let asked = remote.asked.borrow();
-    assert_eq!(asked.len(), 1);
-    let (host, user, identity, command, limit) = &asked[0];
-    assert_eq!(
-        (host.as_str(), user.as_str(), command.as_str()),
-        ("203.0.113.7", "ubuntu", "nvidia-smi -L")
-    );
-    assert_eq!(identity, &PathBuf::from("/keys/id"));
-    assert_eq!(*limit, Duration::from_secs(120));
-    assert!(
-        out.contains("ssh output of nvidia-smi -L:\nGPU 0: Sample"),
-        "{out}"
-    );
     assert!(out.contains("result: terminated after 30 s"), "{out}");
     assert!(
         out.contains("at most 1 cents spent at 75 cents per hour"),
@@ -150,78 +124,19 @@ fn a_launch_goes_active_runs_the_ssh_check_and_terminates() {
         out.contains("STOP: paste back everything printed above"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert!(!out.contains("ssh check"), "{out}");
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert_eq!(rig.fake.count(Call::Terminate), 1);
-}
-
-#[test]
-fn the_default_ssh_command_is_nvidia_smi_and_its_output_is_cut() {
-    let rig = Rig::new();
-    let args = rig.go_args(&ssh_flags());
-    let long = format!("{}{}", "a".repeat(4000), "\u{2603}".repeat(10));
-    let remote = TestRemote::answering(Ok(long));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
-    assert_eq!(status, 0, "{out}");
-    assert_eq!(remote.asked.borrow()[0].3, "nvidia-smi");
-    assert!(!out.contains('\u{2603}'));
-}
-
-#[test]
-fn without_ssh_flags_nothing_is_run_on_the_instance() {
-    let rig = Rig::new();
-    let args = rig.go_args(&[]);
-    let remote = TestRemote::answering(Err("never".to_owned()));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
-    assert_eq!(status, 0, "{out}");
-    assert!(remote.asked.borrow().is_empty());
-    assert!(
-        !out.contains("ssh output") && !out.contains("ssh check failed"),
-        "{out}"
-    );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
-}
-
-#[test]
-fn a_failed_ssh_check_still_terminates_and_fails_the_run() {
-    let rig = Rig::new();
-    let args = rig.go_args(&ssh_flags());
-    let remote = TestRemote::answering(Err("the command ended with status 1".to_owned()));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
-    assert_eq!(status, 1, "{out}");
-    assert!(
-        out.contains("ssh check failed: the command ended with status 1"),
-        "{out}"
-    );
-    assert!(out.contains("result: terminated"));
-    assert!(out.contains("STOP: the run did not finish its check; the instance is terminated"));
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
-}
-
-#[test]
-fn an_instance_without_a_public_address_cannot_be_asked() {
-    let rig = Rig::new();
-    let args = rig.go_args(&ssh_flags());
-    let fake = rig.fake.clone();
-    let remote = TestRemote::answering(Ok(String::new()));
-    let (status, out) = rig.exec_with(
-        &args,
-        &|_| fake.set_status(&id(FIRST), Status::Active),
-        &remote,
-    );
-    assert_eq!(status, 1, "{out}");
-    assert!(out.contains("the instance has no public address"), "{out}");
-    assert!(remote.asked.borrow().is_empty());
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
 }
 
 #[test]
 fn an_instance_that_is_not_ours_by_the_time_of_release_is_not_terminated() {
     let rig = Rig::new();
-    let args = rig.go_args(&ssh_flags());
-    let mut remote = TestRemote::answering(Ok(String::new()));
+    let args = rig.go_args(&[]);
     let fake = rig.fake.clone();
-    remote.on_run = Box::new(move || fake.update_instance(&id(FIRST), &|i| i.tags.clear()));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
+    let (status, out) = rig.exec_with(&args, &|_| {
+        fake.update_instance(&id(FIRST), &|i| i.tags.clear());
+    });
     assert_eq!(status, 1, "{out}");
     assert_eq!(rig.fake.count(Call::Terminate), 0);
     assert!(out.contains("TERMINATION NOT CONFIRMED"), "{out}");
@@ -237,12 +152,12 @@ fn a_launch_that_answers_with_several_instances_terminates_all_of_them() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
     rig.fake.launch_creates(2);
-    let (status, out) = rig.exec_active(&args, 1, &TestRemote::answering(Ok(String::new())));
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("launched: fake0001 fake0002"), "{out}");
     assert!(rig.state_text().contains("instances=fake0001,fake0002\n"));
     for instance in rig.fake.instances() {
-        assert_eq!(instance.status, Status::Terminating, "{}", instance.id);
+        assert_eq!(instance.status, HostStatus::Terminating, "{}", instance.id);
     }
 }
 
@@ -283,14 +198,14 @@ fn a_lost_launch_answer_is_resolved_by_listing_and_the_run_goes_on() {
     let args = rig.go_args(&[]);
     rig.fake
         .lose_response(Call::Launch, ApiError::Transport("timeout".to_owned()));
-    let (status, out) = rig.exec_active(&args, 1, &TestRemote::answering(Ok(String::new())));
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     assert!(
         out.contains("the launch got no answer; looking for the instance"),
         "{out}"
     );
     assert_eq!(rig.fake.launched(), 1);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -320,7 +235,7 @@ fn a_state_file_that_cannot_be_updated_tears_the_instance_down_at_once() {
         out.contains("teardown forced: the state file could not be updated"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert!(rig.sleeps.borrow().is_empty(), "no wait happened");
 }
 
@@ -329,15 +244,11 @@ fn a_failing_list_while_booting_is_reported_and_the_wait_goes_on() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
     let fake = rig.fake.clone();
-    let (status, out) = rig.exec_with(
-        &args,
-        &move |n| match n {
-            1 => fake.fail_next(Call::ListInstances, ApiError::Transport("blip".to_owned())),
-            2 => activate(&fake),
-            _ => {}
-        },
-        &TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_with(&args, &move |n| match n {
+        1 => fake.fail_next(Call::ListInstances, ApiError::Transport("blip".to_owned())),
+        2 => activate(&fake),
+        _ => {}
+    });
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("t+10 s: list failed"), "{out}");
 }
@@ -347,11 +258,9 @@ fn an_instance_that_ends_by_itself_forces_teardown() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
     let fake = rig.fake.clone();
-    let (status, out) = rig.exec_with(
-        &args,
-        &move |_| fake.set_status(&id(FIRST), Status::Preempted),
-        &TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_with(&args, &move |_| {
+        fake.set_status(&id(FIRST), HostStatus::Preempted)
+    });
     assert_eq!(status, 1, "{out}");
     assert!(
         out.contains("teardown forced: the instance ended on its own"),

@@ -26,10 +26,13 @@ struct Accepted {
 ///
 /// The set is read from the file at start and again by [`AgentTokens::reload`]. A read
 /// that fails keeps the set in force, and the caller logs it: an operator's half-saved
-/// edit must not lock every agent out, and must not go unnoticed either.
+/// edit must not lock every agent out, and must not go unnoticed either. A pool that has
+/// no shared token file ([`AgentTokens::none`]) accepts no shared token, so only the
+/// one-time tokens of launched hosts can register one.
 pub(crate) struct AgentTokens {
-    path: PathBuf,
-    client: Token,
+    /// The file the set comes from and the client token it is checked against; `None` for
+    /// a pool with no shared token.
+    file: Option<(PathBuf, Token)>,
     accepted: RwLock<Arc<Vec<Accepted>>>,
 }
 
@@ -40,16 +43,27 @@ impl AgentTokens {
     pub(crate) fn open(path: &Path, client: &Token) -> Result<Self, StartupError> {
         let accepted = read(path, client)?;
         Ok(Self {
-            path: path.to_path_buf(),
-            client: client.clone(),
+            file: Some((path.to_path_buf(), client.clone())),
             accepted: RwLock::new(Arc::new(accepted)),
         })
     }
 
+    /// No shared token: nothing is accepted from this set, and there is no file to read
+    /// again.
+    pub(crate) fn none() -> Self {
+        Self {
+            file: None,
+            accepted: RwLock::new(Arc::new(Vec::new())),
+        }
+    }
+
     /// Reads the file again and, when it is valid, replaces the set. The file's text is
-    /// never in the error.
+    /// never in the error. With no file there is nothing to read and the call is `Ok`.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
-        let accepted = read(&self.path, &self.client)?;
+        let Some((path, client)) = &self.file else {
+            return Ok(());
+        };
+        let accepted = read(path, client)?;
         *self
             .accepted
             .write()
@@ -150,5 +164,19 @@ mod tests {
             .collect::<String>();
         let reason = parse(many.as_bytes()).unwrap_err();
         assert!(reason.contains("more than 16"), "{reason}");
+    }
+
+    /// A set with no shared token accepts no token: not one that looks like a pool token,
+    /// not the empty string; it lists no credential, and a reload has no file to fail on.
+    /// It catches a pool with no token file that admits a request it should not, and a
+    /// reload that errors every tick.
+    #[test]
+    fn a_set_with_no_shared_token_accepts_nothing() {
+        let none = AgentTokens::none();
+        assert!(none.identify(A).is_none());
+        assert!(none.identify("").is_none());
+        assert!(none.credentials().is_empty());
+        assert!(none.reload().is_ok());
+        assert!(none.identify(A).is_none());
     }
 }

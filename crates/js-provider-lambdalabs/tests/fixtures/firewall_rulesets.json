@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "id": "rs-noinbound-a",
+      "name": "js-sched-one-noinbound",
+      "region": {"name": "region-a", "description": "Region A"},
+      "rules": [],
+      "created": "2026-10-01T00:00:00Z",
+      "instance_ids": []
+    },
+    {
+      "id": "rs-web",
+      "name": "web",
+      "region": {"name": "region-a", "description": "Region A"},
+      "rules": [
+        {
+          "protocol": "tcp",
+          "port_range": [22, 22],
+          "source_network": "0.0.0.0/0",
+          "description": "ssh"
+        }
+      ],
+      "created": "2026-10-01T00:00:00Z",
+      "instance_ids": []
+    }
+  ]
+}

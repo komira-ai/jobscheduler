@@ -1,5 +1,4 @@
-//! The runner over a fake account, a manual clock, a scripted sleeper and a scripted
-//! ssh.
+//! The runner over a fake account, a manual clock and a scripted sleeper.
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -9,10 +8,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use js_provider_lambdalabs::first_launch::{Remote, Seams, Sleeper, run, sync_dir};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::first_launch::{Seams, Sleeper, run, sync_dir};
 use js_provider_lambdalabs::{
     ApiKey, Architecture, FakeLambda, InstanceId, InstanceTypeOffer, LambdaApi, ManualClock,
-    Region, SetupError, Status,
+    Region, SetupError,
 };
 
 pub const KEY_BYTES: &str = "secret-key-bytes-4d2f";
@@ -75,51 +75,9 @@ pub fn id(text: &str) -> InstanceId {
 /// Makes the first instance active, with a public address.
 pub fn activate(fake: &FakeLambda) {
     fake.update_instance(&id(FIRST), &|i| {
-        i.status = Status::Active;
+        i.status = HostStatus::Active;
         i.ip = Some("203.0.113.7".to_owned());
     });
-}
-
-/// What the ssh was asked: host, user, identity file, command, time limit.
-pub type Asked = (String, String, PathBuf, String, Duration);
-
-/// A scripted ssh: what it answers, and what it was asked.
-pub struct TestRemote {
-    pub answer: RefCell<Result<String, String>>,
-    pub asked: RefCell<Vec<Asked>>,
-    pub on_run: Box<dyn Fn()>,
-}
-
-impl TestRemote {
-    pub fn answering(answer: Result<String, String>) -> Self {
-        Self {
-            answer: RefCell::new(answer),
-            asked: RefCell::new(Vec::new()),
-            on_run: Box::new(|| {}),
-        }
-    }
-}
-
-impl Remote for TestRemote {
-    fn run(
-        &self,
-        host: &str,
-        user: &str,
-        identity: &Path,
-        command: &str,
-        limit: Duration,
-        _stop: &dyn Fn() -> bool,
-    ) -> Result<String, String> {
-        self.asked.borrow_mut().push((
-            host.to_owned(),
-            user.to_owned(),
-            identity.to_owned(),
-            command.to_owned(),
-            limit,
-        ));
-        (self.on_run)();
-        self.answer.borrow().clone()
-    }
 }
 
 struct TestSleeper<'a> {
@@ -218,12 +176,7 @@ impl Rig {
     }
 
     /// Runs the program with `args`, `hook` called after each sleep with its number.
-    pub fn exec_with(
-        &self,
-        args: &[String],
-        hook: &dyn Fn(u32),
-        remote: &TestRemote,
-    ) -> (i32, String) {
+    pub fn exec_with(&self, args: &[String], hook: &dyn Fn(u32)) -> (i32, String) {
         let sleeper = TestSleeper {
             clock: &self.clock,
             count: Cell::new(0),
@@ -255,7 +208,6 @@ impl Rig {
         let seams = Seams {
             clock: self.clock.clone(),
             sleeper: &sleeper,
-            remote,
             wall_unix: &wall,
             sync_dir: &sync,
             connect: &connect,
@@ -271,26 +223,19 @@ impl Rig {
         (status, text)
     }
 
-    /// Runs with no hook and an ssh that must not be asked.
+    /// Runs with no hook.
     pub fn exec(&self, args: &[String]) -> (i32, String) {
-        let remote = TestRemote::answering(Err("not asked".to_owned()));
-        let out = self.exec_with(args, &|_| {}, &remote);
-        assert!(remote.asked.borrow().is_empty());
-        out
+        self.exec_with(args, &|_| {})
     }
 
     /// A run whose instance becomes active after `after` sleeps.
-    pub fn exec_active(&self, args: &[String], after: u32, remote: &TestRemote) -> (i32, String) {
+    pub fn exec_active(&self, args: &[String], after: u32) -> (i32, String) {
         let fake = self.fake.clone();
-        self.exec_with(
-            args,
-            &move |n| {
-                if n == after {
-                    activate(&fake);
-                }
-            },
-            remote,
-        )
+        self.exec_with(args, &move |n| {
+            if n == after {
+                activate(&fake);
+            }
+        })
     }
 
     /// The plan hash a dry run prints for the flags `extra`.
@@ -312,7 +257,7 @@ impl Rig {
         fs::read_to_string(&self.state).unwrap()
     }
 
-    pub fn status_of(&self, id_text: &str) -> Status {
+    pub fn status_of(&self, id_text: &str) -> HostStatus {
         self.fake
             .instances()
             .into_iter()

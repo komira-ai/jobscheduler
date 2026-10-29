@@ -26,10 +26,18 @@ pub struct RunSeries {
     /// The minutes the run has records for, in any order. A minute given twice counts once,
     /// at the larger of its values.
     pub minutes: Vec<RunMinute>,
-    /// Reserved bits, stored with the run and not read by the fit today: bit 0 for a run
-    /// whose memory is censored (killed at its limit), bit 1 for a run under node
-    /// pressure.
+    /// Reserved bits, stored with the run: [`RunSeries::CENSORED`] and
+    /// [`RunSeries::NODE_PRESSURE`]. The fit reads only the second.
     pub flags: u8,
+}
+
+impl RunSeries {
+    /// Bit 0: the run's memory is censored (it was killed at its limit). The fit does not
+    /// read it today.
+    pub const CENSORED: u8 = 1;
+    /// Bit 1: the node was under CPU pressure during the run, so it shows less CPU than it
+    /// needed. The fit leaves such a run out of the CPU curve.
+    pub const NODE_PRESSURE: u8 = 1 << 1;
 }
 
 /// The use of one minute, or of all minutes from 63 on.
@@ -76,6 +84,12 @@ pub enum Admitted {
 }
 
 impl Run {
+    /// Whether the node was under CPU pressure during the run ([`RunSeries::NODE_PRESSURE`]).
+    #[must_use]
+    pub fn under_node_pressure(&self) -> bool {
+        self.flags & RunSeries::NODE_PRESSURE != 0
+    }
+
     /// The run `series` makes, or why it does not enter.
     ///
     /// # Errors
@@ -292,10 +306,16 @@ pub(crate) mod tests {
             cores_milli: 300,
             ws_bytes: 4,
         });
-        s.flags = 3;
+        s.flags = RunSeries::CENSORED | RunSeries::NODE_PRESSURE;
         let run = Run::from_series(&s).unwrap();
         assert_eq!(run.buckets, vec![bucket(300, 9)]);
         assert_eq!(run.flags, 3);
+        assert!(run.under_node_pressure());
+        assert!(
+            !Run::from_series(&series(&[(1, 1)]))
+                .unwrap()
+                .under_node_pressure()
+        );
     }
 
     /// Catches: a minute index near `u32::MAX` overflowing the expected count.

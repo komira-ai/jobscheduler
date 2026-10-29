@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+js-elastic = { path = "../js-elastic" }
+js-types = { path = "../js-types" }
 rustix = { workspace = true, features = ["fs", "process"] }
 rustls.workspace = true
 serde.workspace = true
@@ -29,6 +31,8 @@ rcgen.workspace = true
 # every log line installs a `log` sink to read them.
 log.workspace = true
 tracing-subscriber.workspace = true
+# The test that pins what `RootCerts::WebPki` stands for.
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

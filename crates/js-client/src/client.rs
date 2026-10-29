@@ -99,6 +99,19 @@ impl Client {
         })
     }
 
+    /// Makes `secret` the bearer of every later request, in place of the token the client
+    /// was built with. The agent calls it once it holds the credential a welcome carried.
+    /// The client keeps the old bearer when `secret` is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Flag`] when `secret` is empty or is not one run of printable ASCII
+    /// (see [`bearer_of`]).
+    pub fn set_bearer(&mut self, secret: &str) -> Result<(), ClientError> {
+        self.bearer = token::bearer_of(secret)?;
+        Ok(())
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.server.base)
     }

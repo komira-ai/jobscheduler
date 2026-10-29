@@ -220,7 +220,7 @@ fn usage_errors_and_help() {
     assert_eq!(unknown.status(), code(2));
     let missing = go(&["--server", "http://127.0.0.1:1"]);
     assert_eq!(missing.status(), code(2));
-    assert!(missing.err.contains("--token-file"), "{}", missing.err);
+    assert!(missing.err.contains("--pool"), "{}", missing.err);
 }
 
 /// Asserts that plain http to a host off the loopback is refused naming `--server`, and

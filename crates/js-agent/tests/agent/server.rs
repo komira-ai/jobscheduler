@@ -288,15 +288,39 @@ impl Agent {
         connector: impl Connector + Send + 'static,
         machine: Arc<FakeMachine>,
     ) -> Self {
+        Self::launch(url, Some(token), extra, host, connector, machine)
+    }
+
+    /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
+    /// root `extra` names.
+    pub fn spawn_tokenless(
+        url: String,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+    ) -> Self {
+        let machine = Arc::new(FakeMachine::new());
+        Self::launch(url, None, extra, host, connector, machine)
+    }
+
+    fn launch(
+        url: String,
+        token: Option<PathBuf>,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<FakeMachine>,
+    ) -> Self {
         let (tell, worker) = channel();
         let (slept, waits) = channel();
         let (go, gate) = channel();
-        let mut args: Vec<String> = vec![
-            "--server".into(),
-            url,
-            "--token-file".into(),
-            token.to_str().unwrap().to_owned(),
-        ];
+        let mut args: Vec<String> = vec!["--server".into(), url];
+        if let Some(token) = token {
+            args.extend([
+                "--token-file".to_owned(),
+                token.to_str().unwrap().to_owned(),
+            ]);
+        }
         if !extra.contains(&"--pool") {
             args.extend(["--pool".to_owned(), "macs".to_owned()]);
         }
@@ -366,6 +390,7 @@ pub struct Redirect(pub Arc<Mutex<String>>);
 struct Redirected {
     to: Arc<Mutex<String>>,
     token_file: PathBuf,
+    credential: Option<String>,
 }
 
 impl Connector for Redirect {
@@ -378,6 +403,7 @@ impl Connector for Redirect {
         Ok(Box::new(Redirected {
             to: self.0.clone(),
             token_file: token_file.to_path_buf(),
+            credential: None,
         }))
     }
 }
@@ -388,7 +414,17 @@ impl Transport for Redirected {
         Dialer
             .connect(&url, &self.token_file, None)
             .map_err(|err| err.to_string())
-            .and_then(|mut transport| transport.post(path, body))
+            .and_then(|mut transport| {
+                if let Some(credential) = &self.credential {
+                    transport.adopt_credential(credential)?;
+                }
+                transport.post(path, body)
+            })
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.credential = Some(secret.to_owned());
+        Ok(())
     }
 }
 
@@ -421,6 +457,10 @@ impl Transport for Rewriting {
         let mut body = body.clone();
         body["protocol"] = json!({ "min": self.majors.min, "max": self.majors.max });
         self.inner.post(path, &body)
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
     }
 }
 
@@ -455,6 +495,10 @@ impl Transport for Counted {
             .fetch_add(beat, std::sync::atomic::Ordering::SeqCst);
         self.inner.post(path, body)
     }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
+    }
 }
 
 /// Records the body of every answer, so a test can look for what must not be printed.
@@ -488,6 +532,10 @@ impl Transport for Spying {
             self.seen.lock().unwrap().push(answer.body.clone());
         }
         answer
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.inner.adopt_credential(secret)
     }
 }
 
