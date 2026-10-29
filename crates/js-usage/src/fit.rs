@@ -57,7 +57,7 @@ pub struct Fit {
 #[must_use]
 pub fn fit(ring: &Ring) -> Option<Fit> {
     let runs = ring.len();
-    if ring.runs().filter(|r| !r.under_node_pressure()).count() < MIN_RUNS_FOR_CURVE {
+    if ring.runs().count() < MIN_RUNS_FOR_CURVE {
         return None;
     }
     let mut raw: Vec<MinutePoint> = Vec::new();
@@ -70,7 +70,6 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         // Reached but never recorded: hold the previous minute, for each figure apart.
         let mut cores: Vec<u64> = ring
             .runs()
-            .filter(|r| !r.under_node_pressure())
             .filter_map(|r| r.buckets.get(t).copied().flatten())
             .map(|b| u64::from(b.cores_milli))
             .collect();
