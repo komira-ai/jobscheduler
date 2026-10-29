@@ -126,6 +126,12 @@ fn refused_hello_is_fatal_per_code() {
             "shape-not-accepted",
         ),
         (refused(403, "host-listed"), 403, "host-listed"),
+        (refused(403, "host-contract"), 403, "host-contract"),
+        (
+            refused(403, "execution-mismatch"),
+            403,
+            "execution-mismatch",
+        ),
         (refused(400, "invalid-hello"), 400, "invalid-hello"),
         (
             refused(400, "unsupported-protocol"),
@@ -142,6 +148,7 @@ fn refused_hello_is_fatal_per_code() {
             status,
             code: code.to_owned(),
             supported: None,
+            field: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal), "{status} {code}");
         assert_eq!(paths(&sent), [HELLO_PATH], "{status} {code}");
@@ -159,9 +166,44 @@ fn refused_hello_is_fatal_per_code() {
             status,
             code: code.to_owned(),
             supported: None,
+            field: None,
         };
         assert_eq!(session.tick(), Step::Fatal(fatal));
         assert_eq!(sent.borrow().len(), 2);
+    }
+}
+
+/// Asserts that the two refusals of the host contract reach the caller with the capability
+/// the server named under `field`, and print it; that a field that is not a plain token is
+/// dropped (the code stays); and that a refusal from a server that sends no field, as every
+/// older server, is fatal with none. It catches an agent that throws the field away, so an
+/// operator cannot tell what the host lacks, and one that prints server text unchecked.
+#[test]
+fn a_host_contract_refusal_carries_the_capability_at_fault() {
+    let cases = [
+        (json!("runtime"), Some("runtime")),
+        (json!("gpu-toolkit"), Some("gpu-toolkit")),
+        (json!("has a space"), None),
+        (json!(""), None),
+        (json!(7), None),
+    ];
+    for (sent, expected) in cases {
+        let body = json!({ "error": "host-contract", "field": sent });
+        let (mut transport, _) = script(vec![reply(403, body)]);
+        let mut session = Session::new(hello("h1"), &mut transport, lowest());
+        let Step::Fatal(fatal) = session.tick() else {
+            panic!("a host-contract refusal must be fatal");
+        };
+        assert_eq!(fatal.code, "host-contract");
+        assert_eq!(fatal.field.as_deref(), expected, "{sent}");
+        let said = fatal.to_string();
+        match expected {
+            Some(field) => assert!(
+                said.contains(&format!("capability at fault is {field}")),
+                "{said}"
+            ),
+            None => assert!(!said.contains("capability at fault"), "{said}"),
+        }
     }
 }
 

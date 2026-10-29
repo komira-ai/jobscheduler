@@ -6,6 +6,9 @@
 //! [`Requirements::from_request`] reads `os` and `arch` from the capabilities the request
 //! requires and leaves disk and execution mode unset.
 
+use std::fmt;
+use std::str::FromStr;
+
 use crate::{Request, Resources};
 
 /// The capability key a request names its operating system by.
@@ -18,12 +21,46 @@ const DIGEST_PREFIX: &str = "sha256:";
 const DIGEST_HEX_LEN: usize = 64;
 
 /// How a host runs a job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecMode {
     /// In a container, through the host's container runtime.
     Container,
     /// Natively, under a `sandbox-exec` profile (macOS).
     SandboxExec,
+}
+
+impl ExecMode {
+    /// The text that names the mode in a pool's `exec` and in a hello.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::SandboxExec => "sandbox-exec",
+        }
+    }
+}
+
+impl fmt::Display for ExecMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A string that names no execution mode.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown execution mode {0:?}; known: container, sandbox-exec")]
+pub struct UnknownExecMode(pub String);
+
+impl FromStr for ExecMode {
+    type Err = UnknownExecMode;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "container" => Ok(Self::Container),
+            "sandbox-exec" => Ok(Self::SandboxExec),
+            _ => Err(UnknownExecMode(s.to_owned())),
+        }
+    }
 }
 
 /// Why text is not an image reference with a digest.
@@ -149,6 +186,18 @@ mod tests {
             labels: BTreeMap::new(),
             validation_run: None,
         }
+    }
+
+    /// Asserts that both modes parse from and print as the names a pool and a hello use,
+    /// and that any other text is refused naming what is known.
+    #[test]
+    fn modes_round_trip_and_unknown_is_refused() {
+        for mode in [ExecMode::Container, ExecMode::SandboxExec] {
+            assert_eq!(mode.to_string().parse::<ExecMode>(), Ok(mode));
+        }
+        let err = "Container".parse::<ExecMode>().unwrap_err();
+        assert_eq!(err, UnknownExecMode("Container".to_owned()));
+        assert!(err.to_string().contains("known: container, sandbox-exec"));
     }
 
     /// Asserts that `os` and `arch` come from the capabilities a request requires, that

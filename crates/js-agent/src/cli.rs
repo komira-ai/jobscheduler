@@ -170,6 +170,15 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// The absolute path of a program that checks the host's GPU container toolkit, run
+    /// once at start when the host offers a GPU. Exit 0 makes the hello report
+    /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
+    /// limit, a program that cannot be started) leaves it out and warns. A pool with GPUs
+    /// refuses a host without it (`host-contract`). The program gets a `PATH` of its own
+    /// and no arguments, and its output is not read. It should run a container that uses
+    /// a GPU, since that is what the capability promises. Needs `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub gpu_toolkit_hook: Option<String>,
     /// The absolute path of a program the agent runs while it prepares the host for a
     /// whole-node lease, after its own checks: exit 0 reports the host ready, other exit
     /// statuses refuse the lease with a typed reason (75 `noise-over-bound`, 76
