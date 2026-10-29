@@ -592,7 +592,9 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        state.book.insert_host(host.clone(), floor.clone());
+        state
+            .book
+            .insert_host(host.clone(), config.booked().clone());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),
@@ -897,7 +899,7 @@ impl Registry {
         if binding.taint().is_none() || records.contains_key(host) {
             return;
         }
-        book.insert_host(host.clone(), self.shared.config.shape().clone());
+        book.insert_host(host.clone(), self.shared.config.booked().clone());
         records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 

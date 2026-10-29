@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use js_elastic::{ElasticProvider, Offer};
+use js_elastic::{CheckResult, ElasticProvider, Offer};
 use js_lease::{Clock, Timestamp};
 use serde::Serialize;
 use tokio::task::spawn_blocking;
@@ -63,6 +63,17 @@ pub(crate) struct Verdict {
     pub(crate) at: Timestamp,
 }
 
+/// What one of the provider's own checks found, with what it said when it held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Checked {
+    /// The check's name, such as `ssh_key`.
+    pub(crate) name: &'static str,
+    /// Its verdict.
+    pub(crate) verdict: Verdict,
+    /// What it said about a pass, if anything.
+    pub(crate) note: Option<String>,
+}
+
 /// What the checks have found so far, as the status routes read it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Health {
@@ -71,6 +82,9 @@ pub(crate) struct Health {
     pub(crate) credentials: Option<Verdict>,
     /// The network mode's check.
     pub(crate) network: Option<Verdict>,
+    /// The provider's own checks of the last pass (the ssh key, the firewall, the `types`
+    /// rows), in the order it gave them; none while the catalog could not be had.
+    pub(crate) provider: Vec<Checked>,
     /// What is wrong with the catalog, and nothing else that has no verdict of its own.
     pub(crate) notes: Vec<String>,
     /// The offers of the last catalog that was had.
@@ -103,6 +117,7 @@ impl Health {
         let all = [failed(&self.credentials)]
             .into_iter()
             .chain(self.notes.iter().cloned().map(Some))
+            .chain(self.provider.iter().map(|c| c.verdict.reason.clone()))
             .chain([failed(&self.network)]);
         all.flatten().collect()
     }
@@ -118,10 +133,19 @@ impl Health {
             credentials,
             notes,
             offers,
+            checks,
         } = pass.provider;
         self.credentials = Some(verdict(credentials));
         self.network = Some(verdict(pass.network));
         self.notes = notes;
+        self.provider = checks
+            .into_iter()
+            .map(|result| Checked {
+                name: result.name,
+                verdict: verdict(result.failure.map_or(Ok(()), Err)),
+                note: result.note,
+            })
+            .collect();
         // A catalog that could not be had keeps the last one that could, so a status
         // page still has offers to plan with while the credentials are being fixed.
         if !offers.is_empty() {
@@ -135,6 +159,7 @@ struct Provided {
     credentials: Result<(), String>,
     notes: Vec<String>,
     offers: Vec<Offer>,
+    checks: Vec<CheckResult>,
 }
 
 /// What one pass found.
@@ -143,8 +168,9 @@ struct Pass {
     network: Result<(), String>,
 }
 
-/// The provider half: the catalog call is the credential check, and the catalog it
-/// returns is checked against the pool's floor.
+/// The provider half: the catalog call is the credential check, the catalog it
+/// returns is checked against the pool's floor, and the provider's own checks run when the
+/// catalog could be had (a refused key would fail each of them the same way).
 fn provider_checks(
     provider: &dyn ElasticProvider,
     floor: &Floor,
@@ -155,11 +181,13 @@ fn provider_checks(
             credentials: Err(format!("credentials: failed ({error})")),
             notes: Vec::new(),
             offers: Vec::new(),
+            checks: Vec::new(),
         },
         Ok(offers) => Provided {
             credentials: Ok(()),
             notes: catalog_notes(&offers, floor, pins),
             offers,
+            checks: provider.checks(),
         },
     }
 }
@@ -237,6 +265,7 @@ async fn pass(
             credentials: Err("credentials: the check panicked".to_owned()),
             notes: Vec::new(),
             offers: Vec::new(),
+            checks: Vec::new(),
         }),
         network: networked.unwrap_or_else(|_| Err("network: the check panicked".to_owned())),
     }

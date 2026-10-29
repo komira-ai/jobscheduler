@@ -15,6 +15,14 @@ use crate::{Request, Resources};
 const OS_KEY: &str = "os";
 /// The capability key a request names its CPU architecture by.
 const ARCH_KEY: &str = "arch";
+/// The capability key a request names its least free disk by, in whole GiB. A host
+/// reports the free space of its work volume under it.
+pub const DISK_GIB_KEY: &str = "disk-gib";
+/// The capability key a request names the mode its host runs jobs in by. A host reports
+/// the mode it runs in under it.
+pub const EXEC_KEY: &str = "exec";
+/// Bytes in a GiB.
+const GIB: u64 = 1 << 30;
 /// The only digest algorithm an image reference may name.
 const DIGEST_PREFIX: &str = "sha256:";
 /// Hex digits in a sha256 digest.
@@ -148,18 +156,64 @@ pub struct Requirements {
     pub exec: Option<ExecMode>,
 }
 
+/// Why a request's `disk-gib` or `exec` capability is not a requirement.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RequirementsError {
+    /// `disk-gib` is not a whole number of GiB that fits in bytes.
+    #[error("disk-gib must be a whole number of GiB below 2^34, not {0:?}")]
+    BadDisk(String),
+    /// `exec` names no execution mode.
+    #[error("exec must be container or sandbox-exec, not {0:?}")]
+    BadExec(String),
+}
+
 impl Requirements {
-    /// The requirements of a lease request: its resources, and `os` and `arch` from the
-    /// capabilities it requires. Disk and execution mode are `None`: a request cannot
-    /// carry them yet.
+    /// The requirements of a lease request: its resources, and `os`, `arch`, `disk-gib`
+    /// and `exec` from the capabilities it requires. A capability the request does not
+    /// name is `None`: any. A `disk-gib` or `exec` that is not valid also reads as `None`
+    /// here; [`Request::validate`] refuses such a request, so none that was admitted has
+    /// one ([`Self::try_from_request`] says why).
     pub fn from_request(request: &Request) -> Self {
-        Self {
+        Self::try_from_request(request).unwrap_or_else(|_| Self {
             resources: request.resources.clone(),
             disk_bytes: None,
             os: request.capabilities.get(OS_KEY).cloned(),
             arch: request.capabilities.get(ARCH_KEY).cloned(),
             exec: None,
-        }
+        })
+    }
+
+    /// [`Self::from_request`], refusing a `disk-gib` or `exec` that is not valid.
+    ///
+    /// # Errors
+    ///
+    /// [`RequirementsError::BadDisk`] when `disk-gib` is not a whole number of GiB whose
+    /// size in bytes fits 64 bits; [`RequirementsError::BadExec`] when `exec` is not a
+    /// mode name. `disk-gib=0` is valid and asks for nothing.
+    pub fn try_from_request(request: &Request) -> Result<Self, RequirementsError> {
+        let caps = &request.capabilities;
+        let disk_bytes = caps
+            .get(DISK_GIB_KEY)
+            .map(|text| {
+                let bad = || RequirementsError::BadDisk(text.clone());
+                let gib: u64 = text.parse().map_err(|_| bad())?;
+                gib.checked_mul(GIB).ok_or_else(bad)
+            })
+            .transpose()?;
+        let exec = caps
+            .get(EXEC_KEY)
+            .map(|text| {
+                text.parse::<ExecMode>()
+                    .map_err(|_| RequirementsError::BadExec(text.clone()))
+            })
+            .transpose()?;
+        Ok(Self {
+            resources: request.resources.clone(),
+            disk_bytes,
+            os: caps.get(OS_KEY).cloned(),
+            arch: caps.get(ARCH_KEY).cloned(),
+            exec,
+        })
     }
 }
 
@@ -201,8 +255,8 @@ mod tests {
     }
 
     /// Asserts that `os` and `arch` come from the capabilities a request requires, that
-    /// the resources are the request's, and that disk and mode stay unset: the request
-    /// cannot carry them.
+    /// the resources are the request's, and that a request that names no disk or mode
+    /// leaves both unset.
     #[test]
     fn requirements_read_os_and_arch_from_the_request() {
         let wanted = Requirements::from_request(&request(&[
@@ -229,6 +283,58 @@ mod tests {
         let arch_only = Requirements::from_request(&request(&[("arch", "aarch64")]));
         assert_eq!(arch_only.os, None);
         assert_eq!(arch_only.arch.as_deref(), Some("aarch64"));
+    }
+
+    /// Asserts that `disk-gib` becomes bytes and `exec` a mode, each on its own, that an
+    /// exact edge of the byte range is accepted, and that `disk-gib=0` is a requirement
+    /// of nothing rather than an absence.
+    #[test]
+    fn disk_and_mode_come_from_the_request() {
+        let both = Requirements::from_request(&request(&[
+            (DISK_GIB_KEY, "50"),
+            (EXEC_KEY, "sandbox-exec"),
+        ]));
+        assert_eq!(both.disk_bytes, Some(50 << 30));
+        assert_eq!(both.exec, Some(ExecMode::SandboxExec));
+        let disk = Requirements::from_request(&request(&[(DISK_GIB_KEY, "1")]));
+        assert_eq!((disk.disk_bytes, disk.exec), (Some(1 << 30), None));
+        let mode = Requirements::from_request(&request(&[(EXEC_KEY, "container")]));
+        assert_eq!(
+            (mode.disk_bytes, mode.exec),
+            (None, Some(ExecMode::Container))
+        );
+        let zero = Requirements::from_request(&request(&[(DISK_GIB_KEY, "0")]));
+        assert_eq!(zero.disk_bytes, Some(0));
+        let edge = (u64::MAX >> 30).to_string();
+        let top = Requirements::try_from_request(&request(&[(DISK_GIB_KEY, &edge)])).unwrap();
+        assert_eq!(top.disk_bytes, Some((u64::MAX >> 30) << 30));
+    }
+
+    /// Asserts that a disk that is not a whole number, is negative, or overflows bytes,
+    /// and a mode that is not named, are refused with an error that names the value, and
+    /// that `from_request` then reads them as not asked while keeping the platform.
+    #[test]
+    fn a_bad_disk_or_mode_is_refused() {
+        let over = ((u64::MAX >> 30) + 1).to_string();
+        for text in ["", "-1", "1.5", "ten", over.as_str()] {
+            let err = Requirements::try_from_request(&request(&[(DISK_GIB_KEY, text)]));
+            assert_eq!(err, Err(RequirementsError::BadDisk(text.to_owned())));
+        }
+        for text in ["", "Container", "native"] {
+            let err = Requirements::try_from_request(&request(&[(EXEC_KEY, text)]));
+            assert_eq!(err, Err(RequirementsError::BadExec(text.to_owned())));
+        }
+        let said = RequirementsError::BadExec("x".into()).to_string();
+        assert!(said.contains("container or sandbox-exec"), "{said}");
+        let said = RequirementsError::BadDisk("x".into()).to_string();
+        assert!(said.contains("disk-gib"), "{said}");
+        let lenient = Requirements::from_request(&request(&[
+            (DISK_GIB_KEY, "ten"),
+            (EXEC_KEY, "native"),
+            ("os", "macos"),
+        ]));
+        assert_eq!((lenient.disk_bytes, lenient.exec), (None, None));
+        assert_eq!(lenient.os.as_deref(), Some("macos"));
     }
 
     /// Asserts that a reference with a digest parses, keeps the name (tag included) and
