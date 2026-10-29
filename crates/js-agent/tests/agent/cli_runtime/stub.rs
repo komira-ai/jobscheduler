@@ -154,6 +154,8 @@ fn cli_runtime_argv_snapshot() {
             "core=0",
             "--ipc",
             "private",
+            "--cgroupns",
+            "private",
             "--sysctl",
             "net.ipv6.conf.all.disable_ipv6=1",
             "--pull",
