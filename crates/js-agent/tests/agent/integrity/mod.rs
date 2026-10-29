@@ -5,6 +5,7 @@
 mod checks;
 mod lifecycle;
 mod mapped;
+mod noise;
 mod proc;
 mod rules;
 

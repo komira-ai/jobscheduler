@@ -38,7 +38,7 @@ fn a_leftover_process_in_the_mapped_range_is_found() {
             100,
             uid,
             900,
-            "0::/system.slice/leftover.service",
+            "0::/machine.slice/libpod-9e1.scope",
         ));
         let found = after(&mut checks, "r1").unwrap_err();
         assert_eq!(
@@ -73,7 +73,7 @@ fn a_process_outside_the_mapped_range_is_not_found() {
             100,
             uid,
             900 + u64::from(pid),
-            "0::/user.slice",
+            "0::/machine.slice/libpod-9e1.scope",
         ));
     }
     assert!(after(&mut checks, "r1").is_ok());
@@ -100,12 +100,24 @@ fn the_checks_use_the_resolved_range_and_never_read_the_id_files() {
     host.set_file("/etc/subuid", "jobmap:900000:65536\n");
     host.set_file("/etc/subgid", "jobmap:900000:65536\n");
     let mut checks = started(&host);
-    host.start_process(process(720, 100, 900_000 + 5, 900, "0::/user.slice"));
+    host.start_process(process(
+        720,
+        100,
+        900_000 + 5,
+        900,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     assert!(
         after(&mut checks, "r1").is_ok(),
         "the files' range is not watched"
     );
-    host.start_process(process(721, 100, START + 5, 901, "0::/user.slice"));
+    host.start_process(process(
+        721,
+        100,
+        START + 5,
+        901,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     assert!(after(&mut checks, "r2").is_err(), "the resolved range is");
 }
 
