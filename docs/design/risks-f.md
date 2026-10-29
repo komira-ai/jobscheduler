@@ -45,7 +45,7 @@ Moved from design.md section 16 to keep that file under its size limit; K1 to K1
   hosts only at the pace of a kbf host release and the coordinator's slots and gates, and a jobscheduler release faster than kbf's is held
   back by kbf's. Accepted while every agent runs kbf. Mitigated by the server refusing an agent major it does not speak (D44), so a host
   left behind fails closed and visibly; the triggers that end the coupling are in D45 and [rollout.md](rollout.md).
-- **K36. The host updater has one signer.** *(Still open and now a precondition: kbf republishes the agent under its own signer before any production install; [kbf-on-js-agent.md](kbf-on-js-agent.md) D5.)* The kbf helper verifies a package against kbf's release signer only. A jobscheduler release
+- **K36. The host updater has one signer.** *(Still open and now a precondition: kbf republishes the agent under its own signer before any production install; [kbf-on-js-agent.md](kbf-on-js-agent.md) D4.)* The kbf helper verifies a package against kbf's release signer only. A jobscheduler release
   signed by another key is not installable by it, and widening the trust (a second signer, or one shared signer) widens who can put code
   on every host. Not solved by this design: it is a security decision for the owner before any option that ships jobscheduler packages
   through the helper (D45). Until then the agent ships only inside the kbf package.

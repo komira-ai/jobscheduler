@@ -22,7 +22,8 @@ and correct or add to it. The design that uses them is [kbf-on-js-agent.md](kbf-
   (`packaging/linux/units/kbf-storage-and-daemon.service`; `docs/deploy/kbf-units.md:383-388`). Action-cache writes are accepted only from the
   daemon role (`crates/kbf-front/src/cache.rs:672-684`).
 - **tierstore** (`crates/tierstore`) is a stateless S3 proxy over two S3 backends with a reconciler; it is deployed nowhere and no kbf crate
-  depends on it. `kbf-pack` is wired into the frontend and daemon behind flags that default off (kbf#1706, #1710, #1747, #1750).
+  depends on it. It refuses presigned (query-string) requests today; the build-output write path needs them (kbf#1922). The owner has decided it goes on
+  the storage nodes with Silo as its hot tier ([kbf-on-js-agent.md](kbf-on-js-agent.md) section 6.2). `kbf-pack` is wired into the frontend and daemon behind flags that default off (kbf#1706, #1710, #1747, #1750).
 
 ## 4.1 Scheduler core
 `crates/kbf-sched` is a pure, single-threaded state machine: no async, network, clock, randomness or hashed collections

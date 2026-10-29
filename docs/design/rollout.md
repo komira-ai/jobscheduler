@@ -29,9 +29,11 @@ The facts below are from kbf at commit `89af8f2ef` and describe the coordinator 
 |---|---|---|
 | kbf frontends with the embedded jobscheduler libraries | kbf's update coordinator, service `kbf` | The libraries are a git dependency at one revision, raised by a pull request of its own in kbf (`Cargo.toml`). The embedded server version is whatever kbf pins. |
 | `js-agent` | kbf's update coordinator, service `js-agent`, `after = ["kbf"]` | A service defined in the coordinator's services file. The agent ships from jobscheduler's release; until the signer decision below it is republished under kbf's signer. |
-| `job-io` and the phase images | kbf | Digest-pinned; the frontend names the digest in each task. The image for frontend N is on every host before N places work. |
+| Fetch and action images | kbf (fetch image), the job (action) | Digest-pinned; the frontend names the digest in each task. The fetch image for frontend N is on every host before N places work (nothing to stage if the design's D2 chooses an agent-side fetch). |
+| Tierstore front | kbf's release workflow | A tarball and example unit, not started at install and not managed by the host updater. Its presigned-PUT verifier is rolled before the frontend that mints for it. |
+| Hot and cold Silo | the operator | A pinned Silo release under systemd; the update and rollback path is the storage design's. |
 | Elastic machines | not updated | A machine launched by an elastic provider boots the current pinned agent, so scale-up is its update path; an old machine leaves by the idle rule (5.10). |
-| Macs | the Mac helper | Until a Mac task runtime exists the Macs stay on the kbf daemon. |
+| Macs | the Mac helper | Until a Mac task runtime exists the Macs stay on the kbf daemon. Task bundles and the VM base are OCI artifacts pinned by digest in the signed release manifest and written to a root-owned allow file by the updater. |
 
 **D42: the coordinator is already multi-service, and `js-agent` is one of its services.** The earlier decision not to generalise it rested on
 every agent shipping inside the kbf package. That premise is gone: the agent is a separate service with its own release.
@@ -39,7 +41,7 @@ every agent shipping inside the kbf package. That premise is gone: the agent is 
 ## Version compatibility
 
 Things that talk across a version boundary: the agent and the embedded server (the agent wire, 10.3), kbf frontends of version N and N-1 on
-one shared Postgres, and a task spec and the `job-io` image it names. The rules (D44):
+one shared Postgres, a task spec and the fetch image it names, and the agent's pack writer and the frontend's pack verifier. The rules (D44):
 
 1. **Protocol majors, additive fields inside a major.** A change inside a major is an optional field (R3); an old peer skips what it does not
    know. A new major is a new package or service that runs beside the old one until no peer uses the old (10.3).
@@ -49,9 +51,11 @@ one shared Postgres, and a task spec and the `job-io` image it names. The rules 
 3. **The server refuses an agent major it does not speak.** A `Hello` whose major is unknown gets a `Welcome` with a refusal code (5.8); the
    agent exits with status 2 and keeps its containers for adoption, so a host left behind fails closed and visibly (K35).
 4. **Security fields are gated on `Hello.capabilities`, never on version text.** An old receiver silently ignores unknown fields, so a field
-   that carries a secret or a network profile is sent only to an agent that advertises it.
-5. **Task spec versus `job-io`.** The frontend names the `job-io` image digest in the task; a host without that image refuses the task with a
+   that carries a secret, a network profile or an upload grant is sent only to an agent that advertises it. An old agent that ignores `upload` returns no upload outcome, which the frontend treats as a failed action, never as "no outputs".
+5. **Task spec versus the fetch image.** The frontend names the fetch image digest in the task; a host without that image refuses the task with a
    plain constant code. This replaces the version-pair check between the agent and an executor.
+6. **One pack format, one crate.** The agent writes and the frontend verifies the same `js-pack-format`. The frontend verifies versions N and N-1,
+   the agent advertises the versions it writes in `Hello`, and the frontend sends an upload grant only to a compatible agent.
 
 ## Rollout order
 
@@ -80,6 +84,6 @@ digest; no rollback needs a format change, because formats change additively (R3
 
 ## What stays open
 
-The storage branch, the credential holder, the Mac default and packaging, the elastic provisioner's home, and the other decisions are in
+The storage branch (tierstore with Silo, presigned-PUT writes) and the Mac packaging direction are decided; the credential holder, the fetch step, the Mac default, the elastic provisioner's home, and the other remaining decisions are in
 [kbf-on-js-agent.md](kbf-on-js-agent.md), section 15. Deploying a service, installing a package on hosts and any registry upload are
 operator acts that need the project owner's go for that action (R7).

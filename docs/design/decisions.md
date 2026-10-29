@@ -186,7 +186,7 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
 > [rollout.md](rollout.md). The premises they rest on, a separate jobscheduler server, a trusted `kbf-executor` and `js-agent` shipping
 > inside the one kbf host package, no longer hold. The replacements: D42 the coordinator is already multi-service and `js-agent` is a
 > service; D43 the order is the kbf service (storage, daemons, frontends) and then `js-agent` with `after = ["kbf"]`; D44 compatibility by
-> protocol major, additive fields and capability gating, with the version-pair check replaced by task spec versus `job-io`; D45 the triggers
+> protocol major, additive fields and capability gating, with the version-pair check replaced by task spec versus the fetch image; D45 the triggers
 > in rollout.md, with the signer decision (K36) taken before any production install. The original text is kept above as history.
 - **D46. Giving a whole node is a lease class of its own. Direction settled by the project owner; the rules are chosen here.** (a) A large
   resource request under `Book` or `BookAll`; (b) a class `whole-node` with its own admission `Whole`: exclusive, quiet, reserved by a
