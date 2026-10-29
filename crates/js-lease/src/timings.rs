@@ -30,9 +30,12 @@ struct Seen {
     timed: u64,
     slow: u64,
     longest: Duration,
+    /// Steps begun and neither finished nor dropped.
+    in_flight: u64,
 }
 
-/// A step being timed; [`Timer::finish`] records it.
+/// A step being timed: in flight until [`Timer::finish`] records it or the timer is
+/// dropped (a cancelled future drops it), either of which ends the flight.
 #[derive(Debug)]
 pub struct Timer {
     timings: Timings,
@@ -50,7 +53,12 @@ impl Timings {
     }
 
     /// Starts timing a step of the table called `operation`.
+    ///
+    /// `operation` is a name from a small fixed set; the record keeps one entry per
+    /// name for the life of the process, so a name built from request data would grow
+    /// it without bound.
     pub fn begin(&self, operation: &'static str) -> Timer {
+        self.update(operation, |seen| seen.in_flight += 1);
         Timer {
             timings: self.clone(),
             operation,
@@ -58,20 +66,35 @@ impl Timings {
         }
     }
 
+    fn update(&self, operation: &'static str, change: impl FnOnce(&mut Seen)) {
+        let mut all = self.0.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        change(all.entry(operation).or_default());
+    }
+
     /// What was timed, one operation after another in name order, for example
     /// `renew: 3 timed, 1 over 1 s, longest 1500 ms`; `no lease steps timed` when
-    /// nothing was.
+    /// nothing was. A step that has begun and not ended is counted as `in flight`, shown
+    /// only while there is one.
     pub fn report(&self) -> String {
         let seen = self.0.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        if seen.is_empty() {
-            return "no lease steps timed".to_string();
-        }
         let line = |(operation, seen): (&&str, &Seen)| {
             let (timed, slow) = (seen.timed, seen.slow);
             let longest = seen.longest.as_millis();
-            format!("{operation}: {timed} timed, {slow} over 1 s, longest {longest} ms")
+            let mut text =
+                format!("{operation}: {timed} timed, {slow} over 1 s, longest {longest} ms");
+            if seen.in_flight > 0 {
+                text.push_str(&format!(", {} in flight", seen.in_flight));
+            }
+            text
         };
-        seen.iter().map(line).collect::<Vec<_>>().join("; ")
+        let lines: Vec<String> = (seen.iter())
+            .filter(|(_, seen)| seen.timed + seen.in_flight > 0)
+            .map(line)
+            .collect();
+        match lines.is_empty() {
+            true => "no lease steps timed".to_string(),
+            false => lines.join("; "),
+        }
     }
 }
 
@@ -84,15 +107,17 @@ impl Timer {
             let (operation, took_ms) = (self.operation, took.as_millis());
             warn!(%operation, took_ms, "slow lease step");
         }
-        let mut all = self
-            .timings
-            .0
-            .seen
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let seen = all.entry(self.operation).or_default();
-        seen.timed += 1;
-        seen.slow += u64::from(slow);
-        seen.longest = seen.longest.max(took);
+        self.timings.update(self.operation, |seen| {
+            seen.timed += 1;
+            seen.slow += u64::from(slow);
+            seen.longest = seen.longest.max(took);
+        });
+    }
+}
+
+impl Drop for Timer {
+    fn drop(&mut self) {
+        self.timings
+            .update(self.operation, |seen| seen.in_flight -= 1);
     }
 }

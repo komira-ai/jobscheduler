@@ -117,7 +117,8 @@
 //! the table's lock under `wait-` and the call's name. A step that takes over one second
 //! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
 //! operation and `took_ms`. [`Timings::report`] gives, per operation, how many steps were
-//! timed, how many took over a second and the longest, whether or not any was slow.
+//! timed, how many took over a second and the longest, whether or not any was slow, and
+//! how many have begun and not ended (a step stuck at this moment).
 //!
 //! # The lock
 //!
