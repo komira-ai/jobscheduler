@@ -171,6 +171,29 @@ async fn exec_none_admits_hosts_without_the_contract_and_the_floor_still_holds()
     assert_eq!(reply.json(), json!({ "error": "shape-not-accepted" }));
 }
 
+/// Asserts that a pool with no join token file admits no host with a token that every
+/// host would share: the join token of the other tests is refused 401, as is the client
+/// token, and a tick that has no token file to read again goes by. It catches a pool that
+/// admits a shared token it was never given.
+#[tokio::test]
+async fn a_pool_without_a_join_token_file_admits_no_shared_token() {
+    let scratch = Scratch::new("serve_no_join_file");
+    let pool = PoolText::elastic(&scratch)
+        .set("name", &quote("burst"))
+        .set("class", &quote("gpu-host"))
+        .set("exec", &quote("none"));
+    let text = file(&server_with_agents(&scratch), &[&pool]);
+    let config = load(&scratch, &text).unwrap();
+    let h = Harness::over(scratch, config).await;
+    h.ticks.step().await;
+    let agent = h.running.agent_addr().unwrap();
+    for token in [JOIN, TOKEN] {
+        let hello = hello("h1", "nvidia-a10", &[]);
+        let reply = call(agent, "POST", "/v1/agent/hello", token, &hello).await;
+        assert_eq!(reply.status, 401, "{}", reply.body);
+    }
+}
+
 /// A certificate for the wildcard test and its key, as PEM text.
 fn identity() -> (String, String) {
     let names = vec!["127.0.0.1".to_string()];

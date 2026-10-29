@@ -742,18 +742,7 @@ impl Elastic<'_> {
         let resources = resources.map_err(|err| s.fail("provider", err))?;
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = PoolConfig::new(id, class.clone(), shape, max);
-        let pool = match exec {
-            Some(mode) => pool.with_exec(mode),
-            None => pool,
-        };
-        let pool = match class.admission() {
-            Admission::Whole => {
-                let whole = pool.with_whole_node(WholeNodeConfig::dedicated(max));
-                whole.map_err(|err| s.fail("class", err))?
-            }
-            _ => pool,
-        };
+        let pool = registry_pool(s, id, &class, shape, max, exec)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             launch,
@@ -767,6 +756,31 @@ impl Elastic<'_> {
             provider: built.provider,
         };
         Ok(Registering { plan, pool, tokens })
+    }
+}
+
+/// The registry's pool for an elastic pool of `class`: `max` machines, the floor `shape`,
+/// the host contract of `exec` when the pool asks for one, and, for a whole-node class,
+/// the settings of a dedicated pool.
+fn registry_pool(
+    s: &Section,
+    id: ProviderId,
+    class: &ResourceClass,
+    shape: Shape,
+    max: usize,
+    exec: Option<ExecMode>,
+) -> Result<PoolConfig, StartupError> {
+    let pool = PoolConfig::new(id, class.clone(), shape, max);
+    let pool = match exec {
+        Some(mode) => pool.with_exec(mode),
+        None => pool,
+    };
+    match class.admission() {
+        Admission::Whole => {
+            let whole = pool.with_whole_node(WholeNodeConfig::dedicated(max));
+            whole.map_err(|err| s.fail("class", err))
+        }
+        _ => Ok(pool),
     }
 }
 
@@ -809,6 +823,27 @@ mod tests {
 
     use super::*;
     use crate::kinds::OwnerOnlyFiles;
+
+    /// Asserts that a whole-node pool of no machines is refused naming the pool and
+    /// `class`, with the registry's own reason, and that a pool of machines is built. It
+    /// catches a dedicated pool whose settings are dropped when the registry refuses them.
+    #[test]
+    fn a_dedicated_pool_of_no_machines_is_refused_naming_the_class() {
+        let section = Section::open(toml::Table::new(), "pool \"x\": ");
+        let floor = Resources::new(1000, 1 << 30, 0, None).unwrap();
+        let shape = Shape::new(floor, BTreeMap::new());
+        let id = || ProviderId::new("x").unwrap();
+        let whole = ResourceClass::whole_node();
+        let refused = registry_pool(&section, id(), &whole, shape.clone(), 0, None);
+        let said = refused.err().unwrap().to_string();
+        assert!(said.starts_with("pool \"x\": class: "), "{said}");
+        assert!(said.ends_with("must be at least 1"), "{said}");
+        let built = registry_pool(&section, id(), &whole, shape, 2, None).unwrap();
+        assert_eq!(
+            built.whole_node().map(|whole| whole.max_whole_node),
+            Some(2)
+        );
+    }
 
     /// A class that books part of a host, which no name stands for today.
     fn mixed(id: ClassId) -> ResourceClass {

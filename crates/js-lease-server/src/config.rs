@@ -594,26 +594,34 @@ pub(crate) fn read_private(path: &Path, flag: &'static str) -> Result<Vec<u8>, S
 /// and the checks are on what it leads to. The reason names the path and never the
 /// content.
 pub(crate) fn read_private_reason(path: &Path) -> Result<Vec<u8>, String> {
+    match open_private(path) {
+        Ok(read) => read,
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
+}
+
+/// [`read_private_reason`] with the system's failures on the outside: a file that could
+/// not be opened, inspected or read, and inside it the refusal a file earns by what it
+/// is.
+fn open_private(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
     let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
-    let opened = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(nonblocking)
-        .open(path);
-    let mut file = opened.map_err(|err| format!("{}: {err}", path.display()))?;
-    let meta = file.metadata().map_err(|err| err.to_string())?;
+        .open(path)?;
+    let meta = file.metadata()?;
     let mode = meta.permissions().mode() & 0o777;
     let euid = geteuid().as_raw();
     if !trusted_private_file(meta.is_file(), mode, meta.uid(), euid) {
-        return Err(format!(
+        return Ok(Err(format!(
             "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
             path.display(),
             meta.uid()
-        ));
+        )));
     }
     let mut bytes = Vec::new();
-    let read = file.read_to_end(&mut bytes);
-    read.map_err(|err| err.to_string())?;
-    Ok(bytes)
+    file.read_to_end(&mut bytes)?;
+    Ok(Ok(bytes))
 }
 
 /// Reads the token from the file `--token-file` names, see [`read_private`].
