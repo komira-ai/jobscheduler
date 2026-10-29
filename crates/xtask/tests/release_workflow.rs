@@ -86,18 +86,32 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
 #[test]
 fn a_push_to_main_is_the_only_releasing_trigger() {
     let text = workflow();
-    assert!(
-        text.contains("\non:\n  push:\n    branches: [main]\n  pull_request:\n    paths: ['.github/workflows/release.yml']\n"),
-        "{text}"
+    // The whole trigger block: nothing else starts a run.
+    let on = text
+        .split_once("\non:\n")
+        .and_then(|(_, rest)| rest.split_once("\npermissions:"))
+        .map(|(on, _)| on)
+        .expect("on block");
+    assert_eq!(
+        on,
+        "  push:\n    branches: [main]\n  pull_request:\n    paths: ['.github/workflows/release.yml']\n"
     );
-    for forbidden in ["workflow_run", "workflow_dispatch", "schedule:", "tags:"] {
-        assert!(
-            !text.lines().any(|l| l.trim_start().starts_with(forbidden)),
-            "{forbidden}"
-        );
-    }
     assert!(text.contains("\n  COMMIT: ${{ github.sha }}\n"));
     assert!(!text.contains("workflow_run."));
+    // The dry run still builds: with the wait skipped, the build and the sums run on the
+    // plan's word alone.
+    for name in ["build", "sums"] {
+        let ifs: Vec<&String> = job(&jobs(&text), name)
+            .iter()
+            .filter(|l| l.starts_with("    if:"))
+            .collect();
+        assert_eq!(ifs.len(), 1, "{name}");
+        assert!(
+            ifs[0].contains("!cancelled() && needs.plan.outputs.release == 'true'"),
+            "{name}: {}",
+            ifs[0]
+        );
+    }
     let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
     let jobs = jobs(&text);
     for name in [

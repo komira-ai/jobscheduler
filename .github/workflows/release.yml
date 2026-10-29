@@ -158,7 +158,9 @@ jobs:
 
   build:
     needs: [plan]
-    if: ${{ needs.plan.outputs.release == 'true' }}
+    # `!cancelled()`: on a pull request the wait before `plan` is skipped, and a skipped job
+    # upstream would otherwise skip this one.
+    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' }}
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -272,6 +274,7 @@ jobs:
   # One SHA256SUMS over every asset, checked before anything is attested or published.
   sums:
     needs: [plan, build]
+    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
