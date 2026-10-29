@@ -19,7 +19,7 @@
 //! and [`Recorder::node_minutes_due`] has nothing to drain.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use js_types::{HostId, LeaseId};
 
@@ -44,6 +44,10 @@ pub const MAX_SEEN_PER_HOST: usize = 96 * 64;
 
 /// The most lease clocks remembered per node, four times what one reading carries.
 pub const MAX_CLOCKS_PER_HOST: usize = 4 * 96;
+
+/// The most ended leases remembered, so that a late reading naming one is refused. Past
+/// it the least recently ended are forgotten, and a reading that late is taken as new.
+pub const MAX_ENDED_LEASES: usize = 4096;
 
 /// Why a reading was not used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -93,6 +97,9 @@ pub struct Counters {
     pub minutes_deduped: u64,
     /// Lease minutes past [`TAIL_MINUTE`], which a valid agent never sends.
     pub minutes_invalid: u64,
+    /// Lease minutes naming a lease already reported ended by [`Recorder::lease_ended`];
+    /// they are left out, so an ended lease is not counted again.
+    pub minutes_after_end: u64,
     /// Remembered `(lease, minute)` records forgotten for age or for the cap.
     pub seen_evicted: u64,
     /// Remembered lease clocks forgotten for age or for the cap.
@@ -164,6 +171,8 @@ struct HostState {
 pub struct Recorder {
     leases_only: bool,
     hosts: BTreeMap<HostId, HostState>,
+    ended: BTreeSet<LeaseId>,
+    ended_order: VecDeque<LeaseId>,
     counters: Counters,
 }
 
@@ -211,10 +220,11 @@ impl Recorder {
         };
         let leases_only = self.leases_only;
         let counters = &mut self.counters;
+        let ended = &self.ended;
         let state = match self.hosts.entry(host.clone()) {
             Entry::Vacant(slot) => {
                 let state = slot.insert(HostState::new(epoch, reading));
-                let minutes = state.take(load, now_wall_minute, counters);
+                let minutes = state.take(load, now_wall_minute, ended, counters);
                 return (refuse(counters, DropReason::NoBaseline), minutes);
             }
             Entry::Occupied(slot) => slot.into_mut(),
@@ -223,7 +233,7 @@ impl Recorder {
             *state = HostState::new(epoch, reading);
             return (
                 refuse(counters, DropReason::EpochChanged),
-                state.take(load, now_wall_minute, counters),
+                state.take(load, now_wall_minute, ended, counters),
             );
         }
         let no_minutes = |counters: &mut Counters, reason| (refuse(counters, reason), Vec::new());
@@ -266,7 +276,7 @@ impl Recorder {
         }
         (
             Observed::Accepted,
-            state.take(load, now_wall_minute, counters),
+            state.take(load, now_wall_minute, ended, counters),
         )
     }
 
@@ -309,6 +319,57 @@ impl Recorder {
         self.hosts.remove(host);
     }
 
+    /// Reports that `lease` has ended: its result was accepted and its grace beats are
+    /// over. On every host the recorder forgets the `(lease, minute)` records it holds for
+    /// it at once, without waiting for them to age out.
+    ///
+    /// The lease is then remembered as ended, and a later reading that still carries a
+    /// minute naming it adds nothing: the minute is left out of what
+    /// [`Recorder::observe`] returns and counted in [`Counters::minutes_after_end`]. Were
+    /// it not, the forgotten records would take a late repeat for new and count the lease
+    /// twice. Lease clocks are not touched. At most [`MAX_ENDED_LEASES`] ended leases are
+    /// remembered, the least recently ended forgotten first; a reading naming a lease
+    /// forgotten that way is judged as any other. Ending a lease already ended, or one the
+    /// recorder holds nothing for, forgets nothing more (the latter is still remembered as
+    /// ended). The same on a [`Recorder::leases_only`] recorder.
+    pub fn lease_ended(&mut self, lease: &LeaseId) {
+        for state in self.hosts.values_mut() {
+            let keys: Vec<(LeaseId, u16)> = state
+                .seen
+                .range((*lease, 0)..=(*lease, u16::MAX))
+                .map(|(key, _)| *key)
+                .collect();
+            for key in keys {
+                state.seen.remove(&key);
+            }
+        }
+        if self.ended.insert(*lease) {
+            self.ended_order.push_back(*lease);
+            if self.ended_order.len() > MAX_ENDED_LEASES {
+                if let Some(oldest) = self.ended_order.pop_front() {
+                    self.ended.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// How many `(lease, minute)` records are remembered for `lease`, over all nodes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn remembered_minutes(&self, lease: &LeaseId) -> usize {
+        self.hosts
+            .values()
+            .map(|state| state.seen.range((*lease, 0)..=(*lease, u16::MAX)).count())
+            .sum()
+    }
+
+    /// How many ended leases are remembered; at most [`MAX_ENDED_LEASES`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn remembered_ended(&self) -> usize {
+        self.ended.len()
+    }
+
     /// Whole minutes since `lease` started, on `host`'s own clock at its latest accepted
     /// reading, rounded down; 0 for a lease with no known start or a start after the
     /// reading.
@@ -348,7 +409,13 @@ impl HostState {
     }
 
     /// Records the lease clocks of `load` and returns its lease minutes that are new.
-    fn take(&mut self, load: &LoadIn, now: u64, counters: &mut Counters) -> Vec<MinuteIn> {
+    fn take(
+        &mut self,
+        load: &LoadIn,
+        now: u64,
+        ended: &BTreeSet<LeaseId>,
+        counters: &mut Counters,
+    ) -> Vec<MinuteIn> {
         for clock in &load.clocks {
             let entry = Clock {
                 started: clock.started_mono_usec,
@@ -361,6 +428,10 @@ impl HostState {
         for minute in &load.minutes {
             if minute.minute > TAIL_MINUTE {
                 counters.minutes_invalid += 1;
+                continue;
+            }
+            if ended.contains(&minute.lease) {
+                counters.minutes_after_end += 1;
                 continue;
             }
             let figures = Figures {
