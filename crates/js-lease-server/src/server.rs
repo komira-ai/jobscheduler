@@ -24,6 +24,7 @@ use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
 use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
+use crate::util::or_pending;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
 /// it the orderly way (requests in flight finish, one last tick).
@@ -274,7 +275,8 @@ impl ScalerLoop {
         let (ticks, mut due) = mpsc::channel::<Tick>(1);
         let task = tokio::spawn(async move {
             let _alive = Alive(shared);
-            while let Some(tick) = due.recv().await {
+            loop {
+                let tick = or_pending(due.recv().await).await;
                 scaler.tick().await;
                 tick.finish();
             }

@@ -62,9 +62,10 @@ impl Effects for Live {
 
     fn leased(&self, host: &str) -> bool {
         let (hosts, _) = self.agents.registry.snapshot();
+        let booked = |view: &HostView| [view.id.as_str() == host, view.lease.is_some()];
         hosts
             .iter()
-            .any(|view| view.id.as_str() == host && view.lease.is_some())
+            .any(|view| booked(view).into_iter().all(|holds| holds))
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {
