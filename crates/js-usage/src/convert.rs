@@ -61,11 +61,7 @@ impl TryFrom<&Fit> for Curve {
     /// is a memory-only curve. A fit holds at most 64 points by construction; the limit
     /// is checked anyway and is never cut to fit.
     fn try_from(fit: &Fit) -> Result<Self, CurveTooLong> {
-        if fit.cores_learned {
-            Curve::new(fit.points.clone(), fit.runs)
-        } else {
-            Curve::memory_only(fit.points.clone(), fit.runs)
-        }
+        Curve::new(fit.points.clone(), fit.runs)
     }
 }
 
