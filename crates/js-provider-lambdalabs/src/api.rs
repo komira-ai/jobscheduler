@@ -38,7 +38,7 @@ pub trait LambdaApi: Send + Sync {
     /// Launches one instance. The answer lists the ids the API says it started; a lost
     /// answer is an error even though the instance may exist, so the caller lists before
     /// it asks again. The call checks nothing about what it launches: the guards live in
-    /// [`Elastic`](crate::Elastic).
+    /// [`LambdaProvider`](crate::LambdaProvider).
     ///
     /// # Errors
     ///
@@ -48,8 +48,7 @@ pub trait LambdaApi: Send + Sync {
     /// Asks the API to terminate one instance (one id per call: a bad id in a batch may
     /// fail the whole call). The answer lists the ids the API says it terminated, which
     /// may be none; it is not proof that the instance is gone. The call does not check
-    /// that the instance is the caller's: [`Elastic::release`](crate::Elastic::release)
-    /// does.
+    /// that the instance is the caller's: the provider's release does.
     ///
     /// # Errors
     ///

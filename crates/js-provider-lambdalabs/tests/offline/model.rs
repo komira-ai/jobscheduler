@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use js_provider_lambdalabs::{ApiError, ErrorCode, InstanceId, Status};
+use js_provider_lambdalabs::{ApiError, ErrorCode, InstanceId};
 
 #[test]
 fn an_instance_id_is_a_path_safe_token() {
@@ -14,33 +14,6 @@ fn an_instance_id_is_a_path_safe_token() {
         let err = InstanceId::new(bad).unwrap_err();
         assert!(err.to_string().contains("instance id"), "{bad:?}");
     }
-}
-
-#[test]
-fn every_documented_status_has_a_variant_and_any_other_is_unknown() {
-    let documented = [
-        ("booting", Status::Booting),
-        ("active", Status::Active),
-        ("unhealthy", Status::Unhealthy),
-        ("terminated", Status::Terminated),
-        ("terminating", Status::Terminating),
-        ("preempted", Status::Preempted),
-    ];
-    for (text, status) in documented {
-        assert_eq!(Status::parse(text), status);
-    }
-    assert_eq!(
-        Status::parse("Active"),
-        Status::Unknown("Active".to_owned())
-    );
-    assert_eq!(
-        Status::parse("a b\u{7}c"),
-        Status::Unknown("abc".to_owned())
-    );
-    let Status::Unknown(long) = Status::parse(&"s".repeat(100)) else {
-        panic!("not unknown");
-    };
-    assert_eq!(long.len(), 40);
 }
 
 #[test]

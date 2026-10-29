@@ -3,7 +3,8 @@
 
 use std::time::Duration;
 
-use js_provider_lambdalabs::{ApiError, Call, Status, TerminateEffect};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{ApiError, Call, TerminateEffect};
 
 use crate::rig::{FIRST, Rig, TestRemote};
 
@@ -22,7 +23,7 @@ fn the_boot_deadline_forces_teardown() {
         "{out}"
     );
     assert_eq!(rig.clock_secs(), 60);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert!(out.contains("STOP: the run did not finish its check; the instance is terminated"));
 }
 
@@ -36,7 +37,7 @@ fn the_wall_clock_cap_forces_teardown_before_a_later_boot_deadline() {
         "{out}"
     );
     assert_eq!(rig.clock_secs(), 30);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -51,7 +52,7 @@ fn the_spend_cap_from_the_api_price_forces_teardown() {
         "{out}"
     );
     assert_eq!(rig.clock_secs(), 50);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -89,7 +90,7 @@ fn a_cap_reached_by_the_time_the_instance_is_active_skips_the_ssh_check() {
         out.contains("teardown forced: the wall-clock cap is reached"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -129,7 +130,7 @@ fn a_termination_that_never_shows_is_tried_a_bounded_number_of_times() {
         .count();
     // One poll pause before the deadline, then four pauses between five tries.
     assert_eq!(pauses, 1 + 4);
-    assert_ne!(rig.status_of(FIRST), Status::Terminating);
+    assert_ne!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -145,7 +146,7 @@ fn a_termination_that_fails_twice_is_retried_and_confirmed_on_the_third_try() {
     );
     assert_eq!(status, 0, "{out}");
     assert_eq!(rig.fake.count(Call::Terminate), 3);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]

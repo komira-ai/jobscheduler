@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use crate::own::SchedulerId;
+use js_elastic::SchedulerId;
 
 /// Whether launches are sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

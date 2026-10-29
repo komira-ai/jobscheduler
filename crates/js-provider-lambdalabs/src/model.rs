@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use js_elastic::{HostRef, HostStatus};
 use time::OffsetDateTime;
 
 /// The id of an instance: 1 to 64 ASCII letters, digits, `-` or `_`. It becomes a path
@@ -41,47 +42,16 @@ impl InstanceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The id as the scheduler knows the machine.
+    pub fn host_ref(&self) -> HostRef {
+        HostRef(self.0.clone())
+    }
 }
 
 impl fmt::Display for InstanceId {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         out.write_str(&self.0)
-    }
-}
-
-/// An instance's status. A value the API adds later reads as [`Status::Unknown`]; one
-/// unknown value never fails a list.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
-    /// Starting.
-    Booting,
-    /// Up.
-    Active,
-    /// Up and failing its health check.
-    Unhealthy,
-    /// Gone.
-    Terminated,
-    /// Being terminated.
-    Terminating,
-    /// Reclaimed by Lambda. Whether it still bills is not documented.
-    Preempted,
-    /// A status this crate does not know, printable ASCII only and shortened. Treat it as
-    /// an instance that exists and may bill.
-    Unknown(String),
-}
-
-impl Status {
-    /// The status named by `text`.
-    pub fn parse(text: &str) -> Self {
-        match text {
-            "booting" => Self::Booting,
-            "active" => Self::Active,
-            "unhealthy" => Self::Unhealthy,
-            "terminated" => Self::Terminated,
-            "terminating" => Self::Terminating,
-            "preempted" => Self::Preempted,
-            other => Self::Unknown(crate::error::plain(other, 40)),
-        }
     }
 }
 
@@ -159,7 +129,7 @@ pub struct Instance {
     /// The name, when one was set.
     pub name: Option<String>,
     /// The status.
-    pub status: Status,
+    pub status: HostStatus,
     /// The region's code.
     pub region: String,
     /// The instance type's name.

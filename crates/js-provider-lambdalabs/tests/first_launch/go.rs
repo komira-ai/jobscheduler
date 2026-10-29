@@ -5,7 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Status, Tag};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{ACQUIRE_TAG, ApiError, Call, ErrorCode, SCHEDULER_TAG, Tag};
 
 use crate::rig::{FIRST, Rig, TestRemote, activate, id};
 
@@ -150,7 +151,7 @@ fn a_launch_goes_active_runs_the_ssh_check_and_terminates() {
         out.contains("STOP: paste back everything printed above"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert_eq!(rig.fake.count(Call::Terminate), 1);
 }
 
@@ -178,7 +179,7 @@ fn without_ssh_flags_nothing_is_run_on_the_instance() {
         !out.contains("ssh output") && !out.contains("ssh check failed"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -194,7 +195,7 @@ fn a_failed_ssh_check_still_terminates_and_fails_the_run() {
     );
     assert!(out.contains("result: terminated"));
     assert!(out.contains("STOP: the run did not finish its check; the instance is terminated"));
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -205,13 +206,13 @@ fn an_instance_without_a_public_address_cannot_be_asked() {
     let remote = TestRemote::answering(Ok(String::new()));
     let (status, out) = rig.exec_with(
         &args,
-        &|_| fake.set_status(&id(FIRST), Status::Active),
+        &|_| fake.set_status(&id(FIRST), HostStatus::Active),
         &remote,
     );
     assert_eq!(status, 1, "{out}");
     assert!(out.contains("the instance has no public address"), "{out}");
     assert!(remote.asked.borrow().is_empty());
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -242,7 +243,7 @@ fn a_launch_that_answers_with_several_instances_terminates_all_of_them() {
     assert!(out.contains("launched: fake0001 fake0002"), "{out}");
     assert!(rig.state_text().contains("instances=fake0001,fake0002\n"));
     for instance in rig.fake.instances() {
-        assert_eq!(instance.status, Status::Terminating, "{}", instance.id);
+        assert_eq!(instance.status, HostStatus::Terminating, "{}", instance.id);
     }
 }
 
@@ -290,7 +291,7 @@ fn a_lost_launch_answer_is_resolved_by_listing_and_the_run_goes_on() {
         "{out}"
     );
     assert_eq!(rig.fake.launched(), 1);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -320,7 +321,7 @@ fn a_state_file_that_cannot_be_updated_tears_the_instance_down_at_once() {
         out.contains("teardown forced: the state file could not be updated"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert!(rig.sleeps.borrow().is_empty(), "no wait happened");
 }
 
@@ -349,7 +350,7 @@ fn an_instance_that_ends_by_itself_forces_teardown() {
     let fake = rig.fake.clone();
     let (status, out) = rig.exec_with(
         &args,
-        &move |_| fake.set_status(&id(FIRST), Status::Preempted),
+        &move |_| fake.set_status(&id(FIRST), HostStatus::Preempted),
         &TestRemote::answering(Ok(String::new())),
     );
     assert_eq!(status, 1, "{out}");
