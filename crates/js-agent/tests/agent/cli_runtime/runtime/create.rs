@@ -145,7 +145,8 @@ fn create_builds_the_documented_argv() {
 #[test]
 fn podman_gets_cdi_devices_and_the_rest_alike() {
     let podman = Scripted::new("podman version 5.2.1");
-    let mut rt = open_with(&podman, "linux", settings());
+    let mut rt = open_with(&podman, "linux", settings())
+        .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
     let mut job = spec("r1");
     job.gpu_indices = vec![3];
     job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
@@ -185,7 +186,8 @@ fn only_a_docker_that_takes_it_gets_recursive_readonly_binds() {
         ("podman version 5.2.1", podman_readonly.as_str()),
     ] {
         let world = Scripted::new(version);
-        let mut rt = open_with(&world, "linux", settings());
+        let mut rt = open_with(&world, "linux", settings())
+            .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
         rt.create_and_start(&job).unwrap();
@@ -562,4 +564,77 @@ fn a_readonly_mount_with_a_submount_is_refused_where_it_cannot_be_recursive() {
         mountinfo_below_srv_in,
     );
     assert!(made.is_ok() && creates == 1);
+}
+
+fn mountinfo_below_escaped_names(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&[
+            "/",
+            "/srv/in\\0431/sub",
+            "/srv/a\\011b/sub",
+            "/srv/odd/\\777",
+        ]),
+        _ => None,
+    }
+}
+
+fn mountinfo_with_a_stray_backslash(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/odd/x\\"]),
+        _ => None,
+    }
+}
+
+/// Asserts that a mount point is found whatever bytes its path has: mountinfo writes a
+/// space, tab, newline, `#` and backslash as a three-digit octal escape (`\011` for a
+/// tab, `\043` for `#`), and each is read back before the path is compared; an escape
+/// that is not one byte (`\777`) or a lone backslash is kept as written. It catches a
+/// submount under a path with a tab or a `#` that is not seen because its name is still
+/// escaped, which would leave it writable below a read-only mount.
+#[test]
+fn a_submount_is_found_under_any_escaped_name() {
+    let refused = |host: &str, read: fn(&str) -> Option<String>| {
+        let world = Scripted::new("podman version 5.2.1");
+        let mut rt =
+            open_with(&world, "linux", settings()).with_proc_files(read, in_another_pid_namespace);
+        let mut job = spec("r1");
+        job.mounts = vec![mount(host, "/mnt/data/in", true)];
+        let made = rt.create_and_start(&job);
+        (
+            made.err().map(|why| why.to_string()),
+            world.calls_of("create").len(),
+        )
+    };
+    for host in ["/srv/in#1", "/srv/a\tb", "/srv/odd"] {
+        let (why, creates) = refused(host, mountinfo_below_escaped_names);
+        assert!(why.unwrap().contains("holds another mount"), "{host}");
+        assert_eq!(creates, 0, "{host}");
+    }
+    let (why, _) = refused("/srv/odd", mountinfo_with_a_stray_backslash);
+    assert!(why.unwrap().contains("holds another mount"));
+}
+
+/// Asserts that where the check applies (Podman, Docker before 25, a Linux host) a
+/// read-only mount is refused, with no `create` call, when `/proc/self/mountinfo` cannot
+/// be read, and the error says so; that a job without a read-only mount does not need
+/// the file; and that a macOS host, whose containers run in a VM the agent's mounts say
+/// nothing about, is not asked for it. It catches a check that passes when it could not
+/// look.
+#[test]
+fn an_unreadable_mountinfo_refuses_a_readonly_mount() {
+    for version in ["podman version 5.2.1", "Docker version 24.0.7, build 1"] {
+        let world = Scripted::new(version);
+        let mut rt = open_with(&world, "linux", settings());
+        let mut job = spec("r1");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        let why = rt.create_and_start(&job).unwrap_err().to_string();
+        assert!(why.contains("mountinfo"), "{version}: {why}");
+        assert!(world.calls_of("create").is_empty(), "{version}");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", false)];
+        rt.create_and_start(&job).unwrap();
+        let world = Scripted::new(version);
+        let mut rt = open_with(&world, "macos", settings());
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        rt.create_and_start(&job).unwrap();
+    }
 }
