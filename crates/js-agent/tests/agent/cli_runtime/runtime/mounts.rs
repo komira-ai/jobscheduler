@@ -3,7 +3,8 @@
 use js_agent::lifecycle::ContainerRuntime;
 
 use super::super::scripted::{Bind, Change, Scripted, Volume};
-use super::super::{docker, mount, open, open_with, settings, spec};
+use super::super::{docker, in_another_pid_namespace, mount, open, open_with, settings, spec};
+use super::create::mountinfo_beside_srv_in;
 use super::{start, strings};
 
 /// Asserts that the mounts are read back after `create` and before `start`: every bind
@@ -324,7 +325,8 @@ fn podman_binds_are_read_back_with_nosuid_and_nodev() {
     ];
     for (name, change) in cases {
         let world = Scripted::new("podman version 5.2.1");
-        let mut rt = open_with(&world, "linux", settings());
+        let mut rt = open_with(&world, "linux", settings())
+            .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
         world.tamper_options(change);
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
@@ -350,7 +352,8 @@ fn podman_binds_are_read_back_with_nosuid_and_nodev() {
         bind(r#","Options":["nosuid",5]"#),
     ] {
         let world = Scripted::new("podman version 5.2.1");
-        let mut rt = open_with(&world, "linux", settings());
+        let mut rt = open_with(&world, "linux", settings())
+            .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
         world.say_once("inspect", &printed);
         let said = rt.create_and_start(&spec("r2")).unwrap_err();
         assert_eq!(
@@ -361,7 +364,8 @@ fn podman_binds_are_read_back_with_nosuid_and_nodev() {
     }
 
     let world = Scripted::new("podman version 5.2.1");
-    let mut rt = open_with(&world, "linux", settings());
+    let mut rt = open_with(&world, "linux", settings())
+        .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
     world.tamper_options(|o| o[0].extend(["rprivate".to_owned(), "relatime".to_owned()]));
     rt.create_and_start(&spec("r3")).unwrap();
     assert_eq!(world.calls_of("start").len(), 1);

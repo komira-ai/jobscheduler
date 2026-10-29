@@ -532,7 +532,7 @@ fn mountinfo_below_srv_in(path: &str) -> Option<String> {
     }
 }
 
-fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
+pub(super) fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
     match path {
         "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in", "/srv/input", "/srv"]),
         _ => None,
