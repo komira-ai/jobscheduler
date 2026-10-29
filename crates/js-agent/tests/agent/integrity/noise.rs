@@ -2,7 +2,7 @@
 //! its operators, Podman's monitors and network namespaces. None of it is a job's, and none
 //! of it may taint the host; anything in a container's own control group still does.
 
-use js_agent::integrity::{FakeHost, Mount, code};
+use js_agent::integrity::{FakeHost, Integrity, Mount, code};
 
 use super::{after, beside, process, started};
 
@@ -63,6 +63,10 @@ fn a_process_in_a_containers_group_counts_wherever_it_is() {
         "0::/",
         "1:name=systemd:/system.slice/x.service",
         "",
+        "0::/system.slice/libpod-conmon-4f3a9c",
+        "0::/system.slice/x.service/docker",
+        "0::/system.slice/x.service/libpod_parent",
+        "0::/user.slice/user-1000.slice/machine.slice",
     ] {
         let host = FakeHost::quiet();
         let mut checks = started(&host, vec![]);
@@ -124,5 +128,81 @@ fn a_mount_near_the_hosts_own_still_counts() {
         host.mount(mount.clone());
         let found = after(&mut checks, "r1").unwrap_err();
         assert_eq!(found.code(), code::NEW_MOUNT, "{mount:?}");
+    }
+}
+
+/// Asserts that a process left in the agent's own control group, or in a group below it,
+/// still counts, though the agent's group is a service of the system slice, while one in
+/// another service, and a Podman monitor's scope below the agent's group (containers
+/// parented under the agent), do not: a child of the agent that outlives it is judged like
+/// any other process. It catches an exemption of every service, the agent's included, and
+/// a monitor counted because it sits under the agent.
+#[test]
+fn the_agents_own_service_is_not_the_hosts() {
+    for cgroup in [
+        "0::/system.slice/agent.service",
+        "0::/system.slice/agent.service/payload",
+    ] {
+        let host = FakeHost::quiet();
+        let mut checks = started(&host, vec![]);
+        host.start_process(process(300, 1, 0, 900, cgroup));
+        let found = after(&mut checks, "r1").unwrap_err();
+        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
+    }
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]);
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/libpod-conmon-4f3a9c.scope",
+    ));
+    assert!(
+        after(&mut checks, "r0").is_ok(),
+        "a Podman monitor under the agent's group"
+    );
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]);
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service-two.service",
+    ));
+    assert!(after(&mut checks, "r1").is_ok(), "another service");
+}
+
+/// Asserts that an agent that cannot read its own control group does not start, saying
+/// why. It catches checks that would exempt the agent's own service unseen.
+#[test]
+fn an_agent_that_cannot_read_its_own_control_group_does_not_start() {
+    let host = FakeHost::quiet();
+    host.remove_file("/proc/self/cgroup");
+    let why = Integrity::start(Box::new(host), super::JOB_USERS, vec![])
+        .err()
+        .unwrap();
+    assert!(
+        why.starts_with("cannot read the agent's own control group: /proc/self/cgroup"),
+        "{why}"
+    );
+}
+
+/// Asserts that an agent whose own control group names no unified path, or the root, starts
+/// and exempts no group for being its own: a service of the system slice is the host's as
+/// it is for any agent, and a process in the root group still counts. It catches a root
+/// path taken as the agent's group, which would make every process the agent's.
+#[test]
+fn an_agent_in_the_root_group_or_on_cgroup_v1_has_no_group_of_its_own() {
+    for own in ["1:name=systemd:/system.slice/agent.service\n", "0::/\n"] {
+        let host = FakeHost::quiet();
+        host.set_file("/proc/self/cgroup", own);
+        let mut checks = started(&host, vec![]);
+        host.start_process(process(300, 1, 0, 900, "0::/system.slice/agent.service"));
+        assert!(after(&mut checks, "r1").is_ok(), "{own:?}");
+        host.start_process(process(301, 1, 0, 901, "0::/"));
+        let found = after(&mut checks, "r2").unwrap_err();
+        assert_eq!(found.code(), code::DAEMONISED_CHILD, "{own:?}");
     }
 }
