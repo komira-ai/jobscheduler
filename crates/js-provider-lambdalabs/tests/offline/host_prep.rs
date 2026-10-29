@@ -39,6 +39,19 @@ fn the_default_steps_match_their_golden_file() {
     assert_eq!(shown(&steps(live(5), 512)), DEFAULT);
 }
 
+/// Asserts that the mount is written to `/etc/fstab` with `nofail`, before the mount step,
+/// so that the scratch file system is there again after a reboot.
+#[test]
+fn the_scratch_mount_is_persisted_in_fstab() {
+    let text = shown(&steps(live(5), 512));
+    let lines: Vec<&str> = text.lines().collect();
+    let at = |start: &str| lines.iter().position(|l| l.starts_with(start)).unwrap();
+    let line = "[\"sed\", \"-i\", \"-e\", \"$a /var/lib/js-agent/scratch.img /var/lib/js-agent/scratch ext4 loop,nodev,nosuid,noatime,nofail 0 0\", \"/etc/fstab\"]";
+    assert_eq!(lines[at("[\"sed\"")], line);
+    assert!(at("[\"mkfs.ext4\"") < at("[\"sed\""));
+    assert!(at("[\"sed\"") < at("[\"mount\""));
+}
+
 /// Asserts that the configured size reaches the allocation and nothing else changes.
 #[test]
 fn the_configured_size_is_the_only_difference() {
@@ -51,7 +64,7 @@ fn the_configured_size_is_the_only_difference() {
 #[test]
 fn a_disk_that_cannot_hold_the_image_and_the_reserve_gets_a_logged_failure() {
     let needed = u64::from(DEFAULT_SCRATCH_GIB) + u64::from(DISK_RESERVE_GIB);
-    assert_eq!(steps(live(5), needed).len(), 8);
+    assert_eq!(steps(live(5), needed).len(), 9);
     assert_eq!(steps(live(5), needed - 1).len(), 2);
     assert_eq!(shown(&steps(live(5), 240)), SMALL_DISK);
     // A byte short of the edge is a GiB short: sizes round down.

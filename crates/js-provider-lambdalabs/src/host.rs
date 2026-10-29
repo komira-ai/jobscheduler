@@ -16,7 +16,8 @@
 //!    configured size, allocated in full (it cannot grow into the space the state root and
 //!    the container images need) and mounted `nodev,nosuid,noatime` on the loop device.
 //!    It is not a tmpfs, which would take the memory the GPU jobs need. The agent's unit
-//!    requires this mount, so it does not start without it.
+//!    requires this mount, so it does not start without it. A line in `/etc/fstab`
+//!    (`loop,nodev,nosuid,noatime,nofail`) makes the mount come back after a reboot.
 //!
 //! Nothing is installed: a missing piece fails its step. What the stock image lacks is
 //! known only after a live run (the design's open question 5), and the steps do not guess.
@@ -31,6 +32,10 @@ pub const SCRATCH_IMAGE: &str = "/var/lib/js-agent/scratch.img";
 /// The GiB of the disk that must stay free beyond the scratch image, for the system, the
 /// container images and the agent's state.
 pub const DISK_RESERVE_GIB: u32 = 50;
+
+/// The options of the scratch mount in `/etc/fstab`: those of the mount step, and `nofail`
+/// so that a machine whose image is gone still boots.
+const FSTAB_OPTIONS: &str = "loop,nodev,nosuid,noatime,nofail";
 
 fn run(argv: &[&str]) -> BootStep {
     BootStep::Run(argv.iter().map(|arg| (*arg).to_owned()).collect())
@@ -51,6 +56,7 @@ pub(crate) fn steps(scratch_gib: u32, disk_bytes: u64) -> Vec<BootStep> {
         ];
     }
     let size = format!("{scratch_gib}G");
+    let fstab = format!("$a {SCRATCH_IMAGE} {SCRATCH_ROOT} ext4 {FSTAB_OPTIONS} 0 0");
     vec![
         run(&["nvidia-smi"]),
         run(&["test", "-x", CONTAINER_BIN]),
@@ -67,6 +73,10 @@ pub(crate) fn steps(scratch_gib: u32, disk_bytes: u64) -> Vec<BootStep> {
             "js-scratch",
             SCRATCH_IMAGE,
         ]),
+        // A line in /etc/fstab, so that the mount comes back after a reboot (the unit of
+        // the agent requires it); `nofail` lets the machine boot without it. GNU sed
+        // appends the line, and a final line without a newline gets one first.
+        run(&["sed", "-i", "-e", &fstab, "/etc/fstab"]),
         run(&[
             "mount",
             "-o",

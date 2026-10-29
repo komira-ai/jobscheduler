@@ -4,5 +4,6 @@
 ["fallocate", "-l", "200G", "--", "/var/lib/js-agent/scratch.img"]
 ["chmod", "0600", "--", "/var/lib/js-agent/scratch.img"]
 ["mkfs.ext4", "-q", "-F", "-m", "0", "-L", "js-scratch", "/var/lib/js-agent/scratch.img"]
+["sed", "-i", "-e", "$a /var/lib/js-agent/scratch.img /var/lib/js-agent/scratch ext4 loop,nodev,nosuid,noatime,nofail 0 0", "/etc/fstab"]
 ["mount", "-o", "loop,nodev,nosuid,noatime", "/var/lib/js-agent/scratch.img", "/var/lib/js-agent/scratch"]
 ["chmod", "0700", "--", "/var/lib/js-agent/scratch"]
