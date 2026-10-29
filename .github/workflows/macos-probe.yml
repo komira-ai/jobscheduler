@@ -1,7 +1,8 @@
 # What a native (sandbox-exec) runtime relies on, probed on a hosted macOS runner.
 # crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
 # expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
-# probe runs as the runner's own user; the trace file is uploaded with the report. The image is the one ci.yml's macos job runs on (macos-14).
+# probe runs as the runner's own user; the trace file is uploaded with the report.
+# The image is the one ci.yml's macos job runs on (macos-14).
 name: macos-probe
 
 on:
