@@ -8,8 +8,8 @@ use js_agent_wire::Isolation;
 
 use super::super::scripted::Scripted;
 use super::super::{
-    HOST, NAME_R1, created, docker, made_at, mount, open, open_at, open_with, platform, settings,
-    spec,
+    HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount, open, open_at,
+    open_with, platform, settings, spec,
 };
 use super::cleanup::other_agent;
 use super::{start, strings, subs};
@@ -157,7 +157,9 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     assert!(args.contains(&"--read-only".to_owned()));
     let at = args.iter().position(|a| a == "--pid").unwrap();
     assert_eq!(args[at + 1], "private");
-    assert!(args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly".to_owned()));
+    assert!(
+        args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly,nosuid,nodev".to_owned())
+    );
     assert_eq!(
         subs(&podman),
         ["--version", "create", "inspect", "start", "inspect"]
@@ -168,17 +170,19 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
 /// (version 25 and later, read from `--version`), and that an older Docker, a version the
 /// agent cannot read, and Podman are given the plain `readonly`. It catches the option
 /// sent to an engine that rejects it, which would refuse every job with a read-only mount.
+/// (Podman also gets `nosuid,nodev` on every mount; the plain `readonly` is its read-only.)
 #[test]
 fn only_a_docker_that_takes_it_gets_recursive_readonly_binds() {
     let readonly = "type=bind,src=/srv/in,dst=/mnt/data/in,readonly";
     let recursive = format!("{readonly},bind-recursive=readonly,bind-propagation=rprivate");
+    let podman_readonly = format!("{readonly},nosuid,nodev");
     for (version, expected) in [
         ("Docker version 25.0.0, build 1", recursive.as_str()),
         ("Docker version 100.1.2, build 1", recursive.as_str()),
         ("Docker version 24.0.7, build afdd53b", readonly),
         ("Docker version unknown", readonly),
         ("Docker 27", readonly),
-        ("podman version 5.2.1", readonly),
+        ("podman version 5.2.1", podman_readonly.as_str()),
     ] {
         let world = Scripted::new(version);
         let mut rt = open_with(&world, "linux", settings());
@@ -472,4 +476,90 @@ fn the_id_is_the_last_line_of_create() {
     world.preface("create", "Unable to find image locally\nPulling fs layer\n");
     let id = start(&mut rt, &world, "r1");
     assert_eq!(id.0.len(), 64);
+}
+
+/// A `/proc/self/mountinfo` with the mount points below, one line each, and no other file.
+fn mountinfo_with(points: &[&str]) -> Option<String> {
+    Some(
+        points
+            .iter()
+            .map(|point| format!("36 25 0:30 / {point} rw,relatime shared:1 - ext4 /dev/sda1 rw\n"))
+            .collect(),
+    )
+}
+
+fn mountinfo_below_srv_in(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in/sub", "/srv/input"]),
+        _ => None,
+    }
+}
+
+fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in", "/srv/input", "/srv"]),
+        _ => None,
+    }
+}
+
+fn mountinfo_below_a_name_with_a_space(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/my\\040data/sub"]),
+        _ => None,
+    }
+}
+
+/// Asserts that a read-only mount that holds another mount point is refused, before any
+/// `create`, on an engine without recursive read-only (Podman, Docker before 25), because
+/// the mount below it would stay writable; that Docker 25 and later, which makes the
+/// mount read-only all the way down, takes it; that a read-write mount, a mount whose
+/// neighbours merely share its name as a prefix, and the mount point itself are not
+/// reasons to refuse; and that a space in the path (escaped in `mountinfo`) is read. It
+/// catches a read-only operator mount with a writable submount, a prefix match on text
+/// instead of on path components, and a refusal that fires for the mount's own entry.
+#[test]
+fn a_readonly_mount_with_a_submount_is_refused_where_it_cannot_be_recursive() {
+    let try_create = |version: &str,
+                      host: &str,
+                      ro: bool,
+                      read: fn(&str) -> Option<String>|
+     -> (Result<(), String>, usize) {
+        let world = Scripted::new(version);
+        let mut rt =
+            open_with(&world, "linux", settings()).with_proc_files(read, in_another_pid_namespace);
+        let mut job = spec("r1");
+        job.mounts = vec![mount(host, "/mnt/data/in", ro)];
+        let made = rt
+            .create_and_start(&job)
+            .map(|_| ())
+            .map_err(|why| why.to_string());
+        (made, world.calls_of("create").len())
+    };
+    for version in ["podman version 5.2.1", "Docker version 24.0.7, build 1"] {
+        let (made, creates) = try_create(version, "/srv/in", true, mountinfo_below_srv_in);
+        let why = made.unwrap_err();
+        assert!(why.contains("holds another mount"), "{version}: {why}");
+        assert_eq!(creates, 0, "{version}");
+        let (made, _) = try_create(version, "/srv/in", false, mountinfo_below_srv_in);
+        assert!(made.is_ok(), "{version}: read-write is not refused");
+        let (made, _) = try_create(version, "/srv/in", true, mountinfo_beside_srv_in);
+        assert!(made.is_ok(), "{version}: no mount below it");
+        let (made, _) = try_create(
+            version,
+            "/srv/my data",
+            true,
+            mountinfo_below_a_name_with_a_space,
+        );
+        assert!(
+            made.unwrap_err().contains("holds another mount"),
+            "{version}"
+        );
+    }
+    let (made, creates) = try_create(
+        "Docker version 27.3.1, build 1",
+        "/srv/in",
+        true,
+        mountinfo_below_srv_in,
+    );
+    assert!(made.is_ok() && creates == 1);
 }

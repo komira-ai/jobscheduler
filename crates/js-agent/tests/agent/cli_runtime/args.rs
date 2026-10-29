@@ -78,13 +78,18 @@ fn limits_to_args_table() {
         ),
     ];
     for (name, job, expected) in rows {
-        for engine in [Engine::Docker, Engine::Podman] {
-            assert_eq!(
-                limits_to_args(engine, &job, true).unwrap(),
-                expected,
-                "{name}"
-            );
-        }
+        assert_eq!(
+            limits_to_args(Engine::Docker, &job, true).unwrap(),
+            expected,
+            "{name}"
+        );
+        let mut podman = expected.clone();
+        podman.last_mut().unwrap().push_str(",nosuid,nodev");
+        assert_eq!(
+            limits_to_args(Engine::Podman, &job, true).unwrap(),
+            podman,
+            "{name}"
+        );
     }
 }
 
@@ -269,6 +274,31 @@ fn mount_ro_honoured() {
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
         ]
     );
+}
+
+/// Asserts that on Podman every mount, the scratch directory first, is `nosuid,nodev`
+/// (after `readonly` where it is read-only), so a set-uid file or a device node a job
+/// leaves there has no effect; and that Docker, whose `--mount` takes no such option,
+/// gets none. It catches a scratch directory that can hold a working set-uid binary or
+/// device node, and the option sent to an engine that rejects it.
+#[test]
+fn podman_mounts_are_nosuid_nodev() {
+    let mut job = spec("r1");
+    job.mounts = vec![
+        mount("/srv/data/in", "/mnt/data/in", true),
+        mount("/srv/data/out", "/mnt/data/out", false),
+    ];
+    let args = limits_to_args(Engine::Podman, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&args),
+        [
+            "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev",
+            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,nosuid,nodev",
+            "type=bind,src=/srv/data/out,dst=/mnt/data/out,nosuid,nodev",
+        ]
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert!(!mounts_of(&docker).iter().any(|m| m.contains("nosuid")));
 }
 
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
