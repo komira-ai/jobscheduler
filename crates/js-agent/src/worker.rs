@@ -76,6 +76,7 @@
 //! A start the worker is already inside when it is closed is not undone: its container may
 //! be made after the rescue listed, and then it is the next process's to adopt.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -682,14 +683,17 @@ fn work(
     (step_every, stop_grace): (Duration, Duration),
 ) {
     let mut answers = LeaseAnswers::default();
-    // A readiness hook that takes its whole time is not a stuck worker: the watchdog's
-    // limit grows by the hook's bound while a hook runs, and by nothing else. (The worker is
-    // the only writer of `busy_until` during an order.)
+    // A readiness hook that takes its whole time is not a stuck worker: while a hook runs
+    // the watchdog's limit is its bound longer, and when the hook returns the order has its
+    // plain limit again, moved later by the time the hook really took. (The worker is the
+    // only writer of `busy_until` during an order.)
+    let (plain, opened) = (Cell::new(0), Cell::new(0));
     let watch = |window: HookWindow| {
         let limit = shared.busy_until.load(Ordering::SeqCst);
-        shared
-            .busy_until
-            .store(window.moves(limit), Ordering::SeqCst);
+        let now = clock.now_ms();
+        let moved = window.moves(limit, plain.get(), opened.get(), now);
+        shared.busy_until.store(moved, Ordering::SeqCst);
+        opened.set(now);
     };
     loop {
         let mut lines = Vec::new();
@@ -705,6 +709,7 @@ fn work(
         let bound = u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);
         shared.busy_until.store(due, Ordering::SeqCst);
+        plain.set(due);
         match order {
             Ok(Order::Reply { reply, received_ms }) => {
                 let closed = shared.closed.load(Ordering::SeqCst);

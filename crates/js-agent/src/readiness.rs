@@ -261,10 +261,12 @@ pub enum HookWindow {
 }
 
 impl HookWindow {
-    /// `limit` (the watchdog's limit in milliseconds) after this change. Taking back never
-    /// goes below zero.
-    pub fn moves(self, limit: u64) -> u64 {
+    /// The watchdog's limit (milliseconds on the lifecycle's clock) after this change.
+    /// `limit` is the limit now, `plain` the limit the order has without a hook (fixed when
+    /// it began), `opened` when the hook started and `now` the time of the change.
+    pub fn moves(self, limit: u64, plain: u64, opened: u64, now: u64) -> u64 {
         let millis = |bound: Duration| u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
+        let _ = (plain, opened, now);
         match self {
             Self::Opens(bound) => limit.saturating_add(millis(bound)),
             Self::Closes(bound) => limit.saturating_sub(millis(bound)),

@@ -241,20 +241,39 @@ fn the_watchdog_hears_of_the_hook_run_and_of_nothing_else() {
     assert_eq!(heard, Vec::<String>::new(), "taken over: no hook");
 }
 
-/// Asserts the window arithmetic: opening adds exactly the bound (in milliseconds) to the
-/// limit and closing takes exactly it back, so open then close is the identity; closing
-/// never goes below zero; opening never wraps. It catches a window that is not taken back
-/// (or taken back twice, or by a different amount) and one that wraps.
+/// Asserts the limit of the watchdog around a hook run that outlasts the plain stall bound,
+/// with the numbers of the real agent (milliseconds): the order began at 0 with a plain
+/// limit of 661_001, its checks took 1_000, the hook's bound is 1_200_000 and the hook took
+/// all of it. Opening gives the bound; closing gives the plain limit moved later by the
+/// time the hook really took (1_861_001), which is not in the past at the hook's end
+/// (1_201_000), so a worker that goes on to step and publish is not called stalled. Also:
+/// a clock that did not move takes nothing, and the sums do not wrap.
 #[test]
-fn a_closed_window_takes_back_exactly_what_the_open_one_gave() {
-    let bound = Duration::from_millis(1500);
-    for limit in [1, 61_001, u64::MAX - 1500] {
-        let open = HookWindow::Opens(bound).moves(limit);
-        assert_eq!(open, limit + 1500);
-        assert_eq!(HookWindow::Closes(bound).moves(open), limit);
-    }
-    assert_eq!(HookWindow::Closes(bound).moves(1000), 0);
-    assert_eq!(HookWindow::Opens(bound).moves(u64::MAX), u64::MAX);
+fn the_limit_after_the_hook_is_the_plain_limit_moved_by_the_hooks_own_time() {
+    let bound = Duration::from_millis(1_200_000);
+    let (plain, opened, ended) = (661_001, 1_000, 1_201_000);
+
+    let during = HookWindow::Opens(bound).moves(plain, plain, opened, opened);
+    assert_eq!(during, plain + 1_200_000);
+
+    let after = HookWindow::Closes(bound).moves(during, plain, opened, ended);
+    assert_eq!(after, 1_861_001);
+    assert!(
+        ended <= after - 1,
+        "the worker is not stalled at the hook's end"
+    );
+
+    let quick = HookWindow::Closes(bound).moves(during, plain, opened, opened);
+    assert_eq!(
+        quick, plain,
+        "a hook that took no time leaves the plain limit"
+    );
+    let back = HookWindow::Closes(bound).moves(during, plain, ended, opened);
+    assert_eq!(back, plain, "a clock that went back takes nothing");
+    let huge = HookWindow::Opens(bound).moves(u64::MAX, plain, opened, opened);
+    assert_eq!(huge, u64::MAX);
+    let edge = HookWindow::Closes(bound).moves(during, u64::MAX, opened, ended);
+    assert_eq!(edge, u64::MAX);
 }
 
 /// Asserts that a lease that ends and is granted again is prepared afresh: the ready
