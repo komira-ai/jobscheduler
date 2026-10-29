@@ -486,7 +486,7 @@ fn the_provider_prepares_the_host_and_names_its_payload_limit() {
     let rig = rig(live(5));
     let mut roomy = crate::rig::candidate("region-a");
     roomy.disk_bytes = 512 << 30;
-    assert_eq!(rig.provider.host_prep(&roomy).len(), 8);
+    assert_eq!(rig.provider.host_prep(&roomy).len(), 9);
     assert_eq!(
         rig.provider.payload_limit(),
         js_provider_lambdalabs::PAYLOAD_LIMIT
