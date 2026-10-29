@@ -115,6 +115,20 @@ async fn hello(
     one_time: Option<Extension<OneTime>>,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<Welcome>, Refused> {
+    serve_hello(&agents, who, one_time.is_some(), body, &|| ()).await
+}
+
+/// The hello route. `between` runs after a one-time token was admitted and before the
+/// registry is asked: the point at which another hello can get in. Production passes a
+/// function that does nothing; a test passes the other hello, so the interleaving is
+/// exact and no thread races on timing.
+async fn serve_hello(
+    agents: &Arc<Agents>,
+    who: Credential,
+    one_time: bool,
+    body: Result<Bytes, BytesRejection>,
+    between: &(dyn Fn() + Sync),
+) -> Result<Json<Welcome>, Refused> {
     let hello: Hello = decode(&read(body, refusal::INVALID_HELLO)?, refusal::INVALID_HELLO)?;
     hello
         .validate()
@@ -126,7 +140,7 @@ async fn hello(
     // its instance. Not when a later hello of the same host was admitted meanwhile: the
     // registry may have accepted that one, and the token then stays the host's.
     let mut fresh = false;
-    if one_time.is_some() {
+    if one_time {
         let instance = hello.instance.clone();
         let admitted = agents
             .admit_join(who.clone(), hello.host_id.clone(), instance)
@@ -137,6 +151,7 @@ async fn hello(
         })?;
         fresh = admission == Admission::Fresh;
     }
+    between();
     let welcome = match agents.registry.hello(&hello, &who) {
         Ok(welcome) => welcome,
         Err(refusal) => {
@@ -382,3 +397,7 @@ mod tests {
         assert_eq!(retry_after(Duration::MAX), u64::MAX);
     }
 }
+
+#[cfg(test)]
+#[path = "agent_api_race_tests.rs"]
+mod race_tests;

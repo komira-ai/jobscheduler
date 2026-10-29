@@ -19,16 +19,16 @@ fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
-const MINT: &str = "/v1/agent/join-tokens";
+pub const MINT: &str = "/v1/agent/join-tokens";
 
 /// `POST` of the mint route with the client token.
-async fn mint(h: &Harness, instance: &str) -> Reply {
+pub async fn mint(h: &Harness, instance: &str) -> Reply {
     let body = json!({ "provider": "lambdalabs", "instance_id": instance });
     h.call("POST", MINT, Some(&body)).await
 }
 
 /// A token minted for `instance`, which must succeed.
-async fn minted(h: &Harness, instance: &str) -> String {
+pub async fn minted(h: &Harness, instance: &str) -> String {
     let reply = mint(h, instance).await;
     assert_eq!(reply.status, 201, "{}", reply.body);
     reply.json()["token"].as_str().unwrap().to_string()
@@ -53,17 +53,17 @@ fn hello_on(host: &str, instance: &str) -> Value {
 }
 
 /// A hello with `token`.
-async fn hello(h: &Harness, token: &str, host: &str, instance: &str) -> Reply {
+pub async fn hello(h: &Harness, token: &str, host: &str, instance: &str) -> Reply {
     post(h, "/v1/agent/hello", Some(token), &hello_on(host, instance)).await
 }
 
 /// The code of a refusal.
-fn code(reply: &Reply) -> String {
+pub fn code(reply: &Reply) -> String {
     reply.json()["error"].as_str().unwrap().to_string()
 }
 
 /// A heartbeat of `session` with `token`.
-async fn beat_with(h: &Harness, token: &str, session: &Session) -> Reply {
+pub async fn beat_with(h: &Harness, token: &str, session: &Session) -> Reply {
     post(h, "/v1/agent/heartbeat", Some(token), &session.beat()).await
 }
 

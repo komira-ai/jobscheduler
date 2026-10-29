@@ -570,3 +570,92 @@ fn a_half_used_row_is_refused() {
         assert!(error.contains("only one of"), "{error}");
     }
 }
+
+/// A revoke drops every token of the instance, used or not, and only that instance's:
+/// the used token serves nobody afterwards and is unknown, the other instance's token is
+/// untouched, the file no longer holds the dropped digests, and a restart reads the same.
+/// A second revoke drops nothing and is not an error. It catches a revoke that leaves a
+/// used token a credential, one that drops another instance's token, one that is kept in
+/// memory only, and one that fails on a repeat.
+#[test]
+fn a_revoke_drops_every_token_of_the_instance_and_is_idempotent() {
+    let path = scratch("revoke");
+    let (joins, _) = tokens(&path);
+    let used = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    let other = joins.mint(instance("i-2"), DEFAULT_TTL).unwrap();
+    let (used_who, other_who) = (credential(&used), credential(&other));
+    joins
+        .admit(&used_who, "host-a", Some(&instance("i-1")))
+        .unwrap();
+    assert_eq!(joins.revoke(&instance("i-1")), Ok(1));
+    assert!(joins.identify(&used.token).is_none());
+    assert_eq!(
+        joins.serves(&used_who, "host-a"),
+        Err(JoinRefusal::NotAdmitted)
+    );
+    assert_eq!(
+        joins.admit(&used_who, "host-a", Some(&instance("i-1"))),
+        Err(JoinRefusal::Expired)
+    );
+    assert!(joins.identify(&other.token).is_some());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains(&used_who.to_hex()), "{text}");
+    assert!(text.contains(&other_who.to_hex()), "{text}");
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o077, 0);
+    assert_eq!(joins.revoke(&instance("i-1")), Ok(0));
+    assert_eq!(joins.revoke(&instance("never-minted")), Ok(0));
+    drop(joins);
+    let (again, _) = tokens(&path);
+    assert!(again.identify(&used.token).is_none());
+    assert!(again.identify(&other.token).is_some());
+}
+
+/// An unused token is revoked too: its first hello is refused. A provider other than the
+/// token's does not match the instance id. It catches a revoke that drops only used
+/// tokens and one that matches the instance id alone.
+#[test]
+fn a_revoke_drops_an_unused_token_and_matches_the_provider() {
+    let path = scratch("revoke_unused");
+    let (joins, _) = tokens(&path);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    let elsewhere = InstanceIdentity {
+        provider: "othercloud".to_string(),
+        instance_id: "i-1".to_string(),
+    };
+    assert_eq!(joins.revoke(&elsewhere), Ok(0));
+    assert!(joins.identify(&minted.token).is_some());
+    assert_eq!(joins.revoke(&instance("i-1")), Ok(1));
+    assert!(joins.identify(&minted.token).is_none());
+}
+
+/// A revoke the file refuses leaves memory and file as they were, and says so: the token
+/// still serves its host. It catches a token dropped in memory alone, which a restart
+/// would give back.
+#[test]
+fn a_revoke_the_file_refuses_changes_nothing() {
+    let path = scratch("revoke_unwritable");
+    let (joins, _) = tokens(&path);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    let who = credential(&minted);
+    joins.admit(&who, "host-a", Some(&instance("i-1"))).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(joins.revoke(&instance("i-1")), Err(RevokeError::Unsaved));
+    assert!(joins.identify(&minted.token).is_some());
+    assert_eq!(joins.serves(&who, "host-a"), Ok(()));
+    assert_eq!(joins.lock().len(), 1);
+}
+
+/// A revoke that drops nothing writes nothing: with the file made unwritable, a revoke of
+/// an instance with no token (or one already revoked) is still `Ok(0)`, where a write
+/// would be `Unsaved`. It catches a revoke that rewrites the file when nothing changed.
+#[test]
+fn a_revoke_that_drops_nothing_writes_nothing() {
+    let path = scratch("revoke_no_write");
+    let (joins, _) = tokens(&path);
+    let minted = joins.mint(instance("i-1"), DEFAULT_TTL).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(joins.revoke(&instance("never-minted")), Ok(0));
+    assert!(joins.identify(&minted.token).is_some());
+}
