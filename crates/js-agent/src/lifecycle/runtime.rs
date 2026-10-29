@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 
 /// Container labels the agent writes, under the prefix the wire reserves, so a job's own
 /// labels (which may not use the prefix) cannot forge them. They carry what a restarted
@@ -101,6 +101,9 @@ pub struct RunSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
+    /// `/run/js-files`; none for a run without files.
+    pub files: Option<PathBuf>,
     /// The slot the run holds: its container user and the owner of its scratch directory are
     /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
     pub slot: u32,
@@ -238,10 +241,33 @@ pub trait Runtime {
         Ok(found.into_iter().map(|one| one.id).collect())
     }
 
+    /// The end of what the exited container `id` wrote to its standard output and standard
+    /// error, read before the container is removed. `None` is a backend that keeps no log.
+    /// The lifecycle calls it once for each job that exited, and a failure never changes
+    /// the job's result: the result goes out without a tail.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot read the log.
+    fn log_tail(&mut self, _id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
+        Ok(None)
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
         true
+    }
+
+    /// Whether the network a contained job gets is limited as the agent was told. Called
+    /// before every contained start; a start whose check fails is refused
+    /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the network or the firewall; the text stays on the host.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        Ok(())
     }
 
     /// The control group directory (an absolute path of the cgroup version 2 file system)

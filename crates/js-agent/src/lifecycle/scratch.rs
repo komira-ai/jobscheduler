@@ -99,16 +99,7 @@ impl ScratchRoot {
     /// The run id is not one ordinary path component, the run's path is not a directory,
     /// or something in it cannot be removed.
     pub fn remove(&self, run_id: &str) -> io::Result<()> {
-        let normal = !matches!(run_id, "" | "." | "..") && !run_id.contains('/');
-        let name = CString::new(run_id)
-            .ok()
-            .filter(|_| normal)
-            .ok_or(io::ErrorKind::InvalidInput)?;
-        let root = self.open_root()?;
-        match remove_tree(&root, &name) {
-            Err(Errno::NOENT) | Ok(()) => Ok(()),
-            Err(why) => Err(why.into()),
-        }
+        remove_entry(&self.path, run_id)
     }
 
     /// Removes every entry of the root that is not the directory of a run in `kept`, and
@@ -123,33 +114,56 @@ impl ScratchRoot {
 
     /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
     fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
-        let (root, entries) = self.open_root().and_then(|root| {
-            Dir::read_from(&root)
-                .map(|entries| (root, entries))
-                .map_err(io::Error::from)
-        })?;
-        let orphans: Vec<CString> = entries
-            .flatten()
-            .map(|entry| entry.file_name().to_owned())
-            .filter(|name| {
-                let bytes = name.to_bytes();
-                bytes != b"." && bytes != b".." && !kept.iter().any(|run| run.as_bytes() == bytes)
-            })
-            .collect();
-        // An entry that cannot be examined is unlinked like a file: if it vanished, the
-        // unlink fails and it is not counted.
-        Ok(orphans
-            .iter()
-            .filter(|name| match is_dir(&root, name) {
-                Ok(true) => remove_tree(&root, name).is_ok(),
-                _ => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
-            })
-            .count())
+        sweep_entries(&self.path, &|name| {
+            kept.iter().any(|run| run.as_bytes() == name)
+        })
     }
+}
 
-    fn open_root(&self) -> io::Result<OwnedFd> {
-        Ok(openat(CWD, &self.path, DIR_FLAGS, Mode::empty())?)
+fn open_root(path: &Path) -> io::Result<OwnedFd> {
+    Ok(openat(CWD, path, DIR_FLAGS, Mode::empty())?)
+}
+
+/// Removes the entry `run_id` of the directory `root` with everything under it (see
+/// [`ScratchRoot::remove`]); one that is not there is not an error.
+pub(super) fn remove_entry(root: &Path, run_id: &str) -> io::Result<()> {
+    let normal = !matches!(run_id, "" | "." | "..") && !run_id.contains('/');
+    let name = CString::new(run_id)
+        .ok()
+        .filter(|_| normal)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let root = open_root(root)?;
+    match remove_tree(&root, &name) {
+        Err(Errno::NOENT) | Ok(()) => Ok(()),
+        Err(why) => Err(why.into()),
     }
+}
+
+/// Removes every entry of the directory `path` that `keep` does not name, and returns how
+/// many it removed (see [`ScratchRoot::sweep`]).
+pub(super) fn sweep_entries(path: &Path, keep: &dyn Fn(&[u8]) -> bool) -> io::Result<usize> {
+    let (root, entries) = open_root(path).and_then(|root| {
+        Dir::read_from(&root)
+            .map(|entries| (root, entries))
+            .map_err(io::Error::from)
+    })?;
+    let orphans: Vec<CString> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_owned())
+        .filter(|name| {
+            let bytes = name.to_bytes();
+            bytes != b"." && bytes != b".." && !keep(bytes)
+        })
+        .collect();
+    // An entry that cannot be examined is unlinked like a file: if it vanished, the
+    // unlink fails and it is not counted.
+    Ok(orphans
+        .iter()
+        .filter(|name| match is_dir(&root, name) {
+            Ok(true) => remove_tree(&root, name).is_ok(),
+            _ => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
+        })
+        .count())
 }
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY

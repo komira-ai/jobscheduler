@@ -9,6 +9,7 @@ mod cleanup;
 mod exclusive;
 mod job;
 mod slots;
+mod tails;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -154,6 +155,7 @@ impl Lifecycle {
             self.clean(index, &mut events);
         }
         self.retry_stuck(&mut events);
+        self.fit_log_tails_to_beat(&mut events);
         self.sweep();
         events
     }
@@ -294,6 +296,18 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if !spec.files.is_empty() && spec.isolation == Isolation::Host {
+            return Err(no(
+                detail::FILES_NEED_CONTAINER,
+                "run files are delivered to contained jobs only",
+            ));
+        }
+        if !spec.files.is_empty() && self.config.files.is_none() {
+            return Err(no(
+                detail::FILES_UNSUPPORTED,
+                "this agent has no run files directory",
+            ));
+        }
         if !spec.gpu_indices.is_empty() && !self.runtime.supports_gpus() {
             return Err(no(
                 detail::GPU_UNSUPPORTED,
@@ -327,11 +341,20 @@ impl Lifecycle {
                 "the job does not fit what is free",
             ));
         }
-        spec.mounts
+        let mounts = spec
+            .mounts
             .iter()
             .map(|mount| self.config.mounts.resolve(mount))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))
+            .map_err(|why| (refusal::INVALID_MOUNT, why.to_string()))?;
+        // Last, so that a job refused for another reason costs no call. Before every
+        // contained create: the firewall can change between two jobs.
+        if spec.isolation == Isolation::Contained {
+            self.runtime
+                .check_egress()
+                .map_err(|why| (detail::EGRESS_UNCHECKED, why.to_string()))?;
+        }
+        Ok(mounts)
     }
 
     /// Taints the host for a job that may change it, and writes the marker.
@@ -396,22 +419,35 @@ impl Lifecycle {
         // On a host no other job is on, what changed since the last check is the host's. A
         // container that could not be removed, or a check that found something, has tainted
         // the host, and `admit` refused this start; so every other job being freed is enough.
+        // The baseline is retaken before this run's scratch directory and files exist, so
+        // neither becomes part of it.
         if self.jobs.iter().all(|job| job.stage == Stage::Freed) {
             self.checks.idle();
         }
         // The slot is held from here until the run's cleanup has passed (`clean`); `admit`
         // found one free.
         let slot = self.slots.take();
-        let started = self.config.scratch.create(run_id).map_err(|why| {
+        let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
                 code::SCRATCH_FAILED,
                 why.to_string(),
                 false,
             )
-        });
+        };
+        let started = self.config.scratch.create(run_id).map_err(failed);
+        // The files are written before the container exists, and only here: a start that
+        // is sent again finds its job above and never reaches this point. `admit` has
+        // seen to it that a start with files has a files root.
         let started = started.and_then(|scratch| {
-            let container = container_spec(spec, mounts, scratch, slot);
+            let written = match (&self.config.files, spec.files.is_empty()) {
+                (Some(root), false) => root.write(run_id, &spec.files).map(Some),
+                _ => Ok(None),
+            };
+            written.map(|files| (scratch, files)).map_err(failed)
+        });
+        let started = started.and_then(|(scratch, files)| {
+            let container = container_spec(spec, mounts, scratch, files, slot);
             self.runtime.create_and_start(&container).map_err(|why| {
                 (
                     detail::RUNTIME_FAILED,

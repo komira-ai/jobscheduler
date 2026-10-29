@@ -6,8 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{
-    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, Settings, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, DEFAULT_PIDS, Engine, FILES_TARGET, SCRATCH_TARGET, Settings, binds_of,
+    hardening_args, label_args, limits_to_args,
 };
 
 use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
@@ -155,8 +155,20 @@ fn hardening_flags_always_present() {
         "--cgroupns",
         "private",
     ];
+    let docker_log = [
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        "max-size=1048576",
+        "--log-opt",
+        "max-file=2",
+    ];
+    let podman_log = ["--log-driver", "k8s-file", "--log-opt", "max-size=1048576"];
     let tail = ["--pull", "never"];
-    assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
+    assert_eq!(
+        docker,
+        strings(&[&common[..], &docker_log[..], &tail[..]].concat())
+    );
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
     let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
@@ -176,6 +188,7 @@ fn hardening_flags_always_present() {
                 &tmpfs[..],
                 after,
                 &["--pid", "private"][..],
+                &podman_log[..],
                 &tail[..]
             ]
             .concat()
@@ -221,6 +234,31 @@ fn podman_hardens_var_tmp_and_run_like_tmp() {
             .iter()
             .any(|arg| arg.starts_with("--read-only-tmpfs"))
     );
+}
+
+/// Asserts that the log of every container is bounded at creation, on both engines: the
+/// driver is named (Podman's default, `journald`, has no size bound and is read back from
+/// a journal), `max-size` is a plain byte count that both engines read, Docker keeps a
+/// second file so a rotation does not empty the tail, and the bound does not depend on the
+/// settings. It catches a job that prints without end filling the host's disk, and a
+/// tail read just after a rotation that finds an empty file.
+#[test]
+fn the_log_is_bounded_on_both_engines() {
+    let value = |args: &[String], flag: &str| -> Vec<String> {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    };
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert_eq!(value(&docker, "--log-driver"), ["json-file"]);
+    assert_eq!(
+        value(&docker, "--log-opt"),
+        ["max-size=1048576", "max-file=2"]
+    );
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert_eq!(value(&podman, "--log-driver"), ["k8s-file"]);
+    assert_eq!(value(&podman, "--log-opt"), ["max-size=1048576"]);
 }
 
 /// Asserts, for both engines, the properties of the hardening list that keep a job
@@ -438,6 +476,43 @@ fn podman_mounts_are_nosuid_nodev() {
     assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
 }
 
+/// Asserts that the run's files directory is mounted read-only at `/run/js-files` after
+/// the job's own mounts, with the recursive read-only options when the engine takes them
+/// and `nosuid,nodev` on Podman, and that a run without files has no such mount. It
+/// catches a files mount that is writable, one that skips the Podman options every other
+/// mount has, and one added to every run.
+#[test]
+fn the_files_mount_is_read_only_at_the_fixed_path() {
+    let mut job = spec("r1");
+    assert!(
+        !mounts_of(&limits_to_args(Engine::Podman, &job, false).unwrap())
+            .iter()
+            .any(|m| m.contains("/run/js-files"))
+    );
+    job.mounts = vec![mount("/srv/data/in", "/mnt/data/in", true)];
+    job.files = Some("/work/scratch/r1@files".into());
+    assert_eq!(FILES_TARGET, "/run/js-files");
+    let podman = limits_to_args(Engine::Podman, &job, true).unwrap();
+    assert_eq!(
+        mounts_of(&podman).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly,bind-recursive=readonly,bind-propagation=rprivate,nosuid,nodev"
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&docker).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly"
+    );
+    let binds = binds_of(&job);
+    assert_eq!(
+        binds.last().unwrap(),
+        &(
+            "/work/scratch/r1@files".to_owned(),
+            "/run/js-files".to_owned(),
+            false
+        )
+    );
+}
+
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
 /// value is refused, and nothing is built: a comma, a double quote, a colon (the
 /// separator of the short form, which the mount roots refuse too, so the claim that it is
@@ -512,4 +587,31 @@ fn labels_are_pairs_and_keys_are_checked() {
         assert_eq!(label_args(&bad), Err(ArgsError::LabelKey), "{key:?}");
     }
     assert!(label_args(&BTreeMap::new()).unwrap().is_empty());
+}
+
+/// Asserts that each `--container-add-host` entry reaches `create` as its own
+/// `--add-host <name>:<ip>` pair, for both engines, in the order given, and that none is
+/// passed when none is configured. It catches an entry that is checked and dropped, one
+/// merged into another argument, and a stray `--add-host` by default.
+#[test]
+fn add_hosts_reach_create() {
+    let none = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert!(!none.iter().any(|a| a == "--add-host"));
+    let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
+    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+        .unwrap()
+        .with_add_hosts(&entries)
+        .unwrap();
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&set, engine, PROFILE);
+        let pairs: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-host")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            pairs,
+            ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
+        );
+    }
 }

@@ -32,6 +32,7 @@ fn job(run: &str, cpu: u64) -> JobSpec {
         isolation: Isolation::Contained,
         labels: Default::default(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
         bundle: None,
         native: None,
@@ -73,6 +74,7 @@ fn result(run: &str, lease: &str) -> RunResult {
         outcome: Outcome::Succeeded,
         exit_code: Some(0),
         detail: None,
+        log_tail: None,
     }
 }
 

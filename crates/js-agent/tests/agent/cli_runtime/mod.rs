@@ -5,7 +5,9 @@
 //! docker and podman themselves are never run.
 
 mod args;
+mod egress;
 mod lifecycle;
+mod logs;
 mod runtime;
 mod scripted;
 mod settings;
@@ -159,6 +161,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         gpu_indices: Vec::new(),
         mounts: Vec::new(),
         scratch: PathBuf::from("/work/scratch").join(run_id),
+        files: None,
         slot: 0,
         isolation: Isolation::Contained,
         labels,

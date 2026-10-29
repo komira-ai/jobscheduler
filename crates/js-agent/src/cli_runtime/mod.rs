@@ -22,6 +22,7 @@
 //!   --mount type=volume,dst=/scratch,volume-driver=local,volume-nocopy,
 //!     volume-opt=type=none,volume-opt=device=<scratch>,"volume-opt=o=bind,nosuid,nodev" (Docker)
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
+//!   --mount type=bind,src=<run files>,dst=/run/js-files,readonly[,...]   (only with run files)
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
@@ -250,6 +251,14 @@
 //! the agent does not accept `--container-bin` there: the post-job checks of
 //! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
 //!
+//! # Logs
+//!
+//! `create` bounds the container's log on the host (see [`logs`]), and once a job has
+//! exited, before the container is removed, one `logs` call reads the last bytes of its
+//! standard output and standard error, apart, for the result ([`Runtime::log_tail`]).
+//! The call has the same limits as every other. The tail is returned verbatim to whoever
+//! can read the run: a job must not print secrets.
+//!
 //! # Not here
 //!
 //! Registry credentials (the agent holds none: an image is on the host, or pullable
@@ -257,6 +266,8 @@
 //! above).
 
 mod args;
+mod logs;
+pub use logs::LOGS_LIMIT;
 mod seccomp;
 mod settings;
 mod subid;
@@ -266,18 +277,22 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 use serde_json::Value;
 
+mod egress;
 use args::user_args;
 pub use args::{
-    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
-    label_args, limits_to_args, scratch_volume_options,
+    ArgsError, Bind, DEFAULT_PIDS, FILES_TARGET, SCRATCH_TARGET, binds_of, check_submounts,
+    hardening_args, label_args, limits_to_args, scratch_volume_options,
+};
+pub use egress::{
+    ALLOW_MAX as EGRESS_ALLOW_MAX, Allow, DEFAULT_NFT, Egress, EgressError, TABLE as EGRESS_TABLE,
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings,
-    SettingsError,
+    ADD_HOST_MAX, CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull,
+    Settings, SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
@@ -419,6 +434,14 @@ pub enum CliError {
         /// The process id the engine reported (`State.Pid`).
         pid: u32,
     },
+    /// The egress check failed: the network or the firewall is not as
+    /// `--container-egress-allow` requires.
+    #[error("{0}")]
+    Egress(#[from] EgressError),
+    /// Egress flags with Docker: the check reads netavark's network and the host's nftables
+    /// table; Docker keeps its own iptables chains, which it does not read.
+    #[error("--container-egress-allow: only Podman is supported")]
+    EgressDocker,
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
     #[error("{why}{note}")]
@@ -532,6 +555,7 @@ pub struct CliRuntime {
     proc_read: ProcRead,
     proc_link: ProcLink,
     profile_dir: Option<PathBuf>,
+    logs_limit: Duration,
     warnings: Vec<String>,
     mapping: Option<Mapping>,
     // Held, never read: the claim of the range lasts as long as the runtime.
@@ -597,6 +621,9 @@ impl CliRuntime {
                 why,
             })?;
         let engine = Engine::of_version(&printed).ok_or(CliError::NotAnEngine)?;
+        if engine == Engine::Docker && settings.egress().is_some() {
+            return Err(CliError::EgressDocker);
+        }
         let docker_major = major_of(&printed).filter(|_| engine == Engine::Docker);
         let mut runtime = Self {
             settings,
@@ -612,6 +639,7 @@ impl CliRuntime {
             proc_read: read_proc,
             proc_link: read_proc_link,
             profile_dir: None,
+            logs_limit: LOGS_LIMIT,
             warnings: Vec::new(),
             mapping: None,
             _claim: None,
@@ -680,6 +708,29 @@ impl CliRuntime {
     /// The engine found.
     pub fn engine(&self) -> Engine {
         self.engine
+    }
+
+    /// Confirms that the named network is limited to the endpoints of
+    /// `--container-egress-allow`: see [`EgressError`]. Nothing is checked for the default
+    /// network. The agent calls this at start and before every job is created.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Egress`].
+    pub fn egress_enforced(&self) -> Result<(), CliError> {
+        let Some(egress) = self.settings.egress() else {
+            return Ok(());
+        };
+        let env = engine_env(&self.settings);
+        let proc = |path: &str| (self.proc_read)(path);
+        egress::check(
+            &*self.runner,
+            (self.settings.bin(), &env),
+            self.settings.network(),
+            egress,
+            &proc,
+        )
+        .map_err(CliError::Egress)
     }
 
     fn call(&self, call: &'static str, args: &[&str]) -> Result<String, CliError> {
@@ -1359,6 +1410,14 @@ impl Runtime for CliRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus
+    }
+
+    fn log_tail(&mut self, id: &RunHandle) -> Result<Option<LogTail>, RuntimeError> {
+        self.read_logs(id).map_err(RuntimeError::from)
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.egress_enforced().map_err(RuntimeError::from)
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
