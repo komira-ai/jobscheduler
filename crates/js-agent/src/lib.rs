@@ -227,8 +227,9 @@ pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue, STALL_CALLS_MAX,
-    STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, WorkerHost, stall_bound,
+    Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
+    STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, WorkerHost,
+    stall_bound,
 };
 
 /// The exit statuses of `js-agent`.

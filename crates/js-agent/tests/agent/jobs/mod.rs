@@ -4,6 +4,7 @@
 //! moved by the test; the worker is a real thread, and every wait on it is for an event
 //! (an order done, a call begun) with a hang guard, never for a time.
 
+mod answers;
 mod contract;
 mod contract_e2e;
 mod drain;
