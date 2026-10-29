@@ -149,19 +149,13 @@ impl Effects for Live {
         }
     }
 
-    fn remove(&self, host: &str) -> bool {
+    fn remove(&self, host: &str) -> Result<(), String> {
         let Ok(id) = HostId::new(host) else {
-            return true;
+            return Ok(());
         };
         let registry = &self.agents.registry;
         registry.mark_ending(&id);
-        match registry.remove(&id) {
-            Ok(()) => true,
-            Err(busy) => {
-                warn!(%host, %busy, "the registry did not remove the host of a machine that is gone; it is tried again");
-                false
-            }
-        }
+        registry.remove(&id).map_err(|busy| busy.to_string())
     }
 }
 
@@ -409,7 +403,7 @@ mod tests {
             live.call(call, &host);
             live.call(call, "Not A Host Id");
         }
-        assert!(live.remove(&host));
-        assert!(live.remove("Not A Host Id"));
+        assert_eq!(live.remove(&host), Ok(()));
+        assert_eq!(live.remove("Not A Host Id"), Ok(()));
     }
 }

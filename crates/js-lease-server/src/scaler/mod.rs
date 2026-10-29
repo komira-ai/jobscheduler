@@ -274,10 +274,20 @@ impl Core {
     fn retry_removes(&self, memory: &mut Memory) {
         let pending: Vec<String> = memory.unremoved.iter().cloned().collect();
         for host in pending {
-            if self.effects.remove(&host) {
-                memory.unremoved.remove(&host);
-            }
+            self.remove(memory, host);
         }
+    }
+
+    /// Takes the host of a machine that is gone out of the registry; keeps it to try again
+    /// when the registry refuses, and says so.
+    fn remove(&self, memory: &mut Memory, host: String) {
+        match self.effects.remove(&host) {
+            Ok(()) => memory.unremoved.remove(&host),
+            Err(why) => {
+                warn!(%host, %why, "the registry did not remove the host of a machine that is gone; it is tried again");
+                memory.unremoved.insert(host)
+            }
+        };
     }
 
     /// Says what the step did that an operator should see: each machine released because
@@ -403,11 +413,7 @@ impl Core {
                     }
                 }
                 Action::ForgetNetwork(host) => self.effects.forget(&host),
-                Action::RemoveHost(host) => {
-                    if !self.effects.remove(&host) {
-                        memory.unremoved.insert(host);
-                    }
-                }
+                Action::RemoveHost(host) => self.remove(memory, host),
             }
         }
         Some(answers)

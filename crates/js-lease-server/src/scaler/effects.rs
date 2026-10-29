@@ -75,9 +75,12 @@ pub trait Effects: Send + Sync {
 
     /// Takes the host `host` out of the registry, for a machine that is confirmed gone: the
     /// host is marked ending first, since nothing is left to protect, and then removed.
-    /// Whether it is out; `false` while the registry still books a lease on it, which is
-    /// asked again at the next tick.
-    fn remove(&self, host: &str) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Why the registry refused: a lease is booked on the host. It is asked again at the
+    /// next tick.
+    fn remove(&self, host: &str) -> Result<(), String>;
 
     /// Forgets the host's network device, if its network mode has one. Best effort.
     fn forget(&self, host: &str);
