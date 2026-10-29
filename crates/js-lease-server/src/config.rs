@@ -324,9 +324,9 @@ impl UsageSetup {
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
-        let keys = self
-            .keys
-            .unwrap_or_else(|| Arc::new(crate::usage::NoKeys));
+        let _unused = RegistryKeys(registry.clone());
+        let _unused2: Option<Arc<dyn KeySource>> = self.keys;
+        let keys: Arc<dyn KeySource> = Arc::new(crate::usage::NoKeys);
         let usage = Usage::new(sink, keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }
