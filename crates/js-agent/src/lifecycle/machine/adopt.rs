@@ -122,7 +122,18 @@ impl Lifecycle {
         // A container that could not be removed may still use its run's directory.
         let kept = this.jobs.iter().map(|job| job.run_id.as_str());
         let held = this.stuck.iter().filter_map(|held| held.run_id.as_deref());
-        this.config.scratch.sweep(kept.chain(held));
+        let owned: Vec<&str> = kept.chain(held).collect();
+        this.config.scratch.sweep(owned.iter().copied());
+        if let Some(files) = &this.config.files {
+            // A root that cannot be listed leaves earlier runs' secrets in place; say so.
+            if let Err(why) = files.sweep(owned.iter().copied()) {
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::SCRATCH_FAILED,
+                    message: format!("the run files root cannot be swept: {why}"),
+                }));
+            }
+        }
         Ok((this, events))
     }
 
