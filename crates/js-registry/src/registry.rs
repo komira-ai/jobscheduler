@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
+use js_caps::HostContract;
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
@@ -464,8 +465,10 @@ impl Registry {
     /// [`Hello::validate`], which include the reserved label prefix), then in this
     /// order: the pool is this one; the host id is not reserved to another source
     /// ([`Registry::reserve`]); the host id is not bound to another credential, nor
-    /// to another instance when its binding names one; the host id is not live; the
-    /// shape claimed offers at least the pool's shape; the pool has room for a host it
+    /// to another instance when its binding names one; the host id is not live; when
+    /// the pool declares an execution mode ([`PoolConfig::with_exec`]), the host meets its
+    /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
+    /// capability at fault); the shape claimed offers at least the pool's shape; the pool has room for a host it
     /// does not know (hosts forgotten after the lost-host retention do not count); a
     /// session secret can be made. A
     /// refused hello creates and changes nothing. An admitted one starts a new session:
@@ -530,6 +533,10 @@ impl Registry {
         }
         let prior_epoch = known.map(|record| record.epoch);
         let floor = config.shape();
+        if let Some(exec) = config.exec() {
+            let contract = HostContract::new(exec, floor.resources().gpus() > 0);
+            contract.check(&hello.capabilities)?;
+        }
         let offers_floor = hello
             .to_shape()
             .ok()
