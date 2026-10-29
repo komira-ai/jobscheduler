@@ -30,6 +30,7 @@ use js_agent_wire::{Isolation, JobSpec, Limits, Mount, Outcome, limits};
 use js_lease::{Clock, LeaseInfo, LeaseState};
 use js_registry::{RunRefusal, RunView};
 use js_types::LeaseId;
+use js_usage::ProfileKey;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -75,6 +76,24 @@ struct RunBody {
     isolation: Isolation,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
+    /// The name of the profile the run's cost curve is learned under, when the client knows
+    /// one: its own key for the work the run does, in the grammar of [`ProfileKey`]. Absent
+    /// means the run teaches the server nothing.
+    ///
+    /// Usage tracks are per lease: when runs of one lease name different profiles, the first
+    /// accepted result takes the whole lease series under its own name. The server has one
+    /// trust domain: any holder of the client token can name any profile, so a wrong or
+    /// hostile run can skew that profile's curve.
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// The profile name of a [`RunBody`], or the 422 `invalid-profile` when it is not a
+/// [`ProfileKey`] (1 to 128 bytes of `0-9`, `a-z`, `.`, `_` and `-`, the first a digit or a
+/// letter).
+fn profile_of(text: &str) -> Result<ProfileKey, ApiError> {
+    ProfileKey::parse(text)
+        .map_err(|_| ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "invalid-profile"))
 }
 
 /// The limits of a [`RunBody`]. The wall time is bounded by what the lease has left
@@ -188,6 +207,7 @@ async fn start(
 ) -> Result<Response, ApiError> {
     let id = parse_id(&id).ok_or_else(ApiError::unknown_lease)?;
     let body = parse::<RunBody>(&body)?;
+    let profile = body.profile.as_deref().map(profile_of).transpose()?;
     let table = api.shared.table().lock().await;
     let lease = find(table.list(), &id)?;
     let ends = lease.expires_at.millis().min(lease.ends_at.millis());
@@ -216,8 +236,12 @@ async fn start(
         labels: body.labels,
         heartbeat_seq: 0,
         valid_for_ms: left.min(limits::MAX_VALID_FOR_MS),
+        native: None,
     };
-    let queued = api.agents.registry.queue_run(&host, &id, spec)?;
+    let queued = api
+        .agents
+        .registry
+        .queue_keyed_run(&host, &id, spec, profile)?;
     info!(lease = %id, host = %host, run = %run_id, "run queued");
     let accepted = Accepted {
         run_id,

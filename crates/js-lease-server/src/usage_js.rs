@@ -21,6 +21,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use js_registry::Registry;
 use js_state::sqlite::{Options, SqliteStore};
 use js_state::{Store, SystemClock};
 use js_types::HostId;
@@ -33,7 +34,8 @@ use tracing::info;
 
 use crate::error::StartupError;
 use crate::usage::{
-    HostLimits, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault, UsageSink,
+    HostLimits, KeySource, LoadIn, NodeRow, Observation, RunEnd, SinkCounters, UsageFault,
+    UsageSink,
 };
 
 /// How admission finds the profile name of a work key: the caller supplies it, since the
@@ -86,6 +88,17 @@ struct Inner {
     recorder: Recorder,
     buffer: NodeBuffer,
     profiles: ProfileStore,
+}
+
+/// The key source the server runs on: the profile name the client supplied when it queued
+/// the run, held by the registry beside the run. A run queued without a name has no key, and
+/// is counted as a run without one.
+pub(crate) struct RegistryKeys(pub(crate) Registry);
+
+impl KeySource for RegistryKeys {
+    fn key_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.0.profile_of(run_id)
+    }
 }
 
 /// Minutes in a day.

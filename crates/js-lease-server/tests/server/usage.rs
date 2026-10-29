@@ -158,12 +158,12 @@ async fn flush_is_every_five_minutes_and_at_shutdown_and_prune_is_daily() {
     drop(scratch);
 }
 
-/// Asserts that without a key source of its own the server learns nothing from a clean
-/// run and says so: the run is counted as `runs_without_key`, the sink is not given it,
-/// and the reads still work. It catches a server that silently learns under a made-up key
-/// and one that fails the run for lacking one.
+/// Asserts that a run queued without a profile name (the server's key source by default) is not
+/// learned from and says so: the run is counted as `runs_without_key`, the sink is not given
+/// it, and the reads still work. It catches a server that silently learns under a made-up
+/// key and one that fails the run for lacking one.
 #[tokio::test]
-async fn without_a_key_source_runs_are_counted_and_nothing_is_learned() {
+async fn a_run_queued_without_a_profile_name_is_counted_and_nothing_is_learned() {
     let fake = Arc::new(Fake::default());
     let scratch = Scratch::new("usage_nokeys");
     let args = agent_args(&scratch, false);

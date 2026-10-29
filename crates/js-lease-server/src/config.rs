@@ -14,7 +14,7 @@ use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
 
-use js_registry::{Credential, PoolConfig, WholeNodeConfig};
+use js_registry::{Credential, PoolConfig, Registry, WholeNodeConfig};
 use js_types::sched::WorkKey;
 
 use crate::adapt::SharedClock;
@@ -27,9 +27,9 @@ use crate::flags;
 use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
 use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
-use crate::usage::{HostLimits, KeySource, NoKeys, ProfileKey, UsageSink};
+use crate::usage::{HostLimits, KeySource, ProfileKey, UsageSink};
 use crate::usage_hub::Usage;
-use crate::usage_js::{self, NameMap, StoreSetup, no_names};
+use crate::usage_js::{self, NameMap, RegistryKeys, StoreSetup, no_names};
 
 /// The command line. Configuration is flags, or one file (`--config`); secrets come from
 /// files.
@@ -363,7 +363,9 @@ pub(crate) struct UsageSetup {
     pub(crate) profile_store_bytes: u64,
     /// The sink to use in place of the one that opens `db`.
     pub(crate) sink: Option<Arc<dyn UsageSink>>,
-    pub(crate) keys: Arc<dyn KeySource>,
+    /// The key source a caller supplied; `None` leaves the server to read the profile names
+    /// clients gave the runs it queued.
+    pub(crate) keys: Option<Arc<dyn KeySource>>,
     /// How admission finds the profile name of a work key; `None` leaves every key flat.
     pub(crate) names: Option<NameMap>,
 }
@@ -382,17 +384,19 @@ impl UsageSetup {
             db,
             profile_store_bytes,
             sink: None,
-            keys: Arc::new(NoKeys),
+            keys: None,
             names: None,
         }
     }
 
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
-    /// A usage file that will not open is a refused start naming `--usage-db`.
+    /// A usage file that will not open is a refused start naming `--usage-db`. A run's key
+    /// is read from `registry` unless the caller supplied a key source.
     pub(crate) fn build(
         self,
         clock: &SharedClock,
         limits: HostLimits,
+        registry: &Registry,
     ) -> Result<Option<Arc<Usage>>, StartupError> {
         let Some(db) = self.db else {
             return Ok(None);
@@ -408,7 +412,10 @@ impl UsageSetup {
                 usage_js::open(&setup, clock.now().millis() / MILLIS_PER_DAY)?
             }
         };
-        let usage = Usage::new(sink, self.keys, clock.clone(), limits);
+        let keys = self
+            .keys
+            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
+        let usage = Usage::new(sink, keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }
 }
@@ -652,10 +659,10 @@ impl Config {
         self
     }
 
-    /// The same configuration naming the key of a run with `keys` (the server has none of
-    /// its own: with the default, no run's key is known and no cost curve is learned).
+    /// The same configuration naming the key of a run with `keys` instead of the profile
+    /// name the client gave when it queued the run (the default).
     pub fn with_key_source(mut self, keys: Arc<dyn KeySource>) -> Self {
-        self.usage.keys = keys;
+        self.usage.keys = Some(keys);
         self
     }
 
