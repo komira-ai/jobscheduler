@@ -353,3 +353,62 @@ async fn a_mint_for_another_provider_is_refused() {
     );
     mint(&h, "node-1").await;
 }
+
+/// A whole-node lease request for `memory_bytes`, with no capability.
+fn wanting(memory_bytes: u64) -> Value {
+    json!({
+        "class": "whole-node",
+        "resources": { "cpu_millis": 1000, "memory_bytes": memory_bytes },
+        "max_wall_seconds": 3600,
+    })
+}
+
+/// Asserts that a joined pool with `memory_schedulable_percent = 90` books
+/// floor(16 GiB x 90 / 100) for a host: one byte more fits nothing (409 `no-fit`) and exactly
+/// that is accepted (202), and `GET /v1/hosts` shows the listed memory, the percent and the
+/// bookable memory. A pool without the key books all 16 GiB: one byte more fits nothing and
+/// 16 GiB is accepted. A host's hello still has to claim the whole listed memory. It catches
+/// a joined pool that books the full memory whatever the key says.
+#[tokio::test]
+async fn a_joined_pool_books_the_memory_percent_it_is_given() {
+    const LISTED: u64 = 17_179_869_184;
+    const NINETY: u64 = LISTED * 90 / 100;
+    let cut = serving("joined_mempct_90", |_| {
+        joined().set("memory_schedulable_percent", "90")
+    })
+    .await;
+    let token = mint(&cut, "node-1").await;
+    let said = hello("node-1", Some("node-1"));
+    let welcome = agent_call(&cut, "/v1/agent/hello", &token, &said).await;
+    session(&welcome, "node-1");
+    let listing = cut.call("GET", "/v1/hosts", None).await.json();
+    let shown = &listing["hosts"][0];
+    assert_eq!(shown["shape"]["memory_bytes"], NINETY, "{listing}");
+    assert_eq!(
+        shown["memory"],
+        json!({
+            "configured_bytes": LISTED,
+            "schedulable_percent": 90,
+            "bookable_bytes": NINETY,
+        })
+    );
+    let ask = wanting(NINETY + 1);
+    let over = cut.call("POST", "/v1/leases", Some(&ask)).await;
+    assert_eq!(over.status, 409, "{}", over.body);
+    assert_eq!(over.json(), json!({ "error": "no-fit" }));
+    let ask = wanting(NINETY);
+    let exact = cut.call("POST", "/v1/leases", Some(&ask)).await;
+    assert_eq!(exact.status, 202, "{}", exact.body);
+
+    let full = serving("joined_mempct_default", |_| joined()).await;
+    let token = mint(&full, "node-1").await;
+    let said = hello("node-1", Some("node-1"));
+    let welcome = agent_call(&full, "/v1/agent/hello", &token, &said).await;
+    session(&welcome, "node-1");
+    let ask = wanting(LISTED + 1);
+    let over = full.call("POST", "/v1/leases", Some(&ask)).await;
+    assert_eq!(over.status, 409, "{}", over.body);
+    let ask = wanting(LISTED);
+    let all = full.call("POST", "/v1/leases", Some(&ask)).await;
+    assert_eq!(all.status, 202, "{}", all.body);
+}

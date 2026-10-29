@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig};
-use js_types::{ClassId, ExecMode, ProviderId, Resources, Shape};
+use js_types::{ClassId, ExecMode, MEMORY_PERCENT_KEY, MemoryPercent, ProviderId, Resources, Shape};
 
 use super::{Pool, Read, Registering, Section, registry_pool};
 use crate::agent_pool::{MAX_MACHINES, capabilities_fit, shipped_class};
@@ -58,6 +58,7 @@ const KEYS: &[&str] = &[
     "capabilities",
     "exec",
     "max_machines",
+    MEMORY_PERCENT_KEY,
     "heartbeat_interval",
     "grace",
     "lost_retention",
@@ -95,8 +96,11 @@ pub struct JoinedPool {
     pub max_machines: usize,
     /// The CPU every host books, in thousandths of a core.
     pub cpu_millis: u64,
-    /// The memory every host books, in bytes.
+    /// The memory every host books, in bytes, before `memory_percent` cuts it.
     pub memory_bytes: u64,
+    /// The share of `memory_bytes` the pool books (`memory_schedulable_percent`); all of
+    /// it unless set.
+    pub memory_percent: MemoryPercent,
     /// The GPUs every host books.
     pub gpus: u64,
     /// The class of those GPUs; present exactly when `gpus` is above zero.
@@ -161,6 +165,7 @@ impl JoinedPool {
             Some(most) => usize::try_from(most).unwrap_or(usize::MAX),
             None => return Err(s.fail("max_machines", "required")),
         };
+        let memory_percent = s.memory_percent()?.unwrap_or_default();
         let exec = match s.string("exec")?.as_deref() {
             None | Some("none") => None,
             Some(other) => match other.parse::<ExecMode>() {
@@ -174,6 +179,7 @@ impl JoinedPool {
             max_machines,
             cpu_millis,
             memory_bytes,
+            memory_percent,
             gpus,
             gpu_class,
             capabilities,
@@ -239,7 +245,15 @@ impl JoinedPool {
             return Err(place.fail("capabilities", &reason));
         }
         let shape = Shape::new(booked, self.capabilities.clone());
-        let pool = registry_pool(&place, id, &class, shape, self.max_machines, self.exec)?;
+        let pool = registry_pool(
+            &place,
+            id,
+            &class,
+            shape,
+            self.max_machines,
+            self.exec,
+            self.memory_percent,
+        )?;
         let pool = match pool.with_timing(millis(self.heartbeat_interval), millis(self.grace)) {
             Ok(pool) => pool,
             Err(err) => return Err(place.fail("grace", &format!("with heartbeat_interval: {err}"))),
@@ -365,6 +379,29 @@ mod tests {
         assert_ne!(full.validate().unwrap(), small.validate().unwrap());
         let none = JoinedPool::from_table(with("exec = \"none\"")).unwrap();
         assert_eq!(none.exec, None);
+    }
+
+    /// `memory_schedulable_percent` on a joined pool is read into `memory_percent` (all of
+    /// it when absent) and reaches the registry's pool, and a value outside 1 to 100 is
+    /// refused naming the key. It catches a key that is refused as unknown, one that is
+    /// read and dropped, and a joined pool that books `MemoryPercent::FULL` regardless.
+    #[test]
+    fn the_memory_percent_is_read_and_reaches_the_registry_pool() {
+        let whole = JoinedPool::from_table(with("")).unwrap();
+        assert_eq!(whole.memory_percent, MemoryPercent::FULL);
+        let booked = whole.validate().unwrap();
+        assert_eq!(booked.memory_percent(), MemoryPercent::FULL);
+        let cut = JoinedPool::from_table(with("memory_schedulable_percent = 90")).unwrap();
+        let ninety = MemoryPercent::new(90).unwrap();
+        assert_eq!(cut.memory_percent, ninety);
+        assert_eq!(cut.validate().unwrap().memory_percent(), ninety);
+        for value in ["0", "101"] {
+            let said = refused(with(&format!("memory_schedulable_percent = {value}")));
+            assert_eq!(
+                said,
+                "pool \"nodes\": memory_schedulable_percent: must be from 1 to 100"
+            );
+        }
     }
 
     /// A caller that builds the struct from its own settings gets the same checks: the

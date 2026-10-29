@@ -33,6 +33,7 @@ exec  = "container"                   # optional; absent or "none": no host cont
 shape = { cpu_millis = 16000, memory_bytes = 68719476736 }   # optional keys: gpus, gpu_class
 capabilities = { os = "linux", arch = "x86_64" }               # optional; as the agent pool file's [capabilities]
 max_machines    = 6                   # required; from 1 to 262144, as in the agent pool file
+memory_schedulable_percent = 90          # optional; from 1 to 100, default 100: the share of the shape's memory the pool books
 join_token_file = "/run/credentials/js/join-token"           # optional shared pool token
 heartbeat_interval = "10s"            # optional; as are grace ("1m") and lost_retention ("24h")
 ```
