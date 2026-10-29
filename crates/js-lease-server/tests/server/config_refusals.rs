@@ -113,10 +113,6 @@ fn the_server_table_is_checked_key_by_key() {
     }
     let cases = [
         (
-            "boot = \"later\"",
-            "server.boot: must be initialise or resume",
-        ),
-        (
             "tick = \"soon\"",
             "server.tick: must be a positive duration such as 600s, 10m or 1h",
         ),
@@ -161,6 +157,11 @@ fn the_server_table_is_checked_key_by_key() {
             "{extra}"
         );
     }
+    let later = server(&scratch, "").replace("\"initialise\"", "\"later\"");
+    assert_eq!(
+        refusal(&scratch, &file(&later, &[&pool])),
+        "server.boot: must be initialise or resume"
+    );
     let said = refused_server("config_ttl", "default_ttl = \"2h\"\nmax_ttl = \"1h\"");
     assert!(said.starts_with("server.default_ttl: "), "{said}");
 }
@@ -203,7 +204,7 @@ fn a_file_needs_pools_written_as_tables() {
     );
     for pools in ["pool = 7", "pool = [1]"] {
         assert_eq!(
-            refusal(&scratch, &format!("{bare}\n{pools}\n")),
+            refusal(&scratch, &format!("{pools}\n{bare}")),
             "pool: must be an array of tables, written [[pool]]"
         );
     }

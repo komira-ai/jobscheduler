@@ -597,7 +597,15 @@ fn read_pool(
     ld: &Load<'_>,
     client: &Token,
 ) -> Result<Read, StartupError> {
-    let mut s = Section::open(table, format!("pool #{number}: "));
+    // The name, when it is one, so that every refusal below names the pool; otherwise the
+    // pool is its number, and the value is not repeated.
+    let named = table.get("name").and_then(toml::Value::as_str);
+    let named = named.filter(|name| ProviderId::new(name).is_ok());
+    let head = match named {
+        Some(name) => format!("pool {name:?}: "),
+        None => format!("pool #{number}: "),
+    };
+    let mut s = Section::open(table, head);
     s.only(POOL_KEYS)?;
     let name = s.required_string("name")?;
     let id = ProviderId::new(&name);
