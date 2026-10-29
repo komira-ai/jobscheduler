@@ -432,6 +432,7 @@ fn request(n: u64) -> Request {
         // actions and had no hermetic lease to hide.
         hermetic: !n.is_multiple_of(4),
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::default(),
     }
 }

@@ -60,6 +60,7 @@ mod tests {
                 resources: Resources::new(1_000, 1 << 30),
                 hermetic: true,
                 do_not_cache: false,
+                whole_worker: false,
                 needs: js_caps::Request::default(),
             };
             let event = Event::Submit {

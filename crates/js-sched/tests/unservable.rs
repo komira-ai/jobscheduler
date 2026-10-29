@@ -28,6 +28,7 @@ fn request(kind: LeaseKind, platform: &[(&str, &str)], resources: Resources) -> 
         resources,
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::from_platform(platform.iter().copied()).unwrap(),
     }
 }

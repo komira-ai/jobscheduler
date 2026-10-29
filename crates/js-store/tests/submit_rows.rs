@@ -72,6 +72,7 @@ fn action(tag: u8) -> Request {
         needs: js_caps::Request::default(),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
     }
 }
 

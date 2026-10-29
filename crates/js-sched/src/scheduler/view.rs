@@ -172,8 +172,8 @@ impl Scheduler {
         self.workers.get(worker).map(|w| &w.phase)
     }
 
-    /// The worker queued whole-machine `operation` holds while it waits for it to empty,
-    /// if any.
+    /// The worker queued `operation` holds while it waits for it to empty, if any: a
+    /// whole-machine lease, or an action that asks for a whole worker.
     #[must_use]
     pub fn reservation(&self, operation: OperationId) -> Option<&WorkerId> {
         self.reservations.get(&operation)
