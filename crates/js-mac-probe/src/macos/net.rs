@@ -31,10 +31,10 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         "",
         &control,
     ));
-    let denied = connect(&Mode::Sandboxed(&off, false), &addr);
+    let denied = connect(&Mode::Sandboxed(&off, ""), &addr);
     let denied_probe = Probe::asserted("net/off-refuses-loopback", denied.refused());
     report.push(describe(denied_probe, "", &denied));
-    let allowed = connect(&Mode::Sandboxed(&loopback, false), &addr);
+    let allowed = connect(&Mode::Sandboxed(&loopback, ""), &addr);
     report.push(describe(
         Probe::asserted("net/loopback-allows-loopback", allowed.ok),
         "",
@@ -45,7 +45,7 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     // (mDNSResponder is reached over mach, not through the network rules).
     let outbound = |mode: &Mode<'_>| connect(mode, EXTERNAL);
     let external_control = outbound(&Mode::Control);
-    let external_off = outbound(&Mode::Sandboxed(&off, false));
+    let external_off = outbound(&Mode::Sandboxed(&off, ""));
     let probe = Probe::info("net/external-connect")
         .fact("target", EXTERNAL)
         .fact("control_connected", external_control.ok)
@@ -62,11 +62,8 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         let key = host.replace('.', "_");
         let outcomes: [(&str, Outcome); 3] = [
             ("control", resolve(&Mode::Control, host)),
-            ("off", resolve(&Mode::Sandboxed(&off, false), host)),
-            (
-                "loopback",
-                resolve(&Mode::Sandboxed(&loopback, false), host),
-            ),
+            ("off", resolve(&Mode::Sandboxed(&off, ""), host)),
+            ("loopback", resolve(&Mode::Sandboxed(&loopback, ""), host)),
         ];
         for (level, outcome) in &outcomes {
             dns = dns.fact(&format!("{key}_{level}_resolved"), outcome.ok);
@@ -87,8 +84,8 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     };
     let inside = Net::Range(lo, hi);
     let outside = Net::Range(out_lo, out_hi);
-    let in_range = connect(&Mode::Sandboxed(&inside, false), &addr);
-    let out_of_range = connect(&Mode::Sandboxed(&outside, false), &addr);
+    let in_range = connect(&Mode::Sandboxed(&inside, ""), &addr);
+    let out_of_range = connect(&Mode::Sandboxed(&outside, ""), &addr);
     let probe = Probe::info("net/port-range")
         .fact("listener_port", port)
         .fact("range_with_port", format!("{lo}-{hi}"))
@@ -99,6 +96,20 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         describe(probe, "inside_", &in_range),
         "outside_",
         &out_of_range,
+    ));
+
+    // Reported: single ports, the form a per-slot allow list would use instead of a range.
+    let with_port = Net::Ports(vec![port]);
+    let other_port = Net::Ports(vec![out_lo]);
+    let port_allowed = connect(&Mode::Sandboxed(&with_port, ""), &addr);
+    let port_other = connect(&Mode::Sandboxed(&other_port, ""), &addr);
+    let probe = Probe::info("net/single-port")
+        .fact("connect_to_allowed_port", port_allowed.ok)
+        .fact("connect_with_only_another_port_allowed", port_other.ok);
+    report.push(describe(
+        describe(probe, "allowed_", &port_allowed),
+        "other_",
+        &port_other,
     ));
     drop(listener);
 }

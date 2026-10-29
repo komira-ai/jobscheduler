@@ -22,7 +22,7 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
         scratch,
         report,
         "sandboxed",
-        &Mode::Sandboxed(&off, false),
+        &Mode::Sandboxed(&off, ""),
         &sandboxed_dir,
     );
 }

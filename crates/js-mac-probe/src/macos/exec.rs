@@ -86,6 +86,8 @@ pub enum Net {
     Loopback,
     /// `Off` plus a loopback port range (`localhost:lo-hi`).
     Range(u16, u16),
+    /// `Off` plus single loopback ports (`localhost:port`).
+    Ports(Vec<u16>),
 }
 
 /// The places a profile is built around; all canonical.
@@ -101,9 +103,9 @@ pub struct Places {
 }
 
 /// The profile text, built the design's way: allow default, deny write, narrow allows,
-/// input protection, network, optionally process-info, the floor last. Paths are
+/// input protection, network, optional extra rules, the floor last. Paths are
 /// `-D` parameters (`RUN`, `UIDENT`, `IN`), never interpolated.
-pub fn profile(net: &Net, process_info: bool) -> String {
+pub fn profile(net: &Net, extra: &str) -> String {
     let mut lines = vec![
         "(version 1)".to_owned(),
         "(allow default)".to_owned(),
@@ -120,15 +122,19 @@ pub fn profile(net: &Net, process_info: bool) -> String {
     match net {
         Net::Off => {}
         Net::Loopback => lines.push("(allow network* (remote ip \"localhost:*\"))".to_owned()),
+        Net::Ports(ports) => {
+            for port in ports {
+                lines.push(format!("(allow network* (remote ip \"localhost:{port}\"))"));
+            }
+        }
         Net::Range(lo, hi) => {
             lines.push(format!(
                 "(allow network* (remote ip \"localhost:{lo}-{hi}\"))"
             ));
         }
     }
-    if process_info {
-        lines.push("(deny process-info* (target others))".to_owned());
-        lines.push("(allow process-info* (target self) (target same-sandbox))".to_owned());
+    if !extra.is_empty() {
+        lines.push(extra.to_owned());
     }
     // The floor, last.
     for floor in [
@@ -146,8 +152,8 @@ pub fn profile(net: &Net, process_info: bool) -> String {
 pub enum Mode<'a> {
     /// No `sandbox-exec`.
     Control,
-    /// Under the profile for this network level; the flag adds the process-info section.
-    Sandboxed(&'a Net, bool),
+    /// Under the profile for this network level; the text is added before the floor.
+    Sandboxed(&'a Net, &'a str),
 }
 
 impl Places {
@@ -155,7 +161,7 @@ impl Places {
     pub fn command(&self, mode: &Mode<'_>, program: &OsStr, args: &[&OsStr]) -> Command {
         let mut cmd = match mode {
             Mode::Control => Command::new(program),
-            Mode::Sandboxed(net, process_info) => {
+            Mode::Sandboxed(net, extra) => {
                 let mut cmd = Command::new("/usr/bin/sandbox-exec");
                 for (name, path) in [
                     ("RUN", &self.run),
@@ -164,7 +170,7 @@ impl Places {
                 ] {
                     cmd.arg("-D").arg(format!("{name}={}", path.display()));
                 }
-                cmd.arg("-p").arg(profile(net, *process_info)).arg(program);
+                cmd.arg("-p").arg(profile(net, extra)).arg(program);
                 cmd
             }
         };

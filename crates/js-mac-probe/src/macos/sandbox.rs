@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::process::Command;
 
 use super::Scratch;
-use super::exec::{Mode, Net, describe, run};
+use super::exec::{Mode, Net, Outcome, describe, run};
 use crate::report::{Probe, Report};
 
 /// A path outside every grant that a control run may create and remove.
@@ -29,7 +29,7 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     ));
 
     let off = Net::Off;
-    let sandboxed = Mode::Sandboxed(&off, false);
+    let sandboxed = Mode::Sandboxed(&off, "");
 
     // The profile compiles and a write inside the run directory works: without this the
     // denials below prove nothing.
@@ -93,21 +93,36 @@ pub fn probes(scratch: &Scratch, report: &mut Report) {
     report.push(describe(entry_probe, "", &entry));
     let _ = std::fs::remove_file(&entry_file);
 
-    // Process visibility: `ps` as the same uid with and without the process-info denies.
-    let ps = |mode: &Mode<'_>| {
-        run(places.command(
-            mode,
-            OsStr::new("/bin/ps"),
-            &[OsStr::new("-axo"), OsStr::new("pid=")],
-        ))
-    };
-    let with_control = ps(&Mode::Control);
-    let denied_info = ps(&Mode::Sandboxed(&off, true));
-    let allowed_info = ps(&sandboxed);
-    let lines = |out: &super::exec::Outcome| out.stdout.lines().count();
-    let probe = Probe::info("sandbox/process-info-others")
-        .fact("control_processes", lines(&with_control))
-        .fact("profile_without_denies_processes", lines(&allowed_info))
-        .fact("profile_with_denies_processes", lines(&denied_info));
-    report.push(describe(probe, "profile_with_denies_", &denied_info));
+    // Reported: process visibility. `ps` (and `true`, to tell a refused exec from a refused
+    // listing) under the design's process-info rule and two narrower ones.
+    let variants: [(&str, &str); 4] = [
+        ("none", ""),
+        (
+            "design",
+            "(deny process-info* (target others))\n(allow process-info* (target self) (target same-sandbox))",
+        ),
+        (
+            "pidinfo",
+            "(deny process-info-pidinfo (target others))\n(allow process-info-pidinfo (target self))",
+        ),
+        ("listpids", "(deny process-info-listpids)"),
+    ];
+    let ps_args = [OsStr::new("-axo"), OsStr::new("pid=")];
+    let count = |out: &Outcome| out.stdout.lines().count();
+    let control = run(places.command(&Mode::Control, OsStr::new("/bin/ps"), &ps_args));
+    let mut probe =
+        Probe::info("sandbox/process-info-others").fact("control_ps_processes", count(&control));
+    for (name, rules) in variants {
+        let mode = Mode::Sandboxed(&off, rules);
+        let ps = run(places.command(&mode, OsStr::new("/bin/ps"), &ps_args));
+        let true_ = run(places.command(&mode, OsStr::new("/usr/bin/true"), &[]));
+        probe = probe
+            .fact(&format!("{name}_ps_processes"), count(&ps))
+            .fact(&format!("{name}_true_ok"), true_.ok);
+        probe = describe(probe, &format!("{name}_ps_"), &ps);
+        if !true_.ok {
+            probe = probe.fact(&format!("{name}_true_stderr"), true_.stderr_tail());
+        }
+    }
+    report.push(probe);
 }
