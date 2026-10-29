@@ -83,6 +83,7 @@ fn job(run: &str) -> JobSpec {
         isolation: Isolation::Contained,
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
         bundle: None,
         native: None,
@@ -204,6 +205,7 @@ impl Agent {
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(dir.path()).unwrap(),
+            files: None,
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
         };

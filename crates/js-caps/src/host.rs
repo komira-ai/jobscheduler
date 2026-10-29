@@ -10,6 +10,7 @@
 //! | [`GPU_TOOLKIT`] | [`FLAG_SET`] | the host offers GPUs and the toolkit check passed |
 //! | [`EXEC`] | an [`ExecMode`] name | the agent runs jobs, in that mode |
 //! | [`DISK_GIB`] | whole GiB | the agent has a work volume (`--scratch-root`) and could read its free space |
+//! | [`RUN_FILES`] | [`FLAG_SET`] | the agent runs containers and writes a start's run files |
 //!
 //! A job request may require [`EXEC`] (the same mode) and [`DISK_GIB`] (at least that
 //! much free disk); see [`crate::Request`].
@@ -36,11 +37,16 @@ pub const EXEC: &str = js_types::EXEC_KEY;
 /// The capability key of the free disk, in whole GiB, of the volume jobs work on.
 pub const DISK_GIB: &str = js_types::DISK_GIB_KEY;
 
+/// The capability key of an agent that writes a start's run files (`JobSpec::files`) and
+/// mounts them at `/run/js-files`. An agent without it ignores the field, so the server
+/// sends a start with files only to a host that reports it as [`FLAG_SET`].
+pub const RUN_FILES: &str = "run-files";
+
 /// The value of a capability that is a flag: present means set.
 pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
-pub const DETECTED_KEYS: [&str; 4] = [RUNTIME, GPU_TOOLKIT, EXEC, DISK_GIB];
+pub const DETECTED_KEYS: [&str; 5] = [RUNTIME, GPU_TOOLKIT, EXEC, DISK_GIB, RUN_FILES];
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
