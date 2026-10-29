@@ -149,12 +149,12 @@ fn the_toolkit_hook_flag_is_checked_at_start() {
     assert_eq!(hello, Value::Null);
 }
 
-/// Asserts that an operator cannot give any of the three capabilities with `--capability`:
+/// Asserts that an operator cannot give any of the four capabilities with `--capability`:
 /// the agent ends with status 2 naming the key, and sends nothing. It catches a pool's
 /// contract satisfied by a flag instead of by what the host has.
 #[test]
 fn the_contract_capabilities_cannot_be_set_by_flag() {
-    for key in ["runtime", "exec", "gpu-toolkit"] {
+    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib"] {
         let flag = format!("{key}=container");
         let (ran, sent, _) = run_scripted(
             &["--capability", flag.as_str()],
@@ -189,4 +189,85 @@ fn capabilities_that_leave_no_room_for_the_contract_are_refused_at_start() {
         ran.err
     );
     assert_eq!(hello, Value::Null);
+}
+
+/// The host a container agent runs on when `df` answers `answer` for its scratch root.
+fn host_with_disk(dir: &Scratch, answer: Result<&str, &str>) -> Host {
+    let mut host = linux_host();
+    let line = format!("/bin/df -P -k {}", dir.path("run-scratch").display());
+    host.commands = host.commands.with(&line, answer);
+    host
+}
+
+/// Runs the whole agent over containers on a host whose `df` answers `answer`; returns
+/// what it printed and the hello it sent.
+fn disk_hello(name: &str, answer: Result<&str, &str>) -> (Ran, Value) {
+    let dir = Scratch::new(name);
+    let host = host_with_disk(&dir, answer);
+    let owned = container_flags(&dir);
+    let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let (script, sent) = Script::new(vec![no_runtime()]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on(
+        &flags(&all),
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    let hello = sent
+        .borrow()
+        .first()
+        .map_or(Value::Null, |sent| sent.1.clone());
+    (ran, hello)
+}
+
+const DF_HEAD: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n";
+
+/// Asserts that the agent reports `disk-gib` as the free space of the scratch root's
+/// volume in whole GiB rounded down (an exact GiB is that many, one KiB less is one fewer,
+/// and under a GiB is 0), and that a file system or mount point with spaces in its name
+/// does not shift the column read. It catches a disk read in the wrong unit, rounded up,
+/// or taken from the wrong column.
+#[test]
+fn the_free_disk_of_the_work_volume_is_reported_in_whole_gib() {
+    let cases = [
+        ("/dev/sda1 900 100 10485760 11% /", "10"),
+        ("/dev/sda1 900 100 10485759 11% /", "9"),
+        ("/dev/sda1 900 100 1048575 11% /", "0"),
+        (
+            "/dev/disk3 s1 900 100 3145728 11% /Volumes/My Disk 100%",
+            "3",
+        ),
+    ];
+    for (n, (row, gib)) in cases.into_iter().enumerate() {
+        let (_, hello) = disk_hello(&format!("disk-ok-{n}"), Ok(&format!("{DF_HEAD}{row}\n")));
+        assert_eq!(hello["capabilities"]["disk-gib"], gib, "{row}");
+        assert_eq!(hello["capabilities"]["runtime"], "container");
+    }
+}
+
+/// Asserts that a volume `df` cannot report (the program fails, prints nothing, prints no
+/// second row, or no number before the capacity) leaves `disk-gib` out of the hello with a
+/// warning naming `--scratch-root` and the reason, and does not stop the agent. It catches
+/// a guess reported as free space.
+#[test]
+fn an_unreadable_volume_is_a_warning_and_no_disk() {
+    let cases = [
+        (Err("df: not found"), "df: not found"),
+        (Ok(""), "df printed no free space"),
+        (Ok(DF_HEAD), "df printed no free space"),
+        (Ok("h\n/dev/sda1 1 2 x 11% /\n"), "df printed no free space"),
+        (Ok("h\n/dev/sda1 1 2 3 4 /\n"), "df printed no free space"),
+    ];
+    for (n, (answer, reason)) in cases.into_iter().enumerate() {
+        let (ran, hello) = disk_hello(&format!("disk-bad-{n}"), answer);
+        assert!(hello["capabilities"].get("disk-gib").is_none(), "{hello}");
+        assert_eq!(hello["capabilities"]["runtime"], "container");
+        let said = format!("--scratch-root: cannot read the free disk ({reason}");
+        assert!(ran.err.contains(&said), "{}", ran.err);
+    }
 }

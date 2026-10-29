@@ -104,13 +104,16 @@ impl Effects for Handle {
         on.is_some_and(|view| view.lease.is_some())
     }
 
-    fn remove(&self, host: &str) -> bool {
+    fn remove(&self, host: &str) -> Result<(), String> {
         let mut world = self.world();
         world.log.push(format!("remove:{host}"));
-        if world.remove_ok {
-            world.hosts.retain(|view| view.id.as_str() != host);
+        match world.remove_ok {
+            true => {
+                world.hosts.retain(|view| view.id.as_str() != host);
+                Ok(())
+            }
+            false => Err("a lease is booked on the host".to_owned()),
         }
-        world.remove_ok
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {

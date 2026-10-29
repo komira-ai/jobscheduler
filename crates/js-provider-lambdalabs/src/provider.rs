@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{
-    AcquireId, AcquireRequest, Acquired, BootStep, Claim, Demand, ElasticProvider, Extra, Held,
-    HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
+    AcquireId, AcquireRequest, Acquired, BootStep, CheckResult, Claim, Demand, ElasticProvider,
+    Extra, Held, HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released,
+    Secret,
 };
 
 use crate::api::LambdaApi;
@@ -15,10 +16,12 @@ use crate::clock::Clock;
 use crate::config::{ElasticConfig, Mode};
 use crate::error::{ApiError, ErrorCode};
 use crate::host;
-use crate::model::{Instance, InstanceId, LaunchRequest};
+use crate::model::{Instance, InstanceId, LaunchRequest, SshKey};
 use crate::options::OptionTable;
 use crate::own::{LabelError, Owner};
 use crate::select;
+
+mod checks;
 
 /// The most bytes of boot payload this provider carries: the user data of a launch.
 ///
@@ -114,6 +117,14 @@ impl PrepareError {
             }
         }
     }
+}
+
+/// The key a launch holds, as [`LambdaProvider::pick_key`] settles it.
+enum KeyPick {
+    /// A key the account has, by name.
+    Use(String),
+    /// The account has none: the key to make, by name.
+    Make(String),
 }
 
 /// What a sweep found. Nothing is terminated by it.
@@ -240,19 +251,29 @@ impl LambdaProvider {
         if let Some(name) = chosen.as_ref() {
             return Ok(name.clone());
         }
-        let ours =
-            Some(format!("js-{}", self.config.scheduler.as_str())).filter(|name| name.len() <= 64);
         let keys = self.api.list_ssh_keys()?;
-        let named = keys.iter().find(|key| Some(&key.name) == ours.as_ref());
-        let name = match (named, keys.as_slice(), ours) {
-            (Some(key), _, _) => key.name.clone(),
-            (None, [only], _) => only.name.clone(),
-            (None, [], Some(ours)) => self.api.create_ssh_key(&ours)?.name,
-            (None, [], None) => return Err(PrepareError::KeyName),
-            (None, many, _) => return Err(PrepareError::SshKeys { count: many.len() }),
+        let name = match self.pick_key(&keys)? {
+            KeyPick::Use(name) => name,
+            KeyPick::Make(ours) => self.api.create_ssh_key(&ours)?.name,
         };
         *chosen = Some(name.clone());
         Ok(name)
+    }
+
+    /// Which of the account's `keys` a launch holds when no key is configured: the one
+    /// named `js-<scheduler>`, else the only key, else (on an account with none) a key to
+    /// make under that name. Calls nothing.
+    fn pick_key(&self, keys: &[SshKey]) -> Result<KeyPick, PrepareError> {
+        let ours =
+            Some(format!("js-{}", self.config.scheduler.as_str())).filter(|name| name.len() <= 64);
+        let named = keys.iter().find(|key| Some(&key.name) == ours.as_ref());
+        match (named, keys, ours) {
+            (Some(key), _, _) => Ok(KeyPick::Use(key.name.clone())),
+            (None, [only], _) => Ok(KeyPick::Use(only.name.clone())),
+            (None, [], Some(ours)) => Ok(KeyPick::Make(ours)),
+            (None, [], None) => Err(PrepareError::KeyName),
+            (None, many, _) => Err(PrepareError::SshKeys { count: many.len() }),
+        }
     }
 
     /// Lists what this scheduler has launched or half-launched and reports it. Report
@@ -601,6 +622,10 @@ impl ElasticProvider for LambdaProvider {
             &types,
             self.config.regions.as_deref(),
         ))
+    }
+
+    fn checks(&self) -> Vec<CheckResult> {
+        self.live_checks()
     }
 
     fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {

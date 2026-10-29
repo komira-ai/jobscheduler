@@ -141,6 +141,9 @@ pub fn cloud_kinds() -> Kinds {
 /// for the key file `scratch` makes.
 pub fn account(scratch: &Scratch) -> Arc<FakeLambda> {
     let account = Arc::new(FakeLambda::new());
+    // The key the pool names (`ElasticConfig::new` in `fake_cloud`): the provider's own
+    // checks find it on the account.
+    account.add_ssh_key("test-key");
     account.set_offers(vec![InstanceTypeOffer {
         name: "gpu_1x_a100".to_owned(),
         description: String::new(),
