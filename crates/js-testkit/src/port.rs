@@ -333,28 +333,27 @@ mod tests {
 
     /// Catches a probed port on the usual loopback address, which another test's
     /// `127.0.0.1:0` bind can take (Linux; elsewhere only `127.0.0.1` exists).
+    ///
+    /// The helper promises an address that is not `127.0.0.1` and differs per call, not
+    /// that the probed port stays free: any socket may take that number after the probe.
+    /// So the test asserts the promise (the address) and the property it is for, that a
+    /// thief on `127.0.0.1` does not block the address, on ports the test holds itself.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_own_address_is_not_the_usual_loopback_and_is_stable() {
         let a = own_loopback_port();
         let b = own_loopback_port();
         assert_ne!(a.ip(), IpAddr::from(Ipv4Addr::LOCALHOST));
+        assert!(a.ip().is_loopback());
         assert_ne!(a.ip(), b.ip());
-        // The same port number is free on 127.0.0.1 for a thief and the address is
-        // still ours to bind.
-        let _thief = TcpListener::bind((Ipv4Addr::LOCALHOST, a.port()));
-        TcpListener::bind(a).expect("our address is still free");
-    }
-
-    /// Shows the race of `an_own_address_is_not_the_usual_loopback_and_is_stable`: the
-    /// probed port is free on the address only until some other socket takes it. Here
-    /// a wildcard listener (another test binding `0.0.0.0:0`) holds that number, and
-    /// the old assertion that the address is still bindable fails.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_wildcard_listener_on_the_probed_port_blocks_the_address() {
-        let a = own_loopback_port();
-        let _other = TcpListener::bind((Ipv4Addr::UNSPECIFIED, a.port())).expect("wildcard");
-        TcpListener::bind(a).expect("our address is still free");
+        // A thief holds a number on 127.0.0.1; our address must still bind that number.
+        // Another process may hold it on a wildcard address, so a few fresh numbers are
+        // tried: a bounded retry, and the thief's number is held while we bind.
+        let bound = (0..8).any(|_| {
+            let thief = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("thief");
+            let port = thief.local_addr().expect("addr").port();
+            TcpListener::bind((a.ip(), port)).is_ok()
+        });
+        assert!(bound, "{} never bound next to a 127.0.0.1 thief", a.ip());
     }
 }
