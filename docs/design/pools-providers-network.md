@@ -139,7 +139,9 @@ impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, ar
 `js-elastic::Demand` is an alias of `Requirements`, so the scaler and the matcher read one
 definition. `ContainerSpec` maps onto the existing run body: `RunBody` gains no field in the
 first slice, its `image` is parsed into `ImageDigestRef` at the edge, and a digest-less image is
-refused at run start only for pools with `require_digest = true` (PROPOSAL, 14 Q16).
+refused at run start with `image-digest-required` (422), for every pool: agents pull what a host
+lacks, so a tag could change under a fleet. This is unconditional and not the `require_digest` pool
+setting of 14 Q16; the agent refuses a tag-only start as well.
 
 Deferred, plainly: in the first slice the lease request still carries `Resources` plus
 `Capabilities`, so disk and exec are `None` in every `Requirements` built from it. `os` and
@@ -1089,9 +1091,12 @@ auth keys expire after 90 days and are not used.
    pool's tag, expiry 10 minutes (`LaunchCtx.valid_for`). One key per launch, never shared.
 3. Return `Fetch` for the Tailscale static binary (pinned version and sha256 in a table
    compiled into the crate and updated by release; PROPOSAL), `SecretFile` for
-   `/etc/jobscheduler/ts-authkey`, then `Run(["tailscaled", ...])` and `Run(["tailscale", "up",
-   "--auth-key=file:/etc/jobscheduler/ts-authkey", "--hostname=<name>", "--accept-dns=false"])`,
-   then `Run(["rm", "-f", "/etc/jobscheduler/ts-authkey"])`. The EXIT trap (7.3) removes the file
+   `/etc/jobscheduler/ts-authkey`, then `Run(["systemd-run", "--unit=tailscaled", "tailscaled", ...])`, a bounded wait for
+   `tailscaled`'s socket (`Run(["sh", "-c", <constant loop>, "sh", <socket path>])`: at most 30
+   checks, one second apart, then a `logger` line and a non-zero exit, which stops the boot), and
+   `Run(["tailscale", "up", "--auth-key=file:/etc/jobscheduler/ts-authkey", "--hostname=<name>",
+   "--accept-dns=true"])`. DNS is accepted because `advertise_url` is a MagicDNS name and the
+   server's certificate is for that name, so the host must resolve it. Then `Run(["rm", "-f", "/etc/jobscheduler/ts-authkey"])`. The EXIT trap (7.3) removes the file
    too, if `tailscale up` fails.
 
 The endpoints and scopes (`auth_keys` to create keys, `devices:core` to delete a device) are

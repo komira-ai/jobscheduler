@@ -81,9 +81,14 @@ a launch answers the packed demand of the queue, never one job (hosts.md, sectio
 
 1. **Acquire.** The scheduler records the intent (acquire id, pool, entry, shape) durably, then calls `acquire`. The provider boots a
    machine from the image its configuration names; the image carries `js-agent`, the scheduler's address and identity to pin, and the pool
-   name. **No secret** is baked in or passed in the launch request (K6).
-2. **The machine registers itself.** The agent says hello. For a launched machine the proof is the cloud's signed instance identity
-   (registration.md, Aws instances), not a join token: the provider verifies it and matches it to the pending acquire (a provider kind
+   name. The image holds **no secret** (K6). What the launch request carries depends on the kind. An aws launch carries none: the host
+   proves itself with the cloud's signed identity. A kind with no signed identity (Lambda) carries, by the design of pools-providers-network.md (7.2 and 9), a launch payload (`user_data`) that
+   holds a one-time join token valid for minutes, and a network key where the pool's network mode needs one; both cross TLS to the
+   provider and are never logged, and the join token is dead after the host's first hello, when a host credential replaces it
+   (registration.md, Host credential). The reason is requirement 8 of pools-providers-network.md: the alternative, a later push over
+   ssh, needs an inbound port open for the instance's whole life.
+2. **The machine registers itself.** The agent says hello. For an aws machine the proof is the cloud's signed instance identity
+   (registration.md, Aws instances), not a join token (a kind with none uses the one-time join token of registration.md): the provider verifies it and matches it to the pending acquire (a provider kind
    implements a verify step beside `acquire`; a kind that cannot prove identity cannot be an elastic provider). The first matching hello
    completes the acquire: the instance leaves `registering` and is a host of the pool.
 3. **The provider's job ends there**, at boot plus registration, or at failure: a refusal, a boot that never says hello within

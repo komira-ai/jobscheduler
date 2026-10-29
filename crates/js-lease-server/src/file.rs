@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
-use js_lease::Settings;
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 
@@ -25,11 +24,16 @@ use crate::adapt::SharedClock;
 use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{BootMode, Limits, TlsFiles, Token, parse_duration, parse_token};
+use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
 use crate::file_checks::{check_listeners, check_live, https_url, sha256};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
+
+mod server;
+
+pub(crate) use server::Server;
+use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
 const MAX_INSTANCES: u64 = 255;
@@ -41,28 +45,6 @@ const FLOOR_CPU_MILLIS: u64 = 1000;
 const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
 const ROOT_KEYS: &[&str] = &["server", "pool"];
-
-const SERVER_KEYS: &[&str] = &[
-    "listen",
-    "agent_listen",
-    "advertise_url",
-    "scheduler_id",
-    "state_file",
-    "boot",
-    "client_token_file",
-    "tls_cert",
-    "tls_key",
-    "tick",
-    "default_ttl",
-    "max_ttl",
-    "max_connections",
-    "handshake_timeout",
-    "header_timeout",
-    "read_timeout",
-    "write_timeout",
-    "max_requests",
-    "drain_timeout",
-];
 
 const POOL_KEYS: &[&str] = &[
     "name",
@@ -202,21 +184,6 @@ impl fmt::Debug for ElasticPlan {
     }
 }
 
-/// What the `[server]` table says.
-pub(crate) struct Server {
-    pub(crate) listen: SocketAddr,
-    pub(crate) agent_listen: Option<SocketAddr>,
-    pub(crate) advertise_url: Option<String>,
-    pub(crate) scheduler: SchedulerId,
-    pub(crate) state_file: PathBuf,
-    pub(crate) boot: BootMode,
-    pub(crate) client_token_file: PathBuf,
-    pub(crate) tls: Option<TlsFiles>,
-    pub(crate) tick: Duration,
-    pub(crate) settings: Settings,
-    pub(crate) limits: Limits,
-}
-
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
 pub(crate) struct Registering {
     pub(crate) plan: ElasticPlan,
@@ -322,6 +289,22 @@ impl Section {
         }
     }
 
+    /// The integer `key` when the file gives it, which must be from `low` to `high`.
+    fn bounded_given(
+        &mut self,
+        key: &str,
+        low: u64,
+        high: u64,
+    ) -> Result<Option<u64>, StartupError> {
+        let Some(number) = self.integer(key)? else {
+            return Ok(None);
+        };
+        match (low..=high).contains(&number) {
+            true => Ok(Some(number)),
+            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
+        }
+    }
+
     /// The integer `key`, or `default`, which must be from `low` to `high`.
     fn bounded(
         &mut self,
@@ -330,10 +313,14 @@ impl Section {
         high: u64,
         default: u64,
     ) -> Result<u64, StartupError> {
-        let number = self.integer(key)?.unwrap_or(default);
-        match (low..=high).contains(&number) {
-            true => Ok(number),
-            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
+        Ok(self.bounded_given(key, low, high)?.unwrap_or(default))
+    }
+
+    fn boolean(&mut self, key: &str) -> Result<Option<bool>, StartupError> {
+        match self.map.remove(key) {
+            None => Ok(None),
+            Some(toml::Value::Boolean(flag)) => Ok(Some(flag)),
+            Some(_) => Err(self.fail(key, "must be true or false")),
         }
     }
 
@@ -499,6 +486,10 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             return Err(StartupError::at("pool", reason));
         }
     };
+    if let (false, Some(key)) = (elastic, server.agents.first_given()) {
+        let reason = "needs an elastic pool, whose hosts register agents";
+        return Err(StartupError::at(format!("server.{key}"), reason));
+    }
     let warnings = check_listeners(&server, elastic)?;
     Ok(Loaded {
         server,
@@ -506,84 +497,6 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         hosts,
         warnings,
     })
-}
-
-fn read_server(table: toml::Table) -> Result<Server, StartupError> {
-    let mut s = Section::open(table, "server.".to_owned());
-    s.only(SERVER_KEYS)?;
-    let listen = s.address("listen")?;
-    let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
-    let agent_listen = s.address("agent_listen")?;
-    let advertise_url = s.string("advertise_url")?;
-    let scheduler = s.string("scheduler_id")?.unwrap_or_else(|| "js".to_owned());
-    let scheduler = match SchedulerId::new(&scheduler) {
-        Ok(id) => id,
-        Err(err) => return Err(s.fail("scheduler_id", &err.to_string())),
-    };
-    let state_file = s.required_path("state_file")?;
-    let boot = s.required_string("boot")?;
-    let boot = match boot.as_str() {
-        "initialise" => BootMode::Initialise,
-        "resume" => BootMode::Resume,
-        _ => return Err(s.fail("boot", "must be initialise or resume")),
-    };
-    let client_token_file = s.required_path("client_token_file")?;
-    let tls = match (s.path("tls_cert")?, s.path("tls_key")?) {
-        (Some(cert), Some(key)) => Some(TlsFiles { cert, key }),
-        (None, None) => None,
-        (Some(_), None) => return Err(s.fail("tls_key", "required with server.tls_cert")),
-        (None, Some(_)) => return Err(s.fail("tls_cert", "required with server.tls_key")),
-    };
-    let secs = Duration::from_secs;
-    let tick = s.duration_or("tick", secs(5))?;
-    let default_ttl = s.duration_or("default_ttl", secs(600))?;
-    let max_ttl = s.duration_or("max_ttl", secs(3600))?;
-    let defaults = Limits::default();
-    let connections = s.bounded("max_connections", 1, u64::from(u16::MAX), 256)?;
-    let requests = s.bounded("max_requests", 1, u64::from(u32::MAX), 100)?;
-    let limits = Limits {
-        max_connections: u16::try_from(connections).unwrap_or(defaults.max_connections),
-        handshake_timeout: s.duration_or("handshake_timeout", defaults.handshake_timeout)?,
-        header_timeout: s.duration_or("header_timeout", defaults.header_timeout)?,
-        read_timeout: s.duration_or("read_timeout", defaults.read_timeout)?,
-        write_timeout: s.duration_or("write_timeout", defaults.write_timeout)?,
-        max_requests: u32::try_from(requests).unwrap_or(defaults.max_requests),
-        drain_timeout: s.duration_or("drain_timeout", defaults.drain_timeout)?,
-    };
-    // The same check as `--default-ttl` and `--max-ttl`.
-    let settings = match Settings::new(default_ttl, max_ttl) {
-        Ok(settings) => settings,
-        Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
-    };
-    Ok(Server {
-        listen,
-        agent_listen,
-        advertise_url,
-        scheduler,
-        state_file,
-        boot,
-        client_token_file,
-        tls,
-        tick,
-        settings,
-        limits,
-    })
-}
-
-fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token, StartupError> {
-    let place = "server.client_token_file";
-    let path = &server.client_token_file;
-    let bytes = match ld.files.read(path) {
-        Ok(bytes) => bytes,
-        Err(reason) => return Err(StartupError::at(place, reason)),
-    };
-    match parse_token(&bytes) {
-        Ok(token) => Ok(token),
-        Err(reason) => {
-            let reason = format!("{} {reason}", path.display());
-            Err(StartupError::at(place, reason))
-        }
-    }
 }
 
 /// A pool of the file, built.

@@ -103,7 +103,7 @@ impl Rig {
     /// Queues a run of `cpu` thousandths of a core.
     fn queue(&self, cpu: u64) -> Reply {
         let body = json!({
-            "image": "busybox:1",
+            "image": "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "args": ["true"],
             "limits": { "cpu_millis": cpu, "memory_bytes": 1048576 },
         });
