@@ -38,6 +38,7 @@ mod pools_support;
 mod restart;
 mod routes;
 mod runs;
+mod runs_files;
 mod runs_more;
 mod runs_routes;
 mod runs_support;
