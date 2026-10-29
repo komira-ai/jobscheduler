@@ -193,8 +193,8 @@ impl Http {
     ) -> Result<Response<Incoming>, Error> {
         let mut url = url.to_owned();
         let mut headers = headers.to_vec();
-        for _ in 0..=MAX_REDIRECTS {
-            let response = self.get_once(&url, &headers, own).await?;
+        for hop in 0..=MAX_REDIRECTS {
+            let response = self.get_once(&url, &headers, own, hop == 0).await?;
             if !response.status().is_redirection() {
                 return Ok(response);
             }
@@ -220,6 +220,7 @@ impl Http {
         url: &str,
         headers: &[(HeaderName, String)],
         own: &Authority,
+        first: bool,
     ) -> Result<Response<Incoming>, Error> {
         // What an error may say of the URL: no query, fragment or userinfo.
         let transport = |why: String| Error::Transport {
@@ -231,7 +232,7 @@ impl Http {
         let Some(authority) = authority else {
             return Err(Error::Insecure(text::url(url)));
         };
-        if ![HTTPS_PORT, own.port()].contains(&authority.port()) {
+        if first && ![HTTPS_PORT, own.port()].contains(&authority.port()) {
             return Err(Error::Port {
                 host: authority.host().to_owned(),
                 port: authority.port(),
