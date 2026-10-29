@@ -106,7 +106,7 @@ impl<'a> Pass<'a> {
     /// Starts the release of a machine: its join token is revoked, and from now on every
     /// step asks the provider to release it. Each machine enters `Releasing` once, so
     /// its token is revoked once.
-    fn start_release(&mut self, i: usize) {
+    pub(crate) fn start_release(&mut self, i: usize) {
         let moved = self.go(i, Phase::Releasing);
         let name = self.records.instances[i].name.clone();
         self.actions.extend(moved.then_some(Action::Revoke(name)));

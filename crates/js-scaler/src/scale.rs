@@ -215,8 +215,7 @@ impl Pass<'_> {
                 let since = *self.quiet.entry(name.clone()).or_insert(self.now);
                 let ripe = self.now.since(since) >= pool.settings.idle;
                 if [condemned, ripe].into_iter().any(|ok| ok) {
-                    self.go(i, Phase::Draining);
-                    self.actions.push(Action::Drain(name));
+                    self.start_release(i);
                 } else {
                     self.quiet_now.insert(name);
                 }
