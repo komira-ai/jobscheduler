@@ -211,19 +211,17 @@ impl JobSpec {
     /// before it queues a start and the agent before it acts on one, so no host pulls an
     /// image whose content can move.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
+        // The bundle first: a native job returns early below and must not skip it.
+        if let Some(bundle) = &self.bundle {
+            image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)?;
+        }
         if self.native.is_some() {
             return Ok(());
         }
         image::pinned(
             At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
             &self.image,
-        )?;
-        match &self.bundle {
-            Some(bundle) => {
-                image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)
-            }
-            None => Ok(()),
-        }
+        )
     }
 
     /// Exactly one of the image and the native body names what runs; a native job also
@@ -247,8 +245,8 @@ impl JobSpec {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
         check::ident(at.field("lease_id"), &self.lease_id)?;
-        self.check_body()?;
         self.check_bundle()?;
+        self.check_body()?;
         check::args(at.field("args"), &self.args)?;
         self.limits.check(at)?;
         let gpus = at.field("gpu_indices");
@@ -277,16 +275,21 @@ impl JobSpec {
         )
     }
 
+    /// A bundle is the toolchain of a native job, and no runtime can fetch one yet, so
+    /// every bundle is refused: without a native body the job is a container (or empty)
+    /// job that an agent from before the field would run without the tools, and beside a
+    /// native body the agent would run the program with the host's tools. The grammar is
+    /// checked first so a malformed name reads as such.
     fn check_bundle(&self) -> Result<(), ValidationError> {
         let Some(bundle) = &self.bundle else {
             return Ok(());
         };
         let at = At::new("bundle", refusal::INVALID_BUNDLE);
         image::bundle(at, bundle)?;
-        self.image
-            .is_empty()
-            .then_some(())
-            .ok_or(at.fail(Rule::Inconsistent))
+        if self.native.is_some() {
+            return Err(at.fail(Rule::Inconsistent));
+        }
+        Err(at.fail(Rule::NeedsNative))
     }
 
     /// Whether the job's limits and the number of its GPU indices fit one host's offered
