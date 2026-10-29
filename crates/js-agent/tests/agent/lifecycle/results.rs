@@ -90,7 +90,7 @@ fn malformed_acknowledgements_are_ignored() {
     h.fake.exit("r1", 0);
     h.life.step();
     let reply = reply_json(&json!({
-        "commands": [{ "type": "start", "run_id": "r2", "lease_id": "l2", "image": "img:1",
+        "commands": [{ "type": "start", "run_id": "r2", "lease_id": "l2", "image": "img:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                        "limits": { "cpu_millis": 100, "memory_bytes": 1048576, "wall_ms": 1000 } }],
         "result_acks": [
             { "run_id": "r1", "ack": "ACCEPTED" },

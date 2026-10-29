@@ -39,6 +39,8 @@ pub const FLOOR: &str = "floor/";
 pub const KEY_FLOOR: &str = "keyfloor/";
 /// `opkey/<operation>`: the size key of an operation.
 pub const OPKEY: &str = "opkey/";
+/// `opwall/<operation>`: the longest an operation may run.
+pub const OPWALL: &str = "opwall/";
 /// `inflight/<class>/<dedup>`: which operation runs a piece of work now.
 pub const INFLIGHT: &str = "inflight/";
 
@@ -55,7 +57,7 @@ pub const NEXT_SEQ: &str = "meta/next_seq";
 
 /// Every prefix of a row this crate owns, and every `meta/` key: what an embedder's rows
 /// ([`crate::Ext`]) must stay out of. A kind of row added above is added here too.
-pub const ALL: [&str; 18] = [
+pub const ALL: [&str; 19] = [
     OPERATION,
     QUEUE,
     LEASE,
@@ -69,6 +71,7 @@ pub const ALL: [&str; 18] = [
     FLOOR,
     KEY_FLOOR,
     OPKEY,
+    OPWALL,
     INFLIGHT,
     EPOCH,
     ALIVE,
@@ -119,6 +122,12 @@ pub fn fate(operation: OperationId) -> String {
 #[must_use]
 pub fn opkey(operation: OperationId) -> String {
     of_operation(OPKEY, operation)
+}
+
+/// The `opwall/` row of `operation`.
+#[must_use]
+pub fn opwall(operation: OperationId) -> String {
+    of_operation(OPWALL, operation)
 }
 
 /// The `done/` row of `operation`.

@@ -57,9 +57,10 @@ mod store;
 mod write;
 
 pub use self::core::{
-    Admitted, Config, Core, Held, NodeAction, NodeUnread, NotQueued, PlaceError, UnknownNode,
+    Admitted, Config, Core, Held, NodeAction, NodeHeld, NodeUnread, NotQueued, PlaceError,
+    SubmitOptions, UnknownNode,
 };
-pub use adapter::{Adapter, Delivery, Link, Lowered, Stage, View};
+pub use adapter::{Adapter, Delivery, Link, Lowered, Stage, View, log_finished_line};
 pub use admission::{Admission, AllowAll, Denied};
 pub use engine::HELD_CAP;
 pub use handover::{FLUSH_LOOK, FOLLOW_EVERY};

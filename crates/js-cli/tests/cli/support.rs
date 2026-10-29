@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
 use js_cli::{Clock, ForwardedSignal, Services, SignalSource, Signaller, Waiter};
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{

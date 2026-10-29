@@ -5,6 +5,8 @@
 //! characters, yet a tool such as podman or skopeo reads them as a local transport and a
 //! host path, not as a registry reference. The grammar below has no place for either.
 
+use js_types::ImageDigestRef;
+
 use crate::check::{At, lower_alnum};
 use crate::error::{Rule, ValidationError};
 use crate::limits;
@@ -45,6 +47,15 @@ pub(crate) fn image(at: At, value: &str) -> Result<(), ValidationError> {
         return Err(at.fail(Rule::BadChars));
     }
     Ok(())
+}
+
+/// The reference pins its content: `@sha256:` and 64 lower case hex digits, checked by
+/// [`js_types::ImageDigestRef`]. The caller has already run [`image`], so the grammar of
+/// the name holds; a reference this refuses may still be a valid tag-only one.
+pub(crate) fn pinned(at: At, value: &str) -> Result<(), ValidationError> {
+    ImageDigestRef::parse(value)
+        .map(|_| ())
+        .map_err(|_| at.fail(Rule::NotPinned))
 }
 
 fn is_reference(value: &str) -> bool {
