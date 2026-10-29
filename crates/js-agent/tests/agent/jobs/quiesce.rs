@@ -5,6 +5,7 @@
 //! done), never for a time.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use js_agent::{
 use js_agent_wire::{Command, HeartbeatReply, JobSpec, RefusalReason};
 use serde_json::{Value, json};
 
-use super::fake::FakeMachine;
+use super::fake::{FakeMachine, HANG_GUARD};
 use super::{STEP_NEVER, plan, start, starts};
 use crate::exclusive::{lines, note};
 use crate::lifecycle::job;
@@ -74,7 +75,11 @@ fn heartbeats(sent: &Sent) -> Vec<Value> {
 }
 
 /// A worker whose readiness hook is `runner`.
-fn hooked(dir: &Scratch, machine: &FakeMachine, runner: Counting) -> Worker {
+fn hooked(
+    dir: &Scratch,
+    machine: &FakeMachine,
+    runner: impl HookRunner + Send + 'static,
+) -> Worker {
     let mut made = plan(dir, machine, STEP_NEVER);
     let program = ReadinessHook::new("/bin/sh", &[]).unwrap();
     let bound = Duration::from_secs(1);
@@ -529,4 +534,101 @@ fn questions_never_crowd_replies_out_of_the_queue() {
         Restored::Busy,
         "asked again once taken"
     );
+}
+
+/// A hook runner that tells the test when it has started and then waits to be released, and
+/// counts its runs.
+struct Gated {
+    runs: Arc<AtomicUsize>,
+    started: Sender<()>,
+    release: Receiver<()>,
+}
+
+impl HookRunner for Gated {
+    fn execute(&self, _program: &str, _args: &[&str], _env: &[(&str, &str)]) -> Ran {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let _ = self.started.send(());
+        let _ = self.release.recv_timeout(HANG_GUARD);
+        Ran::Exited {
+            code: Some(0),
+            text: "exit status: 0".to_owned(),
+            stdout: String::new(),
+        }
+    }
+}
+
+/// Asserts the hook is not run for a host the agent's own checks found busy: with a run
+/// held the question is busy and the hook has run zero times however often it is asked; once
+/// the run's result is acknowledged the host is found quiet, the hook runs once and the
+/// answer is ready. It catches a hook run before the checks passed, which would measure a
+/// host that is not quiet.
+#[test]
+fn the_hook_waits_for_the_hosts_own_checks() {
+    let dir = Scratch::new("jobs-quiesce-hook-busy");
+    let machine = FakeMachine::new();
+    let (runner, runs, _) = Counting::new(0, "");
+    let worker = hooked(&dir, &machine, runner);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    for _ in 0..2 {
+        assert_eq!(host.prepare(LEASE), Quiet::Busy);
+        assert!(handle.settle());
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 0, "a run is held");
+
+    machine.world.exit("r1", 0);
+    assert!(handle.settle());
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &["r1"])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Busy, "asked afresh");
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Ready);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+/// Asserts the hook runs once for a lease even when a second question is queued while the
+/// first is inside the hook: the test holds the hook until the second question is queued,
+/// then releases it; the second order finds the final answer published and does nothing.
+/// It catches a worker that runs the hook again for every order it takes.
+#[test]
+fn a_second_question_taken_after_the_answer_does_not_rerun_the_hook() {
+    let dir = Scratch::new("jobs-quiesce-hook-race");
+    let machine = FakeMachine::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (started, started_rx) = channel();
+    let (release_tx, release) = channel();
+    let runner = Gated {
+        runs: Arc::clone(&runs),
+        started,
+        release,
+    };
+    let worker = hooked(&dir, &machine, runner);
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    started_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the hook started");
+    assert_eq!(host.prepare(LEASE), Quiet::Busy, "queues a second order");
+    release_tx.send(()).unwrap();
+    assert!(handle.settle());
+
+    assert_eq!(host.prepare(LEASE), Quiet::Ready);
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "the hook ran once");
 }

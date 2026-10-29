@@ -352,10 +352,8 @@ impl Answers {
     /// Whether the host is clean after `lease`. A lifecycle that still follows a lease is
     /// not: the reply that ended it has not been applied.
     fn restore(&mut self, life: &mut Lifecycle, lease: String, events: &mut Vec<Event>) {
-        let done = matches!(&self.restored, Some((held, Restored::Done)) if *held == lease);
-        if done {
-            return;
-        }
+        // A second order after `Done` only runs the checks once more, and a finding taints
+        // the host as after any job, so it is not skipped.
         let answer = match life.exclusive() {
             Some(_) => Restored::Busy,
             None => life.restore(events),
@@ -764,20 +762,22 @@ fn work(
             Ok(Order::Settle(done)) => settle = Some(done),
             Ok(Order::Prepare) => {
                 shared.prepare_queued.store(false, Ordering::SeqCst);
+                // A second order whose lease the first took does nothing.
                 let asked = take_asked(&shared.asked_prepare);
                 let mut events = Vec::new();
-                if let Some(lease) = asked {
+                asked.into_iter().for_each(|lease| {
                     answers.prepare(&mut life, hook.as_ref(), lease, &mut events);
-                }
+                });
                 lines.extend(describe(&events));
             }
             Ok(Order::Restore) => {
                 shared.restore_queued.store(false, Ordering::SeqCst);
+                // A second order whose lease the first took does nothing.
                 let asked = take_asked(&shared.asked_restore);
                 let mut events = Vec::new();
-                if let Some(lease) = asked {
+                asked.into_iter().for_each(|lease| {
                     answers.restore(&mut life, lease, &mut events);
-                }
+                });
                 lines.extend(describe(&events));
             }
             Ok(Order::Nudge) | Err(RecvTimeoutError::Timeout) => {}
