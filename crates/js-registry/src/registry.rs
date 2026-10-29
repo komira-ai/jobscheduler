@@ -67,6 +67,11 @@ pub struct HostView {
     pub agent_version: Option<String>,
     /// The current session epoch; 0 for a host that has not yet said hello.
     pub epoch: u64,
+    /// Whether the host has taken a heartbeat since its last hello. It is false only for a
+    /// host that said hello and has not beaten since; a new hello sets it false again. A
+    /// host with no session (not yet heard from since a restart) reads true: the registry
+    /// cannot tell, and a scaler must not read silence there as a failed boot.
+    pub heard_since_hello: bool,
     /// Whether the host holds no lease but is not yet clear of the last one: it still has
     /// runs to finish (runs of a lease that ended, or runs it lists that the server does
     /// not know), or it is restoring after a whole-node lease. It takes no new lease until
@@ -945,6 +950,7 @@ impl Registry {
             labels: record.labels.clone(),
             agent_version: record.agent_version.clone(),
             epoch: record.epoch,
+            heard_since_hello: record.session.is_none() | (record.beats > 0),
             releasing: !booked.contains_key(id)
                 & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
             taint: record.taint.clone(),

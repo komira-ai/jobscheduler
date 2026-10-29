@@ -38,6 +38,9 @@ pub mod label {
     /// without it (made by an earlier agent) is a contained job's. An agent that finds a
     /// `host` one after a restart taints the host.
     pub const ISOLATION: &str = "jobscheduler.dev/isolation";
+    /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
+    /// as a number; absent on a container an earlier agent made.
+    pub const SLOT: &str = "jobscheduler.dev/slot";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -91,6 +94,9 @@ pub struct ContainerSpec {
     /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
     /// `/run/js-files`; none for a run without files.
     pub files: Option<PathBuf>,
+    /// The slot the run holds: its container user and the owner of its scratch directory are
+    /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
+    pub slot: u32,
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,

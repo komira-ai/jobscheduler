@@ -158,10 +158,13 @@ pub struct Cli {
     /// the agent warns at start. Needs `--container-bin`.
     #[arg(long, value_name = "NAME")]
     pub container_network: Option<String>,
-    /// The `<uid>:<gid>` containers run as: container ids, both above zero and below
-    /// 65536 (see `--container-subuid`). By default `65534:65534`. The run's scratch
-    /// directory is private to the agent, which gives it to this user's host ids: the start
-    /// of the `--container-subuid` range plus each id. Needs `--container-bin`.
+    /// The `<uid>:<gid>` of the first slot, the base of the users containers run as:
+    /// container ids, both above zero (see `--container-subuid`). By default `1000:1000`.
+    /// A run in slot `k` (from 0; one slot for each run the agent can hold, 4096) runs as
+    /// the base plus `k` for the uid and the gid, so both numbers must be at most 61440.
+    /// The run's scratch directory is private to the agent, which gives it to its slot's
+    /// host ids: the start of the `--container-subuid` range plus the slot's ids. Needs
+    /// `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
     /// The user whose subordinate id range every job's user namespace is mapped onto, such
