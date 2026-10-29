@@ -96,9 +96,10 @@ fn a_file_that_is_not_records_of_this_version_is_refused() {
 }
 
 /// Asserts that `seen_live` survives the file, and that a file written before the field
-/// existed (every record without it) still reads, with the field `false`.
+/// existed (every record without it) still reads, with the field `true`: the safe direction,
+/// as the lost-Welcome rule stays off for a host that may have been heard from.
 #[test]
-fn seen_live_is_kept_and_an_old_file_without_it_reads_false() {
+fn seen_live_is_kept_and_an_old_file_without_it_reads_true() {
     let kept = Records::decode(&sample().encode().unwrap()).unwrap();
     assert!(!kept.instances[0].seen_live);
     assert!(kept.instances[1].seen_live);
@@ -108,9 +109,9 @@ fn seen_live_is_kept_and_an_old_file_without_it_reads_false() {
         .replace(",\n      \"seen_live\": true", "");
     assert!(!old.contains("seen_live"));
     let read = Records::decode(&old).unwrap();
-    assert!(read.instances.iter().all(|each| !each.seen_live));
+    assert!(read.instances.iter().all(|each| each.seen_live));
     let mut expected = sample();
-    expected.instances[1].seen_live = false;
+    expected.instances[0].seen_live = true;
     assert_eq!(read, expected);
 }
 

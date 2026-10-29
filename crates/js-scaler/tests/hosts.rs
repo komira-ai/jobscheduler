@@ -6,7 +6,7 @@ mod common;
 
 use common::*;
 use js_elastic::HostStatus;
-use js_scaler::{Action, CooldownReason, HostState, Mark, Phase};
+use js_scaler::{Action, CooldownReason, HostState, Mark, Phase, Records};
 
 /// Asserts that the boot clock runs from the launch, as the token's does, and not from
 /// the answer: a machine accepted ten minutes after its launch is given up on at
@@ -397,6 +397,29 @@ fn a_host_heard_before_a_re_hello_is_not_released_at_boot_timeout() {
     rig.tick(at(4 * MINUTE));
     rig.input.hosts[0].state = HostState::Lost;
     for later in [20 * MINUTE, 20 * MINUTE + 1, 3 * HOUR] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+    }
+    assert!(rig.state.records.cooldowns.is_empty());
+    assert_eq!(rig.state.refused, 0);
+}
+
+/// Asserts that after an upgrade, a Registered idle host whose record came from a file
+/// written before `seen_live` existed (so it reads true), re-said hello and went silent, is
+/// not released at `boot_timeout` and starts no cooldown: it keeps the silent-host rules.
+#[test]
+fn a_host_recorded_before_the_upgrade_is_not_released_at_boot_timeout() {
+    let (mut rig, _) = welcome_lost();
+    assert!(!rig.record(0).seen_live);
+    let encoded = rig.state.records.encode().unwrap();
+    let old = encoded
+        .replace(",\n      \"seen_live\": false", "")
+        .replace(",\n      \"seen_live\": true", "");
+    assert!(!old.contains("seen_live"));
+    rig.state.records = Records::decode(&old).unwrap();
+    assert!(rig.record(0).seen_live);
+    for later in [15 * MINUTE - 1, 15 * MINUTE, 3 * HOUR] {
         let actions = rig.tick(at(later));
         assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
         assert_eq!(rig.phase(0), Phase::Registered);
