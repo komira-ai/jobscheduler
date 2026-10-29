@@ -36,9 +36,9 @@ fn rig(percent: u32) -> Rig {
     r
 }
 
-/// A container worker that also runs VMs.
+/// A container worker that also runs VMs and whole-machine leases.
 fn caps() -> NodeCaps {
-    load_rig::caps("container").with_drivers(["container", "vm"])
+    load_rig::caps("container").with_drivers(["container", "vm", "native-whole-machine"])
 }
 
 /// How many of the actions predicted at `memories` bytes (each limited to 8 GiB, one

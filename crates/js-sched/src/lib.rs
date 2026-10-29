@@ -99,9 +99,9 @@
 mod admission;
 mod cordon;
 mod devices;
-mod headroom;
 pub mod fence;
 pub mod harness;
+mod headroom;
 mod input;
 mod load;
 pub use load::{
