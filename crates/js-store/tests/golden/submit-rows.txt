@@ -1,9 +1,9 @@
-# The `op/`, `queue/`, `inflight/` and `opkey/` rows of a store one frontend queued two
-# operations in (ids 4 and 8, each with the size key 7), and the grant of the second took out of
-# the queue, as js-store writes them: the key, when the store's clock expires it (nanoseconds,
+# The `op/`, `queue/`, `inflight/`, `opkey/` and `opwall/` rows of a store one frontend queued two
+# operations in (ids 4 and 8, each with the size key 7, the second with a longest run of 3600.25
+# seconds), and the grant of the second took out of the queue, as js-store writes them: the key, when the store's clock expires it (nanoseconds,
 # `-` for a row that does not expire) and the value as hex.
 #
-# The `inflight/`, `opkey/` and `queue/` lines are the lines of the farm server's golden file of
+# The `inflight/`, `opkey/`, `opwall/` and `queue/` lines are the lines of the farm server's golden file of
 # scheduler rows for the same calls, copied unchanged. The `op/` lines have that file's keys and
 # expiry; their values are the test codec's, because the bytes of an `op/` row belong to the
 # codec the embedding server supplies. A change to this file needs a reason: a store written by
@@ -14,4 +14,5 @@ op/0000000000000004 expires_ns=- value=7375626d69742030
 op/0000000000000008 expires_ns=- value=7375626d69742031
 opkey/0000000000000004 expires_ns=- value=010000000000000007
 opkey/0000000000000008 expires_ns=- value=010000000000000007
+opwall/0000000000000008 expires_ns=- value=010000000000000e100ee6b280
 queue/0000000000000004 expires_ns=- value=
