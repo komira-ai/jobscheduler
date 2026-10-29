@@ -32,16 +32,15 @@ fn https_works_with_the_certificate_trusted() {
     assert_eq!(freed.code, 0, "{}", freed.err);
 }
 
-/// Asserts that an `https://` server without `--ca-cert` is refused before any request
-/// (exit 2 naming the flag): the platform's roots are not read, because the places
-/// they are found depend on the environment, and the token goes only to a server a flag
-/// named the authority of.
+/// Asserts that an `https://` server whose certificate is not from a public authority is
+/// refused without `--ca-cert` (exit 1, no output): the bundled public roots do not
+/// include the test's certificate.
 #[test]
-fn https_without_a_ca_cert_is_refused() {
+fn https_without_a_ca_cert_trusts_only_public_roots() {
     let h = Harness::tls("tls_no_ca");
     let got = h.js.go(&["lease", "list"]);
-    assert_eq!((got.code, got.out.as_str()), (2, ""));
-    assert_eq!(got.err, "js: --ca-cert: required for an https:// server\n");
+    assert_eq!((got.code, got.out.as_str()), (1, ""));
+    assert!(got.err.starts_with("js: "), "{}", got.err);
 }
 
 /// Asserts that a certificate other than the server's is not trusted either, and that
