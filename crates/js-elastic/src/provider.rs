@@ -20,6 +20,46 @@ impl ProviderError {
     }
 }
 
+/// What one named check of a provider found. A check is a read: it never makes anything
+/// on the provider's side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResult {
+    /// The name of the check, such as `ssh_key`.
+    pub name: &'static str,
+    /// Why it failed, in words written to be shown; `None` when it held. The words hold
+    /// no secret.
+    pub failure: Option<String>,
+    /// Something worth showing about a check that held, such as what a launch will make.
+    pub note: Option<String>,
+}
+
+impl CheckResult {
+    /// A check that held.
+    pub fn held(name: &'static str) -> Self {
+        Self {
+            name,
+            failure: None,
+            note: None,
+        }
+    }
+
+    /// A check that held, with a note to show.
+    pub fn held_noting(name: &'static str, note: impl Into<String>) -> Self {
+        Self {
+            note: Some(note.into()),
+            ..Self::held(name)
+        }
+    }
+
+    /// A check that failed for `reason`.
+    pub fn failed(name: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            failure: Some(reason.into()),
+            ..Self::held(name)
+        }
+    }
+}
+
 /// One acquire: launch one machine of `offer`.
 #[derive(Debug)]
 pub struct AcquireRequest {
@@ -54,6 +94,14 @@ pub trait ElasticProvider: Send + Sync {
     ///
     /// [`ProviderError`] when the catalog cannot be had whole.
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;
+
+    /// The provider's own live checks, beyond the catalog call: what only its account can
+    /// say, such as a missing key or a ruleset that holds rules. Called on each check pass
+    /// of a pool whose catalog call worked, and must only read: it never creates or
+    /// changes anything on the provider's side. A provider with none keeps the default.
+    fn checks(&self) -> Vec<CheckResult> {
+        Vec::new()
+    }
 
     /// What a machine of `offer` lacks that its image does not bring, as boot steps. Data
     /// that depends on the offer alone.
