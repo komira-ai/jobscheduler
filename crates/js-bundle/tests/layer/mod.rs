@@ -64,6 +64,7 @@ pub fn limits() -> Limits {
     Limits {
         entries: 1000,
         bytes: 1 << 20,
+        model_bytes: 1 << 28,
     }
 }
 

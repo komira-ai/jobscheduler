@@ -94,6 +94,7 @@ fn a_decompression_bomb_is_stopped_at_the_ceiling() {
     let tight = Limits {
         entries: 10,
         bytes: 64 << 10,
+        model_bytes: 1 << 28,
     };
     let error = stream_error(extract(&blob, &diff_id_of(&tar), &tight));
     assert_eq!(
@@ -114,6 +115,7 @@ fn an_uncompressed_layer_has_the_same_ceiling() {
     let tight = Limits {
         entries: 10,
         bytes: 64 << 10,
+        model_bytes: 1 << 28,
     };
     let result = unpack_layer(
         &tar[..],

@@ -15,6 +15,12 @@
 //! owners, times and every other mode bit are ignored, so a setuid bit never reaches disk.
 //! Nothing else is written: no extended attribute, no device, fifo, socket or hard link.
 //!
+//! Two more bounds keep a hostile layer from costing more than its ceilings say: the model of
+//! the tree holds at most [`Limits::model_bytes`] of paths and targets, and the symlink walker
+//! has a budget of resolution steps for the whole tree (a fixed 65536 and 64 per symlink; a
+//! link of the packer's takes a handful, so its output never nears it). Both refuse with an
+//! error of their own.
+//!
 //! The stream is counted, hashed and capped as it is read, whatever follows the end
 //! marker, so [`Unpacked::diff_id`] is the digest of every byte and a stream over its
 //! ceiling stops there.
@@ -84,6 +90,11 @@ pub struct Limits {
     /// of regular files. The whole raw stream, every byte after the end marker included,
     /// may not pass this plus the two end blocks.
     pub bytes: u64,
+    /// The most bytes the model of the tree may hold: every path twice and every symlink
+    /// target once. A hostile layer cannot grow the extractor's memory past this, whatever
+    /// the entry limit. 256 MiB (`DEFAULT_MODEL_BYTES`) is a thousand times the model of a
+    /// layer of the first bundles.
+    pub model_bytes: u64,
 }
 
 /// What an extraction did.
@@ -554,7 +565,7 @@ fn walk(meter: &mut Meter<'_>, root: BorrowedFd<'_>, limits: &Limits) -> Result<
     let mut state = State {
         root,
         limits,
-        tree: Tree::default(),
+        tree: Tree::new(limits.model_bytes),
         entries: 0,
         file_bytes: 0,
     };

@@ -135,3 +135,22 @@ fn a_refusal_shows_the_path_escaped() {
         r#"path "a\nb" has a byte outside 0x21..=0x7e"#
     );
 }
+
+/// The volume may be case-insensitive, so the reserved names are refused in any letter case.
+#[test]
+fn volume_names_are_refused_in_any_letter_case() {
+    for name in [
+        ".FSEVENTSD",
+        ".spotlight-v100",
+        ".TRASHES",
+        ".Metadata_Never_Index",
+        ".documentrevisions-v100/x",
+        ".temporaryitems",
+    ] {
+        assert_eq!(
+            check_path(name.as_bytes()),
+            Err(NameDefect::RootReserved),
+            "{name}"
+        );
+    }
+}

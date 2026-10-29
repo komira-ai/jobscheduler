@@ -19,9 +19,19 @@ pub const MAX_DEPTH: usize = 64;
 pub const MAX_TARGET_BYTES: usize = 1024;
 /// The most symlinks followed in resolving one target.
 const MAX_HOPS: u32 = 8;
+/// The walker's fixed budget of resolution steps (one per path component followed), before
+/// the per-link share. The packer's own output stays far below the whole budget: a link
+/// takes a handful of steps, the budget gives 64 per link.
+const WALK_BASE_STEPS: u64 = 65_536;
+/// The steps the walker budget adds for each symlink.
+const WALK_STEPS_PER_LINK: u64 = 64;
+/// The default cap on the bytes the model of a tree may hold (see [`Tree::new`]): 256 MiB,
+/// a thousand times the model of the largest layer the first bundles hold.
+pub const DEFAULT_MODEL_BYTES: u64 = 1 << 28;
 
-/// Names that APFS tools treat specially, refused at the tree root: the volume that a
-/// tree is unpacked onto creates them itself.
+/// Names that APFS tools treat specially, refused at the tree root in any letter case (the
+/// volume may be case-insensitive, where `.TRASHES` is `.Trashes`): the volume that a tree is
+/// unpacked onto creates them itself.
 const ROOT_RESERVED: [&str; 6] = [
     ".fseventsd",
     ".Spotlight-V100",
@@ -82,6 +92,9 @@ pub enum EntryDefect {
     /// The parent is an earlier entry, but not a directory.
     #[error("has a parent that is not a directory")]
     ParentNotDirectory,
+    /// The paths and targets of the entries so far are more than the model may hold.
+    #[error("is past the cap on the bytes of paths the tree model holds")]
+    ModelTooLarge,
 }
 
 /// Why a symlink is refused by the walker.
@@ -99,6 +112,9 @@ pub enum LinkDefect {
     /// The target reaches a missing entry and then `.` or `..`.
     #[error("dangles and then climbs")]
     Dangling,
+    /// The walker's budget of steps for the whole tree ran out here.
+    #[error("is where the walker ran out of steps")]
+    OverBudget,
 }
 
 /// Why a path, a symlink target or an entry of a layer is refused. Every path is shown
@@ -195,7 +211,10 @@ pub fn check_path(path: &[u8]) -> Result<&str, NameDefect> {
         }
     }
     let first = text.split('/').next().unwrap_or_default();
-    if ROOT_RESERVED.contains(&first) {
+    if ROOT_RESERVED
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(first))
+    {
         return Err(NameDefect::RootReserved);
     }
     Ok(text)
@@ -246,13 +265,26 @@ pub(crate) enum Node {
 }
 
 /// The entries admitted so far, by path.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Tree {
     nodes: BTreeMap<String, Node>,
     folded: BTreeSet<String>,
+    /// Bytes counted so far: each path twice (it is kept folded too) and each target once.
+    used: u64,
+    cap: u64,
 }
 
 impl Tree {
+    /// An empty tree whose model may hold `cap` bytes of paths (twice) and targets.
+    pub(crate) fn new(cap: u64) -> Tree {
+        Tree {
+            nodes: BTreeMap::new(),
+            folded: BTreeSet::new(),
+            used: 0,
+            cap,
+        }
+    }
+
     /// Adds the entry at `path` (already checked by [`check_path`]).
     ///
     /// # Errors
@@ -268,6 +300,16 @@ impl Tree {
         }
         if !self.folded.insert(path.to_ascii_lowercase()) {
             return Err(refuse(EntryDefect::CaseCollision));
+        }
+        let target = match &node {
+            Node::Link(target) => target.len(),
+            Node::Dir | Node::File => 0,
+        };
+        self.used = self
+            .used
+            .saturating_add(2 * path.len() as u64 + target as u64);
+        if self.used > self.cap {
+            return Err(refuse(EntryDefect::ModelTooLarge));
         }
         let parent = path
             .rsplit_once('/')
@@ -287,9 +329,15 @@ impl Tree {
     /// # Errors
     /// The first symlink (in path order) that fails.
     pub(crate) fn check_links(&self) -> Result<(), TreeRefusal> {
+        let links = self
+            .nodes
+            .values()
+            .filter(|node| matches!(node, Node::Link(_)))
+            .count() as u64;
+        let mut budget = WALK_BASE_STEPS.saturating_add(links * WALK_STEPS_PER_LINK);
         for (path, node) in &self.nodes {
             if let Node::Link(target) = node {
-                self.resolve(path, target)
+                self.resolve(path, target, &mut budget)
                     .map_err(|defect| TreeRefusal::Link {
                         path: path.clone(),
                         defect,
@@ -302,12 +350,18 @@ impl Tree {
     /// Resolves `target`, the target of the symlink at `at`, component by component.
     /// A symlink met on the way is followed (its target replaces it in the queue), `..`
     /// pops the directory resolved so far, and popping past the root is the escape.
-    fn resolve<'a>(&'a self, at: &'a str, target: &'a str) -> Result<(), LinkDefect> {
+    fn resolve<'a>(
+        &'a self,
+        at: &'a str,
+        target: &'a str,
+        budget: &mut u64,
+    ) -> Result<(), LinkDefect> {
         let mut here: Vec<&str> = at.split('/').collect();
         here.pop();
         let mut todo: VecDeque<&str> = target.split('/').collect();
         let mut hops = 0;
         while let Some(part) = todo.pop_front() {
+            *budget = budget.checked_sub(1).ok_or(LinkDefect::OverBudget)?;
             match part {
                 "." => {}
                 ".." => {

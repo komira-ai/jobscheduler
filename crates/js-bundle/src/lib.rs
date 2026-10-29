@@ -59,8 +59,8 @@ pub use pack::{PackError, Packed, PackedTar, pack_layer, pack_tar};
 pub use stream::{Decoder, MAX_WINDOW_BYTES, StreamError, compress};
 pub use template::{Segment, Template};
 pub use tree::{
-    EntryDefect, LinkDefect, MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES, MAX_TARGET_BYTES,
-    NameDefect, TreeRefusal, check_path, check_target,
+    DEFAULT_MODEL_BYTES, EntryDefect, LinkDefect, MAX_COMPONENT_BYTES, MAX_DEPTH, MAX_PATH_BYTES,
+    MAX_TARGET_BYTES, NameDefect, TreeRefusal, check_path, check_target,
 };
 pub use unpack::{END_BLOCKS, Limits, UnpackError, Unpacked, unpack_layer, unpack_tar};
 pub use validate::{

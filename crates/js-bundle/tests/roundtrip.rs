@@ -78,6 +78,7 @@ fn the_configs_numbers_are_exactly_the_extractors_limits() {
     let exact = Limits {
         entries: packed.entries,
         bytes: packed.uncompressed_bytes,
+        model_bytes: 1 << 28,
     };
     extract(exact).unwrap();
     let fewer = Limits {

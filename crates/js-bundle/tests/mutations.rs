@@ -95,6 +95,7 @@ fn damaged_archives_never_escape_or_panic() {
     let limits = Limits {
         entries: 64,
         bytes: 1 << 20,
+        model_bytes: 1 << 28,
     };
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     for seed in seeds() {

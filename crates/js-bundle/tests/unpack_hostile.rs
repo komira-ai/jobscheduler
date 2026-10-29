@@ -385,6 +385,7 @@ fn oversize_entries_and_totals_are_refused() {
     let limits = Limits {
         entries: 10,
         bytes: 1 << 20,
+        model_bytes: 1 << 28,
     };
     let tar = Tar::new()
         .entry(Entry::new(b"big", b'0').size(0o77777777777))
@@ -410,6 +411,7 @@ fn too_many_entries_are_refused() {
     let limits = Limits {
         entries: 3,
         bytes: 1 << 20,
+        model_bytes: 1 << 28,
     };
     extract_with(&Tar::new().dir("a").dir("b").dir("c").end(), &limits).ok();
     let tar = Tar::new().dir("a").dir("b").dir("c").dir("d").end();
@@ -427,6 +429,7 @@ fn trailing_bytes_after_the_end_marker_are_bounded_by_the_raw_ceiling() {
     let tight = Limits {
         entries: 10,
         bytes: body.len() as u64,
+        model_bytes: 1 << 28,
     };
     let mut exact = body.clone();
     exact.resize(body.len() + 1024, 0);
@@ -442,6 +445,7 @@ fn trailing_bytes_after_the_end_marker_are_bounded_by_the_raw_ceiling() {
     let roomy = Limits {
         entries: 10,
         bytes: body.len() as u64 + 4096,
+        model_bytes: 1 << 28,
     };
     let mut padded = exact;
     padded.resize(padded.len() + 3000, 0);
@@ -648,4 +652,74 @@ fn an_existing_path_is_never_overwritten() {
         other => panic!("{other:?}"),
     }
     assert_eq!(std::fs::read(scratch.root().join("f")).unwrap(), b"mine");
+}
+
+/// A path that costs the walker more than its budget is refused with its own error: 300
+/// links of 381 steps each against a budget of 64 steps a link and a fixed 65536.
+#[test]
+fn a_tree_that_costs_the_walker_too_much_is_refused() {
+    let target = format!("{}a", "a/../".repeat(190));
+    let links = |count: usize| {
+        let mut tar = Tar::new().dir("a");
+        for i in 0..count {
+            tar = tar
+                .long_link(target.as_bytes())
+                .symlink(&format!("l{i:03}"), &target);
+        }
+        tar.end()
+    };
+    let limits = Limits {
+        entries: 1000,
+        bytes: 4 << 20,
+        model_bytes: 1 << 28,
+    };
+    extract_with(&links(100), &limits).ok();
+    let run = extract_with(&links(300), &limits);
+    refused!(
+        run,
+        UnpackError::Tree(TreeRefusal::Link {
+            defect: LinkDefect::OverBudget,
+            ..
+        })
+    );
+}
+
+/// The model of the tree has a byte cap of its own.
+#[test]
+fn a_tree_model_past_its_cap_is_refused() {
+    let limits = Limits {
+        entries: 1000,
+        bytes: 1 << 20,
+        model_bytes: 20,
+    };
+    let tar = Tar::new().dir("aaaa").dir("bbbb").dir("cccc").end();
+    refused!(
+        extract_with(&tar, &limits),
+        UnpackError::Tree(TreeRefusal::Entry {
+            defect: EntryDefect::ModelTooLarge,
+            ..
+        })
+    );
+    let tar = Tar::new().dir("aaaa").symlink("l", &"t".repeat(90)).end();
+    refused!(
+        extract_with(&tar, &limits),
+        UnpackError::Tree(TreeRefusal::Entry {
+            defect: EntryDefect::ModelTooLarge,
+            ..
+        })
+    );
+}
+
+/// The reserved volume names are refused as entries in mixed case too.
+#[test]
+fn mixed_case_volume_names_are_refused_as_entries() {
+    for name in [
+        ".FSEVENTSD",
+        ".spotlight-v100",
+        ".TRASHES",
+        ".Metadata_Never_Index",
+    ] {
+        let run = extract(&Tar::new().dir(name).end());
+        assert_eq!(path_defect(&run), NameDefect::RootReserved, "{name}");
+    }
 }

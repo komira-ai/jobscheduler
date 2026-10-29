@@ -314,3 +314,17 @@ fn an_empty_tree_packs_to_two_end_blocks() {
     assert_eq!(packed.entries, 0);
     assert_eq!(packed.bytes, vec![0u8; 1024]);
 }
+
+/// Finder leftovers are not packed: they would make a layer depend on who opened the folder.
+#[test]
+fn finder_leftovers_are_refused() {
+    for name in [".DS_Store", "__MACOSX"] {
+        let scratch = Scratch::new();
+        write(&scratch.root(), "d/f", b"x", 0o644);
+        write(&scratch.root(), &format!("d/{name}"), b"x", 0o644);
+        match pack_error(&scratch.root()) {
+            PackError::Excluded { path } => assert_eq!(path, format!("d/{name}")),
+            other => panic!("{other:?}"),
+        }
+    }
+}

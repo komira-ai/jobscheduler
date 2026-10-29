@@ -8,6 +8,17 @@
 //! read from the directory but names, kinds, execute bits, file bytes and link targets
 //! reaches the output.
 //!
+//! The compressor writes no content size in the frame header (the encoder of the `ruzstd`
+//! crate leaves it out and uses a window descriptor), which differs from a frame that states
+//! its size; the decoder does not need it. The config's `uncompressed_bytes` is the length of
+//! the tar stream before its end blocks, headers and long-name records included, not the
+//! bytes of the files and not the size on disk. A long path or target is written as a GNU
+//! record whose header holds its first 100 bytes; the extractor accepts a header that is any
+//! prefix of an effective path over 100 bytes (the effective path is what it uses). The
+//! whole layer is built in memory (every file, the tar, the compressed copy), so the host
+//! that packs needs about three times the layer's size in RAM. `.DS_Store` and `__MACOSX`
+//! are refused, since they appear when someone opens the folder in Finder.
+//!
 //! The packer applies the rules the extractor applies (same path and target checks, same
 //! walker), so it refuses what the extractor would: a name outside the rules, a symlink
 //! that leaves the tree, and also, because the extractor ignores them, a file with a set-id
@@ -24,7 +35,9 @@ use sha2::{Digest, Sha256};
 
 use crate::names::DiffId;
 use crate::stream::compress;
-use crate::tree::{NameDefect, Node, Tree, TreeRefusal, check_path, check_target, show};
+use crate::tree::{
+    DEFAULT_MODEL_BYTES, NameDefect, Node, Tree, TreeRefusal, check_path, check_target, show,
+};
 use crate::unpack::END_BLOCKS;
 
 /// The set-user-id, set-group-id and sticky bits.
@@ -59,6 +72,13 @@ pub enum PackError {
         path: String,
         /// The link count.
         links: u64,
+    },
+    /// The entry is a Finder leftover (`.DS_Store`, `__MACOSX`), which would make a layer depend
+    /// on who last opened the directory.
+    #[error("{path:?} is a Finder leftover; remove it before packing")]
+    Excluded {
+        /// The path.
+        path: String,
     },
     /// Reading the directory failed.
     #[error("{path}: {source}")]
@@ -139,6 +159,9 @@ fn collect(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Item>) -> Result
             path: shown.clone(),
             defect,
         })?;
+        if matches!(name.to_str(), Some(".DS_Store" | "__MACOSX")) {
+            return Err(PackError::Excluded { path: shown });
+        }
         let source = listed.path();
         let meta = at(&source, std::fs::symlink_metadata(&source))?;
         let kind = meta.file_type();
@@ -238,7 +261,7 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Resul
 pub fn pack_tar(root: &Path) -> Result<PackedTar, PackError> {
     let mut items = BTreeMap::new();
     collect(root, "", &mut items)?;
-    let mut tree = Tree::default();
+    let mut tree = Tree::new(DEFAULT_MODEL_BYTES);
     for (path, item) in &items {
         let node = match item {
             Item::Dir => Node::Dir,
