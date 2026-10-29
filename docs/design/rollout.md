@@ -5,10 +5,11 @@ and which carries the reasons, the storage branches and the open decisions. Deci
 risks K35 and K36 are in [risks-f.md](risks-f.md); the checks are step 55 ([extraction-steps-d.md](extraction-steps-d.md)).
 
 This file replaces the first version of the plan, which assumed a separate jobscheduler server and a trusted `kbf-executor` shipped with
-`js-agent` in one kbf host package. Neither holds under the owner's model: the jobscheduler libraries run inside kbf's frontends (no server
-of their own is deployed), `js-agent` is standalone on every host (no kbf process beside it on the task path), and there is no
-`kbf-executor`. A release therefore coordinates two things that roll through kbf's update coordinator: the kbf service (frontends with the
-embedded libraries, and kbf's storage and daemon roles) and the `js-agent` service. This file says who updates what, which versions must
+`js-agent` in one kbf host package. Neither holds under the owner's model: a js-lease-server is deployed and kbf-server leases whole hosts from it, submitting each
+action as a run through its run API (the placement libraries run inside kbf's frontends); `js-agent` is standalone on every host (no kbf
+process beside it on the task path); and there is no `kbf-executor`. A release therefore coordinates three things: the kbf service (frontends
+with the embedded libraries and the lease client, and kbf's storage and daemon roles), the `js-agent` service (both roll through kbf's update
+coordinator), and the lease server, whose update path is open (design Q23). This file says who updates what, which versions must
 work together, and in what order a change rolls out.
 
 ## What exists: kbf's update coordinator
@@ -28,8 +29,9 @@ The facts below are from kbf at commit `89af8f2ef` and describe the coordinator 
 | Part | Updated by | How |
 |---|---|---|
 | kbf frontends with the embedded jobscheduler libraries | kbf's update coordinator, service `kbf` | The libraries are a git dependency at one revision, raised by a pull request of its own in kbf (`Cargo.toml`). The embedded server version is whatever kbf pins. |
+| js-lease-server | jobscheduler's release | Deployed. Its runs live in memory, so an update drops all of them (`410 run-forgotten`) and kbf re-queues; roll it with no run in flight or accept the requeue. |
 | `js-agent` | kbf's update coordinator, service `js-agent`, `after = ["kbf"]` | A service defined in the coordinator's services file. The agent ships from jobscheduler's release; until the signer decision below it is republished under kbf's signer. |
-| Fetch and action images | kbf (fetch image), the job (action) | Digest-pinned; the frontend names the digest in each task. The fetch image for frontend N is on every host before N places work (nothing to stage if the design's D2 chooses an agent-side fetch). |
+| Action images and `kbf-task` | the job (action image), kbf (`kbf-task`) | Action images are digest-pinned and pre-pulled; `kbf-task` is mounted from the `kbf-tools` agent root. The frontend names the image digest and the tools version in each run, and both are on every host before frontend N places work. |
 | Tierstore front | kbf's release workflow | A tarball and example unit, not started at install and not managed by the host updater. Its presigned-PUT verifier is rolled before the frontend that mints for it. |
 | Hot and cold Silo | the operator | A pinned Silo release under systemd; the update and rollback path is the storage design's. |
 | Elastic machines | not updated | A machine launched by an elastic provider boots the current pinned agent, so scale-up is its update path; an old machine leaves by the idle rule (5.10). |
@@ -41,21 +43,21 @@ every agent shipping inside the kbf package. That premise is gone: the agent is 
 ## Version compatibility
 
 Things that talk across a version boundary: the agent and the embedded server (the agent wire, 10.3), kbf frontends of version N and N-1 on
-one shared Postgres, a task spec and the fetch image it names, and the agent's pack writer and the frontend's pack verifier. The rules (D44):
+one shared Postgres, a run spec and the action image and `kbf-tools` version it names, the lease client and the lease server's run API, and the task tool's pack writer and the frontend's pack verifier. The rules (D44):
 
 1. **Protocol majors, additive fields inside a major.** A change inside a major is an optional field (R3); an old peer skips what it does not
    know. A new major is a new package or service that runs beside the old one until no peer uses the old (10.3).
-2. **The embedded server speaks every protocol major its agents use.** It retires a major only after the last agent using it has gone. The
+2. **The server that serves agents (the deployed lease server) speaks every protocol major its agents use.** It retires a major only after the last agent using it has gone. The
    agent is released from main while the embedded server is at kbf's pin, so skew between them is normal, and a skew test in jobscheduler's CI
    runs the newest agent against kbf's pinned server and the reverse.
 3. **The server refuses an agent major it does not speak.** A `Hello` whose major is unknown gets a `Welcome` with a refusal code (5.8); the
    agent exits with status 2 and keeps its containers for adoption, so a host left behind fails closed and visibly (K35).
 4. **Security fields are gated on `Hello.capabilities`, never on version text.** An old receiver silently ignores unknown fields, so a field
    that carries a secret, a network profile or an upload grant is sent only to an agent that advertises it. An old agent that ignores `upload` returns no upload outcome, which the frontend treats as a failed action, never as "no outputs".
-5. **Task spec versus the fetch image.** The frontend names the task image digest (and a fetch image only if one is used) in the task; a host without that image refuses the task with a
+5. **Run spec versus the images.** The frontend names the action image digest and the `kbf-tools` version in the run; a host without them refuses the run with a
    plain constant code. This replaces the version-pair check between the agent and an executor.
 6. **One pack format, one crate.** The task tool writes and the frontend verifies the same `js-pack-format`. The frontend verifies versions N and N-1
-   and sends an upload grant only with a task image whose tool writes a format it verifies.
+   and sends an upload grant only with a `kbf-tools` version whose tool writes a format it verifies.
 
 ## Rollout order
 
@@ -64,7 +66,7 @@ one shared Postgres, a task spec and the fetch image it names, and the agent's p
    one host at once (kbf#1825). Per host: the updater installs on trial, the host is cordoned and drained until it holds no run (bounded by a
    cap, because the agent's own SIGTERM stops jobs after `--drain-wait`), the helper switches, the agent says `Hello`, the ready check passes,
    the helper confirms or reverts, and the host is uncordoned.
-3. **Phase images** are staged before the frontend that names them places work.
+3. **Action images and `kbf-tools`** are staged before the frontend that names them places work. Rollback of the executor path is the flag: `--executor kbf-daemon` (the default) needs no package change.
 
 A change that adds a field or feature rolls in this order and needs nothing more. A change that retires a major adds a step at the end: the
 server drops the major only after the agents that used it have gone (rule 2). Rollback is the reverse: kbf by setting an older version, the
@@ -84,6 +86,6 @@ digest; no rollback needs a format change, because formats change additively (R3
 
 ## What stays open
 
-The storage branch (tierstore with Silo, presigned-PUT writes) and the Mac packaging direction are decided; the credential holder (the whole task holds the presigned URL: decided 2026-10-29), how the task gets its inputs, the Mac default, the elastic provisioner's home, and the other remaining decisions are in
+The storage branch (tierstore with Silo, presigned-PUT writes) and the Mac packaging direction are decided; the credential holder (the whole task holds the presigned URL: decided 2026-10-29), the lease-server integration, the task tool and its inputs (decided 2026-10-29), the Mac default, the elastic provisioner's home, and the other remaining decisions are in
 [kbf-on-js-agent.md](kbf-on-js-agent.md), section 15. Deploying a service, installing a package on hosts and any registry upload are
 operator acts that need the project owner's go for that action (R7).

@@ -1000,8 +1000,8 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 
 ## 17. Rolling out two services
 
-**Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md):** under the owner's model the jobscheduler libraries run inside kbf's
-frontends, `js-agent` is a separate service on every host, and there is no `kbf-executor`; the text below is the earlier plan. Detail and the
+**Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md):** under the owner's model kbf-server leases whole hosts from a deployed
+js-lease-server and submits each action as a run, the placement libraries run inside kbf's frontends, `js-agent` is a separate service on every host, and there is no `kbf-executor`; the text below is the earlier plan. Detail and the
 rewritten rollout: [design/rollout.md](design/rollout.md).
 
 jobscheduler is the distributed service (a server, and `js-agent` on every host); kbf is a frontend that talks to it, so a release touches
