@@ -159,28 +159,35 @@ marked settled. The ids run D1 to D65 with no gaps. D26 is open. Superseded deci
   queued request whose last capable host leaves (and no elastic provider could serve it) waits `regain_grace` (default 5 minutes on the
   injected clock) and is then refused with `no-capable-host`; a new submission gets no grace. Alternatives: refuse at once (a routine agent
   restart would refuse every queued request), or wait for ever (a wait nobody can end). Recommend the grace.
-- **D42. kbf's update coordinator is not generalised; one version per host. Settled by the project owner, on the advice of the owner of
+- **D42. (Superseded: see the note after D45.) kbf's update coordinator is not generalised; one version per host. Settled by the project owner, on the advice of the owner of
   kbf's update coordinator.** That coordinator is single-service today (one desired version per host, limits keyed by kbf's four roles, one
   heartbeat version and health per host, a helper that installs one signed kbf package). Options: (a) generalise it to a service map now;
   (b) leave it as it is. Adopted: (b). The jobscheduler server updates by its own Kubernetes redeploy ([deployment.md](deployment.md); an
   operator act with the owner's go, R7). When kbf's daemon splits into `js-agent` plus `kbf-executor` (9.2), both ship in the one kbf host
   package the updater already installs, so a host keeps one version and the coordinator needs no change. Rejected (a): it buys nothing
   while every agent runs kbf, and it changes a working updater and its trust. Text in [rollout.md](rollout.md).
-- **D43. Rollout order. Settled by the project owner.** The jobscheduler server first; then hosts (`js-agent` with `kbf-executor` in the
+- **D43. (Superseded: see the note after D45.) Rollout order. Settled by the project owner.** The jobscheduler server first; then hosts (`js-agent` with `kbf-executor` in the
   kbf package, rolled by kbf's coordinator with its own slots and gates); then kbf frontends, as clients, once the server they call
   supports what they send. Servers before agents is the wire rule (10.3). Elastic machines boot the current image at launch, so scale-up
   is their update path. Text in [rollout.md](rollout.md).
-- **D44. Compatibility rules between server, agent and kbf. Settled by the project owner.** Protocol majors, with additive fields inside a
+- **D44. (Superseded: see the note after D45.) Compatibility rules between server, agent and kbf. Settled by the project owner.** Protocol majors, with additive fields inside a
   major (R3, 10.3); the server speaks every protocol major that its agents and kbf clients use, and refuses an agent major it does not
   speak; kbf clients negotiate or check the server's advertised version and features before sending what an older server would skip; if
   `js-agent` and `kbf-executor` ever ship apart, a version-pair check at the agent (it refuses a start it cannot pair) and not a service
   map in the coordinator. Step 55.
-- **D45. What would change D42, and the decision that comes first. Direction settled; each trigger is decided when it happens.** (1) A
+- **D45. (Superseded: see the note after D45.) What would change D42, and the decision that comes first. Direction settled; each trigger is decided when it happens.** (1) A
   `js-agent` population that does not run kbf and must be updated: a second coordinator instance, or replace-not-update for elastic
   machines. (2) `js-agent` and `kbf-executor` on different release cadences with a required order: the version-pair check at the agent
   first, not a coordinator service map. (3) jobscheduler releasing faster than kbf with urgent agent fixes: package coupling hurts (K35),
   and the options are reopened. (4) The kbf helper's single signer not extending to jobscheduler's release signer: a security decision
   for the owner before any option (K36).
+
+> **D42 to D45 are superseded** by [kbf-on-js-agent.md](kbf-on-js-agent.md) (the design for the owner's model) and the rewritten
+> [rollout.md](rollout.md). The premises they rest on, a separate jobscheduler server, a trusted `kbf-executor` and `js-agent` shipping
+> inside the one kbf host package, no longer hold. The replacements: D42 the coordinator is already multi-service and `js-agent` is a
+> service; D43 the order is the kbf service (storage, daemons, frontends) and then `js-agent` with `after = ["kbf"]`; D44 compatibility by
+> protocol major, additive fields and capability gating, with the version-pair check replaced by task spec versus `job-io`; D45 the triggers
+> in rollout.md, with the signer decision (K36) taken before any production install. The original text is kept above as history.
 - **D46. Giving a whole node is a lease class of its own. Direction settled by the project owner; the rules are chosen here.** (a) A large
   resource request under `Book` or `BookAll`; (b) a class `whole-node` with its own admission `Whole`: exclusive, quiet, reserved by a
   drain, capped. Adopted: (b). A big request is placed beside other work, starts on any state, is never drained for and has no cap; the

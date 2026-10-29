@@ -1,86 +1,85 @@
-# Rolling out two services
+# Rolling out js-agent with kbf
 
-Companion to [docs/design.md](../design.md), section 17. Section numbers refer to design.md. Decisions D42 to D45 are in
-[decisions.md](decisions.md); the risks K35 and K36 are in [risks-f.md](risks-f.md); the checks are step 55
-([extraction-steps-d.md](extraction-steps-d.md)).
+Companion to [docs/design.md](../design.md), section 17, and to [kbf-on-js-agent.md](kbf-on-js-agent.md), which is the design this file follows
+and which carries the reasons, the storage branches and the open decisions. Decisions D42 to D45 are in [decisions.md](decisions.md); the
+risks K35 and K36 are in [risks-f.md](risks-f.md); the checks are step 55 ([extraction-steps-d.md](extraction-steps-d.md)).
 
-jobscheduler is now the distributed service: a server (scheduler, lease API, agent API; 5.16) and `js-agent` on every host. kbf is a
-frontend that talks to a jobscheduler instance, and on a host its executor, `kbf-executor`, runs beside `js-agent` (9.2). A release
-therefore coordinates two services. This file says who updates what, which versions must work together, and in what order a change
-rolls out. It is the plan adopted on the advice of the owner of kbf's update coordinator, who made a read-only assessment of that
-coordinator.
+This file replaces the first version of the plan, which assumed a separate jobscheduler server and a trusted `kbf-executor` shipped with
+`js-agent` in one kbf host package. Neither holds under the owner's model: the jobscheduler libraries run inside kbf's frontends (no server
+of their own is deployed), `js-agent` is standalone on every host (no kbf process beside it on the task path), and there is no
+`kbf-executor`. A release therefore coordinates two things that roll through kbf's update coordinator: the kbf service (frontends with the
+embedded libraries, and kbf's storage and daemon roles) and the `js-agent` service. This file says who updates what, which versions must
+work together, and in what order a change rolls out.
 
 ## What exists: kbf's update coordinator
 
-The facts below are from that assessment and describe the coordinator as it is today.
+The facts below are from kbf at commit `89af8f2ef` and describe the coordinator as it is.
 
-- It is single-service. It keeps one desired version per host, and its limits (how many nodes may update at once) are keyed by kbf's four
-  roles: frontend, storage, daemon and Mac daemon.
-- Each host reports one heartbeat version and one health.
-- On the host, a helper installs one signed kbf package (apt on Linux, a kit on the Mac), verified against kbf's release signer.
-- Per node it runs: drain, switch, health check, then confirm or revert.
+- It is multi-service. A service is data (`crates/kbf-coordinator/src/services.rs`): a name, the roles it runs on with limits, and `after`,
+  the services whose live hosts must all run their desired version before any host of this service is ordered. `kbf` is built in. A services
+  file defines others (kbf#1818 to #1825). One update per host at a time.
+- Described services need the updater and the helper to handle them: kbf#1826 (open) covers the Linux local socket only, and the Mac helper
+  serves `kbf` only.
+- On the host, a helper installs one signed package, verified against kbf's release signer, with per-node drain, switch, health check and
+  confirm-or-revert. Updates are host-driven and pull-shaped.
 
 ## Who updates what
 
 | Part | Updated by | How |
 |---|---|---|
-| jobscheduler server | its own Kubernetes redeploy | An operator act with the project owner's go (R7): the Deployment names the new image by digest, `Recreate` (deployment.md, "Upgrades"). Rollback is a redeploy of the previous image on the same volume. |
-| `js-agent` and `kbf-executor` on a host | kbf's update coordinator | Both ship in the one kbf host package the helper already installs. The host keeps one version; the coordinator's one version per host covers both. Its slots, drain, health and confirm-or-revert apply unchanged. |
-| kbf frontends | kbf's update coordinator | As today, with kbf. A frontend is a client of the lease and run APIs; it is not a jobscheduler component. |
-| Elastic machines | not updated | A machine launched by an elastic provider boots the current image, so scale-up is its update path. An old elastic machine leaves by the idle rule (5.10) and is replaced by a current one. |
+| kbf frontends with the embedded jobscheduler libraries | kbf's update coordinator, service `kbf` | The libraries are a git dependency at one revision, raised by a pull request of its own in kbf (`Cargo.toml`). The embedded server version is whatever kbf pins. |
+| `js-agent` | kbf's update coordinator, service `js-agent`, `after = ["kbf"]` | A service defined in the coordinator's services file. The agent ships from jobscheduler's release; until the signer decision below it is republished under kbf's signer. |
+| `job-io` and the phase images | kbf | Digest-pinned; the frontend names the digest in each task. The image for frontend N is on every host before N places work. |
+| Elastic machines | not updated | A machine launched by an elastic provider boots the current pinned agent, so scale-up is its update path; an old machine leaves by the idle rule (5.10). |
+| Macs | the Mac helper | Until a Mac task runtime exists the Macs stay on the kbf daemon. |
 
-**D42: the coordinator is not generalised.** A service map (several services, each with its own version, limits and health per host)
-would change a working updater and its trust for no present gain, because every host that runs `js-agent` also runs kbf. The coordinator
-stays as it is. When kbf's daemon splits into `js-agent` plus `kbf-executor`, the package carries both, and a host reports one version.
+**D42: the coordinator is already multi-service, and `js-agent` is one of its services.** The earlier decision not to generalise it rested on
+every agent shipping inside the kbf package. That premise is gone: the agent is a separate service with its own release.
 
 ## Version compatibility
 
-Three things talk across a version boundary: the agent and the server (the agent wire, 10.3), kbf and the server (the lease and run
-APIs), and on a host `js-agent` and `kbf-executor` (the agent's local seam, 5.13 and 9.2). The rules (D44):
+Things that talk across a version boundary: the agent and the embedded server (the agent wire, 10.3), kbf frontends of version N and N-1 on
+one shared Postgres, and a task spec and the `job-io` image it names. The rules (D44):
 
-1. **Protocol majors, additive fields inside a major.** A change inside a major is an optional field (R3); an old peer skips what it
-   does not know. A new major is a new package or service that runs beside the old one until no peer uses the old (10.3).
-2. **The server speaks every protocol major its agents and kbf clients use.** It retires a major only after the last peer using it has
-   gone, which the agents' reported `agent_version` and the clients' versions show.
-3. **The server refuses an agent major it does not speak.** A `Hello` whose major is unknown gets a `Welcome` with a refusal code (5.8),
-   the host is not entered in the table, and the agent logs it and keeps its current state. A host left behind therefore fails closed and
-   visibly (K35); it does not register and then misbehave.
-4. **A frontend checks what the server advertises.** `Welcome` and the server's version reply carry the protocol majors and `features`
-   (10.3). A kbf client sends a request only if the server lists what it needs, and otherwise fails closed naming the missing feature,
-   as it already does for `needs`. A frontend that is newer than the server it calls waits for the server rather than sending fields the
-   server would skip.
-5. **A version-pair check between `js-agent` and `kbf-executor`, only if they ever ship apart.** While both come in one package, one
-   version covers both and no pair check exists. If they are released separately, the check sits at the agent: the agent knows the
-   executor's version from the local seam and refuses a `Start` it cannot pair, with a plain constant code. It is not a service map in
-   the coordinator.
+1. **Protocol majors, additive fields inside a major.** A change inside a major is an optional field (R3); an old peer skips what it does not
+   know. A new major is a new package or service that runs beside the old one until no peer uses the old (10.3).
+2. **The embedded server speaks every protocol major its agents use.** It retires a major only after the last agent using it has gone. The
+   agent is released from main while the embedded server is at kbf's pin, so skew between them is normal, and a skew test in jobscheduler's CI
+   runs the newest agent against kbf's pinned server and the reverse.
+3. **The server refuses an agent major it does not speak.** A `Hello` whose major is unknown gets a `Welcome` with a refusal code (5.8); the
+   agent exits with status 2 and keeps its containers for adoption, so a host left behind fails closed and visibly (K35).
+4. **Security fields are gated on `Hello.capabilities`, never on version text.** An old receiver silently ignores unknown fields, so a field
+   that carries a secret or a network profile is sent only to an agent that advertises it.
+5. **Task spec versus `job-io`.** The frontend names the `job-io` image digest in the task; a host without that image refuses the task with a
+   plain constant code. This replaces the version-pair check between the agent and an executor.
 
 ## Rollout order
 
-1. **The jobscheduler server first** (D43). Servers before agents is the wire rule (10.3). The new server speaks every protocol major
-   that the current agents and kbf clients use, so nothing that runs now breaks when it starts. The outage of a `Recreate` redeploy is
-   the stop of the old pod plus the start of the new one; agents and clients retry inside the lease TTL (step 52, deployment.md).
-2. **Then hosts.** `js-agent` with `kbf-executor` rolls through kbf's coordinator as part of the kbf host package, with the
-   coordinator's own slots and gates. Draining a host takes it out of capacity for new requests (D41) while its leases finish.
-3. **Then kbf frontends,** as clients, after the server they call supports what they send. They check the server's advertised version
-   (rule 4); a frontend that finds the server too old does not send.
+1. **The kbf service first, in kbf's own order** (D43): storage and daemon roles, then frontends last. The embedded server is the kbf frontend.
+2. **Then `js-agent`**, ordered `after = ["kbf"]`, so no agent is updated until every kbf host runs its desired version. Never two services on
+   one host at once (kbf#1825). Per host: the updater installs on trial, the host is cordoned and drained until it holds no run (bounded by a
+   cap, because the agent's own SIGTERM stops jobs after `--drain-wait`), the helper switches, the agent says `Hello`, the ready check passes,
+   the helper confirms or reverts, and the host is uncordoned.
+3. **Phase images** are staged before the frontend that names them places work.
 
-A change that adds a field or feature rolls in this order and needs nothing more. A change that retires a major adds a step at the end:
-the server drops the major only after the hosts and frontends that used it have gone (rule 2). Rollback is the reverse: frontends are
-reverted by kbf, hosts by the coordinator's revert, the server by a redeploy of the previous image; no rollback needs a format change,
-because formats change additively (R3) and an older reader skips new keys (13.6).
+A change that adds a field or feature rolls in this order and needs nothing more. A change that retires a major adds a step at the end: the
+server drops the major only after the agents that used it have gone (rule 2). Rollback is the reverse: kbf by setting an older version, the
+agent by the helper's trial-and-revert (containers are adopted by the restarted agent; a taint persists), images by re-issuing the previous
+digest; no rollback needs a format change, because formats change additively (R3).
 
 ## What would change the plan (D45)
 
-- **A `js-agent` population that does not run kbf and must be updated.** The kbf package does not reach it. Then a second coordinator
-  instance for that population, or replace-not-update for elastic machines (replace the machine with one booted from the current image).
-- **`js-agent` and `kbf-executor` on different release cadences with a required order.** Then the version-pair check at the agent
-  (rule 5) first, not a service map in the coordinator.
-- **jobscheduler releasing faster than kbf, with urgent agent fixes.** Package coupling then hurts (K35): the fix waits for a kbf host
-  release. The options are reopened.
-- **The kbf helper's single signer not extending to jobscheduler's release signer.** A security decision for the project owner, taken
-  before any option that ships jobscheduler packages through the helper (K36). Until then the agent ships only inside the kbf package.
+- **A `js-agent` population that does not run kbf and must be updated.** Then a second coordinator instance for that population, or
+  replace-not-update for elastic machines.
+- **Agent fixes that must outrun kbf releases.** The agent has its own service, so this is the normal case; the limit is kbf's republish step.
+- **The signer decision (K36).** The kbf helper verifies against kbf's release signer. Trusting jobscheduler's release workflow directly
+  would make anyone who can push its `main` root on every host, because the agent runs as root and `main` has no rulesets. The plan is for kbf
+  to republish the agent under its own signer, with branch protection on jobscheduler first; trusting jobscheduler's workflow is reopened only
+  after rulesets and a protected release environment. A security decision for the project owner, taken before any production install.
+- **A Mac task runtime.** Until one exists the Macs are not on this plan.
 
 ## What stays open
 
-Nothing in this plan is open. The triggers above are conditions for revisiting it, not questions waiting for an answer. Deploying the
-server, installing a package on hosts and any registry upload are operator acts that need the project owner's go for that action (R7).
+The storage branch, the credential holder, the Mac default and packaging, the elastic provisioner's home, and the other decisions are in
+[kbf-on-js-agent.md](kbf-on-js-agent.md), section 15. Deploying a service, installing a package on hosts and any registry upload are
+operator acts that need the project owner's go for that action (R7).
