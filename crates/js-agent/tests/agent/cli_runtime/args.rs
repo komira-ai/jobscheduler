@@ -550,3 +550,30 @@ fn labels_are_pairs_and_keys_are_checked() {
     }
     assert!(label_args(&BTreeMap::new()).unwrap().is_empty());
 }
+
+/// Asserts that each `--container-add-host` entry reaches `create` as its own
+/// `--add-host <name>:<ip>` pair, for both engines, in the order given, and that none is
+/// passed when none is configured. It catches an entry that is checked and dropped, one
+/// merged into another argument, and a stray `--add-host` by default.
+#[test]
+fn add_hosts_reach_create() {
+    let none = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert!(!none.iter().any(|a| a == "--add-host"));
+    let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
+    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+        .unwrap()
+        .with_add_hosts(&entries)
+        .unwrap();
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&set, engine, PROFILE);
+        let pairs: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-host")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            pairs,
+            ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
+        );
+    }
+}
