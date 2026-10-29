@@ -284,6 +284,7 @@ impl Scripted {
                 labels,
                 create: Vec::new(),
                 binds: Vec::new(),
+                options: Vec::new(),
                 volume: None,
                 started,
                 exit: None,

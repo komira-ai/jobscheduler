@@ -317,7 +317,9 @@ fn podman_binds_are_read_back_with_nosuid_and_nodev() {
     let cases: [Case; 4] = [
         ("scratch without nosuid", |o| o[0].retain(|x| x != "nosuid")),
         ("scratch without nodev", |o| o[0].retain(|x| x != "nodev")),
-        ("job bind without nosuid", |o| o[1].retain(|x| x != "nosuid")),
+        ("job bind without nosuid", |o| {
+            o[1].retain(|x| x != "nosuid")
+        }),
         ("job bind without nodev", |o| o[1].retain(|x| x != "nodev")),
     ];
     for (name, change) in cases {

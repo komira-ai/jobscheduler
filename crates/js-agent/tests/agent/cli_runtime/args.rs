@@ -212,7 +212,11 @@ fn podman_hardens_var_tmp_and_run_like_tmp() {
         ["/tmp:rw,noexec,nosuid,nodev,size=2g"]
     );
     let podman = hardening_args(&set, Engine::Podman, PROFILE);
-    assert!(!podman.iter().any(|arg| arg.starts_with("--read-only-tmpfs")));
+    assert!(
+        !podman
+            .iter()
+            .any(|arg| arg.starts_with("--read-only-tmpfs"))
+    );
 }
 
 /// Asserts, for both engines, the properties of the hardening list that keep a job
