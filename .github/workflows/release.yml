@@ -123,8 +123,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # js does not build for macOS yet: js-cli draws its run label with rustix getrandom,
-        # which exists only on Linux. Add aarch64-apple-darwin here once it does.
+        # The lease server is Linux-only; the client and the agent also build for Apple
+        # silicon.
         include:
           # Static musl binaries: they run on gcr.io/distroless/cc-debian12 and on any
           # Linux host, whatever its libc. rustls links ring, which compiles C, hence
@@ -132,6 +132,9 @@ jobs:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
             builds: js-lease-server:js-lease-server js-cli:js js-agent:js-agent
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            builds: js-cli:js js-agent:js-agent
     env:
       TARGET: ${{ matrix.target }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -145,6 +148,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends musl-tools
+      # The archives are made with GNU tar's options; the runner has Homebrew's gnu-tar
+      # (`gtar`), and this installs it if an image does not.
+      - name: Install GNU tar
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: command -v gtar > /dev/null || brew install gnu-tar
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
       # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so
@@ -161,6 +169,11 @@ jobs:
           # commit's time as the modification time, numeric owner 0/0, no name or time in
           # the gzip header. A full re-run then makes the same files as the first run.
           mtime="$(git log -1 --format=%ct "$COMMIT")"
+          # The options below are GNU tar's: on a Mac, Homebrew's gnu-tar is `gtar`.
+          tar=tar
+          if command -v gtar > /dev/null; then
+            tar=gtar
+          fi
           for entry in $BUILDS; do
             package="${entry%%:*}"
             bin="${entry##*:}"
@@ -169,7 +182,7 @@ jobs:
             mkdir "stage-$bin"
             mkdir "stage-$bin/$name"
             cp "target/$TARGET/release/$bin" LICENSE "stage-$bin/$name/"
-            tar -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
+            "$tar" -C "stage-$bin" --sort=name --mtime="@$mtime" --owner=0 --group=0 --numeric-owner -cf - "$name" | gzip -n > "dist/$name.tar.gz"
           done
           ls -l dist
       - name: Check the binaries
@@ -231,7 +244,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          expected="js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          expected="js-$VERSION-aarch64-apple-darwin.tar.gz js-$VERSION-x86_64-unknown-linux-musl.tar.gz js-agent-$VERSION-aarch64-apple-darwin.tar.gz js-agent-$VERSION-x86_64-unknown-linux-musl.tar.gz js-lease-server-$VERSION-x86_64-unknown-linux-musl.tar.gz"
           actual="$(ls | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
           if [ "$actual" != "$expected" ]; then
             echo "::error::unexpected assets: '$actual' (expected '$expected')"
