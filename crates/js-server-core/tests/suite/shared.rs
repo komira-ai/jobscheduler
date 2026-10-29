@@ -313,9 +313,9 @@ fn a_refusal_is_judged_against_the_cut_capacity_of_the_other_frontends() {
 fn the_stage_of_a_waiting_operation_judges_the_other_frontends_by_the_cut_capacity() {
     let setup = Setup::new();
     let a = cut_pair(&setup);
-    a.refresh_remote();
-
     submit_request(&a, 1, sized(1, 4, 60 * GIB)).expect("queued");
+    // The other frontends' daemons are read once an operation waits.
+    a.refresh_remote();
     let above = shown(&a);
     assert!(matches!(above.last(), Some(Stage::Waiting(_))), "{above:?}");
 
