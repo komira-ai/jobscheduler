@@ -63,14 +63,15 @@ impl Lifecycle {
             let Some((weight, job)) = heaviest else {
                 return;
             };
-            match (weight, job.result.as_mut()) {
-                (0, Some(result)) => {
-                    result.log_tail = None;
-                    let why = "the log tail did not fit a heartbeat and was left out".to_owned();
-                    job.note(code::LOG_TAIL_SHED, why, events);
-                }
-                (_, Some(result)) => result.log_tail.iter_mut().for_each(halve),
-                (_, None) => return,
+            let dropped = weight == 0;
+            // The result is there: the heaviest was found among the jobs that have one.
+            job.result.iter_mut().for_each(|result| match dropped {
+                true => result.log_tail = None,
+                false => result.log_tail.iter_mut().for_each(halve),
+            });
+            if dropped {
+                let why = "the log tail did not fit a heartbeat and was left out".to_owned();
+                job.note(code::LOG_TAIL_SHED, why, events);
             }
         }
     }

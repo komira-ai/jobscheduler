@@ -132,3 +132,31 @@ fn a_tail_that_cannot_fit_even_empty_is_dropped_with_a_finding() {
         "{findings:?}"
     );
 }
+
+/// Asserts that a tail with a multi-byte character at the halving point is cut at a
+/// character boundary (the end kept, whole characters only), that an empty stream stays
+/// empty, and that the cut stops as soon as the results fit. It catches a cut that splits
+/// a character (a broken string on the wire) and one that goes on past what was needed.
+#[test]
+fn halving_cuts_at_a_character_boundary_and_stops_when_it_fits() {
+    let mut h = Harness::new("log-shed-boundary");
+    let tail = LogTail {
+        stdout: "\u{20AC}".repeat(41),
+        stderr: String::new(),
+        truncated: false,
+    };
+    h.fake.print("r1", tail);
+    h.start(job("r1"));
+    h.fake.exit("r1", 1);
+    h.life.step();
+    let size = serde_json::to_vec(&h.life.results()[0]).unwrap().len();
+    h.life.fit_log_tails(size - 1, &mut Vec::new());
+    let cut = h.life.results().remove(0).log_tail.unwrap();
+    assert_eq!(
+        cut.stdout,
+        "\u{20AC}".repeat(20),
+        "61 bytes, from a boundary: 60"
+    );
+    assert_eq!(cut.stderr, "");
+    assert!(cut.truncated);
+}
