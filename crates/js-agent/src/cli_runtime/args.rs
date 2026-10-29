@@ -15,6 +15,17 @@ use crate::lifecycle::ContainerSpec;
 /// Where the run's scratch directory is mounted, read-write, inside the container.
 pub const SCRATCH_TARGET: &str = "/scratch";
 
+/// Where the run's files are mounted, read-only, inside the container.
+///
+/// The container's root is read-only, and an engine puts a tmpfs on `/run` for such a
+/// container (Podman does; an explicit `--tmpfs /run` may be added). The bind sits on top
+/// of that tmpfs: engines order mounts parent first, so `/run` is mounted before
+/// `/run/js-files`, and the engine creates the mount point itself. Nothing here assumes
+/// `/run` exists in the image. The mount is built by the same [`mount_value`] as a job's
+/// mounts (read-only, `nosuid,nodev` on Podman) and is in [`binds_of`], so the read-back
+/// after `create` checks it like them: one that reads back writable is refused.
+pub const FILES_TARGET: &str = "/run/js-files";
+
 /// The most processes a job may hold when its limits name no bound: a fork bomb is
 /// stopped well before it takes the host, and a build with many threads still fits.
 pub const DEFAULT_PIDS: u64 = 4096;
@@ -105,10 +116,15 @@ pub fn limits_to_args(
         let value = mount_value(engine, &mount.host, &mount.target, mount.ro, recursive_ro)?;
         args.extend(["--mount".to_owned(), value]);
     }
+    if let Some(files) = &spec.files {
+        let value = mount_value(engine, files, FILES_TARGET, true, recursive_ro)?;
+        args.extend(["--mount".to_owned(), value]);
+    }
     Ok(args)
 }
 
-/// The bind mounts `spec` asks for, the scratch directory first: what the engine must
+/// The bind mounts `spec` asks for, the scratch directory first and the run's files
+/// (read-only) last: what the engine must
 /// report back for the container after `create`.
 pub fn binds_of(spec: &ContainerSpec) -> Vec<Bind> {
     let text = |path: &Path| path.to_string_lossy().into_owned();
@@ -117,7 +133,11 @@ pub fn binds_of(spec: &ContainerSpec) -> Vec<Bind> {
         .mounts
         .iter()
         .map(|mount| (text(&mount.host), mount.target.clone(), !mount.ro));
-    std::iter::once(scratch).chain(jobs).collect()
+    let files = spec
+        .files
+        .iter()
+        .map(|dir| (text(dir), FILES_TARGET.to_owned(), false));
+    std::iter::once(scratch).chain(jobs).chain(files).collect()
 }
 
 fn gpu_args(engine: Engine, indices: &[u32]) -> Vec<String> {

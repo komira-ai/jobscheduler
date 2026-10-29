@@ -91,6 +91,9 @@ pub struct ContainerSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
+    /// `/run/js-files`; none for a run without files.
+    pub files: Option<PathBuf>,
     /// The slot the run holds: its container user and the owner of its scratch directory are
     /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
     pub slot: u32,

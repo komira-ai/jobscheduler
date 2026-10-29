@@ -4,7 +4,7 @@
 use super::Lifecycle;
 use super::job::{Cause, Stage, check_taint, cleanup_taint, outcome};
 use crate::lifecycle::runtime::{ContainerId, Status};
-use crate::lifecycle::{CheckFinding, Event, Finished, code};
+use crate::lifecycle::{CheckFinding, Config, Event, Finished, code};
 
 impl Lifecycle {
     /// Watches one running job: the wall-time limit, a stop that is owed, the exit.
@@ -138,7 +138,7 @@ impl Lifecycle {
                         return;
                     }
                 },
-                Stage::Scratch => match config.scratch.remove(&run_id) {
+                Stage::Scratch => match remove_run_dirs(config, &run_id) {
                     Ok(()) => {
                         events.push(Event::ScratchRemoved {
                             run_id: run_id.clone(),
@@ -213,4 +213,15 @@ impl Lifecycle {
             }
         }
     }
+}
+
+/// Removes the run's scratch directory and its files directory; both are tried, and the
+/// first failure is the one reported.
+fn remove_run_dirs(config: &Config, run_id: &str) -> std::io::Result<()> {
+    let scratch = config.scratch.remove(run_id);
+    let files = config
+        .files
+        .as_ref()
+        .map_or(Ok(()), |root| root.remove(run_id));
+    scratch.and(files)
 }

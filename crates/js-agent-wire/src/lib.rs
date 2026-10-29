@@ -64,6 +64,11 @@
 //!   as [`Command::Unknown`]), so an agent never runs a job it cannot classify, while an
 //!   absent one means [`Isolation::Contained`].
 //!
+//! A field an old receiver would silently ignore cannot carry something the job needs.
+//! `JobSpec::files` is such a field (a presigned URL is a secret the task cannot run
+//! without), so an agent that can write them reports the capability `run-files` in its
+//! hello, and the server queues and sends a start with files only to a host that did.
+//!
 //! # Not here yet
 //!
 //! Fields of design 5.2 that a later change adds, as optional fields of the types here:
@@ -98,6 +103,7 @@ mod check;
 mod command;
 mod credential;
 mod error;
+mod files;
 mod heartbeat;
 mod hello;
 mod image;
@@ -110,6 +116,7 @@ pub mod refusal;
 pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
+pub use files::{RunFile, validate_files};
 pub use heartbeat::{
     Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, LogTail, Outcome,
     RefusalReason, RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,

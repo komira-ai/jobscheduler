@@ -18,6 +18,7 @@
 //! | native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
 //! | native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
+//! | run files | [`MAX_RUN_FILES`] entries; name [`MAX_RUN_FILE_NAME_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric, none twice; contents [`MAX_RUN_FILE_LEN`] bytes each and [`MAX_RUN_FILES_TOTAL_BYTES`] in all, no NUL |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
 //! | free text (`agent_version`, taint, `detail`) | [`MAX_VERSION_LEN`], [`MAX_TAINT_TEXT_LEN`], [`MAX_DETAIL_LEN`] bytes, no control or format character |
@@ -59,6 +60,14 @@ pub const MAX_MOUNTS: usize = 64;
 pub const MAX_ROOT_NAME_LEN: usize = 64;
 /// Longest path below a mount root, in bytes.
 pub const MAX_REL_LEN: usize = 4096;
+/// Most files one job may be given (`JobSpec::files`).
+pub const MAX_RUN_FILES: usize = 8;
+/// Longest run file name, in bytes; the same grammar and cap as a mount root name.
+pub const MAX_RUN_FILE_NAME_LEN: usize = MAX_ROOT_NAME_LEN;
+/// Most bytes of contents in one run file.
+pub const MAX_RUN_FILE_LEN: usize = 16 * 1024;
+/// Most bytes of contents all the run files of one job may hold together.
+pub const MAX_RUN_FILES_TOTAL_BYTES: usize = 64 * 1024;
 /// Most labels on a hello or a job.
 pub const MAX_LABELS: usize = 64;
 /// Longest label key, in bytes.

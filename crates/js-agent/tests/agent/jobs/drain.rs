@@ -365,6 +365,8 @@ pub fn container_flags(dir: &Scratch) -> Vec<String> {
         private(dir, "state").display().to_string(),
         "--scratch-root".to_owned(),
         private(dir, "run-scratch").display().to_string(),
+        "--run-files-root".to_owned(),
+        private(dir, "run-files").display().to_string(),
     ]
 }
 
