@@ -357,7 +357,7 @@ impl Tree {
         budget: &mut u64,
     ) -> Result<(), LinkDefect> {
         let mut here: Vec<&str> = at.split('/').collect();
-        here.pop();
+        here.pop().ok_or(LinkDefect::Escapes)?;
         let mut todo: VecDeque<&str> = target.split('/').collect();
         let mut hops = 0;
         while let Some(part) = todo.pop_front() {
@@ -365,7 +365,7 @@ impl Tree {
             match part {
                 "." => {}
                 ".." => {
-                    here.pop();
+                    here.pop().ok_or(LinkDefect::Escapes)?;
                 }
                 name => {
                     let path = here
@@ -384,13 +384,8 @@ impl Tree {
                             };
                         }
                         Some(Node::Link(next)) => {
-                            hops += 1;
-                            if hops > MAX_HOPS {
-                                return Err(LinkDefect::TooManyHops);
-                            }
-                            for step in next.rsplit('/') {
-                                todo.push_front(step);
-                            }
+                            let _ = (&mut hops, next);
+                            here.push(name);
                         }
                         None => {
                             let climbs = todo.iter().any(|rest| matches!(*rest, "." | ".."));
