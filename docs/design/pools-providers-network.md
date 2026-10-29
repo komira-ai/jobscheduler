@@ -78,12 +78,10 @@ generic. Secrets are files mounted at run time and named by path in the config (
 
 Deviations a reviewer should see (each is also under Open questions 20):
 
-- Requirement 1 and 4: a job carries disk and may require an execution mode. In the first slice the
-  lease request carries cpu, memory, gpus and capabilities only (3.1). `os` and `arch` are
-  carried (capability keys that exist) and `Offer::fit` refuses an offer whose os or arch
-  differs from the request's. Disk and `exec` are `None`, so an offer with too little disk
-  still fits. Lambda is the only elastic kind and runs `container`, so this costs nothing
-  until a macOS pool or a disk-sized job exists (PR 11).
+- Requirement 1 and 4 (lifted by PR 11): a job carries disk and may require an execution mode.
+  The lease request carries them as the capabilities `disk-gib` and `exec` (3.1), beside `os`
+  and `arch`, and `Offer::fit` refuses an offer whose os, arch, mode or disk differs from or
+  falls short of the request's, naming the dimension.
 - Requirement 14 says "elastic pools" (plural). The first slice serves one registering pool because
   `Registry::new` takes one `PoolConfig` (`crates/js-registry/src/registry.rs`). `js-scaler`
   takes a list of pools; the registry is the limit (6.5, PR 12).
@@ -132,23 +130,27 @@ pub struct Requirements {
     pub os: Option<String>, pub arch: Option<String>,      // "linux"/"macos", "x86_64"/"aarch64"
     pub exec: Option<ExecMode>,          // Container | SandboxExec; None = either
 }
-impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, arch from the request's
-                                                                       // required caps; disk, exec are None
+impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, arch, disk (disk-gib),
+                                                                       // exec from the required caps
 ```
 
 `js-elastic::Demand` is an alias of `Requirements`, so the scaler and the matcher read one
 definition. `ContainerSpec` maps onto the existing run body: `RunBody` gains no field in the
 first slice, its `image` is parsed into `ImageDigestRef` at the edge, and a digest-less image is
-refused at run start only for pools with `require_digest = true` (PROPOSAL, 14 Q16).
+refused at run start with `image-digest-required` (422), for every pool: agents pull what a host
+lacks, so a tag could change under a fleet. This is unconditional and not the `require_digest` pool
+setting of 14 Q16; the agent refuses a tag-only start as well.
 
-Deferred, plainly: in the first slice the lease request still carries `Resources` plus
-`Capabilities`, so disk and exec are `None` in every `Requirements` built from it. `os` and
-`arch` are read from the request's required `os` and `arch` capabilities in PR 1, and
-`Offer::fit` refuses an offer whose os or arch differs (naming `Dimension::Os` or `Arch`).
-This is a deviation from requirements 1 and 4 (1.1, Open questions 20). PR 11 adds the
-capability keys `disk-gib` and `exec` in `crates/js-caps`, has the agent report them, and makes
-the request carry them; macOS pools and disk-sized launches need it, Lambda does not. A job never
-contains an AMI, a cloud name or an instance type; 4.3 shows where those live.
+A lease request carries `Resources` plus `Capabilities`, and `Requirements::from_request` reads
+the rest from the capabilities it requires. `os` and `arch` are read from `os` and `arch` (PR 1),
+`disk_bytes` from `disk-gib` (whole GiB, at least the amount; `0` asks for nothing) and `exec` from
+`exec` (`container` or `sandbox-exec`); a request that names a key it does not need leaves
+the field `None`, which is "any". A `disk-gib` that is not a whole number of GiB, or an `exec`
+that names no mode, is a 400 on `POST /v1/leases` and is refused by `Request::validate`. `Offer::fit`
+refuses an offer whose os or arch differs, whose mode differs, or whose disk is below the
+request's, naming `Dimension::Os`, `Arch`, `Exec` or `DiskBytes` (PR 11 lifted the earlier
+deviation from requirements 1 and 4). A job never contains an AMI, a cloud name or an instance
+type; 4.3 shows where those live.
 
 ### 3.2 Pools (requirement 2)
 
@@ -249,6 +251,11 @@ agent reports in its hello, as capabilities declared in `crates/js-caps`:
   jobs with was found and ran (`--container-bin` in `crates/js-agent/src/cli.rs`).
 - `gpu-toolkit` (flag): set only if the toolkit hook works, reported only when gpus > 0.
 - `exec` (text): the mode the agent runs jobs in. PR 6 reports it; PR 11 lets a job require it.
+- `disk-gib` (whole number): the free space of the volume that holds `--scratch-root`, where
+  every run gets its directory, in GiB rounded down, read once when the hello is made with
+  `df -P -k` (the same on Linux and macOS). An agent with no `--scratch-root`, or whose volume
+  cannot be read (a warning says why), reports none, and a job that requires disk is not
+  placed on it. Like the others, an operator cannot set it.
 
 A pool declares `exec = "container"` (default) or `"sandbox-exec"`. The pool floor (4.5)
 requires `runtime` to equal the pool's `exec`, and for a pool with gpus, `gpu-toolkit`.
@@ -256,7 +263,22 @@ Admission refuses with two new codes beside `SHAPE_NOT_ACCEPTED`
 (`crates/js-agent-wire/src/refusal.rs`): `host-contract` (runtime or toolkit missing) and
 `execution-mismatch` (reported mode differs from the pool's). Both name the field. A job that
 requires a mode (`Requirements.exec`) is matched against the reported value, never against
-the pool's name or the cloud.
+the pool's name or the cloud: admission holds each host to the mode it reports, and a pool that
+declares `exec` books its hosts with that mode among their capabilities, so a job that requires
+`sandbox-exec` is never placed on a container host. A pool that declares no mode books none,
+and a job that requires one finds no host there unless the pool's `[capabilities]` name `exec`
+(the join then compares each host's reported value with it). `disk-gib` is a minimum everywhere
+(`Shape::satisfies`, `js_caps::Request`): a pool that lists `disk-gib` in its `[capabilities]`
+admits only hosts that report at least that much, and serves jobs that require up to it.
+
+Two limits, stated plainly:
+
+- Registry pools place jobs by the pool's booked shape. A host's reported `disk-gib` is only an
+  admission floor against the pool's promise, and never places a job by itself. A job with
+  `disk-gib` on a pool whose `[capabilities]` omit `disk-gib` gets no fit.
+- Disk is read once, at hello, so it goes stale afterwards. A host that fills up keeps its
+  booked promise. Re-reading it periodically or per heartbeat is tracked in
+  komira-ai/jobscheduler#328.
 
 ## 4. Configuration (requirement 9, 10)
 
@@ -585,7 +607,7 @@ pub enum NetworkStep { Run(Vec<String>),                       // argv, never a 
     Fetch { url: String, sha256: [u8; 32], dest: String } }
 ```
 
-The launch path in the shell (`scaler.rs`) is `mode.prepare` to `BootPlan` to `render` to
+The launch path in the shell (`scaler/launch.rs`) is `mode.prepare` to `BootPlan` to `render` to
 `provider.acquire(payload)`. The shell is the only place that holds both a mode and a provider;
 neither knows the other. The renderer quotes every argv element, so no step can add shell syntax.
 `default` returns an empty `Contribution`; its `check` confirms `advertise_url` parses and, for
@@ -599,9 +621,16 @@ neither knows the other. The renderer quotes every argv element, so no step can 
 
 Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes the previous `State`, one
 `Input` and the time now, and returns the next `State` and the `Vec<Action>`. The shell lives in
-`crates/js-lease-server/src/scaler.rs` and runs on the existing tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots, calls
-`step`, runs the actions on a `blocking()` task (`util.rs`), and feeds the answers into the
-next step. No lock is held across a provider call. Lambda allows one launch per 12 s
+`crates/js-lease-server/src/scaler/` and runs on the tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots the registry
+(hosts and wait list under one lock), calls `step`, runs the actions on a `blocking()` task
+(`util.rs`), and feeds the answers into the next step. The scaler ticks on a task of its own, so a
+slow provider call does not hold back the table's lease expiry, and a tick that finds the scaler
+still at the last one skips it. No lock is held across a provider call, nor the lock of the shell's
+own memory (a tick works on a copy and swaps it in), so the status page is answered during one. A
+panic in the scaler's tick ends its task: `/healthz` answers 503 and the supervisor of the process
+must restart the server (the records are on disk before any call they describe, so a restart launches
+nothing twice). A registry refusal to remove the host of a machine that is gone is kept and tried
+again at every tick, and alerted. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
 the pool until the injected clock passes it.
 
@@ -652,6 +681,13 @@ A record exists for each acquire, written to `<state file>.scaler` before the ca
 describes (write-whole-file-and-rename, as `agent_state::replace` does for `join_tokens.rs`
 and the bindings file). A pool starts in `Checking`: nothing launches before the first full
 check pass succeeds (10.1).
+
+The file is never taken to be empty by default. A pool with `launch = "live"` whose file is
+missing does not start: a start with no records forgets the machines in flight and the day's
+spend, and could launch twice. The operator who says this is the first start does it with the
+flag that already says it for the lease file, `--boot initialise` (`boot = "initialise"`); every
+later start is `--boot resume`, which also refuses a missing records file. A pool in `plan`
+mode starts without the file.
 
 ```
 Planned -> Launching -> Booting -> Registered -> Draining -> Releasing -> Gone
@@ -769,7 +805,9 @@ Rules, each tied to a requirement or to existing behaviour:
   is placed by the registry's normal path on the consumer's next poll.
 - Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
   token's life is): the agent never said hello (or was refused `host-contract`). A host the
-  registry shows has said hello, so a silent one is not released by this. Only a complete
+  registry shows has said hello, so a silent one is not released by this, with one exception: a registered host
+  that has not been heard from since its hello and books nothing (a lost Welcome, 7.2) is released at `boot_timeout`
+  from the launch, with the same cooldown. Only a complete
   registry view gives up on a machine: on an incomplete one its host may have said hello and be
   missing from the part that was read, so the machine is held and counted. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
@@ -809,7 +847,10 @@ Rules, each tied to a requirement or to existing behaviour:
   and read back to Gone once the registry shows the mark. A silent host the scaler had already
   marked `Releasing` needs no flag. The step names each machine it releases this way for the
   shell to log. A host that shows a lease, a run or a stream, or a `Held` or `Reserved` mark, is
-  never released, whatever the flag says. Hosts of a static pool are never released by the
+  never released, whatever the flag says. A registered host that said hello and has not been heard from since
+  (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
+  heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
+  cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
   scaler. Until then the machine counts toward the caps and the state shows the age of its
   silence.
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
@@ -879,7 +920,8 @@ Rules, each tied to a requirement or to existing behaviour:
 - `max_spend_per_hour` caps the rate. `max_spend_per_day` is in the first slice (6.2 Caps)
   and bounds spend over time even when a stuck or Lost machine is counted forever. A Lost
   host that the provider still lists keeps accruing in the day total until released; status
-  shows its age. `max_age` is Later.
+  shows its age. `max_age` is Later. The day cap gates new launches only: machines already
+  running when it is reached keep running (and accruing) until they are released.
 
 ### 6.5 What the single-pool slice costs
 
@@ -969,8 +1011,14 @@ launch, not as an option:
   state as tokens (`agent_state::replace`), revoked by the same `revoke_for(pool, name)`, and
   carries the same `CREDENTIAL_TTL` silence bound.
 - Failure case: the `Welcome` is lost on the wire after the registry retired the token. The
-  host cannot re-register; the scaler sees Booting with no heartbeat, `boot_timeout` releases it.
-  Tested in 13.3.
+  host cannot re-register; the registry shows the host (its hello was admitted) and it never heartbeats, so the scaler releases it at `boot_timeout`
+  from the launch (`heard_since_hello`, 6.2 Lost), not at `unknown_hold`.
+  The exception is a host that was seen live and heard from on an earlier step
+  (`Record::seen_live`, kept in the records): a long-running host whose agent restarts and
+  says hello again reads `heard_since_hello` false until its next heartbeat, is not a lost
+  Welcome, and keeps the `unknown_hold` rules. Tested in 13.2 (`js-scaler`: the rule at
+  `boot_timeout` to the millisecond, the re-hello exception, a draining record); the
+  registry, agent and wire halves are not tested there.
 - The Welcome that can carry the credential is sent with `Cache-Control: no-store` and
   `Pragma: no-cache`.
 - An agent that is given no `--token-file` uses the `host-credential` file of its `--state-root`
@@ -1032,7 +1080,11 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    Needs one live test (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
-   a record), `--container-bin`, `--container-pull missing`, `--gpu-toolkit-hook` (on every
+   a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
+   the agent's default `never`, which exists so that a job cannot make a host reach a registry of
+   its choosing, would fail every job on it; the server refuses a run whose image is not pinned by
+   a sha256 digest, so a pull fetches the content the submitter named, and the host reaches the
+   registry only over the pool's network; a pool-level setting is Later), `--gpu-toolkit-hook` (on every
    offer; the agent runs the hook only when the host offers a GPU, and a pool with GPUs refuses
    a host without it as `host-contract` on `gpu-toolkit`), `--state-root`, `--scratch-root`, the
    `--watch-dir` list the agent's help suggests, and labels.
@@ -1089,9 +1141,12 @@ auth keys expire after 90 days and are not used.
    pool's tag, expiry 10 minutes (`LaunchCtx.valid_for`). One key per launch, never shared.
 3. Return `Fetch` for the Tailscale static binary (pinned version and sha256 in a table
    compiled into the crate and updated by release; PROPOSAL), `SecretFile` for
-   `/etc/jobscheduler/ts-authkey`, then `Run(["tailscaled", ...])` and `Run(["tailscale", "up",
-   "--auth-key=file:/etc/jobscheduler/ts-authkey", "--hostname=<name>", "--accept-dns=false"])`,
-   then `Run(["rm", "-f", "/etc/jobscheduler/ts-authkey"])`. The EXIT trap (7.3) removes the file
+   `/etc/jobscheduler/ts-authkey`, then `Run(["systemd-run", "--unit=tailscaled", "tailscaled", ...])`, a bounded wait for
+   `tailscaled`'s socket (`Run(["sh", "-c", <constant loop>, "sh", <socket path>])`: at most 30
+   checks, one second apart, then a `logger` line and a non-zero exit, which stops the boot), and
+   `Run(["tailscale", "up", "--auth-key=file:/etc/jobscheduler/ts-authkey", "--hostname=<name>",
+   "--accept-dns=true"])`. DNS is accepted because `advertise_url` is a MagicDNS name and the
+   server's certificate is for that name, so the host must resolve it. Then `Run(["rm", "-f", "/etc/jobscheduler/ts-authkey"])`. The EXIT trap (7.3) removes the file
    too, if `tailscale up` fails.
 
 The endpoints and scopes (`auth_keys` to create keys, `devices:core` to delete a device) are
@@ -1129,7 +1184,9 @@ compromised GPU host to the agent port, so the design does not leave it unchecke
 
 After release, `forget(host)` looks up the device by hostname and deletes it. The device is
 ephemeral and drops when offline anyway; the delete frees the name. A failed delete is logged and
-shown and does not block the release.
+shown and does not block the release. It is sent once, after the machine is confirmed gone;
+the keys are single-use, ephemeral and tagged, so a device whose delete failed drops when it
+goes offline.
 
 ### 8.5 Live check
 
@@ -1144,7 +1201,7 @@ boot is Open questions 11.
 The service does not join the tailnet. The deployment does (the host's own `tailscaled`, or
 a sidecar), and `advertise_url` names it. Nothing in `js-lease-server`'s core modules,
 `js-scaler`, `js-elastic`, `js-registry` or any provider crate names `network::`; only `kinds.rs`
-and the launch shell (`scaler.rs`, through the trait) do. A CI check greps for the path and fails
+and the launch shell (`scaler/`, through the trait) do. A CI check greps for the path and fails
 if a file other than those and `network/` names it
 (PR 10). Nothing depends on our hosts either (requirement 5): no address, name or path of ours
 appears in a default.
@@ -1287,7 +1344,7 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 | 8 | scaler | new `js-scaler`, `js-lease-server` | pure `step`, records file, shell on the tick, caps (hour and day), `boot_fail_cooldown`; `launch = "live"` honoured |
 | 9 | Lambda end to end | `js-lease-server` (tests), docs | e2e with `FakeLambda`, fake Tailscale and a hello through the real registry |
 | 10 | one config file; docs | `js-lease-server`, docs | server flags into `[server]`; flags refused beside `--config`; amend `providers.md` K6, `registration.md`, `configuration.md`; the path check of 8.6 (no provider crate names a network type); fix the stale `--ca-cert` comment in `js-agent/src/cli.rs` |
-| 11 | disk and exec on jobs | `js-caps`, `js-agent`, `js-scaler`, `js-lease-server` | `disk-gib` and `exec` carried by the lease request; needed before any macOS pool and before disk-sized launches |
+| 11 | disk and exec on jobs | `js-caps`, `js-types`, `js-agent`, `js-registry`, `js-scaler`, `js-lease-server` | `disk-gib` and `exec` carried by the lease request (a 400 for a bad value), reported by the agent (`disk-gib` from the `--scratch-root` volume), compared by `Shape::satisfies`, `js_caps::Request` and `Offer::fit`; needed before any macOS pool and before disk-sized launches |
 | 12 | more pools | `js-registry`, `js-scaler` | several registering pools; part-host classes; first-fit packing |
 
 PR 7b is required before the go (7.2). Later, each behind its own need and not built first:
@@ -1384,10 +1441,14 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   `release_host`; (d) a run started by a lease booked before the mark. In every order either the work
   runs and the host is kept, or the host is released and the work is refused.
 - Release: `Revoke` precedes `Release` and follows `ReleaseHost`; `Released::Unknown` retries every
-  tick and never removes; `Gone` removes and revokes once. Booting past `boot_timeout` is released and
-  starts `boot_fail_cooldown`; on an incomplete registry view it is held. A Lost host the provider
-  calls `terminated` is removed. A silent host that books nothing is drained and released after
-  `unknown_hold`; one that shows work is never released. Failing health
+  tick and never removes; `Gone` removes and revokes. A `Failed` record was revoked when it failed
+  and may be revoked again on entering release; that is harmless, for revoking a missing token is a
+  no-op. Booting past `boot_timeout` is released and starts `boot_fail_cooldown`; on an incomplete
+  registry view it is held. A registered host that said hello, was never heard from since and was
+  never seen live and heard from, and books nothing (a lost Welcome), is released at `boot_timeout`
+  from the launch with the same cooldown, not at `unknown_hold`. A Lost host the provider calls
+  `terminated` is removed. Any other silent host that books nothing is drained and released after
+  `unknown_hold` (so is a draining lost-Welcome one); one that shows work is never released. Failing health
   or `Checking`: no launch, running hosts still released.
 
 ### 13.3 End to end (PR 9), in process, with fakes
@@ -1486,9 +1547,9 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 18. Several elastic pools and part-host classes (6.5). Recommendation: after the live proof.
 19. Modes beyond `default` and `tailscale` are Later (section 12). Recommendation: none until a pool
     needs one.
-20. Deviations from requirements (1.1): disk and `exec` on the job are `None` in the first slice, one
-    registering pool instead of several, gpu class from a `types` row. Recommendation: accept for
-    the first slice; PRs 11 and 12 lift the first two.
+20. Deviations from requirements (1.1): one registering pool instead of several, gpu class from a
+    `types` row (disk and `exec` on the job were deviations too, and PR 11 has landed them).
+    Recommendation: accept for the first slice; PR 12 lifts the first.
 21. A reservation counts as covering however long its `drain_deadline` is (6.2). Alternative: launch
     when the reservation's deadline is further away than `boot_timeout`. Recommendation: covering
     always in the first slice; revisit with live data, since the alternative can buy a second machine.

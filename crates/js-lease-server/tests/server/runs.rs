@@ -37,7 +37,10 @@ async fn run_started_on_next_heartbeat_and_result_returned() {
     assert_eq!(words(&reply), ["start run-1-1"]);
     let start = &reply["commands"][0];
     assert_eq!(start["lease_id"], lease.as_str());
-    assert_eq!(start["image"], "busybox:1");
+    assert_eq!(
+        start["image"],
+        "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
     assert_eq!(start["limits"]["cpu_millis"], 2000);
     assert_eq!(start["limits"]["wall_ms"], 600_000);
     assert_eq!(start["valid_for_ms"], 600_000);
@@ -115,6 +118,68 @@ async fn start_to_lost_host_never_started() {
     queued(&h, &lease, 8000).await;
 }
 
+/// Asserts that a run whose image is not pinned by `@sha256:<64 lower case hex>` is
+/// refused with 422 `image-digest-required` (a tag alone, a bare name, a digest of
+/// another length or algorithm), a digest that breaks the image grammar with 422
+/// `invalid-image`, and that nothing is queued: the agent's next heartbeat carries no
+/// start. A digest alone and a tag with a digest are queued and reach the agent with the
+/// image as sent. It catches a tag-only image reaching a host that pulls what it lacks.
+#[tokio::test]
+async fn unpinned_image_422_and_never_sent_to_the_agent() {
+    let h = start_agents("runs_digest", false).await;
+    let me = join(&h, "burst-1").await;
+    let lease = lease(&h).await;
+    let hex = "0123456789abcdef".repeat(4);
+    let refuse = |image: String| {
+        let (h, lease) = (&h, &lease);
+        async move {
+            let mut body = run_body(1000);
+            body["image"] = json!(image);
+            let reply = queue(h, lease, &body).await;
+            (
+                reply.status,
+                reply.json()["error"].as_str().unwrap().to_string(),
+            )
+        }
+    };
+    let required = (422, "image-digest-required".to_string());
+    for image in [
+        "busybox:1".to_string(),
+        "busybox".to_string(),
+        format!("busybox@sha256:{}", &hex[..40]),
+        format!("busybox@sha256:{hex}0"),
+        format!("busybox@sha512:{hex}{hex}"),
+    ] {
+        assert_eq!(refuse(image.clone()).await, required, "{image}");
+    }
+    for image in [
+        format!("busybox@sha256:{}", hex.to_uppercase()),
+        format!("busybox@sha256:{}", &hex[..31]),
+    ] {
+        assert_eq!(refuse(image.clone()).await, (422, "invalid-image".into()));
+    }
+    assert!(runs(&h, &lease).await.is_empty());
+    let reply = beat(&h, &me, &[], &[]).await;
+    assert!(words(&reply).is_empty(), "{reply}");
+
+    let digest = format!("busybox@sha256:{hex}");
+    let both = format!("busybox:1@sha256:{hex}");
+    for image in [&digest, &both] {
+        let mut body = run_body(1000);
+        body["image"] = json!(image);
+        let reply = queue(&h, &lease, &body).await;
+        assert_eq!(reply.status, 202, "{}", reply.body);
+    }
+    let reply = beat(&h, &me, &[], &[]).await;
+    let sent: Vec<&str> = reply["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["image"].as_str().unwrap())
+        .collect();
+    assert_eq!(sent, [digest.as_str(), both.as_str()]);
+}
+
 /// Asserts the refusals of a job that cannot run on the lease, each 422 with its code and
 /// each leaving nothing queued: limits over the booked shape, a GPU index the shape does
 /// not have, an image with a transport prefix, a mount that climbs, and a job that asks
@@ -163,7 +228,7 @@ async fn limits_over_shape_422() {
     let mut extra = run_body(1000);
     extra["priority"] = json!(1);
     assert_eq!(queue(&h, &lease, &extra).await.status, 400);
-    let nothing = json!({ "image": "busybox:1" });
+    let nothing = json!({ "image": "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" });
     assert_eq!(queue(&h, &lease, &nothing).await.status, 400);
     let mut unknown = run_body(1000);
     unknown["isolation"] = json!("quantum");

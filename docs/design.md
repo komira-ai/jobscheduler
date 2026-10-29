@@ -313,7 +313,7 @@ What the agent trusts, and who trusts it:
   session, authenticated by a token the scheduler minted for that lease. It obeys no other caller.
 - The agent proves itself to the scheduler with the join credential of its pool, or on aws the instance proof (5.8), and sends it only
   on a TLS stream whose server identity it has pinned. A credential admits a host to one pool only.
-- The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
+- **(Superseded in part by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md): there is no trusted `kbf-executor` beside the agent; the agent writes a per-run upload grant (one presigned PUT per pack slot) as a 0400 file on a per-run tmpfs, redacted and never persisted elsewhere, and the task's own tool uploads with it; the owner ruled on 2026-10-29 that the whole task holds the URL.)** The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
   outputs leave as a mounted directory. The component that fetches inputs, uploads outputs and reports to a frontend is the consumer's
   trusted executor (for kbf, `kbf-executor`, 9.2). It runs on the host beside the agent, in its own process and identity, and shares the
   mounted input, output and cache directories with it; it is part of the host image or package, so the aws launch template and the
@@ -663,6 +663,10 @@ Consequences:
   only dials out (D22). The scheduler's own run service, which places ucdk requests (11), is a consumer in this sense.
 
 ### 9.2 The daemon splits three ways
+
+> **Superseded by [kbf-on-js-agent.md](kbf-on-js-agent.md).** The split is now `js-agent` (standalone, no kbf process beside it), ordered steps in
+> one lease (a task that fetches, runs and then writes kbf packs to presigned PUTs itself through the kbf task tool in its container, with the agent relaying its report), and a frontend CommitPack in kbf that verifies the packs and builds the cache entry. There is
+> no `kbf-executor` and no mounted input/output contract. The text below is the earlier plan.
 Today's daemon (`crates/kbf-daemon/src/daemon.rs`) becomes:
 
 - **`js-agent`**, generic: hello with capacity, labels and GPUs; heartbeat, session, acks, fence, drain and pressure; start and stop
@@ -736,7 +740,7 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-guest` (in review) | the rest of `crates/kbf-guest` | the program inside a macOS VM guest: it serves the run protocol on a Unix socket, runs one command per boot, and carries the guest's setup and probe verbs. The executable keeps the name `kbf-guest` |
 | `js-sizing` | `crates/kbf-estimator` | `SizingPolicy`; resource-vector windows |
 | `js-state` | the `Store` trait and conformance suite of `crates/kbf-state` | trait and fake only; SQLite and Postgres backends stay in kbf (D13) |
-| `js-store` | generic rows of `farm/durable/*` | the scheduler's rows over `js-state`: the keys of the rows and the id blocks, the epoch, the owner, session and cordon rows, the `RowCodec` trait (the embedding server supplies the bytes of the request, lease and session values), the `Ext` trait (the rows only the embedding server has, which the crate calls inside the transactions it builds and at a load, and sees only as bytes), the submission of an operation (its `op/`, `queue/`, `inflight/` and `opkey/` rows in one transaction), the load of the unfinished operations with the floors and key floors, the grant, the result, the refusal and the `done/` row, the give-up of a lease with its loss count and fate, the memory floors and key floors, and the orphan sweep. `ACK_WINDOW` is a js-store constant. The size-summary rows (`est/`), the action-usage subjects (`subject/`) and the done-of rows (`doneof/`) stay the embedding server's `Ext` rows |
+| `js-store` | generic rows of `farm/durable/*` | the scheduler's rows over `js-state`: the keys of the rows and the id blocks, the epoch, the owner, session and cordon rows, the `RowCodec` trait (the embedding server supplies the bytes of the request, lease and session values), the `Ext` trait (the rows only the embedding server has, which the crate calls inside the transactions it builds and at a load, and sees only as bytes), the submission of an operation (its `op/`, `queue/`, `inflight/`, `opkey/` and, when it has a longest run, `opwall/` rows in one transaction), the load of the unfinished operations with the floors and key floors, the grant, the result, the refusal and the `done/` row, the give-up of a lease with its loss count and fate, the memory floors and key floors, and the orphan sweep. `ACK_WINDOW` is a js-store constant. The size-summary rows (`est/`), the action-usage subjects (`subject/`) and the done-of rows (`doneof/`) stay the embedding server's `Ext` rows |
 | `js-agent` | generic half of `crates/kbf-daemon` | the agent of 5.2 and 5.4: session, leases, acks, fence, drain, pressure, hello and registration, start and stop containers with limits, host mounts; facts and probes (5.13); the VM backend (5.14) |
 | `js-contain` | `delegate.rs`, `cgroup.rs`, `cgroup_usage.rs`, `numa.rs`, `subids.rs`, `container.rs`, `keeper.rs`, `remove.rs`, `running.rs` and `oci/*` (with the container init) of `kbf-driver-container` | node-local containment; `js-agent` depends on it. In review, not merged yet (mark it (merged) in the pull request that merges it). The move keeps no REAPI types: a lease's booking is `js_types::Resources`; the cgroup's OOM outcome (`OomOutcome`), the usage counters (`CgroupUsage`) and the node's capacity (`Capacity`) are its own types; `memory_max` is the one function for a lease's memory cap. The OCI runner takes what it cannot own as plain data or a trait: the registry client (`ImageSource`), the arguments of the helper modes of the host binary (`HelperModes`), the environment scrub and the keeper launcher (`KeeperLauncher`). The modules that name the CAS, the output tree or the program lookup (`logs`, `outputs`, `tree`, `program`, `hashing`, `cas`, `credential`, `chown_dirs`, `input_phases`, `unpack_layers`) are not moved. |
 | `js-mac-session` | `crates/kbf-mac-session` | the Mac node's root helper: a throwaway user per lease, the standing VM user's session, `role-run` of the configured VMM only, image verbs, the whole-machine session switch, and its client; macOS-gated as it is in kbf; its socket protocol and files are unchanged |
@@ -928,7 +932,7 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
   cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the
   booting machine is kept and released by the idle rule. D41 what is capable and what happens to queued requests when capability goes.
-- D42 kbf's update coordinator is not generalised: one version per host, js-agent and kbf-executor ship in the one kbf host package, and the
+- **(Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md) and the rewritten [design/rollout.md](design/rollout.md).)** D42 kbf's update coordinator is not generalised: one version per host, js-agent and kbf-executor ship in the one kbf host package, and the
   server updates by its own redeploy (settled; adopted from the coordinator's owner). D43 rollout order: server, then hosts, then kbf
   frontends. D44 compatibility rules: majors, additive fields, the server refuses an agent major it does not speak, a version-pair check at
   the agent if the two ever ship apart, frontends check the server's advertised version. D45 what would change the plan, and the signer
@@ -954,7 +958,10 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 - **K5. One tenant fills a pool.** Without tenant caps in jobscheduler, one tenant's leases can drive a pool to its `max_machines`. `max_machines` is the
   overload bound; the cloud's quotas are the second, and they refuse an `acquire` (`Refused(quota)`). jobscheduler adds no third limit.
 - **K6. Secrets.** `secret_env` references must never reach the run record, labels or logs. The record stores references only. No secret
-  goes in user data or in an instance tag; an agent's join credential is short-lived or read from a file the host already has.
+  goes in an instance tag or an image. User data carries a secret only for a kind with no signed instance identity (Lambda), and
+  then only a one-time join token that lives minutes and a network key that lives ten minutes, crossing TLS to the provider, never logged,
+  the token dead after the first hello (registration.md, Host credential); an agent's join credential is otherwise short-lived or read
+  from a file the host already has. Why: pools-providers-network.md, 9.
 - **K7. Tenancy and identity.** The scheduler has no tenant concept (3, 4.1). A tenant must come from an authenticated caller, not a
   request field. kbf already authenticates frontends and nodes (`crates/kbf-auth`, `crates/kbf-oidc`); the design reuses that identity
   path and does not add a second. Scheduled triggers, pool scaling and the reaper run with no caller present, so they need a delegated
@@ -992,6 +999,10 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   agent's claim (K39), and for hosts that run many jobs K42 to K48.
 
 ## 17. Rolling out two services
+
+**Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md):** under the owner's model kbf-server leases whole hosts from a deployed
+js-lease-server and submits each action as a run, the placement libraries run inside kbf's frontends, `js-agent` is a separate service on every host, and there is no `kbf-executor`; the text below is the earlier plan. Detail and the
+rewritten rollout: [design/rollout.md](design/rollout.md).
 
 jobscheduler is the distributed service (a server, and `js-agent` on every host); kbf is a frontend that talks to it, so a release touches
 two services. Detail, D42 to D45 and the risks: [design/rollout.md](design/rollout.md).

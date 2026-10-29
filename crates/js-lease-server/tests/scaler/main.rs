@@ -4,6 +4,7 @@
 //! to a provider, and the records file. Time is an injected clock; nothing sleeps and no
 //! test touches a network.
 
+mod complete;
 mod duties;
 mod fakes;
 mod launcher;

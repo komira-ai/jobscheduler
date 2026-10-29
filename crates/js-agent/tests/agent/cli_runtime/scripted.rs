@@ -15,8 +15,21 @@ pub const DOCKER: &str = "Docker version 27.3.1, build ce12230\n";
 /// What a bind mount of a container is: source, destination, writable.
 pub type Bind = (String, String, bool);
 
+/// A volume of the local driver, as `volume inspect` reports it, and as `.Mounts` does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Volume {
+    pub dst: String,
+    pub driver: String,
+    pub rw: bool,
+    /// The driver options (`type`, `device`, `o`).
+    pub options: BTreeMap<String, String>,
+}
+
 /// How a job's tampering changes the binds a container ends up with.
 pub type Change = Box<dyn Fn(&mut Vec<Bind>)>;
+
+/// How a job's tampering changes the volume a container ends up with.
+pub type ChangeVolume = Box<dyn Fn(&mut Volume)>;
 
 /// The environment of one call: `None` when the call was made with the agent's own
 /// environment, the exact pairs otherwise.
@@ -27,6 +40,8 @@ struct Container {
     labels: BTreeMap<String, String>,
     create: Vec<String>,
     binds: Vec<Bind>,
+    /// The name of the volume the container was made with, in [`State::volumes`].
+    volume: Option<String>,
     started: bool,
     exit: Option<(i32, bool)>,
     /// The process id the engine reports while it runs.
@@ -46,6 +61,9 @@ struct State {
     prefaces: BTreeMap<String, String>,
     after_create: Option<Result<String, ()>>,
     tamper: Option<Change>,
+    tamper_volume: Option<ChangeVolume>,
+    /// The volumes that exist, by name.
+    volumes: BTreeMap<String, Volume>,
     /// What every look at the process of a container prints, instead of its pid and state.
     pid_says: Option<String>,
     /// How many more looks at the process of a container fail.
@@ -127,6 +145,24 @@ impl Scripted {
     /// swapped a directory for a link while the daemon was setting up would.
     pub fn tamper(&self, change: impl Fn(&mut Vec<Bind>) + 'static) {
         self.0.borrow_mut().tamper = Some(Box::new(change));
+    }
+
+    /// Makes every `create` make its volume as `change` says, as an engine that bound the
+    /// scratch directory otherwise than asked would.
+    pub fn tamper_volume(&self, change: impl Fn(&mut Volume) + 'static) {
+        self.0.borrow_mut().tamper_volume = Some(Box::new(change));
+    }
+
+    /// The names of the volumes that exist.
+    pub fn volumes(&self) -> Vec<String> {
+        self.0.borrow().volumes.keys().cloned().collect()
+    }
+
+    /// The volume of the container `id`, as the engine holds it.
+    pub fn volume_of(&self, id: &str) -> Option<Volume> {
+        let state = self.0.borrow();
+        let name = state.containers.get(id)?.volume.clone()?;
+        state.volumes.get(&name).cloned()
     }
 
     /// Every call, as the argv after the program, in order.
@@ -236,6 +272,7 @@ impl Scripted {
                 labels,
                 create: Vec::new(),
                 binds: Vec::new(),
+                volume: None,
                 started,
                 exit: None,
                 pid: 4000,
@@ -284,6 +321,7 @@ fn name_matches(pattern: &str, name: &str) -> bool {
 fn binds_of(args: &[&str]) -> Vec<Bind> {
     values(args, "--mount")
         .into_iter()
+        .filter(|value| value.starts_with("type=bind,"))
         .map(|value| {
             let part = |key: &str| {
                 value
@@ -296,6 +334,48 @@ fn binds_of(args: &[&str]) -> Vec<Bind> {
             (part("src="), part("dst="), !readonly)
         })
         .collect()
+}
+
+/// The fields of a CSV record, as the engine reads a `--mount` value: a field in double
+/// quotes may hold commas.
+fn csv_fields(value: &str) -> Vec<String> {
+    let (mut fields, mut field, mut quoted) = (Vec::new(), String::new(), false);
+    for c in value.chars() {
+        match (c, quoted) {
+            ('"', _) => quoted = !quoted,
+            (',', false) => fields.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
+/// The volume a `--mount type=volume,..` value asks for, when it is one.
+fn volume_of_mount(args: &[&str]) -> Option<Volume> {
+    let value = values(args, "--mount")
+        .into_iter()
+        .find(|value| value.starts_with("type=volume,"))?;
+    let fields = csv_fields(value);
+    let field = |key: &str| {
+        fields
+            .iter()
+            .find_map(|item| item.strip_prefix(key))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let options = fields
+        .iter()
+        .filter_map(|item| item.strip_prefix("volume-opt="))
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    Some(Volume {
+        dst: field("dst="),
+        driver: field("volume-driver="),
+        rw: true,
+        options,
+    })
 }
 
 impl State {
@@ -323,11 +403,20 @@ impl State {
         let name = values(args, "--name")
             .first()
             .map_or_else(|| format!("auto-{}", self.next), |name| (*name).to_owned());
+        let volume = volume_of_mount(args).map(|mut volume| {
+            if let Some(change) = &self.tamper_volume {
+                change(&mut volume);
+            }
+            let volume_name = format!("{:064x}", 0xfeed_u64 + self.next);
+            self.volumes.insert(volume_name.clone(), volume);
+            volume_name
+        });
         let container = Container {
             name,
             labels,
             create,
             binds,
+            volume,
             started: false,
             exit: None,
             pid: 4000,
@@ -336,7 +425,11 @@ impl State {
         format!("{id}\n")
     }
 
-    fn mounts(container: &Container) -> String {
+    fn mounts(&self, container: &Container) -> String {
+        let volume = container
+            .volume
+            .as_ref()
+            .and_then(|name| Some((name.clone(), self.volumes.get(name)?.clone())));
         let mut mounts: Vec<serde_json::Value> = container
             .binds
             .iter()
@@ -347,6 +440,13 @@ impl State {
                 })
             })
             .collect();
+        mounts.extend(volume.map(|(name, v)| {
+            serde_json::json!({
+                "Type": "volume", "Name": name, "Driver": v.driver,
+                "Source": format!("/var/lib/engine/volumes/{name}/_data"),
+                "Destination": v.dst, "Mode": "z", "RW": v.rw, "Propagation": ""
+            })
+        }));
         mounts.push(serde_json::json!({
             "Type": "tmpfs", "Source": "", "Destination": "/tmp", "Mode": "", "RW": true
         }));
@@ -370,7 +470,7 @@ impl State {
         }
         let labels = serde_json::to_string(&container.labels).unwrap();
         match (format.contains("Mounts"), format.contains("Config.Labels")) {
-            (true, _) => format!("{}\n", Self::mounts(container)),
+            (true, _) => format!("{}\n", self.mounts(container)),
             (false, true) => format!("{state} {labels}\n"),
             (false, false) => match container.exit {
                 None => format!("{state} 0 false\n"),
@@ -449,6 +549,13 @@ impl Scripted {
                 }
             }
             ("ps", _) => Ok(state.ps(args)),
+            ("volume", _) => match (args.get(1), state.volumes.get(key)) {
+                (Some(&"inspect"), Some(volume)) => Ok(format!(
+                    "{}\n",
+                    serde_json::to_string(&volume.options).unwrap()
+                )),
+                _ => failed(program),
+            },
             ("info", _) => Ok("true\n".to_owned()),
             ("start", true) => {
                 state.containers.get_mut(&id).unwrap().started = true;
@@ -461,7 +568,13 @@ impl Scripted {
                 Ok(format!("{id}\n"))
             }
             ("rm", true) => {
-                state.containers.remove(&id);
+                let gone = state.containers.remove(&id);
+                if let Some(name) = gone
+                    .and_then(|c| c.volume)
+                    .filter(|_| args.contains(&"--volumes"))
+                {
+                    state.volumes.remove(&name);
+                }
                 Ok(format!("{id}\n"))
             }
             _ => failed(program),

@@ -28,6 +28,7 @@ mod marks;
 mod provider_side;
 mod start;
 
+use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use marks::Busy;
 
@@ -591,7 +592,9 @@ impl Registry {
             .fresh()
             .map(|bytes| secret_text(&bytes))
             .ok_or(Refusal::SessionUnavailable)?;
-        state.book.insert_host(host.clone(), floor.clone());
+        state
+            .book
+            .insert_host(host.clone(), config.booked().clone());
         let held = hello.held.iter().map(|run| run.run_id.clone()).collect();
         state.records.insert(
             host.clone(),
@@ -896,7 +899,7 @@ impl Registry {
         if binding.taint().is_none() || records.contains_key(host) {
             return;
         }
-        book.insert_host(host.clone(), self.shared.config.shape().clone());
+        book.insert_host(host.clone(), self.shared.config.booked().clone());
         records.insert(host.clone(), Record::awaiting(Some(binding), now));
     }
 
@@ -904,6 +907,19 @@ impl Registry {
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
+        self.host_views(&state, now)
+    }
+
+    /// The hosts ([`Registry::hosts`]) and the wait list ([`Registry::waiting`]) as of one
+    /// moment, read under one lock: a request is not shown as reserved on a host that the
+    /// hosts do not show as set aside, nor the other way round.
+    pub fn snapshot(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
+        (self.host_views(&state, now), waiting_rows(&state))
+    }
+
+    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let booked = state.book.booked();
         let shape = self.shared.config.shape();
         let marks = state.marks.reservations();

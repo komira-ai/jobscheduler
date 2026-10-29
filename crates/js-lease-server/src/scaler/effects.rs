@@ -6,11 +6,12 @@
 use std::time::Duration;
 
 use js_elastic::{AcquireId, Acquired, Held, HostRef, Offer, ProviderError, Released, Secret};
-use js_registry::{HostView, Waiting};
+use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 
-/// A call on the registry that names one host. None of them returns anything the scaler
-/// acts on: it reads the registry's marks back at its next step.
+/// A call on the registry that names one host, other than the removal of a host. None of
+/// them returns anything the scaler acts on: it reads the registry's marks back at its next
+/// step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Call {
     /// `Registry::drain`.
@@ -19,8 +20,6 @@ pub enum Call {
     Undrain,
     /// `Registry::release_host`.
     ReleaseHost,
-    /// `Registry::remove`.
-    Remove,
     /// `Registry::mark_ending`.
     MarkEnding,
 }
@@ -29,11 +28,12 @@ pub enum Call {
 /// and the disk. Every method blocks and none holds a lock another part of the server
 /// waits on across a provider call.
 pub trait Effects: Send + Sync {
-    /// The whole-node requests that found no host.
-    fn waiting(&self) -> Vec<Waiting>;
+    /// The hosts the registry holds and the whole-node requests that found no host, as of
+    /// one moment (one lock of the registry).
+    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>);
 
-    /// The hosts the registry holds.
-    fn hosts(&self) -> Vec<HostView>;
+    /// Whether the registry books a lease on the host `host`.
+    fn leased(&self, host: &str) -> bool;
 
     /// What the pool's checks say, and the offers they read: the scaler launches only while
     /// the checks pass, and only from these offers.
@@ -72,6 +72,15 @@ pub trait Effects: Send + Sync {
     /// Revokes every join token and credential of the host `host`; whether it did. A
     /// host with none is revoked.
     fn revoke(&self, host: &str) -> bool;
+
+    /// Takes the host `host` out of the registry, for a machine that is confirmed gone: the
+    /// host is marked ending first, since nothing is left to protect, and then removed.
+    ///
+    /// # Errors
+    ///
+    /// Why the registry refused: a lease is booked on the host ([`Busy::Lease`]). It is asked again at the
+    /// next tick.
+    fn remove(&self, host: &str) -> Result<(), Busy>;
 
     /// Forgets the host's network device, if its network mode has one. Best effort.
     fn forget(&self, host: &str);

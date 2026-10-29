@@ -162,6 +162,7 @@ impl RunRefusal {
 /// indices fit the shape alone.
 pub(crate) fn vet(spec: &JobSpec, shape: &Resources) -> Result<(), RunRefusal> {
     spec.validate().map_err(RunRefusal::Invalid)?;
+    spec.require_pinned().map_err(RunRefusal::Invalid)?;
     if spec.isolation == Isolation::Host {
         return Err(RunRefusal::HostJobsNotAllowed);
     }
@@ -580,7 +581,9 @@ mod tests {
         JobSpec {
             run_id: "r1".into(),
             lease_id: "1-1".into(),
-            image: "busybox:1".into(),
+            image:
+                "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
             args: Vec::new(),
             limits: Limits {
                 cpu_millis: 1000,
@@ -594,6 +597,8 @@ mod tests {
             labels: Default::default(),
             heartbeat_seq: 0,
             valid_for_ms: 0,
+            bundle: None,
+            native: None,
         }
     }
 

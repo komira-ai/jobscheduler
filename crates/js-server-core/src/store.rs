@@ -27,7 +27,7 @@ use js_types::sched::{
 };
 
 use crate::adapter::Adapter;
-use crate::core::{Held, NodeAction, NodeUnread, NotQueued, PlaceError, UnknownNode};
+use crate::core::{Held, NodeAction, NodeHeld, NodeUnread, NotQueued, PlaceError, UnknownNode};
 use crate::engine::Engine;
 use crate::write::{Attempt, Settles, Writer};
 
@@ -214,6 +214,7 @@ impl Engine {
         let none = self.sched.apply(Input::new(now, Event::Tick));
         debug_assert!(none.is_empty(), "a tick of an empty scheduler: {none:?}");
         let mut keyed = Vec::new();
+        let mut walled = Vec::new();
         let mut costed = Vec::new();
         let mut recovered: Vec<Recovered> = Vec::new();
         for op in stored
@@ -225,6 +226,9 @@ impl Engine {
                 keyed.push((op.operation, size_key));
             }
             let operation = op.operation;
+            if let Some(wall) = op.max_wall {
+                walled.push((operation, wall));
+            }
             let prediction = Self::predict_stored(a, &op);
             recovered.push(self.take_stored(a, op));
             if let Some(prediction) = prediction {
@@ -242,6 +246,11 @@ impl Engine {
         // queued after it; a recovered lease keeps the request the store holds.
         for (operation, size_key) in keyed {
             self.sched.set_size_key(operation, size_key);
+        }
+        // The longest each operation may run, from its row, before the first placement round:
+        // the whole-node drain order and deadlines read it.
+        for (operation, wall) in walled {
+            self.sched.set_max_wall(operation, wall);
         }
         for (operation, prediction) in costed {
             self.sched.set_cost(operation, prediction);
@@ -291,7 +300,7 @@ impl Engine {
     /// Takes `op`, which the store holds and the scheduler neither holds nor has finished
     /// (the caller checked), into the scheduler.
     pub(crate) fn take_in_stored(&mut self, a: &mut dyn Adapter, op: StoredOperation) {
-        let (operation, size_key) = (op.operation, op.size_key);
+        let (operation, size_key, max_wall) = (op.operation, op.size_key, op.max_wall);
         let prediction = Self::predict_stored(a, &op);
         let recovered = self.take_stored(a, op);
         // The operation is neither in the scheduler nor finished, so `take_in` has nothing
@@ -301,6 +310,10 @@ impl Engine {
         // The key its `opkey/` row names (none unless size keys are read).
         if let Some(size_key) = size_key {
             self.sched.set_size_key(operation, size_key);
+        }
+        // The longest it may run, which its `opwall/` row names (whatever the settings).
+        if let Some(wall) = max_wall {
+            self.sched.set_max_wall(operation, wall);
         }
         if let Some(prediction) = prediction {
             self.sched.set_cost(operation, prediction);
@@ -424,11 +437,12 @@ impl Engine {
                 .as_ref()
                 .and_then(|u| u.floors.key_raised.as_ref());
             if let Some(raised) = raised {
-                self.unwritten_floors.retain(|f| f.key != raised.key);
+                self.unwritten_floors.retain(|f| f.row.key != raised.key);
             }
-            a.learned_requeue(&self.view(), requeue);
-            let lowered = a.lowered();
-            self.lower_key_floors(a, lowered);
+            if self.size_keys {
+                a.learned_requeue(&self.view(), requeue);
+            }
+            self.lower_asked_key_floors(a);
             self.unsettled.extend(unsettled);
         }
         let pending = std::mem::take(&mut self.unsettled);
@@ -542,6 +556,7 @@ impl Engine {
         request: &Request,
         parcel: &[u8],
         size_key: Option<u64>,
+        max_wall: Option<Duration>,
         now: FarmTime,
     ) -> Result<Held, NotQueued> {
         if self.rows.is_none() || self.sched.twin(request).is_some() {
@@ -553,7 +568,7 @@ impl Engine {
             // The id comes from the block this frontend reserved: the operation's row is
             // put under an id no other frontend takes.
             let id = rows.reserve_operation(wanted)?;
-            submitted = Some(rows.submit(id, request, parcel, size_key)?);
+            submitted = Some(rows.submit_walled(id, request, parcel, size_key, max_wall)?);
             Ok(())
         });
         if attempt != Attempt::Taken {
@@ -603,6 +618,42 @@ impl Engine {
             Ok(())
         });
         known
+    }
+
+    /// Which frontend holds `worker`: this one when it owns the node, or the node is
+    /// connected here and no frontend has claimed it; another when the store knows the node
+    /// and this core does not own it, with the leases the store holds on it. A core with no
+    /// state store, or a fenced one, holds the nodes connected to it and knows no other.
+    pub(crate) fn node_held(&mut self, now: FarmTime, worker: &WorkerId) -> NodeHeld {
+        let connected = self.links.contains_key(worker);
+        if self.fenced || self.rows.is_none() {
+            return if connected {
+                NodeHeld::Here
+            } else {
+                NodeHeld::Unknown
+            };
+        }
+        match self.owner_look(now, worker) {
+            None => return NodeHeld::Unread,
+            Some(true) => return NodeHeld::Here,
+            Some(false) => {}
+        }
+        match self.known_elsewhere(worker) {
+            None => return NodeHeld::Unread,
+            Some(false) if connected => return NodeHeld::Here,
+            Some(false) => return NodeHeld::Unknown,
+            Some(true) => {}
+        }
+        let mut leases = None;
+        self.attempt("a node look", &mut |rows| {
+            let held = rows.held_by(worker)?;
+            let granted = held.into_iter().filter_map(|op| op.lease);
+            leases = Some(granted.map(|grant| grant.lease).collect::<Vec<_>>());
+            Ok(())
+        });
+        // The lease rows are keyed by zero-padded hexadecimal term and sequence, so the
+        // store lists them in lease order.
+        leases.map_or(NodeHeld::Unread, |leases| NodeHeld::Elsewhere { leases })
     }
 
     /// Cordons, drains or uncordons `worker` (see `js_sched::Cordon`), after the store has

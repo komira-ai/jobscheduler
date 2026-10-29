@@ -21,8 +21,8 @@ use std::time::Duration;
 use js_sched::{DaemonInstance, NodePhase, Prediction, Request, Requeue, Scheduler};
 use js_store::Ending;
 use js_types::sched::{
-    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId,
-    WorkerId,
+    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Outcome, Refusal, StartLease,
+    WaiterId, WorkerId,
 };
 
 use crate::host::Stream;
@@ -126,6 +126,20 @@ impl Lowered {
     }
 }
 
+/// The `lease finished` line with the fields the core knows: `operation`, `lease`, `node`,
+/// whether the scheduler took the report (`accepted`), and for a failure its kind.
+pub fn log_finished_line(operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+    let (lease, node, accepted) = (report.lease, worker, taken == Taken::Accepted);
+    match report.outcome {
+        Outcome::Completed { .. } => {
+            tracing::info!(%operation, %lease, %node, accepted, "lease finished ok");
+        }
+        Outcome::Failed(failure) => {
+            tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
+        }
+    }
+}
+
 /// Everything the core asks of the server around it. See the module documentation.
 pub trait Adapter: Send {
     /// The farm time of the feed about to start, called at the top of every feed that is
@@ -173,6 +187,18 @@ pub trait Adapter: Send {
         _answers: &[Answer],
         _taken: Taken,
     ) {
+    }
+
+    /// Writes the one log line for a report that was fed: `lease finished ok` (INFO) or
+    /// `lease finished failed` (WARN), naming the operation, lease and node, and whether the
+    /// scheduler took the report (`accepted`). Called once for each
+    /// [`Core::report`](crate::Core::report), right after the matching
+    /// [`Adapter::after_report`], so the line follows whatever that hook logged. `operation`
+    /// is the name [`Adapter::name`] gave before the feed. An adapter that has more to say
+    /// on the line (the exit code of the run, say) overrides this and writes the line itself,
+    /// with the same words; the default is [`log_finished_line`], the fields the core knows.
+    fn log_finished(&mut self, operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+        log_finished_line(operation, worker, report, taken);
     }
 
     /// Whether the connection of `worker`'s stream `stream` is still open. Asked when the
@@ -227,13 +253,22 @@ pub trait Adapter: Send {
     /// may learn from the attempt. For a kill for memory, the scheduler's key floor of the
     /// operation is already raised ([`View::sched`]). Whatever floors the estimator then
     /// wants lowered it names in [`Adapter::lowered`], which the core asks for right after.
-    /// No I/O: the hook runs under the lock. Does nothing by default.
+    /// No I/O: the hook runs under the lock. Not called when size keys are off. Does nothing
+    /// by default.
     fn learned_requeue(&mut self, _view: &View<'_>, _requeue: &Requeue) {}
 
     /// The key floors the adapter's estimator has decided to lower since the last call;
     /// asked after [`Adapter::learned_requeue`] and after [`Adapter::after_report`]. The core
     /// lowers each in the scheduler (unless a kill raised it above `before`) and writes the
-    /// row, again at a later tick if the store refuses it. Nothing by default.
+    /// row, again at a later tick if the store refuses it; the row is lowered only while it
+    /// holds no more than `before`, so a floor another frontend raised is kept. Not called,
+    /// nor is [`Adapter::learned_requeue`], when size keys are off
+    /// ([`Config::with_size_keys`](crate::Config::with_size_keys)). Nothing by default.
+    ///
+    /// The core does not clamp what it is told: the adapter must never ask below the peaks
+    /// it has seen for the key. A floor lowered beneath a peak makes the next operation of
+    /// the key run too small and be killed again; the estimator owns the floor under which
+    /// that loop cannot start.
     fn lowered(&mut self) -> Vec<Lowered> {
         Vec::new()
     }

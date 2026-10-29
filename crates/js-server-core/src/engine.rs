@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Prediction, Request,
-    Requeue, Scheduler,
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Request, Requeue,
+    Scheduler,
 };
 use js_store::Rows;
 use js_types::sched::{
@@ -28,7 +28,7 @@ use js_types::sched::{
 };
 
 use crate::adapter::{Adapter, Link, Lowered, Stage, View};
-use crate::core::{Admitted, Config, Held, NotQueued};
+use crate::core::{Admitted, Config, Held, NotQueued, SubmitOptions};
 use crate::intake::Intake;
 use crate::store::Unsettled;
 use crate::write::{Attempt, Batch, Settles, Writer};
@@ -126,7 +126,16 @@ pub(crate) struct Engine {
     pub(crate) size_keys: bool,
     /// Key floors the estimator lowered that the state store has not taken yet, at most one
     /// per size key ([`Engine::lower_key_floors`]).
-    pub(crate) unwritten_floors: Vec<KeyFloor>,
+    pub(crate) unwritten_floors: Vec<Lowering>,
+}
+
+/// A key floor the estimator lowered, for the state store to take.
+pub(crate) struct Lowering {
+    /// The floor as it stands in the scheduler now.
+    pub(crate) row: KeyFloor,
+    /// The ask the estimator lowered it from: the store's row is lowered only while it holds
+    /// no more than this ([`Rows::lower_key_floor`]).
+    pub(crate) before: u64,
 }
 
 impl Engine {
@@ -490,18 +499,22 @@ impl Engine {
         a: &mut dyn Adapter,
         request: &Request,
         parcel: &[u8],
-        size_key: Option<u64>,
-        prediction: Option<Prediction>,
+        options: SubmitOptions,
         now: FarmTime,
     ) -> Result<Admitted, NotQueued> {
         if self.fenced {
             return Err(NotQueued::Fenced);
         }
+        let SubmitOptions {
+            size_key,
+            prediction,
+            max_wall,
+        } = options;
         // A core with size keys off ignores the key: nothing is written, nothing is booked.
         let size_key = size_key.filter(|_| self.size_keys);
         let waiter = WaiterId(self.next_waiter);
         self.next_waiter += 1;
-        let held = self.queue(a, request, parcel, size_key, now)?;
+        let held = self.queue(a, request, parcel, size_key, max_wall, now)?;
         let twin = match held {
             Held::Here => self.sched.twin(request),
             Held::Elsewhere(operation) => Some(operation),
@@ -517,6 +530,12 @@ impl Engine {
         // to it). A joined caller keeps the key of the operation it joined.
         if let Some(key) = size_key.filter(|_| !admitted.joined && held == Held::Here) {
             self.sched.set_size_key(admitted.operation, key);
+        }
+        // The longest run likewise, for the whole-node drain: a joined caller keeps the wall
+        // time of the operation it joined (taken from its row when the store's twin was taken
+        // in).
+        if let Some(wall) = max_wall.filter(|_| !admitted.joined && held == Held::Here) {
+            self.sched.set_max_wall(admitted.operation, wall);
         }
         // The cost likewise: a new operation is charged it from its first round. A twin keeps
         // its cost while it holds a lease; one that still waits takes the newer prediction.
@@ -534,7 +553,16 @@ impl Engine {
     /// again at a later tick ([`Engine::write_key_floors`]); until then a restart books the
     /// higher floor. A floor the scheduler holds above what the estimator saw before the
     /// decay is left alone: a kill the estimator never saw raised it since.
-    pub(crate) fn lower_key_floors(&mut self, a: &dyn Adapter, lowered: Vec<Lowered>) {
+    pub(crate) fn lower_asked_key_floors(&mut self, a: &mut dyn Adapter) {
+        // A core with size keys off holds no key floors: the adapter is not asked.
+        if self.size_keys {
+            let lowered = a.lowered();
+            self.lower_key_floors(a, lowered);
+        }
+    }
+
+    /// [`Engine::lower_key_floors`] for the floors `lowered`, which the adapter named.
+    fn lower_key_floors(&mut self, a: &dyn Adapter, lowered: Vec<Lowered>) {
         for Lowered {
             size_key,
             before,
@@ -547,8 +575,15 @@ impl Engine {
             let Some(row) = self.sched.lower_key_floor(size_key, ask) else {
                 continue;
             };
-            self.unwritten_floors.retain(|f| f.key != size_key);
-            self.unwritten_floors.push(row);
+            // A row still waiting for the store replaces an older one of its key, and the
+            // store's row is still the one the older lowering saw: the larger `before` stands.
+            let waiting = self
+                .unwritten_floors
+                .iter()
+                .filter(|f| f.row.key == size_key);
+            let before = waiting.map(|f| f.before).fold(before, u64::max);
+            self.unwritten_floors.retain(|f| f.row.key != size_key);
+            self.unwritten_floors.push(Lowering { row, before });
         }
         self.write_key_floors(a);
     }
@@ -569,10 +604,12 @@ impl Engine {
         // to: a kill that raised it since has written the higher row (a restart loses what is
         // pending, and the higher row it leaves is the safe side).
         self.unwritten_floors
-            .retain(|row| sched.key_floor(row.key).unwrap_or(0) == row.ask);
-        self.unwritten_floors.retain(|row| {
-            let summary = a.summary_name(row.key);
-            let refused = rows.put_key_floor(row, summary.as_deref()).err();
+            .retain(|l| sched.key_floor(l.row.key).unwrap_or(0) == l.row.ask);
+        self.unwritten_floors.retain(|l| {
+            let summary = a.summary_name(l.row.key);
+            let refused = rows
+                .lower_key_floor(&l.row, l.before, summary.as_deref())
+                .err();
             if let Some(error) = &refused {
                 tracing::warn!(%error, "a lowered key floor was not written");
             }

@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootStep, ElasticProvider, GpuClass, Held, HostRef, Offer,
-    PriceUnit, ProviderError, Released, Secret, SlotName,
+    AcquireRequest, Acquired, Artifact, BootStep, CheckResult, ElasticProvider, GpuClass, Held,
+    HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
@@ -81,6 +81,7 @@ pub struct FakeCloud {
     catalog: Mutex<Result<Vec<Offer>, String>>,
     prep: Mutex<Vec<BootStep>>,
     panics: AtomicBool,
+    delegate: Mutex<Option<Arc<dyn ElasticProvider>>>,
     catalogs: AtomicUsize,
     others: AtomicUsize,
 }
@@ -96,9 +97,16 @@ impl FakeCloud {
                 "fake-driver".to_owned(),
             ])]),
             panics: AtomicBool::new(false),
+            delegate: Mutex::new(None),
             catalogs: AtomicUsize::new(0),
             others: AtomicUsize::new(0),
         })
+    }
+
+    /// Has the catalog call and the provider's own checks answered by `provider` from now
+    /// on; the other calls stay counted and unanswered.
+    pub fn delegate(&self, provider: Arc<dyn ElasticProvider>) {
+        *self.delegate.lock().unwrap() = Some(provider);
     }
 
     /// The catalog from now on.
@@ -142,8 +150,16 @@ impl ElasticProvider for Handle {
         if self.0.panics.load(Ordering::SeqCst) {
             panic!("the fake cloud was told to panic");
         }
+        if let Some(provider) = self.0.delegate.lock().unwrap().clone() {
+            return provider.catalog();
+        }
         let answer = self.0.catalog.lock().unwrap().clone();
         answer.map_err(ProviderError::new)
+    }
+
+    fn checks(&self) -> Vec<CheckResult> {
+        let delegate = self.0.delegate.lock().unwrap().clone();
+        delegate.map_or_else(Vec::new, |provider| provider.checks())
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -356,10 +372,14 @@ pub struct Rig {
 impl Rig {
     /// Starts a server named `name` over a cloud with `offers`.
     pub async fn start(name: &str, offers: Vec<Offer>, options: Options) -> Self {
+        Self::start_over(name, FakeCloud::new(offers), options).await
+    }
+
+    /// Starts a server named `name` over `cloud`, which the test may have given a delegate.
+    pub async fn start_over(name: &str, cloud: Arc<FakeCloud>, options: Options) -> Self {
         let logs = LogCapture::start();
         quiet_logs();
         let scratch = Scratch::new(name);
-        let cloud = FakeCloud::new(offers);
         let net = FakeNet::new();
         let (extra, tls) = Self::listeners(&scratch, options);
         let advertise = options

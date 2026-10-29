@@ -10,7 +10,7 @@ use js_agent::integrity::{
 };
 use js_agent::lifecycle::CHECK_DETAIL_MAX;
 
-use super::{JOB_UID, after, beside, mount, process, said, started};
+use super::{JOB_UID, JOB_USERS, after, beside, mount, process, said, started};
 use crate::support::Scratch;
 
 /// Asserts that a process the baseline did not have, whose parent is `init`, is found after
@@ -22,7 +22,7 @@ use crate::support::Scratch;
 fn daemonised_child() {
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
-    host.start_process(process(300, 1, 2000, 900, "0::/user.slice"));
+    host.start_process(process(300, 1, 2000, 900, "0::/"));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
@@ -65,7 +65,13 @@ fn process_as_job_user_after_end() {
         after(&mut checks, "r0").is_ok(),
         "the process that was there is not new"
     );
-    host.start_process(process(401, 100, JOB_UID, 901, "0::/user.slice"));
+    host.start_process(process(
+        401,
+        100,
+        JOB_UID,
+        901,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after(&mut checks, "r1").unwrap_err();
     assert_eq!(
         said(&found),
@@ -252,7 +258,7 @@ fn file_outside_watch_dir_not_a_finding() {
         fake: FakeHost::quiet(),
         real: ProcHost::system(),
     };
-    let mut checks = Integrity::start(Box::new(mixed), JOB_UID, vec![watched.clone()]).unwrap();
+    let mut checks = Integrity::start(Box::new(mixed), JOB_USERS, vec![watched.clone()]).unwrap();
     fs::write(other.join("b"), "outside").unwrap();
     assert!(after(&mut checks, "r1").is_ok());
     fs::write(watched.join("b"), "inside").unwrap();
@@ -268,7 +274,7 @@ fn file_outside_watch_dir_not_a_finding() {
         fake: FakeHost::quiet(),
         real: ProcHost::system(),
     };
-    let mut checks = Integrity::start(Box::new(mixed), JOB_UID, vec![watched.clone()]).unwrap();
+    let mut checks = Integrity::start(Box::new(mixed), JOB_USERS, vec![watched.clone()]).unwrap();
     fs::write(watched.join("a"), "a much longer text than before").unwrap();
     assert_eq!(
         after(&mut checks, "r3").unwrap_err().code(),
@@ -279,7 +285,7 @@ fn file_outside_watch_dir_not_a_finding() {
         fake: FakeHost::quiet(),
         real: ProcHost::system(),
     };
-    let mut checks = Integrity::start(Box::new(mixed), JOB_UID, vec![watched.clone()]).unwrap();
+    let mut checks = Integrity::start(Box::new(mixed), JOB_USERS, vec![watched.clone()]).unwrap();
     fs::remove_file(watched.join("a")).unwrap();
     assert_eq!(
         after(&mut checks, "r4").unwrap_err().code(),
@@ -309,7 +315,7 @@ fn watch_listing_over_bound_is_a_finding() {
             "watch-over-bound: /watch/big: more than 4096 entries".to_owned()
         )
     );
-    let started_over = Integrity::start(Box::new(host.clone()), JOB_UID, vec![dir]);
+    let started_over = Integrity::start(Box::new(host.clone()), JOB_USERS, vec![dir]);
     let why = started_over.err().unwrap();
     assert!(
         why.starts_with("cannot take the baseline of the host: watch-over-bound"),
@@ -322,7 +328,7 @@ fn watch_listing_over_bound_is_a_finding() {
         fake: FakeHost::quiet(),
         real: ProcHost::system().with_caps(PROCESS_CAP, 2),
     };
-    let mut checks = Integrity::start(Box::new(small()), JOB_UID, vec![watched.clone()]).unwrap();
+    let mut checks = Integrity::start(Box::new(small()), JOB_USERS, vec![watched.clone()]).unwrap();
     assert!(after(&mut checks, "r2").is_ok(), "exactly the cap is read");
     fs::write(watched.join("c"), "c").unwrap();
     let found = after(&mut checks, "r3").unwrap_err();
@@ -362,7 +368,7 @@ fn unreadable_input_is_a_finding_not_a_skip() {
             "{which}"
         );
         let started_blind =
-            Integrity::start(Box::new(host.clone()), JOB_UID, vec![watched.clone()]);
+            Integrity::start(Box::new(host.clone()), JOB_USERS, vec![watched.clone()]);
         assert!(
             started_blind.err().unwrap().contains(expected),
             "{which}: no baseline without it"
@@ -386,11 +392,11 @@ fn unreadable_input_is_a_finding_not_a_skip() {
     );
 
     let missing = FakeHost::quiet();
-    let mut blind = Integrity::start(Box::new(missing.clone()), JOB_UID, vec![]).unwrap();
+    let mut blind = Integrity::start(Box::new(missing.clone()), JOB_USERS, vec![]).unwrap();
     assert!(after(&mut blind, "r5").is_ok());
     let gone = Integrity::start(
         Box::new(missing),
-        JOB_UID,
+        JOB_USERS,
         vec![PathBuf::from("/not/there")],
     );
     let why = gone.err().unwrap();

@@ -17,8 +17,8 @@ use serde_json::json;
 
 use crate::agents_support::{entry, hosts};
 use crate::scaler_support::{
-    account, beat, hello, host_id_in, join, name_of, records_path, spec, start, text, text_with,
-    token_in,
+    account, beat, hello, host_id_in, join, name_of, records_path, spec, start, start_refused,
+    text, text_with, token_in,
 };
 use crate::support::{Harness, Scratch, T0};
 
@@ -218,6 +218,7 @@ fn releasing(name: &str) -> Records {
             condemned: false,
             clean_lists: 0,
             last_clean: None,
+            seen_live: false,
         }],
         cooldowns: BTreeMap::new(),
     }
@@ -276,4 +277,52 @@ async fn a_host_whose_release_was_under_way_is_marked_when_it_says_hello_again()
     let state = h.running.scaler().unwrap().state();
     assert_eq!(state.records.instances.len(), 2);
     assert_ne!(state.records.instances[1].name, name);
+}
+
+/// Asserts that a missing records file is a first start only when the operator says so
+/// (`--boot initialise`). A live pool started with `initialise` and no file starts, and
+/// writes no file until it has something to record; started again with `resume` and still
+/// no file it is refused, and the refusal names the file and the remedy; a pool in `plan`
+/// mode starts with `resume` and no file; and a live pool with the file present starts with
+/// `resume`. It catches a deleted or moved records file read as an empty memory, which
+/// would launch again for machines in flight and reset the day's spend.
+#[tokio::test]
+async fn a_live_pool_with_no_records_file_starts_only_at_a_first_start() {
+    let scratch = Scratch::new("scaler_missing_records");
+    account(&scratch);
+    let first = text(&scratch, "live", "initialise");
+    let h = start(scratch, &first).await;
+    h.ticks.step().await;
+    let Harness {
+        running, scratch, ..
+    } = h;
+    running.shutdown().await.unwrap();
+    let path = records_path(&scratch);
+    assert!(!path.exists());
+
+    let resumed = text(&scratch, "live", "resume");
+    let said = start_refused(&scratch, &resumed).await;
+    assert!(said.contains(&path.display().to_string()), "{said}");
+    assert!(said.contains("is missing"), "{said}");
+    assert!(said.contains("--boot initialise"), "{said}");
+
+    let planned = text(&scratch, "plan", "resume");
+    let h = start(scratch, &planned).await;
+    let Harness {
+        running, scratch, ..
+    } = h;
+    running.shutdown().await.unwrap();
+
+    RecordsFile::new(path).save(&Records::default()).unwrap();
+    let present = text(&scratch, "live", "resume");
+    let h = start(scratch, &present).await;
+    assert!(
+        h.running
+            .scaler()
+            .unwrap()
+            .state()
+            .records
+            .instances
+            .is_empty()
+    );
 }

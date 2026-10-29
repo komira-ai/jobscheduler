@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::{Capabilities, ClassId, LabelError, Labels, ReservedKey, Resources};
+use crate::{
+    Capabilities, ClassId, LabelError, Labels, Requirements, RequirementsError, ReservedKey,
+    Resources,
+};
 
 /// A request broke a rule that holds for every class and provider (design 5.2).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -12,6 +15,9 @@ pub enum RequestError {
     /// A label was refused.
     #[error(transparent)]
     Label(#[from] LabelError),
+    /// The `disk-gib` or `exec` capability is not a requirement.
+    #[error(transparent)]
+    Requirements(#[from] RequirementsError),
 }
 
 /// What a caller asks for: one run of a class with resources, capabilities, a wall
@@ -33,13 +39,15 @@ pub struct Request {
 }
 
 impl Request {
-    /// Applies the rules every request must meet: a positive wall time and labels free
-    /// of reserved keys. Returns the labels to stamp on every billable resource: the
+    /// Applies the rules every request must meet: a positive wall time, labels free
+    /// of reserved keys, and a `disk-gib` and `exec` capability that are requirements
+    /// ([`Requirements::try_from_request`]). Returns the labels to stamp on every billable resource: the
     /// caller's, plus the validation run label when a validation run id is set.
     pub fn validate(&self) -> Result<Labels, RequestError> {
         if self.max_wall.is_zero() {
             return Err(RequestError::WallTimeNotPositive);
         }
+        Requirements::try_from_request(self)?;
         let labels = Labels::from_caller(&self.labels)?;
         match &self.validation_run {
             None => Ok(labels),
@@ -89,6 +97,29 @@ mod tests {
         let mut r = request();
         r.max_wall = Duration::ZERO;
         assert_eq!(r.validate(), Err(RequestError::WallTimeNotPositive));
+    }
+
+    /// Asserts that a request whose `disk-gib` or `exec` is not a requirement is refused
+    /// by `validate`, and one that names good values passes.
+    #[test]
+    fn bad_disk_or_mode_is_refused() {
+        let mut r = request();
+        r.capabilities.insert("disk-gib".into(), "100".into());
+        r.capabilities.insert("exec".into(), "sandbox-exec".into());
+        assert!(r.validate().is_ok());
+        r.capabilities.insert("disk-gib".into(), "lots".into());
+        assert_eq!(
+            r.validate(),
+            Err(RequestError::Requirements(RequirementsError::BadDisk(
+                "lots".into()
+            )))
+        );
+        r.capabilities.insert("disk-gib".into(), "1".into());
+        r.capabilities.insert("exec".into(), "vm".into());
+        assert!(matches!(
+            r.validate(),
+            Err(RequestError::Requirements(RequirementsError::BadExec(_)))
+        ));
     }
 
     /// Asserts that a reserved caller label and a malformed validation run id are

@@ -1,0 +1,56 @@
+# What a native (sandbox-exec) runtime relies on, probed on a hosted macOS runner.
+# crates/js-mac-probe prints a JSON report and exits non-zero when a probe with an
+# expected outcome is wrong; probes whose answer is unknown only report. No sudo: the
+# probe runs as the runner's own user. The image is pinned to macos-14, as ci.yml's macos
+# job pins it. It runs only when the probe crate or this file changes (not on lockfile or
+# toolchain bumps), to spare the scarce macOS runners.
+name: macos-probe
+
+on:
+  pull_request:
+    paths:
+      - crates/js-mac-probe/**
+      - .github/workflows/macos-probe.yml
+  workflow_dispatch:
+
+permissions: {}
+
+# One run per pull request: a new push cancels the queued or running probe of that PR.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  probe:
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: cargo clippy -p js-mac-probe --all-targets --locked -- -D warnings
+      - run: cargo test -p js-mac-probe --locked
+      - name: Probe
+        run: |
+          mkdir -p "$RUNNER_TEMP/report"
+          cargo run -q -p js-mac-probe --locked -- report --work "$RUNNER_TEMP" --home "$HOME" --out "$RUNNER_TEMP/report/report.json"
+      - name: Report
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/report/report.json" ]; then
+            { echo '```json'; cat "$RUNNER_TEMP/report/report.json"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: macos-probe-report
+          path: ${{ runner.temp }}/report/report.json
+          if-no-files-found: ignore

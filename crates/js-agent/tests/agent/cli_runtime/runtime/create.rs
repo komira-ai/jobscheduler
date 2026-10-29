@@ -2,17 +2,22 @@
 //! refusals that reach the runtime not at all, the name of a container, and the failures
 //! of a create or a start.
 
+use std::fs;
+
 use js_agent::cli_runtime::{CliError, CliRuntime, Engine};
 use js_agent::lifecycle::{ContainerRuntime, label};
 use js_agent_wire::Isolation;
+use sha2::{Digest, Sha256};
 
-use super::super::scripted::Scripted;
+use super::super::scripted::{DOCKER, Scripted};
 use super::super::{
-    HOST, NAME_R1, created, docker, made_at, mount, open, open_at, open_with, platform, settings,
+    DOCKER_SCRATCH, HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount,
+    no_file, open, open_at, open_with, platform, profile_option, sees_the_engines_pid, settings,
     spec,
 };
 use super::cleanup::other_agent;
 use super::{start, strings, subs};
+use crate::support::Scratch;
 
 /// The `/tmp` of a container with the defaults.
 const TMPFS: &str = "/tmp:rw,noexec,nosuid,nodev,size=64m";
@@ -106,13 +111,15 @@ fn create_builds_the_documented_argv() {
         "--gpus",
         "\"device=0,1\"",
         "--mount",
-        "type=bind,src=/work/scratch/r1,dst=/scratch",
+        DOCKER_SCRATCH,
         "--mount",
         "type=bind,src=/srv/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        &profile_option(),
         "--network",
         "none",
         "--read-only",
@@ -135,7 +142,15 @@ fn create_builds_the_documented_argv() {
     assert_eq!(world.calls_of("create"), [expected]);
     assert_eq!(
         subs(&world),
-        ["--version", "info", "create", "inspect", "start", "inspect"]
+        [
+            "--version",
+            "info",
+            "create",
+            "inspect",
+            "volume",
+            "start",
+            "inspect"
+        ]
     );
 }
 
@@ -145,7 +160,8 @@ fn create_builds_the_documented_argv() {
 #[test]
 fn podman_gets_cdi_devices_and_the_rest_alike() {
     let podman = Scripted::new("podman version 5.2.1");
-    let mut rt = open_with(&podman, "linux", settings());
+    let mut rt = open_with(&podman, "linux", settings())
+        .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
     let mut job = spec("r1");
     job.gpu_indices = vec![3];
     job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
@@ -157,31 +173,37 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     assert!(args.contains(&"--read-only".to_owned()));
     let at = args.iter().position(|a| a == "--pid").unwrap();
     assert_eq!(args[at + 1], "private");
-    assert!(args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly".to_owned()));
+    assert!(
+        args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly,nosuid,nodev".to_owned())
+    );
     assert_eq!(
         subs(&podman),
         ["--version", "create", "inspect", "start", "inspect"]
     );
+    assert!(podman.volumes().is_empty(), "Podman's scratch stays a bind");
 }
 
 /// Asserts that the recursive read-only option is passed only to a Docker that takes it
 /// (version 25 and later, read from `--version`), and that an older Docker, a version the
 /// agent cannot read, and Podman are given the plain `readonly`. It catches the option
 /// sent to an engine that rejects it, which would refuse every job with a read-only mount.
+/// (Podman also gets `nosuid,nodev` on every mount; the plain `readonly` is its read-only.)
 #[test]
 fn only_a_docker_that_takes_it_gets_recursive_readonly_binds() {
     let readonly = "type=bind,src=/srv/in,dst=/mnt/data/in,readonly";
     let recursive = format!("{readonly},bind-recursive=readonly,bind-propagation=rprivate");
+    let podman_readonly = format!("{readonly},nosuid,nodev");
     for (version, expected) in [
         ("Docker version 25.0.0, build 1", recursive.as_str()),
         ("Docker version 100.1.2, build 1", recursive.as_str()),
         ("Docker version 24.0.7, build afdd53b", readonly),
         ("Docker version unknown", readonly),
         ("Docker 27", readonly),
-        ("podman version 5.2.1", readonly),
+        ("podman version 5.2.1", podman_readonly.as_str()),
     ] {
         let world = Scripted::new(version);
-        let mut rt = open_with(&world, "linux", settings());
+        let mut rt = open_with(&world, "linux", settings())
+            .with_proc_files(mountinfo_beside_srv_in, in_another_pid_namespace);
         let mut job = spec("r1");
         job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
         rt.create_and_start(&job).unwrap();
@@ -230,6 +252,7 @@ fn the_job_cannot_reach_the_runtimes_options() {
         rt.create_and_start(&job).unwrap();
         kinds.push((job.run_id.clone(), job.image.clone(), job.args.clone()));
     }
+    let profile = profile_option();
     for (run, image, job_args) in kinds {
         let args = created(&world, &run);
         let dashes = args.iter().position(|a| a == "--").unwrap();
@@ -253,6 +276,11 @@ fn the_job_cannot_reach_the_runtimes_options() {
             let at = before.iter().position(|a| a == flag).unwrap();
             assert_eq!(before[at + 1], value, "{run}: {flag}");
         }
+        assert_eq!(
+            security_options(before),
+            ["no-new-privileges", profile.as_str()],
+            "{run}"
+        );
         assert!(before.contains(&"--read-only".to_owned()), "{run}");
         assert!(before.contains(&"--pids-limit".to_owned()), "{run}");
     }
@@ -472,4 +500,306 @@ fn the_id_is_the_last_line_of_create() {
     world.preface("create", "Unable to find image locally\nPulling fs layer\n");
     let id = start(&mut rt, &world, "r1");
     assert_eq!(id.0.len(), 64);
+}
+
+/// A `/proc/self/mountinfo` with the mount points below, one line each, and no other file.
+fn mountinfo_with(points: &[&str]) -> Option<String> {
+    Some(
+        points
+            .iter()
+            .map(|point| format!("36 25 0:30 / {point} rw,relatime shared:1 - ext4 /dev/sda1 rw\n"))
+            .collect(),
+    )
+}
+
+fn mountinfo_below_srv_in(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in/sub", "/srv/input"]),
+        _ => None,
+    }
+}
+
+fn mountinfo_beside_srv_in(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/in", "/srv/input", "/srv"]),
+        _ => None,
+    }
+}
+
+fn mountinfo_below_a_name_with_a_space(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/my\\040data/sub"]),
+        _ => None,
+    }
+}
+
+/// Asserts that a read-only mount that holds another mount point is refused, before any
+/// `create`, on an engine without recursive read-only (Podman, Docker before 25), because
+/// the mount below it would stay writable; that Docker 25 and later, which makes the
+/// mount read-only all the way down, takes it; that a read-write mount, a mount whose
+/// neighbours merely share its name as a prefix, and the mount point itself are not
+/// reasons to refuse; and that a space in the path (escaped in `mountinfo`) is read. It
+/// catches a read-only operator mount with a writable submount, a prefix match on text
+/// instead of on path components, and a refusal that fires for the mount's own entry.
+#[test]
+fn a_readonly_mount_with_a_submount_is_refused_where_it_cannot_be_recursive() {
+    let try_create = |version: &str,
+                      host: &str,
+                      ro: bool,
+                      read: fn(&str) -> Option<String>|
+     -> (Result<(), String>, usize) {
+        let world = Scripted::new(version);
+        let mut rt =
+            open_with(&world, "linux", settings()).with_proc_files(read, in_another_pid_namespace);
+        let mut job = spec("r1");
+        job.mounts = vec![mount(host, "/mnt/data/in", ro)];
+        let made = rt
+            .create_and_start(&job)
+            .map(|_| ())
+            .map_err(|why| why.to_string());
+        (made, world.calls_of("create").len())
+    };
+    for version in ["podman version 5.2.1", "Docker version 24.0.7, build 1"] {
+        let (made, creates) = try_create(version, "/srv/in", true, mountinfo_below_srv_in);
+        let why = made.unwrap_err();
+        assert!(why.contains("holds another mount"), "{version}: {why}");
+        assert_eq!(creates, 0, "{version}");
+        let (made, _) = try_create(version, "/srv/in", false, mountinfo_below_srv_in);
+        assert!(made.is_ok(), "{version}: read-write is not refused");
+        let (made, _) = try_create(version, "/srv/in", true, mountinfo_beside_srv_in);
+        assert!(made.is_ok(), "{version}: no mount below it");
+        let (made, _) = try_create(
+            version,
+            "/srv/my data",
+            true,
+            mountinfo_below_a_name_with_a_space,
+        );
+        assert!(
+            made.unwrap_err().contains("holds another mount"),
+            "{version}"
+        );
+    }
+    let (made, creates) = try_create(
+        "Docker version 27.3.1, build 1",
+        "/srv/in",
+        true,
+        mountinfo_below_srv_in,
+    );
+    assert!(made.is_ok() && creates == 1);
+}
+
+fn mountinfo_below_escaped_names(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&[
+            "/",
+            "/srv/in\\0431/sub",
+            "/srv/a\\011b/sub",
+            "/srv/odd/\\777",
+        ]),
+        _ => None,
+    }
+}
+
+fn mountinfo_with_a_stray_backslash(path: &str) -> Option<String> {
+    match path {
+        "/proc/self/mountinfo" => mountinfo_with(&["/", "/srv/odd/x\\"]),
+        _ => None,
+    }
+}
+
+/// Asserts that a mount point is found whatever bytes its path has: mountinfo writes a
+/// space, tab, newline, `#` and backslash as a three-digit octal escape (`\011` for a
+/// tab, `\043` for `#`), and each is read back before the path is compared; an escape
+/// that is not one byte (`\777`) or a lone backslash is kept as written. It catches a
+/// submount under a path with a tab or a `#` that is not seen because its name is still
+/// escaped, which would leave it writable below a read-only mount.
+#[test]
+fn a_submount_is_found_under_any_escaped_name() {
+    let refused = |host: &str, read: fn(&str) -> Option<String>| {
+        let world = Scripted::new("podman version 5.2.1");
+        let mut rt =
+            open_with(&world, "linux", settings()).with_proc_files(read, in_another_pid_namespace);
+        let mut job = spec("r1");
+        job.mounts = vec![mount(host, "/mnt/data/in", true)];
+        let made = rt.create_and_start(&job);
+        (
+            made.err().map(|why| why.to_string()),
+            world.calls_of("create").len(),
+        )
+    };
+    for host in ["/srv/in#1", "/srv/a\tb", "/srv/odd"] {
+        let (why, creates) = refused(host, mountinfo_below_escaped_names);
+        assert!(why.unwrap().contains("holds another mount"), "{host}");
+        assert_eq!(creates, 0, "{host}");
+    }
+    let (why, _) = refused("/srv/odd", mountinfo_with_a_stray_backslash);
+    assert!(why.unwrap().contains("holds another mount"));
+}
+
+/// Asserts that where the check applies (Podman, Docker before 25, a Linux host) a
+/// read-only mount is refused, with no `create` call, when `/proc/self/mountinfo` cannot
+/// be read, and the error says so; that a job without a read-only mount does not need
+/// the file; and that a macOS host, whose containers run in a VM the agent's mounts say
+/// nothing about, is not asked for it. It catches a check that passes when it could not
+/// look.
+#[test]
+fn an_unreadable_mountinfo_refuses_a_readonly_mount() {
+    for version in ["podman version 5.2.1", "Docker version 24.0.7, build 1"] {
+        let world = Scripted::new(version);
+        let mut rt = open_with(&world, "linux", settings());
+        let mut job = spec("r1");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        let why = rt.create_and_start(&job).unwrap_err().to_string();
+        assert!(why.contains("mountinfo"), "{version}: {why}");
+        assert!(world.calls_of("create").is_empty(), "{version}");
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", false)];
+        rt.create_and_start(&job).unwrap();
+        let world = Scripted::new(version);
+        let mut rt = open_with(&world, "macos", settings());
+        job.mounts = vec![mount("/srv/in", "/mnt/data/in", true)];
+        rt.create_and_start(&job).unwrap();
+    }
+}
+
+/// The sha256 of the pinned profile, spelled out here and not computed from the source
+/// file, so that an edit of the profile fails this test until the pin is changed on
+/// purpose.
+const PROFILE_SHA256: &str = "e2bbdceda151ab5482a7ffeca6a8650ab5d111c8ed65ba7fb8f5ca2b95bcef67";
+
+/// The file the agent keeps the profile in, beside the run directories.
+const PROFILE_FILE: &str = "seccomp+pinned.json";
+
+fn sha256_of(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// A runtime over `world` that keeps its profile where it is told to in production: in
+/// the directory above the run's scratch directory.
+fn bare(world: &Scripted) -> CliRuntime {
+    CliRuntime::open(
+        settings(),
+        HOST,
+        &platform("linux"),
+        made_at,
+        Box::new(world.clone()),
+    )
+    .unwrap()
+    .with_pid_seen(sees_the_engines_pid)
+    .with_proc_files(no_file, in_another_pid_namespace)
+}
+
+/// The `--security-opt` values of a create argv.
+fn security_options(args: &[String]) -> Vec<String> {
+    args.windows(2)
+        .filter(|pair| pair[0] == "--security-opt")
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
+/// Asserts, for Docker and for Podman, that a create names a profile file that exists
+/// when the engine is called, that the file is the pinned profile byte for byte (by
+/// its sha256, and a default-deny `defaultAction`), that it sits in the scratch root
+/// (the directory above the run's own, which only the agent may enter), and that
+/// `no-new-privileges` is still there. It catches a create with no profile of its own,
+/// a profile named but never written, a copy that differs from the pin, and a file
+/// that a job could read or replace because it is inside the run's directory.
+#[test]
+fn create_passes_the_pinned_profile_file() {
+    for (n, version) in [DOCKER, "podman version 5.2.1\n"].into_iter().enumerate() {
+        let root = Scratch::new("seccomp-create");
+        let world = Scripted::new(version);
+        let mut rt = bare(&world);
+        let run = format!("r{n}");
+        let mut job = spec(&run);
+        job.scratch = root.path(&run);
+        rt.create_and_start(&job).unwrap();
+        let options = security_options(&created(&world, &run));
+        let profile = root.path(PROFILE_FILE);
+        assert_eq!(
+            options,
+            [
+                "no-new-privileges".to_owned(),
+                format!("seccomp={}", profile.display())
+            ]
+        );
+        let bytes = fs::read(&profile).unwrap();
+        assert_eq!(sha256_of(&bytes), PROFILE_SHA256);
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed["defaultAction"], "SCMP_ACT_ERRNO");
+    }
+}
+
+/// Asserts that a profile file that was replaced by something else is made right again
+/// before the next create, and one that is right is left as it is. It catches an agent
+/// that trusts a file because it exists.
+#[test]
+fn a_changed_profile_file_is_written_again() {
+    let root = Scratch::new("seccomp-rewrite");
+    let world = docker();
+    let mut rt = bare(&world);
+    let profile = root.path(PROFILE_FILE);
+    fs::write(&profile, "{\"defaultAction\":\"SCMP_ACT_ALLOW\"}").unwrap();
+    for run in ["a1", "a2"] {
+        let mut job = spec(run);
+        job.scratch = root.path(run);
+        rt.create_and_start(&job).unwrap();
+        assert_eq!(
+            sha256_of(&fs::read(&profile).unwrap()),
+            PROFILE_SHA256,
+            "{run}"
+        );
+    }
+}
+
+/// Asserts that a create whose profile cannot be written fails before the engine is
+/// asked to create anything, whether the scratch directory has no parent or the parent
+/// is not a directory that exists, and that the error names the profile. It catches a
+/// job started without its syscall filter because the file was missing.
+#[test]
+fn no_profile_no_container() {
+    let world = docker();
+    let mut rt = bare(&world);
+    for scratch in ["/", "/no/such/root/r1"] {
+        let mut job = spec("r1");
+        job.scratch = scratch.into();
+        let said = rt.create_and_start(&job).err().unwrap().to_string();
+        assert!(
+            said.starts_with("scratch: seccomp profile"),
+            "{scratch}: {said}"
+        );
+    }
+    assert!(world.calls_of("create").is_empty());
+}
+
+/// Asserts that a directory whose name is not UTF-8 is refused before anything is
+/// written: the profile's path is an argv entry and must be text. It catches a path
+/// that is mangled lossily into one that names another file.
+#[test]
+fn a_profile_directory_that_is_not_text_is_refused() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::path::Path::new(OsStr::from_bytes(b"/work/\xff"));
+    let said = js_agent::cli_runtime::install_profile(dir).unwrap_err();
+    assert_eq!(said.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+/// Asserts that a profile directory whose path holds a comma is refused, by
+/// `install_profile` itself (nothing is written there) and by a create (the engine is
+/// never called): Docker splits a `--security-opt` value on commas, so the path would be
+/// read as a profile and an option of the job's host. It catches a profile named by a
+/// path that changes the meaning of the option.
+#[test]
+fn a_profile_directory_with_a_comma_is_refused() {
+    let root = Scratch::new("seccomp-comma");
+    let dir = root.path("a,b");
+    fs::create_dir(&dir).unwrap();
+    let said = js_agent::cli_runtime::install_profile(&dir).unwrap_err();
+    assert_eq!(said.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!dir.join(PROFILE_FILE).exists());
+
+    let world = docker();
+    let mut rt = open(&world).with_profile_dir(&dir);
+    let said = rt.create_and_start(&spec("r1")).err().unwrap().to_string();
+    assert!(said.starts_with("scratch: seccomp profile"), "{said}");
+    assert!(world.calls_of("create").is_empty());
 }

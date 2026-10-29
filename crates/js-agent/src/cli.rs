@@ -36,8 +36,9 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub instance_file: Option<PathBuf>,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
-    /// authority that issued it). Required for `https://`; the platform's roots are not
-    /// read.
+    /// authority that issued it); only those certificates are trusted then. Optional:
+    /// without it an `https://` server is verified against the public roots bundled in the
+    /// agent (a Mozilla set), never the platform's store.
     #[arg(long, value_name = "PATH")]
     pub ca_cert: Option<PathBuf>,
     /// The pool this host asks to join.
@@ -131,9 +132,10 @@ pub struct Cli {
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
     /// that a rootless Podman needs (it may then run containers without their limits), so
-    /// use a rootful engine, without user-namespace remapping (`userns-remap` shows the
-    /// container user as another uid on the host, and the check for a job's leftover
-    /// processes would miss them). The agent must see the host: it must be in the pid and
+    /// use a rootful engine. Every job runs in a user namespace mapped onto the
+    /// `--container-subuid` range (Podman: per container; Docker: the daemon must run with
+    /// `userns-remap` set to that user, or the agent does not start). The agent must see
+    /// the host: it must be in the pid and
     /// mount namespaces of `init` (not in a container, and not under a service manager's
     /// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`), and able to read
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
@@ -145,12 +147,25 @@ pub struct Cli {
     /// the agent warns at start. Needs `--container-bin`.
     #[arg(long, value_name = "NAME")]
     pub container_network: Option<String>,
-    /// The `<uid>:<gid>` containers run as, both above zero. By default `65534:65534`.
-    /// The run's scratch directory is private to the agent: an agent that runs as root
-    /// gives it to this user, any other agent refuses to start unless this is its own
-    /// `<uid>:<gid>`. Needs `--container-bin`.
+    /// The `<uid>:<gid>` containers run as: container ids, both above zero and below
+    /// 65536 (see `--container-subuid`). By default `65534:65534`. The run's scratch
+    /// directory is private to the agent, which gives it to this user's host ids: the start
+    /// of the `--container-subuid` range plus each id. Needs `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
+    /// The user whose subordinate id range every job's user namespace is mapped onto, such
+    /// as `jobmap`. When it starts the agent reads that user's range from `/etc/subuid`
+    /// and `/etc/subgid` and refuses to start unless both have an entry of at least 65536
+    /// ids that does not begin at 0 and holds no id of `/etc/passwd` or `/etc/group`.
+    /// Container ids 0 to 65535 are host ids of that range, so no id in a container is a
+    /// host id. With Podman every container is created with `--uidmap` and `--gidmap` of
+    /// the range. Docker has no such option per container: its daemon must run with
+    /// `"userns-remap"` set to this user in `daemon.json`, and the agent refuses to start
+    /// when it does not. A second agent on the host whose range overlaps one in use is
+    /// refused. The agent must run as root: it gives each run's scratch directory to the
+    /// job's mapped user. Required with `--container-bin`, and needs it.
+    #[arg(long, value_name = "USER")]
+    pub container_subuid: Option<String>,
     /// The engine to talk to, as `unix:///<path>`: a socket on this machine; given to the
     /// program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By default none
     /// is given and the engine uses its own default. Any other address (`tcp://`,

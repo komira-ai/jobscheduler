@@ -8,7 +8,7 @@ use js_elastic::Demand;
 use js_lease::Timestamp;
 use js_types::{HostId, RequestId};
 
-use super::Registry;
+use super::{Registry, State};
 
 /// One whole-node request on the wait list ([`Registry::waiting`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,15 +56,7 @@ impl Registry {
     /// that finds no free host, and leaves it when it is placed, cancelled, refused, or
     /// not presented for the pool's `regain_grace` (see [`Registry::queue_position`]).
     pub fn waiting(&self) -> Vec<Waiting> {
-        let state = self.lock();
-        let waiting = state.waiting.waiting();
-        let rows = waiting.map(|(id, request, since)| Waiting {
-            id: id.clone(),
-            demand: Demand::from_request(request),
-            since,
-            reserved: state.marks.host_of(id),
-        });
-        rows.collect()
+        waiting_rows(&self.lock())
     }
 
     /// Sets, or with `None` removes, the answer to "could a launch serve this request".
@@ -74,4 +66,16 @@ impl Registry {
     pub fn set_launchable(&self, launchable: Option<Launchable>) {
         self.lock().launchable = launchable;
     }
+}
+
+/// The wait list in `state`, longest waiting first.
+pub(super) fn waiting_rows(state: &State) -> Vec<Waiting> {
+    let waiting = state.waiting.waiting();
+    let rows = waiting.map(|(id, request, since)| Waiting {
+        id: id.clone(),
+        demand: Demand::from_request(request),
+        since,
+        reserved: state.marks.host_of(id),
+    });
+    rows.collect()
 }
