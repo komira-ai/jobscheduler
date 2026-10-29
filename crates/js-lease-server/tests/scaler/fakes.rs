@@ -2,7 +2,7 @@
 //! something, keeps a provider that holds machines, and keeps a registry whose marks move
 //! the way the real one's do. A test changes what the fake answers and reads its log.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -43,6 +43,12 @@ pub struct World {
     pub list_fails: bool,
     pub machines: Vec<Held>,
     pub saved: Option<Records>,
+    /// The hosts last written as the ones the registry would not remove.
+    pub saved_unremoved: Option<BTreeSet<String>>,
+    /// Every set of unremoved hosts a write was asked for, in order, whether it succeeded or not.
+    pub unremoved_writes: Vec<BTreeSet<String>>,
+    /// Whether a write of the unremoved hosts succeeds.
+    pub save_unremoved_ok: bool,
     pub save_ok: bool,
     pub mint_ok: bool,
     pub revoke_ok: bool,
@@ -154,6 +160,19 @@ impl Effects for Handle {
                 if let Some(hosts) = world.after_save.take() {
                     world.hosts = hosts;
                 }
+                Ok(())
+            }
+            false => Err("the disk is full".to_owned()),
+        }
+    }
+
+    fn save_unremoved(&self, hosts: &BTreeSet<String>) -> Result<(), String> {
+        let mut world = self.world();
+        world.log.push("save-unremoved".to_owned());
+        world.unremoved_writes.push(hosts.clone());
+        match world.save_unremoved_ok {
+            true => {
+                world.saved_unremoved = Some(hosts.clone());
                 Ok(())
             }
             false => Err("the disk is full".to_owned()),
@@ -303,10 +322,10 @@ pub fn rig(records: Records, settings: Settings) -> Rig {
     rig_with(records, settings, Box::new(SequentialSessions::new()))
 }
 
-/// [`rig`] with `entropy` for the random part of the acquire ids.
-pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSource>) -> Rig {
+/// A world with one a10 offer at 60 cents an hour and no machines, hosts or requests.
+pub fn new_world() -> Arc<Mutex<World>> {
     trace_everything();
-    let world = Arc::new(Mutex::new(World {
+    Arc::new(Mutex::new(World {
         log: Vec::new(),
         waiting: Vec::new(),
         hosts: Vec::new(),
@@ -318,6 +337,9 @@ pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSo
         list_fails: false,
         machines: Vec::new(),
         saved: None,
+        saved_unremoved: None,
+        unremoved_writes: Vec::new(),
+        save_unremoved_ok: true,
         save_ok: true,
         mint_ok: true,
         revoke_ok: true,
@@ -326,7 +348,13 @@ pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSo
         after_save: None,
         release_answer: None,
         gate: None,
-    }));
+    }))
+}
+
+/// [`rig`] with `entropy` for the random part of the acquire ids.
+pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSource>) -> Rig {
+    trace_everything();
+    let world = new_world();
     let clock = ManualClock::new(Timestamp::from_millis(START));
     let scaler = Scaler::new(
         Box::new(Handle(world.clone())),
