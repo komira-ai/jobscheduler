@@ -15,6 +15,11 @@
 //! Sanitizers, `gdb`, `rr` and `valgrind` set it, and a build job runs them; the
 //! comparison masks that single bit out and still requires one of the four allowed
 //! personas, so `READ_IMPLIES_EXEC` and every other flag or persona stay refused. The
+//! Provenance: the upstream file is containers/common tag v0.57.4,
+//! `pkg/seccomp/seccomp.json`, sha256
+//! `cc374cf23846ce1f62f4dc807a8e2b8673c783c6f56cb475467621035d281e6c`. The embedded file
+//! equals it, as parsed JSON, except for four added `personality` entries (the
+//! `ADDR_NO_RANDOMIZE` ones above). The
 //! file is `seccomp.json` beside this one; a test pins its sha256, so an edit of the
 //! profile is a reviewed change.
 
@@ -41,13 +46,14 @@ pub const PROFILE_FILE: &str = "seccomp+pinned.json";
 ///
 /// # Errors
 ///
-/// `dir` is not UTF-8, or the file cannot be written.
+/// `dir` is not UTF-8, holds a comma (Docker splits a `--security-opt` value on commas, so
+/// the path would be read as more than a file name), or the file cannot be written.
 pub fn install_profile(dir: &Path) -> io::Result<String> {
     let path = dir.join(PROFILE_FILE);
-    let Some(text) = path.to_str() else {
+    let Some(text) = path.to_str().filter(|text| !text.contains(',')) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "the directory is not UTF-8",
+            "the directory must be UTF-8 without a comma",
         ));
     };
     if fs::read(&path).is_ok_and(|have| have == PROFILE.as_bytes()) {
