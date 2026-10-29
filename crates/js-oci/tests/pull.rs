@@ -1299,6 +1299,9 @@ async fn a_huge_redirect_host_gives_a_bounded_error() {
     let text = format!("{err} {err:?}");
     assert!(text.len() < 2048, "{}", text.len());
 
+    // A name a TLS client can use is at most 253 bytes, so the refused-address check
+    // sees at most that; it is still longer than the 128 bytes an error carries.
+    let host = format!("{0}.{0}.{0}.test", "a".repeat(60));
     fx.behave(|b| b.redirect_blobs = Some(format!("https://{host}:{}/x", fx.port)));
     let client = fx.client().with_resolved(&host, support::LOOPBACK);
     let repo = client.repository(fx.location(REPO)).expect("repository");
@@ -1310,13 +1313,8 @@ async fn a_huge_redirect_host_gives_a_bounded_error() {
         .fetch_blob(&manifest.layers()[0], &mut Recording::default())
         .await
         .expect_err("address");
-    assert!(
-        matches!(err, Error::Address { .. }),
-        "{}",
-        err.to_string().len()
-    );
-    let text = format!("{err} {err:?}");
-    assert!(text.len() < 2048, "{}", text.len());
+    assert!(matches!(err, Error::Address { .. }), "{err}");
+    assert!(err.to_string().len() < 210, "{err}");
 }
 
 /// Proves a TLS failure's text is bounded: a certificate with hundreds of names, none
