@@ -10,8 +10,9 @@ pub const BASE: Duration = Duration::from_secs(1);
 pub const CAP: Duration = Duration::from_secs(60);
 
 /// The longest `Retry-After` the agent obeys: a server that asks for more is not
-/// allowed to silence the host for longer.
-pub const RETRY_AFTER_CAP: Duration = Duration::from_secs(120);
+/// allowed to silence the host for longer. Owned by the wire crate, which the server
+/// also reads it from.
+pub use js_agent_wire::RETRY_AFTER_CAP;
 
 /// Doublings after which the ceiling is above [`CAP`] for any [`BASE`] of a second.
 const MAX_DOUBLINGS: u32 = 6;

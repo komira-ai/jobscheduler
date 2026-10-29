@@ -56,7 +56,7 @@ numbers refer to design.md.
     policy passes the check of 12.4.
 33. Consumer pool selection: class and label selectors in the lease request, and `--pool`, `--class`, `--label` in `js-cli`. *Proves:*
     no match is refused, a pool at `max_machines` queues, a selector picks the right pool.
-34. `kbf-executor` beside `js-agent`, with host mounts for the input cache (9.2). *Proves:* the action container holds no storage
+34. `kbf-executor` *(superseded by [kbf-on-js-agent.md](kbf-on-js-agent.md): no `kbf-executor`)* beside `js-agent`, with host mounts for the input cache (9.2). *Proves:* the action container holds no storage
     credential; a container that reads the executor's credential path, the metadata endpoint or a mount outside the roots fails, and
     the agent refuses a `Start` naming such a mount; the same seeded scenario yields the same event trace as before the split.
 34b. kbf as a consumer. The kbf server holds a standing machine lease per existing daemon host (a pool of kbf's own hosts, which register

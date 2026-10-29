@@ -313,7 +313,7 @@ What the agent trusts, and who trusts it:
   session, authenticated by a token the scheduler minted for that lease. It obeys no other caller.
 - The agent proves itself to the scheduler with the join credential of its pool, or on aws the instance proof (5.8), and sends it only
   on a TLS stream whose server identity it has pinned. A credential admits a host to one pool only.
-- The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
+- **(Superseded in part by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md): there is no trusted `kbf-executor` beside the agent; the agent writes a per-run upload grant (one presigned PUT per pack slot) as a 0400 file on a per-run tmpfs, redacted and never persisted elsewhere, and the task's own tool uploads with it; the owner ruled on 2026-10-29 that the whole task holds the URL.)** The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
   outputs leave as a mounted directory. The component that fetches inputs, uploads outputs and reports to a frontend is the consumer's
   trusted executor (for kbf, `kbf-executor`, 9.2). It runs on the host beside the agent, in its own process and identity, and shares the
   mounted input, output and cache directories with it; it is part of the host image or package, so the aws launch template and the
@@ -663,6 +663,10 @@ Consequences:
   only dials out (D22). The scheduler's own run service, which places ucdk requests (11), is a consumer in this sense.
 
 ### 9.2 The daemon splits three ways
+
+> **Superseded by [kbf-on-js-agent.md](kbf-on-js-agent.md).** The split is now `js-agent` (standalone, no kbf process beside it), ordered steps in
+> one lease (a task that fetches, runs and then writes kbf packs to presigned PUTs itself through the kbf task tool in its container, with the agent relaying its report), and a frontend CommitPack in kbf that verifies the packs and builds the cache entry. There is
+> no `kbf-executor` and no mounted input/output contract. The text below is the earlier plan.
 Today's daemon (`crates/kbf-daemon/src/daemon.rs`) becomes:
 
 - **`js-agent`**, generic: hello with capacity, labels and GPUs; heartbeat, session, acks, fence, drain and pressure; start and stop
@@ -726,9 +730,9 @@ drivers, iOS device vocabulary and Xcode properties, the macOS logic that decide
 | `js-coverage` (merged) | new | the coverage ratchet (R6) |
 | `js-config` | new | the configuration schema and loader of 5.7 |
 | `js-provider-aws` | new | the `aws` capacity provider over a cloud-client trait with a fake (5.5); disabled by default |
-| `js-elastic` | new | the provider-neutral contract for machines a scheduler launches (pure layer): `ElasticProvider` (catalog, host_prep, payload_limit, acquire, list, release), `Offer` and its `fit` against a demand, `Secret` and `BootPayload`, `BootPlan`, `HostName`, the acquire and release answers; the Lambda provider implements it |
-| `js-provider-lambdalabs` | new | the Lambda Cloud provider (runtime layer): the API client (instance types with GPU facts and regional capacity, instances, launch, terminate), the owner-only key file, a fake, the `[[option]]` table and the choice of instance type for a GPU request; the provider side of the `js-elastic` contract (`ElasticProvider`: catalog, acquire, list, release) with ownership marks, an idempotent acquire and a release that reads back, and a cost guard (disabled and dry-run by default, `max_machines`, which this provider enforces as a hard cap on the instances carrying its ownership marks, counted from a fresh list before each launch: the provider's own backstop, not a pool-level cost policy, and not the pool's `max_machines` of 5.1 and 5.11, a launch rate limit, a report-only sweep); the `first_launch` example, a runner for the first live launch (dry run by default; `--go` needs the plan hash the dry run printed; state file before the wait; boot deadline, wall-clock and spend caps force teardown; `--teardown-only`); not wired to a scheduler |
-| `js-scaler` | new | the scaler's pure step (pure layer): demand matched to elastic pools by their offers, launches within the instance, hourly and daily caps, idempotent acquire records (versioned, serialisable), the instance state machine, idle drain then release with no deadline, `boot_fail_cooldown`; takes the clock as an argument and does no I/O; the server shell that runs it on the tick comes after it |
+| `js-elastic` | new | the provider-neutral contract for machines a scheduler launches (pure layer): `ElasticProvider` (catalog, host_prep, payload_limit, acquire, list, release, and two calls with a default: the acquire ids it holds an unresolved call for, and a read by id that says a machine is gone), `Offer` and its `fit` against a demand, `Secret` and `BootPayload`, `BootPlan`, `HostName`, the acquire and release answers; the Lambda provider implements it |
+| `js-provider-lambdalabs` | new | the Lambda Cloud provider (runtime layer): the API client (instance types with GPU facts and regional capacity, instances, launch, terminate), the owner-only key file, a fake, the `[[option]]` table and the choice of instance type for a GPU request; the provider side of the `js-elastic` contract (`ElasticProvider`: catalog, acquire, list, release) with ownership marks, an idempotent acquire and a release that reads back, and a cost guard (disabled and dry-run by default, `max_machines`, which this provider enforces as a hard cap on the instances carrying its ownership marks, counted from a fresh list before each launch: the provider's own backstop, not a pool-level cost policy, and not the pool's `max_machines` of 5.1 and 5.11, a launch rate limit, a report-only sweep); the `first_launch` example, a runner for the first live launch (dry run by default; `--go` needs the plan hash the dry run printed; state file before the wait; boot deadline, wall-clock and spend caps force teardown; `--teardown-only`); its `kind::build` builds it from a pool of the server's configuration file (the `lambdalabs` kind) |
+| `js-scaler` | new | the scaler's pure step (pure layer): demand matched to elastic pools by their offers, launches within the instance, hourly and daily caps, idempotent acquire records (versioned, serialisable), the instance state machine, idle drain then release with no deadline, `boot_fail_cooldown`; takes the clock as an argument and does no I/O; the shell that runs it on the tick is the `scaler` module of `js-lease-server` |
 | `js-provider-<kind>` | new | one crate per later kind; the core names none (5.7) |
 | `js-sched` | `crates/kbf-sched` | per-request placement, generic over `Payload`, `ResultBlob`, `Fit`, `Rank`, `RetryPolicy`, `Queue`; keeps the fence and phase constants; scope per D15 |
 | `js-caps` | new at step 36; `crates/kbf-caps/src/matching.rs` joins at step 15 | the typed model, version order, schema and constraint evaluator of 5.13; kbf keeps its key tables and host detection |
@@ -928,7 +932,7 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   (settled; supersedes D21 and D23(c)). D39 a provider hierarchy: an ordered list per pool, falling through only when an earlier entry
   cannot satisfy now (direction settled). D40 a host that frees while a later entry's machine boots takes the waiting request, and the
   booting machine is kept and released by the idle rule. D41 what is capable and what happens to queued requests when capability goes.
-- D42 kbf's update coordinator is not generalised: one version per host, js-agent and kbf-executor ship in the one kbf host package, and the
+- **(Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md) and the rewritten [design/rollout.md](design/rollout.md).)** D42 kbf's update coordinator is not generalised: one version per host, js-agent and kbf-executor ship in the one kbf host package, and the
   server updates by its own redeploy (settled; adopted from the coordinator's owner). D43 rollout order: server, then hosts, then kbf
   frontends. D44 compatibility rules: majors, additive fields, the server refuses an agent major it does not speak, a version-pair check at
   the agent if the two ever ship apart, frontends check the server's advertised version. D45 what would change the plan, and the signer
@@ -995,6 +999,10 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
   agent's claim (K39), and for hosts that run many jobs K42 to K48.
 
 ## 17. Rolling out two services
+
+**Superseded by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md):** under the owner's model kbf-server leases whole hosts from a deployed
+js-lease-server and submits each action as a run, the placement libraries run inside kbf's frontends, `js-agent` is a separate service on every host, and there is no `kbf-executor`; the text below is the earlier plan. Detail and the
+rewritten rollout: [design/rollout.md](design/rollout.md).
 
 jobscheduler is the distributed service (a server, and `js-agent` on every host); kbf is a frontend that talks to it, so a release touches
 two services. Detail, D42 to D45 and the risks: [design/rollout.md](design/rollout.md).
