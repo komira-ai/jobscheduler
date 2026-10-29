@@ -18,6 +18,7 @@ mod learned;
 mod outage;
 mod owners;
 mod placement;
+mod predicted;
 mod recover;
 mod report;
 mod session;
