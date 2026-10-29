@@ -24,6 +24,13 @@
 //! Nothing here has a built-in address: [`HttpApi::connect`] takes the base URL from its
 //! caller, and a plain `http://` address is accepted for the loopback interface only.
 //!
+//! The guard's memory (launches sent, launches answered and not yet listed, the time of
+//! the last launch) is one process's `Mutex`: run one provider instance per scheduler id.
+//! A restart, or a second process, sees only the list, which can lag a write.
+//!
+//! A release that answers [`Released::Unknown`] means "not known": callers must retry it,
+//! never read it as "gone".
+//!
 //! The provider is not wired to a scheduler. The calls block, each under a time limit, so
 //! they must not run under a lock that other work waits on. It does not implement the
 //! delivered whole-host `Provider` trait, which is called under the lease table's lock.

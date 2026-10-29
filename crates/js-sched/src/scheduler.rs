@@ -48,6 +48,7 @@ use crate::fence::HANDOVER_GRACE;
 use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
 use crate::servable::{Attempt, Placed, Servable, Verdict};
+use crate::unservable::Unservable;
 use memory::{MemoryLadder, MemoryState};
 
 /// At most this many leases are granted per [`crate::Event::Tick`] (one log flush per round).
@@ -106,7 +107,7 @@ struct Operation {
     gave_up: bool,
     /// While queued: since when, and why, no live worker can run it. `None` while one
     /// can.
-    unservable: Option<Unservable>,
+    unservable: Option<UnservableWait>,
     /// Its runs that ended as the farm's fault, oldest first: the farm reruns it has
     /// used ([`memory::FARM_RERUNS`]).
     farm_runs: Vec<FarmRun>,
@@ -142,9 +143,11 @@ struct KeyApplied {
 /// A queued operation no live worker can run: since when, why, and whether the wait
 /// counts toward its refusal.
 #[derive(Clone, Debug)]
-struct Unservable {
+struct UnservableWait {
     since: FarmTime,
-    reason: String,
+    reason: Unservable,
+    /// `reason` as callers are told it, made once when the reason changes.
+    text: String,
     /// `false` while only cordoned workers could run it: it waits for the cordon to
     /// end and is never refused for it.
     refusable: bool,
@@ -456,7 +459,7 @@ impl Scheduler {
                 .map(|u| {
                     Effect::Waiting(Waiting {
                         operation: id,
-                        reason: Some(u.reason.clone()),
+                        reason: Some(u.text.clone()),
                     })
                 })
                 .collect();
@@ -831,13 +834,15 @@ impl Scheduler {
                     Some(u) if u.refusable && refusable => u.since,
                     _ => now,
                 };
+                let text = reason.to_string();
                 effects.push(Effect::Waiting(Waiting {
                     operation: id,
-                    reason: Some(reason.clone()),
+                    reason: Some(text.clone()),
                 }));
-                slot.insert(Unservable {
+                slot.insert(UnservableWait {
                     since,
                     reason,
+                    text,
                     refusable,
                 })
             }
@@ -845,7 +850,7 @@ impl Scheduler {
         if unservable.refusable && now >= unservable.since.saturating_add(wait) {
             let reason = format!(
                 "{} (waited {} s for a worker that can run it)",
-                unservable.reason,
+                unservable.text,
                 wait.as_secs()
             );
             self.queue.remove(&(Reverse(op.request.qos.clone()), id));

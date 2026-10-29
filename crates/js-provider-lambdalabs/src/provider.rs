@@ -28,6 +28,20 @@ struct Launching {
     /// An entry ends when a list shows the instance, when the launch is answered, or
     /// when the hold runs out.
     unknown: BTreeMap<String, Duration>,
+    /// Launches that were answered with an instance id, by acquire id, until a list shows
+    /// the instance. A list can lag a write, so for a while the instance exists only in
+    /// the API's list-to-be: it counts toward `max_machines` and a retry of the same
+    /// acquire gets the earlier answer. An entry ends when a list shows the instance or
+    /// when the hold runs out.
+    answered: BTreeMap<String, Answered>,
+}
+
+/// A launch that was answered and that no list shows yet.
+struct Answered {
+    /// What the answer named.
+    held: Held,
+    /// When the launch was answered.
+    sent: Duration,
 }
 
 /// What a sweep found. Nothing is terminated by it.
@@ -140,7 +154,9 @@ impl LambdaProvider {
         })
     }
 
-    /// Forgets the unknown launches a list shows or the hold has outlasted.
+    /// Forgets the unknown and the answered launches a list shows or the hold has
+    /// outlasted. After the hold a list is trusted: an instance it still hides is not
+    /// counted, as with an unknown launch.
     fn settle(&self, gate: &mut Launching, rows: &[Instance], now: Duration) {
         let hold = self.config.unknown_hold;
         gate.unknown.retain(|acquire, sent| {
@@ -148,6 +164,10 @@ impl LambdaProvider {
                 .iter()
                 .any(|row| Owner::acquire_of(row) == Some(acquire.as_str()));
             !seen && now.saturating_sub(*sent) < hold
+        });
+        gate.answered.retain(|_, launched| {
+            let seen = rows.iter().any(|row| row.id == launched.held.id);
+            !seen && now.saturating_sub(launched.sent) < hold
         });
     }
 
@@ -237,6 +257,16 @@ impl LambdaProvider {
             );
             return Acquired::Deferred { wait };
         }
+        if let Some(launched) = gate.answered.get(wanted) {
+            // The launch of this acquire was answered and no list shows the instance yet
+            // (the caller may have crashed before it recorded the answer): give the
+            // answer again rather than launch a second instance.
+            tracing::warn!(id = %launched.held.id, "an earlier launch of this acquire is not listed yet; answering again");
+            return Acquired::Accepted {
+                held: launched.held.clone(),
+                extras: Vec::new(),
+            };
+        }
         let half = live
             .iter()
             .filter(|(_, claim)| *claim == Claim::Suspect)
@@ -248,7 +278,7 @@ impl LambdaProvider {
             );
             return Self::refuse(RefusalCode::Denied, Reason::HalfMarked { count: half });
         }
-        let held = live.len() + gate.unknown.len();
+        let held = live.len() + gate.unknown.len() + gate.answered.len();
         let max_machines = self.config.max_machines.get();
         if held >= max_machines {
             tracing::warn!(held, max_machines, "no launch: max_machines is reached");
@@ -289,6 +319,21 @@ impl LambdaProvider {
             return Acquired::Unknown;
         };
         gate.unknown.remove(wanted);
+        let held = Held {
+            id: first.clone(),
+            acquire: wanted.to_owned(),
+            name: Some(launch.name.clone()),
+            instance_type: launch.instance_type.clone(),
+            region: launch.region.clone(),
+            status: Status::Booting,
+        };
+        gate.answered.insert(
+            wanted.to_owned(),
+            Answered {
+                held: held.clone(),
+                sent: now,
+            },
+        );
         let extras = rest
             .iter()
             .map(|id| {
@@ -305,17 +350,7 @@ impl LambdaProvider {
                 }
             })
             .collect();
-        Acquired::Accepted {
-            held: Held {
-                id: first.clone(),
-                acquire: wanted.to_owned(),
-                name: Some(launch.name.clone()),
-                instance_type: launch.instance_type.clone(),
-                region: launch.region.clone(),
-                status: Status::Booting,
-            },
-            extras,
-        }
+        Acquired::Accepted { held, extras }
     }
 }
 

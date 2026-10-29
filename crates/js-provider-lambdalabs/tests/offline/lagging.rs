@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_provider_lambdalabs::{
     Acquired, ApiError, Call, Elastic, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
-    LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, Released, Status,
+    LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, Reason, Released, Status,
 };
 
 use crate::rig::{INTERVAL, TABLE, ask, id, live, offer};
@@ -142,4 +142,107 @@ fn an_extra_whose_read_is_a_404_right_after_launch_is_reported_unconfirmed() {
     assert_eq!(extras[0].released, Released::Unknown);
     // Nothing was terminated: the extra is still there for a sweep to report.
     assert_eq!(api.fake.count(Call::Terminate), 0);
+}
+
+/// A rig whose list hides every row from before the first launch, which is answered.
+fn hidden_rig(max_machines: usize) -> (Arc<Lagging>, Arc<ManualClock>, LambdaProvider) {
+    let (api, clock, provider) = rig(max_machines);
+    api.hide.store(true, Ordering::SeqCst);
+    (api, clock, provider)
+}
+
+#[test]
+fn an_answered_launch_the_list_hides_counts_toward_max_machines() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    // The interval passes at every try; the list still shows nothing.
+    for _ in 0..3 {
+        clock.advance(INTERVAL);
+        let Acquired::Refused(refusal) = provider.acquire(&ask("b")) else {
+            panic!("launched past the cap");
+        };
+        assert_eq!(
+            refusal.reason,
+            Reason::AtMaxMachines {
+                held: 1,
+                max_machines: 1
+            }
+        );
+    }
+    assert_eq!(api.fake.launched(), 1);
+}
+
+#[test]
+fn a_retry_of_an_answered_acquire_gets_the_first_instance_and_launches_nothing() {
+    let (api, clock, provider) = hidden_rig(5);
+    let Acquired::Accepted { held: first, .. } = provider.acquire(&ask("a")) else {
+        panic!("not accepted");
+    };
+    clock.advance(INTERVAL);
+    let Acquired::Accepted {
+        held: again,
+        extras,
+    } = provider.acquire(&ask("a"))
+    else {
+        panic!("not accepted");
+    };
+    assert_eq!(again, first);
+    assert_eq!(again.id, id("fake0001"));
+    assert!(extras.is_empty());
+    assert_eq!(api.fake.launched(), 1);
+    assert_eq!(api.fake.count(Call::Launch), 1);
+}
+
+#[test]
+fn once_the_list_shows_the_instance_the_count_comes_from_the_list() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    api.hide.store(false, Ordering::SeqCst);
+    clock.advance(INTERVAL);
+    // One instance held, not two: the listed row and the answered launch are one.
+    let Acquired::Refused(refusal) = provider.acquire(&ask("b")) else {
+        panic!("launched past the cap");
+    };
+    assert_eq!(
+        refusal.reason,
+        Reason::AtMaxMachines {
+            held: 1,
+            max_machines: 1
+        }
+    );
+    // The entry is gone: with the instance removed and the list hidden again, nothing
+    // is counted and the next acquire launches.
+    api.fake.remove_instance(&id("fake0001"));
+    api.hide.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        provider.acquire(&ask("b")),
+        Acquired::Accepted { .. }
+    ));
+    assert_eq!(api.fake.launched(), 2);
+}
+
+#[test]
+fn after_the_hold_an_instance_the_list_still_hides_is_no_longer_counted() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    // Just inside the hold: still counted.
+    clock.advance(Duration::from_secs(599));
+    assert!(matches!(provider.acquire(&ask("b")), Acquired::Refused(_)));
+    // The hold ends: the list is trusted again, as for an unknown launch. The retry of
+    // the same acquire launches, and so does the one for another id once it is due.
+    clock.advance(Duration::from_secs(1));
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    assert_eq!(api.fake.launched(), 2);
 }
