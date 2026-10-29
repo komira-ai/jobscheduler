@@ -1,7 +1,11 @@
-//! What the agent does with a whole-node lease when it runs jobs (it ignores the lease:
-//! the job worker does not implement `Quiesce`), and what it does with a `Start` when it
-//! runs none (it ignores that, and counts it). Both over the whole agent: the flags, the
-//! scripted server and a machine of the test's own.
+//! What the agent does with a whole-node lease when it runs jobs (it follows the lease
+//! through the job worker), and what it does with a `Start` when it runs none (it ignores
+//! that, and counts it). Both over the whole agent: the flags, the scripted server and a
+//! machine of the test's own.
+
+/// The whole-node lease of the first test: the lease of the run `r2`, so a start of `r2`
+/// is a start for the lease and any other run's is for another.
+const LEASE: &str = "lease-r2";
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -49,31 +53,133 @@ fn naming(base: Value, lease: &str) -> crate::support::Reply {
     reply(200, body)
 }
 
-/// Asserts what an agent that runs jobs does when the server names a whole-node lease: the
-/// lease is ignored, as the library documentation says. The start the same reply carries
-/// is refused as `failed_to_start` (`no-capacity`) because the worker's lifecycle never
-/// finds the host ready for a lease nothing prepares it for, and the start in a reply that
-/// names no lease runs; every heartbeat stays in the phase `serving` and says neither
-/// `exclusive_ready` nor `exclusive_refused`, the log has no line about preparing the host,
-/// and the drain that follows a stop request is the ordinary one. It catches a session
-/// that half follows the lease (a phase `preparing` that nothing ends, or a ready report
-/// for a host that was not made quiet) and a run started on a host the server holds whole.
+/// Asserts what the whole agent does when the server holds its host whole: with
+/// `--container-bin` the session follows the lease through the job worker. A start for
+/// another lease that arrives with the grant is refused (`no-capacity`); the heartbeats say
+/// `preparing` and no ready until the result of that refused run is acknowledged and the
+/// worker found the host quiet; the first beat after says `serving` with `exclusive_ready`
+/// and the beat after repeats it; then a start for the lease runs and a start for another
+/// lease is refused, and the drain that follows a stop request still carries the ready
+/// report. It catches a lease the real agent ignores (no `preparing`, a start refused for
+/// ever), a ready reported before the worker answered, and a gate that lets another
+/// lease's start through.
 #[test]
-fn an_agent_with_jobs_ignores_a_whole_node_lease() {
+fn an_agent_with_jobs_follows_a_whole_node_lease_through_its_worker() {
     let dir = Scratch::new("jobs-exclusive");
     let owned = container_flags(&dir);
     let extra: Vec<&str> = owned.iter().map(String::as_str).collect();
     let args = flags(&extra);
     let machine = Arc::new(FakeMachine::new());
     let world = machine.world.clone();
+    let acked = json!({
+        "commands": [],
+        "result_acks": [{ "run_id": "r1", "ack": "ACCEPTED" }],
+    });
     let replies = vec![
         welcome(1),
-        naming(start_answer(&["r1"]), "lease-1"),
-        naming(json!({ "commands": [] }), "lease-1"),
-        reply(200, start_answer(&["r2"])),
-        beat_ok(),
+        naming(start_answer(&["r1"]), LEASE),
+        naming(acked, LEASE),
+        naming(json!({ "commands": [] }), LEASE),
+        naming(start_answer(&["r2", "r3"]), LEASE),
+        naming(json!({ "commands": [] }), LEASE),
         beat_ok(),
     ];
+    let (script, sent) = Script::new(replies);
+    let seen: RefCell<Option<Handle>> = RefCell::new(None);
+    let hook = |handle: Handle| *seen.borrow_mut() = Some(handle);
+    let mut sleeper = Settle {
+        seen: &seen,
+        calls: 0,
+        stop_at: 6,
+        budget: WakeBudget::new(),
+    };
+    let jobs: Jobs<'_> = (machine, Some(&hook));
+    let ran = run_on(
+        &args,
+        &linux_host(),
+        &ScriptConnector::of(script),
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+
+    assert_eq!(
+        world.created(),
+        ["r2"],
+        "only the lease's own start ran, and only once the host was ready"
+    );
+    let sent = sent.borrow();
+    let beats: Vec<&Value> = sent.iter().skip(1).map(|(_, body)| body).collect();
+    let phases: Vec<&str> = beats.iter().map(|b| b["phase"].as_str().unwrap()).collect();
+    assert_eq!(
+        phases,
+        [
+            "serving",
+            "preparing",
+            "preparing",
+            "serving",
+            "serving",
+            "draining"
+        ]
+    );
+    let ready: Vec<Option<&str>> = beats
+        .iter()
+        .map(|b| b.get("exclusive_ready").and_then(Value::as_str))
+        .collect();
+    assert_eq!(
+        ready,
+        [None, None, None, Some(LEASE), Some(LEASE), Some(LEASE)]
+    );
+    for beat in &beats {
+        assert!(beat.get("exclusive_refused").is_none(), "{beat}");
+    }
+    assert_eq!(
+        beats[1]["results"],
+        json!([{
+            "run_id": "r1",
+            "lease_id": "lease-r1",
+            "outcome": "failed_to_start",
+            "detail": "no-capacity",
+        }])
+    );
+    assert_eq!(
+        beats[4]["results"],
+        json!([{
+            "run_id": "r3",
+            "lease_id": "lease-r3",
+            "outcome": "failed_to_start",
+            "detail": "no-capacity",
+        }])
+    );
+    assert_eq!(
+        beats[4]["held"],
+        json!([
+            { "run_id": "r2", "state": "running" },
+            { "run_id": "r3", "state": "exited_unacked" },
+        ])
+    );
+}
+
+/// Asserts the readiness hook is wired into the whole agent: with `--container-bin` and
+/// `--readiness-hook` (a shell command that records each run in a file) the heartbeat that gets
+/// the worker's answer says `exclusive_ready`, and the program ran exactly once. It catches a hook that is checked and then dropped (no
+/// run), and a bound or flag that does not reach the worker.
+#[test]
+fn the_readiness_hook_runs_once_in_the_whole_agent() {
+    let dir = Scratch::new("jobs-exclusive-hook");
+    let marker = dir.path("hook-runs");
+    let script = format!("echo ran >> {}", marker.display());
+    let owned = container_flags(&dir);
+    let mut extra: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let hook_args = ["--readiness-hook", "/bin/sh", "--readiness-hook-arg=-c"];
+    extra.extend(hook_args);
+    extra.extend(["--readiness-hook-arg", &script]);
+    let args = flags(&extra);
+    let machine = Arc::new(FakeMachine::new());
+    let mut replies = vec![welcome(1)];
+    replies.extend((0..4).map(|_| naming(json!({ "commands": [] }), LEASE)));
+    replies.push(beat_ok());
     let (script, sent) = Script::new(replies);
     let seen: RefCell<Option<Handle>> = RefCell::new(None);
     let hook = |handle: Handle| *seen.borrow_mut() = Some(handle);
@@ -94,43 +200,12 @@ fn an_agent_with_jobs_ignores_a_whole_node_lease() {
     );
     assert_eq!(ran.status(), code(0), "{}", ran.err);
 
-    assert_eq!(
-        world.created(),
-        ["r2"],
-        "no container for the refused start"
-    );
     let sent = sent.borrow();
     let beats: Vec<&Value> = sent.iter().skip(1).map(|(_, body)| body).collect();
-    let phases: Vec<&str> = beats.iter().map(|b| b["phase"].as_str().unwrap()).collect();
-    assert_eq!(
-        phases,
-        ["serving", "serving", "serving", "serving", "draining"]
-    );
-    for beat in &beats {
-        assert!(beat.get("exclusive_ready").is_none(), "{beat}");
-        assert!(beat.get("exclusive_refused").is_none(), "{beat}");
-    }
-    // The lifecycle still holds the host for the lease the reply names: the start in that
-    // reply is refused (and reported), nothing is created for it, and the start in the
-    // reply that no longer names the lease runs.
-    assert_eq!(
-        beats[1]["results"],
-        json!([{
-            "run_id": "r1",
-            "lease_id": "lease-r1",
-            "outcome": "failed_to_start",
-            "detail": "no-capacity",
-        }])
-    );
-    assert_eq!(
-        beats[3]["held"],
-        json!([
-            { "run_id": "r1", "state": "exited_unacked" },
-            { "run_id": "r2", "state": "running" },
-        ])
-    );
-    assert!(!ran.err.contains("preparing"), "{}", ran.err);
-    assert!(!ran.err.contains("refusing"), "{}", ran.err);
+    assert_eq!(beats[3]["exclusive_ready"], LEASE, "{}", beats[3]);
+    assert_eq!(beats[3]["phase"], "serving");
+    let runs = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(runs.lines().count(), 1, "{runs}");
 }
 
 /// Asserts the agent without `--container-bin` is the agent without jobs: a `Start` the

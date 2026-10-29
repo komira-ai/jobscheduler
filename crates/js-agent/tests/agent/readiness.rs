@@ -241,8 +241,8 @@ fn the_hook_runs_only_after_the_agents_own_checks() {
     let hook = hook(&[]);
     let mut probe = Probe::new(vec![Quiet::Busy, unsafe_host("found")], Vec::new()).0;
     let mut host = Hooked::new(&mut probe, &hook, &runner);
-    assert_eq!(host.prepare(), Quiet::Busy);
-    assert_eq!(host.prepare(), unsafe_host("found"));
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    assert_eq!(host.prepare(LEASE), unsafe_host("found"));
     assert!(runner.calls.borrow().is_empty());
 }
 
@@ -253,7 +253,7 @@ fn restoring_is_the_hosts_own() {
     let hook = hook(&[]);
     let mut probe = Probe::new(Vec::new(), vec![js_agent::lifecycle::Restored::Done]).0;
     let mut host = Hooked::new(&mut probe, &hook, &runner);
-    assert_eq!(host.restore(), js_agent::lifecycle::Restored::Done);
+    assert_eq!(host.restore(LEASE), js_agent::lifecycle::Restored::Done);
     assert!(runner.calls.borrow().is_empty());
 }
 
