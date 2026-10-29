@@ -129,6 +129,8 @@ fn create_builds_the_documented_argv() {
         "core=0",
         "--ipc",
         "private",
+        "--cgroupns",
+        "private",
         "--log-driver",
         "json-file",
         "--log-opt",
@@ -295,6 +297,7 @@ fn the_job_cannot_reach_the_runtimes_options() {
             ("--tmpfs", TMPFS),
             ("--ulimit", "core=0"),
             ("--ipc", "private"),
+            ("--cgroupns", "private"),
             ("--pull", "never"),
             ("--user", "1000:1000"),
         ];
