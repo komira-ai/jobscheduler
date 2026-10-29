@@ -258,10 +258,7 @@ fn the_limit_after_the_hook_is_the_plain_limit_moved_by_the_hooks_own_time() {
 
     let after = HookWindow::Closes(bound).moves(during, plain, opened, ended);
     assert_eq!(after, 1_861_001);
-    assert!(
-        ended <= after - 1,
-        "the worker is not stalled at the hook's end"
-    );
+    assert!(ended < after, "the worker is not stalled at the hook's end");
 
     let quick = HookWindow::Closes(bound).moves(during, plain, opened, opened);
     assert_eq!(

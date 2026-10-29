@@ -50,8 +50,9 @@
 //! `prepare_timeout`) the worker applies no reply: starts, stops and acknowledgements wait
 //! in the queue, a start may go stale there, and replies beyond the queue are dropped and
 //! sent again. Heartbeats are not delayed. The worker's stall watchdog is allowed the
-//! hook's bound only while the hook runs ([`HookWindow`]): it is given back when the hook
-//! returns, so the rest of the order has the plain stall bound again.
+//! hook's bound only while the hook runs ([`HookWindow`]): when the hook
+//! returns the limit is the order's plain one moved later by the time the hook took, so
+//! the rest of the order has the plain stall bound and the hook's time is not charged to it.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -250,26 +251,31 @@ fn vetted(verdict: Verdict) -> Quiet {
 }
 
 /// A change to the time the worker's watchdog allows, told by [`WorkerHook::vet`] around a
-/// hook run: the hook's bound is added when the hook is about to start and taken away when
-/// it has returned, so the allowance lasts for the hook and for nothing else.
+/// hook run: the hook's bound is added when the hook is about to start, and when it has
+/// returned the allowance is the time the hook really took, so it lasts for the hook and
+/// for nothing else. (A hook that panics skips the closing: the worker thread ends, and the
+/// session fails on that.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookWindow {
     /// The hook is about to start; it may take this long.
     Opens(Duration),
-    /// The hook has returned; the same time is taken back.
+    /// The hook has returned (it was given this bound).
     Closes(Duration),
 }
 
 impl HookWindow {
     /// The watchdog's limit (milliseconds on the lifecycle's clock) after this change.
     /// `limit` is the limit now, `plain` the limit the order has without a hook (fixed when
-    /// it began), `opened` when the hook started and `now` the time of the change.
+    /// it began), `opened` when the hook started and `now` the time of the change. Opening
+    /// adds the bound; closing gives the plain limit moved later by the time the hook took,
+    /// so only the hook's own time is excused.
     pub fn moves(self, limit: u64, plain: u64, opened: u64, now: u64) -> u64 {
         let millis = |bound: Duration| u64::try_from(bound.as_millis()).unwrap_or(u64::MAX);
-        let _ = (plain, opened, now);
         match self {
             Self::Opens(bound) => limit.saturating_add(millis(bound)),
-            Self::Closes(bound) => limit.saturating_sub(millis(bound)),
+            // Not `limit` minus the bound: the plain limit was fixed when the order began,
+            // and a hook that ran longer than it would leave the limit in the past.
+            Self::Closes(_) => plain.saturating_add(now.saturating_sub(opened)),
         }
     }
 }
@@ -301,7 +307,7 @@ impl WorkerHook {
     /// run. Blocks as long as the hook runs, up to the bound given to [`WorkerHook::new`];
     /// `watch` is told [`HookWindow::Opens`] with that bound just before the hook starts and
     /// [`HookWindow::Closes`] with it as soon as the hook has returned (the worker moves its
-    /// watchdog's limit by it); it is told nothing when the hook does not run.
+    /// watchdog's limit by what the hook took); it is told nothing when the hook does not run.
     pub fn vet(&self, found: Quiet, watch: &dyn Fn(HookWindow)) -> Quiet {
         match found {
             Quiet::Ready => {

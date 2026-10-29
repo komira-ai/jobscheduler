@@ -798,8 +798,9 @@ fn the_checks_before_the_hook_have_the_plain_stall_bound() {
 /// nothing once the first has published `Done`: the test holds the checks of the first order,
 /// asks again (a second order queues behind it), and releases both; the answer is `Done` and
 /// the checks ran once (one listing of the host's processes). It catches a worker that
-/// recomputes the answer for every restore order, which would run the checks again (and
-/// turn `Done` into `Busy` if a job had started).
+/// recomputes the answer for every restore order: it would run the checks again (the count
+/// of host listings is what bites here; the answer is `Done` either way when no job has
+/// started, and `answers.rs` covers the job that starts between the orders).
 #[test]
 fn a_second_restore_order_through_the_worker_leaves_done() {
     let dir = Scratch::new("jobs-quiesce-restore-twice");
@@ -819,6 +820,53 @@ fn a_second_restore_order_through_the_worker_leaves_done() {
     machine.world.release();
     assert!(handle.settle());
 
-    assert_eq!(host.restore(LEASE), Restored::Done);
+    assert_eq!(host.restore(LEASE), Restored::Done, "the answer is kept");
     assert_eq!(machine.world.checked(), 1, "the checks ran once");
+}
+
+/// Asserts a hook that outlasts the plain stall bound (the clock moved past it while the hook
+/// runs, still inside the hook's bound) leaves a worker that is alive, not stalled and with
+/// the lease ready once the hook returns: the worker goes on to step and publish. The
+/// limit right after the hook returns (the plain limit moved by the hook's run time) is
+/// pinned in `answers.rs`; nothing in the real worker can be held between the hook's return
+/// and the end of the order, so this test sees the end of the order only.
+#[test]
+fn a_hook_longer_than_the_plain_stall_bound_leaves_the_worker_sound() {
+    let dir = Scratch::new("jobs-quiesce-long-hook");
+    let machine = FakeMachine::new();
+    let runs = Arc::new(AtomicUsize::new(0));
+    let (started, started_rx) = channel();
+    let (release_tx, release) = channel();
+    let worker = hooked(
+        &dir,
+        &machine,
+        Gated {
+            runs: Arc::clone(&runs),
+            started,
+            release,
+        },
+    );
+    let handle = worker.handle();
+    let mut host = WorkerHost::new(handle.clone());
+
+    assert_eq!(
+        worker.try_deliver(granting(LEASE, &[])),
+        Delivery::Delivered
+    );
+    assert!(handle.settle());
+    assert_eq!(host.prepare(LEASE), Quiet::Busy);
+    started_rx
+        .recv_timeout(HANG_GUARD)
+        .expect("the hook started");
+    let own = stall_bound(Duration::from_secs(1), 1);
+    machine
+        .clock
+        .advance(u64::try_from(own.as_millis()).unwrap() + 500);
+    assert!(!worker.stalled(), "past the plain bound, inside the hook's");
+    release_tx.send(()).unwrap();
+    assert!(handle.settle());
+
+    assert!(!worker.ended());
+    assert!(!worker.stalled());
+    assert_eq!(host.prepare(LEASE), Quiet::Ready);
 }

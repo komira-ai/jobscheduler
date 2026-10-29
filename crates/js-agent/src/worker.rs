@@ -35,9 +35,10 @@
 //!   starts, stops and acknowledgements wait in the queue (a start's validity counts from
 //!   its arrival and may pass), and replies beyond the queue are dropped and sent again.
 //!   Heartbeats go on. The watchdog allows the worker that long for the hook, only while the
-//!   hook runs: its limit grows by the bound when the hook is about to start and falls by the
-//!   same when the hook returns ([`HookWindow`]), so every other part of an order has the
-//!   plain stall bound.
+//!   hook runs: its limit grows by the bound when the hook is about to start, and when the hook
+//!   returns it is the order's plain limit moved later by the time the hook really took
+//!   ([`HookWindow`]), so the rest of the order has the plain stall bound counted from its
+//!   own start, less nothing the hook used.
 //! - **What the worker does is logged by the session thread**: the lifecycle's events
 //!   are kept as lines ([`Worker::take_lines`]; at most [`LINES_CAP`] wait, the rest are
 //!   counted and dropped) and the loop around the session prints them.
