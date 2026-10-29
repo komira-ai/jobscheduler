@@ -33,11 +33,15 @@
 //!   leaves the record unresolved until a list shows the machine or `unknown_hold` has
 //!   passed; a machine found after that is released and never uncounted.
 //! * Machines the registry does not hear from. A host the registry shows but does not hear
-//!   from is held and counted, and [`State::silent`] says since when. One the registry no
-//!   longer shows is released: it holds no lease and is still billed. That needs a complete
-//!   registry view ([`Input::registry_complete`], the shell's duty to vouch for) and the
-//!   machine missing on two steps `unknown_hold` apart; otherwise it is held and counted. One the provider says
-//!   it no longer has ([`Input::not_found`]) is settled.
+//!   from is held and counted, and [`State::silent`] says since when; once the registry's
+//!   lease grace has given up its leases ([`HostFacts::lease_given_up`]) and it has stayed
+//!   silent for `unknown_hold`, the machine is released, since it costs money and holds
+//!   nothing, and [`State::silent_released`] names it for the shell to log. Hosts the
+//!   scaler did not launch are never released. One the registry no longer shows is
+//!   released too, but only on a complete registry view ([`Input::registry_complete`], the
+//!   shell's duty to vouch for) with the machine missing on two steps `unknown_hold` apart;
+//!   otherwise it is held and counted. One the provider says it no longer has
+//!   ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is
 //!   revoked and the machine released, every step, until a read by id says gone. There is

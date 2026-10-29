@@ -455,7 +455,8 @@ impl Offer { pub fn fit(&self, demand: &Demand) -> Result<(), Dimension>; }  // 
 
 /// Chosen before launch, derived from scheduler id and acquire id; same `js-<hash>-`
 /// prefix as the Lambda ownership marks, so `Owner::claim` works unchanged. The acquire id is
-/// 128 random bits drawn at Planned and written in the record, so a name is never reused
+/// 128 random bits taken from the scaler's input (the shell draws them; the pure step has no randomness)
+/// when the Launching record is made, and written in the record, so a name is never reused
 /// (not after a restart, not after a lost state file; see 6.3).
 pub struct HostName(String);
 pub struct HostRef(pub String);      // the provider's own id for a machine
@@ -617,7 +618,7 @@ pub struct Input<'a> { pub now: Instant /* injected */, pub pool: &'a PoolSettin
     pub health: &'a PoolHealth, pub offers: &'a [Offer],
     pub waiting: &'a [Waiting], pub hosts: &'a [HostFacts],
     pub held: Option<&'a [Held]> /* None if list failed */, pub records: &'a Records }
-pub enum Action { Record(Record) /* written first */, Mint { host: HostName, valid_for: Duration },
+pub enum Action { Save(Records) /* the whole records, written first when a step changed them */, Mint { host: HostName, valid_for: Duration },
     Acquire(AcquireRequest) /* payload already rendered by the shell */, Drain(HostName), Undrain(HostName),
     ReleaseHost(HostName) /* registry mark, only if still quiet */, Revoke(HostName),
     Release { host: HostName, id: HostRef }, ForgetNetwork(HostName), RemoveHost(HostName) }
@@ -668,10 +669,13 @@ Rules, each tied to a requirement or to existing behaviour:
   caps fail, the pool shows `blocked: max_instances`, `blocked: max_spend` or
   `blocked: max_spend_day` and the request keeps waiting. `held == None` (the list failed)
   blocks launches the same way.
-  The day total (requirement 15, a hard bound on spend over time) is the sum, over every record
-  launched in the last 24 hours on the injected clock, of its stored price times its billed
-  time: from launch to Gone (or to now, if not Gone), never less than one minute, and for a
-  boot that failed or was never seen, never less than `boot_timeout`. The billing granule is
+  The day total (requirement 15, a hard bound on spend over time) is the sum, over every record,
+  of its stored price times the part of its billed time that lies in the last 24 hours on the
+  injected clock: the billed time runs from launch to Gone (or to now, if not Gone), never less
+  than one minute, and for a boot that failed or was never seen, never less than `boot_timeout`.
+  A record that ended more than a day ago costs nothing and is dropped; one that still runs
+  costs the 24 hours it has run. A launch waiting for its time (`Deferred`) counts its least
+  cost, and its retry is checked against every cap again. The billing granule is
   not verified (the Lambda crate and docs do not state it; Open questions 2): the design
   rounds each record up to whole minutes and counts failed boots in full, which can only
   overstate. The candidate's minimum cost is its price times `boot_timeout`. A record
@@ -718,11 +722,14 @@ Rules, each tied to a requirement or to existing behaviour:
   token is re-minted at the retry.
 - Booting to Registered: the first hello whose `instance.instance_id` equals the name is
   admitted by the registry. The hello's shape is compared with the offer. A host that
-  reports less than its offer (cpu, memory, gpus, gpu class) is rejected, moves to
-  Releasing, and starts the boot-failure cooldown below. Otherwise the real shape is the capacity, and the pending request
+  reports less than its offer (cpu, memory, gpus, gpu class) is rejected: the boot-failure
+  cooldown below starts at once, and the host is drained and then released as soon as it is
+  quiet (`drain` and `release_host` are each checked under the registry's lock, so no work is
+  cut; a host that already has work is left until it is quiet). Otherwise the real shape is the capacity, and the pending request
   is placed by the registry's normal path on the consumer's next poll.
-- Booting to Releasing on `boot_timeout` (default 15 min): the agent never said hello (or
-  was refused `host-contract`). The instance is released. Any boot failure blocks new
+- Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
+  token's life is): the agent never said hello (or was refused `host-contract`). A host the
+  registry shows has said hello, so a silent one is not released by this. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
   14 Q14) and shows `blocked: boot_failed`. The billed minutes of the failed boot stay in the
   day total. Counting failures, doubling the cooldown and suppressing a single offer are
@@ -749,9 +756,20 @@ Rules, each tied to a requirement or to existing behaviour:
   `Gone` (a 404 by id after a successful list, `provider.rs::trust_absent`) moves to Gone
   and calls `Registry::remove`. Release keeps retrying until a read by id says Gone.
 - Lost: a registered host silent past grace is not released on silence alone (silence is
-  Unknown, `registration.md` Lifecycle). If the provider reports `terminated` or
-  `preempted`, or `get_instance` answers not-found, the scaler revokes, forgets the device
-  and removes the host so its slot is free. Until then it counts toward the caps.
+  Unknown, `registration.md` Lifecycle), and not while the registry still holds its leases.
+  If the provider reports `terminated` or `preempted`, or `get_instance` answers not-found
+  (the input names the machine), the scaler revokes, forgets the device and removes the host so
+  its slot is free. A silent machine the scaler launched also costs money, so once the lease
+  grace has given up its leases (the shell says so in the host facts) and it has stayed silent
+  for `unknown_hold`, it is released (revoke, release, read back to Gone) and the step names it
+  for the shell to log. Hosts of a static pool are never released by the scaler. Until then the
+  machine counts toward the caps and the state shows the age of its silence.
+- A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
+  way, but only on a complete, settled registry view (the shell says so in the input; a view
+  read while the registry is loading, or in part, is incomplete and holds everything) and when
+  the machine has been missing on two steps at least `unknown_hold` apart, with no step between
+  that showed it or had an incomplete view. Releasing on a view that merely lacks hosts would
+  cut work after a registry restart.
 - Orphans: an instance in `list` with our marks and no record (a lost state file). Policy
   is in 6.4.
 
@@ -781,10 +799,10 @@ Rules, each tied to a requirement or to existing behaviour:
   scaler's call after a read-back `Gone`; `remove` on a host already forgotten is a no-op
   `Ok`; the scaler counts machines by its records and the provider's `list`, never by the
   registry, so a forgotten host that still exists in the cloud is still counted and still
-  released. `forget_lost` drops a forgotten host's binding too (`registry.rs`: the binding
+  released (on a complete registry view, missing twice; 6.2 Lost). `forget_lost` drops a forgotten host's binding too (`registry.rs`: the binding
   file is rewritten from live records only), so nothing on the scheduler side remembers a
   forgotten host. That is safe here because every launch has a fresh `HostName` (the
-  acquire id is random and unique per acquire, 5.2), so a name is never reused, even after
+  acquire id is the pool and 128 random bits from the input, unique per acquire, 5.2), so a name is never reused, even after
   a lost state file; and a forgotten host's token is already spent and its credential is
   revoked at release (7.2), so it cannot re-register under the old name. Only a hand-joined
   host that reuses an old name meets `host-bound`, which is the existing behaviour.
@@ -870,7 +888,7 @@ nothing else. It is chosen over first-use binding because it needs no change to
 
 The real defences against a stolen token, in the order they act:
 
-1. Expiry: the token is minted with ttl `boot_timeout` plus a margin (default 20 min), under
+1. Expiry: the token is minted with ttl `boot_timeout` plus a margin (default 5 min, so 20 min), counted from the launch, under
    `MAX_TTL` (24 h). An unused token is dead after that.
 2. The host credential (below), issued at the first hello. After it, the token is dead.
 3. Revoke at release, before terminate (6.2), and at Failed.

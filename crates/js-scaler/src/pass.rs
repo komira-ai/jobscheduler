@@ -22,6 +22,8 @@ pub(crate) struct Pass<'a> {
     /// Since when each silent host was silent at the last step, and at this one.
     silent: BTreeMap<String, Millis>,
     pub(crate) silent_now: BTreeMap<String, Millis>,
+    /// The machines released this step on their host's silence.
+    pub(crate) silent_released: Vec<String>,
     /// Since when each machine was missing from a complete view, at the last step and now.
     missing: BTreeMap<String, Millis>,
     pub(crate) missing_now: BTreeMap<String, Millis>,
@@ -90,6 +92,7 @@ impl<'a> Pass<'a> {
             quiet_now: BTreeSet::new(),
             silent: state.silent,
             silent_now: BTreeMap::new(),
+            silent_released: Vec::new(),
             missing: state.missing,
             missing_now: BTreeMap::new(),
             extras: Vec::new(),
@@ -453,11 +456,17 @@ impl<'a> Pass<'a> {
     ///   hear from: revoked, forgotten and removed, and gone.
     /// * A host the registry no longer shows: it forgot it (`forget_lost`), so it holds no
     ///   lease, and the machine is still billed and still counted; it is released.
-    /// * A host the registry shows but does not hear from: held and counted, never released
-    ///   on silence, until the provider says it is terminated or not found.
+    /// * A host the registry shows but does not hear from: held and counted while the
+    ///   registry still holds its leases. Once its lease grace has given up the leases
+    ///   (`lease_given_up`) and it has stayed silent for `unknown_hold`, the machine is
+    ///   released (nothing is lost, and it costs money), named in `silent_released` for the
+    ///   shell to log. Until then only the provider saying it is terminated or not found
+    ///   ends it.
     fn on_held(&mut self, pool: &PoolInput, i: usize, host: Option<&HostFacts>) {
         let name = self.records.instances[i].name.clone();
         let not_found = self.input.not_found.contains(&name);
+        let given_up = host.is_some_and(|host| host.lease_given_up);
+        let hold = pool.settings.unknown_hold;
         match (host.map(|host| (host.state, host.mark)), not_found) {
             (Some((HostState::Live, mark)), _) => self.on_mark(i, mark),
             (_, true) => {
@@ -465,7 +474,14 @@ impl<'a> Pass<'a> {
                 self.confirm_gone(i);
             }
             (None, false) => self.on_forgotten(pool, i, name),
-            (Some(_), false) => {}
+            (Some(_), false) => {
+                let since = self.silent.get(&name).copied();
+                let ripe = since.is_some_and(|since| self.now.since(since) >= hold);
+                if [given_up, ripe].into_iter().all(|ok| ok) {
+                    self.start_release(i);
+                    self.silent_released.push(name);
+                }
+            }
         }
     }
 

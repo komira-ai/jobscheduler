@@ -294,7 +294,7 @@ fn a_silent_host_with_its_leases_given_up_is_released_after_the_hold() {
     assert_eq!(count(&actions, "Revoke"), 1);
     assert_eq!(count(&actions, "Release"), 1);
     assert_eq!(rig.phase(0), Phase::Releasing);
-    assert_eq!(rig.state.silent_released, [name.clone()]);
+    assert_eq!(rig.state.silent_released, vec![name.clone()]);
 
     rig.input.released = vec![js_scaler::ReleaseResult {
         host: name,
