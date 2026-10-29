@@ -68,10 +68,12 @@ impl AcquireBody {
         };
         Requirements::try_from_request(&request).map_err(|why| {
             ApiError::bad_request(match why {
-                RequirementsError::BadDisk(_) => {
-                    "disk-gib must be a whole number of GiB below 2^34"
+                RequirementsError::BadDisk(value) => {
+                    format!("disk-gib must be a whole number of GiB below 2^34, not {value}")
                 }
-                RequirementsError::BadExec(_) => "exec must be container or sandbox-exec",
+                RequirementsError::BadExec(_) => {
+                    "exec must be container or sandbox-exec".to_owned()
+                }
             })
         })?;
         Ok((request, self.ttl_seconds.map(Duration::from_secs)))
