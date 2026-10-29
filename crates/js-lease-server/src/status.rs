@@ -27,6 +27,7 @@ use serde::Serialize;
 
 use crate::adapt::SharedClock;
 use crate::checks::{Checked, State, Verdict};
+use crate::hosts::MemoryView;
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 use crate::scaler::Scaler;
 
@@ -56,6 +57,9 @@ struct PoolView {
     /// The execution mode the hosts must report, or `none` for a pool that asked for none.
     exec: String,
     launch: &'static str,
+    /// The memory of the pool's floor, the percent of it the pool books and what that
+    /// comes to.
+    memory: MemoryView,
     state: State,
     /// Why the pool is unavailable, one line for each check that failed.
     reasons: Vec<String>,
@@ -284,6 +288,7 @@ impl Status {
             network: pool.network_kind,
             exec: exec_name(pool.exec),
             launch: pool.launch,
+            memory: MemoryView::of(pool.memory),
             state,
             reasons: health.reasons(),
             credentials: check_view(health.credentials),
@@ -372,6 +377,12 @@ fn pool_section(out: &mut String, pool: &PoolView) {
     row(out, "network", pool.network);
     row(out, "exec", &pool.exec);
     row(out, "launch", pool.launch);
+    let memory = &pool.memory;
+    let booked = format!(
+        "{} of {} bytes ({}%)",
+        memory.bookable_bytes, memory.configured_bytes, memory.schedulable_percent
+    );
+    row(out, "memory booked", &booked);
     row(out, "credentials", &check_text(&pool.credentials));
     row(out, "network check", &check_text(&pool.network_check));
     for check in &pool.provider_checks {

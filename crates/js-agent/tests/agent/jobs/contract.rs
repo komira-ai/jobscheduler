@@ -53,7 +53,9 @@ fn host_checked_by(answer: Result<&str, &str>) -> Host {
 /// `exec=container` beside `os` and `arch`, that a host with two GPUs and no toolkit hook
 /// reports no `gpu-toolkit`, and that the capability the server names in its refusal is
 /// printed. It catches an agent that does not say how it runs jobs (every pool with a mode
-/// would refuse it), and one that claims a toolkit it never checked.
+/// would refuse it), one that claims a toolkit it never checked, and one that does not
+/// advertise `run-files` (the server would never send it a start with files, or, worse
+/// for a server that guessed, would send one to an agent that ignores them).
 #[test]
 fn a_container_agent_reports_its_runtime_and_mode() {
     let (ran, hello) = container_hello("contract-container", &[], &linux_host());
@@ -65,6 +67,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "arch": "x86_64",
             "runtime": "container",
             "exec": "container",
+            "run-files": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";
@@ -149,12 +152,12 @@ fn the_toolkit_hook_flag_is_checked_at_start() {
     assert_eq!(hello, Value::Null);
 }
 
-/// Asserts that an operator cannot give any of the four capabilities with `--capability`:
+/// Asserts that an operator cannot give any of the five capabilities with `--capability`:
 /// the agent ends with status 2 naming the key, and sends nothing. It catches a pool's
 /// contract satisfied by a flag instead of by what the host has.
 #[test]
 fn the_contract_capabilities_cannot_be_set_by_flag() {
-    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib"] {
+    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib", "run-files"] {
         let flag = format!("{key}=container");
         let (ran, sent, _) = run_scripted(
             &["--capability", flag.as_str()],
@@ -270,4 +273,72 @@ fn an_unreadable_volume_is_a_warning_and_no_disk() {
         let said = format!("--scratch-root: cannot read the free disk ({reason}");
         assert!(ran.err.contains(&said), "{}", ran.err);
     }
+}
+
+/// Asserts that an agent whose run files root is on a disk, not on a tmpfs, ends with
+/// status 2 naming `--run-files-root` before it sends anything, and that the same agent
+/// with the root on a tmpfs says hello with `run-files`. It catches secrets (URLs, tokens)
+/// that would be written to a disk, and a check that cannot fail.
+#[test]
+fn a_run_files_root_must_be_on_a_tmpfs() {
+    let dir = Scratch::new("contract-files-disk");
+    let owned = container_flags(&dir);
+    let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let root = std::fs::canonicalize(dir.path("run-files")).unwrap();
+    let mut host = linux_host();
+    host.files = host.files.clone().disk_under(&root);
+    let (script, sent) = Script::new(vec![no_runtime()]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on(
+        &flags(&all),
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains("--run-files-root:") && ran.err.contains("is not on a tmpfs"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
+    let (_, hello) = container_hello("contract-files-tmpfs", &[], &linux_host());
+    assert_eq!(hello["capabilities"]["run-files"], "true");
+}
+
+/// Asserts that a run files root whose file system cannot be looked at stops the agent
+/// with status 2, naming `--run-files-root` and that it cannot tell, and sends nothing. It
+/// catches a probe failure read as "fine", which would let secrets reach a disk.
+#[test]
+fn a_run_files_root_that_cannot_be_looked_at_stops_the_agent() {
+    let dir = Scratch::new("contract-files-unlooked");
+    let owned = container_flags(&dir);
+    let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let root = std::fs::canonicalize(dir.path("run-files")).unwrap();
+    let mut host = linux_host();
+    host.files = host.files.clone().unlooked_under(&root);
+    let (script, sent) = Script::new(vec![no_runtime()]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on(
+        &flags(&all),
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err
+            .contains("--run-files-root: cannot tell what file system it is on"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
 }
