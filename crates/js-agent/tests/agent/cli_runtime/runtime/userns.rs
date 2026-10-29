@@ -99,7 +99,7 @@ fn maps(args: &[String]) -> Vec<String> {
 fn podman_creates_every_container_with_both_maps() {
     let world = podman();
     let dir = Scratch::new("userns-podman");
-    let mut rt = open_mapped(&world, &dir).unwrap();
+    let mut rt = open_mapped(&world, &dir).unwrap().with_chown(record);
     rt.create_and_start(&spec("r1")).unwrap();
     rt.create_and_start(&spec("r2")).unwrap();
     for run in ["r1", "r2"] {
@@ -130,7 +130,7 @@ fn docker_that_remaps_onto_the_range_is_accepted_and_given_no_maps() {
         let world = docker();
         world.say("info", printed);
         let dir = Scratch::new("userns-docker-ok");
-        let mut rt = open_mapped(&world, &dir).unwrap();
+        let mut rt = open_mapped(&world, &dir).unwrap().with_chown(record);
         rt.create_and_start(&spec("r1")).unwrap();
         let args = created(&world, "r1");
         assert!(
