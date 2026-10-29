@@ -172,7 +172,7 @@ impl<'a> Pass<'a> {
             Acquired::Accepted { held, extras } => {
                 let failed = self.records.instances[i].phase == Phase::Failed;
                 let moved = if failed {
-                    self.start_release(i)
+                    self.go(i, Phase::Releasing)
                 } else {
                     self.go(i, Phase::Booting)
                 };
@@ -296,7 +296,7 @@ impl<'a> Pass<'a> {
                 self.go(i, Phase::Booting);
             }
             Phase::Failed => {
-                self.start_release(i);
+                self.go(i, Phase::Releasing);
             }
             _ => {}
         }
