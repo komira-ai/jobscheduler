@@ -103,7 +103,7 @@ impl WorkKeyBody {
     /// The key, or the 422 `invalid-work-key` when the class is empty or a part is longer
     /// than [`MAX_WORK_KEY_PART`] bytes.
     fn into_key(self) -> Result<WorkKey, ApiError> {
-        let fits = |part: &str| part.len() <= MAX_WORK_KEY_PART;
+        let fits = |part: &str| part.chars().count() <= MAX_WORK_KEY_PART;
         match !self.class.is_empty() && fits(&self.class) && fits(&self.dedup) {
             true => Ok(WorkKey::new(self.class, self.dedup)),
             false => Err(ApiError::coded(
