@@ -1,0 +1,128 @@
+# The js-agent deb (packaging/js-agent): built from the musl binary by nfpm (pinned by
+# SHA-256), checked against the list of what it may contain (`cargo xtask pkg check-deb`),
+# and attested. It publishes nothing: no release, no package repository, no registry, no
+# bucket. The deb is a workflow artifact for seven days, and its provenance attestation is
+# stored by GitHub; getting it anywhere else is a separate, deliberate step.
+#
+# A pull request that changes the package, its checker or the agent builds and checks it as
+# version 0.0.0 and attests nothing. The filter lists what the package and its checker are made
+# of (the workflow, packaging/js-agent, js-agent, xtask, Cargo.lock, LICENSE); a change to a
+# crate that js-agent depends on is built into the deb at the next manual run, which is
+# deliberate. A manual run on main with a version builds and checks the deb of that version,
+# then attests it and verifies the attestation as a host would (`gh attestation verify`). Only
+# the `attest` job holds id-token and attestations write, and it runs no repository code.
+#
+# What a manual run attests is the tip of main when it starts, built here, as the version typed:
+# the typed version goes through `cargo xtask release stamp` (MAJOR.MINOR.PATCH only) before
+# anything uses it, and into the deb's control file, which the attestation covers by digest. The
+# run is not tied to a passing `ci` run, to a tag or to the workspace version (release.yml ties
+# a release to those), and it has no `environment:` gate: the person who dispatches it picks the
+# version and answers for it. The attest and verify jobs cannot run on a pull request, so the
+# first manual run on main is their first run; read its verify job before relying on the
+# attestation.
+# crates/xtask/tests/js_agent_package.rs pins these rules.
+name: js-agent-deb
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/js-agent-deb.yml'
+      - 'packaging/js-agent/**'
+      - 'crates/js-agent/**'
+      - 'crates/xtask/**'
+      - 'Cargo.lock'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The package version, MAJOR.MINOR.PATCH
+        required: true
+        type: string
+
+permissions: {}
+
+# Two manual runs of different versions on main do not replace one another while pending.
+concurrency:
+  group: js-agent-deb-${{ github.ref }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  VERSION: ${{ inputs.version || '0.0.0' }}
+  TARGET: x86_64-unknown-linux-musl
+  NFPM_VERSION: 2.48.0
+  NFPM_SHA256_X86_64_LINUX: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      # The version goes into this checkout only, so the binary prints it.
+      - name: Stamp the version
+        run: cargo xtask release stamp --to "$VERSION"
+      - name: Build js-agent
+        run: cargo build --locked --release --target "$TARGET" -p js-agent --bin js-agent
+      - name: Fetch nfpm (pinned version, checked by SHA-256)
+        run: cargo xtask fetch --url "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" --sha256 "$NFPM_SHA256_X86_64_LINUX" --out "$RUNNER_TEMP/tools/nfpm" --extract tar.gz --member nfpm
+      - name: Build the deb
+        env:
+          SOURCE_DATE_EPOCH: '1790000000'
+        run: $RUNNER_TEMP/tools/nfpm package --config packaging/js-agent/nfpm.yaml --packager deb --target "js-agent_${VERSION}_amd64.deb"
+      - name: The deb holds exactly the package, with the binary and the unit of this commit
+        run: cargo xtask pkg check-deb --deb "js-agent_${VERSION}_amd64.deb" --version "$VERSION" --binary "target/$TARGET/release/js-agent" --packaging packaging/js-agent --license LICENSE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: js-agent-deb
+          path: js-agent_${{ env.VERSION }}_amd64.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  # Build provenance for the deb. No repository code runs here.
+  attest:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: js-agent-deb
+          path: dist
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/js-agent_${{ env.VERSION }}_amd64.deb
+
+  # The attestation as a host checks it: made by this workflow, from main, for this commit.
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    needs: [attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: js-agent-deb
+          path: dist
+      - name: Verify the deb's attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh attestation verify "dist/js-agent_${VERSION}_amd64.deb" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/js-agent-deb.yml" --source-ref refs/heads/main --source-digest "$GITHUB_SHA" --deny-self-hosted-runners

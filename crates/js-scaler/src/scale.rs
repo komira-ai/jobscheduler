@@ -540,6 +540,7 @@ impl Pass<'_> {
             condemned: false,
             clean_lists: 0,
             last_clean: None,
+            seen_live: false,
         };
         (!repeat).then_some(record).ok_or(Blocked::Entropy)
     }

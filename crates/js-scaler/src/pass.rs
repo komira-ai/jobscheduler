@@ -119,12 +119,15 @@ impl<'a> Pass<'a> {
     }
 
     /// Starts the release of a machine: its join token is revoked, and from now on every
-    /// step asks the provider to release it. Each machine enters `Releasing` once, so
-    /// its token is revoked once.
-    fn start_release(&mut self, i: usize) {
+    /// step asks the provider to release it. Each machine enters `Releasing` once. A
+    /// `Failed` record was already revoked by `clean_up` when it failed, so it is revoked
+    /// again on entering `Releasing`: that is harmless, for revoking a name that has no
+    /// token is a no-op that succeeds, and it keeps a restart from losing the first revoke.
+    fn start_release(&mut self, i: usize) -> bool {
         let moved = self.go(i, Phase::Releasing);
         let name = self.records.instances[i].name.clone();
         self.actions.extend(moved.then_some(Action::Revoke(name)));
+        moved
     }
 
     /// Revokes the token and forgets the network key of a machine that never was.
@@ -169,11 +172,13 @@ impl<'a> Pass<'a> {
     fn on_acquired(&mut self, pool: &PoolInput, i: usize, result: &AcquireResult) {
         match &result.answer {
             Acquired::Accepted { held, extras } => {
-                let to = match self.records.instances[i].phase {
-                    Phase::Failed => Phase::Releasing,
-                    _ => Phase::Booting,
+                let failed = self.records.instances[i].phase == Phase::Failed;
+                let moved = if failed {
+                    self.start_release(i)
+                } else {
+                    self.go(i, Phase::Booting)
                 };
-                if self.go(i, to) {
+                if moved {
                     self.records.instances[i].cloud_id = Some(held.id.0.clone());
                     self.record_extras(i, extras);
                 }
@@ -218,6 +223,7 @@ impl<'a> Pass<'a> {
                 condemned: false,
                 clean_lists: 0,
                 last_clean: None,
+                seen_live: false,
                 ..launch.clone()
             });
         }
@@ -288,13 +294,14 @@ impl<'a> Pass<'a> {
         self.records.instances[i]
             .cloud_id
             .get_or_insert_with(|| held.id.0.clone());
-        let found = match before {
-            Phase::Launching | Phase::Unresolved => Some(Phase::Booting),
-            Phase::Failed => Some(Phase::Releasing),
-            _ => None,
-        };
-        if let Some(to) = found {
-            self.go(i, to);
+        match before {
+            Phase::Launching | Phase::Unresolved => {
+                self.go(i, Phase::Booting);
+            }
+            Phase::Failed => {
+                self.start_release(i);
+            }
+            _ => {}
         }
         match (before, is_dead(&held.status)) {
             (Phase::Booting | Phase::Registered | Phase::Draining, true) => {
@@ -407,6 +414,7 @@ impl<'a> Pass<'a> {
                 condemned: false,
                 clean_lists: 0,
                 last_clean: None,
+                seen_live: false,
             });
         }
     }
@@ -416,7 +424,14 @@ impl<'a> Pass<'a> {
         for i in self.indices(&pool.settings.pool) {
             let record = &self.records.instances[i];
             let host = host_named(input, &record.name);
-            match (record.phase, host) {
+            let heard = host.is_some_and(|each| {
+                [each.state == HostState::Live, each.heard_since_hello]
+                    .into_iter()
+                    .all(|ok| ok)
+            });
+            let phase = record.phase;
+            self.records.instances[i].seen_live |= heard;
+            match (phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
                 (Phase::Booting, None) => self.on_boot_wait(pool, i),
                 (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
@@ -427,7 +442,8 @@ impl<'a> Pass<'a> {
 
     /// The first hello of a booting machine: it is registered, and condemned if it
     /// announced less than its offer. A host the registry shows has said hello whatever it
-    /// has done since, so one that is silent now is registered too and then held.
+    /// has done since, so one that is silent now is registered too; if it was never heard from
+    /// after its hello and books nothing, [`Pass::on_silent`] then releases it at `boot_timeout`.
     fn on_hello(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
         let record = &mut self.records.instances[i];
         let short = below(&record.offer, &host.shape);
@@ -442,7 +458,8 @@ impl<'a> Pass<'a> {
     /// A machine that has not said hello is given up on `boot_timeout` after its launch,
     /// the instant its join token was minted from, and only on a complete registry view: on
     /// an incomplete one its host may have said hello and be holding work, so the machine is
-    /// held and counted until a complete view still shows no hello.
+    /// held and counted until a complete view still shows no hello. A host that said hello
+    /// and was never heard from again is not this case: see [`Pass::on_silent`].
     fn on_boot_wait(&mut self, pool: &PoolInput, i: usize) {
         let waited = self.now.since(self.records.instances[i].launched_at);
         let due = [
@@ -482,9 +499,24 @@ impl<'a> Pass<'a> {
     /// from. It is held and counted, and `silent` says since when, until the host books
     /// nothing and has been silent for `unknown_hold`; only then does the machine cost
     /// money for nothing. A host that holds a lease, a run or a stream, or is set aside
-    /// for work (`Held`, `Reserved`), is never released, whatever else the snapshot says.
-    /// Otherwise:
+    /// for work (`Held`, `Reserved`, or a waiting request's reservation), is never
+    /// released, whatever else the snapshot says. Otherwise:
     ///
+    /// * a registered host that has not been heard from since its hello
+    ///   ([`HostFacts::heard_since_hello`] false: its Welcome was lost, so it cannot
+    ///   heartbeat) and was never seen live and heard from on any step
+    ///   ([`Record::seen_live`]) is a failed boot: it is released `boot_timeout` after the
+    ///   launch and the boot-failure cooldown starts, as for a boot that never said hello.
+    ///   A host that was heard from once booted, so a re-hello after an agent restart (the
+    ///   registry starts its heartbeat count over) does not make it a failed boot. The rule
+    ///   reads `busy`, the mark and the waiting requests, and not
+    ///   [`HostFacts::lease_given_up`]: it relies on `busy` reflecting the lease the
+    ///   registry booked on the host. For a silent host `lease_given_up` is true when the
+    ///   host holds no lease, which is what `!busy` already says, so reading it as well would
+    ///   add no case and would make the rule wait for the lease grace it is meant to skip;
+    ///   the unknown-hold rules below are what read it. A draining host is not caught by this
+    ///   rule: it falls back to those rules, which wait for `unknown_hold`, the safe
+    ///   direction;
     /// * the registry marks the host `Releasing` (it booked nothing when it did): the
     ///   machine is released and named in `silent_released` for the shell to log;
     /// * the registry's lease grace has given up the leases
@@ -499,11 +531,31 @@ impl<'a> Pass<'a> {
             .silent
             .get(&name)
             .is_some_and(|since| self.now.since(*since) >= hold);
+        let requested = self
+            .input
+            .waiting
+            .iter()
+            .any(|each| each.reserved.as_ref() == Some(&host.id));
         let working = [
             host.busy,
             matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
+            requested,
         ];
-        let due = [ripe, !working.into_iter().any(|work| work)];
+        let idle = !working.into_iter().any(|work| work);
+        let record = &self.records.instances[i];
+        let failed_boot = [
+            !host.heard_since_hello,
+            !record.seen_live,
+            record.phase == Phase::Registered,
+            self.now.since(record.launched_at) >= pool.settings.boot_timeout,
+            idle,
+        ];
+        if failed_boot.into_iter().all(|ok| ok) {
+            self.start_release(i);
+            self.cool(&pool.settings, CooldownReason::BootFailed);
+            return;
+        }
+        let due = [ripe, idle];
         let marked = host.mark == Some(Mark::Releasing);
         match (due.into_iter().all(|ok| ok), marked, host.lease_given_up) {
             (false, _, _) | (true, false, false) => {}
@@ -543,7 +595,9 @@ impl<'a> Pass<'a> {
     /// take (the host was busy) or was undone, so the host is registered again.
     fn on_mark(&mut self, i: usize, mark: Option<Mark>) {
         match (self.records.instances[i].phase, mark) {
-            (_, Some(Mark::Releasing)) => self.start_release(i),
+            (_, Some(Mark::Releasing)) => {
+                self.start_release(i);
+            }
             (Phase::Draining, Some(Mark::Draining)) => {}
             (Phase::Draining, _) => {
                 self.go(i, Phase::Registered);

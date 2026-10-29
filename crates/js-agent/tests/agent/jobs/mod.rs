@@ -4,6 +4,7 @@
 //! moved by the test; the worker is a real thread, and every wait on it is for an event
 //! (an order done, a call begun) with a hang guard, never for a time.
 
+mod answers;
 mod contract;
 mod contract_e2e;
 mod drain;
@@ -11,6 +12,7 @@ mod e2e;
 mod ends;
 mod exclusive;
 pub mod fake;
+mod quiesce;
 mod session;
 mod system;
 mod worker;
@@ -86,6 +88,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         machine: Arc::new(machine.clone()),
         step_every,
         rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
+        readiness: None,
     }
 }
 
