@@ -30,6 +30,7 @@ cat > /etc/systemd/system/js-metadata-block.service <<'BLOCK'
 [Unit]
 Description=jobscheduler metadata address block
 DefaultDependencies=no
+After=nftables.service
 Before=network-pre.target js-agent.service
 Wants=network-pre.target
 
@@ -44,7 +45,20 @@ BLOCK
 chmod 0644 /etc/systemd/system/js-metadata-block.service
 systemctl daemon-reload
 systemctl enable --now js-metadata-block.service
-/usr/sbin/nft list table inet js_metadata > /dev/null
+test "$(/usr/sbin/nft list table inet js_metadata | grep -c drop)" = 2
+# container user namespace
+useradd --system --no-create-home --shell /usr/sbin/nologin js-jobs
+printf '%s\n' js-jobs:1000000:65536 >> /etc/subuid
+printf '%s\n' js-jobs:1000000:65536 >> /etc/subgid
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/js-userns.conf <<'REMAP'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --userns-remap=js-jobs
+REMAP
+chmod 0644 /etc/systemd/system/docker.service.d/js-userns.conf
+systemctl daemon-reload
+systemctl restart docker.service
 # identity
 mkdir -p /etc/jobscheduler
 printf '%s' '***' > /etc/jobscheduler/token
@@ -82,7 +96,7 @@ Wants=network-online.target
 RequiresMountsFor=/var/lib/js-agent/scratch
 
 [Service]
-ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --container-bin /usr/bin/docker --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --container-bin /usr/bin/docker --container-subuid js-jobs --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=5
 

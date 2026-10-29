@@ -3,7 +3,7 @@
 //! requiring them. That a container really cannot read the address is a live check.
 
 use js_lease_server::bootstrap::{
-    Fill, METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_UNIT, NFT_BIN, render,
+    DROP_RULES, Fill, METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_UNIT, NFT_BIN, render,
 };
 use js_lease_server::network::{DefaultMode, NetworkMode};
 
@@ -75,7 +75,8 @@ fn the_block_is_loaded_before_the_agent_exists() {
 
 /// Asserts that the rules persist across a reboot: they are in a file, a oneshot unit
 /// loads that file, the unit is enabled (not only started), stays active after the load,
-/// and is ordered before the agent and before the network comes up.
+/// and is ordered before the agent and before the network comes up, and after the
+/// image's own `nftables.service`, which flushes the whole ruleset as it starts.
 #[test]
 fn the_block_persists_and_is_ordered_before_the_agent() {
     let script = script();
@@ -91,6 +92,7 @@ fn the_block_persists_and_is_ordered_before_the_agent() {
     )));
     assert!(has("WantedBy=multi-user.target"));
     assert!(has("Before=network-pre.target js-agent.service"), "{unit}");
+    assert!(has("After=nftables.service"), "{unit}");
     assert!(script.contains(&format!("systemctl enable --now {METADATA_UNIT}\n")));
 }
 
@@ -128,4 +130,25 @@ fn nothing_from_the_plan_reaches_the_block() {
         section(&render(&odd, Fill::Mask).unwrap()),
         section(&script())
     );
+}
+
+/// Asserts that the readback proves the rules and not only the table: the script lists
+/// the table and compares the number of `drop` lines with the number of drop rules in
+/// the rules file, and `set -e` stops the script on a mismatch. A table that exists but
+/// lost a chain (or an image that flushed it) fails here.
+#[test]
+fn the_readback_counts_both_drop_rules() {
+    let script = script();
+    let rules = heredoc(
+        &script,
+        &format!("cat > {METADATA_RULES_PATH} <<'RULES'\n"),
+        "RULES",
+    );
+    assert_eq!(rules.matches(" drop\n").count(), DROP_RULES);
+    assert_eq!(DROP_RULES, 2);
+    let readback = format!(
+        "test \"$({NFT_BIN} list table inet js_metadata | grep -c drop)\" = {DROP_RULES}\n"
+    );
+    assert!(script.contains(&readback), "{script}");
+    assert!(script.contains("\nset -eu\n"));
 }

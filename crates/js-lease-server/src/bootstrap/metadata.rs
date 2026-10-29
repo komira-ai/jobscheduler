@@ -12,13 +12,18 @@
 //! (a drop is final):
 //!
 //! - `forward`: a container's packets are forwarded by the host, whatever bridge the
-//!   engine made, so one rule on the destination covers every container network.
+//!   engine made, so one rule on the destination covers every bridge network. It does
+//!   not cover every network an engine can make: a rootful `slirp4netns` or `pasta`
+//!   network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
+//!   or `ipvlan` network never passes the host's forward hook. The agent refuses those
+//!   four as `--container-network` names, and the agent's unit passes no network at all.
 //! - `output`: packets of a process on the host, dropped for every uid but 0. The agent
 //!   runs as root and the bootstrap's own steps run as root; once the script is done
 //!   neither needs the address, so it is not opened to them by name.
 //!
 //! The rules live in a file loaded by `js-metadata-block.service`, a oneshot enabled for
-//! boot and ordered `Before=` the agent; the agent's unit `Requires=` it, so the agent
+//! boot, ordered `After=nftables.service` (the image's own service, when enabled, flushes
+//! the whole ruleset as it starts) and `Before=` the agent; the agent's unit `Requires=` it, so the agent
 //! does not start on a boot where the rules failed to load. The table is deleted and made
 //! again on every load, so a second load changes nothing.
 //!
@@ -43,6 +48,10 @@ pub const NFT_BIN: &str = "/usr/sbin/nft";
 
 /// The name of the table the rules are in.
 pub const METADATA_TABLE: &str = "js_metadata";
+
+/// How many `drop` rules the table holds once loaded: the forward chain's and the output
+/// chain's. The script reads the table back and fails if it holds another number.
+pub const DROP_RULES: usize = 2;
 
 /// The rules file, as the machine reads it.
 pub fn rules() -> String {
@@ -70,6 +79,7 @@ pub fn unit() -> String {
         "[Unit]\n\
          Description=jobscheduler metadata address block\n\
          DefaultDependencies=no\n\
+         After=nftables.service\n\
          Before=network-pre.target js-agent.service\n\
          Wants=network-pre.target\n\
          \n\
@@ -84,7 +94,9 @@ pub fn unit() -> String {
 }
 
 /// Writes the block's lines: the program checked, the rules and the unit written, the
-/// unit enabled and started, and the loaded table read back. Any failing line stops the
+/// unit enabled and started, and the loaded table read back: both drop rules must be in
+/// it (`nft` lists them, `grep` counts the lines that drop, `test` compares with the two
+/// the rules file has). Any failing line stops the
 /// script (`set -e`) before the agent's unit is written.
 pub(super) fn write(w: &mut Writer<'_>) {
     w.line("# metadata block");
@@ -103,6 +115,6 @@ pub(super) fn write(w: &mut Writer<'_>) {
     w.line("systemctl daemon-reload");
     w.line(&format!("systemctl enable --now {METADATA_UNIT}"));
     w.line(&format!(
-        "{NFT_BIN} list table inet {METADATA_TABLE} > /dev/null"
+        "test \"$({NFT_BIN} list table inet {METADATA_TABLE} | grep -c drop)\" = {DROP_RULES}"
     ));
 }

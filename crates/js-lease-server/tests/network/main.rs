@@ -17,3 +17,4 @@ mod tailscale_errors;
 mod tailscale_forget;
 mod tailscale_mint;
 mod tailscale_setup;
+mod userns;
