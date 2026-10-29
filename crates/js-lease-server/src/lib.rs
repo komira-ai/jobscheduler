@@ -55,6 +55,9 @@
 //! | `--write-timeout` | how long a write to a client may make no progress before the connection is closed, `10s` |
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
+//! | `--usage-db <path>` | the file the per-minute usage of nodes and the learned cost curves are kept in; `usage.db` beside `--state-file` unless given. Needs agent registration to have anything to keep. Not with `--usage-off` |
+//! | `--usage-off` | turns usage recording off (for an emergency: the per-minute series is meant to be always collected) |
+//! | `--profile-store-bytes <n>` | the most bytes the learned cost curves may take in the usage file, `268435456`; `0` is refused |
 //!
 //! A start that is refused prints the flag at fault and exits with status 2. The
 //! hello limit flags and `--require-host-credential` need `--agent-pool-config`, and are
@@ -88,6 +91,8 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
+//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //!
 //! [[pool]]
 //! name     = "gpu-static"
@@ -376,6 +381,31 @@
 //! written (the failure is logged and counted) a lease granted meanwhile survives a
 //! restart without its binding until a later tick writes it.
 //!
+//! # Usage
+//!
+//! With agents on (and no `--usage-off`) a heartbeat may carry the node's load. After the
+//! registry accepted the beat, the server checks the load, turns it into plain values and
+//! gives it to a [`UsageSink`]; the sink owns the arithmetic and the storage. A load that
+//! is bad costs nothing but its own data: the beat's results, held list and taint are
+//! handled as ever and the reply is unchanged (the load is counted in
+//! [`Running::usage_counters`]). A beat the registry refuses (unknown host, stale epoch,
+//! wrong session) records nothing. Runs that ended cleanly (an `ACCEPTED` result with the
+//! outcome `succeeded` or `failed`) are handed to the sink with their series once the
+//! host has sent two more beats, so the lease's last partial minute is not lost, if a
+//! [`KeySource`] names the work they did; the server has no key of its own, so by default
+//! no run is learned from and `runs_without_key` counts them. The seam types and
+//! [`NoUsage`] are public so that a test or an embedding program can supply its own
+//! ([`Config::with_usage_sink`], [`Config::with_key_source`]). Without a sink of its own
+//! the server records into the SQLite file `--usage-db` names (beside the lease file by
+//! default): node minutes are written by the flush, and the profiles learned from clean
+//! runs are kept under `--profile-store-bytes`; a file that cannot be opened refuses the
+//! start. `--usage-off` leaves the usage side out altogether.
+//!
+//! Every tick acts by the wall clock of the server: the sink is flushed every five
+//! minutes and once more at shutdown, and pruned at the first tick and once a day. A
+//! flush logs one `node minute` line for each node minute it closed and a warning for
+//! each node and minute that had readings dropped.
+//!
 //! # Ticks
 //!
 //! Only a tick expires a lease, retries a stop or resolves a pending start. The server
@@ -420,6 +450,10 @@ mod server;
 mod status;
 mod ticker;
 mod tls;
+mod usage;
+mod usage_hub;
+mod usage_js;
+mod usage_map;
 mod util;
 mod wire;
 
@@ -453,6 +487,12 @@ pub use scaler::{
 };
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
+pub use usage::{
+    BadKey, ClockIn, DropReason, HostLimits, KeySource, LoadIn, MAX_KEY_LEN, MinuteIn, NoKeys,
+    NoUsage, NodeRow, Observation, Observed, ProfileCurves, ProfileKey, RunEnd, RunMinute,
+    RunSeries, SinkCounters, UsageFault, UsageSink,
+};
+pub use usage_hub::UsageCounters;
 
 use error::Failure;
 

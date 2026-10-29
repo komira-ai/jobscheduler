@@ -24,6 +24,8 @@ use crate::scaler::{Parts, Scaler, build};
 use crate::status::Status;
 use crate::ticker::{IntervalTicker, Tick, Ticker};
 use crate::tls;
+use crate::usage::ProfileCurves;
+use crate::usage_hub::UsageCounters;
 use crate::util::or_pending;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
@@ -88,7 +90,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     let tick = config.tick_period();
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
-    let (source, agents) = assemble(config.hosts, &clock, &config.state_file)?;
+    let (source, agents) = assemble(config.hosts, config.usage, &clock, &config.state_file)?;
     let registry = agents.as_ref().map(|agents| agents.registry.clone());
     let elastic = config.elastic.take().map(|mut plan| {
         let setup = Setup {
@@ -341,6 +343,23 @@ impl Running {
         self.shared.agent_errors()
     }
 
+    /// The curves learned from runs that ended cleanly, for admission to read as its
+    /// `CurveSource`. A curve is kept under the profile name the caller supplied for the runs,
+    /// not under the work key, so admission finds it through the names the caller gave
+    /// (`Config::with_curve_names`); without them every work key is charged flat.
+    /// `None` without agent registration, with `--usage-off`, or with a sink that learns
+    /// none.
+    pub fn usage_curves(&self) -> Option<Arc<ProfileCurves>> {
+        self.shared.usage_curves()
+    }
+
+    /// What the usage side has counted since the server started: loads rejected, records
+    /// dropped, runs learned or not and why, and the failures of the usage store, with the
+    /// sink's own counts. All zero without agent registration or with `--usage-off`.
+    pub fn usage_counters(&self) -> UsageCounters {
+        self.shared.usage_counters()
+    }
+
     /// How many times the accept loop found every one of the `--max-connections` slots
     /// taken and waited for one to be given back, since the server started. A loop
     /// that waits is not accepting: this is how a test sees the cap hold, with a
@@ -371,6 +390,9 @@ impl Running {
         self.ticking.0.abort();
         let _ = (&mut self.ticking.0).await;
         let report = self.shared.tick().await;
+        if let Some(usage) = self.shared.usage() {
+            usage.finish().await;
+        }
         let saved = report.save_error.map_or(Ok(()), |err| {
             let file = self.state_file.display();
             let reason = format!("the final tick could not write the lease file {file}: {err}");

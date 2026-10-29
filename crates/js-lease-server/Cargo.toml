@@ -18,7 +18,9 @@ js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-registry = { path = "../js-registry" }
 js-scaler = { path = "../js-scaler" }
 js-sched = { path = "../js-sched" }
+js-state = { path = "../js-state" }
 js-types = { path = "../js-types" }
+js-usage = { path = "../js-usage" }
 axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
@@ -39,6 +41,7 @@ ureq.workspace = true
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+js-state = { path = "../js-state", features = ["test-support"] }
 js-testkit = { path = "../js-testkit" }
 # The test that keeps the secrets out of every log line reads the HTTP client's own
 # `log` output.
