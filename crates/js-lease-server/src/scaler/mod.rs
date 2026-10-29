@@ -17,12 +17,24 @@
 //!   at the start of every tick, and the host's `Release` is not sent until the revoke has
 //!   gone through, so a machine is never terminated while its token still works;
 //! - the alerts it has raised, so that each is said once while it holds;
-//! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. This
-//!   set is not on disk: a restart forgets it, and the new registry then holds the host of
-//!   a gone machine only when the lease file seated a lease on it, which nothing removes
-//!   but the registry's own `forget_lost` (24 hours after the host was lost, and only
-//!   when no lease is booked on it). A restart therefore waits on `forget_lost` for such a
-//!   host.
+//! - the hosts the registry refused to remove (`unremoved`), tried again at every tick. The
+//!   set is kept in its own file ([`UnremovedFile`]) and is a write-ahead: a host is added
+//!   to the set and the file is written before the registry is asked to remove it, and the
+//!   host is dropped and the file written again only after the registry has removed it. A
+//!   refusal therefore needs no write of its own; the file already lists the host. A tick
+//!   writes the file at most once after a failed write and counts one error for it, however
+//!   many hosts are pending; the write is tried again at the start of the next tick. If the
+//!   write-ahead fails the removal is still attempted: when it succeeds there is nothing to
+//!   keep, and when it is refused the host stays in memory and the next tick writes it.
+//!   After a restart [`Scaler::retry_removals`] adds the file's hosts to the set, and the
+//!   first tick tries them: the new registry holds the host of a gone machine when the lease
+//!   file seated a lease on it, and nothing else removes it but the registry's own
+//!   `forget_lost` (24 hours after the host was lost, and only when no lease is booked on it).
+//!   Two windows remain, both with a crash as the second event: between the write of the
+//!   records that call the machine gone and the write-ahead of its host (the records are
+//!   written first because no call may run before the file holds the records it depends on),
+//!   and after a write-ahead that failed, until a later tick writes it. In either the host
+//!   is not retried after the restart and is left to the registry's `forget_lost`.
 //!
 //! The pool's health and offers are the pool's checks' (the `checks` module): the shell asks
 //! the provider for no catalog of its own.
@@ -58,6 +70,7 @@ mod effects;
 mod launch;
 mod live;
 mod store;
+mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,6 +96,7 @@ pub use effects::{Call, Effects};
 pub use launch::{KEY_VALID_FOR, Launcher, RETRY_AFTER};
 pub(crate) use live::Live;
 pub use store::RecordsFile;
+pub use unremoved::UnremovedFile;
 
 /// What the last tick saw, kept for the registry's question "could a launch serve this
 /// request".
@@ -102,6 +116,11 @@ struct Memory {
     /// The hosts of machines that are confirmed gone and that the registry still holds
     /// (it refused to remove them); removed again at the start of every tick.
     unremoved: BTreeSet<String>,
+    /// Whether `unremoved` differs from what its file holds.
+    unremoved_dirty: bool,
+    /// Whether a write of the file failed in this tick: no other is tried in it, and the
+    /// failure is counted once.
+    unremoved_failed: bool,
     /// The alerts that hold now, by key, with their text.
     alerts: BTreeMap<String, String>,
     save_errors: u64,
@@ -171,6 +190,8 @@ impl Scaler {
             released: Vec::new(),
             unrevoked,
             unremoved: BTreeSet::new(),
+            unremoved_dirty: false,
+            unremoved_failed: false,
             alerts: BTreeMap::new(),
             save_errors: 0,
         };
@@ -190,6 +211,14 @@ impl Scaler {
         Self {
             core: Arc::new(core),
         }
+    }
+
+    /// Adds the hosts a run before a restart could not remove from the registry (what
+    /// [`UnremovedFile::load`] read) to the ones to remove, so that the first tick tries
+    /// them again. Called after [`Scaler::new`] has marked the machines being released; a
+    /// second call adds to the first.
+    pub fn retry_removals(&self, hosts: BTreeSet<String>) {
+        self.core.memory().unremoved.extend(hosts);
     }
 
     /// The server's listeners are bound: the time before the scaler vouches for the
@@ -249,7 +278,8 @@ impl Scaler {
         self.core.memory().alerts.values().cloned().collect()
     }
 
-    /// How many times the records could not be written since the scaler started.
+    /// How many times the records, or the file of hosts the registry refused to remove,
+    /// could not be written since the scaler started.
     pub fn save_errors(&self) -> u64 {
         self.core.memory().save_errors
     }
@@ -266,6 +296,7 @@ impl Core {
         let _one = self.one_tick.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Millis::new(self.clock.now().millis());
         let mut work = self.memory().clone();
+        work.unremoved_failed = false;
         self.retry_revokes(&mut work);
         self.retry_removes(&mut work);
         let input = self.input(&work, now);
@@ -297,30 +328,58 @@ impl Core {
         }
     }
 
-    /// Tries again the removals of hosts from the registry that it refused.
+    /// Tries again the removals of hosts from the registry that it refused. The file is
+    /// written once before them (a write that failed earlier) and once after, and not
+    /// between: a tick that cannot write counts one error.
     fn retry_removes(&self, memory: &mut Memory) {
+        self.flush_unremoved(memory);
         let pending: Vec<String> = memory.unremoved.iter().cloned().collect();
         for host in pending {
-            self.remove(memory, host);
+            self.ask_removal(memory, &host, false);
+        }
+        self.flush_unremoved(memory);
+    }
+
+    /// Writes the set of hosts the registry refused to remove when it differs from the
+    /// file's. After a failed write nothing more is tried in the tick: the failure is
+    /// counted once and the next tick writes again.
+    fn flush_unremoved(&self, memory: &mut Memory) {
+        if !memory.unremoved_dirty || memory.unremoved_failed {
+            return;
+        }
+        match self.effects.save_unremoved(&memory.unremoved) {
+            Ok(()) => memory.unremoved_dirty = false,
+            Err(why) => {
+                warn!(%why, "cannot write the hosts the registry did not remove; it is tried again");
+                memory.save_errors += 1;
+                memory.unremoved_failed = true;
+            }
         }
     }
 
-    /// Takes the host of a machine that is gone out of the registry; keeps it to try again
-    /// when the registry refuses. The refusal is a warning the first time only: the same
-    /// refusal at each later tick (a lease its holder keeps renewing can last a long
-    /// while) is a debug line, and the alert says it once for as long as it holds.
+    /// Takes the host of a machine that is gone out of the registry. A host not yet in the
+    /// set is added and the file written first, so that a crash after the registry's refusal
+    /// leaves the host in the file; a failed write does not stop the removal.
     fn remove(&self, memory: &mut Memory, host: String) {
-        match self.effects.remove(&host) {
-            Ok(()) => {
-                memory.unremoved.remove(&host);
+        let added = memory.unremoved.insert(host.clone());
+        memory.unremoved_dirty |= added;
+        self.flush_unremoved(memory);
+        self.ask_removal(memory, &host, added);
+        self.flush_unremoved(memory);
+    }
+
+    /// Asks the registry to remove the host, and drops it from the set when it did. The
+    /// refusal is a warning the first time only (`added`): the same refusal at each later
+    /// tick (a lease its holder keeps renewing can last a long while) is a debug line, and
+    /// the alert says it once for as long as it holds.
+    fn ask_removal(&self, memory: &mut Memory, host: &str, added: bool) {
+        match self.effects.remove(host) {
+            Ok(()) => memory.unremoved_dirty |= memory.unremoved.remove(host),
+            Err(why) if added => {
+                warn!(%host, %why, "the registry did not remove the host of a machine that is gone; it is tried again");
             }
             Err(why) => {
-                if memory.unremoved.contains(&host) {
-                    debug!(%host, %why, "the registry still does not remove the host of a machine that is gone");
-                } else {
-                    warn!(%host, %why, "the registry did not remove the host of a machine that is gone; it is tried again");
-                    memory.unremoved.insert(host);
-                }
+                debug!(%host, %why, "the registry still does not remove the host of a machine that is gone");
             }
         }
     }
