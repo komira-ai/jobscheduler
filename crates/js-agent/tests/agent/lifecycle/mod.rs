@@ -16,6 +16,7 @@ mod results;
 mod rules;
 mod running;
 mod scratch;
+mod slots;
 mod taint;
 
 use std::collections::BTreeSet;
