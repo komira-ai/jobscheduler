@@ -111,21 +111,59 @@ pub fn probes(scratch: &Scratch, trace_out: Option<&Path>, report: &mut Report) 
         ("EXE".to_owned(), places.exe.clone()),
     ];
 
-    // The trace of the steps: what a base set is derived from. Reported, with the reads no
-    // grant above covers.
+    // The trace of the steps: what a base set is derived from. Which profile makes the
+    // facility record on this macOS is not known, so each form runs `true` first and the
+    // first that records is used for the steps. Reported, with the reads no grant above covers.
     let trace_file = trace_out.map_or_else(|| scratch.base.join("trace.sb"), Path::to_path_buf);
-    let trace = Custom {
-        text: format!("(version 1)\n(trace \"{}\")", trace_file.display()),
-        params: Vec::new(),
-    };
-    case(
-        scratch,
-        report,
-        "trace",
-        &Mode::Custom(&trace),
-        &places.run.join("tool-trace"),
-        false,
-    );
+    let forms = [
+        ("trace_only", "(version 1)\n(trace \"FILE\")"),
+        (
+            "deny_default",
+            "(version 1)\n(deny default)\n(trace \"FILE\")",
+        ),
+        (
+            "allow_default",
+            "(version 1)\n(allow default)\n(trace \"FILE\")",
+        ),
+    ];
+    let mut forms_probe = Probe::info("sandbox/trace-forms");
+    let mut chosen = None;
+    for (name, template) in forms {
+        let file = scratch.base.join(format!("form-{name}.sb"));
+        let custom = Custom {
+            text: template.replace("FILE", &file.display().to_string()),
+            params: Vec::new(),
+        };
+        let out = run(places.command(
+            &Mode::Custom(&custom),
+            std::ffi::OsStr::new("/usr/bin/true"),
+            &[],
+        ));
+        let recorded = std::fs::metadata(&file).map_or(0, |m| m.len());
+        forms_probe = describe(
+            forms_probe.fact(&format!("{name}_recorded_bytes"), recorded),
+            &format!("{name}_"),
+            &out,
+        );
+        if chosen.is_none() && out.ok && recorded > 0 {
+            chosen = Some(template);
+        }
+    }
+    report.push(forms_probe);
+    if let Some(template) = chosen {
+        let trace = Custom {
+            text: template.replace("FILE", &trace_file.display().to_string()),
+            params: Vec::new(),
+        };
+        case(
+            scratch,
+            report,
+            "trace",
+            &Mode::Custom(&trace),
+            &places.run.join("tool-trace"),
+            false,
+        );
+    }
     let text = std::fs::read_to_string(&trace_file).unwrap_or_default();
     let mut subpaths: Vec<String> = SUBPATHS.iter().map(|s| (*s).to_owned()).collect();
     subpaths.extend([&places.run, &places.uid_entry, &app].map(|p| p.display().to_string()));
@@ -167,6 +205,9 @@ pub fn probes(scratch: &Scratch, trace_out: Option<&Path>, report: &mut Report) 
         &places.run.join("tool-allow"),
         true,
     );
+
+    // Reported: what the kernel logged as denied during the allow-list run, deduplicated.
+    report.push(denials());
 
     // A planted file outside every grant, and one inside the run directory.
     let planted = scratch.control.join("planted-secret");
@@ -212,4 +253,42 @@ pub fn probes(scratch: &Scratch, trace_out: Option<&Path>, report: &mut Report) 
     let probe = describe(probe, "control_planted_", &control_data);
     let probe = describe(probe, "allow_planted_", &denied_data);
     report.push(describe(probe, "allow_granted_", &inside_data));
+}
+
+/// The sandbox denials in the unified log from the last minutes: `process operation path`.
+fn denials() -> Probe {
+    let out = run({
+        let mut cmd = Command::new("/usr/bin/log");
+        cmd.args([
+            "show",
+            "--last",
+            "5m",
+            "--style",
+            "compact",
+            "--predicate",
+            "eventMessage CONTAINS \"deny(\"",
+        ]);
+        cmd
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    for line in out.stdout.lines() {
+        let Some((_, rest)) = line.split_once("Sandbox: ") else {
+            continue;
+        };
+        let Some((process, tail)) = rest.split_once('(') else {
+            continue;
+        };
+        let Some((_, what)) = tail.split_once(") ") else {
+            continue;
+        };
+        seen.insert(format!("{process} {what}"));
+    }
+    let listed: Vec<String> = seen.iter().take(200).cloned().collect();
+    describe(
+        Probe::info("sandbox/denials-in-log")
+            .fact("count", seen.len())
+            .fact("denials", listed.join(" | ")),
+        "log_",
+        &out,
+    )
 }
