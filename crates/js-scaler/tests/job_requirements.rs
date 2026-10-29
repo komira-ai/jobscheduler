@@ -32,6 +32,10 @@ fn asking(id: &str, pairs: &[(&str, &str)]) -> Waiting {
     }
 }
 
+/// A change to a host or a stored offer, what the request requires, and how many
+/// launches are left to make.
+type Case<'a, T> = (fn(&mut T), &'a [(&'a str, &'a str)], usize);
+
 fn miss(offers: Vec<Offer>, want: Waiting) -> (usize, Option<Dimension>) {
     let mut rig = Rig::new(settings("gpu"));
     rig.pool().offers = offers;
@@ -86,7 +90,7 @@ fn an_offer_of_the_other_mode_is_refused_and_the_miss_is_named() {
 /// does not leaves the request to a launch.
 #[test]
 fn a_host_covers_a_request_only_if_disk_and_mode_fit() {
-    let cases: [(fn(&mut js_scaler::HostFacts), &[(&str, &str)], usize); 5] = [
+    let cases: [Case<js_scaler::HostFacts>; 5] = [
         (|h| h.shape.disk_bytes = 99 << 30, &[("disk-gib", "100")], 1),
         (
             |h| h.shape.disk_bytes = 100 << 30,
@@ -120,7 +124,7 @@ fn a_host_covers_a_request_only_if_disk_and_mode_fit() {
 /// launch of its own, and one that fits covers it.
 #[test]
 fn a_machine_on_its_way_covers_a_request_only_if_disk_and_mode_fit() {
-    let cases: [(fn(&mut js_scaler::StoredOffer), &[(&str, &str)], usize); 4] = [
+    let cases: [Case<js_scaler::StoredOffer>; 4] = [
         (|o| o.disk_bytes = 99 << 30, &[("disk-gib", "100")], 1),
         (|o| o.disk_bytes = 100 << 30, &[("disk-gib", "100")], 0),
         (
