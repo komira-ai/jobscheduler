@@ -319,35 +319,34 @@ impl LambdaProvider {
 
     /// Completes `launch` for sending: the ssh key, the no-inbound ruleset of its region
     /// and the payload as user data (none when the payload is empty). Makes the account's
-    /// ruleset or key when it has none, so it is not called in a dry run.
-    fn prepare(
-        &self,
-        launch: &mut LaunchRequest,
-        request: &AcquireRequest,
-    ) -> Result<(), Acquired> {
+    /// ruleset or key when it has none, so it is not called in a dry run. The answer that
+    /// stops the launch, if something does.
+    fn prepare(&self, launch: &mut LaunchRequest, request: &AcquireRequest) -> Option<Acquired> {
         let retry = self.config.launch_interval;
-        launch.ssh_key = self.ssh_key().map_err(|why| why.answer(retry))?;
-        let ruleset = self
-            .ensure_firewall(&launch.region)
-            .map_err(|why| why.answer(retry))?;
-        launch.firewall_ruleset_ids.push(ruleset);
+        match self.ssh_key() {
+            Ok(name) => launch.ssh_key = name,
+            Err(why) => return Some(why.answer(retry)),
+        }
+        match self.ensure_firewall(&launch.region) {
+            Ok(id) => launch.firewall_ruleset_ids.push(id),
+            Err(why) => return Some(why.answer(retry)),
+        }
         launch.user_data = match request.payload.is_empty() {
             true => None,
             false => Some(Secret::new(request.payload.expose().to_owned())),
         };
-        Self::protected(launch)
+        Self::unprotected(launch)
     }
 
-    /// Refuses a launch that carries no firewall ruleset: it would have the account's
-    /// default rules, and a ruleset can only be attached at launch. Never sent.
-    fn protected(launch: &LaunchRequest) -> Result<(), Acquired> {
-        match launch.firewall_ruleset_ids.is_empty() {
-            true => Err(Self::refuse(
+    /// The refusal of a launch that carries no firewall ruleset: it would have the
+    /// account's default rules, and a ruleset can only be attached at launch. Never sent.
+    fn unprotected(launch: &LaunchRequest) -> Option<Acquired> {
+        launch.firewall_ruleset_ids.is_empty().then(|| {
+            Self::refuse(
                 RefusalCode::Shape,
                 Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
-            )),
-            false => Ok(()),
-        }
+            )
+        })
     }
 
     /// Forgets the unknown launches a list shows or the hold has outlasted (after the
@@ -662,7 +661,7 @@ impl ElasticProvider for LambdaProvider {
             }
             return Self::refuse(RefusalCode::Denied, Reason::DryRun);
         }
-        if let Err(answer) = self.prepare(&mut launch, request) {
+        if let Some(answer) = self.prepare(&mut launch, request) {
             return answer;
         }
         let mut gate = self.launching();
@@ -759,13 +758,13 @@ mod tests {
             firewall_ruleset_ids: Vec::new(),
         };
         assert_eq!(
-            LambdaProvider::protected(&launch),
-            Err(Acquired::Refused(Refusal {
+            LambdaProvider::unprotected(&launch),
+            Some(Acquired::Refused(Refusal {
                 code: RefusalCode::Shape,
                 reason: Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
             }))
         );
         launch.firewall_ruleset_ids.push("rs".to_owned());
-        assert!(LambdaProvider::protected(&launch).is_ok());
+        assert_eq!(LambdaProvider::unprotected(&launch), None);
     }
 }
