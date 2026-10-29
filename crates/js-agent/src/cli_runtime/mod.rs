@@ -27,7 +27,7 @@
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
 //!   [--tmpfs /var/tmp:rw,noexec,nosuid,nodev,size=64m --tmpfs /run:rw,noexec,nosuid,nodev,size=64m] (Podman)
 //!   --ulimit core=0 --ipc private
-//!   [--pid private] --pull never --user 65534:65534
+//!   [--pid private] --pull never --user <base uid + slot>:<base gid + slot>
 //!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
 //! <bin> volume inspect --format "{{json .Options}}" -- <scratch volume>   (Docker)
@@ -161,11 +161,15 @@
 //!
 //! # The scratch directory and the user
 //!
-//! A run's scratch directory is `0700` and the agent's. The container runs as a user that
-//! is not root (`--container-user`, `65534:65534` by default; a container id, below
-//! 65536), so the directory has to be made writable for it: an agent that runs as root
-//! gives the directory before `create` ([`hand_over`]) to the host ids that user's ids are
-//! mapped onto (the start of the range plus the id, for the uid and the gid). Any other
+//! A run's scratch directory is `0700` and the agent's. Every run holds a slot (see
+//! [`crate::lifecycle::Slots`]) and its container runs as the user of that slot, which is
+//! not root: the base of `--container-user` (`1000:1000` by default) plus the slot number,
+//! for the uid and the gid ([`Settings::slot_ids`]). The base must leave room for every
+//! slot below 65536 ([`Settings::with_subuid`]). The directory has to be made writable for
+//! that user: an agent that runs as root gives the directory before `create`
+//! ([`hand_over`]) to the host ids that user's ids are mapped onto (the start of the range
+//! plus the slot's id, for the uid and the gid). Files a job receives under the directory
+//! are not touched by that. Any other
 //! agent cannot give a file away: it refuses to start unless the container user is its own
 //! `uid:gid` ([`Settings::with_agent`]), and then a mapped job is a host user the agent is
 //! not, so [`CliRuntime::open_in`] refuses it. Nothing else of the agent's is owned by the range.
@@ -275,6 +279,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::{Isolation, LogTail};
 use serde_json::Value;
 
+use args::user_args;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
     label_args, limits_to_args, scratch_volume_options,
@@ -768,6 +773,7 @@ impl CliRuntime {
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
+        args.extend(user_args(&self.settings, spec.slot));
         // Podman maps each container; Docker's daemon maps them all (see `open_in`).
         let maps = self.mapping.filter(|_| self.engine == Engine::Podman);
         args.extend(maps.into_iter().flat_map(Mapping::podman_args));
@@ -881,7 +887,11 @@ impl CliRuntime {
             (self.chown)(&spec.scratch, uid_base + uid, gid_base + gid)
                 .map_err(|why| CliError::Scratch(why.to_string()))
         };
-        self.settings.chown_scratch().map_or(Ok(()), give)
+        let slot = self.settings.slot_ids(spec.slot);
+        self.settings
+            .chown_scratch()
+            .map(|_| slot)
+            .map_or(Ok(()), give)
     }
 
     /// Reads the binds of the container back and compares them with what `spec` asked
