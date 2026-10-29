@@ -394,3 +394,40 @@ fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
         assert!(!text.contains("SECRET-PLANTED"), "{text}");
     }
 }
+
+/// The delivery contract of run files, as it stands: the job gets its files directory
+/// read-only (the mount argument says `readonly`, the directory is `0555` and each file
+/// `0444`, so it can neither edit nor delete them), and the agent, not the job, removes
+/// them at the end of the run, in the cleanup step that also removes the scratch directory
+/// and before the post-job checks run. It catches a files mount a job could write, files
+/// left on the tmpfs after the run, and files still present while the host is checked (so
+/// they would be part of what the checks see).
+#[test]
+fn run_files_are_read_only_to_the_job_and_removed_by_the_agent_at_run_end() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut w = World::new("files-contract", "linux");
+    let mut spec = job("r1");
+    spec.files = vec![RunFile {
+        name: "tok".to_owned(),
+        contents: "x".to_owned(),
+    }];
+    w.life.apply(&reply(vec![Command::Start(Box::new(spec))]));
+    let create = super::created(&w.docker, "r1");
+    let mount = create
+        .iter()
+        .find(|arg| arg.contains(",dst=/run/js-files"))
+        .unwrap();
+    assert!(mount.contains(",readonly"), "{mount}");
+    let dir = w.config.files.as_ref().unwrap().of("r1");
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!((mode(&dir), mode(&dir.join("tok"))), (0o555, 0o444));
+    w.docker.exit("r1", 0);
+    let events = names(&w.life.step());
+    assert_eq!(
+        events[1..],
+        cleanup("r1"),
+        "scratch (and files) go before the checks"
+    );
+    assert!(!dir.exists());
+}

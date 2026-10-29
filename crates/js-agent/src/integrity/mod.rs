@@ -10,9 +10,12 @@
 //!
 //! [`Integrity::start`] takes the baseline when the agent starts; a host that cannot be
 //! read whole then is no host to run jobs on, and the agent does not start. A check that
-//! finds nothing takes the baseline again, so it is always the host as it was after the
-//! last job that left nothing; a check that finds something leaves it alone (the host is
-//! tainted for good, and every later job is compared with the last clean state).
+//! finds nothing takes the baseline again, and so does a job that starts on an idle host
+//! (no other job's container, scratch directory or checks on it, and no container the agent
+//! could not remove; see [`CheckHook::idle`]): what changed between jobs is the host's, not
+//! a job's. So the baseline is the host as it was after the last job that left nothing, or
+//! when the job started on an idle host. A check that finds something leaves it alone (the
+//! host is tainted for good, and every later job is compared with the last clean state).
 //!
 //! # What is checked
 //!
@@ -26,6 +29,9 @@
 //! | `watch-dir-changed` | the names, sizes, modification or status change times, inodes, owners or modes of the entries of a `--watch-dir` differ | residue |
 //! | `processes-unreadable`, `mounts-unreadable`, `users-unreadable`, `groups-unreadable`, `modules-unreadable`, `watch-unreadable` | an input could not be read or understood | unchecked |
 //! | `watch-over-bound` | a `--watch-dir` holds more than [`WATCH_ENTRY_CAP`] entries, so it cannot be digested | unchecked |
+//!
+//! A new process and a new mount count only when they are not the host's own (see
+//! [What the host does while jobs run](#what-the-host-does-while-jobs-run)).
 //!
 //! A check that cannot run is a finding, never a skipped check. When several things are
 //! found, the code is the first's (in the order of the table) and the detail holds all of
@@ -96,6 +102,30 @@
 //!   databases, the modules or a watched directory behind. This is a post-job check, not an
 //!   audit: eBPF and the audit subsystem are not used.
 //!
+//! # What the host does while jobs run
+//!
+//! A host starts processes and makes mounts of its own while jobs run, and none of them is
+//! a job's: a job cannot place a process outside its container's control group, nor make a
+//! mount on the host. They are not counted:
+//!
+//! - **A process in a service of the system slice** (`/system.slice/<unit>.service`, as
+//!   timers start them: a disk alarm every minute, statistics, package upgrades, firmware
+//!   refreshes), **in the user slice** (`/user.slice/...`: a login's session and its
+//!   `systemd --user`), **or in a Podman container's monitor scope**
+//!   (`libpod-conmon-<id>.scope`, which outlives its container for a moment). The path of
+//!   the unified hierarchy is read; a path that names a container (`libpod-<id>`,
+//!   `docker-<id>`, `crio-`, `cri-containerd-`, `/docker/`, `libpod_parent`,
+//!   `machine.slice`) always counts, wherever it is, and so does a scope under a system
+//!   service. A job's process left in its own container's control group counts.
+//! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
+//!   a neighbour's included, named without the container id), **the bind of `/run/netns`
+//!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
+//!   **and a user's run directory** (`tmpfs` at `/run/user/<uid>`), made by a login.
+//!
+//! What is not on this list still counts: Kubernetes pods, a container engine's other
+//! mounts, and a service started in a scope. A host with such churn can still be tainted
+//! when it overlaps a job's end.
+//!
 //! # Jobs that run side by side
 //!
 //! The agent runs several jobs at once, so the host at the end of one job holds the
@@ -112,7 +142,8 @@
 //!
 //! A container user that is the agent's own user (`--container-user` for an agent that
 //! does not run as root) makes every process of the agent's user that is not in the
-//! baseline a finding, children of the agent included.
+//! baseline, and not in the host's own control groups, a finding: a child of the agent
+//! that left its service's control group included.
 //!
 //! # macOS
 //!
@@ -319,6 +350,73 @@ fn is_live(job: &Finished<'_>, text: &str) -> bool {
     job.live.iter().any(|id| text.contains(&id.0))
 }
 
+/// Whether a process in the control groups `cgroup` (the lines of `/proc/<pid>/cgroup`) is
+/// the host's own, which no job can have left: one in a service of the system slice, in the
+/// user slice (logins, `systemd --user`), or in the scope of a Podman container's monitor
+/// (`libpod-conmon-<id>.scope`, which outlives its container for a moment). Only the path
+/// of the unified hierarchy (`0::`) is read; a process without one is not the host's.
+///
+/// A container's processes are in a control group that names the container
+/// (`libpod-<id>.scope`, `docker-<id>.scope`, `/docker/<id>`), and a contained job cannot
+/// move a process out of it: the control group file system is read-only in the container.
+/// A path that holds such a name is never the host's, wherever it is, so a container placed
+/// under the system or the user slice still counts.
+fn hosts_own_process(cgroup: &str) -> bool {
+    let Some(path) = cgroup
+        .split_whitespace()
+        .find_map(|line| line.strip_prefix("0::"))
+    else {
+        return false;
+    };
+    let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
+    let monitor = units
+        .last()
+        .is_some_and(|unit| unit.starts_with("libpod-conmon-") && unit.ends_with(".scope"));
+    if monitor {
+        return true;
+    }
+    if units.iter().any(|unit| names_a_container(unit)) {
+        return false;
+    }
+    match units.as_slice() {
+        ["user.slice", ..] => true,
+        ["system.slice", unit, rest @ ..] => {
+            unit.ends_with(".service") && !rest.iter().any(|unit| unit.ends_with(".scope"))
+        }
+        _ => false,
+    }
+}
+
+/// Whether the control group `unit` is one a container engine makes for a container.
+fn names_a_container(unit: &str) -> bool {
+    const ENGINES: [&str; 4] = ["libpod-", "docker-", "crio-", "cri-containerd-"];
+    ENGINES.iter().any(|prefix| unit.starts_with(prefix))
+        || ["docker", "libpod_parent", "machine.slice"].contains(&unit)
+}
+
+/// Whether `mount` is one the host makes while jobs run, which no job can have left: the
+/// network namespaces Podman pins under `/run/netns` (one per container, the neighbours'
+/// included, whose names hold no container id), the bind of `/run/netns` onto itself that
+/// the first container after a boot makes, and the run directory of a user who logs in
+/// (`/run/user/<uid>`).
+fn hosts_own_mount(mount: &Mount) -> bool {
+    let one_name = |rest: &str| !rest.is_empty() && !rest.contains('/');
+    match mount.fstype.as_str() {
+        "nsfs" => mount
+            .point
+            .strip_prefix("/run/netns/")
+            .is_some_and(one_name),
+        "tmpfs" => {
+            (mount.point == "/run/netns" && mount.root == "/netns")
+                || mount
+                    .point
+                    .strip_prefix("/run/user/")
+                    .is_some_and(|uid| one_name(uid) && uid.bytes().all(|b| b.is_ascii_digit()))
+        }
+        _ => false,
+    }
+}
+
 /// The post-job checks: a [`HostView`], the user the containers run as, the watched
 /// directories, and the baseline.
 pub struct Integrity {
@@ -400,14 +498,23 @@ impl Integrity {
         let strays: Vec<&Process> = now
             .processes
             .iter()
-            .filter(|process| !known.contains(&process.key()) && !mine(&process.cgroup))
+            .filter(|process| {
+                !known.contains(&process.key())
+                    && !mine(&process.cgroup)
+                    && !hosts_own_process(&process.cgroup)
+            })
             .collect();
         let as_job = strays.iter().filter(|stray| stray.uid == self.uid);
         let daemonised = strays.iter().filter(|stray| stray.ppid == 1);
         let new_mounts = now
             .mounts
             .difference(&self.baseline.mounts)
-            .filter(|mount| !(mine(&mount.root) || mine(&mount.point) || mine(&mount.source)));
+            .filter(|mount| {
+                !(mine(&mount.root)
+                    || mine(&mount.point)
+                    || mine(&mount.source)
+                    || hosts_own_mount(mount))
+            });
         let moved = now
             .watched
             .iter()
@@ -501,6 +608,16 @@ fn details(problems: &[Problem]) -> String {
 }
 
 impl CheckHook for Integrity {
+    /// Takes the baseline again: no job is on the host, so what changed since the last
+    /// clean check (an operator's login, a timer's service, a package upgrade) is the
+    /// host's. A host that cannot be read keeps the baseline it had; the check after the job
+    /// finds it unreadable.
+    fn idle(&mut self) {
+        if let Ok(now) = self.observe() {
+            self.baseline = now;
+        }
+    }
+
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         let problems = match self.observe() {
             Err(unrun) => unrun,

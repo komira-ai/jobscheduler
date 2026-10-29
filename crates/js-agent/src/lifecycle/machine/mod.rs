@@ -350,6 +350,14 @@ impl Lifecycle {
                 return;
             }
         };
+        // On a host no other job is on, what changed since the last check is the host's. A
+        // container that could not be removed, or a check that found something, has tainted
+        // the host, and `admit` refused this start; so every other job being freed is enough.
+        // The baseline is retaken before this run's scratch directory and files exist, so
+        // neither becomes part of it.
+        if self.jobs.iter().all(|job| job.stage == Stage::Freed) {
+            self.checks.idle();
+        }
         let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,

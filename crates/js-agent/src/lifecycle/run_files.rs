@@ -6,7 +6,8 @@
 //! can add, change or unlink one without first changing the directory's mode. The root is
 //! `0700` and the agent's. A reboot clears a tmpfs, which is fine: a run does not survive
 //! a reboot, and the agent's start-up sweep would remove what an earlier process left in
-//! it anyway (except the directories of runs it adopts).
+//! it anyway (except the directories of runs it adopts). A tmpfs can be swapped to disk when
+//! the host has swap, so a host that handles these secrets runs with swap off or encrypted.
 
 use std::fs;
 use std::io::{self, Write};

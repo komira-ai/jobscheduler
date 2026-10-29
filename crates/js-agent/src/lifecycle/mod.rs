@@ -255,6 +255,12 @@ pub trait CheckHook {
     /// What was found, or that the check could not run. The slot is not freed and the host
     /// is tainted.
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding>;
+
+    /// The host is idle: a job is about to start, and no other job's container, scratch
+    /// directory or checks are on it, nor a container the agent could not remove. Nothing a
+    /// job did can change the host now, so a hook may take its baseline again. The default
+    /// does nothing.
+    fn idle(&mut self) {}
 }
 
 /// The most bytes of detail a [`CheckFinding`] keeps.
@@ -483,6 +489,9 @@ pub struct Local {
     /// `--run-files-root`, or the default under `/run` when that can be made; always none
     /// without `--container-bin`.
     pub files: Option<FilesRoot>,
+    /// Why the default run files root could not be used, for a warning; none when it was
+    /// used, was not needed, or `--run-files-root` was given (then a fault is an error).
+    pub files_warning: Option<String>,
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
@@ -524,6 +533,20 @@ impl Local {
     ///
     /// The text names the flag at fault.
     pub fn from_cli(cli: &Cli) -> Result<Self, String> {
+        Self::from_cli_with_default_files_root(cli, Path::new(DEFAULT_RUN_FILES_ROOT))
+    }
+
+    /// [`Local::from_cli`] with `default_files_root` where the run files go when
+    /// `--run-files-root` is not given (a seam for tests; the agent uses
+    /// [`DEFAULT_RUN_FILES_ROOT`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Local::from_cli`].
+    pub fn from_cli_with_default_files_root(
+        cli: &Cli,
+        default_files_root: &Path,
+    ) -> Result<Self, String> {
         if cli.allow_host_jobs {
             return Err(
                 "--allow-host-jobs: host jobs are not available yet: the scheduler \
@@ -556,6 +579,9 @@ impl Local {
         if container.is_none() && !cli.watch_dirs.is_empty() {
             return Err("--watch-dir: needs --container-bin".to_owned());
         }
+        if container.is_none() && cli.run_files_root.is_some() {
+            return Err("--run-files-root: needs --container-bin".to_owned());
+        }
         if container.is_some() && state.is_none() {
             return Err(
                 "--state-root: required with --container-bin: the taint marker is \
@@ -579,12 +605,6 @@ impl Local {
                 );
             }
         }
-        let busy: Vec<&Path> = mounts
-            .paths()
-            .chain(scratch.iter().map(ScratchRoot::path))
-            .chain(state.iter().map(StateRoot::path))
-            .collect();
-        let watch = watch_dirs(&cli.watch_dirs, &busy)?;
         if container.is_some() && scratch.is_none() {
             return Err(
                 "--scratch-root: required with --container-bin: each run's private \
@@ -592,17 +612,48 @@ impl Local {
                     .to_owned(),
             );
         }
-        // The files root is the last check, so no other flag's error depends on it.
-        let files = match (&cli.run_files_root, container.is_some()) {
-            (_, false) => None,
-            (Some(path), true) => Some(FilesRoot::open(path)?),
-            (None, true) => FilesRoot::open(Path::new(DEFAULT_RUN_FILES_ROOT)).ok(),
+        let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
+            (_, false) => (None, None),
+            (Some(path), true) => (Some(FilesRoot::open(path)?), None),
+            (None, true) => match FilesRoot::open(default_files_root) {
+                Ok(root) => (Some(root), None),
+                Err(why) => (None, Some(format!("run files unavailable: {why}"))),
+            },
         };
+        // The files root is swept at every start (everything in it that is not an adopted
+        // run's directory is removed) and its directories are the agent's to remove, so it
+        // may not be, hold or lie in any other root of the agent: a sweep over the state
+        // root would delete the taint marker and the host credential, and a mount root
+        // that holds it would show every run's secrets to a job.
+        if let Some(root) = &files {
+            let others = mounts
+                .paths()
+                .map(|path| ("--mount-root", path))
+                .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
+                .chain(state.iter().map(|r| ("--state-root", r.path())));
+            for (flag, other) in others {
+                if root.path().starts_with(other) || other.starts_with(root.path()) {
+                    return Err(format!(
+                        "--run-files-root: is, holds or lies in the {flag} {}: the roots \
+                         must be separate directories",
+                        other.display()
+                    ));
+                }
+            }
+        }
+        let busy: Vec<&Path> = mounts
+            .paths()
+            .chain(scratch.iter().map(ScratchRoot::path))
+            .chain(state.iter().map(StateRoot::path))
+            .chain(files.iter().map(FilesRoot::path))
+            .collect();
+        let watch = watch_dirs(&cli.watch_dirs, &busy)?;
         Ok(Self {
             watch,
             mounts,
             scratch,
             files,
+            files_warning,
             container,
             state,
             stop_grace,

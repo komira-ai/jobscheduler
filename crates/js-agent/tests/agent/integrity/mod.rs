@@ -4,6 +4,7 @@
 
 mod checks;
 mod lifecycle;
+mod noise;
 mod proc;
 mod rules;
 

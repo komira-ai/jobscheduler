@@ -17,6 +17,7 @@ fn job_with_files(run: &str, files: Vec<RunFile>) -> JobSpec {
         image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             .into(),
         native: None,
+        bundle: None,
         args: Vec::new(),
         limits: Limits {
             cpu_millis: 1000,
