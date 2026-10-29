@@ -480,9 +480,8 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     }
     let elastic = registering.is_some();
     // A joined pool has no plan, so only an elastic pool's launch settings are checked.
-    if let Some(Registering {
-        plan: Some(plan), ..
-    }) = &registering
+    if let Some(registering) = &registering
+        && let Some(plan) = &registering.plan
     {
         check_live(&server, plan)?;
     }
