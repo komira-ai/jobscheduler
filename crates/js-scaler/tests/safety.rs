@@ -22,6 +22,22 @@ fn a_booting_machine_is_held_by_the_boot_timeout_on_an_incomplete_view() {
     assert_eq!(rig.phase(0), Phase::Booting);
 }
 
+/// Asserts that the boot timeout does give up on a machine that has said nothing once the
+/// registry's view is complete again, at the next step: it is revoked and released, and the
+/// pool cools off.
+#[test]
+fn a_booting_machine_is_given_up_once_the_view_is_complete() {
+    let (mut rig, _plan, _) = booting(settings("gpu"), "i-1");
+    rig.input.registry_complete = false;
+    rig.tick(at(15 * MINUTE));
+    rig.input.registry_complete = true;
+    let actions = rig.tick(at(15 * MINUTE + SECOND));
+    assert_eq!(count(&actions, "Revoke"), 1);
+    assert_eq!(count(&actions, "Release"), 1);
+    assert_eq!(rig.phase(0), Phase::Releasing);
+    assert_eq!(rig.state.records.cooldowns.len(), 1);
+}
+
 /// A rig whose registered host is silent, with the registry's lease flag set, and which is
 /// then changed by `change`.
 fn silent_given_up(change: impl FnOnce(&mut HostFacts)) -> Rig {
@@ -51,6 +67,17 @@ fn a_silent_host_marked_held_is_not_released() {
         let actions = rig.tick(at(later));
         assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
     }
+}
+
+/// Asserts that a silent host set aside for a waiting request is not released, drained or
+/// marked either.
+#[test]
+fn a_silent_host_marked_reserved_is_left_alone() {
+    let mut rig = silent_given_up(|host| host.mark = Some(Mark::Reserved));
+    for later in [3 * SECOND, 3 * SECOND + 30 * MINUTE, 2 * HOUR] {
+        assert!(rig.tick(at(later)).is_empty());
+    }
+    assert_eq!(rig.phase(0), Phase::Registered);
 }
 
 /// Asserts that a silent host the registry shows marked for release, which books nothing,

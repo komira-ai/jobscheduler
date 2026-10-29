@@ -33,20 +33,32 @@
 //!   leaves the record unresolved until a list shows the machine or `unknown_hold` has
 //!   passed; a machine found after that is released and never uncounted.
 //! * Machines the registry does not hear from. A host the registry shows but does not hear
-//!   from is held and counted, and [`State::silent`] says since when; once the registry's
-//!   lease grace has given up its leases ([`HostFacts::lease_given_up`]) and it has stayed
+//!   from is held and counted, and [`State::silent`] says since when. Once it books nothing
+//!   ([`HostFacts::lease_given_up`], or the registry marked it `Releasing`) and has stayed
 //!   silent for `unknown_hold`, the machine is released, since it costs money and holds
-//!   nothing, and [`State::silent_released`] names it for the shell to log. Hosts the
-//!   scaler did not launch are never released. One the registry no longer shows is
-//!   released too, but only on a complete registry view ([`Input::registry_complete`], the
-//!   shell's duty to vouch for) with the machine missing on two steps `unknown_hold` apart;
-//!   otherwise it is held and counted. One the provider says it no longer has
-//!   ([`Input::not_found`]) is settled.
+//!   nothing: drained and marked for release, which the registry checks when the actions
+//!   run, then released when the mark is read back; [`State::silent_released`] names it for
+//!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
+//!   mark is never released. Hosts the scaler did not launch are never released. One the
+//!   registry no longer shows is released too, but only on a complete registry view
+//!   ([`Input::registry_complete`], the shell's duty to vouch for) with the machine missing
+//!   on two steps `unknown_hold` apart; otherwise it is held and counted. A booting
+//!   machine is given up on at `boot_timeout` on a complete view only. One the provider
+//!   says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is
 //!   revoked and the machine released, every step, until a read by id says gone. There is
 //!   no deadline on any of this, and nothing is released that the registry did not
 //!   mark while quiet, except a machine the registry has forgotten, which holds no work.
+//!
+//! * Machines the scaler does not release. An orphan (a listed machine no record knows, or
+//!   one a launch answer named and could not confirm released) is counted and reported and
+//!   never released: the design leaves that to the operator. The shell shows
+//!   [`State::records`] to the operator and alerts on every `Orphan` record. The same holds
+//!   for a record whose pool is no longer among [`Input::pools`]: it stays in the records and
+//!   counts, but no pass reconciles or releases it, so the shell alerts on such a record
+//!   and the operator releases the machine at the provider and removes the record. A
+//!   launch the provider told to wait that no request waits for any more is forgotten.
 //!
 //! The state machine is [`Phase`]. A transition it does not list is refused, counted in
 //! [`State::refused`], and changes nothing.
@@ -109,6 +121,7 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
         waiting = pass.cover(pool, waiting, &mut claims);
         waiting = pass.undrain(pool, waiting, &mut claims);
     }
+    pass.drop_unwanted(&claims);
     let uncovered = waiting.clone();
     for pool in &input.pools {
         pass.settle(pool, &claims);

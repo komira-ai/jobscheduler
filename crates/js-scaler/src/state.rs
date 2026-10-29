@@ -103,11 +103,13 @@ pub struct State {
     pub(crate) quiet: BTreeMap<String, Millis>,
     /// Since when each registered host the registry does not hear from (lost, or waiting
     /// to say hello again) has been silent, as this process first saw it. A silent host is
-    /// held and counted, never released on its silence, so this is the age a status page
-    /// shows. Not written to disk: after a restart the age counts again from the first step.
+    /// held and counted until it books nothing and has been silent for `unknown_hold`, so
+    /// this is the age a status page shows. Not written to disk: after a restart the age
+    /// counts again from the first step.
     pub silent: BTreeMap<String, Millis>,
-    /// The machines released this step because their host was silent, its leases given up,
-    /// for `unknown_hold`. The shell logs each: a paid machine was released on silence.
+    /// The machines released this step because their host was silent for `unknown_hold`
+    /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
+    /// a paid machine was released on silence.
     pub silent_released: Vec<String>,
     /// Since when each registered machine has been missing from a complete registry view,
     /// unbroken. Not written to disk: after a restart the count starts again.

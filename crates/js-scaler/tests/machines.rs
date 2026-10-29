@@ -153,25 +153,23 @@ fn an_orphan_is_gone_only_after_two_clean_lists() {
     assert_eq!(rig.record(0).gone_at, Some(at(33 * MINUTE)));
 }
 
-/// Asserts that a machine whose record is gone or was refused, but which a list shows
-/// running, is counted again as an orphan, and the old record is left as it was.
+/// Asserts that a machine whose record is gone, but which a list shows running, is counted
+/// again as an orphan, and the old record is left as it was.
 #[test]
 fn a_machine_listed_running_after_it_was_gone_is_counted_again() {
-    for phase in [Phase::Gone, Phase::Refused] {
-        let mut rig = Rig::new(settings("gpu"));
-        let mut old = record(phase, 60, 0);
-        old.gone_at = Some(at(MINUTE));
-        rig.pool().held = Some(vec![Held {
-            acquire: String::new(),
-            ..stray(old.cloud_id.as_deref().unwrap())
-        }]);
-        rig.state.records.instances = vec![old.clone()];
-        rig.tick(at(HOUR));
-        assert_eq!(rig.state.records.instances.len(), 2, "{phase:?}");
-        assert_eq!(rig.record(0), &old);
-        assert_eq!(rig.phase(1), Phase::Orphan);
-        assert!(rig.record(1).counts());
-    }
+    let mut rig = Rig::new(settings("gpu"));
+    let mut old = record(Phase::Gone, 60, 0);
+    old.gone_at = Some(at(MINUTE));
+    rig.pool().held = Some(vec![Held {
+        acquire: String::new(),
+        ..stray(old.cloud_id.as_deref().unwrap())
+    }]);
+    rig.state.records.instances = vec![old.clone()];
+    rig.tick(at(HOUR));
+    assert_eq!(rig.state.records.instances.len(), 2);
+    assert_eq!(rig.record(0), &old);
+    assert_eq!(rig.phase(1), Phase::Orphan);
+    assert!(rig.record(1).counts());
 }
 
 /// Asserts that the machines an accepted launch named besides the one wanted are recorded

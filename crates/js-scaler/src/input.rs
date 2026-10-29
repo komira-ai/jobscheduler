@@ -67,10 +67,13 @@ pub struct HostFacts {
     pub mark: Option<Mark>,
     /// Whether the host holds a lease, a run or a stream.
     pub busy: bool,
-    /// Whether the registry's lease grace has given up the host's leases: it was silent
-    /// past grace and its bookings were dropped, so nothing is lost by releasing the
-    /// machine. The shell sets it from the lease table; it is `false` for a host that
-    /// still holds a lease or whose bookings it cannot read.
+    /// Whether the registry books nothing on the host: its lease grace gave up the leases
+    /// it held, or it held none. The shell sets it for a silent host from the lease table,
+    /// and it is `true` for a silent host that has no bookings at all (one that never held
+    /// a lease included); it is `false` for a host that still holds a lease or whose
+    /// bookings the shell cannot read. A silent host marked `Releasing` needs no flag: the
+    /// registry booked nothing on it when it set the mark. The scaler also reads `busy` and
+    /// `mark` and never releases a host that shows work, whatever this says.
     pub lease_given_up: bool,
 }
 
@@ -126,7 +129,9 @@ pub struct Input {
     /// after it finished loading its state. The shell sets it `false` for a view it cannot
     /// vouch for (the registry has just started, a read failed or was partial). A machine
     /// missing from `hosts` is released only on a complete view, seen missing twice at
-    /// least `unknown_hold` apart; on an incomplete one everything is held and counted.
+    /// least `unknown_hold` apart, and a booting machine is given up on at `boot_timeout`
+    /// only on a complete view (its host may have said hello and be missing from a partial
+    /// one); on an incomplete one everything is held and counted.
     pub registry_complete: bool,
     /// Answers to acquires.
     pub acquired: Vec<AcquireResult>,

@@ -156,8 +156,8 @@ fn a_late_acceptance_of_a_failed_acquire_is_released() {
 }
 
 /// Asserts that `Capacity` refuses the offer for this step: the request is launched at
-/// the next cheapest offer in the same step, the refused record is Refused, and its
-/// token and network key are cleaned up.
+/// the next cheapest offer in the same step, the refused record is gone with the step, and
+/// its token and network key are cleaned up.
 #[test]
 fn a_capacity_refusal_tries_the_next_offer() {
     let (mut rig, plan) = launched(settings("gpu"));
@@ -168,9 +168,31 @@ fn a_capacity_refusal_tries_the_next_offer() {
         kinds(&actions),
         ["Save", "Revoke", "ForgetNetwork", "Mint", "Acquire"]
     );
-    assert_eq!(rig.phase(0), Phase::Refused);
+    assert_eq!(rig.state.records.instances.len(), 1);
+    assert_eq!(rig.phase(0), Phase::Launching);
     assert_eq!(acquires(&actions)[0].offer.id, "b");
     assert!(rig.state.blocked.is_empty());
+}
+
+/// Asserts that a pool whose only offer is refused for capacity over and over keeps no
+/// refused record and mints no token in the step that learns of the refusal: the records
+/// hold the one launch in flight and no more, after a thousand steps.
+#[test]
+fn a_pool_refused_for_capacity_over_and_over_keeps_its_records_bounded() {
+    let (mut rig, mut plan) = launched(settings("gpu"));
+    let mut launches = 1;
+    for round in 1..=1000 {
+        rig.input.acquired = vec![answered(&plan, refusal(RefusalCode::Capacity))];
+        let refusal_step = rig.tick(at((2 * round - 1) * SECOND));
+        assert_eq!(kinds(&refusal_step), ["Save", "Revoke", "ForgetNetwork"]);
+        assert!(rig.state.records.instances.is_empty());
+
+        let retry = rig.tick(at(2 * round * SECOND));
+        plan = acquires(&retry).remove(0);
+        launches += 1;
+        assert_eq!(rig.state.records.instances.len(), 1);
+    }
+    assert_eq!(launches, 1001);
 }
 
 /// Asserts that a quota, a denial and a shape refusal each block the pool, with their own

@@ -157,6 +157,63 @@ fn a_record_leaves_the_window_when_it_ended_a_day_ago() {
     }
 }
 
+/// Asserts that a machine launched 30 hours ago and still running costs only the 24 hours
+/// of its run that lie in the window, 1440 cents at a cent a minute, and not its whole 30
+/// hours, 1800 cents: with a launch costing 15 cents at least, a day cap of 1455 admits one
+/// and a cap of 1454 does not, and a whole-time bill would refuse both.
+#[test]
+fn a_running_machine_counts_only_its_last_24_hours() {
+    for (cap, expected) in [(1455, 1), (1454, 0)] {
+        let mut limits = settings("gpu");
+        limits.max_spend_per_day = cap;
+        let mut rig = Rig::new(limits);
+        let mut old = record(Phase::Registered, 60, 0);
+        old.registered = true;
+        old.offer.cpu_millis = 1000;
+        rig.input.hosts = vec![small_host(&old.name)];
+        rig.state.records.instances = vec![old];
+        rig.input.waiting = vec![request("r1")];
+        assert_eq!(acquires(&rig.tick(at(30 * HOUR))).len(), expected, "{cap}");
+    }
+}
+
+/// Asserts that a launch the provider told to wait is forgotten when no request waits for it
+/// any more, in a live pool and in a pool that only plans: its token is revoked, nothing is
+/// retried when its time comes, and it no longer counts against the pool.
+#[test]
+fn a_planned_launch_no_request_waits_for_is_forgotten() {
+    for mode in [LaunchMode::Live, LaunchMode::Plan] {
+        let (mut rig, plan) = launched(settings("gpu"));
+        rig.input.acquired = vec![answered(&plan, deferred(10))];
+        rig.tick(at(SECOND));
+        assert_eq!(rig.phase(0), Phase::Planned);
+        rig.pool().settings.launch = mode;
+
+        rig.input.waiting = Vec::new();
+        let actions = rig.tick(at(2 * SECOND));
+        assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+        assert!(rig.state.records.instances.is_empty());
+
+        assert!(rig.tick(at(20 * SECOND)).is_empty());
+    }
+}
+
+/// Asserts that a launch the provider told to wait is kept while a request that fits waits
+/// for it, and forgotten once a free host covers that request instead.
+#[test]
+fn a_planned_launch_is_kept_for_the_request_that_waits_for_it() {
+    let (mut rig, plan) = launched(settings("gpu"));
+    rig.input.acquired = vec![answered(&plan, deferred(600))];
+    rig.tick(at(SECOND));
+    assert_eq!(rig.phase(0), Phase::Planned);
+    assert!(rig.tick(at(2 * SECOND)).is_empty());
+
+    rig.input.hosts = vec![host("h1", "gpu")];
+    let actions = rig.tick(at(3 * SECOND));
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "ForgetNetwork"]);
+    assert!(rig.state.records.instances.is_empty());
+}
+
 /// Asserts that a launch told to wait is checked against every cap again when its time
 /// comes: it stays planned, sends nothing and shows the cap, and goes out once the cap
 /// has room.
@@ -200,6 +257,7 @@ fn a_planned_retry_is_checked_against_the_caps_again() {
         planned.retry_at = Some(at(0));
         let mut rig = Rig::new(limits);
         rig.state.records.instances = vec![planned, other];
+        rig.input.waiting = vec![request("r1")];
         let actions = rig.tick(at(now));
         assert_eq!(acquires(&actions).len(), 0, "{expected:?}");
         assert_eq!(count(&actions, "Mint"), 0, "{expected:?}");

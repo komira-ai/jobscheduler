@@ -281,26 +281,37 @@ fn a_silent_host_with_leases_still_held_is_not_released() {
     assert!(rig.state.silent_released.is_empty());
 }
 
-/// Asserts that a silent elastic host whose leases were given up is released once it has
-/// been silent `unknown_hold`, to the millisecond, the release is named in the state for
-/// the shell to log, and the usual read-back then ends it Gone.
+/// Asserts that a silent elastic host whose leases were given up is drained and marked
+/// for release once it has been silent `unknown_hold`, to the millisecond, as an idle one
+/// is; that both are asked again while the registry has not marked it; that once the
+/// registry shows it marked releasing it is revoked and released and named in the state
+/// for the shell to log; and that the usual read-back then ends it Gone.
 #[test]
-fn a_silent_host_with_its_leases_given_up_is_released_after_the_hold() {
+fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hold() {
     let (mut rig, name) = silent_for_a_while(true);
     assert!(rig.tick(at(3 * SECOND)).is_empty());
     assert!(rig.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
-    assert!(rig.state.silent_released.is_empty());
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
-    assert_eq!(count(&actions, "Revoke"), 1);
-    assert_eq!(count(&actions, "Release"), 1);
+    assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
+    assert_eq!(rig.phase(0), Phase::Draining);
+
+    let actions = rig.tick(at(3 * SECOND + 31 * MINUTE));
+    assert_eq!(kinds(&actions), ["Drain", "ReleaseHost"]);
+    assert_eq!(rig.phase(0), Phase::Draining);
+    assert!(rig.state.silent_released.is_empty());
+
+    rig.input.hosts[0].mark = Some(Mark::Releasing);
+    let actions = rig.tick(at(3 * SECOND + 32 * MINUTE));
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.state.silent_released, vec![name.clone()]);
+    assert_eq!(rig.state.refused, 0);
 
     rig.input.released = vec![js_scaler::ReleaseResult {
         host: name,
         answer: js_elastic::Released::Gone,
     }];
-    let actions = rig.tick(at(3 * SECOND + 31 * MINUTE));
+    let actions = rig.tick(at(3 * SECOND + 33 * MINUTE));
     assert_eq!(count(&actions, "RemoveHost"), 1);
     assert_eq!(rig.phase(0), Phase::Gone);
     assert!(rig.state.silent_released.is_empty());

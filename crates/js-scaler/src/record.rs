@@ -19,8 +19,8 @@ use crate::time::Millis;
 /// Orphan -> Gone (two lists, `unknown_hold` apart, no longer show it)
 /// ```
 ///
-/// The design's "Failed (Refused)" is [`Phase::Refused`] here: no machine exists and
-/// nothing is counted. [`Phase::Failed`] is an acquire that was never seen; it stays
+/// The design's "Failed (Refused)" is [`Phase::Refused`] here: no machine exists, nothing
+/// is counted, and the record is dropped at the end of the step that made it. [`Phase::Failed`] is an acquire that was never seen; it stays
 /// counted until two clean lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +39,8 @@ pub enum Phase {
     Draining,
     /// The machine is being terminated; the answer is read back until it is gone.
     Releasing,
-    /// The provider refused the acquire. No machine exists.
+    /// The provider refused the acquire. No machine exists; the record goes at the end of
+    /// the step.
     Refused,
     /// The acquire was never seen after `unknown_hold`. Counted until two clean lists.
     Failed,
