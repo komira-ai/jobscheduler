@@ -73,7 +73,7 @@ fn listed(record: &Record, held: &Held) -> bool {
 /// Whether a host's announced shape is below the offer its machine was launched from, in
 /// cpu, memory, gpus or gpu class. A host whose shape is not known is not below anything.
 fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
-    host.is_some_and(|host| {
+    host.is_none_or(|host| {
         let holds = [
             host.cpu_millis >= offer.cpu_millis,
             host.memory_bytes >= offer.memory_bytes,
