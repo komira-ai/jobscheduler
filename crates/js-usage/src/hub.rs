@@ -410,7 +410,7 @@ impl UsageHub {
     pub fn counters(&self) -> UsageCounters {
         let counts = self.books().counts.clone();
         UsageCounters {
-            sink: self.sink.counters(),
+            sink: SinkCounters::default(),
             ..counts
         }
     }
