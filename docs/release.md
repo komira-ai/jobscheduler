@@ -5,10 +5,13 @@ changes code that ships is released as the next version, after `ci` has passed o
 
 ## What happens on each merge to main
 
-1. `ci` runs on the push, as for any push.
-2. When `ci` succeeds, the `release` workflow (`.github/workflows/release.yml`) starts. It acts only
-   on a successful `ci` run for a push to `main` of this repository, and works on the commit that
-   run passed.
+1. `ci` runs on the push, as for any push, and the `release` workflow (`.github/workflows/release.yml`)
+   starts on the same push. It acts only on a push to `main`, and works on the commit pushed: the
+   run's own `github.sha`.
+2. `ci-passed` waits for the `ci` run of that commit (it polls every 120 s, for up to four hours)
+   and passes only when that run succeeded. If it failed, was cancelled, timed out or ended any
+   other way, the release fails with an error naming the `ci` run and its conclusion, and nothing
+   is released. It holds `actions: read` and nothing else, and checks out no code.
 3. `plan` (`cargo xtask release plan`) decides whether to release and as which version (below).
    When there is nothing to release, the run ends there, green.
 4. `build` stamps the version into the CI checkout, builds the three binaries for
@@ -26,19 +29,22 @@ jobs from the run's page (below): the run continues the draft of the version, ad
 lacks, and replaces none of a published release (a differing file there fails the run; a stale or
 differing draft is replaced).
 
-`plan` releases the commit only while `main` is still at it, as the GitHub API reports when the job
-runs. If `main` has moved on since the commit passed `ci`, the run releases nothing: a build is
-attested with the commit the workflow runs at, which is the tip of `main`, and the push that moved it
-releases this change too. The same rule stops a full re-run of an old run: its commit is no longer the tip.
-`plan` also refuses a commit that a later `v*` tag is past (a tag at a descendant of the commit).
+The run releases its own commit even if `main` has moved on while it waited or built: the attestation
+records the commit the run is at, which is the pushed commit, so the files and the provenance agree.
+`plan` refuses a commit that a later `v*` tag is past (a tag at a descendant of the commit): a later
+release covers it, the version stays monotonic, and no tag lands on an older commit. `publish` checks
+this again right before the publishing call: the latest `v*` tag, by version, must be a proper ancestor
+of the commit (the compare API says `ahead`), or nothing is published. That closes the race where two
+runs finish out of order. Releases are one at a time and none is cancelled: while one runs, GitHub keeps
+one waiting run and a newer push replaces an older waiting one, whose change the newer release covers.
 
 The archives are made to be byte-identical when built again from the same commit: sorted file names,
 the commit's time as modification time, numeric owner 0, `gzip -n`. A full re-run therefore uploads
 the same files the first run did; if a build still came out different, the run fails at the
 comparison rather than mix two builds (see Recovery).
 
-A gap to know: a run skipped because `main` moved is made up by the newer push's run. If that newer
-push fails `ci` (or its release run fails), nothing releases the skipped change until the next push
+A gap to know: a waiting run replaced by a newer push is made up by the newer push's run. If that newer
+push fails `ci` (or its release run fails), nothing releases the replaced change until the next push
 that passes `ci` and ships code. Nothing runs on a timer.
 
 7. `gamma` (off until its variables are set, below) sets the release as the desired version of the
@@ -47,7 +53,7 @@ that passes `ci` and ships code. Nothing runs on a timer.
 
 Each job holds only the permission it needs: `contents: read` for plan, build, deploy-tool, sums and
 verify (plus `attestations: read` for verify), `id-token` and `attestations` write for `attest`,
-`contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`. No job
+`actions: read` alone for `ci-passed`, `contents` write for `publish` (the tag and the release), `id-token` write alone for `gamma`. No job
 that holds a write permission runs repository code, except that `gamma` runs the `xtask` binary
 that `deploy-tool` built in a job with no token: the build, whose scripts run code from the locked
 dependency set, never shares a job with the token service's address and key. The rules (SHA-pinned
@@ -160,7 +166,7 @@ Not proven until the first real run on `main`, and fixed there if it differs:
 
 - that creating the tag by publishing the release is allowed under the tag ruleset above;
 - the values of the attestation's source claims, `--source-ref refs/heads/main` and
-  `--source-digest <commit>`, for a run started by `workflow_run` (`verify` refuses the release
+  `--source-digest <commit>`, for a run started by a push (`verify` refuses the release
   before anything is published if they differ);
 - the draft and asset calls of `publish` (listing drafts, uploading to a draft, reading an asset
   back to compare it).
@@ -235,16 +241,15 @@ whose upload did not finish is deleted before it is uploaded again.
 | A published release is on the wrong commit (the tag does not name the commit the files were built from) | A public release that must not be trusted | Its files are not changed and the release is not edited. Mark it so on the release page and in a new issue, and cut the next version by pushing a change that ships; users verify with `--source-digest` (above), which fails for these files at the tag's commit. |
 | `publish` failed at the last call or after it | Possibly the tag and a published release | Re-run failed jobs: the tag stays, files the release lacks are added, the tag is checked to name the commit. |
 | `publish` says a file differs | The release holds a file that is not this run's | Never delete or replace assets of a published release. Cut a new version: push a change that ships (the next version counts from the tag). |
-| The run was green but released nothing | `plan` printed why | `main` moved on (the newer push releases this change), a later release exists past the commit, or nothing that ships changed. Nothing to do. |
+| The run was green but released nothing | `plan` printed why | a later release exists past the commit, or nothing that ships changed. Nothing to do. |
 | "Re-run all jobs" after a successful release | The release is complete | It rebuilds the same files; `publish` compares each against the release and keeps them. If a file differs the run fails and nothing is changed. |
 
-Skipped runs: a release run for a commit that is not the tip of `main` is skipped on purpose (an
-attestation records the tip, and a build of an older commit must not be published as the newest). The
-push that moved `main` releases the change, unless it fails `ci`; then the next green push that ships
-code does.
+Runs that wait: a release run starts with its push and waits for `ci`; if `ci` fails there, the run fails
+at `ci-passed` (red, with the `ci` run's link) and the change is released by the next push that passes
+`ci` and ships code. Re-run the failed jobs after re-running `ci`, if the commit should release itself.
 
 There is no dispatch and no tag trigger: a `v*` tag pushed by hand does not start a release, and
 `workflow_dispatch` does not exist. An old run that is re-run with "Re-run all jobs" cannot publish its
-old commit, because `plan` finds `main` past it. A re-run of only the failed jobs does not run `plan`
+old commit under a newer release, because `plan` finds a later tag past it, and `publish` checks the tag order again. A re-run of only the failed jobs does not run `plan`
 again; the tag checks in `publish` and the attestation check in `verify` are what guard it (the draft
 it finds is replaced when it targets another commit). To release by hand there is nothing to do but merge a change that ships.

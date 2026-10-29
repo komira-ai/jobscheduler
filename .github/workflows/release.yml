@@ -2,22 +2,30 @@
 # released as the next version, with no step by hand (docs/release.md). GitHub-hosted
 # runners only, actions pinned to commit SHAs.
 #
-# What starts it. The completion of a `ci` run (`workflow_run`), and only one that
-# succeeded for a push to main of this repository: every job below tests the conclusion,
-# the event, the branch and the head repository of the run that started it, and works on
-# `workflow_run.head_sha`, the commit that passed `ci`. A pull request that changes this
-# file builds the same assets as a dry run (`plan` is told so with --dry-run) and never
-# attests, tags or publishes. No tag and no manual run starts a release.
+# What starts it. A push to main (`on: push`), and nothing else releases: every job below
+# but `plan` tests that the event is a push and the ref is main, and no tag and no manual
+# run starts a release. A pull request that changes this file builds the same assets as a
+# dry run (`plan` is told so with --dry-run) and never waits for `ci`, attests, tags or
+# publishes.
 #
-# Which commit. A run started by `workflow_run` is at the tip of main (`github.sha`), and
-# that is the commit an attestation records. `plan` therefore releases the commit only
-# while main is still at it, read from the API when the job runs (a re-run keeps the
-# commit and `github.sha` of the run it repeats; a re-run of only the failed jobs keeps
-# the `plan` that succeeded and does not read main again, so `publish` and `verify`
-# check the tag and the attestations); if main has moved on, the newer push
-# releases its change too, since a release covers everything since the latest tag. The
-# one gap: a run skipped because main moved is not made up if the newer push then fails
-# `ci`; the next push that passes releases it.
+# Which commit. The one pushed: `github.sha` of a push run is the pushed commit, and an
+# attestation records `github.sha` and `github.ref` (the certificate's source digest and
+# ref), so the run has to be at the commit it releases; that is why the release is not
+# started by the completion of `ci` (`workflow_run`), whose runs are at main's tip, not at
+# the commit that passed. The first job, `ci-passed`, waits for the `ci` run of that
+# commit (a push run; it polls every 120 s, up to four hours) and fails the release, with
+# the run's URL and conclusion, unless it succeeded. Every other job needs it. It holds
+# `actions: read` only and checks out nothing. A re-run keeps the commit and `github.sha`
+# of the run it repeats; a re-run of only the failed jobs keeps the `plan` that succeeded,
+# so `publish` and `verify` check the tag and the attestations.
+#
+# Main may move on while a run waits or builds. The run still releases its own commit,
+# since the commit passed `ci`; `plan` refuses it only when a `v*` tag is at a descendant
+# (a later release covers it, which keeps the version monotonic), and `publish` checks
+# again right before the publishing call that the latest `v*` tag is a proper ancestor of
+# the commit, so two runs that finish out of order never put a tag on an older commit. The
+# one gap: a run replaced while it waits for the group (below) is made up by the newer
+# push's release, and if that push then fails `ci` the next push that passes releases it.
 #
 # The decision and the version are `cargo xtask release plan` (crates/xtask): a release
 # only when a file that ships changed since the latest `v*` tag, as the next patch
@@ -25,7 +33,7 @@
 # stamp` puts the version into the build's checkout, so `--version` prints it; nothing is
 # committed.
 #
-# Order: plan, build, sums, attest, verify, publish, then gamma. The tag is made last: `publish` makes
+# Order: ci-passed, plan, build, sums, attest, verify, publish, then gamma. The tag is made last: `publish` makes
 # a draft release, uploads the files built, attested and verified, and publishes it in
 # one call, which creates the tag. A failed run leaves no tag. A re-run of a failed run
 # continues the same draft and adds what is missing; a published release is never changed,
@@ -45,9 +53,7 @@
 name: release
 
 on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
+  push:
     branches: [main]
   pull_request:
     paths: ['.github/workflows/release.yml']
@@ -57,26 +63,70 @@ permissions: {}
 # One release at a time, none cancelled: a second waits for the first (GitHub keeps one
 # waiting run per group, and the newer replaces the older; the replaced push is released
 # by the newer one). Only a run that will release shares the group (the same test as the
-# jobs': a successful `ci` run of a push to main of this repository); any other (a `ci` run
-# that failed or was cancelled, a pull request, a fork's branch named `main`) takes a group
-# of its own so it cannot replace the waiting one.
+# jobs': a push to main); a pull request takes a group of its own so it cannot replace the
+# waiting one. The wait for `ci` is inside the group, so the run that is releasing is never
+# replaced.
 concurrency:
-  group: release-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && 'main' || github.run_id }}
+  group: release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # The commit that passed `ci` (not `github.sha`, which for `workflow_run` is the tip of
-  # main); for a pull request, its merge commit.
-  COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+  # The commit the run is at: the pushed commit; for a pull request, its merge commit.
+  COMMIT: ${{ github.sha }}
 
 jobs:
+  # Waits for the `ci` run of this commit and passes only when it succeeded. It holds
+  # `actions: read` and nothing else, checks out nothing and runs no repository code. On a
+  # pull request it is skipped.
+  ci-passed:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for ci on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          while true; do
+            # The newest run of `ci` for this commit's push: a re-run of it is the same run.
+            if ! run="$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$COMMIT&event=push&per_page=100" \
+              --jq '.workflow_runs | sort_by(.created_at) | last // empty | "\(.status) \(.conclusion // "none") \(.html_url)"')"; then
+              echo "::warning::reading the ci runs failed; trying again"
+              run=""
+            fi
+            if [ -z "$run" ]; then
+              echo "no ci run for $COMMIT yet"
+            else
+              read -r status conclusion url <<< "$run"
+              case "$status" in
+                completed)
+                  if [ "$conclusion" = success ]; then
+                    echo "ci passed: $url"
+                    exit 0
+                  fi
+                  echo "::error::ci did not pass for $COMMIT: conclusion $conclusion, $url; nothing is released"
+                  exit 1
+                  ;;
+                *)
+                  echo "ci is $status: $url"
+                  ;;
+              esac
+            fi
+            sleep 120
+          done
+
   # Whether to release, and as which version (crates/xtask, `release plan`).
   plan:
-    # The run that started this one succeeded, for a push to main of this repository; or a
-    # pull request (a dry run).
-    if: ${{ github.event_name == 'pull_request' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) }}
+    # The wait passed, for a push to main; or a pull request (a dry run, which skips the
+    # wait).
+    needs: [ci-passed]
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || (needs.ci-passed.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -98,20 +148,13 @@ jobs:
         name: Plan the release
         env:
           EVENT: ${{ github.event_name }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           flags=()
           if [ "$EVENT" = pull_request ]; then
             flags+=(--dry-run)
-            tip="$COMMIT"
-          else
-            # Main's tip now, from the API: a re-run keeps the commit and GITHUB_SHA of the
-            # run it repeats, which may be long past.
-            tip="$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)"
           fi
-          cargo xtask release plan --head "$COMMIT" --tip "$tip" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
+          cargo xtask release plan --head "$COMMIT" --output "$GITHUB_OUTPUT" "${flags[@]}" | tee "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: [plan]
@@ -263,7 +306,7 @@ jobs:
 
   # Build provenance for every asset, from the checksums file. No repository code runs here.
   attest:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     needs: [plan, sums]
     runs-on: ubuntu-24.04
     permissions:
@@ -282,7 +325,7 @@ jobs:
   # The attestations as a user checks them (docs/release.md), before anything is tagged:
   # made by this workflow, for the commit being released.
   verify:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     needs: [plan, attest]
     runs-on: ubuntu-24.04
     permissions:
@@ -318,13 +361,14 @@ jobs:
   # holds a file that differs from this run's, is deleted and made again (else a failed
   # publish of an older commit would block the version for good), and a file whose upload
   # did not finish is deleted before it is uploaded again. The tag is read again right
-  # before the publishing call; one that names another commit stops the run.
+  # before the publishing call; one that names another commit stops the run, and so does a
+# latest `v*` tag that is not a proper ancestor of this commit (a newer release finished first).
   #
   # This shell is not in xtask on purpose: the job holds contents write and runs no
   # repository code (see the top of this file), so its decisions stay in the few lines
   # below. Nothing here is covered by a test; the dry run checks the file parses.
   publish:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     needs: [plan, sums, verify]
     runs-on: ubuntu-24.04
     permissions:
@@ -434,6 +478,18 @@ jobs:
               echo "::error::the tag $TAG appeared and names $now, not $COMMIT; nothing was published (docs/release.md)"
               exit 1
             fi
+            # The latest release tag, by version, must be a proper ancestor of this commit
+            # (GitHub says "ahead"): a run for an older commit that finished after a newer
+            # release would otherwise tag the older commit. No tag yet is the first release.
+            latest="$(gh api --paginate "$api/tags" --jq '.[] | select(.name | test("^v[0-9]+[.][0-9]+[.][0-9]+$")) | "\(.name) \(.commit.sha)"' | sort -V | tail -n 1)"
+            if [ -n "$latest" ]; then
+              read -r latest_tag latest_sha <<< "$latest"
+              relation="$(gh api "$api/compare/$latest_sha...$COMMIT" --jq .status)"
+              if [ "$relation" != ahead ]; then
+                echo "::error::the latest release tag $latest_tag ($latest_sha) is not a proper ancestor of $COMMIT (compare says $relation); nothing was published (docs/release.md)"
+                exit 1
+              fi
+            fi
             gh api --method PATCH "$api/releases/$id" -f tag_name="$TAG" -f target_commitish="$COMMIT" -F draft=false --silent
           fi
           at="$(gh api "$api/commits/$TAG" --jq .sha)"
@@ -445,7 +501,7 @@ jobs:
   # Builds the gamma step's client. A job of its own so that the build, whose scripts run
   # code from the locked dependency set, is not in the job that holds id-token write.
   deploy-tool:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     needs: [plan]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -477,7 +533,7 @@ jobs:
   # services report in their heartbeats, because `--version` of each binary prints it
   # (docs/release.md, "The gamma step").
   gamma:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && needs.plan.outputs.release == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true' }}
     needs: [plan, publish, deploy-tool]
     runs-on: ubuntu-24.04
     timeout-minutes: 150

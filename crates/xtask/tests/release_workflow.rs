@@ -1,7 +1,8 @@
 //! The rules the release workflow keeps (the comments at the top of
 //! `.github/workflows/release.yml`), read from the file as text: actions pinned to commit
-//! SHAs, no permission at the top, hosted runners, `id-token: write` only where it is
-//! meant, and the gamma step's shape.
+//! SHAs, no permission at the top, hosted runners, a push to main as the only trigger that
+//! releases, a read-only wait for `ci`, `id-token: write` and `contents: write` only where
+//! they are meant, and the gamma step's shape.
 
 use std::path::Path;
 
@@ -76,6 +77,105 @@ fn actions_are_pinned_and_the_top_grants_nothing() {
             runs_on[0]
         );
     }
+}
+
+/// Asserts that a push to main is the only trigger that releases (the other is a pull
+/// request, the dry run), that the run's commit is its own `github.sha`, and that every job
+/// that attests, publishes or deploys, and the wait and the plan, tests for a push to main
+/// of its own condition; the other jobs follow `plan`'s output.
+#[test]
+fn a_push_to_main_is_the_only_releasing_trigger() {
+    let text = workflow();
+    assert!(
+        text.contains("\non:\n  push:\n    branches: [main]\n  pull_request:\n    paths: ['.github/workflows/release.yml']\n"),
+        "{text}"
+    );
+    for forbidden in ["workflow_run", "workflow_dispatch", "schedule:", "tags:"] {
+        assert!(
+            !text.lines().any(|l| l.trim_start().starts_with(forbidden)),
+            "{forbidden}"
+        );
+    }
+    assert!(text.contains("\n  COMMIT: ${{ github.sha }}\n"));
+    assert!(!text.contains("workflow_run."));
+    let push = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+    let jobs = jobs(&text);
+    for name in [
+        "ci-passed",
+        "plan",
+        "attest",
+        "verify",
+        "publish",
+        "deploy-tool",
+        "gamma",
+    ] {
+        let ifs: Vec<&String> = job(&jobs, name)
+            .iter()
+            .filter(|l| l.starts_with("    if:"))
+            .collect();
+        assert_eq!(ifs.len(), 1, "{name}");
+        assert!(ifs[0].contains(push), "{name}: {}", ifs[0]);
+    }
+    // The dry run: the wait is skipped on a pull request and `plan` runs anyway.
+    let plan = job(&jobs, "plan").join("\n");
+    assert!(
+        plan.contains("github.event_name == 'pull_request'"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("needs.ci-passed.result == 'success'"),
+        "{plan}"
+    );
+    assert!(!plan.contains("--tip"));
+    // One group for the runs that release, never cancelled.
+    assert!(text.contains("group: release-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main' || github.run_id }}"));
+    assert!(text.contains("cancel-in-progress: false"));
+}
+
+/// Asserts the wait for `ci`: a job with exactly `actions: read` and nothing else, no
+/// checkout (no repository code runs in it), a four-hour limit, a poll every 120 s of the
+/// `ci` runs of this commit's push, and a failure naming the run for any conclusion but
+/// success.
+#[test]
+fn the_wait_for_ci_reads_actions_and_runs_no_repository_code() {
+    let text = workflow();
+    let jobs = jobs(&text);
+    let wait = job(&jobs, "ci-passed").join("\n");
+    assert!(
+        wait.contains("    permissions:\n      actions: read\n    steps:"),
+        "{wait}"
+    );
+    assert_eq!(wait.matches("permissions:").count(), 1, "{wait}");
+    assert!(!wait.contains("uses:") && !wait.contains("checkout") && !wait.contains("cargo "));
+    assert!(wait.contains("timeout-minutes: 240"));
+    assert!(wait.contains("workflows/ci.yml/runs?head_sha=$COMMIT&event=push"));
+    assert!(wait.contains("sleep 120"));
+    assert!(wait.contains("completed)"));
+    assert!(wait.contains(r#"if [ "$conclusion" = success ]"#));
+    assert!(wait.contains("::error::ci did not pass for $COMMIT: conclusion $conclusion, $url"));
+    // Nothing is planned before the wait has passed.
+    assert!(job(&jobs, "plan").join("\n").contains("needs: [ci-passed]"));
+}
+
+/// Asserts that only `publish` holds `contents: write`, and that it checks the latest
+/// release tag is a proper ancestor of the commit before the publishing call.
+#[test]
+fn only_publish_holds_contents_write_and_checks_the_tag_order() {
+    let text = workflow();
+    let holders: Vec<String> = jobs(&text)
+        .into_iter()
+        .filter(|(_, lines)| lines.iter().any(|l| l.trim() == "contents: write"))
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(holders, ["publish"]);
+    let jobs = jobs(&text);
+    let publish = job(&jobs, "publish").join("\n");
+    let compare = publish
+        .find(r#"gh api "$api/compare/$latest_sha...$COMMIT" --jq .status"#)
+        .expect("compare");
+    let patch = publish.find("--method PATCH").expect("publishing call");
+    assert!(compare < patch);
+    assert!(publish.contains(r#"[ "$relation" != ahead ]"#));
 }
 
 /// Asserts that `id-token: write` is held by `attest` and `gamma` and by no other job.
