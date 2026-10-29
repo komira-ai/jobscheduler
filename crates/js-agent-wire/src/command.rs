@@ -209,6 +209,7 @@ impl JobSpec {
         match &self.bundle {
             Some(bundle) => {
                 image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)
+                    .or(Ok(()))
             }
             None => Ok(()),
         }
