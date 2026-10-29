@@ -3,10 +3,11 @@
 //! spec that follow from a job.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 
 use js_agent_wire::{HeldRun, HeldState, Isolation, JobSpec, Outcome, RunResult, Taint};
 
-use super::RETIRED_CAP;
+use super::{RETIRED_CAP, SLOTS};
 use crate::lifecycle::runtime::{ContainerId, ContainerSpec, Exit, Found, ResolvedMount};
 use crate::lifecycle::taint::{TaintState, reason};
 use crate::lifecycle::{Capacity, CheckFinding, Event, Finding, code, label};
@@ -138,6 +139,12 @@ impl Booking {
     }
 }
 
+/// The slot a found container's labels name, when they name one that exists.
+pub(super) fn slot_label(found: &Found) -> Option<u32> {
+    let slot = label_number(found, label::SLOT)?;
+    u32::try_from(slot).ok().filter(|slot| *slot < SLOTS)
+}
+
 /// The label `key` of a found container, as a number.
 fn label_number(found: &Found, key: &str) -> Option<u64> {
     found.labels.get(key)?.parse().ok()
@@ -150,12 +157,17 @@ pub(super) struct Stuck {
     pub(super) booking: Booking,
     /// The run its labels name, whose scratch directory the container may still use.
     pub(super) run_id: Option<String>,
+    /// The slot its labels name: its uid may still be alive, so the slot is quarantined.
+    pub(super) slot: Option<u32>,
 }
 
 pub(super) struct Job {
     pub(super) run_id: String,
     pub(super) lease_id: String,
     pub(super) booking: Booking,
+    /// The slot the run holds, none for a run that was refused and one taken over from a
+    /// container no slot is written on.
+    pub(super) slot: Option<u32>,
     /// On the agent's clock.
     pub(super) deadline_ms: u64,
     pub(super) stage: Stage,
@@ -170,7 +182,19 @@ pub(super) struct Job {
     pub(super) owed: bool,
     pub(super) result: Option<RunResult>,
     pub(super) findings: Vec<Finding>,
+    /// When the container started, on the agent's monotonic clock, in microseconds (the
+    /// lifecycle's clock counts milliseconds, so the stamp is a whole number of them). For
+    /// an adopted job it is when the runtime says the container began; `None` when that was
+    /// before the clock did, which the clock cannot say.
+    pub(super) started_usec: Option<u64>,
+    /// The container's control group directory, asked of the runtime once.
+    pub(super) cgroup: Option<PathBuf>,
+    /// Taken over from an earlier process of the agent: its first minutes were not seen.
+    pub(super) adopted: bool,
 }
+
+/// Microseconds in a millisecond.
+const USEC_PER_MS: u64 = 1000;
 
 impl Job {
     pub(super) fn report(
@@ -262,8 +286,8 @@ impl Retired {
 }
 
 impl Job {
-    /// A job for `spec` in `stage`, booking what the spec asks.
-    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64) -> Self {
+    /// A job for `spec` in `stage`, booking what the spec asks, in `slot`.
+    pub(super) fn of(spec: &JobSpec, stage: Stage, deadline_ms: u64, slot: Option<u32>) -> Self {
         Self {
             run_id: spec.run_id.clone(),
             lease_id: spec.lease_id.clone(),
@@ -272,6 +296,7 @@ impl Job {
                 memory_bytes: spec.limits.memory_bytes,
                 gpus: spec.gpu_indices.clone(),
             },
+            slot,
             deadline_ms,
             stage,
             cause: None,
@@ -281,6 +306,9 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: None,
+            cgroup: None,
+            adopted: false,
         }
     }
 
@@ -289,10 +317,15 @@ impl Job {
         let booking = Booking::from_labels(found)?;
         let wall_ms = label_number(found, label::WALL_MS)?;
         let remaining = wall_ms.saturating_sub(found.running_ms);
+        let slot = match found.labels.contains_key(label::SLOT) {
+            true => Some(slot_label(found)?),
+            false => None,
+        };
         Some(Self {
             run_id: label_id(found, label::RUN)?.to_owned(),
             lease_id: label_id(found, label::LEASE)?.to_owned(),
             booking,
+            slot,
             deadline_ms: now.saturating_add(remaining),
             stage: Stage::Running(found.id.clone()),
             cause: None,
@@ -302,7 +335,17 @@ impl Job {
             owed: false,
             result: None,
             findings: Vec::new(),
+            started_usec: now
+                .checked_sub(found.running_ms)
+                .map(|started| started.saturating_mul(USEC_PER_MS)),
+            cgroup: None,
+            adopted: true,
         })
+    }
+
+    /// Marks the job as started `now_ms` on the agent's clock.
+    pub(super) fn started_at(&mut self, now_ms: u64) {
+        self.started_usec = Some(now_ms.saturating_mul(USEC_PER_MS));
     }
 }
 
@@ -353,6 +396,7 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
+    slot: u32,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
@@ -361,6 +405,7 @@ pub(super) fn container_spec(
         (label::CPU_MILLIS, spec.limits.cpu_millis.to_string()),
         (label::MEMORY_BYTES, spec.limits.memory_bytes.to_string()),
         (label::GPUS, gpus.join(",")),
+        (label::SLOT, slot.to_string()),
         (label::WALL_MS, spec.limits.wall_ms.to_string()),
         (
             label::ISOLATION,
@@ -382,6 +427,7 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        slot,
         isolation: spec.isolation,
         labels,
     }

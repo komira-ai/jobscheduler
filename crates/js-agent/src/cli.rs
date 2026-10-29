@@ -132,9 +132,10 @@ pub struct Cli {
     /// (`nvidia.com/gpu=<index>`) the operator has generated. Rootless engines are not
     /// supported: the engine gets none of `XDG_RUNTIME_DIR`, `HOME` or the D-Bus session
     /// that a rootless Podman needs (it may then run containers without their limits), so
-    /// use a rootful engine, without user-namespace remapping (`userns-remap` shows the
-    /// container user as another uid on the host, and the check for a job's leftover
-    /// processes would miss them). The agent must see the host: it must be in the pid and
+    /// use a rootful engine. Every job runs in a user namespace mapped onto the
+    /// `--container-subuid` range (Podman: per container; Docker: the daemon must run with
+    /// `userns-remap` set to that user, or the agent does not start). The agent must see
+    /// the host: it must be in the pid and
     /// mount namespaces of `init` (not in a container, and not under a service manager's
     /// `PrivatePIDs`, `PrivateMounts` or `ProtectSystem`), and able to read
     /// `/proc/1/ns` (root, or `CAP_SYS_PTRACE`), or it does not start.
@@ -146,12 +147,28 @@ pub struct Cli {
     /// the agent warns at start. Needs `--container-bin`.
     #[arg(long, value_name = "NAME")]
     pub container_network: Option<String>,
-    /// The `<uid>:<gid>` containers run as, both above zero. By default `65534:65534`.
-    /// The run's scratch directory is private to the agent: an agent that runs as root
-    /// gives it to this user, any other agent refuses to start unless this is its own
-    /// `<uid>:<gid>`. Needs `--container-bin`.
+    /// The `<uid>:<gid>` of the first slot, the base of the users containers run as:
+    /// container ids, both above zero (see `--container-subuid`). By default `1000:1000`.
+    /// A run in slot `k` (from 0; one slot for each run the agent can hold, 4096) runs as
+    /// the base plus `k` for the uid and the gid, so both numbers must be at most 61440.
+    /// The run's scratch directory is private to the agent, which gives it to its slot's
+    /// host ids: the start of the `--container-subuid` range plus the slot's ids. Needs
+    /// `--container-bin`.
     #[arg(long, value_name = "UID:GID")]
     pub container_user: Option<String>,
+    /// The user whose subordinate id range every job's user namespace is mapped onto, such
+    /// as `jobmap`. When it starts the agent reads that user's range from `/etc/subuid`
+    /// and `/etc/subgid` and refuses to start unless both have an entry of at least 65536
+    /// ids that does not begin at 0 and holds no id of `/etc/passwd` or `/etc/group`.
+    /// Container ids 0 to 65535 are host ids of that range, so no id in a container is a
+    /// host id. With Podman every container is created with `--uidmap` and `--gidmap` of
+    /// the range. Docker has no such option per container: its daemon must run with
+    /// `"userns-remap"` set to this user in `daemon.json`, and the agent refuses to start
+    /// when it does not. A second agent on the host whose range overlaps one in use is
+    /// refused. The agent must run as root: it gives each run's scratch directory to the
+    /// job's mapped user. Required with `--container-bin`, and needs it.
+    #[arg(long, value_name = "USER")]
+    pub container_subuid: Option<String>,
     /// The engine to talk to, as `unix:///<path>`: a socket on this machine; given to the
     /// program as `DOCKER_HOST` and `CONTAINER_HOST` for its calls only. By default none
     /// is given and the engine uses its own default. Any other address (`tcp://`,
@@ -172,6 +189,18 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// The control group that holds every container the agent starts, as a directory of
+    /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
+    /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The
+    /// agent starts each container in it (`--cgroup-parent`: the slice name for a
+    /// one-component path that ends in `.slice`, which the systemd cgroup driver takes,
+    /// and the path below `/sys/fs/cgroup` with a leading `/` otherwise, for the cgroupfs
+    /// driver) and reads the CPU and memory of the directory and of each container's
+    /// control group to send what each lease costs on the heartbeat. Without it containers
+    /// land where the engine puts them and the heartbeat carries no load. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub actions_cgroup: Option<PathBuf>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe

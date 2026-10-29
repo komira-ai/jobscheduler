@@ -6,7 +6,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use js_lease_server::{SharedClock, StartupError, channel_ticker, start};
+use js_lease_server::{SharedClock, StartupError, channel_ticker};
 use js_registry::Credential;
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ use crate::agents_support::{
     restarted, start_agents,
 };
 use crate::support::{
-    Harness, LogCapture, Scratch, base_args, config, ids, lease_body, lease_file, replace,
+    Harness, LogCapture, Scratch, base_args, config, ids, lease_body, lease_file, replace, start,
 };
 
 fn secs(n: u64) -> Duration {

@@ -265,14 +265,19 @@ fn mount_value(
 /// What every contained job gets, whatever it asked for: no capability, no privilege
 /// gain, the network the agent was configured with (none by default), a read-only root
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
-/// files, and limited in size: Podman does not default to `noexec`), no core dumps, a
-/// private IPC namespace against a daemon whose default is to share it, the pull policy
-/// the agent was configured with (never by default), and a user that is not root. For
+/// files, and limited in size: Podman does not default to `noexec`; on Podman `/var/tmp`
+/// and `/run` are such tmpfs mounts too), no core dumps, a private IPC namespace against a
+/// daemon whose default is to share it, a private control group namespace (both engines
+/// default to it on cgroup v2, but the integrity checks rely on a job seeing only its own
+/// group, so it is named), the pull policy the agent was configured with (never by
+/// default), and, when `--actions-cgroup` is given, `--cgroup-parent` naming it so the
+/// container's usage is counted in it. The user is not here: it is the run's slot's
+/// (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
-    let tmpfs = format!("/tmp:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
+    let tmpfs = |dir: &str| format!("{dir}:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
     let profile = format!("seccomp={seccomp}");
     let mut args: Vec<String> = [
         "--cap-drop",
@@ -285,27 +290,43 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         settings.network(),
         "--read-only",
         "--tmpfs",
-        &tmpfs,
+        &tmpfs("/tmp"),
         "--ulimit",
         "core=0",
         "--ipc",
+        "private",
+        "--cgroupns",
         "private",
     ]
     .map(str::to_owned)
     .to_vec();
     if engine == Engine::Podman {
+        // Podman's `--read-only` also mounts writable tmpfs at `/var/tmp` and at the
+        // image's run path, with neither `noexec` nor a size (`--read-only-tmpfs` is on
+        // by default, and turning it off would make `/dev` and `/dev/shm` read-only).
+        // A mount named here replaces the default one at its destination. Docker adds no
+        // such mounts, so it gets no writable `/var/tmp` or `/run` it did not have.
+        let at = args
+            .iter()
+            .position(|arg| arg == "--ulimit")
+            .unwrap_or(args.len());
+        let more = ["/var/tmp", "/run"]
+            .into_iter()
+            .flat_map(|dir| ["--tmpfs".to_owned(), tmpfs(dir)]);
+        args.splice(at..at, more.collect::<Vec<_>>());
         args.extend(["--pid", "private"].map(str::to_owned));
     }
-    args.extend(
-        [
-            "--pull",
-            settings.pull().as_str(),
-            "--user",
-            settings.user(),
-        ]
-        .map(str::to_owned),
-    );
+    args.extend(["--pull", settings.pull().as_str()].map(str::to_owned));
+    if let Some(parent) = settings.cgroup_parent() {
+        args.extend(["--cgroup-parent", parent].map(str::to_owned));
+    }
     args
+}
+
+/// The user of a run: `--user <uid>:<gid>` of its slot, one for each slot (see
+/// [`Settings::slot_user`]), so two runs held at once never share a user.
+pub(super) fn user_args(settings: &Settings, slot: u32) -> Vec<String> {
+    vec!["--user".to_owned(), settings.slot_user(slot)]
 }
 
 /// One `--label key=value` for each label, in key order.

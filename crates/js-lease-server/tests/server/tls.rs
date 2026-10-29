@@ -14,8 +14,9 @@ use tokio_rustls::TlsConnector;
 
 use crate::support::{
     Harness, Scratch, TOKEN, args_with, config, exchange, guard, lease_body, replace, request,
+    start,
 };
-use js_lease_server::{Limits, SharedClock, channel_ticker, start};
+use js_lease_server::{Limits, SharedClock, channel_ticker};
 
 /// A certificate for 127.0.0.1 and its key, as PEM text.
 pub fn test_identity() -> (String, String) {

@@ -55,6 +55,10 @@ struct State {
     marker: Option<PathBuf>,
     /// Whether the next create fails as a start that shows the host is not seen.
     blind: bool,
+    /// The control group directory of the container of each run.
+    cgroups: BTreeMap<String, PathBuf>,
+    /// How many times the scripted checks were told the host is idle.
+    idles: u32,
 }
 
 /// A runtime whose containers exit when a test says so, whose calls fail when a test
@@ -89,6 +93,11 @@ impl FakeRuntime {
         self.state.borrow_mut().failing.insert(call, times);
     }
 
+    /// How many times the scripted checks were told the host is idle (`CheckHook::idle`).
+    pub fn idles(&self) -> u32 {
+        self.state.borrow().idles
+    }
+
     /// The next `create_and_start` fails as a start does when the agent cannot see the host
     /// its containers run on (the container is not made).
     pub fn blind_next_create(&self) {
@@ -118,6 +127,15 @@ impl FakeRuntime {
     /// Every `create_and_start` takes `ms` on the test's clock.
     pub fn create_takes(&self, ms: u64) {
         self.state.borrow_mut().create_takes_ms = ms;
+    }
+
+    /// The runtime reports `dir` as the control group of the container of `run_id`.
+    pub fn set_cgroup(&self, run_id: &str, dir: &str) {
+        let dir = PathBuf::from(dir);
+        self.state
+            .borrow_mut()
+            .cgroups
+            .insert(run_id.to_owned(), dir);
     }
 
     /// The container of `run_id` exits with `code`.
@@ -295,6 +313,12 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.cgroups.get(run).cloned()
+    }
+
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         if self.fails("list") {
             return Err(err("list"));
@@ -339,6 +363,10 @@ impl ScriptedChecks {
 }
 
 impl CheckHook for ScriptedChecks {
+    fn idle(&mut self) {
+        self.runtime.state.borrow_mut().idles += 1;
+    }
+
     fn run(&mut self, job: &Finished<'_>) -> Result<(), CheckFinding> {
         let run_id = job.run_id;
         let container = match self.runtime.gone(run_id) {

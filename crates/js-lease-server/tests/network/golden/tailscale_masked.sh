@@ -28,6 +28,13 @@ install -d -m 0700 -- /var/lib/js-agent/state /var/lib/js-agent/scratch
 curl --fail --silent --show-error --location --proto =https --output /usr/local/bin/js-agent --url https://sched.example.org:7301/v1/bootstrap/agent/x86_64
 printf '%s  %s\n' abababababababababababababababababababababababababababababababab /usr/local/bin/js-agent | sha256sum --check --status -
 chmod 0755 /usr/local/bin/js-agent
+# gpu toolkit hook
+install -d -m 0755 -- /usr/local/lib/js-agent
+cat > /usr/local/lib/js-agent/gpu-toolkit-hook <<'HOOK'
+#!/bin/sh
+exec nvidia-container-cli info
+HOOK
+chmod 0700 /usr/local/lib/js-agent/gpu-toolkit-hook
 cat > /etc/systemd/system/js-agent.service <<'UNIT'
 [Unit]
 Description=jobscheduler agent
@@ -36,7 +43,7 @@ Wants=network-online.target
 RequiresMountsFor=/var/lib/js-agent/scratch
 
 [Service]
-ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+ExecStart=/usr/local/bin/js-agent --server "https://sched.example.org:7301" --token-file /etc/jobscheduler/token --instance-file /etc/jobscheduler/instance --pool "gpu" --host-id "<HOST>" --container-bin /usr/bin/docker --container-pull missing --gpu-toolkit-hook /usr/local/lib/js-agent/gpu-toolkit-hook --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
 Restart=always
 RestartSec=5
 

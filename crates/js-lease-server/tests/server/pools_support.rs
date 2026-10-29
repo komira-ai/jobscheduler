@@ -134,8 +134,9 @@ impl FakeCloud {
         self.catalogs.load(Ordering::SeqCst)
     }
 
-    /// How many calls other than the catalog and the host preparation (acquire, list,
-    /// release) were made: a pool in `plan` makes none.
+    /// How many calls other than the catalog, the host preparation and the list (acquire,
+    /// release) were made: a pool in `plan` makes none. A list reads and changes nothing,
+    /// and the scaler reads it to show what a plan pool would launch.
     pub fn others(&self) -> usize {
         self.others.load(Ordering::SeqCst)
     }
@@ -175,7 +176,6 @@ impl ElasticProvider for Handle {
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
-        self.0.others.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
 
@@ -183,6 +183,15 @@ impl ElasticProvider for Handle {
         self.0.others.fetch_add(1, Ordering::SeqCst);
         Released::Unknown
     }
+}
+
+/// The pin of the agent for x86_64: an `https` address and a hash.
+fn agent_pin() -> String {
+    format!(
+        "{{ x86_64 = {{ url = {}, sha256 = {} }} }}",
+        quote("https://js.example:7301/agent"),
+        quote(&"ab".repeat(32))
+    )
 }
 
 thread_local! {
@@ -320,7 +329,7 @@ pub enum Net {
 pub struct Options {
     /// `server.advertise_url`.
     pub advertise: Option<&'static str>,
-    /// Whether the agent binary's digest is known.
+    /// Whether the pool pins an agent binary for x86_64 (a `live` pool needs it).
     pub digest: bool,
     /// The network mode.
     pub net: Net,
@@ -392,6 +401,10 @@ impl Rig {
             true => pool.set("launch", &quote("live")),
             false => pool,
         };
+        let pool = match options.digest {
+            true => pool.set("agent", &agent_pin()),
+            false => pool,
+        };
         let pool = match options.net {
             Net::Tailscale { .. } => pool.set(
                 "network",
@@ -406,9 +419,6 @@ impl Rig {
         NEXT.with(|next| *next.borrow_mut() = Some(cloud.clone()));
         let config = Config::from_config_file(&path, &kinds(), &OwnerOnlyFiles, clock()).unwrap();
         let mut inputs = LaunchInputs::default();
-        if options.digest {
-            inputs.agent_sha256.insert("x86_64".to_owned(), [0xab; 32]);
-        }
         match options.net {
             Net::Fake => inputs.network = Some(net.clone()),
             Net::Tailscale { pinned: true } => {

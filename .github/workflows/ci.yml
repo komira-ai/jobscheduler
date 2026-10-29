@@ -14,9 +14,11 @@ on:
 permissions: {}
 
 # One run per workflow and pull request: a new push to a PR cancels that PR's queued or
-# running run (macOS runners are scarce), while pushes to main are never cancelled.
+# running run (macOS runners are scarce). A push to main gets a group of its own (the run
+# id), so it is never cancelled and never replaced while pending: GitHub keeps only one
+# pending run per group, and the release runs only after a main run succeeds.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -99,10 +101,86 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # Whether a pull request touches what the macos job builds, so a PR that does not skips
+  # that job (macOS runners are scarce) and a push to main always runs it. The paths are
+  # the workspace crates in the dependency closure of js-agent and js-cli (normal, build
+  # and dev dependencies, from `cargo metadata --format-version 1 --no-deps`), the
+  # lockfile, the workspace manifest, the toolchain pin and this file. A path ending in `/`
+  # matches everything under it. crates/xtask/tests/macos_filter.rs fails when a crate of
+  # the closure is missing here. The macos job builds and tests only js-agent and js-cli.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      macos: ${{ steps.filter.outputs.macos }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+          PATHS: |
+            crates/js-agent/
+            crates/js-agent-usage/
+            crates/js-agent-wire/
+            crates/js-caps/
+            crates/js-cli/
+            crates/js-client/
+            crates/js-elastic/
+            crates/js-lease/
+            crates/js-lease-server/
+            crates/js-pool-static/
+            crates/js-provider/
+            crates/js-provider-fake/
+            crates/js-provider-lambdalabs/
+            crates/js-registry/
+            crates/js-scaler/
+            crates/js-sched/
+            crates/js-sim/
+            crates/js-sizing/
+            crates/js-testkit/
+            crates/js-types/
+            crates/js-whole/
+            Cargo.lock
+            Cargo.toml
+            rust-toolchain.toml
+            .github/workflows/ci.yml
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail closed: if the diff cannot be computed, run the macOS job. Renames count as
+          # both the old and the new path, and names are not quoted.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "origin/$BASE...HEAD"); then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          macos=false
+          while IFS= read -r file; do
+            while IFS= read -r path; do
+              if [ "${path%/}" != "$path" ]; then
+                if [ "${file#"$path"}" != "$file" ]; then macos=true; fi
+              elif [ "$file" = "$path" ]; then
+                macos=true
+              fi
+            done <<< "$PATHS"
+          done <<< "$files"
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+
   # js-agent and js-cli (with the crates their tests start) build and pass their tests on
   # Apple silicon. Tests that need Linux (pidfds, /proc) are cfg-gated, not removed; the
   # coverage and the Postgres tests stay on Linux.
   macos:
+    needs: changes
+    # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
+    # run cancelled by a newer push to the same pull request does not.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-14
     timeout-minutes: 45
     permissions:
@@ -171,6 +249,69 @@ jobs:
       - run: cargo clippy -p js-state --features postgres --all-targets --locked -- -D warnings
       # The write-rate measurement (tests/postgres_write_rate.rs) is read by a person, not a gate.
       - run: cargo test -p js-state --features postgres --locked -- --include-ignored --skip the_write_rate_of_one_two_and_three_frontends
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The sandbox a job gets, proven by a job: js-agent's container create path against a
+  # real rootful Podman (the distro's, the version the hosts run), with the job's own
+  # view of its seccomp filter, capabilities, user namespace, network, root, /tmp and
+  # scratch mount read from inside the running container
+  # (crates/js-agent/tests/live_podman.rs, ignored in every other job). The host is
+  # prepared here and only read by the test: a subordinate id range for a user name that
+  # has no account, and the image, pulled by digest because the agent pulls nothing. The
+  # job stands alone, so a failure here blocks no other job.
+  live-podman:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      JS_LIVE_IMAGE: docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      JS_LIVE_SUBUID_USER: js-live-map
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install Podman from the distribution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman
+          podman --version
+      # One line per file, for a user name no account has: ids 300000 to 365535, above every
+      # id of the runner's passwd and group files and of its own ranges.
+      - name: Prepare the subordinate id range
+        run: |
+          echo "$JS_LIVE_SUBUID_USER:300000:65536" | sudo tee -a /etc/subuid
+          echo "$JS_LIVE_SUBUID_USER:300000:65536" | sudo tee -a /etc/subgid
+      - name: Pull the image by digest
+        run: sudo podman pull "$JS_LIVE_IMAGE"
+      - name: Build the test as the runner user
+        run: cargo test -p js-agent --test live_podman --locked --no-run
+      # Root runs the test (the agent refuses to map jobs otherwise), with the runner's
+      # toolchain and home.
+      - name: Run one job in Podman and assert its sandbox
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture
+      - name: Podman state after a failure
+        if: ${{ failure() }}
+        run: |
+          sudo podman ps -a
+          sudo podman logs --latest || true
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

@@ -68,6 +68,8 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                let raw_memory_bytes = capacity.memory_bytes;
+                let capacity = self.memory_percent.of_capacity(capacity);
                 let now = self.now;
                 match self.workers.get_mut(&worker) {
                     Some(w) => {
@@ -88,6 +90,7 @@ impl StateMachine for Scheduler {
                         }
                         w.instance = instance;
                         w.capacity = capacity;
+                        w.raw_memory_bytes = raw_memory_bytes;
                         w.caps = caps;
                         w.last_heard = now;
                         w.session += 1;
@@ -98,6 +101,7 @@ impl StateMachine for Scheduler {
                     None => {
                         let mut fresh = Worker {
                             capacity,
+                            raw_memory_bytes,
                             caps,
                             booked: Resources::default(),
                             leases: 0,
@@ -124,8 +128,11 @@ impl StateMachine for Scheduler {
                 capacity,
                 caps,
             } => {
+                let raw_memory_bytes = capacity.memory_bytes;
+                let capacity = self.memory_percent.of_capacity(capacity);
                 if let Some(w) = self.workers.get_mut(&worker) {
                     w.capacity = capacity;
+                    w.raw_memory_bytes = raw_memory_bytes;
                     w.caps = caps;
                     w.last_heard = w.last_heard.max(self.now);
                 }
@@ -144,6 +151,7 @@ impl StateMachine for Scheduler {
                             load,
                             self.now,
                             &w.capacity,
+                            w.raw_memory_bytes,
                             &adm.cfg,
                             &mut adm.counters,
                         );

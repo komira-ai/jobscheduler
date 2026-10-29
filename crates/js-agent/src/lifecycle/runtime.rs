@@ -38,6 +38,9 @@ pub mod label {
     /// without it (made by an earlier agent) is a contained job's. An agent that finds a
     /// `host` one after a restart taints the host.
     pub const ISOLATION: &str = "jobscheduler.dev/isolation";
+    /// The slot the run holds (`slot-uid` of the module documentation of the lifecycle),
+    /// as a number; absent on a container an earlier agent made.
+    pub const SLOT: &str = "jobscheduler.dev/slot";
     /// The id the agent registered under. A runtime puts it on every container it makes
     /// and lists only the containers that carry it, so two agents sharing one runtime
     /// never adopt each other's jobs.
@@ -88,6 +91,9 @@ pub struct ContainerSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The slot the run holds: its container user and the owner of its scratch directory are
+    /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
+    pub slot: u32,
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,
@@ -226,5 +232,15 @@ pub trait ContainerRuntime {
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
         true
+    }
+
+    /// The control group directory (an absolute path of the cgroup version 2 file system)
+    /// of a container that runs, or `None` when the runtime cannot say: the container is
+    /// not in the agent's `/proc`, its control group is not the unified one, or it lies
+    /// outside the control group the agent was told holds its containers. The lifecycle
+    /// asks once, when a job starts or is adopted, and a lease with no control group is
+    /// simply not sampled. A runtime with no control groups keeps the default.
+    fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
+        None
     }
 }

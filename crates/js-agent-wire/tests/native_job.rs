@@ -355,6 +355,34 @@ fn env_rules() {
     assert_eq!(ok.validate(), Ok(()));
 }
 
+/// The wire check reads the one list in `js-types`: a job cannot set `MallocStackLogging`,
+/// `OBJC_DEBUG`, `__XPC_X` or `JS_FOO`, nor a name the agent owns (`HOME`, `TMPDIR`), and
+/// every entry of that list is refused here. It catches a copy of the list drifting from
+/// the shared one.
+#[test]
+fn env_names_are_refused_by_the_shared_reserved_list() {
+    let field = "native.env";
+    let code = refusal::INVALID_ENV;
+    let one = |key: &str| check(|n| n.env = BTreeMap::from([(key.to_owned(), "v".to_owned())]));
+    for key in [
+        "MallocStackLogging",
+        "OBJC_DEBUG",
+        "__XPC_X",
+        "JS_FOO",
+        "HOME",
+        "TMPDIR",
+    ] {
+        expect(one(key), field, Rule::Reserved, code);
+    }
+    for prefix in js_types::env::RESERVED_ENV_PREFIXES {
+        expect(one(&format!("{prefix}X")), field, Rule::Reserved, code);
+    }
+    for name in js_types::env::OWNED_ENV_NAMES {
+        expect(one(name), field, Rule::Reserved, code);
+    }
+    assert_eq!(MAX_ENV_KEY_LEN, js_types::env::MAX_ENV_NAME_LEN);
+}
+
 /// The working directory, an input `dest`, an output path and an input's mount path are
 /// relative paths below the exec root as a mount's `rel` is; only the working directory
 /// may be empty. It catches `..` and absolute paths on any of them.
