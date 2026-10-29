@@ -257,6 +257,76 @@ fn a_refusal_waits_while_another_frontends_daemon_could_run_the_operation() {
     );
 }
 
+/// A request for `cores` cores and `memory` bytes.
+fn sized(n: u64, cores: u64, memory: u64) -> js_sched::Request {
+    let mut sized = request(n);
+    sized.resources = Resources::new(cores * 1_000, memory);
+    sized
+}
+
+/// A frontend at 90% of the memory a host reports, over `setup`, with a one-core node, and
+/// another frontend with an eight-core node of 64 GiB (its session row holds all of it).
+fn cut_pair(setup: &Setup) -> js_server_core::Core<Rig> {
+    let config = js_server_core::Config::new(1)
+        .with_unservable_wait(Duration::from_secs(1))
+        .with_memory_schedulable_percent(90)
+        .expect("in range");
+    let a = setup.core_with(&config, Rig::default(), 0);
+    let b = setup.core(2);
+    up(&b, 0, "node-b", "d2");
+    up_after(&a, 0, "node-a", ("d1", ""), reported(1));
+    a
+}
+
+/// Asserts that, at 90%, a refusal is judged against the cut capacity of the other
+/// frontends' daemons as against its own: a request of 60 GiB, above the 57.6 GiB cut of
+/// the other frontend's 64 GiB host and within what it reports, is refused once the
+/// scheduler finds it unservable, while a request the cut capacity of that host holds
+/// (4 cores, 1 GiB, too many for the local node) is held. Catches: a hold that reads the raw
+/// session rows, so an operation no daemon could run waits again for ever.
+#[test]
+fn a_refusal_is_judged_against_the_cut_capacity_of_the_other_frontends() {
+    let setup = Setup::new();
+    let a = cut_pair(&setup);
+    let between = submit_request(&a, 1, sized(1, 1, 60 * GIB)).expect("queued");
+    let held = submit_request(&a, 2, four_cores(2)).expect("queued");
+
+    for now in [5_000, 10_000, 20_000, 30_000] {
+        block_on(a.tick(at(now)));
+    }
+
+    assert!(
+        calls(&a).contains(&Call::Refuse(between.operation)),
+        "above the cut of every daemon"
+    );
+    assert!(
+        !calls(&a).contains(&Call::Refuse(held.operation)),
+        "another frontend's cut capacity holds it"
+    );
+}
+
+/// Asserts that the stage of a waiting operation judges the other frontends' daemons by the
+/// cut capacity: at 90%, a request of 60 GiB that only the raw 64 GiB of the other
+/// frontend's host holds is shown `Waiting`, one its cut holds `WaitingKept`. Catches: the
+/// look at the remote sessions reading their raw capacity.
+#[test]
+fn the_stage_of_a_waiting_operation_judges_the_other_frontends_by_the_cut_capacity() {
+    let setup = Setup::new();
+    let a = cut_pair(&setup);
+    submit_request(&a, 1, sized(1, 4, 60 * GIB)).expect("queued");
+    // The other frontends' daemons are read once an operation waits.
+    a.refresh_remote();
+    let above = shown(&a);
+    assert!(matches!(above.last(), Some(Stage::Waiting(_))), "{above:?}");
+
+    submit_request(&a, 2, sized(2, 4, 50 * GIB)).expect("queued");
+    let within = shown(&a);
+    assert!(
+        matches!(within.last(), Some(Stage::WaitingKept(_))),
+        "{within:?}"
+    );
+}
+
 /// Asserts that the stage of an operation that waits for a worker is decided again once the
 /// daemons of the other frontends are read: it is kept (a drain keeps its stream) while one
 /// could run it, an operation that waits later is shown so at once, and a look that fails

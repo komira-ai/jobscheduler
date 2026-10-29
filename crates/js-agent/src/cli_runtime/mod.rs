@@ -24,8 +24,11 @@
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
-//!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m --ulimit core=0 --ipc private
-//!   [--pid private] --pull never --user 65534:65534 -- <image> <args>...
+//!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
+//!   [--tmpfs /var/tmp:rw,noexec,nosuid,nodev,size=64m --tmpfs /run:rw,noexec,nosuid,nodev,size=64m] (Podman)
+//!   --ulimit core=0 --ipc private
+//!   [--pid private] --pull never --user 65534:65534
+//!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
 //! <bin> volume inspect --format "{{json .Options}}" -- <scratch volume>   (Docker)
 //! <bin> start -- <id>
@@ -61,17 +64,15 @@
 //! the agent's own `PATH`) reaches the engine, and the host is a flag, not a variable.
 //! Without `--container-host` the engine uses its own default (the system socket).
 //!
-//! **Not supported:** rootless engines, engines with user-namespace remapping, and an
-//! engine on another machine. A rootless Podman needs `XDG_RUNTIME_DIR`, `HOME` and the
-//! D-Bus session of its user, none of which it is given, and may then run a container
-//! without its limits; they are not passed through, so a rootless engine is configured at
-//! the operator's own risk. With `userns-remap` the container's user is another uid on the
-//! host, so the post-job check for a job's leftover processes (which compares the host uid
-//! with `--container-user`) would miss them. `--container-host` accepts only a socket on
-//! this machine (`unix:///<path>`): the post-job checks read this machine's `/proc`,
-//! mounts and users, and a job on a machine reached through `tcp://` or `ssh://` would
-//! pass them all, so those are refused when the agent starts. The supported setup is a
-//! rootful engine on a local socket.
+//! **Not supported:** rootless engines and an engine on another machine. A rootless Podman
+//! needs `XDG_RUNTIME_DIR`, `HOME` and the D-Bus session of its user, none of which it is
+//! given, and may then run a container without its limits; they are not passed through, so
+//! a rootless engine is configured at the operator's own risk. `--container-host` accepts
+//! only a socket on this machine (`unix:///<path>`): the post-job checks read this
+//! machine's `/proc`, mounts and users, and a job on a machine reached through `tcp://` or
+//! `ssh://` would pass them all, so those are refused when the agent starts. The supported
+//! setup is a rootful engine on a local socket, with every job in a user namespace mapped
+//! onto a subordinate id range (see below).
 //!
 //! # Names, and a create that may have worked
 //!
@@ -108,6 +109,8 @@
 //! `.Mounts`) and requires that every bind has the source the agent resolved (the
 //! scratch path is canonical, see `ScratchRoot`), the destination and the access it asked
 //! for, and that there is no other bind; the tmpfs and other volumes are not looked at. On
+//! Podman every bind must also list `nosuid` and `nodev` in its `Options`, so the two
+//! options are read back, not assumed. On
 //! Docker the scratch directory is not a bind but a volume of the local driver that
 //! binds it `nosuid,nodev`, so the read-back also requires that volume at `/scratch`
 //! (local driver, writable) and, from `volume inspect`, exactly the options that bind the
@@ -127,13 +130,45 @@
 //! has not been checked here; do not rely on it. Mount roots shared by jobs of different trust are still shared at their own
 //! risk (see [`MountRoots`](crate::lifecycle::MountRoots)).
 //!
+//! # The user namespace of every job
+//!
+//! Every job runs in a user namespace whose ids 0 to 65535 are mapped onto one range of
+//! unprivileged subordinate ids of the host, the range of the user `--container-subuid`
+//! names in `/etc/subuid` and `/etc/subgid`, so that no id inside a container is a host
+//! id. [`CliRuntime::open_in`] reads the range ([`Mapping::read`]: at least 65536 ids, not
+//! beginning at 0, holding no id of `/etc/passwd` or `/etc/group`) and refuses to open
+//! the runtime otherwise, which stops the agent before its first hello. It also claims
+//! the range host-wide ([`RangeClaim`]), so a second agent on the host whose range
+//! overlaps is refused.
+//!
+//! - **Podman** is given the map in every `create`: `--uidmap 0:<start>:65536` and
+//!   `--gidmap 0:<start>:65536`.
+//! - **Docker** has no map per container; the daemon maps all of them. The agent requires
+//!   `"userns-remap": "<user>"` in the daemon's `daemon.json` and asks the engine once when
+//!   the runtime opens: `info --format '{{json .SecurityOptions}} {{.DockerRootDir}}'`.
+//!   The security options must name `userns`, and the data root, which Docker makes
+//!   `<data root>/<uid>.<gid>` when it remaps, must name the first ids of the range read
+//!   from `/etc/subuid` and `/etc/subgid`; otherwise the runtime is not opened and the
+//!   message names the fix. That the data root names the range is Docker's documented
+//!   layout and has not been checked here against a live daemon.
+//!
+//! With an engine that remaps, the checks above that read the agent's own namespaces are
+//! unchanged: the daemon and the agent are in the host's user, pid and mount namespaces,
+//! and `State.Pid` is the process id on the host, so the process is in the agent's
+//! `/proc` and its `/proc/<pid>/ns/pid` differs from the agent's. Reading that link of a
+//! process in a child user namespace needs the same privilege the agent already needs for
+//! `/proc/1/ns` (root).
+//!
 //! # The scratch directory and the user
 //!
 //! A run's scratch directory is `0700` and the agent's. The container runs as a user that
-//! is not root (`--container-user`, `65534:65534` by default), so the directory has to
-//! be made writable for it: an agent that runs as root gives the directory to that user
-//! before `create` ([`hand_over`]); any other agent cannot give a file away and refuses to
-//! start unless the container user is its own `uid:gid` ([`Settings::with_agent`]).
+//! is not root (`--container-user`, `65534:65534` by default; a container id, below
+//! 65536), so the directory has to be made writable for it: an agent that runs as root
+//! gives the directory before `create` ([`hand_over`]) to the host ids that user's ids are
+//! mapped onto (the start of the range plus the id, for the uid and the gid). Any other
+//! agent cannot give a file away: it refuses to start unless the container user is its own
+//! `uid:gid` ([`Settings::with_agent`]), and then a mapped job is a host user the agent is
+//! not, so [`CliRuntime::open_in`] refuses it. Nothing else of the agent's is owned by the range.
 //!
 //! # Docker and Podman
 //!
@@ -230,6 +265,7 @@ mod logs;
 pub use logs::LOGS_LIMIT;
 mod seccomp;
 mod settings;
+mod subid;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -247,8 +283,11 @@ pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
     DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
 };
+pub use subid::{
+    CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
+};
 
-use crate::facts::{CommandRunner, Platform, SystemCommands};
+use crate::facts::{CommandRunner, FileReader, Platform, SystemCommands, SystemFiles};
 use crate::lifecycle::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
 };
@@ -340,6 +379,35 @@ pub enum CliError {
     /// A run id that cannot be made a container name.
     #[error("the run id cannot be made a container name")]
     Name,
+    /// The `--container-subuid` range cannot be used, or is claimed.
+    #[error("{0}")]
+    Subid(#[from] SubidError),
+    /// The jobs are mapped onto a subordinate range and the agent is not root, which can
+    /// give the run's scratch directory to a host id of the range.
+    #[error(
+        "--container-subuid: the agent must run as root: it gives each run's scratch directory to the job's mapped user"
+    )]
+    AgentNotRoot,
+    /// Docker's daemon does not remap user namespaces.
+    #[error(
+        "the docker daemon does not remap user namespaces: set \"userns-remap\": \"{user}\" in daemon.json (the user needs an entry in /etc/subuid and /etc/subgid) and restart the daemon; --container-subuid runs every job in a user namespace mapped onto that user's range, and Docker has no per-container map"
+    )]
+    NoUserns {
+        /// The user `--container-subuid` named.
+        user: String,
+    },
+    /// Docker's daemon remaps to a range other than the one `--container-subuid` names.
+    #[error(
+        "the docker daemon remaps to {root} (the ids its data root names), not to the range {want} of --container-subuid {user}: set \"userns-remap\": \"{user}\" in daemon.json and restart the daemon"
+    )]
+    RemapDiffers {
+        /// The user `--container-subuid` named.
+        user: String,
+        /// The `<uid>.<gid>` the user's range begins at.
+        want: String,
+        /// The daemon's data root.
+        root: String,
+    },
     /// The scratch directory could not be given to the container's user.
     #[error("scratch: {0}")]
     Scratch(String),
@@ -378,6 +446,13 @@ impl From<CliError> for RuntimeError {
     }
 }
 
+/// The `(uid, gid)` a Docker data root names: `<dir>/<uid>.<gid>`, which the daemon makes of
+/// its data root when `userns-remap` is on.
+fn remap_of(root: &str) -> Option<(u32, u32)> {
+    let (uid, gid) = root.rsplit('/').next()?.split_once('.')?;
+    uid.parse().ok().zip(gid.parse().ok())
+}
+
 /// Milliseconds since the Unix epoch on the system clock: what [`CliRuntime`] stamps a
 /// container with, and measures its age against after a restart.
 pub fn unix_ms() -> u64 {
@@ -396,7 +471,9 @@ pub fn system_runner(stop_grace: Duration) -> SystemCommands {
 /// Gives a directory to a user and group.
 pub type Chown = fn(&Path, u32, u32) -> io::Result<()>;
 
-/// Gives the directory `path` itself (a link is not followed) to `uid` and `gid`.
+/// Gives the directory `path` itself (a link is not followed) to `uid` and `gid`, by path
+/// (`lchown`, not through an open descriptor). The path is a run's directory the agent made
+/// in its private scratch root, which nobody else can enter or replace.
 ///
 /// # Errors
 ///
@@ -461,22 +538,62 @@ pub struct CliRuntime {
     profile_dir: Option<PathBuf>,
     logs_limit: Duration,
     warnings: Vec<String>,
+    mapping: Option<Mapping>,
+    // Held, never read: the claim of the range lasts as long as the runtime.
+    _claim: Option<RangeClaim>,
 }
 
 impl CliRuntime {
     /// Finds out which engine `settings.bin()` is (by `--version`) and returns the
     /// runtime. `host_id` is the id the agent registered under; `now_ms` is the wall
-    /// clock ([`unix_ms`]).
+    /// clock ([`unix_ms`]). Settings that map the jobs onto a subordinate range
+    /// ([`Settings::with_subuid`]) read it from this machine's `/etc` and claim it in
+    /// [`CLAIM_DIR`]; see [`CliRuntime::open_in`].
     ///
     /// # Errors
     ///
-    /// The program cannot be run, or it is neither Docker nor Podman.
+    /// The program cannot be run, or it is neither Docker nor Podman, or the range cannot
+    /// be used (see [`CliRuntime::open_in`]).
     pub fn open(
         settings: Settings,
         host_id: &str,
         platform: &Platform,
         now_ms: fn() -> u64,
         runner: Box<dyn CommandRunner>,
+    ) -> Result<Self, CliError> {
+        Self::open_in(
+            settings,
+            host_id,
+            platform,
+            now_ms,
+            runner,
+            &SystemFiles,
+            Path::new(CLAIM_DIR),
+        )
+    }
+
+    /// [`CliRuntime::open`] reading `/etc/subuid`, `/etc/subgid`, `/etc/passwd` and
+    /// `/etc/group` with `files`, and claiming the range in `claims`.
+    ///
+    /// When the settings map the jobs, the range is read and checked ([`Mapping::read`]);
+    /// with Docker the daemon must run with `userns-remap` onto that very range (see
+    /// the module documentation); and the range is claimed for as long as the runtime
+    /// lives ([`RangeClaim`]). Podman needs nothing of its daemon: each container is given
+    /// the maps.
+    ///
+    /// # Errors
+    ///
+    /// The program cannot be run, or it is neither Docker nor Podman; the jobs are mapped
+    /// and the agent is not root; the range is not acceptable or is claimed; Docker's
+    /// daemon does not remap onto the range.
+    pub fn open_in(
+        settings: Settings,
+        host_id: &str,
+        platform: &Platform,
+        now_ms: fn() -> u64,
+        runner: Box<dyn CommandRunner>,
+        files: &dyn FileReader,
+        claims: &Path,
     ) -> Result<Self, CliError> {
         let printed = runner
             .run_in(settings.bin(), &["--version"], &engine_env(&settings))
@@ -502,8 +619,26 @@ impl CliRuntime {
             profile_dir: None,
             logs_limit: LOGS_LIMIT,
             warnings: Vec::new(),
+            mapping: None,
+            _claim: None,
         };
         runtime.warnings = runtime.swap_warning().into_iter().collect();
+        if let Some(user) = runtime.settings.subuid().map(str::to_owned) {
+            if runtime.settings.chown_scratch().is_none() {
+                return Err(CliError::AgentNotRoot);
+            }
+            let read = |path: &str| files.read(path);
+            let mapping = match runtime.engine {
+                Engine::Docker => Mapping::read_exact(&user, &read),
+                Engine::Podman => Mapping::read(&user, &read),
+            }?;
+            if runtime.engine == Engine::Docker {
+                runtime.require_userns(&user, mapping)?;
+            }
+            runtime._claim = Some(RangeClaim::take(claims, mapping)?);
+            runtime.settings.resolve(mapping);
+            runtime.mapping = Some(mapping);
+        }
         Ok(runtime)
     }
 
@@ -569,6 +704,51 @@ impl CliRuntime {
             .map(|_| NO_SWAP_LIMIT.to_owned())
     }
 
+    /// For Docker, asks the daemon again (one `info`) whether it still remaps onto the
+    /// range, before a container is created: a daemon restarted with another
+    /// `userns-remap`, or none, would run the job outside the range the scratch directory
+    /// was given to and the checks watch. The create is refused and nothing is made or
+    /// given away; the start fails as `failed_to_start` (`runtime-failed`) with the
+    /// daemon's mismatch as its reason, and the host is not tainted, since no job ran.
+    fn still_remapped(&self) -> Result<(), CliError> {
+        match (self.engine, self.mapping, self.settings.subuid()) {
+            (Engine::Docker, Some(mapping), Some(user)) => self.require_userns(user, mapping),
+            _ => Ok(()),
+        }
+    }
+
+    /// Requires that Docker's daemon runs with `userns-remap` and that its remap range is
+    /// `mapping`: Docker has no map per container, so the daemon's own is the only one the
+    /// jobs can run in. The engine tells both in one call: its security options name
+    /// `userns` when the daemon remaps, and its data root is then `<root>/<uid>.<gid>`, the
+    /// first ids of the range it remaps to.
+    fn require_userns(&self, user: &str, mapping: Mapping) -> Result<(), CliError> {
+        let format = "{{json .SecurityOptions}} {{.DockerRootDir}}";
+        let printed = self.call("info", &["info", "--format", format])?;
+        let unreadable = || CliError::Unreadable { call: "info" };
+        let (options, root) = printed.trim().split_once(' ').ok_or_else(unreadable)?;
+        let options: Option<Vec<String>> =
+            serde_json::from_str(options).map_err(|_| unreadable())?;
+        let options = options.unwrap_or_default();
+        let remaps = (options.iter())
+            .flat_map(|option| option.split(','))
+            .any(|part| part == "name=userns");
+        if !remaps {
+            return Err(CliError::NoUserns {
+                user: user.to_owned(),
+            });
+        }
+        let want = (mapping.uid().start(), mapping.gid().start());
+        match remap_of(root) {
+            Some(found) if found == want => Ok(()),
+            _ => Err(CliError::RemapDiffers {
+                user: user.to_owned(),
+                want: format!("{}.{}", want.0, want.1),
+                root: root.to_owned(),
+            }),
+        }
+    }
+
     /// The argv of `create` for `spec`, named `name` and made `created_ms`.
     fn create_args(
         &self,
@@ -588,6 +768,9 @@ impl CliRuntime {
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         let profile = self.profile_file(spec)?;
         args.extend(hardening_args(&self.settings, self.engine, &profile));
+        // Podman maps each container; Docker's daemon maps them all (see `open_in`).
+        let maps = self.mapping.filter(|_| self.engine == Engine::Podman);
+        args.extend(maps.into_iter().flat_map(Mapping::podman_args));
         args.extend(["--".to_owned(), spec.image.clone()]);
         args.extend(spec.args.iter().cloned());
         Ok(args)
@@ -615,6 +798,7 @@ impl CliRuntime {
         let name = container_name(&self.host_id, &spec.run_id)?;
         let args = self.create_args(spec, &name, (self.now_ms)())?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.still_remapped()?;
         self.hand_over_scratch(spec)?;
         let created = self
             .call("create", &args)
@@ -688,10 +872,14 @@ impl CliRuntime {
         matches!((theirs, own), (Some(theirs), Some(own)) if theirs != own)
     }
 
-    /// Gives the run's scratch directory to the container's user, when the agent is root.
+    /// Gives the run's scratch directory to the container's user, when the agent is root:
+    /// to the host ids the user's ids are mapped onto, when the jobs are mapped.
     fn hand_over_scratch(&self, spec: &ContainerSpec) -> Result<(), CliError> {
+        let first = |range: fn(Mapping) -> IdRange| self.mapping.map_or(0, |m| range(m).start());
+        let (uid_base, gid_base) = (first(Mapping::uid), first(Mapping::gid));
         let give = |(uid, gid): (u32, u32)| {
-            (self.chown)(&spec.scratch, uid, gid).map_err(|why| CliError::Scratch(why.to_string()))
+            (self.chown)(&spec.scratch, uid_base + uid, gid_base + gid)
+                .map_err(|why| CliError::Scratch(why.to_string()))
         };
         self.settings.chown_scratch().map_or(Ok(()), give)
     }
@@ -717,7 +905,10 @@ impl CliRuntime {
             .then_some(())
             .ok_or(CliError::MountsDiffer)?;
         match self.engine {
-            Engine::Podman => Ok(()),
+            Engine::Podman => unprivileged_binds(&text)
+                .ok_or_else(unreadable)?
+                .then_some(())
+                .ok_or(CliError::MountsDiffer),
             Engine::Docker => self.verify_scratch_volume(&text, spec),
         }
     }
@@ -979,7 +1170,9 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     let [pid, state] = text.split_whitespace().collect::<Vec<_>>()[..] else {
         return None;
     };
-    let ended = matches!(state, "exited" | "stopped" | "dead");
+    // `removing` is a container on its way out (no process to look for); `initialized`,
+    // `stopping` and `paused` are Podman states in which the container still exists.
+    let ended = matches!(state, "exited" | "stopped" | "dead" | "removing");
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
@@ -1000,6 +1193,28 @@ fn binds_read(text: &str) -> Option<Vec<Bind>> {
     let each = entries.iter().map(bind_of);
     each.collect::<Option<Vec<_>>>()
         .map(|binds| binds.into_iter().flatten().collect())
+}
+
+/// Whether every bind in the JSON `.Mounts` of a Podman `inspect` lists `nosuid` and
+/// `nodev` in its `Options`. A bind without `Options`, or with one that is not a list of
+/// strings, does not. `None` when the text is not a list of mounts.
+fn unprivileged_binds(text: &str) -> Option<bool> {
+    let options = |entry: &Value| -> Vec<String> {
+        let list = entry.get("Options").and_then(Value::as_array);
+        let strings = list.map(|list| list.iter().map(|o| o.as_str().map(str::to_owned)));
+        strings
+            .and_then(|each| each.collect::<Option<Vec<_>>>())
+            .unwrap_or_default()
+    };
+    let entries = mount_entries(text)?;
+    let binds = entries
+        .iter()
+        .filter(|entry| entry.get("Type").and_then(Value::as_str) == Some("bind"));
+    Some(binds.map(options).all(|options| {
+        ["nosuid", "nodev"]
+            .iter()
+            .all(|wanted| options.iter().any(|o| o == wanted))
+    }))
 }
 
 /// One entry of `.Mounts`: `Some(None)` for a kind other than a bind, `None` for an entry
@@ -1068,9 +1283,12 @@ fn parse_status(text: &str) -> Option<Status> {
         })
     };
     match state {
-        "running" | "paused" | "restarting" | "removing" | "created" | "configured" => {
-            Some(Status::Running)
-        }
+        // Podman 4.9 also prints `initialized` and `stopping`: both still exist, so both
+        // are running. `removing` is not over yet: the container is gone on a later poll.
+        // `unknown` (Podman's state for a container it cannot read) is no answer, so it
+        // stays unreadable like any other word the agent has no meaning for.
+        "running" | "paused" | "restarting" | "removing" | "created" | "configured"
+        | "initialized" | "stopping" => Some(Status::Running),
         "exited" | "stopped" => exit().map(Status::Exited),
         // A container the engine could not remove after it stopped. Its code may be 0
         // however the job ended, so it is a success only if nothing says otherwise, and

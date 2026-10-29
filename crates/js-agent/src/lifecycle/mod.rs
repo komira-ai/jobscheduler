@@ -542,6 +542,7 @@ impl Local {
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
+                subuid: cli.container_subuid.as_deref(),
             },
             (
                 rustix::process::geteuid().as_raw(),

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use js_sched::{DaemonInstance, KeyFloor, NodePhase, OpState, Request, Requeue};
 use js_server_core::{
-    Adapter, Admitted, Config, Core, Delivery, Lowered, Report, Stage, Stream, View,
+    Adapter, Admitted, Config, Core, Delivery, Lowered, OpenError, Report, Stage, Stream, View,
 };
 use js_store::{Ending, StateError, keys};
 use js_types::sched::{
@@ -256,7 +256,10 @@ fn a_restart_with_size_keys_on_refuses_a_bad_opkey_row() {
 
     let opened = Core::open(&on(), Rig::default(), setup.storage(), at(5));
 
-    assert!(matches!(opened.err(), Some(StateError::Corrupt { .. })));
+    assert!(matches!(
+        opened.err(),
+        Some(OpenError::State(StateError::Corrupt { .. }))
+    ));
 }
 
 /// Asserts that `adopted` is told the size key of a stored operation when size keys are on,
@@ -711,7 +714,10 @@ fn a_bad_keyfloor_row_refuses_a_start_with_size_keys_on_and_is_ignored_with_them
     setup.store.put(&keys::key_floor(K), vec![9, 9, 9]);
 
     let opened = Core::open(&on(), Rig::default(), setup.storage(), at(5));
-    assert!(matches!(opened.err(), Some(StateError::Corrupt { .. })));
+    assert!(matches!(
+        opened.err(),
+        Some(OpenError::State(StateError::Corrupt { .. }))
+    ));
 
     let ignoring = setup.core_with(&Config::new(1), Rig::default(), 6);
     assert_eq!(floor(&ignoring, K), None);
