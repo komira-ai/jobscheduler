@@ -75,6 +75,7 @@ pub fn job() -> JobSpec {
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
         valid_for_ms: 10_000,
+        bundle: None,
     }
 }
 

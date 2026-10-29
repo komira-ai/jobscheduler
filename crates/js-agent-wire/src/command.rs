@@ -184,19 +184,34 @@ pub struct JobSpec {
     /// on the agent's clock alone; 0 means no bound.
     #[serde(default)]
     pub valid_for_ms: u64,
+    /// A darwin bundle the job pins: `name[:tag]@sha256:<manifest digest>`, at most one.
+    /// It is checked like `image` (same alphabet and length) and must be pinned
+    /// ([`JobSpec::require_pinned`]). It is refused beside a non-empty `image`: an agent
+    /// from before this field ignores it, and would run the image without the tools.
+    /// A job with a bundle therefore has an empty `image`, which such an agent refuses
+    /// as `invalid-image`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
 }
 
 impl JobSpec {
     /// Checks that the image is pinned by a `sha256:` digest, after [`JobSpec::validate`]
     /// has passed. A tag-only image is refused with [`refusal::IMAGE_DIGEST_REQUIRED`]
-    /// naming `image`; `name:tag@sha256:...` passes. The server calls it with `validate`
+    /// naming `image`, and a tag-only bundle with [`refusal::BUNDLE_DIGEST_REQUIRED`]
+    /// naming `bundle`; `name:tag@sha256:...` passes. The server calls it with `validate`
     /// before it queues a start and the agent before it acts on one, so no host pulls an
     /// image whose content can move.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
         image::pinned(
             At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
             &self.image,
-        )
+        )?;
+        match &self.bundle {
+            Some(bundle) => {
+                image::bundle_pinned(At::new("bundle", refusal::BUNDLE_DIGEST_REQUIRED), bundle)
+            }
+            None => Ok(()),
+        }
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
@@ -207,6 +222,7 @@ impl JobSpec {
         check::ident(at.field("run_id"), &self.run_id)?;
         check::ident(at.field("lease_id"), &self.lease_id)?;
         image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
+        self.check_bundle()?;
         self.check_args(at.field("args"))?;
         self.limits.check(at)?;
         let gpus = at.field("gpu_indices");
@@ -233,6 +249,21 @@ impl JobSpec {
             0,
             limits::MAX_VALID_FOR_MS,
         )
+    }
+
+    fn check_bundle(&self) -> Result<(), ValidationError> {
+        let Some(bundle) = &self.bundle else {
+            return Ok(());
+        };
+        let at = At::new("bundle", refusal::INVALID_BUNDLE);
+        image::bundle(at, bundle)?;
+        // Today `validate` has refused an empty image before it gets here, so a bundle
+        // always sits beside an image and is refused; a later change that lets a native
+        // or vm job leave `image` empty makes this the pass.
+        self.image
+            .is_empty()
+            .then_some(())
+            .ok_or(at.fail(Rule::Inconsistent))
     }
 
     fn check_args(&self, at: At) -> Result<(), ValidationError> {

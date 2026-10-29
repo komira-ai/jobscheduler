@@ -12,6 +12,7 @@
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
+//! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
