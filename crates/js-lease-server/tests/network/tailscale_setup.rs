@@ -18,7 +18,7 @@ fn api(base: &str, tailnet: &str) -> Result<TailscaleApi, NetworkError> {
 /// Asserts which base URLs are accepted: https to any host with no path, http to a
 /// loopback host only (an address, a bracketed IPv6 address or `localhost`), and the
 /// real API's own address; and that every other form is refused as misconfigured:
-/// another scheme, a path, a trailing slash, a query, a non-loopback http host, and text
+/// another scheme, credentials in the URL, a path, a trailing slash, a query, a non-loopback http host, and text
 /// that is no URL.
 #[test]
 fn a_base_url_is_https_or_loopback_http_with_no_path() {
@@ -36,6 +36,7 @@ fn a_base_url_is_https_or_loopback_http_with_no_path() {
         "https://example.org/api",
         "https://example.org/",
         "https://example.org?x=1",
+        "https://user:pw@example.org",
         "http://example.org",
         "http://10.0.0.1:9",
         "http://127.0.0.1:9/x",
@@ -48,6 +49,24 @@ fn a_base_url_is_https_or_loopback_http_with_no_path() {
             "{bad:?}"
         );
     }
+}
+
+/// Asserts that the refusal of a base URL does not repeat the URL, which may carry a
+/// password (`https://user:secret@host`) the refusal would write to the log and the
+/// status page. It catches a message that echoes what the operator wrote.
+#[test]
+fn a_refused_base_url_is_not_echoed() {
+    let Err(NetworkError::Misconfigured(said)) = api("https://user:hunter2@example.org/x", "-")
+    else {
+        panic!("a URL with a path is refused");
+    };
+    assert!(!said.contains("hunter2"), "{said}");
+    assert!(said.contains("must be https://host"), "{said}");
+    let Err(NetworkError::Misconfigured(said)) = api("https://user:hunter2@example.org", "-")
+    else {
+        panic!("a URL with credentials is refused");
+    };
+    assert!(!said.contains("hunter2"), "{said}");
 }
 
 /// Asserts that a tailnet is `-` or a name of letters, digits, `.`, `_` and `-`, and that

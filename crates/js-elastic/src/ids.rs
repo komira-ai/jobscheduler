@@ -97,6 +97,15 @@ impl HostName {
         format!("js-{}-", short_hash(scheduler.as_str()))
     }
 
+    /// The name `text` if it is one `scheduler` derives: its prefix and 12 lower-case
+    /// hexadecimal digits. A name read back from a record or a provider, never a way to
+    /// make one up.
+    pub fn parse(scheduler: &SchedulerId, text: &str) -> Option<Self> {
+        let rest = text.strip_prefix(Self::prefix(scheduler).as_str())?;
+        let digits = rest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        (digits & (rest.len() == HASH_CHARS)).then_some(Self(text.to_owned()))
+    }
+
     /// The name of the host launched for `acquire` by `scheduler`: the prefix and a short
     /// hash of the acquire id.
     pub fn derive(scheduler: &SchedulerId, acquire: &AcquireId) -> Self {
@@ -186,6 +195,28 @@ mod tests {
         assert_eq!(prefix.len(), 16);
         assert_eq!(name.as_str().len(), 28);
         assert_eq!(name.to_string(), name.as_str());
+    }
+
+    /// Asserts that a name this scheduler derives reads back as itself, and that text
+    /// that is not one does not: another scheduler's name, a name with a short, long or
+    /// upper-case tail, and no name at all. It catches a parser that takes any text with
+    /// the prefix, which would let a record or a provider's answer make up a name.
+    #[test]
+    fn only_a_derived_name_reads_back() {
+        let one = SchedulerId::new("one").unwrap();
+        let two = SchedulerId::new("two").unwrap();
+        let name = HostName::derive(&one, &AcquireId::new("a").unwrap());
+        assert_eq!(HostName::parse(&one, name.as_str()), Some(name.clone()));
+        assert_eq!(HostName::parse(&two, name.as_str()), None);
+        let prefix = HostName::prefix(&one);
+        for tail in ["", "abc", "0123456789abc", "0123456789AB", "0123456789xy"] {
+            assert_eq!(
+                HostName::parse(&one, &format!("{prefix}{tail}")),
+                None,
+                "{tail}"
+            );
+        }
+        assert_eq!(HostName::parse(&one, ""), None);
     }
 
     /// Asserts that a host reference keeps the provider's text and prints it.
