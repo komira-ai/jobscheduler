@@ -2,8 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use std::collections::BTreeMap;
-
 use js_bundle::{ExpandError, MAX_VALUE_BYTES, Segment, Template, TemplateError, TreeName};
 
 fn tree(name: &str) -> TreeName {
