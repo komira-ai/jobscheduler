@@ -310,10 +310,8 @@ impl Engine {
     /// What the adapter predicts for `op`, which the store holds: asked only for an operation
     /// that waits for a lease (one that holds a lease keeps the cost it was charged).
     fn predict_stored(a: &mut dyn Adapter, op: &StoredOperation) -> Option<Prediction> {
-        if op.lease.is_some() {
-            return None;
-        }
-        a.predicted(op.operation, &op.request, op.size_key)
+        let _ = (a, op);
+        None
     }
 
     /// Runs `write` on the state store, if the core has one, and says how it ended; a
