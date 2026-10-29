@@ -1,11 +1,10 @@
-//! The `[server]` table of the configuration file: its keys, the checks on the listeners
-//! and the advertised address, and the client token file.
+//! The `[server]` table of the configuration file: its keys and the client token file.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hyper::Uri;
+use js_elastic::SchedulerId;
 use js_lease::Settings;
 
 use super::{Load, Section};
@@ -17,6 +16,7 @@ const SERVER_KEYS: &[&str] = &[
     "listen",
     "agent_listen",
     "advertise_url",
+    "scheduler_id",
     "state_file",
     "boot",
     "client_token_file",
@@ -45,6 +45,7 @@ pub(crate) struct Server {
     pub(crate) listen: SocketAddr,
     pub(crate) agent_listen: Option<SocketAddr>,
     pub(crate) advertise_url: Option<String>,
+    pub(crate) scheduler: SchedulerId,
     pub(crate) state_file: PathBuf,
     pub(crate) boot: BootMode,
     pub(crate) client_token_file: PathBuf,
@@ -102,75 +103,6 @@ impl AgentKeys {
     }
 }
 
-/// What the listeners and the advertised address must be, given whether a pool launches
-/// hosts; the warnings the server shows.
-pub(super) fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<String>, StartupError> {
-    if elastic {
-        let apart = match server.agent_listen {
-            Some(agent) => agent != server.listen,
-            None => false,
-        };
-        if !apart {
-            return Err(StartupError::at(
-                "server.agent_listen",
-                "required with an elastic pool; must differ from server.listen",
-            ));
-        }
-        let refused = match &server.advertise_url {
-            Some(url) => plain_http(url),
-            None => false,
-        };
-        if refused {
-            return Err(StartupError::at(
-                "server.advertise_url",
-                "http:// is refused by agents; use https (or loopback)",
-            ));
-        }
-    }
-    let mut listeners = vec![("server.listen", server.listen)];
-    if let Some(agent) = server.agent_listen {
-        listeners.push(("server.agent_listen", agent));
-    }
-    let mut warnings = Vec::new();
-    for (key, addr) in listeners {
-        if server.tls.is_none() & !addr.ip().is_loopback() {
-            return Err(StartupError::at(
-                key,
-                format!(
-                    "{addr} is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear"
-                ),
-            ));
-        }
-        if addr.ip().is_unspecified() {
-            // The status pages are on `server.listen` alone.
-            let pages = match key == "server.listen" {
-                true => "; /v1/pools and /status are served only to private peers",
-                false => "",
-            };
-            warnings.push(format!(
-                "server: warning: binds all interfaces ({key} {addr}){pages}"
-            ));
-        }
-    }
-    Ok(warnings)
-}
-
-/// Whether `url` is `http://` to a host that is not loopback, which an agent refuses.
-fn plain_http(url: &str) -> bool {
-    let Ok(uri) = url.parse::<Uri>() else {
-        return false;
-    };
-    let host = uri.host().unwrap_or_default();
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let address = match bare.parse::<IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => false,
-    };
-    let loopback = (host == "localhost") | address;
-    let plain = uri.scheme_str() == Some("http");
-    plain & !loopback
-}
-
 pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let mut s = Section::open(table, "server.".to_owned());
     s.only(SERVER_KEYS)?;
@@ -178,6 +110,11 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
     let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
     let agent_listen = s.address("agent_listen")?;
     let advertise_url = s.string("advertise_url")?;
+    let scheduler = s.string("scheduler_id")?.unwrap_or_else(|| "js".to_owned());
+    let scheduler = match SchedulerId::new(&scheduler) {
+        Ok(id) => id,
+        Err(err) => return Err(s.fail("scheduler_id", &err.to_string())),
+    };
     let state_file = s.required_path("state_file")?;
     let boot = s.required_string("boot")?;
     let boot = match boot.as_str() {
@@ -224,6 +161,7 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         listen,
         agent_listen,
         advertise_url,
+        scheduler,
         state_file,
         boot,
         client_token_file,

@@ -1,5 +1,7 @@
-//! No source or test of this crate names the production API host: the address is the
-//! caller's to give, and a test that could reach it would be a test that spends.
+//! No source or test of this crate names the production API host except one: the default
+//! address of the `lambdalabs` kind (`src/kind.rs`), which a table's `api_url` overrides.
+//! Everywhere else the address is the caller's to give, and a test that could reach it
+//! would be a test that spends.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +39,11 @@ fn nothing_names_the_production_host() {
     files(&root.join("src"), &mut found);
     files(&root.join("tests"), &mut found);
     assert!(found.len() > 10, "the scan found {} files", found.len());
+    let default_address = root.join("src").join("kind.rs");
     for path in found {
+        if path == default_address {
+            continue;
+        }
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };

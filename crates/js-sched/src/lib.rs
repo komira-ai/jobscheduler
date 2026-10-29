@@ -101,6 +101,7 @@ mod cordon;
 mod devices;
 pub mod fence;
 pub mod harness;
+mod headroom;
 mod input;
 mod load;
 pub use load::{
@@ -120,6 +121,7 @@ pub use admission::{
 pub use cordon::Cordon;
 pub use devices::DEVICE_LEASES_PER_WORKER;
 pub use fence::SelfFence;
+pub use headroom::{MEMORY_SCHEDULABLE_PERCENT, MemoryPercent, PercentError};
 pub use input::{DaemonInstance, Event, Input, Request};
 pub use js_types::sched::NodePhase;
 pub use requeue::{Gib, Requeue, RequeueReason};
