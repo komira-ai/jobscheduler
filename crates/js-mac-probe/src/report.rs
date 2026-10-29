@@ -164,16 +164,8 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_writer_is_an_error() {
-        struct Broken;
-        impl io::Write for Broken {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("closed"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        assert!(Report::default().write_json(&mut Broken).is_err());
+    fn a_writer_that_cannot_hold_the_report_is_an_error() {
+        let mut tiny = [0u8; 4];
+        assert!(Report::default().write_json(&mut &mut tiny[..]).is_err());
     }
 }
