@@ -459,6 +459,7 @@ impl<A: Adapter> Core<A> {
                     request,
                 };
                 engine.feed_quiet(adapter, now, event);
+                engine.apply_cost(&admitted, prediction);
             }
             // The operation is another frontend's: this scheduler never holds it, and the
             // caller is shown what the store says of it at the intake polls.

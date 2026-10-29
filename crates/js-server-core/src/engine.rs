@@ -520,13 +520,17 @@ impl Engine {
         }
         // The cost likewise: a new operation is charged it from its first round. A twin keeps
         // its cost while it holds a lease; one that still waits takes the newer prediction.
+        let _ = prediction;
+        Ok(admitted)
+    }
+
+    pub(crate) fn apply_cost(&mut self, admitted: &Admitted, prediction: Option<Prediction>) {
         if let Some(prediction) = prediction.filter(|_| admitted.held == Held::Here) {
             let waiting = self.sched.state(admitted.operation) == Some(&OpState::Queued);
             if !admitted.joined || waiting {
                 self.sched.set_cost(admitted.operation, prediction);
             }
         }
-        Ok(admitted)
     }
 
     /// Takes the key floors the adapter's estimator wants lowered to the scheduler, and
