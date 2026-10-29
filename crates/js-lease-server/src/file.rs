@@ -867,7 +867,8 @@ fn read_agents(
         let toml::Value::Table(pin) = value else {
             return Err(StartupError::at(place, "must be a table { url, sha256 }"));
         };
-        agents.insert(arch, read_artifact(pin, format!("{head}{arch}."))?);
+        let artifact = read_artifact(pin, format!("{head}{arch}."))?;
+        agents.insert(arch, artifact);
     }
     Ok(agents)
 }
