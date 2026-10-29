@@ -730,7 +730,7 @@ impl Elastic<'_> {
         let tokens = match &keys.join_token_file {
             Some(path) => AgentTokens::open(path, client)
                 .map_err(|err| s.fail("join_token_file", err.reason()))?,
-            None => AgentTokens::none(client),
+            None => AgentTokens::none(),
         };
         let gpu_class = built.floor.gpu_class.as_ref().map(ToString::to_string);
         let resources = Resources::new(

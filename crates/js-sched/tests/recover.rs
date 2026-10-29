@@ -17,9 +17,9 @@ use js_sched::{
     RequeueReason, Scheduler,
 };
 use js_types::sched::{
-    ControlRecord, Effect, Failure, FarmFault, FarmRun, FarmTime, LeaseId, LeaseKind, LostWhy,
-    MemoryKill, MemoryRun, OperationId, Outcome, Qos, Resources, ResultRecord, StateMachine,
-    WaiterId, WorkerId,
+    ControlRecord, Effect, Failure, FarmFault, FarmRun, FarmTime, LeaseGrant, LeaseId, LeaseKind,
+    LostWhy, MemoryKill, MemoryRun, OperationId, Outcome, Qos, Resources, ResultRecord,
+    StateMachine, WaiterId, WorkerId,
 };
 
 const GIB: u64 = 1 << 30;
@@ -659,4 +659,120 @@ fn a_lease_taken_in_for_a_registered_worker_is_held_for_another_process() {
         panic!("one lease expected to be given up: {held:?}");
     };
     assert_eq!(requeue.reason, RequeueReason::Replaced);
+}
+
+/// Catches: a result of the operation's current lease dropped because an older lease of
+/// it, taken in from the store, had a higher sequence number. Sequence numbers are
+/// handed out in blocks per frontend, so a lease granted later can have a lower one; the
+/// result of that lease must end the operation (answer its callers, release the lease
+/// and the worker's booking), not wait for a run that is over.
+#[test]
+fn a_result_of_a_grant_with_a_lower_sequence_than_the_taken_in_lease_ends_the_operation() {
+    let mut s = recovered(Vec::new());
+    assert!(s.take_in(leased(3, request(3), 500, "node-a")));
+    s.hold_recovered_leases(at(0), &node("node-a"), WAIT);
+    up(&mut s, 5, "node-a");
+    heartbeat(&mut s, 6, "node-a", Vec::new());
+    // The handover ends: the taken-in lease is given up and the operation waits again.
+    heartbeat(&mut s, 51, "node-a", Vec::new());
+    assert_eq!(s.state(OperationId(3)), Some(&OpState::Queued));
+    assert_eq!(s.leases_held(), 0);
+
+    let effects = feed(&mut s, 52, Event::Tick);
+    let [Effect::Commit(ControlRecord::Lease(grant))] = effects.as_slice() else {
+        panic!("{effects:?}");
+    };
+    let grant = grant.clone();
+    assert_eq!(grant.lease, LeaseId::new(TERM, 20));
+    assert!(grant.lease < LeaseId::new(TERM, 500));
+    let committed = feed(
+        &mut s,
+        52,
+        Event::Committed(ControlRecord::Lease(grant.clone())),
+    );
+    assert!(
+        matches!(committed.as_slice(), [Effect::Start(_)]),
+        "{committed:?}"
+    );
+
+    let outcome = Outcome::Failed(Failure::Invalid);
+    let reported = feed(
+        &mut s,
+        53,
+        Event::Report {
+            operation: OperationId(3),
+            lease: grant.lease,
+            outcome,
+        },
+    );
+    let [Effect::Commit(result @ ControlRecord::Result(_))] = reported.as_slice() else {
+        panic!("{reported:?}");
+    };
+    let answered = feed(&mut s, 54, Event::Committed(result.clone()));
+    let [Effect::Answer(answer)] = answered.as_slice() else {
+        panic!("the result of the current lease was dropped: {answered:?}");
+    };
+    assert_eq!(answer.lease, grant.lease);
+    assert_eq!(s.leases_held(), 0);
+    assert_eq!(s.booked(&node("node-a")), Some(Resources::default()));
+}
+
+/// Catches: a commit of a lease that is no longer the operation's current one (here the lease
+/// taken in from the store, whose commit arrives late, after the operation was given up and
+/// granted again) taken as the operation's committed lease. The result of the current lease
+/// must still end the operation; a scheduler that took any committed grant as current would
+/// drop it.
+#[test]
+fn a_late_commit_of_a_superseded_grant_leaves_the_current_lease_to_end_the_operation() {
+    let mut s = recovered(Vec::new());
+    assert!(s.take_in(leased(3, request(3), 500, "node-a")));
+    s.hold_recovered_leases(at(0), &node("node-a"), WAIT);
+    up(&mut s, 5, "node-a");
+    heartbeat(&mut s, 6, "node-a", Vec::new());
+    heartbeat(&mut s, 51, "node-a", Vec::new());
+    assert_eq!(s.state(OperationId(3)), Some(&OpState::Queued));
+
+    let effects = feed(&mut s, 52, Event::Tick);
+    let [Effect::Commit(ControlRecord::Lease(grant))] = effects.as_slice() else {
+        panic!("{effects:?}");
+    };
+    let grant = grant.clone();
+    let committed = feed(
+        &mut s,
+        52,
+        Event::Committed(ControlRecord::Lease(grant.clone())),
+    );
+    assert!(
+        matches!(committed.as_slice(), [Effect::Start(_)]),
+        "{committed:?}"
+    );
+    // The taken-in lease's grant commits late, after the operation was granted again.
+    let superseded = LeaseGrant {
+        lease: LeaseId::new(TERM, 500),
+        ..grant.clone()
+    };
+    feed(
+        &mut s,
+        53,
+        Event::Committed(ControlRecord::Lease(superseded)),
+    );
+
+    let reported = feed(
+        &mut s,
+        54,
+        Event::Report {
+            operation: OperationId(3),
+            lease: grant.lease,
+            outcome: Outcome::Failed(Failure::Invalid),
+        },
+    );
+    let [Effect::Commit(result @ ControlRecord::Result(_))] = reported.as_slice() else {
+        panic!("{reported:?}");
+    };
+    let answered = feed(&mut s, 55, Event::Committed(result.clone()));
+    let [Effect::Answer(answer)] = answered.as_slice() else {
+        panic!("the result of the current lease was dropped: {answered:?}");
+    };
+    assert_eq!(answer.lease, grant.lease);
+    assert_eq!(s.leases_held(), 0);
 }

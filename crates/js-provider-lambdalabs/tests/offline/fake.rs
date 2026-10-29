@@ -144,6 +144,8 @@ fn launch_request(name: &str, region: &str) -> js_provider_lambdalabs::LaunchReq
         ssh_key: "key".to_owned(),
         name: name.to_owned(),
         tags: Vec::new(),
+        user_data: None,
+        firewall_ruleset_ids: Vec::new(),
     }
 }
 
@@ -217,4 +219,99 @@ fn scripted_outcomes_apply_in_order_and_a_pass_lets_one_call_through() {
     let held = InstanceId::new("held").unwrap();
     fake.remove_instance(&held);
     assert!(fake.get_instance(&held).unwrap_err().is_absent());
+}
+
+fn status_of(error: ApiError) -> u16 {
+    match error {
+        ApiError::Api { status, .. } => status,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_ruleset_is_made_with_no_rules_once_per_name_and_region() {
+    let fake = FakeLambda::new();
+    let made = fake
+        .create_firewall_ruleset("region-a", "js-x-noinbound")
+        .unwrap();
+    assert_eq!((made.rules, made.region.as_str()), (0, "region-a"));
+    assert_eq!(
+        fake.list_firewall_rulesets().unwrap(),
+        std::slice::from_ref(&made)
+    );
+    assert_eq!(fake.firewall_rulesets(), [made]);
+    // The same name in the same region is the 409; in another region it is a new ruleset.
+    let again = fake.create_firewall_ruleset("region-a", "js-x-noinbound");
+    assert_eq!(status_of(again.unwrap_err()), 409);
+    assert!(
+        fake.create_firewall_ruleset("region-b", "js-x-noinbound")
+            .is_ok()
+    );
+    for bad in ["", &"n".repeat(65)] {
+        let result = fake.create_firewall_ruleset("region-a", bad);
+        assert_eq!(status_of(result.unwrap_err()), 400, "{bad:?}");
+    }
+    assert_eq!(fake.firewall_rulesets().len(), 2);
+}
+
+#[test]
+fn a_key_is_made_once_per_name() {
+    let fake = FakeLambda::new();
+    let made = fake.create_ssh_key("js-x").unwrap();
+    assert_eq!(made.name, "js-x");
+    assert_eq!(fake.list_ssh_keys().unwrap(), std::slice::from_ref(&made));
+    assert_eq!(fake.ssh_keys(), [made]);
+    for bad in ["js-x", "", &"n".repeat(65)] {
+        let result = fake.create_ssh_key(bad);
+        assert_eq!(status_of(result.unwrap_err()), 400, "{bad:?}");
+    }
+    assert_eq!(fake.ssh_keys().len(), 1);
+}
+
+#[test]
+fn a_launch_may_attach_only_rulesets_the_region_holds_and_the_log_hides_the_user_data() {
+    let fake = FakeLambda::new();
+    fake.set_offers(vec![offer("gpu_1x_sample")]);
+    let here = fake.add_firewall_ruleset("js-x-noinbound", "region-a", 0);
+    let there = fake.add_firewall_ruleset("js-x-noinbound", "region-b", 0);
+    for unknown in ["nope".to_owned(), there] {
+        let mut request = launch_request("box", "region-a");
+        request.firewall_ruleset_ids = vec![unknown];
+        let error = fake.launch(&request).unwrap_err();
+        assert!(error.is_absent(), "{error:?}");
+    }
+    assert!(fake.launches().is_empty());
+
+    let mut request = launch_request("box", "region-a");
+    request.firewall_ruleset_ids = vec![here.clone()];
+    request.user_data = Some(js_elastic::Secret::new("TOKEN-CANARY".to_owned()));
+    fake.launch(&request).unwrap();
+    let launches = fake.launches();
+    assert_eq!(launches[0].firewall_ruleset_ids, [here]);
+    assert_eq!(launches[0].user_data(), Some("TOKEN-CANARY"));
+    let shown = format!("{launches:?}{:?}{request:?}", fake.calls());
+    assert!(!shown.contains("TOKEN-CANARY"), "{shown}");
+    assert!(shown.contains("user_data_bytes: Some(12)"), "{shown}");
+}
+
+#[test]
+fn the_new_calls_are_recorded_and_can_be_scripted_to_fail() {
+    let fake = FakeLambda::new();
+    fake.add_ssh_key("k");
+    fake.fail_next(Call::ListSshKeys, ApiError::Incomplete);
+    assert_eq!(fake.list_ssh_keys(), Err(ApiError::Incomplete));
+    let _ = fake.list_ssh_keys();
+    let _ = fake.list_firewall_rulesets();
+    let _ = fake.create_firewall_ruleset("r", "n");
+    let _ = fake.create_ssh_key("m");
+    assert_eq!(
+        fake.calls(),
+        [
+            Call::ListSshKeys,
+            Call::ListSshKeys,
+            Call::ListFirewallRulesets,
+            Call::CreateFirewallRuleset,
+            Call::CreateSshKey
+        ]
+    );
 }

@@ -7,22 +7,28 @@ use std::time::Duration;
 
 use js_elastic::{
     AcquireId, AcquireRequest, Acquired, BootStep, Claim, Demand, ElasticProvider, Extra, Held,
-    HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released,
+    HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
 };
 
 use crate::api::LambdaApi;
 use crate::clock::Clock;
 use crate::config::{ElasticConfig, Mode};
 use crate::error::{ApiError, ErrorCode};
+use crate::host;
 use crate::model::{Instance, InstanceId, LaunchRequest};
 use crate::options::OptionTable;
 use crate::own::{LabelError, Owner};
 use crate::select;
 
-/// The most bytes of boot payload this provider carries. It does not deliver one yet (the
-/// launch has no field for it), so it carries none, and refuses a payload rather than
-/// launch a machine that never receives it.
-const PAYLOAD_LIMIT: usize = 0;
+/// The most bytes of boot payload this provider carries: the user data of a launch.
+///
+/// UNVERIFIED. Lambda's published API description says the user data "cannot exceed 1MB in
+/// size", and does not say whether that is 10^6 or 2^20 bytes, whether it counts the text
+/// as sent (JSON escapes included) or what the check does at the edge. This is the smaller
+/// reading, 10^6 bytes of the payload itself. No call has been made to see where the API
+/// refuses; the first live launch is the check, and a payload the API refuses after this
+/// accepts it comes back as a refusal, not a launch.
+pub const PAYLOAD_LIMIT: usize = 1_000_000;
 
 /// What the launch lock protects: the guard's memory. Holding the lock across the list
 /// and the launch is what lets one launch run at a time.
@@ -59,6 +65,57 @@ struct Answered {
     due: Duration,
 }
 
+/// Why the firewall or the ssh key of a launch could not be settled. Nothing was launched.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PrepareError {
+    /// A call to the API failed.
+    #[error("{0}")]
+    Api(#[from] ApiError),
+    /// The scheduler id is too long for the ruleset's name (64 characters at most).
+    #[error("firewall: the scheduler id is too long for a ruleset name of 64 characters")]
+    FirewallName,
+    /// The ruleset of our name holds rules, so it is not the one that lets nothing in.
+    #[error("firewall: the ruleset {name} holds {rules} rules; it must hold none")]
+    FirewallRules {
+        /// The ruleset's name.
+        name: String,
+        /// How many rules it holds.
+        rules: usize,
+    },
+    /// The scheduler id is too long for the name of a key to make (64 characters at most).
+    #[error("provider.ssh_key: the scheduler id is too long to name a key; name one")]
+    KeyName,
+    /// The account has several keys and none is named.
+    #[error("provider.ssh_key: account has {count} keys; name one")]
+    SshKeys {
+        /// How many keys the account has.
+        count: usize,
+    },
+}
+
+impl PrepareError {
+    /// The answer to an acquire that stopped here. A failed call that may or may not have
+    /// reached the API is [`Acquired::Deferred`] by `retry`, not [`Acquired::Unknown`]:
+    /// no launch was sent.
+    fn answer(&self, retry: Duration) -> Acquired {
+        match self {
+            Self::Api(error) => match LambdaProvider::failed(error) {
+                Acquired::Unknown => Acquired::Deferred { wait: retry },
+                definite => definite,
+            },
+            Self::FirewallName => {
+                LambdaProvider::refuse(RefusalCode::Shape, Reason::Firewall(self.to_string()))
+            }
+            Self::FirewallRules { .. } => {
+                LambdaProvider::refuse(RefusalCode::Denied, Reason::Firewall(self.to_string()))
+            }
+            Self::KeyName | Self::SshKeys { .. } => {
+                LambdaProvider::refuse(RefusalCode::Denied, Reason::SshKey(self.to_string()))
+            }
+        }
+    }
+}
+
 /// What a sweep found. Nothing is terminated by it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Sweep {
@@ -81,6 +138,8 @@ pub struct LambdaProvider {
     /// Whether a list has succeeded: a 404 on a read by id is trusted only after one.
     probed: AtomicBool,
     dry_run_logged: AtomicBool,
+    /// The name of the ssh key every launch holds, once settled.
+    key: Mutex<Option<String>>,
 }
 
 impl LambdaProvider {
@@ -102,6 +161,7 @@ impl LambdaProvider {
             launching: Mutex::new(Launching::default()),
             probed: AtomicBool::new(false),
             dry_run_logged: AtomicBool::new(false),
+            key: Mutex::new(None),
         }
     }
 
@@ -120,9 +180,79 @@ impl LambdaProvider {
     pub fn launch_options(&self, demand: &Demand) -> Result<Vec<Offer>, ApiError> {
         let types = self.api.instance_types()?;
         Ok(select::candidates(
-            &select::offers(&self.options, &types),
+            &select::offers(&self.options, &types, self.config.regions.as_deref()),
             demand,
         ))
+    }
+
+    /// The id of this scheduler's ruleset that lets nothing in, in `region`: found by the
+    /// name `js-<scheduler>-noinbound`, or created with no rules when the region has none.
+    /// Read again before every launch, never remembered: a rule added since the last
+    /// launch must not ride along on the next one, and one list call is cheap next to a
+    /// launch. Every launch attaches it, because a ruleset can only be attached at launch.
+    /// A ruleset of that name that holds rules is refused, never used.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError`] when the scheduler id is too long for the name, a call fails, or
+    /// the ruleset holds rules.
+    pub fn ensure_firewall(&self, region: &str) -> Result<String, PrepareError> {
+        let name = format!("js-{}-noinbound", self.config.scheduler.as_str());
+        if name.len() > 64 {
+            return Err(PrepareError::FirewallName);
+        }
+        let found = self
+            .api
+            .list_firewall_rulesets()?
+            .into_iter()
+            .find(|ruleset| ruleset.name == name && ruleset.region == region);
+        let ruleset = match found {
+            Some(ruleset) => ruleset,
+            None => self.api.create_firewall_ruleset(region, &name)?,
+        };
+        if ruleset.rules > 0 {
+            return Err(PrepareError::FirewallRules {
+                name,
+                rules: ruleset.rules,
+            });
+        }
+        Ok(ruleset.id)
+    }
+
+    /// The name of the one ssh key every launch holds. Lambda takes exactly one name and
+    /// the key is never used to log in, because the ruleset lets nothing in. The key is,
+    /// in this order: the one named in the configuration (not looked up: a name the account
+    /// does not hold is refused by the API at launch); the account's key named
+    /// `js-<scheduler>`; the account's only key; or, on an account with no key, a key made
+    /// under the name `js-<scheduler>` by the API, of which neither half is kept. An
+    /// account with several keys and none of that name is an error that asks for a name.
+    /// Settled once and kept.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError`] when a call fails, the account has several keys and none to pick,
+    /// or the key to make cannot be named.
+    pub fn ssh_key(&self) -> Result<String, PrepareError> {
+        if let Some(name) = &self.config.ssh_key {
+            return Ok(name.clone());
+        }
+        let mut chosen = self.key.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(name) = chosen.as_ref() {
+            return Ok(name.clone());
+        }
+        let ours =
+            Some(format!("js-{}", self.config.scheduler.as_str())).filter(|name| name.len() <= 64);
+        let keys = self.api.list_ssh_keys()?;
+        let named = keys.iter().find(|key| Some(&key.name) == ours.as_ref());
+        let name = match (named, keys.as_slice(), ours) {
+            (Some(key), _, _) => key.name.clone(),
+            (None, [only], _) => only.name.clone(),
+            (None, [], Some(ours)) => self.api.create_ssh_key(&ours)?.name,
+            (None, [], None) => return Err(PrepareError::KeyName),
+            (None, many, _) => return Err(PrepareError::SshKeys { count: many.len() }),
+        };
+        *chosen = Some(name.clone());
+        Ok(name)
     }
 
     /// Lists what this scheduler has launched or half-launched and reports it. Report
@@ -167,12 +297,48 @@ impl LambdaProvider {
         let tags = self
             .owner
             .tags(&request.acquire, &request.pool, &request.labels)?;
+        // The key, the ruleset and the user data are put in when the launch is to be sent
+        // (`prepare`): a dry run builds this much and calls nothing.
         Ok(LaunchRequest {
             region: zone.to_owned(),
             instance_type: request.offer.id.clone(),
-            ssh_key: self.config.ssh_key.clone(),
+            ssh_key: String::new(),
             name: request.name.to_string(),
             tags,
+            user_data: None,
+            firewall_ruleset_ids: Vec::new(),
+        })
+    }
+
+    /// Completes `launch` for sending: the ssh key, the no-inbound ruleset of its region
+    /// and the payload as user data (none when the payload is empty). Makes the account's
+    /// ruleset or key when it has none, so it is not called in a dry run. The answer that
+    /// stops the launch, if something does.
+    fn prepare(&self, launch: &mut LaunchRequest, request: &AcquireRequest) -> Option<Acquired> {
+        let retry = self.config.launch_interval;
+        match self.ssh_key() {
+            Ok(name) => launch.ssh_key = name,
+            Err(why) => return Some(why.answer(retry)),
+        }
+        match self.ensure_firewall(&launch.region) {
+            Ok(id) => launch.firewall_ruleset_ids.push(id),
+            Err(why) => return Some(why.answer(retry)),
+        }
+        launch.user_data = match request.payload.is_empty() {
+            true => None,
+            false => Some(Secret::new(request.payload.expose().to_owned())),
+        };
+        Self::unprotected(launch)
+    }
+
+    /// The refusal of a launch that carries no firewall ruleset: it would have the
+    /// account's default rules, and a ruleset can only be attached at launch. Never sent.
+    fn unprotected(launch: &LaunchRequest) -> Option<Acquired> {
+        launch.firewall_ruleset_ids.is_empty().then(|| {
+            Self::refuse(
+                RefusalCode::Shape,
+                Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
+            )
         })
     }
 
@@ -430,11 +596,15 @@ impl LambdaProvider {
 impl ElasticProvider for LambdaProvider {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
         let types = self.api.instance_types().map_err(provider_error)?;
-        Ok(select::offers(&self.options, &types))
+        Ok(select::offers(
+            &self.options,
+            &types,
+            self.config.regions.as_deref(),
+        ))
     }
 
-    fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
-        Vec::new()
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
+        host::steps(self.config.scratch_gib, offer.disk_bytes)
     }
 
     fn payload_limit(&self) -> usize {
@@ -458,7 +628,15 @@ impl ElasticProvider for LambdaProvider {
         if len > limit {
             return Self::refuse(RefusalCode::Shape, Reason::PayloadTooLarge { len, limit });
         }
-        let launch = match self.launch_request(request, zone) {
+        let in_regions = self
+            .config
+            .regions
+            .as_ref()
+            .is_none_or(|only| only.iter().any(|region| region == zone));
+        if !in_regions {
+            return Self::refuse(RefusalCode::Shape, Reason::NotAllowed);
+        }
+        let mut launch = match self.launch_request(request, zone) {
             Ok(launch) => launch,
             Err(why) => return Self::refuse(RefusalCode::Shape, Reason::Label(why.to_string())),
         };
@@ -475,6 +653,9 @@ impl ElasticProvider for LambdaProvider {
                 true => tracing::debug!(name = %launch.name, "dry run: a launch would be sent"),
             }
             return Self::refuse(RefusalCode::Denied, Reason::DryRun);
+        }
+        if let Some(answer) = self.prepare(&mut launch, request) {
+            return answer;
         }
         let mut gate = self.launching();
         self.launch_locked(&mut gate, request, &launch)
@@ -548,5 +729,35 @@ fn held_of(instance: &Instance) -> Held {
         offer: instance.instance_type.clone(),
         zone: Some(instance.region.clone()),
         status: instance.status.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a launch with no firewall ruleset is refused as a shape error and
+    /// that one with a ruleset passes: the guard that keeps a launch from going out under
+    /// the account's default rules.
+    #[test]
+    fn a_launch_without_a_ruleset_is_refused_as_shape() {
+        let mut launch = LaunchRequest {
+            region: "r".to_owned(),
+            instance_type: "t".to_owned(),
+            ssh_key: "k".to_owned(),
+            name: "n".to_owned(),
+            tags: Vec::new(),
+            user_data: None,
+            firewall_ruleset_ids: Vec::new(),
+        };
+        assert_eq!(
+            LambdaProvider::unprotected(&launch),
+            Some(Acquired::Refused(Refusal {
+                code: RefusalCode::Shape,
+                reason: Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
+            }))
+        );
+        launch.firewall_ruleset_ids.push("rs".to_owned());
+        assert_eq!(LambdaProvider::unprotected(&launch), None);
     }
 }

@@ -181,9 +181,14 @@ fn a_success_that_is_not_the_documented_shape_is_malformed() {
 }
 
 #[test]
-fn the_quoted_parser_message_is_short() {
+fn the_malformed_message_quotes_no_part_of_the_answer() {
     let body = format!(r#"{{"data": "{}"}}"#, "y".repeat(5000));
-    assert!(malformed(&body).len() <= 160);
+    let why = malformed(&body);
+    assert!(
+        why.starts_with("unexpected answer shape (line 1, column "),
+        "{why}"
+    );
+    assert!(!why.contains('y'), "{why}");
 }
 
 #[test]

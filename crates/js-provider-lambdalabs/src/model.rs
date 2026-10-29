@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use js_elastic::{HostRef, HostStatus};
+use js_elastic::{HostRef, HostStatus, Secret};
 use time::OffsetDateTime;
 
 /// The id of an instance: 1 to 64 ASCII letters, digits, `-` or `_`. It becomes a path
@@ -149,7 +149,10 @@ pub struct Instance {
 }
 
 /// What one launch asks for. The ssh key is one name: Lambda takes exactly one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The user data is a [`Secret`]: it holds the machine's join token, so the request has no
+/// `Clone` or `PartialEq`, and its `Debug` prints `***` for the data.
+#[derive(Debug)]
 pub struct LaunchRequest {
     /// The region's code.
     pub region: String,
@@ -161,4 +164,32 @@ pub struct LaunchRequest {
     pub name: String,
     /// The tags to put on the instance.
     pub tags: Vec<Tag>,
+    /// What the instance boots with (cloud-init user data), delivered as it is. `None`
+    /// sends no user data.
+    pub user_data: Option<Secret>,
+    /// The ids of the firewall rulesets to attach. A ruleset can only be attached at
+    /// launch, and must be in the instance's region.
+    pub firewall_ruleset_ids: Vec<String>,
+}
+
+/// A firewall ruleset of the account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirewallRuleset {
+    /// The id, which a launch names it by.
+    pub id: String,
+    /// The name.
+    pub name: String,
+    /// The region's code; a ruleset belongs to one region.
+    pub region: String,
+    /// How many rules it holds. A ruleset with none lets nothing in.
+    pub rules: usize,
+}
+
+/// An ssh key of the account. The private half, if the API made the key, is never read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshKey {
+    /// The id.
+    pub id: String,
+    /// The name, which a launch names it by.
+    pub name: String,
 }

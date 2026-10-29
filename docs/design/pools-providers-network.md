@@ -523,7 +523,8 @@ All in `crates/js-provider-lambdalabs`:
   payload as `user_data`; it holds no cloud-init template and no network code.
 - `LambdaApi` gains `list_firewall_rulesets` and `create_firewall_ruleset` (no inbound
   rules). `ensure_firewall` finds a ruleset named `js-<scheduler>-noinbound` or creates it,
-  once per region, caches the id, and every launch attaches it. Rulesets can only be
+  in the region, and every launch attaches it; it reads the ruleset again before every launch
+  (one list call), and a ruleset that holds a rule by then refuses the launch. Rulesets can only be
   attached at launch (requirement 8), so a launch with no ruleset is refused `Shape`, not sent.
 - The ssh key. The API requires exactly one name (`ssh_key_names: [&str; 1]`, `wire.rs`)
   and `ElasticConfig::new` requires one with no default. The key is unused, because the
