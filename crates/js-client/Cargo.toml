@@ -16,6 +16,7 @@ ureq.workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
+webpki-roots.workspace = true
 
 [lints]
 workspace = true

@@ -165,8 +165,8 @@ pub(crate) struct LeaseList {
 /// An error answer: a status and `{"error": "<code>"}`, with a `reason` for a 400.
 #[derive(Debug)]
 pub(crate) struct ApiError {
-    status: StatusCode,
-    code: &'static str,
+    pub(crate) status: StatusCode,
+    pub(crate) code: &'static str,
     reason: Option<String>,
 }
 
