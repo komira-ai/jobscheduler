@@ -1,12 +1,19 @@
 //! The program itself, run as a child process against the server of the test: the real
 //! waiter, the real signal handlers and the process's own exit status.
 
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Command, Output, Stdio};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+use std::process::{Command, Output};
 
+#[cfg(target_os = "linux")]
 use crate::procs::{fifo, path_str};
-use crate::support::{Harness, run_words};
+use crate::support::Harness;
+#[cfg(target_os = "linux")]
+use crate::support::run_words;
 
 const PROGRAM: &str = env!("CARGO_BIN_EXE_js");
 
