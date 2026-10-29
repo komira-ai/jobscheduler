@@ -35,5 +35,5 @@ pub use answer::{
 pub use boot::{Artifact, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, SlotName};
 pub use ids::{AcquireId, HostName, HostRef, InvalidId, SchedulerId};
 pub use offer::{Demand, Dimension, GpuClass, Offer, PriceUnit};
-pub use provider::{AcquireRequest, ElasticProvider, ProviderError};
+pub use provider::{AcquireRequest, CheckResult, ElasticProvider, ProviderError};
 pub use secret::{BootPayload, Secret};
