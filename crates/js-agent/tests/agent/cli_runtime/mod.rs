@@ -156,6 +156,7 @@ pub fn spec(run_id: &str) -> ContainerSpec {
         gpu_indices: Vec::new(),
         mounts: Vec::new(),
         scratch: PathBuf::from("/work/scratch").join(run_id),
+        files: None,
         isolation: Isolation::Contained,
         labels,
     }

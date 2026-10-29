@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 pub mod fake;
+mod files;
 mod flags;
 mod mounts;
 mod owed;
@@ -216,6 +217,7 @@ pub fn job(run_id: &str) -> JobSpec {
         isolation: js_agent_wire::Isolation::Contained,
         labels: std::collections::BTreeMap::new(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
     }
 }

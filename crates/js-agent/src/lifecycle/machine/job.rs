@@ -353,6 +353,7 @@ pub(super) fn container_spec(
     spec: &JobSpec,
     mounts: Vec<ResolvedMount>,
     scratch: std::path::PathBuf,
+    files: Option<std::path::PathBuf>,
 ) -> ContainerSpec {
     let gpus: Vec<String> = spec.gpu_indices.iter().map(u32::to_string).collect();
     let own = [
@@ -382,6 +383,7 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        files,
         isolation: spec.isolation,
         labels,
     }

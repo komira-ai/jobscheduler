@@ -22,6 +22,7 @@
 //!   --mount type=volume,dst=/scratch,volume-driver=local,volume-nocopy,
 //!     volume-opt=type=none,volume-opt=device=<scratch>,"volume-opt=o=bind,nosuid,nodev" (Docker)
 //!   --mount type=bind,src=..,dst=..,readonly[,bind-recursive=readonly,bind-propagation=rprivate]
+//!   --mount type=bind,src=<run files>,dst=/run/js-files,readonly[,...]   (only with run files)
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m --ulimit core=0 --ipc private
@@ -230,8 +231,8 @@ use js_agent_wire::Isolation;
 use serde_json::Value;
 
 pub use args::{
-    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
-    label_args, limits_to_args, scratch_volume_options,
+    ArgsError, Bind, DEFAULT_PIDS, FILES_TARGET, SCRATCH_TARGET, binds_of, check_submounts,
+    hardening_args, label_args, limits_to_args, scratch_volume_options,
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{

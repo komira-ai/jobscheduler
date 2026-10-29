@@ -88,6 +88,9 @@ pub struct ContainerSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
+    /// `/run/js-files`; none for a run without files.
+    pub files: Option<PathBuf>,
     /// Container or host. The backend decides what a host job gets; the lifecycle only
     /// carries the field.
     pub isolation: Isolation,

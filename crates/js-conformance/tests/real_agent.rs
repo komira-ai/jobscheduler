@@ -83,6 +83,7 @@ fn job(run: &str) -> JobSpec {
         isolation: Isolation::Contained,
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
+        files: Vec::new(),
         valid_for_ms: 0,
     }
 }

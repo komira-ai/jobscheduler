@@ -53,7 +53,9 @@ fn host_checked_by(answer: Result<&str, &str>) -> Host {
 /// `exec=container` beside `os` and `arch`, that a host with two GPUs and no toolkit hook
 /// reports no `gpu-toolkit`, and that the capability the server names in its refusal is
 /// printed. It catches an agent that does not say how it runs jobs (every pool with a mode
-/// would refuse it), and one that claims a toolkit it never checked.
+/// would refuse it), one that claims a toolkit it never checked, and one that does not
+/// advertise `run-files` (the server would never send it a start with files, or, worse
+/// for a server that guessed, would send one to an agent that ignores them).
 #[test]
 fn a_container_agent_reports_its_runtime_and_mode() {
     let (ran, hello) = container_hello("contract-container", &[], &linux_host());
@@ -65,6 +67,7 @@ fn a_container_agent_reports_its_runtime_and_mode() {
             "arch": "x86_64",
             "runtime": "container",
             "exec": "container",
+            "run-files": "true",
         })
     );
     let said = "(host-contract; the capability at fault is runtime)";
@@ -149,12 +152,12 @@ fn the_toolkit_hook_flag_is_checked_at_start() {
     assert_eq!(hello, Value::Null);
 }
 
-/// Asserts that an operator cannot give any of the four capabilities with `--capability`:
+/// Asserts that an operator cannot give any of the five capabilities with `--capability`:
 /// the agent ends with status 2 naming the key, and sends nothing. It catches a pool's
 /// contract satisfied by a flag instead of by what the host has.
 #[test]
 fn the_contract_capabilities_cannot_be_set_by_flag() {
-    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib"] {
+    for key in ["runtime", "exec", "gpu-toolkit", "disk-gib", "run-files"] {
         let flag = format!("{key}=container");
         let (ran, sent, _) = run_scripted(
             &["--capability", flag.as_str()],

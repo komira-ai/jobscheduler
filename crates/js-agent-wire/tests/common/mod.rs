@@ -74,6 +74,7 @@ pub fn job() -> JobSpec {
         isolation: Isolation::Host,
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
+        files: Vec::new(),
         valid_for_ms: 10_000,
     }
 }

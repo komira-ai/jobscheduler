@@ -180,6 +180,9 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The job is a host job and carries run files, which only a container can be given
+    /// (they are mounted read-only at `/run/js-files`). Nothing is created.
+    pub const FILES_NEED_CONTAINER: &str = "files-need-container";
     /// The job may change the host and the taint marker could not be written, so the job
     /// was not started.
     pub const TAINT_FAILED: &str = "taint-failed";

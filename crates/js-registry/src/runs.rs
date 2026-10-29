@@ -131,6 +131,10 @@ pub enum RunRefusal {
     /// The run id is already in use. A caller that mints ids never sees it.
     #[error("the run id is in use")]
     RunExists,
+    /// The job carries run files and the host did not report the `run-files` capability:
+    /// an agent without it would ignore the files and run the job without its secrets.
+    #[error("the host does not deliver run files")]
+    FilesUnsupported,
     /// The lease has no such run.
     #[error("the lease has no such run")]
     UnknownRun,
@@ -152,6 +156,7 @@ impl RunRefusal {
             Self::HostTainted => refusal::HOST_TAINTED,
             Self::NotReady => refusal::NOT_READY,
             Self::RunExists => "run-exists",
+            Self::FilesUnsupported => "files-unsupported",
             Self::UnknownRun => "unknown-run",
         }
     }
@@ -596,6 +601,7 @@ mod tests {
             isolation: Isolation::Contained,
             labels: Default::default(),
             heartbeat_seq: 0,
+            files: Vec::new(),
             valid_for_ms: 0,
         }
     }

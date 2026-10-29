@@ -234,6 +234,12 @@ impl Lifecycle {
                 "this agent runs no host jobs",
             ));
         }
+        if !spec.files.is_empty() && spec.isolation == Isolation::Host {
+            return Err(no(
+                detail::FILES_NEED_CONTAINER,
+                "run files are delivered to contained jobs only",
+            ));
+        }
         if !spec.gpu_indices.is_empty() && !self.runtime.supports_gpus() {
             return Err(no(
                 detail::GPU_UNSUPPORTED,
@@ -340,8 +346,28 @@ impl Lifecycle {
                 false,
             )
         });
+        // The files are written before the container exists, and only here: a start that
+        // is sent again finds its job above and never reaches this point.
         let started = started.and_then(|scratch| {
-            let container = container_spec(spec, mounts, scratch);
+            let files = match spec.files.is_empty() {
+                true => Ok(None),
+                false => self
+                    .config
+                    .scratch
+                    .write_files(run_id, &spec.files)
+                    .map(Some),
+            };
+            files.map(|files| (scratch, files)).map_err(|why| {
+                (
+                    detail::SCRATCH_FAILED,
+                    code::SCRATCH_FAILED,
+                    why.to_string(),
+                    false,
+                )
+            })
+        });
+        let started = started.and_then(|(scratch, files)| {
+            let container = container_spec(spec, mounts, scratch, files);
             self.runtime.create_and_start(&container).map_err(|why| {
                 (
                     detail::RUNTIME_FAILED,
