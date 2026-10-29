@@ -788,7 +788,8 @@ fn work(
 /// without waiting (a full queue only means the question is asked again on the next
 /// heartbeat) and the answer is what the worker last published, if that is about the lease
 /// asked. Any other answer, or none yet, is busy, so an answer for one lease is never taken
-/// for another. A final answer is not asked for twice.
+/// for another. A final answer is not asked for twice, and at most one question of each
+/// kind waits in the queue, so questions never crowd heartbeat replies out of it.
 pub struct WorkerHost {
     handle: Handle,
 }
