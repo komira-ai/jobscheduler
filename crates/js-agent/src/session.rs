@@ -21,7 +21,8 @@
 //!   so the session ends with the status and the server's code ([`Fatal`]) and the
 //!   program exits 2. These are the refusals that name something only the operator can
 //!   change: the token (401), the pool (`unknown-pool`), the shape the pool accepts
-//!   (`shape-not-accepted`), the credential the host id was admitted with (`host-bound`),
+//!   (`shape-not-accepted`), the host contract of an execution mode (`host-contract`,
+//!   `execution-mismatch`; the refusal names the capability at fault), the credential the host id was admitted with (`host-bound`),
 //!   the pool's static host list (`host-listed`), and a message the server cannot read or
 //!   serve (`invalid-hello`, `invalid-heartbeat`, `unsupported-protocol`,
 //!   `body-too-large`). The operator fixes the cause and restarts the agent.
@@ -127,6 +128,9 @@ pub struct Fatal {
     pub code: String,
     /// The majors the server speaks, when it said so (`unsupported-protocol`).
     pub supported: Option<ProtocolRange>,
+    /// The capability at fault, when the server named one (`host-contract`,
+    /// `execution-mismatch`).
+    pub field: Option<String>,
 }
 
 impl fmt::Display for Fatal {
@@ -135,9 +139,14 @@ impl fmt::Display for Fatal {
             .supported
             .map(|range| format!("; it speaks majors {} to {}", range.min, range.max))
             .unwrap_or_default();
+        let field = self
+            .field
+            .as_ref()
+            .map(|field| format!("; the capability at fault is {field}"))
+            .unwrap_or_default();
         write!(
             f,
-            "the server refused the {} with status {} ({}{majors}); not retrying",
+            "the server refused the {} with status {} ({}{majors}{field}); not retrying",
             self.what, self.status, self.code
         )
     }
@@ -334,8 +343,19 @@ fn supported_of(body: &Value, code: &str) -> Option<ProtocolRange> {
     let refused = Refused {
         code: code.to_owned(),
         supported,
+        field: None,
     };
     refused.validate().ok().and(refused.supported)
+}
+
+/// The capability a refusal body names under `field`, when it is a plain token.
+fn field_of(body: &Value, code: &str) -> Option<String> {
+    let refused = Refused {
+        code: code.to_owned(),
+        supported: None,
+        field: body.get("field").and_then(Value::as_str).map(str::to_owned),
+    };
+    refused.validate().ok().and(refused.field)
 }
 
 /// The welcome in an answer body, checked.
@@ -721,6 +741,7 @@ impl<'a> Session<'a> {
                 what,
                 status: answer.status,
                 supported: supported_of(&answer.body, &code),
+                field: field_of(&answer.body, &code),
                 code,
             }),
             _ => {

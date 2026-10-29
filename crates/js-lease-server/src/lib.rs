@@ -25,7 +25,7 @@
 //! | `--boot initialise\|resume` | required: `initialise` may create the file, `resume` needs it |
 //! | `--pool-config <path>` | the static pool file ([`js_pool_static`]); optional when agents register hosts, and one of the two sources is required (a start with neither is refused naming this flag) |
 //! | `--agent-token-file <path>` | turns agent registration on: join tokens, one per line, each as strong as `--token-file`'s, in an owner-only file; read again at every tick. Needs `--agent-pool-config` |
-//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`. Needs `--agent-token-file` |
+//! | `--agent-pool-config <path>` | the pool agents join, as TOML: `name`, `class`, `max_machines`, `[shape]`, `[capabilities]`, `heartbeat_interval`, `grace`, `lost_retention`, `exec` (`container` or `sandbox-exec`: the hosts must report a `runtime` of that mode, and `gpu-toolkit` when the shape has GPUs, or are refused `host-contract` or `execution-mismatch`; absent, nothing is required). Needs `--agent-token-file` |
 //! | `--agent-hello-burst`, `--agent-hello-interval` | the hellos one join token may say in a burst (`60`) and how often one more is allowed after (`1s`) |
 //! | `--token-file <path>` | required: a regular file owned by the server's user, mode 0600 or 0400, holding one token of printable ASCII of at least 32 bytes ([`MIN_TOKEN_BYTES`]; trailing whitespace is dropped). A shorter token is refused at start |
 //! | `--default-ttl`, `--max-ttl` | `600s` and `3600s` unless given; `90`, `90s`, `15m`, `2h` |
@@ -121,7 +121,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
+//! | `POST /v1/agent/hello` | 200 the welcome (protocol, epoch, heartbeat interval, grace, pool, session secret); 400 `invalid-hello`, a wire code, or `unsupported-protocol` with the majors served; 403 `unknown-pool`, `host-bound`, `host-listed`, `shape-not-accepted`, `host-contract` and `execution-mismatch` (with `"field"`, the capability at fault; only a pool that declares an execution mode sends them), `pool-full`; 409 `host-live`; 413 `body-too-large`; 429 `rate-limited` with `Retry-After`; 503 `session-unavailable` |
 //! | `POST /v1/agent/heartbeat` | 200 `{commands, result_acks, taint_ack}` (see "Runs" and "Taint"); 400 `invalid-heartbeat`; 403 `host-bound`, `session-mismatch`; 409 `stale-epoch`, `unknown-host` (the agent says hello again); 413 |
 //!
 //! A leasing client asks for a lease as ever and is given a static host first, a

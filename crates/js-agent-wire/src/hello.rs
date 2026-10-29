@@ -384,6 +384,11 @@ pub struct Refused {
     /// For [`refusal::UNSUPPORTED_PROTOCOL`]: the majors the server speaks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported: Option<ProtocolRange>,
+    /// For [`refusal::HOST_CONTRACT`] and [`refusal::EXECUTION_MISMATCH`]: the capability
+    /// at fault (`runtime`, `gpu-toolkit` or `exec`). A peer that predates the field
+    /// ignores it and reads the code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 impl Refused {
@@ -396,6 +401,10 @@ impl Refused {
             limits::MAX_CODE_LEN,
             check::ident_byte,
         )?;
+        if let Some(field) = &self.field {
+            let max = limits::MAX_CAPABILITY_KEY_LEN;
+            check::token(at.field("field"), field, max, check::ident_byte)?;
+        }
         match &self.supported {
             Some(range) => range.check("supported", refusal::INVALID_WELCOME),
             None => Ok(()),
@@ -407,7 +416,8 @@ impl Refused {
 /// transport-neutral form. Over HTTP the lease server sends the welcome bare (status 200,
 /// the fields of [`Welcome`]) and a refusal as the error body every route of the API
 /// uses: a 4xx or 5xx status and `{"error": "<code>"}`, with `"supported"` (a
-/// [`ProtocolRange`]) beside it for [`refusal::UNSUPPORTED_PROTOCOL`]. [`Refused::code`]
+/// [`ProtocolRange`]) beside it for [`refusal::UNSUPPORTED_PROTOCOL`] and `"field"` (the
+/// capability at fault) for [`refusal::HOST_CONTRACT`] and [`refusal::EXECUTION_MISMATCH`]. [`Refused::code`]
 /// is that `error`. The agent reads that HTTP shape, not this tagged one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

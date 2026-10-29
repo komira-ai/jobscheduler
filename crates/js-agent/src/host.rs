@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use js_agent_wire::{Hello, InstanceIdentity, Phase, ProtocolRange, WireShape};
 
+use js_caps::DETECTED_KEYS;
+
 use crate::cli::Cli;
 use crate::facts::{CommandRunner, FileReader, Platform, detect, host_id, machine_id};
 
@@ -41,7 +43,8 @@ fn class(
     }
 }
 
-/// The capabilities to report: the operator's, and `os` and `arch` as detected.
+/// The capabilities to report: the operator's, and `os` and `arch` as detected. The keys
+/// of the host contract are detected too and cannot be given.
 fn capabilities(
     platform: &Platform,
     given: &[(String, String)],
@@ -49,7 +52,7 @@ fn capabilities(
     let clash = given
         .iter()
         .map(|(key, _)| key.as_str())
-        .find(|key| matches!(*key, "os" | "arch"));
+        .find(|key| matches!(*key, "os" | "arch") || DETECTED_KEYS.contains(key));
     match clash {
         Some(key) => Err(format!("--capability: {key} is detected and cannot be set")),
         None => Ok(given

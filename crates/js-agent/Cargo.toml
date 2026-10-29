@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 js-agent-usage = { path = "../js-agent-usage" }
 js-agent-wire = { path = "../js-agent-wire" }
+js-caps = { path = "../js-caps" }
 js-client = { path = "../js-client" }
 clap.workspace = true
 hex.workspace = true

@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
+use js_caps::ExecMode;
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
 use serde::Deserialize;
@@ -37,6 +38,9 @@ struct RawPool {
     heartbeat_interval: Option<String>,
     grace: Option<String>,
     lost_retention: Option<String>,
+    // `container` or `sandbox-exec`: the mode the pool's hosts run jobs in. Absent, the
+    // pool requires no host contract, as before.
+    exec: Option<String>,
     // The whole-node class (design whole-node.md, section 6). Every key is optional.
     max_whole_node: Option<usize>,
     max_draining: Option<usize>,
@@ -166,6 +170,11 @@ fn parse_with(
         .map_err(|err| format!("lost_retention: {err}"))?;
     let pool = match whole {
         Some(whole) => pool.with_whole_node(whole).map_err(|err| err.to_string())?,
+        None => pool,
+    };
+    let exec = raw.exec.as_deref().map(str::parse::<ExecMode>);
+    let pool = match exec.transpose().map_err(|err| format!("exec: {err}"))? {
+        Some(exec) => pool.with_exec(exec),
         None => pool,
     };
     match admission {
@@ -317,6 +326,19 @@ mod tests {
         assert_eq!(timed, full);
     }
 
+    /// The `exec` key sets the mode the pool's hosts run jobs in, and a file without it
+    /// leaves the pool requiring nothing of the host contract. It catches an `exec` that is
+    /// read and dropped, and a default that would refuse every agent that predates the
+    /// capabilities.
+    #[test]
+    fn exec_sets_the_host_contract_and_its_absence_leaves_none() {
+        assert_eq!(parse(MINIMAL).unwrap().exec(), None);
+        let container = parse(&with("exec = \"container\"")).unwrap();
+        assert_eq!(container.exec(), Some(ExecMode::Container));
+        let mac = parse(&with("exec = \"sandbox-exec\"")).unwrap();
+        assert_eq!(mac.exec(), Some(ExecMode::SandboxExec));
+    }
+
     /// A file in the temp directory that is removed when the guard drops, so a failing
     /// assertion does not leave it behind.
     struct TempFile(std::path::PathBuf);
@@ -412,6 +434,8 @@ mod tests {
             (with("grace = \"5s\""), "heartbeat_interval and grace"),
             (with("lost_retention = \"1s\""), "lost_retention"),
             (with("lost_retention = \"later\""), "lost_retention"),
+            (with("exec = \"vm\""), "exec: unknown execution mode"),
+            (with("exec = \"\""), "known: container, sandbox-exec"),
             (String::from("name = ["), "TOML"),
         ];
         for (text, names) in cases {

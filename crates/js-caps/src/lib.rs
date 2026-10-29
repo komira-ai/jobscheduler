@@ -17,6 +17,8 @@
 //!   and kbf's own keys, the names in any case: [`property_name`]) as a request;
 //!   [`NodeCaps::from_report`] reads a daemon's node report as the capabilities
 //!   requests are matched against.
+//! - [`HostContract`] is what a pool requires of the capabilities a host reports about how
+//!   it runs jobs ([`RUNTIME`], [`GPU_TOOLKIT`], [`EXEC`]).
 //!
 //! This is a pure crate: no async runtime, network, clock, randomness or hashed
 //! collections. The lists in `clippy.toml` enforce it.
@@ -28,6 +30,7 @@
 
 mod cpu;
 mod gpu;
+mod host;
 mod level;
 mod macos;
 mod matching;
@@ -38,6 +41,10 @@ pub use cpu::{Arch, CpuCaps, ParseError, UnknownArch};
 pub use gpu::{
     GPU_KIND_NATIVE, PciFunction, gpu_cores_from_macos_ioreg, gpus_from_linux_pci,
     gpus_from_macos_sysctl, metal_family_of_apple_chip,
+};
+pub use host::{
+    Breach, DETECTED_KEYS, EXEC, ExecMode, FLAG_SET, GPU_TOOLKIT, HostContract, RUNTIME,
+    UnknownExecMode,
 };
 pub use level::{ArmVersion, IsaLevel, UnknownIsaLevel, X86Level};
 pub use matching::{

@@ -234,6 +234,9 @@ pub(crate) struct Refused {
     error: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     supported: Option<ProtocolRange>,
+    /// The capability at fault, for the two refusals of the host contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<&'static str>,
 }
 
 impl Refused {
@@ -242,6 +245,7 @@ impl Refused {
             status,
             error,
             supported: None,
+            field: None,
         }
     }
 
@@ -269,6 +273,8 @@ impl Refused {
             | Refusal::HostBound
             | Refusal::HostListed
             | Refusal::ShapeNotAccepted
+            | Refusal::HostContract { .. }
+            | Refusal::ExecutionMismatch { .. }
             | Refusal::PoolFull
             | Refusal::SessionMismatch => StatusCode::FORBIDDEN,
             Refusal::SessionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -277,6 +283,7 @@ impl Refused {
         let unsupported = code == js_agent_wire::refusal::UNSUPPORTED_PROTOCOL;
         Self {
             supported: unsupported.then_some(ProtocolRange::THIS),
+            field: refusal.field(),
             ..Self::new(status, code)
         }
     }
@@ -351,6 +358,16 @@ mod tests {
             (Refusal::HostBound, 403, "host-bound"),
             (Refusal::HostListed, 403, "host-listed"),
             (Refusal::ShapeNotAccepted, 403, "shape-not-accepted"),
+            (
+                Refusal::HostContract { field: "runtime" },
+                403,
+                "host-contract",
+            ),
+            (
+                Refusal::ExecutionMismatch { field: "exec" },
+                403,
+                "execution-mismatch",
+            ),
             (Refusal::PoolFull, 403, "pool-full"),
             (Refusal::SessionMismatch, 403, "session-mismatch"),
             (Refusal::SessionUnavailable, 503, "session-unavailable"),
@@ -361,6 +378,7 @@ mod tests {
             assert_eq!(answer.error, code);
             let says_majors = code == "unsupported-protocol";
             assert_eq!(answer.supported.is_some(), says_majors, "{code}");
+            assert_eq!(answer.field, refusal.field(), "{code}");
         }
     }
 

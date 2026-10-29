@@ -1,6 +1,7 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
+use js_caps::ExecMode;
 use js_types::{Admission, ProviderId, ResourceClass, Shape};
 
 use crate::WholeNodeConfig;
@@ -49,6 +50,7 @@ pub struct PoolConfig {
     grace_ms: u64,
     lost_retention_ms: u64,
     whole_node: Option<WholeNodeConfig>,
+    exec: Option<ExecMode>,
 }
 
 impl PoolConfig {
@@ -70,6 +72,7 @@ impl PoolConfig {
             grace_ms: DEFAULT_GRACE_MS,
             lost_retention_ms: DEFAULT_LOST_RETENTION_MS,
             whole_node: None,
+            exec: None,
         }
     }
 
@@ -111,6 +114,25 @@ impl PoolConfig {
             }
             false => Err(ConfigError::LostRetention),
         }
+    }
+
+    /// The same pool requiring the host contract of `exec`: a host is admitted only if
+    /// it reports `runtime` equal to `exec` (and `exec`, when it reports one, equal to it),
+    /// and, in a pool whose shape has GPUs, a working `gpu-toolkit` (see
+    /// [`js_caps::HostContract`]). A host that does not is refused `host-contract` or
+    /// `execution-mismatch` before its shape is compared.
+    ///
+    /// A pool made without this setting requires nothing of the kind, so hosts that
+    /// predate the capabilities keep joining it.
+    #[must_use]
+    pub fn with_exec(mut self, exec: ExecMode) -> Self {
+        self.exec = Some(exec);
+        self
+    }
+
+    /// The execution mode the pool's hosts must run jobs in, when the pool declares one.
+    pub fn exec(&self) -> Option<ExecMode> {
+        self.exec
     }
 
     /// The same pool with the whole-node settings `whole`, checked against the pool: its
