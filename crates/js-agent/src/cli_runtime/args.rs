@@ -267,8 +267,10 @@ fn mount_value(
 /// with a `/tmp` that is a tmpfs (read-write, but no programs, no devices, no set-uid
 /// files, and limited in size: Podman does not default to `noexec`; on Podman `/var/tmp`
 /// and `/run` are such tmpfs mounts too), no core dumps, a private IPC namespace against a
-/// daemon whose default is to share it, and the pull policy the agent was configured with
-/// (never by default). The user is not here: it is the run's slot's (`user_args`). For
+/// daemon whose default is to share it, a private control group namespace (both engines
+/// default to it on cgroup v2, but the integrity checks rely on a job seeing only its own
+/// group, so it is named), and the pull policy the agent was configured with (never by
+/// default). The user is not here: it is the run's slot's (`user_args`). For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
@@ -290,6 +292,8 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
         "--ulimit",
         "core=0",
         "--ipc",
+        "private",
+        "--cgroupns",
         "private",
     ]
     .map(str::to_owned)
