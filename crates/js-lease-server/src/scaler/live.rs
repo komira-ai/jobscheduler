@@ -1,6 +1,7 @@
 //! The real [`Effects`]: the server's registry and join tokens, the pool's provider and
 //! network mode, and the records file.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -13,7 +14,7 @@ use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
 
-use super::{Call, Effects, Launcher, RecordsFile};
+use super::{Call, Effects, Launcher, RecordsFile, UnremovedFile};
 use crate::agents::Agents;
 use crate::checks::Health as Checks;
 
@@ -25,18 +26,20 @@ pub(crate) struct Live {
     provider: Arc<dyn ElasticProvider>,
     launcher: Launcher,
     file: RecordsFile,
+    unremoved: UnremovedFile,
     checks: Arc<Mutex<Checks>>,
 }
 
 impl Live {
     /// The effects for the pool `pool` of `scheduler`: its machines are launched and
     /// released through `provider` and `launcher`, its tokens and hosts are `agents`', its
-    /// records are kept in `file`, and its health and offers are what its `checks` found.
+    /// records are kept in `file`, the hosts the registry would not remove in `unremoved`,
+    /// and its health and offers are what its `checks` found.
     pub(crate) fn new(
         (agents, pool, scheduler): (Arc<Agents>, ProviderId, SchedulerId),
         provider: Arc<dyn ElasticProvider>,
         launcher: Launcher,
-        (file, checks): (RecordsFile, Arc<Mutex<Checks>>),
+        (file, unremoved, checks): (RecordsFile, UnremovedFile, Arc<Mutex<Checks>>),
     ) -> Self {
         Self {
             agents,
@@ -45,6 +48,7 @@ impl Live {
             provider,
             launcher,
             file,
+            unremoved,
             checks,
         }
     }
@@ -87,6 +91,13 @@ impl Effects for Live {
 
     fn save(&self, records: &Records) -> Result<(), String> {
         match self.file.save(records) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+
+    fn save_unremoved(&self, hosts: &BTreeSet<String>) -> Result<(), String> {
+        match self.unremoved.save(hosts) {
             Ok(()) => Ok(()),
             Err(err) => Err(err.to_string()),
         }
@@ -270,12 +281,13 @@ mod tests {
             )]),
         );
         let file = RecordsFile::new(dir.join("records"));
+        let unremoved = UnremovedFile::new(dir.join("unremoved"));
         let checks = Arc::new(Mutex::new(Checks::default()));
         let live = Live::new(
             (agents, pool, scheduler()),
             Arc::new(Stub),
             launcher,
-            (file, checks),
+            (file, unremoved, checks),
         );
         (live, dir)
     }
@@ -348,9 +360,27 @@ mod tests {
         assert!(broken.save(&Records::default()).is_err());
     }
 
+    /// Asserts that the hosts the registry would not remove are written to their own file,
+    /// and that a write into a directory that is not there is reported. It catches a save
+    /// that swallows its error, which would let the shell go on as if a restart would
+    /// retry the removal.
+    #[test]
+    fn the_unremoved_hosts_are_written_and_a_failure_is_reported() {
+        let (live, dir) = live("save_unremoved");
+        let hosts = BTreeSet::from(["js-a".to_owned()]);
+        assert_eq!(live.save_unremoved(&hosts), Ok(()));
+        assert_eq!(
+            UnremovedFile::new(dir.join("unremoved")).load().unwrap(),
+            hosts
+        );
+        let (broken, _) = live_at_missing_dir();
+        assert!(broken.save_unremoved(&hosts).is_err());
+    }
+
     fn live_at_missing_dir() -> (Live, PathBuf) {
         let (mut live, dir) = live("save_missing");
         live.file = RecordsFile::new(dir.join("absent").join("records"));
+        live.unremoved = UnremovedFile::new(dir.join("absent").join("unremoved"));
         (live, dir)
     }
 
