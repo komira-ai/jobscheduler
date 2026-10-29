@@ -25,6 +25,10 @@ const MAX_HOPS: u32 = 8;
 const WALK_BASE_STEPS: u64 = 65_536;
 /// The steps the walker budget adds for each symlink.
 const WALK_STEPS_PER_LINK: u64 = 64;
+/// What the model costs per entry besides its text, charged to the cap: an estimate of the
+/// `String` headers and `BTreeMap` and `BTreeSet` nodes an entry takes, so that many entries
+/// with short names cannot grow memory far past the cap.
+const MODEL_ENTRY_OVERHEAD: u64 = 192;
 /// The default cap on the bytes the model of a tree may hold (see [`Tree::new`]): 256 MiB,
 /// a thousand times the model of the largest layer the first bundles hold.
 pub const DEFAULT_MODEL_BYTES: u64 = 1 << 28;
@@ -269,7 +273,8 @@ pub(crate) enum Node {
 pub(crate) struct Tree {
     nodes: BTreeMap<String, Node>,
     folded: BTreeSet<String>,
-    /// Bytes counted so far: each path twice (it is kept folded too) and each target once.
+    /// Bytes counted so far: per entry an overhead estimate, each path twice (it is kept
+    /// folded too) and each target once.
     used: u64,
     cap: u64,
 }
@@ -307,7 +312,7 @@ impl Tree {
         };
         self.used = self
             .used
-            .saturating_add(2 * path.len() as u64 + target as u64);
+            .saturating_add(MODEL_ENTRY_OVERHEAD + 2 * path.len() as u64 + target as u64);
         if self.used > self.cap {
             return Err(refuse(EntryDefect::ModelTooLarge));
         }

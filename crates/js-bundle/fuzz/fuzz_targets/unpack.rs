@@ -20,7 +20,9 @@ fuzz_target!(|data: &[u8]| {
     let handle = std::fs::File::open(&root).unwrap();
     let limits = Limits {
         entries: 256,
-        bytes: 1 << 20, model_bytes: 1 << 28 };
+        bytes: 1 << 20,
+        model_bytes: 1 << 28,
+    };
     let result = unpack_tar(data, handle.as_fd(), &limits);
     assert_eq!(std::fs::read_dir(dir.join("outside")).unwrap().count(), 0);
     if result.is_ok() {

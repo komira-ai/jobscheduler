@@ -673,7 +673,8 @@ fn a_tree_that_costs_the_walker_too_much_is_refused() {
         bytes: 4 << 20,
         model_bytes: 1 << 28,
     };
-    extract_with(&links(100), &limits).ok();
+    let under = extract_with(&links(100), &limits);
+    assert!(under.result.is_ok(), "{:?}", under.result);
     let run = extract_with(&links(300), &limits);
     refused!(
         run,
@@ -695,6 +696,21 @@ fn a_tree_model_past_its_cap_is_refused() {
     let tar = Tar::new().dir("aaaa").dir("bbbb").dir("cccc").end();
     refused!(
         extract_with(&tar, &limits),
+        UnpackError::Tree(TreeRefusal::Entry {
+            defect: EntryDefect::ModelTooLarge,
+            ..
+        })
+    );
+    // Short names still cost the per-entry overhead: two entries fit 400 bytes, three do not.
+    let small = Limits {
+        model_bytes: 400,
+        ..limits
+    };
+    let two = extract_with(&Tar::new().dir("a").dir("b").end(), &small);
+    assert!(two.result.is_ok(), "{:?}", two.result);
+    let tar = Tar::new().dir("a").dir("b").dir("c").end();
+    refused!(
+        extract_with(&tar, &small),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::ModelTooLarge,
             ..

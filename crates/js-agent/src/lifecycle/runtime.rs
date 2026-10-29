@@ -91,6 +91,9 @@ pub struct ContainerSpec {
     pub mounts: Vec<ResolvedMount>,
     /// The run's scratch directory, mounted read-write.
     pub scratch: PathBuf,
+    /// The directory of the run's files (`0555`, its files `0444`), mounted read-only at
+    /// `/run/js-files`; none for a run without files.
+    pub files: Option<PathBuf>,
     /// The slot the run holds: its container user and the owner of its scratch directory are
     /// the slot's ids ([`Settings::slot_ids`](crate::cli_runtime::Settings::slot_ids)).
     pub slot: u32,
@@ -232,5 +235,26 @@ pub trait ContainerRuntime {
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {
         true
+    }
+
+    /// Whether the network a contained job gets is limited as the agent was told. Called
+    /// before every contained start; a start whose check fails is refused
+    /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the network or the firewall; the text stays on the host.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// The control group directory (an absolute path of the cgroup version 2 file system)
+    /// of a container that runs, or `None` when the runtime cannot say: the container is
+    /// not in the agent's `/proc`, its control group is not the unified one, or it lies
+    /// outside the control group the agent was told holds its containers. The lifecycle
+    /// asks once, when a job starts or is adopted, and a lease with no control group is
+    /// simply not sampled. A runtime with no control groups keeps the default.
+    fn cgroup(&mut self, _id: &ContainerId) -> Option<PathBuf> {
+        None
     }
 }

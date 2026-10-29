@@ -64,7 +64,7 @@ fn random_tar(rng: &mut Rng) -> Vec<u8> {
 fn every_admitted_symlink_resolves_inside_the_root() {
     let mut rng = Rng(0x2545_F491_4F6C_DD1D);
     let (mut admitted, mut refused, mut climbing) = (0, 0, 0);
-    for _ in 0..400 {
+    for _ in 0..5000 {
         let run = extract_with(&random_tar(&mut rng), &limits());
         if run.result.is_err() {
             refused += 1;
@@ -85,7 +85,7 @@ fn every_admitted_symlink_resolves_inside_the_root() {
         run.scratch.assert_contained();
     }
     assert!(
-        admitted > 20 && refused > 20 && climbing > 2,
+        admitted > 200 && refused > 200 && climbing > 20,
         "{admitted} {refused} {climbing}"
     );
 }

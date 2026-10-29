@@ -90,10 +90,13 @@ pub struct Limits {
     /// of regular files. The whole raw stream, every byte after the end marker included,
     /// may not pass this plus the two end blocks.
     pub bytes: u64,
-    /// The most bytes the model of the tree may hold: every path twice and every symlink
-    /// target once. A hostile layer cannot grow the extractor's memory past this, whatever
-    /// the entry limit. 256 MiB (`DEFAULT_MODEL_BYTES`) is a thousand times the model of a
-    /// layer of the first bundles.
+    /// The most bytes the model of the tree may hold, as charged: 192 bytes per entry (an
+    /// estimate of the `String` headers and tree nodes) plus every path twice and every
+    /// symlink target once. The charge estimates the memory, so the real size is near it, not
+    /// exactly it. 256 MiB (`DEFAULT_MODEL_BYTES`) is far above the model of a layer of the
+    /// first bundles. The packer checks its trees against the default; the extractor takes
+    /// the caller's cap, so a caller that passes a smaller one can refuse a layer the packer
+    /// admitted.
     pub model_bytes: u64,
 }
 
