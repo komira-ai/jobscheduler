@@ -313,11 +313,11 @@ impl Core {
 
     /// Tries again the removals of hosts from the registry that it refused.
     fn retry_removes(&self, memory: &mut Memory) {
+        self.flush_unremoved(memory);
         let pending: Vec<String> = memory.unremoved.iter().cloned().collect();
         for host in pending {
             self.remove(memory, host);
         }
-        self.flush_unremoved(memory);
     }
 
     /// Writes the set of hosts the registry refused to remove when it differs from the
