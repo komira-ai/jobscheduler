@@ -40,6 +40,30 @@ async fn a_guard_that_fires_names_the_unfinished_tasks_and_the_timings() {
     );
 }
 
+/// Asserts that a step that began and never finished at the moment the guard fires is in
+/// the message as in flight, beside a finished one of the same operation: here a
+/// `wait-renew` that took 1500 ms and a second one still waiting, so the message is
+/// exactly the one asserted below. It catches a report that shows only finished steps,
+/// which says nothing about the step the hang is in.
+#[tokio::test(start_paused = true)]
+async fn a_guard_that_fires_shows_the_step_still_in_flight() {
+    let timings = Timings::new(Stepping::of(millis(1500)));
+    timings.begin("wait-renew").finish();
+    let stuck_step = timings.begin("wait-renew");
+    let stuck = tokio::spawn(std::future::pending::<()>());
+    let waiting = tokio::spawn(async move {
+        guard_tasks(vec![("lease-calls", stuck)], &timings).await;
+    });
+    let payload = waiting.await.unwrap_err().into_panic();
+    let message = payload.downcast_ref::<String>().unwrap();
+    assert_eq!(
+        message,
+        "still waiting after 30s: unfinished tasks: [\"lease-calls\"]; \
+         lease steps: wait-renew: 1 timed, 1 over 1 s, longest 1500 ms, 1 in flight"
+    );
+    drop(stuck_step);
+}
+
 /// Asserts that tasks that all finish pass the guard, and a task that panicked fails it
 /// with that task's own panic.
 #[tokio::test]

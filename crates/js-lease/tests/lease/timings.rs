@@ -86,3 +86,33 @@ fn the_open_save_is_recorded_as_open() {
         "{report}"
     );
 }
+
+/// Asserts that a step that has begun and not finished is reported as in flight, under
+/// its operation, with nothing yet timed; that finishing it moves it to the timed count
+/// and the suffix goes; and that a timer dropped without finishing (a cancelled future)
+/// does not stay in flight or count as timed. It catches a record that only knows
+/// finished steps, which shows nothing about a step stuck at the moment of a hang, and
+/// one that counts a cancelled step as in flight for ever.
+#[test]
+fn a_step_that_has_begun_is_in_flight_until_it_finishes_or_is_dropped() {
+    let timings = Timings::new(Script::of(&[0, 1500, 1500, 1500]));
+    let waiting = timings.begin("wait-renew");
+    assert_eq!(
+        timings.report(),
+        "wait-renew: 0 timed, 0 over 1 s, longest 0 ms, 1 in flight"
+    );
+    let second = timings.begin("wait-renew");
+    assert!(timings.report().ends_with("longest 0 ms, 2 in flight"));
+    drop(second);
+    assert!(timings.report().ends_with("longest 0 ms, 1 in flight"));
+    waiting.finish();
+    assert_eq!(
+        timings.report(),
+        "wait-renew: 1 timed, 1 over 1 s, longest 1500 ms"
+    );
+    drop(timings.begin("renew"));
+    assert_eq!(
+        timings.report(),
+        "wait-renew: 1 timed, 1 over 1 s, longest 1500 ms"
+    );
+}
