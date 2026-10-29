@@ -714,7 +714,10 @@ fn a_bad_keyfloor_row_refuses_a_start_with_size_keys_on_and_is_ignored_with_them
     setup.store.put(&keys::key_floor(K), vec![9, 9, 9]);
 
     let opened = Core::open(&on(), Rig::default(), setup.storage(), at(5));
-    assert!(matches!(opened.err(), Some(StateError::Corrupt { .. })));
+    assert!(matches!(
+        opened.err(),
+        Some(OpenError::State(StateError::Corrupt { .. }))
+    ));
 
     let ignoring = setup.core_with(&Config::new(1), Rig::default(), 6);
     assert_eq!(floor(&ignoring, K), None);
