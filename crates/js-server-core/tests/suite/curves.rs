@@ -37,10 +37,10 @@ impl CurveSource for Spy {
 }
 
 /// How many actions the scheduler charged flat though their key has a curve, after `core`
-/// admits one action onto a new node.
-fn flat_with_curve(core: &Core<Rig>, base: u64) -> u64 {
+/// admits action `n` onto a new node.
+fn flat_with_curve(core: &Core<Rig>, base: u64, n: u64) -> u64 {
     up(core, base, "node-a", "d1");
-    submit(core, base + 1, 1);
+    submit(core, base + 1, n);
     block_on(core.tick(at(base + 1_000)));
     core.with(|view, _| view.sched().load_counters().curve_flat)
 }
@@ -50,7 +50,7 @@ fn flat_with_curve(core: &Core<Rig>, base: u64) -> u64 {
 #[test]
 fn a_core_without_a_curve_source_places_as_before() {
     let core = core_by(&Config::new(1));
-    assert_eq!(flat_with_curve(&core, 0), 0);
+    assert_eq!(flat_with_curve(&core, 0, 1), 0);
     core.with(|view, _| assert_eq!(view.sched().load_counters().admitted, 1));
 }
 
@@ -61,7 +61,7 @@ fn a_core_with_a_curve_source_lets_the_scheduler_read_it() {
     let spy = Arc::new(Spy::default());
     let core = core_by(&Config::new(1).with_curves(spy.clone()));
     assert_eq!(spy.asked(), 0, "nothing is read before a placement");
-    assert_eq!(flat_with_curve(&core, 0), 1);
+    assert_eq!(flat_with_curve(&core, 0, 1), 1);
     assert!(spy.asked() > 0);
 }
 
@@ -75,19 +75,19 @@ fn every_core_built_from_a_configuration_reads_its_source() {
     let setup = Setup::new();
 
     let first = setup.core_with(&config, Rig::default(), 0);
-    assert_eq!(flat_with_curve(&first, 0), 1, "opened over a store");
+    assert_eq!(flat_with_curve(&first, 0, 1), 1, "opened over a store");
     let seen = spy.asked();
     assert!(seen > 0);
     drop(first);
 
     let restarted = setup.core_with(&config, Rig::default(), 5_000);
-    assert_eq!(flat_with_curve(&restarted, 5_000), 1, "after a restart");
+    assert_eq!(flat_with_curve(&restarted, 5_000, 2), 1, "after a restart");
     assert!(spy.asked() > seen);
     let seen = spy.asked();
 
     let second = setup.core_with(&config.clone(), Rig::default(), 6_000);
     assert_eq!(
-        flat_with_curve(&second, 6_000),
+        flat_with_curve(&second, 6_000, 3),
         1,
         "a clone of the configuration"
     );
