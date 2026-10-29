@@ -766,7 +766,9 @@ Rules, each tied to a requirement or to existing behaviour:
   is placed by the registry's normal path on the consumer's next poll.
 - Booting to Releasing on `boot_timeout` (default 15 min, counted from the launch, as the join
   token's life is): the agent never said hello (or was refused `host-contract`). A host the
-  registry shows has said hello, so a silent one is not released by this. Only a complete
+  registry shows has said hello, so a silent one is not released by this, with one exception: a registered host
+  that has not been heard from since its hello and books nothing (a lost Welcome, 7.2) is released at `boot_timeout`
+  from the launch, with the same cooldown. Only a complete
   registry view gives up on a machine: on an incomplete one its host may have said hello and be
   missing from the part that was read, so the machine is held and counted. The instance is released. Any boot failure blocks new
   launches in the pool for `boot_fail_cooldown` (default 10 min, a fixed value; PROPOSAL,
@@ -806,7 +808,10 @@ Rules, each tied to a requirement or to existing behaviour:
   and read back to Gone once the registry shows the mark. A silent host the scaler had already
   marked `Releasing` needs no flag. The step names each machine it releases this way for the
   shell to log. A host that shows a lease, a run or a stream, or a `Held` or `Reserved` mark, is
-  never released, whatever the flag says. Hosts of a static pool are never released by the
+  never released, whatever the flag says. A registered host that said hello and has not been heard from since
+  (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
+  heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure
+  cooldown starts. One that heartbeated once keeps the rules above. Hosts of a static pool are never released by the
   scaler. Until then the machine counts toward the caps and the state shows the age of its
   silence.
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same
@@ -966,7 +971,8 @@ launch, not as an option:
   state as tokens (`agent_state::replace`), revoked by the same `revoke_for(pool, name)`, and
   carries the same `CREDENTIAL_TTL` silence bound.
 - Failure case: the `Welcome` is lost on the wire after the registry retired the token. The
-  host cannot re-register; the scaler sees Booting with no heartbeat, `boot_timeout` releases it.
+  host cannot re-register; the registry shows the host (its hello was admitted) and it never heartbeats, so the scaler releases it at `boot_timeout`
+  from the launch (`heard_since_hello`, 6.2 Lost), not at `unknown_hold`.
   Tested in 13.3.
 - The Welcome that can carry the credential is sent with `Cache-Control: no-store` and
   `Pragma: no-cache`.
