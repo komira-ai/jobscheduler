@@ -4,9 +4,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use js_elastic::HostStatus;
+
 use crate::api::LambdaApi;
 use crate::error::{ApiError, ErrorCode};
-use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Status};
+use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest};
 
 /// One of the calls of [`LambdaApi`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -109,7 +111,7 @@ impl FakeLambda {
     }
 
     /// Sets the status of the instance `id`, if the account holds it.
-    pub fn set_status(&self, id: &InstanceId, status: Status) {
+    pub fn set_status(&self, id: &InstanceId, status: HostStatus) {
         self.update_instance(id, &|instance| instance.status = status.clone());
     }
 
@@ -201,7 +203,7 @@ impl LambdaApi for FakeLambda {
             state.instances.push(Instance {
                 id: id.clone(),
                 name: Some(request.name.clone()),
-                status: Status::Booting,
+                status: HostStatus::Booting,
                 region: request.region.clone(),
                 instance_type: request.instance_type.clone(),
                 ip: None,
@@ -232,7 +234,7 @@ impl LambdaApi for FakeLambda {
         };
         match effect {
             TerminateEffect::Nothing => return Ok(Vec::new()),
-            TerminateEffect::Terminating => instance.status = Status::Terminating,
+            TerminateEffect::Terminating => instance.status = HostStatus::Terminating,
             TerminateEffect::Removed => state.instances.retain(|i| i.id != *id),
         }
         match state

@@ -7,7 +7,8 @@
 //! iteration one at the top and one before the pause; after the instance is active, one
 //! before the ssh step and one after it.
 
-use js_provider_lambdalabs::{Call, Status, TerminateEffect};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{Call, TerminateEffect};
 
 use crate::rig::{FIRST, Rig, TestRemote, activate};
 
@@ -34,7 +35,7 @@ fn assert_interrupted_and_terminated(rig: &Rig, status: i32, out: &str) {
     assert!(out.contains("result: terminated"), "{out}");
     assert_eq!(rig.fake.count(Call::Launch), 1);
     assert_eq!(rig.fake.count(Call::Terminate), 1);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
@@ -206,5 +207,5 @@ fn the_printed_teardown_command_works_and_carries_a_ca_bundle() {
     let (status, out) = rig.exec(&words);
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("tearing down: fake0001"), "{out}");
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }

@@ -1,11 +1,12 @@
 //! The in-memory account.
 
+use js_elastic::HostStatus;
 use js_provider_lambdalabs::{
     ApiError, Architecture, Call, ErrorCode, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
-    LambdaApi, Region, Status,
+    LambdaApi, Region,
 };
 
-fn instance(id: &str, status: Status) -> Instance {
+fn instance(id: &str, status: HostStatus) -> Instance {
     Instance {
         id: InstanceId::new(id).unwrap(),
         name: None,
@@ -62,8 +63,8 @@ fn offers_come_back_ordered_by_name() {
 #[test]
 fn instances_are_listed_in_the_order_added_and_read_by_id() {
     let fake = FakeLambda::new();
-    fake.add_instance(instance("one", Status::Active));
-    fake.add_instance(instance("two", Status::Booting));
+    fake.add_instance(instance("one", HostStatus::Active));
+    fake.add_instance(instance("two", HostStatus::Booting));
     let ids: Vec<String> = fake
         .list_instances()
         .unwrap()
@@ -75,7 +76,7 @@ fn instances_are_listed_in_the_order_added_and_read_by_id() {
         fake.get_instance(&InstanceId::new("two").unwrap())
             .unwrap()
             .status,
-        Status::Booting
+        HostStatus::Booting
     );
 }
 
@@ -99,7 +100,7 @@ fn an_instance_it_does_not_hold_fails_as_the_real_api_does() {
 #[test]
 fn scripted_failures_are_used_once_each_in_order_per_call() {
     let fake = FakeLambda::new();
-    fake.add_instance(instance("one", Status::Active));
+    fake.add_instance(instance("one", HostStatus::Active));
     fake.fail_next(Call::ListInstances, ApiError::Transport("first".to_owned()));
     fake.fail_next(Call::ListInstances, ApiError::Incomplete);
     fake.fail_next(Call::InstanceTypes, ApiError::Malformed("types".to_owned()));
@@ -157,7 +158,7 @@ fn a_launch_starts_a_booting_instance_with_the_name_and_tags_asked_for() {
     }];
     let ids = fake.launch(&request).unwrap();
     let held = fake.get_instance(&ids[0]).unwrap();
-    assert_eq!(held.status, Status::Booting);
+    assert_eq!(held.status, HostStatus::Booting);
     assert_eq!(held.name.as_deref(), Some("box"));
     assert_eq!(held.tags, request.tags);
     assert_eq!((fake.launched(), fake.count(Call::Launch)), (1, 1));
@@ -208,11 +209,11 @@ fn scripted_outcomes_apply_in_order_and_a_pass_lets_one_call_through() {
     assert!(fake.list_instances().is_ok());
     // Editing or removing an instance the account does not hold changes nothing.
     let id = InstanceId::new("nope").unwrap();
-    fake.set_status(&id, Status::Active);
+    fake.set_status(&id, HostStatus::Active);
     fake.remove_instance(&id);
     assert!(fake.instances().is_empty());
     // One it does hold is dropped, and a read of it is the 404.
-    fake.add_instance(instance("held", Status::Active));
+    fake.add_instance(instance("held", HostStatus::Active));
     let held = InstanceId::new("held").unwrap();
     fake.remove_instance(&held);
     assert!(fake.get_instance(&held).unwrap_err().is_absent());

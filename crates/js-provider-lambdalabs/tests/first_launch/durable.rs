@@ -4,7 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use js_provider_lambdalabs::{Call, Status};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::Call;
 
 use crate::rig::{FIRST, Rig, TestRemote};
 
@@ -54,7 +55,7 @@ fn a_failed_sync_after_the_rename_tears_the_instance_down_at_once() {
         out.contains("teardown forced: the state file could not be updated"),
         "{out}"
     );
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
     assert!(rig.sleeps.borrow().is_empty(), "no wait happened");
 }
 

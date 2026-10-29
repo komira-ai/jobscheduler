@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use js_elastic::HostStatus;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -11,7 +12,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::error::{ApiError, ErrorCode, cut, plain};
 use crate::model::{
-    Architecture, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Region, Status, Tag,
+    Architecture, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Region, Tag,
 };
 
 /// The longest parser message quoted in an error.
@@ -166,7 +167,7 @@ fn instance(wire: WireInstance) -> Result<Instance, ApiError> {
     Ok(Instance {
         id,
         name: wire.name,
-        status: Status::parse(&wire.status),
+        status: HostStatus::parse(&wire.status),
         region: wire.region.name,
         instance_type: wire.instance_type.name,
         ip: wire.ip,

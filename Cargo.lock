@@ -1048,6 +1048,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-elastic"
+version = "0.1.0"
+dependencies = [
+ "js-types",
+ "sha2 0.11.1",
+ "thiserror",
+]
+
+[[package]]
 name = "js-guest"
 version = "0.1.0"
 dependencies = [
@@ -1174,6 +1183,8 @@ dependencies = [
 name = "js-provider-lambdalabs"
 version = "0.1.0"
 dependencies = [
+ "js-elastic",
+ "js-types",
  "libc",
  "log",
  "rcgen",
