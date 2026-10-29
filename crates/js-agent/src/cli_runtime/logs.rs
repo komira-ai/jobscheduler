@@ -78,7 +78,7 @@ fn text_of(bytes: &[u8], started_inside: bool) -> (String, bool) {
     let text = String::from_utf8_lossy(&bytes[start..]).into_owned();
     match text.len().checked_sub(MAX_LOG_STREAM_LEN) {
         // Replacing invalid bytes can lengthen the text (one byte becomes three).
-        Some(over) if over > 0 => {
+        Some(over) if over > 1 => {
             let mut at = over;
             while !text.is_char_boundary(at) {
                 at += 1;
