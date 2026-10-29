@@ -155,6 +155,12 @@ jobs:
             echo "macos=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Fail closed: if the diff cannot be computed, run the macOS job. Renames count as
+          # both the old and the new path, and names are not quoted.
+          if ! files=$(git -c core.quotePath=false diff --no-renames --name-only "origin/$BASE...HEAD"); then
+            echo "macos=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           macos=false
           while IFS= read -r file; do
             while IFS= read -r path; do
@@ -164,7 +170,7 @@ jobs:
                 macos=true
               fi
             done <<< "$PATHS"
-          done < <(git diff --name-only "origin/$BASE...HEAD")
+          done <<< "$files"
           echo "macos=$macos" >> "$GITHUB_OUTPUT"
 
   # js-agent and js-cli (with the crates their tests start) build and pass their tests on
@@ -172,7 +178,9 @@ jobs:
   # coverage and the Postgres tests stay on Linux.
   macos:
     needs: changes
-    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true' }}
+    # !cancelled(): a push to main, or a failed changes job, still runs the macOS job, while a
+    # run cancelled by a newer push to the same pull request does not.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.macos == 'true') }}
     runs-on: macos-14
     timeout-minutes: 45
     permissions:
