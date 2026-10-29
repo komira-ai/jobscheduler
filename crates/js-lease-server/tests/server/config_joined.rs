@@ -344,7 +344,10 @@ async fn a_mint_for_another_provider_is_refused() {
     let reply = h.call("POST", "/v1/agent/join-tokens", Some(&body)).await;
     assert_eq!(reply.status, 400, "{}", reply.body);
     assert!(
-        reply.json()["reason"].as_str().unwrap().contains("provider"),
+        reply.json()["reason"]
+            .as_str()
+            .unwrap()
+            .contains("provider"),
         "{}",
         reply.body
     );
