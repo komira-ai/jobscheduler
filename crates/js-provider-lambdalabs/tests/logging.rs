@@ -103,6 +103,8 @@ fn the_key_is_in_no_log_line() {
             ssh_key: "fixture-key".to_owned(),
             name: "js-0123456789ab-000000000001".to_owned(),
             tags: Vec::new(),
+            user_data: None,
+            firewall_ruleset_ids: Vec::new(),
         };
         shown.push_str(&format!("{:?}", api.launch(&launch)));
         shown.push_str(&format!("{:?}", api.terminate(&id)));

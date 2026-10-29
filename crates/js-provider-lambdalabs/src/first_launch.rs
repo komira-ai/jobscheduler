@@ -1,9 +1,9 @@
 //! The first live launch as a program: one instance, launched through [`LambdaProvider`],
-//! waited for, optionally asked a question over ssh, and terminated, under hard limits.
+//! waited for until it is active, and terminated, under hard limits.
 //!
 //! It is a library module so that every branch runs in a test against [`FakeLambda`] with
-//! a [`ManualClock`]; the example `first_launch` only wires the real client, clock, sleep
-//! and ssh into [`run`]. Nothing here makes an HTTP request of its own.
+//! a [`ManualClock`]; the example `first_launch` only wires the real client, clock and
+//! sleep into [`run`]. Nothing here makes an HTTP request of its own.
 //!
 //! - A dry run (the default) reads the instance types, picks the cheapest x86_64 GPU
 //!   type with capacity (or the one named by flag), prints the plan with the price the
@@ -19,6 +19,11 @@
 //! - A boot deadline, a wall-clock cap and a spend cap (the API's hourly price times the
 //!   time since the launch) each force teardown. Termination is tried a bounded number
 //!   of times and each try reads the instance back.
+//!
+//! The launch goes through [`LambdaProvider::acquire`], so the instance carries the
+//! no-inbound firewall ruleset that every launch carries: nothing can connect to it, so
+//! the runner takes no ssh flag (`--ssh-key`, `--ssh-user` and `--ssh-command` are
+//! refused) and checks nothing on the instance: it waits for the API to report it active.
 
 mod args;
 mod state;
@@ -31,40 +36,49 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootPayload, Claim, Demand, ElasticProvider, Held,
+    HostName, HostRef, HostStatus, Offer, Released, SchedulerId,
+};
+use js_types::Resources;
 use sha2::{Digest, Sha256};
 
 use crate::api::LambdaApi;
 use crate::clock::Clock;
 use crate::config::ElasticConfig;
-use crate::elastic::{AcquireRequest, Acquired, Candidate, Elastic, GpuRequest, Held, Released};
 use crate::http::SetupError;
 use crate::key::ApiKey;
-use crate::model::{InstanceId, Status};
-use crate::options::{GpuClass, OptionTable};
-use crate::own::{AcquireId, Claim, Owner, SchedulerId};
+use crate::options::OptionTable;
+use crate::own::Owner;
 use crate::provider::LambdaProvider;
 
-use args::{Args, Mode, Ssh};
+use args::{Args, Mode};
 use state::State;
 
 pub use state::sync_dir;
 
 /// The scheduler id and pool name on everything this runner launches.
 const OWNER: &str = "first-launch";
+
+/// The scheduler id of this runner.
+fn owner_id() -> SchedulerId {
+    SchedulerId::new(OWNER).expect("OWNER is a valid scheduler id")
+}
+
+/// The acquire id of the plan with `hash`: the owner and the hex digest.
+fn acquire_id(hash: &str) -> AcquireId {
+    AcquireId::new(&format!("{OWNER}-{hash}")).expect("the owner and a hex digest make an id")
+}
 /// How often the instance is looked at while booting.
 const POLL: Duration = Duration::from_secs(10);
 /// The most tries to terminate one instance.
 pub const TERMINATE_ATTEMPTS: u32 = 5;
 /// The pause between two tries to terminate.
 const TERMINATE_PAUSE: Duration = Duration::from_secs(10);
-/// The longest the remote command may run.
-const SSH_LIMIT: Duration = Duration::from_secs(120);
-/// The most of the remote command's output printed.
-const SSH_OUTPUT: usize = 4000;
 /// What to paste back after a run that did what was asked.
 const STOP_DONE: &str = "paste back everything printed above, from the plan line to here.";
 /// What to paste back after a run whose check failed but whose instance is gone.
-const STOP_CHECK_FAILED: &str = "the run did not finish its check; the instance is terminated. Paste back everything printed above.";
+const STOP_CHECK_FAILED: &str = "the run did not reach active; the instance is terminated. Paste back everything printed above.";
 /// Why a run stopped because the operator or the system asked it to (a signal, in the
 /// example).
 const INTERRUPTED: &str = "interrupted: a stop was requested (SIGINT, SIGTERM or SIGHUP)";
@@ -75,26 +89,6 @@ const ANY_GPU: &str = "any";
 pub trait Sleeper {
     /// Blocks for `how_long`.
     fn sleep(&self, how_long: Duration);
-}
-
-/// Running a command on the instance.
-pub trait Remote {
-    /// Runs `command` as `user` at `host`, with the private key in `identity`, and
-    /// gives up after `limit` or as soon as `stop` answers true. The output, or why it
-    /// failed.
-    ///
-    /// # Errors
-    ///
-    /// A sentence for the operator.
-    fn run(
-        &self,
-        host: &str,
-        user: &str,
-        identity: &Path,
-        command: &str,
-        limit: Duration,
-        stop: &dyn Fn() -> bool,
-    ) -> Result<String, String>;
 }
 
 /// Builds the client for a base URL, a key and an optional CA bundle.
@@ -110,8 +104,6 @@ pub struct Seams<'a> {
     pub clock: Arc<dyn Clock>,
     /// Waits between polls and tries.
     pub sleeper: &'a dyn Sleeper,
-    /// Runs the ssh command.
-    pub remote: &'a dyn Remote,
     /// Seconds since the Unix epoch, for the state file.
     pub wall_unix: &'a dyn Fn() -> u64,
     /// Syncs the directory of the state file after the file was created or renamed into
@@ -120,7 +112,7 @@ pub struct Seams<'a> {
     /// Builds the API client.
     pub connect: &'a Connect<'a>,
     /// True once a stop was requested (the example sets it from a signal handler). Read
-    /// before the launch, on every wait iteration and around the ssh step; once a launch
+    /// before the launch, on every wait iteration; once a launch
     /// has happened it sends the run straight to teardown.
     pub stop: &'a dyn Fn() -> bool,
 }
@@ -178,7 +170,9 @@ pub fn run(args: &[String], seams: &Seams<'_>, out: &mut dyn Write) -> i32 {
 
 /// What a dry run prints and a launch is checked against.
 struct Plan {
-    candidate: Candidate,
+    offer: Offer,
+    /// The offer's price per hour, which is more than zero.
+    price_cents_per_hour: u64,
     key_name: String,
     state_file: std::path::PathBuf,
     text: String,
@@ -209,10 +203,6 @@ impl Caps {
             (false, false) => None,
         }
     }
-
-    fn left(&self, elapsed: Duration) -> Duration {
-        self.wall.min(self.spend_after).saturating_sub(elapsed)
-    }
 }
 
 struct Runner<'a, 'o> {
@@ -238,12 +228,8 @@ impl Runner<'_, '_> {
     }
 
     /// A provider that may use the instance types of `rows` (name and GPU count), with
-    /// room for one machine, and the class its rows carry.
-    fn build(
-        &mut self,
-        rows: &[(String, u32)],
-        key_name: &str,
-    ) -> Result<(LambdaProvider, GpuClass), i32> {
+    /// room for one machine.
+    fn build(&mut self, rows: &[(String, u32)], key_name: &str) -> Result<LambdaProvider, i32> {
         // One row at a time, so that a type name the table would refuse (the API's
         // naming is not ours to trust) only drops that type; the later row of a name
         // seen twice replaces the earlier one.
@@ -263,8 +249,7 @@ impl Runner<'_, '_> {
                 "paste back this output.",
             ));
         };
-        let class = table.rows()[0].gpu_class.clone();
-        let config = ElasticConfig::new(SchedulerId::made(OWNER), key_name, NonZeroUsize::MIN);
+        let config = ElasticConfig::new(owner_id(), key_name, NonZeroUsize::MIN);
         let Ok(config) = config else {
             return Err(self.fail(
                 "the ssh key name must be 1 to 64 printable ASCII characters",
@@ -277,7 +262,7 @@ impl Runner<'_, '_> {
             table,
             config.enable().live(),
         );
-        Ok((provider, class))
+        Ok(provider)
     }
 
     /// The plan for the flags and the account as the API shows it now.
@@ -299,12 +284,16 @@ impl Runner<'_, '_> {
             }
         };
         let rows: Vec<(String, u32)> = offers.iter().map(|o| (o.name.clone(), o.gpus)).collect();
-        let (provider, any) = self.build(&rows, &key_name)?;
-        let want = GpuRequest {
-            cpu_millis: 0,
-            memory_bytes: 0,
-            gpus: 1,
-            gpu_class: any,
+        let provider = self.build(&rows, &key_name)?;
+        // Every row of the generated table is a GPU type of the one class `any`, so asking
+        // for no resources at all still picks only among GPU types; the agent is released
+        // for x86_64 only.
+        let want = Demand {
+            resources: Resources::default(),
+            disk_bytes: None,
+            os: None,
+            arch: Some("x86_64".to_owned()),
+            exec: None,
         };
         let options = match provider.launch_options(&want) {
             Ok(options) => options,
@@ -317,39 +306,37 @@ impl Runner<'_, '_> {
         };
         let args = self.args;
         let chosen = options.into_iter().find(|c| {
-            args.instance_type
-                .as_ref()
-                .is_none_or(|t| *t == c.instance_type)
-                && args.region.as_ref().is_none_or(|r| *r == c.region)
+            args.instance_type.as_ref().is_none_or(|t| *t == c.id)
+                && args
+                    .region
+                    .as_ref()
+                    .is_none_or(|r| c.zone.as_deref() == Some(r.as_str()))
         });
-        let Some(candidate) = chosen else {
+        let Some(offer) = chosen else {
             return Err(self.fail(
                 "no x86_64 GPU instance type with capacity fits the flags",
                 "nothing was launched; paste back this output.",
             ));
         };
-        if candidate.price_cents_per_hour == 0 {
+        let Some(price_cents_per_hour) = offer.price_cents_per_hour.filter(|price| *price > 0)
+        else {
             return Err(self.fail(
                 "the API gave no price for the instance type",
                 "nothing was launched; paste back this output.",
             ));
-        }
-        let caps = Caps::new(args, candidate.price_cents_per_hour);
+        };
+        let caps = Caps::new(args, price_cents_per_hour);
         let how = match (&args.instance_type, &args.region) {
             (None, None) => "the cheapest x86_64 GPU type with capacity",
             _ => "named by flag, with capacity",
         };
-        let ssh = match &args.ssh {
-            None => "none".to_owned(),
-            Some(ssh) => format!("{}@instance: {}", ssh.user, ssh.command),
-        };
         let text = format!(
-            "first launch plan\n  api: {}\n  choice: {how}\n  instance type: {}\n  region: {}\n  gpus: {}\n  price: {} cents per hour (from the API)\n  ssh key name on the account: {key_name}\n  state file: {}\n  boot deadline: {} s\n  wall-clock cap: {} s\n  spend cap: {} cents, reached {} s after the launch at this price\n  ssh check: {ssh}\n  instances launched: 1\n",
+            "first launch plan\n  api: {}\n  choice: {how}\n  instance type: {}\n  region: {}\n  gpus: {}\n  price: {} cents per hour (from the API)\n  ssh key name on the account: {key_name}\n  state file: {}\n  boot deadline: {} s\n  wall-clock cap: {} s\n  spend cap: {} cents, reached {} s after the launch at this price\n  instances launched: 1\n",
             args.base_url,
-            candidate.instance_type,
-            candidate.region,
-            candidate.gpus,
-            candidate.price_cents_per_hour,
+            offer.id,
+            offer.zone.as_deref().unwrap_or_default(),
+            offer.gpus,
+            price_cents_per_hour,
             state_file.display(),
             args.boot_deadline.as_secs(),
             args.wall_cap.as_secs(),
@@ -360,7 +347,8 @@ impl Runner<'_, '_> {
         let hash: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
         Ok((
             Plan {
-                candidate,
+                offer,
+                price_cents_per_hour,
                 key_name,
                 state_file,
                 text,
@@ -374,7 +362,7 @@ impl Runner<'_, '_> {
     /// partial) and still exist, or why the account could not be read. `None` when the
     /// account holds none. A terminated instance no longer bills and is skipped.
     fn existing(&self) -> Option<(String, Vec<String>)> {
-        let owner = Owner::new(SchedulerId::made(OWNER));
+        let owner = Owner::new(owner_id());
         let all = match self.api.list_instances() {
             Ok(all) => all,
             Err(why) => {
@@ -386,7 +374,7 @@ impl Runner<'_, '_> {
         };
         let lines: Vec<String> = all
             .iter()
-            .filter(|i| i.status != Status::Terminated)
+            .filter(|i| i.status != HostStatus::Terminated)
             .filter_map(|i| {
                 let marks = match owner.claim(i) {
                     Claim::Ours => "ours",
@@ -449,14 +437,14 @@ impl Runner<'_, '_> {
     }
 
     fn launch(&mut self, plan: &Plan, provider: &LambdaProvider) -> i32 {
-        let acquire = AcquireId::made(format!("{OWNER}-{}", plan.hash));
+        let acquire = acquire_id(&plan.hash);
         let mut state = State {
             acquire: acquire.clone(),
             launched_unix: (self.seams.wall_unix)(),
             key_name: plan.key_name.clone(),
-            instance_type: plan.candidate.instance_type.clone(),
-            region: plan.candidate.region.clone(),
-            price_cents_per_hour: plan.candidate.price_cents_per_hour,
+            instance_type: plan.offer.id.clone(),
+            region: plan.offer.zone.clone().unwrap_or_default(),
+            price_cents_per_hour: plan.price_cents_per_hour,
             instances: Vec::new(),
         };
         if let Err(why) = state.create(&plan.state_file, self.seams.sync_dir) {
@@ -487,10 +475,13 @@ impl Runner<'_, '_> {
         }
         let launched_at = self.seams.clock.now();
         let request = AcquireRequest {
+            name: HostName::derive(&owner_id(), &acquire),
             acquire: acquire.clone(),
             pool: OWNER.to_owned(),
+            offer: plan.offer.clone(),
             labels: Vec::new(),
-            candidate: plan.candidate.clone(),
+            // This runner boots nothing of its own: the stock image, no payload.
+            payload: BootPayload::new(String::new()),
         };
         let ids = match provider.acquire(&request) {
             Acquired::Accepted { held, extras } => {
@@ -521,21 +512,20 @@ impl Runner<'_, '_> {
         };
         state.instances.clone_from(&ids);
         let recorded = state.replace(&plan.state_file, self.seams.sync_dir);
-        let names: Vec<&str> = ids.iter().map(InstanceId::as_str).collect();
+        let names: Vec<&str> = ids.iter().map(HostRef::as_str).collect();
         self.say(format_args!("launched: {}", names.join(" ")));
         self.say(format_args!("state file: {}", plan.state_file.display()));
-        let caps = Caps::new(self.args, plan.candidate.price_cents_per_hour);
-        let mut ok = true;
+        let caps = Caps::new(self.args, plan.price_cents_per_hour);
         let reason = match recorded {
             Err(why) => Some(format!("the state file could not be updated: {why}")),
-            Ok(()) => self.wait_and_ask(provider, &ids, launched_at, &caps, &mut ok),
+            Ok(()) => self.wait_for_active(provider, &ids, launched_at, &caps),
         };
         if let Some(reason) = &reason {
             self.say(format_args!("teardown forced: {reason}"));
-            ok = false;
         }
+        let ok = reason.is_none();
         let torn = self.terminate_all(provider, &ids);
-        let spent = (u128::from(plan.candidate.price_cents_per_hour)
+        let spent = (u128::from(plan.price_cents_per_hour)
             * self
                 .seams
                 .clock
@@ -551,7 +541,7 @@ impl Runner<'_, '_> {
                 "TERMINATION NOT CONFIRMED"
             },
             self.seams.clock.now().saturating_sub(launched_at).as_secs(),
-            plan.candidate.price_cents_per_hour,
+            plan.price_cents_per_hour,
         ));
         self.finish(ok && torn, torn, &plan.state_file)
     }
@@ -569,19 +559,17 @@ impl Runner<'_, '_> {
         i32::from(!ok)
     }
 
-    /// Waits for active within the limits and runs the ssh check. Returns why the run
-    /// must be torn down early, or `None` when it reached active and was asked what it
-    /// was meant to be asked (`ok` is cleared when the ssh check failed).
-    fn wait_and_ask(
+    /// Waits for active within the limits. Returns why the run must be torn down early,
+    /// or `None` when it reached active.
+    fn wait_for_active(
         &mut self,
         provider: &LambdaProvider,
-        ids: &[InstanceId],
+        ids: &[HostRef],
         launched_at: Duration,
         caps: &Caps,
-        ok: &mut bool,
     ) -> Option<String> {
         let clock = self.seams.clock.clone();
-        let mut shown: Option<Status> = None;
+        let mut shown: Option<HostStatus> = None;
         loop {
             if self.stop_requested() {
                 return Some(INTERRUPTED.to_owned());
@@ -598,8 +586,12 @@ impl Runner<'_, '_> {
                         shown.clone_from(&status);
                     }
                     match status {
-                        Some(Status::Active) => break,
-                        Some(Status::Terminating | Status::Terminated | Status::Preempted) => {
+                        Some(HostStatus::Active) => break,
+                        Some(
+                            HostStatus::Terminating
+                            | HostStatus::Terminated
+                            | HostStatus::Preempted,
+                        ) => {
                             return Some("the instance ended on its own".to_owned());
                         }
                         _ => {}
@@ -629,49 +621,12 @@ impl Runner<'_, '_> {
         if self.stop_requested() {
             return Some(INTERRUPTED.to_owned());
         }
-        if let Some(ssh) = &self.args.ssh {
-            *ok = self.ask(ssh, &ids[0], caps.left(elapsed));
-            if self.stop_requested() {
-                return Some(INTERRUPTED.to_owned());
-            }
-        }
         None
-    }
-
-    fn ask(&mut self, ssh: &Ssh, id: &InstanceId, left: Duration) -> bool {
-        let host = self.api.get_instance(id).ok().and_then(|i| i.ip);
-        let Some(host) = host else {
-            self.say("ssh check failed: the instance has no public address");
-            return false;
-        };
-        let limit = left.min(SSH_LIMIT);
-        match self.seams.remote.run(
-            &host,
-            &ssh.user,
-            &ssh.identity,
-            &ssh.command,
-            limit,
-            self.seams.stop,
-        ) {
-            Ok(output) => {
-                let shown: String = output.chars().take(SSH_OUTPUT).collect();
-                self.say(format_args!(
-                    "ssh output of {}:\n{}",
-                    ssh.command,
-                    shown.trim_end()
-                ));
-                true
-            }
-            Err(why) => {
-                self.say(format_args!("ssh check failed: {why}"));
-                false
-            }
-        }
     }
 
     /// Terminates every instance of `ids`, a bounded number of tries each, reading each
     /// back. True when every one is confirmed going or gone.
-    fn terminate_all(&mut self, provider: &LambdaProvider, ids: &[InstanceId]) -> bool {
+    fn terminate_all(&mut self, provider: &LambdaProvider, ids: &[HostRef]) -> bool {
         let mut all = true;
         for id in ids {
             let mut done = false;
@@ -680,7 +635,7 @@ impl Runner<'_, '_> {
                 self.say(format_args!("terminate {id}, try {attempt}: {released:?}"));
                 match released {
                     Released::Gone
-                    | Released::Terminating(Status::Terminating | Status::Terminated) => {
+                    | Released::Terminating(HostStatus::Terminating | HostStatus::Terminated) => {
                         done = true;
                         break;
                     }
@@ -704,7 +659,7 @@ impl Runner<'_, '_> {
             }
         };
         let rows = [(state.instance_type.clone(), 1)];
-        let (provider, _) = match self.build(&rows, &state.key_name) {
+        let provider = match self.build(&rows, &state.key_name) {
             Ok(built) => built,
             Err(status) => return status,
         };
@@ -725,7 +680,7 @@ impl Runner<'_, '_> {
                 "check the provider console, then paste back this output.",
             );
         }
-        let names: Vec<&str> = ids.iter().map(InstanceId::as_str).collect();
+        let names: Vec<&str> = ids.iter().map(HostRef::as_str).collect();
         self.say(format_args!("tearing down: {}", names.join(" ")));
         let torn = self.terminate_all(&provider, &ids);
         self.say(format_args!(
@@ -740,9 +695,24 @@ impl Runner<'_, '_> {
     }
 }
 
-fn matching(held: &[Held], acquire: &AcquireId) -> Vec<InstanceId> {
+fn matching(held: &[Held], acquire: &AcquireId) -> Vec<HostRef> {
     held.iter()
         .filter(|h| h.acquire == acquire.as_str())
         .map(|h| h.id.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that the runner's constant ids pass the checked constructors: the owner
+    /// as a scheduler id, and the owner with a 16-digit hex digest (the longest the plan
+    /// hash gets) as an acquire id.
+    #[test]
+    fn the_runners_constant_ids_are_valid() {
+        assert_eq!(owner_id().as_str(), OWNER);
+        let acquire = acquire_id("0123456789abcdef");
+        assert_eq!(acquire.as_str(), "first-launch-0123456789abcdef");
+    }
 }

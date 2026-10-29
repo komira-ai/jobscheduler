@@ -37,6 +37,26 @@ fn body(host: &str) -> Bytes {
     Bytes::from(hello.to_string())
 }
 
+/// The body of a hello of `host` that names the instance `i-1` and says it keeps a host
+/// credential.
+fn asking(host: &str) -> Bytes {
+    let mut hello: serde_json::Value = serde_json::from_slice(&body(host)).unwrap();
+    hello["accepts_host_credential"] = json!(true);
+    Bytes::from(hello.to_string())
+}
+
+/// The rows of the join token file of the agents made by `agents(name)`.
+fn rows(name: &str) -> usize {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/agent_api_unit")
+        .join(name)
+        .join("joins");
+    std::fs::read_to_string(file)
+        .unwrap()
+        .matches("[[join]]")
+        .count()
+}
+
 fn agents(name: &str) -> Arc<Agents> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/agent_api_unit")
@@ -77,7 +97,14 @@ async fn a_refused_fresh_hello_does_not_free_a_token_an_again_hello_registered()
             .hello(&hello, &who)
             .expect("the second hello is accepted");
     };
-    let first = serve_hello(&agents, who.clone(), true, Ok(body("host-a")), &second).await;
+    let first = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(body("host-a")),
+        &second,
+    )
+    .await;
     let refused = first.expect_err("the registry refuses the first hello");
     assert_eq!((refused.status.as_u16(), refused.error), (409, "host-live"));
     assert_eq!(agents.joins.serves(&who, "host-a"), Ok(()));
@@ -100,11 +127,149 @@ async fn a_revoke_between_admit_and_registry_leaves_the_token_gone() {
     let revoke = || {
         assert_eq!(agents.joins.revoke(&instance()), Ok(1));
     };
-    let first = serve_hello(&agents, who.clone(), true, Ok(body("host-a")), &revoke).await;
+    let first = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(body("host-a")),
+        &revoke,
+    )
+    .await;
     assert!(first.is_ok());
     assert!(agents.joins.identify(&minted.token).is_none());
     assert_eq!(
         agents.joins.serves(&who, "host-a"),
         Err(JoinRefusal::NotAdmitted)
     );
+}
+
+/// Of two first hellos that both ask for a credential, the one admitted first is given the
+/// credential and retires the token; the other, which reaches the token in the seam of the
+/// first, finds it gone. One credential exists, it authenticates, the token does not, and
+/// the file holds one row. The second hello runs inside the seam of the first, so the order
+/// is fixed and nothing waits on timing. It catches two credentials for one token, and a
+/// token that is left good beside its credential.
+#[tokio::test]
+async fn of_two_first_hellos_one_credential_is_made_and_the_token_retired() {
+    let agents = agents("credential_race");
+    let minted = agents
+        .joins
+        .mint(instance(), Duration::from_secs(600))
+        .unwrap();
+    let who = Credential::of_token(&minted.token);
+    let raced = || {
+        let other = agents
+            .joins
+            .admit_with(&who, "host-a", Some(&instance()), true);
+        assert_eq!(other, Err(JoinRefusal::Expired));
+        let another = agents
+            .joins
+            .admit_with(&who, "host-b", Some(&instance()), true);
+        assert_eq!(another, Err(JoinRefusal::Expired));
+    };
+    let first = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(asking("host-a")),
+        &raced,
+    )
+    .await;
+    let Json(welcome) = first.expect("the first hello is admitted");
+    let credential = welcome.host_credential.expect("it is given the credential");
+    assert!(agents.joins.identify(&minted.token).is_none());
+    let digest = agents.joins.identify(credential.expose());
+    assert!(digest.is_some());
+    assert_eq!(agents.joins.registered_as(&digest.unwrap()), who);
+    assert_eq!(rows("credential_race"), 1);
+}
+
+/// The registry refuses the hello that issued a credential (the host id is bound to another
+/// credential, which a hello in the seam arranges): the answer is the refusal, the token is
+/// unused again, no credential row remains, and a hello of another host with the token is
+/// then given a credential. It catches a refused hello that leaves the token retired for a
+/// credential nobody received, which would strand the instance until its boot time ran out.
+#[tokio::test]
+async fn a_refused_hello_gives_the_credential_back_with_the_token() {
+    let agents = agents("credential_refused");
+    let minted = agents
+        .joins
+        .mint(instance(), Duration::from_secs(600))
+        .unwrap();
+    let who = Credential::of_token(&minted.token);
+    let rival = || {
+        let hello: Hello = serde_json::from_slice(&body("host-a")).unwrap();
+        let elsewhere = Credential::of_token("another-token");
+        agents.registry.hello(&hello, &elsewhere).unwrap();
+    };
+    let first = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(asking("host-a")),
+        &rival,
+    )
+    .await;
+    let refused = first.expect_err("the registry refuses the first hello");
+    assert_eq!(
+        (refused.status.as_u16(), refused.error),
+        (403, "host-bound")
+    );
+    assert!(agents.joins.identify(&minted.token).is_some());
+    assert_eq!(rows("credential_refused"), 1);
+    let retry = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(asking("host-b")),
+        &|| (),
+    )
+    .await;
+    let Json(welcome) = retry.expect("another host is admitted with the token");
+    assert!(welcome.host_credential.is_some());
+    assert!(agents.joins.identify(&minted.token).is_none());
+}
+
+/// The welcome that carries the credential is lost on the wire after the server admitted the
+/// host. The host holds nothing that authenticates: the token is unknown, a hello that was
+/// already past the check is refused, and no other host can use the token. The release of
+/// the instance (the revoke the scaler's boot timeout makes) leaves nothing in the file. It
+/// catches a token that stays good after its credential was issued, which would let the
+/// host, or a copy of the token, register again.
+#[tokio::test]
+async fn a_lost_welcome_leaves_no_way_in_and_the_revoke_clears_the_file() {
+    let agents = agents("credential_lost");
+    let minted = agents
+        .joins
+        .mint(instance(), Duration::from_secs(600))
+        .unwrap();
+    let who = Credential::of_token(&minted.token);
+    let sent = serve_hello(
+        &agents,
+        who.clone(),
+        Some(who.clone()),
+        Ok(asking("host-a")),
+        &|| (),
+    )
+    .await;
+    drop(sent.expect("the first hello is admitted"));
+    assert!(agents.joins.identify(&minted.token).is_none());
+    for host in ["host-a", "host-b"] {
+        let retry = serve_hello(
+            &agents,
+            who.clone(),
+            Some(who.clone()),
+            Ok(asking(host)),
+            &|| (),
+        )
+        .await;
+        let refused = retry.expect_err("the retired token registers nothing");
+        assert_eq!(
+            (refused.status.as_u16(), refused.error),
+            (403, "join-token-expired")
+        );
+    }
+    assert_eq!(rows("credential_lost"), 1);
+    assert_eq!(agents.joins.revoke(&instance()), Ok(1));
+    assert_eq!(rows("credential_lost"), 0);
 }

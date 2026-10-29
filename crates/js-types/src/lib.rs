@@ -5,7 +5,8 @@
 //! 12.5 of the design: [`Resources`] is the resource vector, [`ResourceClass`] is a
 //! resource class as data, [`Shape`] is what a host offers, [`LeaseId`] identifies a
 //! lease, [`Labels`] carry the reserved `jobscheduler.dev/` schema, and [`Request`] is
-//! what a caller asks for.
+//! what a caller asks for. [`ContainerSpec`] and [`Requirements`] say what a job runs and
+//! what it needs of a host.
 //!
 //! The [`sched`] module holds the scheduler's own vocabulary (operations, leases,
 //! control-log records, QoS, farm time, the state-machine trait). It shares names with
@@ -16,6 +17,7 @@
 
 mod class;
 mod ids;
+mod job;
 mod labels;
 pub mod profile_key;
 mod request;
@@ -25,6 +27,9 @@ mod shape;
 
 pub use class::{Admission, ClassError, ResourceClass};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
+pub use job::{
+    ContainerSpec, ExecMode, ImageDigestRef, ImageRefError, Requirements, UnknownExecMode,
+};
 pub use labels::{LabelError, Labels, RESERVED_PREFIX, ReservedKey};
 pub use request::{Request, RequestError};
 pub use resources::{Dim, Dims, Resources, TypeError};

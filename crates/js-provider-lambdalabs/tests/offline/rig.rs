@@ -4,11 +4,15 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_provider_lambdalabs::{
-    AcquireId, AcquireRequest, Architecture, Candidate, ElasticConfig, FakeLambda, Instance,
-    InstanceId, InstanceTypeOffer, LambdaProvider, ManualClock, OptionTable, Region, SchedulerId,
-    Status, Tag,
+use js_elastic::{
+    AcquireId, AcquireRequest, BootPayload, GpuClass, HostName, HostRef, HostStatus, Offer,
+    PriceUnit, SchedulerId,
 };
+use js_provider_lambdalabs::{
+    Architecture, ElasticConfig, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
+    LambdaProvider, ManualClock, OptionTable, Region, Tag,
+};
+use js_types::ExecMode;
 
 pub const SCHEDULER: &str = "sched-one";
 pub const KEY: &str = "fixture-key";
@@ -128,26 +132,50 @@ pub fn rig_with(config: ElasticConfig, table: &str) -> Rig {
     }
 }
 
-pub fn candidate(region: &str) -> Candidate {
-    Candidate {
-        instance_type: "gpu_1x_sample".to_owned(),
-        region: region.to_owned(),
-        price_cents_per_hour: 75,
+/// The offer of `gpu_1x_sample` in `region`, as the catalog gives it.
+pub fn candidate(region: &str) -> Offer {
+    Offer {
+        id: "gpu_1x_sample".to_owned(),
+        zone: Some(region.to_owned()),
+        cpu_millis: 8000,
+        memory_bytes: 64 << 30,
+        disk_bytes: 100 << 30,
         gpus: 1,
+        gpu_class: Some(GpuClass::parse("nvidia-sample").unwrap()),
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+        exec: ExecMode::Container,
+        price_cents_per_hour: Some(75),
+        price_unit: PriceUnit::UsCents,
+        available: true,
     }
 }
 
+/// An acquire of the rig's scheduler, with the name it derives and no payload.
 pub fn ask(acquire: &str) -> AcquireRequest {
+    ask_as(SCHEDULER, acquire)
+}
+
+/// An acquire as the scheduler `scheduler` makes it.
+pub fn ask_as(scheduler: &str, acquire: &str) -> AcquireRequest {
+    let acquire = AcquireId::new(acquire).unwrap();
     AcquireRequest {
-        acquire: AcquireId::new(acquire).unwrap(),
+        name: HostName::derive(&SchedulerId::new(scheduler).unwrap(), &acquire),
+        acquire,
         pool: "pool-a".to_owned(),
+        offer: candidate("region-a"),
         labels: Vec::new(),
-        candidate: candidate("region-a"),
+        payload: BootPayload::new(String::new()),
     }
 }
 
 pub fn id(text: &str) -> InstanceId {
     InstanceId::new(text).unwrap()
+}
+
+/// The scheduler's reference to the instance `text`.
+pub fn host(text: &str) -> HostRef {
+    id(text).host_ref()
 }
 
 pub fn tag(key: &str, value: &str) -> Tag {
@@ -158,7 +186,7 @@ pub fn tag(key: &str, value: &str) -> Tag {
 }
 
 /// An instance of the account with these tags and name, as `GET /instances` shows it.
-pub fn row(id_text: &str, name: Option<&str>, status: Status, tags: Vec<Tag>) -> Instance {
+pub fn row(id_text: &str, name: Option<&str>, status: HostStatus, tags: Vec<Tag>) -> Instance {
     Instance {
         id: id(id_text),
         name: name.map(str::to_owned),

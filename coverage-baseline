@@ -20,6 +20,7 @@ js-client                   0      0
 js-conformance              0      0
 js-contain                  0      0
 js-coverage                 0      0
+js-elastic                  0      0
 js-guest                    0      0
 js-guest-wire               0      0
 js-lease                    0      0
@@ -30,6 +31,7 @@ js-provider                 0      -
 js-provider-fake            0      0
 js-provider-lambdalabs      0      0
 js-registry                 0      0
+js-scaler                   0      0
 js-sched                    0      0
 js-server-core              0      0
 js-sim                      0      0

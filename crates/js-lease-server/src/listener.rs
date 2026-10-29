@@ -32,13 +32,15 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
+use axum::Extension;
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderValue;
 use axum::http::header::CONNECTION;
 use axum::middleware::{Next, from_fn_with_state};
@@ -197,10 +199,21 @@ async fn connection(
     limits: Limits,
     stopping: watch::Receiver<()>,
 ) {
+    // The peer is read before the handshake, so a plain and a TLS connection carry it the
+    // same way. A stream that cannot name its peer carries none, and the routes that
+    // gate on the peer refuse it.
+    let app = with_peer(app, stream.peer_addr().ok());
     let io = handshake(stream, tls, limits.handshake_timeout).await;
     if let Some(io) = io {
         talk(io, app, limits, stopping).await;
     }
+}
+
+/// `app` with `peer` as the [`ConnectInfo`] every request of the connection carries; with
+/// no peer it carries none.
+fn with_peer(app: Router, peer: Option<SocketAddr>) -> Router {
+    peer.into_iter()
+        .fold(app, |app, peer| app.layer(Extension(ConnectInfo(peer))))
 }
 
 /// Finishes the connection's handshake, if it is a TLS one. A client that fails or

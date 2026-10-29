@@ -383,6 +383,16 @@ pub fn welcome_speaking(epoch: u64, interval_ms: u64, grace_ms: u64, protocol: u
     )
 }
 
+/// A welcome for `epoch` that carries the host credential `credential`.
+pub fn welcome_issuing(epoch: u64, credential: &str) -> Reply {
+    let mut body = match welcome(epoch) {
+        Ok(answer) => answer.body,
+        Err(why) => panic!("{why}"),
+    };
+    body["host_credential"] = json!(credential);
+    reply(200, body)
+}
+
 /// An accepted heartbeat with nothing to say.
 pub fn beat_ok() -> Reply {
     reply(
@@ -402,6 +412,7 @@ pub struct Script {
     replies: VecDeque<Reply>,
     sent: Sent,
     limit: usize,
+    refuses_credentials: bool,
 }
 
 impl Script {
@@ -417,10 +428,23 @@ impl Script {
             replies: replies.into(),
             sent: sent.clone(),
             limit,
+            refuses_credentials: false,
         };
         (script, sent)
     }
+
+    /// The same script, whose transport will not take a credential as its bearer.
+    pub fn refusing_credentials(self) -> Self {
+        Self {
+            refuses_credentials: true,
+            ..self
+        }
+    }
 }
+
+/// The path under which [`Script`] records that its bearer was replaced by a credential;
+/// the body is the credential's text.
+pub const ADOPTED: &str = "(adopt-credential)";
 
 impl Transport for Script {
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String> {
@@ -435,6 +459,17 @@ impl Transport for Script {
         self.replies
             .pop_front()
             .unwrap_or_else(|| Err("the script is used up".to_owned()))
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        match self.refuses_credentials {
+            true => Err("the script takes no credential".to_owned()),
+            false => {
+                let adopted = (ADOPTED.to_owned(), Value::String(secret.to_owned()));
+                self.sent.borrow_mut().push(adopted);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -532,6 +567,7 @@ pub fn hello(host: &str) -> Hello {
         labels: BTreeMap::new(),
         phase: Phase::Serving,
         held: Vec::new(),
+        accepts_host_credential: false,
     }
 }
 

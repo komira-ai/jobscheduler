@@ -1,12 +1,13 @@
 //! `--go` refuses while instances with this runner's ownership marks exist.
 
+use js_elastic::HostStatus;
 use js_provider_lambdalabs::{
-    ACQUIRE_TAG, ApiError, Call, Instance, SCHEDULER_TAG, Status, Tag, TerminateEffect,
+    ACQUIRE_TAG, ApiError, Call, Instance, SCHEDULER_TAG, Tag, TerminateEffect,
 };
 
 use crate::rig::{FIRST, Rig, id};
 
-fn row(id_text: &str, name: Option<&str>, tags: Vec<Tag>, status: Status) -> Instance {
+fn row(id_text: &str, name: Option<&str>, tags: Vec<Tag>, status: HostStatus) -> Instance {
     Instance {
         id: id(id_text),
         name: name.map(str::to_owned),
@@ -29,7 +30,7 @@ fn tag(key: &str, value: &str) -> Tag {
 }
 
 /// An instance with the scheduler tag and nothing else: half the marks.
-fn half_marked(status: Status) -> Instance {
+fn half_marked(status: HostStatus) -> Instance {
     row(
         "other001",
         Some("renamed-by-hand"),
@@ -53,7 +54,7 @@ fn assert_refused(rig: &Rig, status: i32, out: &str) {
 fn a_half_marked_instance_refuses_go() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
-    rig.fake.add_instance(half_marked(Status::Active));
+    rig.fake.add_instance(half_marked(HostStatus::Active));
     let (status, out) = rig.exec(&args);
     assert_refused(&rig, status, &out);
     assert!(
@@ -70,7 +71,7 @@ fn an_instance_with_an_acquire_tag_alone_is_half_marked_too() {
         "other001",
         None,
         vec![tag(ACQUIRE_TAG, "x")],
-        Status::Booting,
+        HostStatus::Booting,
     ));
     let (status, out) = rig.exec(&args);
     assert_refused(&rig, status, &out);
@@ -123,13 +124,9 @@ fn a_foreign_instance_does_not_refuse() {
         "other001",
         Some("someone-elses"),
         vec![tag("team", "x")],
-        Status::Active,
+        HostStatus::Active,
     ));
-    let (status, out) = rig.exec_active(
-        &args,
-        1,
-        &crate::rig::TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     assert!(!out.contains("already exist"), "{out}");
     assert_eq!(rig.fake.count(Call::Launch), 1);
@@ -140,7 +137,7 @@ fn a_terminated_instance_with_our_marks_does_not_count() {
     let rig = Rig::new();
     let (status, out) = rig.exec(&rig.args(&[]));
     assert_eq!(status, 0, "{out}");
-    rig.fake.add_instance(half_marked(Status::Terminated));
+    rig.fake.add_instance(half_marked(HostStatus::Terminated));
     let (status, out) = rig.exec(&rig.args(&[]));
     assert_eq!(status, 0, "{out}");
     assert!(!out.contains("warning"), "{out}");
@@ -150,7 +147,7 @@ fn a_terminated_instance_with_our_marks_does_not_count() {
 fn a_dry_run_shows_the_same_finding_as_a_warning_and_still_succeeds() {
     let rig = Rig::new();
     let clean = rig.hash(&[]);
-    rig.fake.add_instance(half_marked(Status::Active));
+    rig.fake.add_instance(half_marked(HostStatus::Active));
     let (status, out) = rig.exec(&rig.args(&[]));
     assert_eq!(status, 0, "{out}");
     assert!(

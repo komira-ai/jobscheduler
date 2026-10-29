@@ -2,14 +2,14 @@
 
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Clock, Settings};
+use js_lease::{Boot, Clock, Settings, SystemClock};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
@@ -21,12 +21,16 @@ use crate::agent_pool;
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::{CapacitySource, StaticPoolSource};
 use crate::error::StartupError;
+use crate::file::{self, ElasticPlan, Load, Loaded, LoadedHosts, Registering};
+use crate::kinds::{Kinds, OwnerOnlyFiles, SecretFiles};
+use crate::pool::LaunchInputs;
 use crate::rate::HelloLimit;
 use crate::usage::{HostLimits, KeySource, NoKeys, UsageSink};
 use crate::usage_hub::Usage;
 use crate::usage_js::{self, StoreSetup};
 
-/// The command line. Configuration is flags only; secrets come from files.
+/// The command line. Configuration is flags, or one file (`--config`); secrets come from
+/// files.
 #[derive(Debug, Parser)]
 #[command(
     name = "js-lease-server",
@@ -34,33 +38,39 @@ use crate::usage_js::{self, StoreSetup};
     about = "Serves a lease table over an authenticated HTTP JSON API"
 )]
 pub struct Cli {
+    /// The configuration file: a `[server]` table and `[[pool]]` tables (see the crate
+    /// docs). With it, the file decides what it names and the flags below are not read;
+    /// until they are refused beside it, a flag given with `--config` has no effect.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
     /// The address to listen on. Anything but a loopback address needs --tls-cert and
     /// --tls-key: a bearer token never crosses a network in clear.
     #[arg(long, default_value = "127.0.0.1:7300")]
     pub listen: SocketAddr,
     /// The lease file.
-    #[arg(long)]
-    pub state_file: PathBuf,
+    #[arg(long, required_unless_present = "config")]
+    pub state_file: Option<PathBuf>,
     /// `initialise` creates the lease file when it is missing (the first boot);
     /// `resume` requires it. There is no default, so a lost state file is never
     /// silently started empty.
-    #[arg(long, value_enum)]
-    pub boot: BootMode,
+    #[arg(long, value_enum, required_unless_present = "config")]
+    pub boot: Option<BootMode>,
     /// The TOML file listing the hosts to lease. Optional when agents register hosts
-    /// (`--agent-token-file`); one of the two sources is required.
+    /// (`--agent-pool-config`); one of the two sources is required.
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
-    #[arg(long)]
-    pub token_file: PathBuf,
-    /// Turns agent registration on: a file holding the join tokens agents present, one
-    /// per line (several while one is being replaced), each at least 32 bytes and the
-    /// file owner-only like `--token-file`. Read again at every tick. Needs
-    /// `--agent-pool-config`.
+    #[arg(long, required_unless_present = "config")]
+    pub token_file: Option<PathBuf>,
+    /// The pool's shared join tokens: a file holding the tokens agents present, one per
+    /// line (several while one is being replaced), each at least 32 bytes and the file
+    /// owner-only like `--token-file`. Read again at every tick. Needs
+    /// `--agent-pool-config`. Without it the pool admits only hosts whose one-time join
+    /// token verifies (`POST /v1/agent/join-tokens`).
     #[arg(long)]
     pub agent_token_file: Option<PathBuf>,
-    /// The TOML file describing the pool that registering hosts join: its name, class,
-    /// machine limit, shape, capabilities and timing. Needs `--agent-token-file`.
+    /// Turns agent registration on: the TOML file describing the pool that registering
+    /// hosts join (its name, class, machine limit, shape, capabilities and timing).
     #[arg(long)]
     pub agent_pool_config: Option<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
@@ -69,7 +79,7 @@ pub struct Cli {
         long,
         default_value = "60",
         value_parser = clap::value_parser!(u32).range(1..),
-        requires = "agent_token_file"
+        requires = "agent_pool_config"
     )]
     pub agent_hello_burst: u32,
     /// How often a join token that spent its burst is allowed one more hello.
@@ -77,9 +87,16 @@ pub struct Cli {
         long,
         default_value = "1s",
         value_parser = parse_duration,
-        requires = "agent_token_file"
+        requires = "agent_pool_config"
     )]
     pub agent_hello_interval: Duration,
+    /// Refuses the first hello of a one-time join token that does not say the agent keeps
+    /// a host credential, so every launched host's token is dead after its first hello.
+    /// Turn it on once every agent is new: an agent that predates the host credential
+    /// cannot say so and is refused with `join-token-credential-required`. Off by default;
+    /// pool join tokens are not affected.
+    #[arg(long, requires = "agent_pool_config")]
+    pub require_host_credential: bool,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -231,6 +248,43 @@ pub fn parse_duration(text: &str) -> Result<Duration, String> {
     }
 }
 
+/// Whether `ip` is an address only a private network reaches: the loopback, the private
+/// ranges (10/8, 172.16/12, 192.168/16, and fc00::/7), link-local addresses, the shared
+/// range a tailnet uses (100.64/10; its IPv6 range is in fc00::/7), and, because a
+/// wildcard bind is normal in a VPC or a container and the server cannot tell what is
+/// behind it, the wildcard. Anything else is a public address.
+pub fn is_private_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let shared = v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64;
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || shared
+        }
+        IpAddr::V6(v6) => {
+            let local = (v6.segments()[0] & 0xfe00) == 0xfc00;
+            let link = (v6.segments()[0] & 0xffc0) == 0xfe80;
+            let mapped = v6
+                .to_ipv4_mapped()
+                .is_some_and(|v4| is_private_address(v4.into()));
+            v6.is_loopback() || v6.is_unspecified() || local || link || mapped
+        }
+    }
+}
+
+/// Whether the status routes are served on `listen`; when not, says so in `warnings`.
+fn status_policy(flag: &str, listen: SocketAddr, warnings: &mut Vec<String>) -> bool {
+    let private = is_private_address(listen.ip());
+    if !private {
+        warnings.push(format!(
+            "server: warning: /v1/pools and /status are not served: {flag} {listen} is not a private address"
+        ));
+    }
+    private
+}
+
 /// The bearer token. It is compared in constant time and never printed.
 #[derive(Clone)]
 pub struct Token(Vec<u8>);
@@ -274,6 +328,15 @@ pub struct TlsFiles {
 /// sense together, and the token was read from an owner-only file.
 pub struct Config {
     pub(crate) listen: SocketAddr,
+    /// What names the listen address in a refusal: `--listen` or `server.listen`.
+    pub(crate) listen_flag: &'static str,
+    pub(crate) agent_listen: Option<SocketAddr>,
+    pub(crate) advertise_url: Option<String>,
+    pub(crate) warnings: Vec<String>,
+    /// Whether `/v1/pools` and `/status` are served: the listen address is a private one.
+    pub(crate) status: bool,
+    pub(crate) launch_inputs: LaunchInputs,
+    pub(crate) elastic: Option<ElasticPlan>,
     pub(crate) state_file: PathBuf,
     pub(crate) boot: Boot,
     pub(crate) settings: Settings,
@@ -296,10 +359,25 @@ pub(crate) struct UsageSetup {
     pub(crate) keys: Arc<dyn KeySource>,
 }
 
+/// The default of `--profile-store-bytes`.
+const DEFAULT_PROFILE_STORE_BYTES: u64 = 268_435_456;
+
 /// Milliseconds in a day.
 const MILLIS_PER_DAY: u64 = 86_400_000;
 
 impl UsageSetup {
+    /// Usage on, beside the lease file at `state_file`, with the default store size: what
+    /// a configuration file gives, since it has no usage keys; `--usage-db`, `--usage-off`
+    /// and `--profile-store-bytes` still apply on top of it.
+    fn unconfigured(state_file: &Path) -> Self {
+        Self {
+            db: Some(state_file.with_file_name("usage.db")),
+            profile_store_bytes: DEFAULT_PROFILE_STORE_BYTES,
+            sink: None,
+            keys: Arc::new(NoKeys),
+        }
+    }
+
     /// The usage side for hosts the pool books as `limits`, or `None` when usage is off.
     /// A usage file that will not open is a refused start naming `--usage-db`.
     pub(crate) fn build(
@@ -339,11 +417,14 @@ pub(crate) enum Hosts {
     },
 }
 
-/// What `--agent-token-file`, `--agent-pool-config` and the hello limit decided.
+/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
+/// decided.
 pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
     pub(crate) hello_limit: HelloLimit,
+    /// `--require-host-credential`.
+    pub(crate) require_host_credential: bool,
 }
 
 impl Config {
@@ -351,23 +432,36 @@ impl Config {
     /// TLS flags, the token files are owner-only and hold tokens, the pool files are
     /// valid, and at least one source of hosts is configured.
     pub fn from_cli(cli: Cli) -> Result<Self, StartupError> {
+        if let Some(path) = &cli.config {
+            let clock = SharedClock::new(SystemClock);
+            let mut config =
+                Self::from_config_file(path, &Kinds::standard(), &OwnerOnlyFiles, clock)?;
+            config.usage = usage_setup(&cli, &config.state_file);
+            return Ok(config);
+        }
         let settings = Settings::new(cli.default_ttl, cli.max_ttl)
             .map_err(|err| StartupError::new("--default-ttl", err))?;
         let tls = tls_files(&cli)?;
-        let token = read_token(&cli.token_file)?;
+        let token_file = required(cli.token_file.as_ref(), "--token-file")?;
+        let token = read_token(token_file)?;
         let limits = Limits::from(&cli);
         let hosts = hosts(&cli, &token)?;
         let settings = with_pool_settings(settings, &hosts)?;
-        let usage = UsageSetup {
-            db: usage_db(&cli),
-            profile_store_bytes: cli.profile_store_bytes,
-            sink: None,
-            keys: Arc::new(NoKeys),
-        };
+        let state_file = required(cli.state_file.clone(), "--state-file")?;
+        let usage = usage_setup(&cli, &state_file);
+        let mut warnings = Vec::new();
+        let status = status_policy("--listen", cli.listen, &mut warnings);
         Ok(Self {
             listen: cli.listen,
-            state_file: cli.state_file,
-            boot: cli.boot.into(),
+            listen_flag: "--listen",
+            agent_listen: None,
+            advertise_url: None,
+            warnings,
+            status,
+            launch_inputs: LaunchInputs::default(),
+            elastic: None,
+            state_file,
+            boot: required(cli.boot, "--boot")?.into(),
             settings,
             tick: cli.tick,
             token,
@@ -376,6 +470,130 @@ impl Config {
             hosts,
             usage,
         })
+    }
+
+    /// Checks the configuration file at `path` (see the crate docs for its format) and
+    /// builds the pools it describes with `kinds`, reading secret files through `files`.
+    /// Nothing here makes a network call: what only the network can say is for the
+    /// checks of a running server.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] naming the pool and the field at fault.
+    pub fn from_config_file(
+        path: &Path,
+        kinds: &Kinds,
+        files: &dyn SecretFiles,
+        clock: SharedClock,
+    ) -> Result<Self, StartupError> {
+        let load = Load {
+            kinds,
+            files,
+            clock,
+        };
+        let Loaded {
+            server,
+            client_token,
+            hosts,
+            mut warnings,
+        } = file::load(path, &load)?;
+        let (hosts, elastic) = match hosts {
+            LoadedHosts::Static(source) => (Hosts::Static(source), None),
+            LoadedHosts::Registering {
+                static_pool,
+                registering,
+            } => {
+                let Registering { plan, pool, tokens } = *registering;
+                let hello_limit = HelloLimit {
+                    burst: 60,
+                    interval: Duration::from_secs(1),
+                };
+                let agents = Box::new(AgentSetup {
+                    tokens,
+                    pool,
+                    hello_limit,
+                    require_host_credential: false,
+                });
+                (
+                    Hosts::Layered {
+                        static_pool,
+                        agents,
+                    },
+                    Some(plan),
+                )
+            }
+        };
+        let state_file = server.state_file;
+        let usage = UsageSetup::unconfigured(&state_file);
+        let settings = with_pool_settings(server.settings, &hosts)?;
+        let status = status_policy("server.listen", server.listen, &mut warnings);
+        Ok(Self {
+            listen: server.listen,
+            listen_flag: "server.listen",
+            agent_listen: server.agent_listen,
+            advertise_url: server.advertise_url,
+            warnings,
+            status,
+            launch_inputs: LaunchInputs::default(),
+            elastic,
+            state_file,
+            boot: server.boot.into(),
+            settings,
+            tick: server.tick,
+            token: client_token,
+            tls: server.tls,
+            limits: server.limits,
+            hosts,
+            usage,
+        })
+    }
+
+    /// The limits on what a client may hold open.
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+
+    /// The address the client, operator and status routes are served on.
+    pub fn listen(&self) -> SocketAddr {
+        self.listen
+    }
+
+    /// The address the agent routes alone are served on, when the file gives one.
+    pub fn agent_listen(&self) -> Option<SocketAddr> {
+        self.agent_listen
+    }
+
+    /// The URL agents are told to dial, when the file gives one.
+    pub fn advertise_url(&self) -> Option<&str> {
+        self.advertise_url.as_deref()
+    }
+
+    /// What the server shows and logs as warnings once it runs, such as a listener bound
+    /// to every interface.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Whether the server serves `GET /v1/pools` and `GET /status`. They take no token, so
+    /// they are served only when the listen address is a private one
+    /// ([`is_private_address`]); on any other the routes do not exist, and the server says
+    /// so in [`warnings`](Self::warnings). Where they are served, a request is answered
+    /// only when its peer is a private address too; any other peer gets the reply of an
+    /// unknown route.
+    pub fn serves_status(&self) -> bool {
+        self.status
+    }
+
+    /// The same configuration with what a launch plan needs that the file does not carry:
+    /// the agent binary's digest, the Tailscale build, or a stand-in network mode.
+    pub fn with_launch_inputs(mut self, inputs: LaunchInputs) -> Self {
+        self.launch_inputs = inputs;
+        self
+    }
+
+    /// The elastic pool of the file, when it has one.
+    pub fn elastic_pool(&self) -> Option<&ElasticPlan> {
+        self.elastic.as_ref()
     }
 
     /// The same configuration taking its static hosts from `capacity` instead of the
@@ -430,9 +648,19 @@ impl Config {
 
 /// The usage file the flags name: none for `--usage-off`, else `--usage-db` or `usage.db`
 /// in the directory of the lease file.
-fn usage_db(cli: &Cli) -> Option<PathBuf> {
-    let beside = || cli.state_file.with_file_name("usage.db");
+fn usage_db(cli: &Cli, state_file: &Path) -> Option<PathBuf> {
+    let beside = || state_file.with_file_name("usage.db");
     (!cli.usage_off).then(|| cli.usage_db.clone().unwrap_or_else(beside))
+}
+
+/// What the usage flags decide, for the lease file at `state_file`.
+fn usage_setup(cli: &Cli, state_file: &Path) -> UsageSetup {
+    UsageSetup {
+        db: usage_db(cli, state_file),
+        profile_store_bytes: cli.profile_store_bytes,
+        sink: None,
+        keys: Arc::new(NoKeys),
+    }
 }
 
 /// `settings` with what the registered pool's file decides about whole-node leases: the
@@ -459,8 +687,14 @@ fn with_whole_node(
         .map_err(|err| StartupError::new("--agent-pool-config", err))
 }
 
-/// The sources of hosts the flags name. At least one is required; the two agent flags
-/// come together.
+/// `value`, or the refusal of the flag that was left out: `clap` requires the flag unless
+/// `--config` is given, so a missing one means a `Cli` built by hand.
+fn required<T>(value: Option<T>, flag: &'static str) -> Result<T, StartupError> {
+    value.ok_or_else(|| StartupError::new(flag, "required unless --config is given"))
+}
+
+/// The sources of hosts the flags name. At least one is required; the shared join token
+/// file needs the agent pool file, which alone turns registration on.
 fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
@@ -470,27 +704,30 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
         (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
             StartupError::new(
                 "--pool-config",
-                "required unless agents register hosts (--agent-token-file and --agent-pool-config)",
+                "required unless agents register hosts (--agent-pool-config)",
             )
         }),
-        (Some(tokens), Some(pool)) => Ok(Hosts::Layered {
-            static_pool,
-            agents: Box::new(AgentSetup {
-                tokens: AgentTokens::open(tokens, client)?,
-                pool: agent_pool::read(pool)?,
-                hello_limit: HelloLimit {
-                    burst: cli.agent_hello_burst,
-                    interval: cli.agent_hello_interval,
-                },
-            }),
-        }),
+        (tokens, Some(pool)) => {
+            let tokens = match tokens {
+                Some(path) => AgentTokens::open(path, client)?,
+                None => AgentTokens::none(),
+            };
+            Ok(Hosts::Layered {
+                static_pool,
+                agents: Box::new(AgentSetup {
+                    tokens,
+                    pool: agent_pool::read(pool)?,
+                    hello_limit: HelloLimit {
+                        burst: cli.agent_hello_burst,
+                        interval: cli.agent_hello_interval,
+                    },
+                    require_host_credential: cli.require_host_credential,
+                }),
+            })
+        }
         (Some(_), None) => Err(StartupError::new(
             "--agent-pool-config",
             "required with --agent-token-file",
-        )),
-        (None, Some(_)) => Err(StartupError::new(
-            "--agent-token-file",
-            "required with --agent-pool-config",
         )),
     }
 }
@@ -552,34 +789,46 @@ pub(crate) fn parse_token(bytes: &[u8]) -> Result<Token, String> {
 
 /// Reads the secret file at `path`, named by `flag`, after checking, on the open file,
 /// that it is a regular file owned by the server's user that only that user can use.
-/// The file is opened without blocking, so a named pipe at the path is refused instead
-/// of waited on; a symbolic link is followed (secret mounts are links) and the checks
-/// are on what it leads to.
+/// See [`read_private_reason`].
 pub(crate) fn read_private(path: &Path, flag: &'static str) -> Result<Vec<u8>, StartupError> {
-    let refuse = StartupError::because(flag);
+    read_private_reason(path).map_err(StartupError::because(flag))
+}
+
+/// Reads the secret file at `path` after checking, on the open file, that it is a regular
+/// file owned by the server's user that only that user can use, and says why it was not
+/// read otherwise. The file is opened without blocking, so a named pipe at the path is
+/// refused instead of waited on; a symbolic link is followed (secret mounts are links)
+/// and the checks are on what it leads to. The reason names the path and never the
+/// content.
+pub(crate) fn read_private_reason(path: &Path) -> Result<Vec<u8>, String> {
+    match open_private(path) {
+        Ok(read) => read,
+        Err(err) => Err(format!("{}: {err}", path.display())),
+    }
+}
+
+/// [`read_private_reason`] with the system's failures on the outside: a file that could
+/// not be opened, inspected or read, and inside it the refusal a file earns by what it
+/// is.
+fn open_private(path: &Path) -> std::io::Result<Result<Vec<u8>, String>> {
     let nonblocking = OFlags::NONBLOCK.bits().cast_signed();
-    let opened = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(nonblocking)
-        .open(path);
-    let mut file = opened.map_err(|err| refuse(format!("{}: {err}", path.display())))?;
-    let meta = file.metadata().map_err(StartupError::because(flag))?;
+        .open(path)?;
+    let meta = file.metadata()?;
     let mode = meta.permissions().mode() & 0o777;
     let euid = geteuid().as_raw();
     if !trusted_private_file(meta.is_file(), mode, meta.uid(), euid) {
-        return Err(StartupError::new(
-            flag,
-            format!(
-                "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
-                path.display(),
-                meta.uid()
-            ),
-        ));
+        return Ok(Err(format!(
+            "{} must be a regular file owned by the user running the server and readable only by that user (mode 0600 or 0400), not mode {mode:04o} owned by uid {}",
+            path.display(),
+            meta.uid()
+        )));
     }
     let mut bytes = Vec::new();
-    let read = file.read_to_end(&mut bytes);
-    read.map_err(StartupError::because(flag))?;
-    Ok(bytes)
+    file.read_to_end(&mut bytes)?;
+    Ok(Ok(bytes))
 }
 
 /// Reads the token from the file `--token-file` names, see [`read_private`].

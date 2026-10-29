@@ -1,6 +1,7 @@
 //! The `[[option]]` table.
 
-use js_provider_lambdalabs::{GpuClass, OptionRow, OptionTable, OptionsError};
+use js_elastic::GpuClass;
+use js_provider_lambdalabs::{OptionRow, OptionTable, OptionsError};
 
 const GOOD: &str = r#"
 unrelated = "left to another reader"
@@ -124,23 +125,7 @@ fn an_instance_type_is_lower_case_letters_digits_and_underscores() {
 }
 
 #[test]
-fn a_gpu_class_must_be_in_the_agents_spelling() {
-    for good in ["nvidia-a10", "x", "nvidia-h100-80gb-hbm3", "a1-2b"] {
-        assert_eq!(GpuClass::parse(good).unwrap().as_str(), good);
-    }
-    for bad in [
-        "",
-        "NVIDIA-A10",
-        "nvidia a10",
-        "nvidia--a10",
-        "-nvidia",
-        "nvidia-",
-        "nvidia_a10",
-        "nvidia-a10 ",
-        "nvidia-\u{e9}",
-    ] {
-        assert!(GpuClass::parse(bad).is_err(), "{bad:?}");
-    }
+fn a_row_whose_gpu_class_is_not_in_the_agents_spelling_is_refused_and_named() {
     let text = row("instance_type = \"gpu_1x_a\"\ngpu_class = \"NVIDIA A10\"\ngpus = 1");
     let OptionsError::Row { why, .. } = refused(&text) else {
         panic!("not a row error");
