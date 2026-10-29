@@ -51,6 +51,11 @@ pub struct Config {
     /// How the scheduler holds and drains workers for whole-machine requests; `None` holds
     /// a worker at once, with no drain wait, deadline or give-up.
     pub whole_node: Option<WholeNodeConfig>,
+    /// Whether the core reads and writes size keys: the `opkey/` row of a submission that
+    /// names one ([`Core::submit_keyed`]), the key floors a kill raises, and the key floors
+    /// and their summary names a start takes up. Off, a key is ignored and the rows of an
+    /// earlier run are neither read nor allowed to fail a start.
+    pub size_keys: bool,
 }
 
 impl Config {
@@ -67,7 +72,15 @@ impl Config {
             memory_floors: None,
             loss_requeues: LOSS_REQUEUES,
             whole_node: None,
+            size_keys: false,
         }
+    }
+
+    /// This configuration, reading and writing size keys when `on` ([`Config::size_keys`]).
+    #[must_use]
+    pub const fn with_size_keys(mut self, on: bool) -> Self {
+        self.size_keys = on;
+        self
     }
 
     /// This configuration, climbing `ladder` after an action passes its own memory limit
@@ -348,11 +361,31 @@ impl<A: Adapter> Core<A> {
         parcel: &[u8],
         enrol: impl FnOnce(&mut A, &Admitted),
     ) -> Result<Admitted, NotQueued> {
+        self.submit_keyed(now, request, parcel, None, enrol)
+    }
+
+    /// [`Core::submit`] for a request with a size key: the key its kill-driven memory floor
+    /// is kept under, which the caller derives outside the lock. A core over a store writes
+    /// it in the same transaction as the request (the `opkey/` row), unless the request
+    /// joins an operation the scheduler or the store holds: that operation keeps its own key.
+    /// The scheduler books the operation's first placement round with the floor of the key.
+    /// A key is ignored by a core that has size keys off ([`Config::with_size_keys`]).
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_keyed(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(adapter, &request, parcel, now)?;
+        let admitted = engine.admit(adapter, &request, parcel, size_key, now)?;
         enrol(adapter, &admitted);
         match admitted.held {
             Held::Here => {

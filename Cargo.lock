@@ -1069,6 +1069,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-testkit",
  "js-types",
  "serde",
  "thiserror",

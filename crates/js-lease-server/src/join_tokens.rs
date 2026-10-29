@@ -43,6 +43,14 @@
 //! errs on the side of one token, one host. When that write fails the token stays tied to
 //! the host, which says hello again with it; if that host cannot register, mint another.
 //!
+//! The scheduler's terminate path revokes the token of the instance it terminates
+//! (`DELETE /v1/agent/join-tokens`, see [`crate::join_api`]): [`JoinTokens::revoke`] drops
+//! every token bound to the instance, used or not, in one whole-file write under the
+//! lock. A revoked token is unknown from then on, so its hello and heartbeat get the
+//! same 401 as a token that never existed. This closes the window of a used token (up to
+//! [`CREDENTIAL_TTL`] of silence) for the instances the scheduler terminates itself; an
+//! instance that dies without a terminate call still falls back to that bound.
+//!
 //! Only the SHA-256 digest of a token is kept, in memory and in `<state file>.joins`, which
 //! is written whole through a temporary file and renamed, like the file of bindings, and
 //! is owner-only:
@@ -171,6 +179,13 @@ pub(crate) enum MintError {
     /// [`MAX_WAITING`] tokens already wait to be used.
     Full,
     /// The file could not be written; nothing was made.
+    Unsaved,
+}
+
+/// Why no token was revoked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RevokeError {
+    /// The file could not be written; nothing was dropped.
     Unsaved,
 }
 
@@ -345,9 +360,9 @@ impl JoinTokens {
     /// whose credential is `credential`: the registry refused the hello, and the token
     /// stays good for the instance it was minted for. It does nothing when a hello of
     /// `host` was admitted [`Admission::Again`] since the use: that hello may have been
-    /// the one the registry accepted, and the token is then the host's. Written like the use; when the write
-    /// fails the token stays tied to `host` (a restart agrees with the memory), and the
-    /// operator mints again if that host cannot register.
+    /// the one the registry accepted, and the token is then the host's. Written like the
+    /// use; when the write fails the token stays tied to `host` (a restart agrees with the
+    /// memory), and the operator mints again if that host cannot register.
     pub(crate) fn release(&self, credential: &Credential, host: &str) {
         let key = credential.to_hex();
         let mut entries = self.lock();
@@ -368,6 +383,25 @@ impl JoinTokens {
             Ok(()) => *entries = next,
             Err(err) => error!(error = %err, "cannot write the join token file"),
         }
+    }
+
+    /// Drops every token bound to `instance`, used or not, and writes the file; kept only
+    /// when the write succeeded. Returns how many were dropped. An instance with no token
+    /// drops none and writes nothing, so a repeated revoke is a no-op that succeeds.
+    pub(crate) fn revoke(&self, instance: &InstanceIdentity) -> Result<usize, RevokeError> {
+        let mut entries = self.lock();
+        let mut next = entries.clone();
+        next.retain(|_, entry| entry.instance != *instance);
+        let dropped = entries.len() - next.len();
+        if dropped == 0 {
+            return Ok(0);
+        }
+        self.write(&next).map_err(|err| {
+            error!(error = %err, "cannot write the join token file");
+            RevokeError::Unsaved
+        })?;
+        *entries = next;
+        Ok(dropped)
     }
 
     /// Whether the token whose credential is `credential` registered `host` and its
