@@ -522,7 +522,7 @@ impl<'a> Pass<'a> {
         let idle = !working.into_iter().any(|work| work);
         let record = &self.records.instances[i];
         let failed_boot = [
-            !host.heard_since_hello,
+            true,
             record.phase == Phase::Registered,
             self.now.since(record.launched_at) >= pool.settings.boot_timeout,
             idle,
