@@ -836,7 +836,7 @@ async fn names_and_certificates_that_do_not_check_out_are_errors() {
                 .private(),
         ])
     };
-    let other_authority = Fixture::start().await.cert;
+    let other_authority = Fixture::start().await.cert.clone();
     for (name, client, text) in [
         ("system roots", Client::new(policy()), "TLS"),
         (
