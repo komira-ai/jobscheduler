@@ -97,8 +97,16 @@ fn check_layer(index: usize, layer: &Layer) -> Result<(), ConfigError> {
     if layer.uncompressed_bytes == 0 {
         return Err(bad(at("uncompressed_bytes"), Defect::Zero));
     }
+    if layer.uncompressed_bytes > MAX_TOTAL_BYTES {
+        let max = MAX_TOTAL_BYTES;
+        return Err(bad(at("uncompressed_bytes"), Defect::OverLimit { max }));
+    }
     if layer.entries == 0 {
         return Err(bad(at("entries"), Defect::Zero));
+    }
+    if layer.entries > MAX_ENTRIES {
+        let max = MAX_ENTRIES;
+        return Err(bad(at("entries"), Defect::OverLimit { max }));
     }
     non_empty(&at("license"), &layer.license, MAX_LICENSE)?;
     let spdx = layer.license.chars().all(
@@ -130,6 +138,7 @@ fn check_layers(config: &BundleConfig) -> Result<BTreeSet<&TreeName>, ConfigErro
     non_empty_list("layers", config.layers.len(), MAX_LAYERS)?;
     let mut trees = BTreeSet::new();
     let mut diffs = BTreeSet::new();
+    let mut total: u64 = 0;
     for (index, layer) in config.layers.iter().enumerate() {
         if !trees.insert(&layer.tree) {
             return Err(bad(format!("layers[{index}].tree"), Defect::Duplicate));
@@ -138,6 +147,11 @@ fn check_layers(config: &BundleConfig) -> Result<BTreeSet<&TreeName>, ConfigErro
             return Err(bad(format!("layers[{index}].diff_id"), Defect::Duplicate));
         }
         check_layer(index, layer)?;
+        total = total.saturating_add(layer.uncompressed_bytes);
+        if total > MAX_TOTAL_BYTES {
+            let max = MAX_TOTAL_BYTES;
+            return Err(bad("layers", Defect::OverLimit { max }));
+        }
     }
     Ok(trees)
 }

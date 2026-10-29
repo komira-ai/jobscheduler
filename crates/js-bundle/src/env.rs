@@ -1,26 +1,13 @@
-//! Which environment names a bundle or a job may set (format section 1.3).
+//! Which environment names a bundle or a job may set (format section 1.3). The reserved
+//! list is [`js_types::env`]'s, the same one the agent's wire check reads.
+
+use js_types::env::{MAX_ENV_NAME_LEN, env_name_reserved};
 
 use crate::error::EnvNameError;
 
-/// The prefix of the names the agent reserves for itself.
-pub const RESERVED_ENV_PREFIX: &str = "JS_";
-
-const PREFIXES: [&str; 4] = ["DYLD_", "LD_", "SANDBOX_", RESERVED_ENV_PREFIX];
-
-/// Names the agent owns (it sets them for every run).
-const OWNED: [&str; 6] = [
-    "HOME",
-    "TMPDIR",
-    "CFFIXED_USER_HOME",
-    "XDG_CACHE_HOME",
-    "CLANG_MODULE_CACHE_PATH",
-    "DEVELOPER_DIR",
-];
-
-/// Checks an environment name a bundle rule or a job sets: `[A-Za-z_][A-Za-z0-9_]*`,
-/// not starting with `DYLD_`, `LD_`, `SANDBOX_` or [`RESERVED_ENV_PREFIX`], and not one
-/// of `HOME`, `TMPDIR`, `CFFIXED_USER_HOME`, `XDG_CACHE_HOME`,
-/// `CLANG_MODULE_CACHE_PATH` and `DEVELOPER_DIR`.
+/// Checks an environment name a bundle rule or a job sets: `[A-Za-z_][A-Za-z0-9_]*`, at
+/// most [`MAX_ENV_NAME_LEN`] bytes, and not reserved
+/// ([`js_types::env::env_name_reserved`]).
 pub fn check_env_name(name: &str) -> Result<(), EnvNameError> {
     let mut bytes = name.bytes();
     let first_ok = bytes
@@ -30,7 +17,12 @@ pub fn check_env_name(name: &str) -> Result<(), EnvNameError> {
     if !(first_ok && rest_ok) {
         return Err(EnvNameError::Malformed);
     }
-    if PREFIXES.iter().any(|prefix| name.starts_with(prefix)) || OWNED.contains(&name) {
+    if name.len() > MAX_ENV_NAME_LEN {
+        return Err(EnvNameError::TooLong {
+            max: MAX_ENV_NAME_LEN,
+        });
+    }
+    if env_name_reserved(name) {
         return Err(EnvNameError::Forbidden);
     }
     Ok(())

@@ -3,11 +3,12 @@
 //! Field order in each struct is the order of the canonical JSON; reordering a field
 //! changes every config digest, so the golden test pins it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map};
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::error::ConfigError;
+use crate::error::{ConfigError, bounded_json_message};
 use crate::names::{DiffId, TreeName};
 use crate::template::Template;
 use crate::validate::{self, MAX_CONFIG_BYTES};
@@ -16,8 +17,11 @@ use crate::version::DottedVersion;
 /// The config of a bundle, `application/vnd.komira.js.bundle.config.v1+json`.
 ///
 /// Unknown fields are refused, so a writer of a newer schema is refused loudly rather
-/// than half read. Read a config with [`BundleConfig::parse`]; a config built in
-/// memory is checked with [`BundleConfig::validate`] before it is used.
+/// than half read. [`BundleConfig::parse`] is the one entry point for bytes: it applies
+/// the size limit, bounds what an error echoes and validates. Deserializing with
+/// `serde_json::from_slice` (or any other serde format) skips all three, so a config
+/// read that way is checked with [`BundleConfig::validate`] before it is used, as is one
+/// built in memory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleConfig {
@@ -40,9 +44,11 @@ pub struct BundleConfig {
     pub env: Vec<EnvRule>,
     /// Whether the system directories follow the bundle's `PATH` entries.
     pub system_path: bool,
-    /// Programs a job names as `@bundle/<name>`.
+    /// Programs a job names as `@bundle/<name>`. A name that appears twice is refused.
+    #[serde(deserialize_with = "unique_entrypoints")]
     pub entrypoints: BTreeMap<String, Entrypoint>,
-    /// Trees that need a writable clone because their tools write beside themselves.
+    /// Trees that need a writable clone because their tools write beside themselves. A
+    /// set: the canonical JSON writes it sorted.
     pub writable_trees: Vec<TreeName>,
     /// What the tools need from the host's file system and network.
     pub seatbelt: Seatbelt,
@@ -98,6 +104,42 @@ pub struct EnvRule {
     pub values: Vec<Template>,
     /// Whether a job's environment is refused when it sets the variable.
     pub locked: bool,
+}
+
+/// Reads the entrypoints map and refuses a name that appears twice: the config digest is
+/// over the raw bytes, so a reader that took the first of two would see another program
+/// than the agent that took the last.
+fn unique_entrypoints<'de, D>(deserializer: D) -> Result<BTreeMap<String, Entrypoint>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct Entrypoints;
+
+    impl<'de> Visitor<'de> for Entrypoints {
+        type Value = BTreeMap<String, Entrypoint>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a map of entrypoints")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+            let mut entries = BTreeMap::new();
+            while let Some((name, entry)) = map.next_entry::<String, Entrypoint>()? {
+                match entries.entry(name) {
+                    btree_map::Entry::Vacant(slot) => {
+                        slot.insert(entry);
+                    }
+                    btree_map::Entry::Occupied(slot) => {
+                        let name = slot.key();
+                        return Err(de::Error::custom(format!("duplicate entrypoint `{name}`")));
+                    }
+                }
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_map(Entrypoints)
 }
 
 /// A program of the bundle.
@@ -164,7 +206,9 @@ pub enum NetworkLevel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Seatbelt {
-    /// The reads the tools need, without repeats.
+    /// The reads the tools need, without repeats. The order is significant: the profile
+    /// builder reads the grants in it, so two orders are two configs and the canonical
+    /// JSON keeps it.
     pub reads: Vec<ReadGrantKind>,
     /// The highest network level the tools need. The agent clamps a job's request to
     /// the lower of this and its own limit (`Ord` is the order: `Off` is lowest).
@@ -191,7 +235,8 @@ pub enum XcodeComponent {
 pub struct XcodeNeed {
     /// The lowest Xcode version that works.
     pub min: DottedVersion,
-    /// The components the tools call, without repeats.
+    /// The components the tools call, without repeats. A set: the canonical JSON writes it
+    /// sorted (`clang`, `swift`, `metal`, `simctl`).
     pub components: Vec<XcodeComponent>,
 }
 
@@ -217,7 +262,10 @@ pub struct Built {
 
 impl BundleConfig {
     /// Reads a config: refuses a document over [`MAX_CONFIG_BYTES`] unread, parses it
-    /// (refusing unknown fields and repeated keys of the structs), and validates it.
+    /// (refusing unknown fields and repeated keys, of the structs and of the entrypoints
+    /// map), and validates it. This is the only entry point for bytes: `from_slice` on
+    /// the type skips the size limit and `validate`. What a parse error echoes of the
+    /// document is escaped and cut to [`crate::MAX_JSON_ERROR_BYTES`].
     pub fn parse(bytes: &[u8]) -> Result<BundleConfig, ConfigError> {
         if bytes.len() > MAX_CONFIG_BYTES {
             return Err(ConfigError::TooLarge {
@@ -225,8 +273,8 @@ impl BundleConfig {
                 max: MAX_CONFIG_BYTES,
             });
         }
-        let config: BundleConfig =
-            serde_json::from_slice(bytes).map_err(|err| ConfigError::Json(err.to_string()))?;
+        let config: BundleConfig = serde_json::from_slice(bytes)
+            .map_err(|err| ConfigError::Json(bounded_json_message(&err.to_string())))?;
         config.validate()?;
         Ok(config)
     }
@@ -237,14 +285,20 @@ impl BundleConfig {
         validate::validate(self)
     }
 
-    /// The canonical JSON: fields in declaration order, entrypoints sorted by name, no
-    /// whitespace, no trailing newline. Two equal configs give equal bytes, so this
+    /// The canonical JSON: fields in declaration order, entrypoints sorted by name, the
+    /// sets `writable_trees` and `xcode.components` sorted, `seatbelt.reads` in its given
+    /// order (it is significant), no whitespace, no trailing newline. Two equal configs give equal bytes, so this
     /// is what a pack tool hashes. A config that parsed from other spellings (a
     /// version `14.0.0`, other whitespace or order) writes the normalised form.
     ///
     /// Writing these types as JSON cannot fail; were it to, the result is empty, which
     /// no digest check accepts.
     pub fn to_canonical_json(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        let mut canonical = self.clone();
+        canonical.writable_trees.sort();
+        if let Some(need) = canonical.xcode.as_mut() {
+            need.components.sort();
+        }
+        serde_json::to_vec(&canonical).unwrap_or_default()
     }
 }

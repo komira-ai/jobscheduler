@@ -38,13 +38,13 @@ pub use config::{
     Built, BundleConfig, Entrypoint, EnvOp, EnvRule, Layer, NetworkLevel, ReadGrantKind, Seatbelt,
     XcodeComponent, XcodeNeed,
 };
-pub use env::{RESERVED_ENV_PREFIX, check_env_name};
+pub use env::check_env_name;
 pub use error::{
     ConfigError, Defect, EnvNameError, ExpandError, MAX_JSON_ERROR_BYTES, MaterialiseError,
     TemplateError,
 };
 pub use materialise::{Inputs, MAX_ENV_BYTES, Materialised, SYSTEM_PATH, materialise, tree_path};
-pub use names::{DiffId, ParseError, TreeName};
+pub use names::{DiffId, FieldParseError, TreeName};
 pub use template::{Segment, Template};
 pub use validate::{
     MAX_CONFIG_BYTES, MAX_ENTRIES, MAX_ENV_RULES, MAX_LAYERS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES,

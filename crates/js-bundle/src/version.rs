@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::names::ParseError;
+use crate::names::FieldParseError;
 
 /// A macOS or Xcode version, compared numerically (`14.10` is above `14.9`). The text
 /// form is `major.minor` or `major.minor.patch`, each part decimal digits without a
@@ -28,7 +28,7 @@ fn part(text: &str) -> Option<u32> {
 
 impl DottedVersion {
     /// Parses `major.minor[.patch]`.
-    pub fn parse(text: &str) -> Result<DottedVersion, ParseError> {
+    pub fn parse(text: &str) -> Result<DottedVersion, FieldParseError> {
         let parts: Vec<Option<u32>> = text.split('.').map(part).collect();
         match parts.as_slice() {
             [Some(major), Some(minor)] => Ok(DottedVersion {
@@ -41,7 +41,7 @@ impl DottedVersion {
                 minor: *minor,
                 patch: *patch,
             }),
-            _ => Err(ParseError::new("version", text)),
+            _ => Err(FieldParseError::new("version", text)),
         }
     }
 
@@ -62,9 +62,9 @@ impl DottedVersion {
 }
 
 impl TryFrom<String> for DottedVersion {
-    type Error = ParseError;
+    type Error = FieldParseError;
 
-    fn try_from(text: String) -> Result<DottedVersion, ParseError> {
+    fn try_from(text: String) -> Result<DottedVersion, FieldParseError> {
         DottedVersion::parse(&text)
     }
 }

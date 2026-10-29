@@ -3,6 +3,31 @@
 use std::path::PathBuf;
 
 use crate::names::TreeName;
+use crate::template::is_forbidden_char;
+
+/// `message` with its control characters escaped and its length cut to
+/// [`MAX_JSON_ERROR_BYTES`] (the cut is marked with `...`). A parser echoes keys and values
+/// of the document, which a writer controls: unescaped they would split a log line, and
+/// unbounded they would bloat it.
+pub(crate) fn bounded_json_message(message: &str) -> String {
+    const MARK: &str = "...";
+    let mut out = String::new();
+    for c in message.chars() {
+        if is_forbidden_char(c) {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+        if out.len() > MAX_JSON_ERROR_BYTES {
+            while out.len() > MAX_JSON_ERROR_BYTES - MARK.len() {
+                out.pop();
+            }
+            out.push_str(MARK);
+            break;
+        }
+    }
+    out
+}
 
 /// Why a placeholder string is refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -169,7 +194,7 @@ pub enum MaterialiseError {
     #[error("{0}")]
     Config(#[from] ConfigError),
     /// A path the caller gave is not an absolute, normalised UTF-8 path without
-    /// control characters.
+    /// control characters or `:`.
     #[error("not an absolute normalised path: {0:?}")]
     BadPath(PathBuf),
     /// The config lists a writable tree and the caller gave no clone for it.

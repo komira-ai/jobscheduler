@@ -28,6 +28,9 @@ pub const MAX_ENV_NAME_LEN: usize = 128;
 
 /// Whether `name` starts with a [`RESERVED_ENV_PREFIXES`] entry or is one of the
 /// [`OWNED_ENV_NAMES`]. The comparison is exact and case-sensitive.
-pub fn env_name_reserved(_name: &str) -> bool {
-    false
+pub fn env_name_reserved(name: &str) -> bool {
+    RESERVED_ENV_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || OWNED_ENV_NAMES.contains(&name)
 }

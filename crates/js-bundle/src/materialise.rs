@@ -13,7 +13,7 @@ use crate::config::{BundleConfig, EnvOp, ReadGrantKind};
 use crate::env::check_env_name;
 use crate::error::{ExpandError, MaterialiseError};
 use crate::names::{DiffId, TreeName};
-use crate::template::{Template, check_components};
+use crate::template::{Template, check_components, is_forbidden_char};
 
 /// The directories searched after a bundle's own `PATH` entries when the config's
 /// `system_path` is true.
@@ -73,11 +73,12 @@ pub struct Materialised {
 }
 
 /// An absolute, normalised path as text, or `None`: not UTF-8, not absolute, an empty,
-/// `.` or `..` component, or a control character.
+/// `.` or `..` component, a control character (as a [`Template`] refuses them) or a `:`
+/// (these paths are joined into `PATH`-like values with it).
 fn clean(path: &Path) -> Option<String> {
     let text = path.to_str()?;
     let rest = text.strip_prefix('/')?;
-    if text.chars().any(char::is_control) {
+    if text.chars().any(|c| is_forbidden_char(c) || c == ':') {
         return None;
     }
     check_components(rest).ok()?;
@@ -132,7 +133,7 @@ fn expand_each<'a>(
 /// each, or the writable clone); the environment (the base, the rules in order, then
 /// `PATH` extended by [`SYSTEM_PATH`] when `system_path` is set, then `DEVELOPER_DIR`
 /// when a developer directory is given, then the job's variables); the job's
-/// arguments; the entrypoints. A job variable that is reserved
+/// arguments; the entrypoints. The environment is bounded by [`MAX_ENV_BYTES`]. A job variable that is reserved
 /// ([`check_env_name`]) or locked by a bundle rule is refused.
 pub fn materialise(
     config: &BundleConfig,
@@ -191,6 +192,17 @@ pub fn materialise(
         let text = [(format!("env {name}"), value.as_str())];
         let value = expand_each(text, &dirs, developer_dir)?.concat();
         put(&mut env, name, value);
+    }
+
+    let len: usize = env
+        .iter()
+        .map(|(name, value)| name.len() + value.len() + 2)
+        .sum();
+    if len > MAX_ENV_BYTES {
+        return Err(MaterialiseError::EnvTooLarge {
+            len,
+            max: MAX_ENV_BYTES,
+        });
     }
 
     let texts = inputs

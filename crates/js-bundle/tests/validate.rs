@@ -729,3 +729,10 @@ fn json_errors_escape_control_characters_and_stay_bounded() {
     assert!(short.len() < MAX_JSON_ERROR_BYTES);
     assert!(!short.ends_with("..."));
 }
+
+/// The entrypoints must be a map: another JSON type is refused saying so.
+#[test]
+fn entrypoints_must_be_a_map() {
+    let message = json_error(edited(|v| set(v, "/entrypoints", json!([]))));
+    assert!(message.contains("a map of entrypoints"), "{message}");
+}

@@ -25,7 +25,9 @@ pub enum Segment {
 /// The rules, which are the same for a bundle config's values, a job's environment
 /// values and a job's arguments:
 ///
-/// - at most [`MAX_VALUE_BYTES`] bytes, no NUL and no line break;
+/// - at most [`MAX_VALUE_BYTES`] bytes, and no control character: not NUL, a line
+///   break, a tab, an escape or any other `Cc` character, nor U+2028, U+2029, the
+///   bidirectional controls U+202A to U+202E and U+2066 to U+2069;
 /// - the placeholders are `${tree:NAME}` (a valid tree name) and `${developer_dir}`;
 ///   any other `${` is refused;
 /// - what follows a placeholder is empty or starts with `/` (so a placeholder is a
@@ -40,6 +42,15 @@ pub enum Segment {
 pub struct Template {
     text: String,
     segments: Vec<Segment>,
+}
+
+/// Whether a character may not appear in a value or a path: every control character
+/// (Unicode `Cc`, which has NUL, tab, line breaks, escape, DEL and the C1 controls), the
+/// line and paragraph separators and the bidirectional controls, which make a path read
+/// as another or reach a terminal as an instruction.
+pub(crate) fn is_forbidden_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Checks the components of a path, the part after its leading `/`.
@@ -117,6 +128,9 @@ impl Template {
         }
         if text.contains(['\n', '\r']) {
             return Err(TemplateError::Newline);
+        }
+        if let Some(c) = text.chars().find(|&c| is_forbidden_char(c)) {
+            return Err(TemplateError::Control { code: c as u32 });
         }
         let segments = split(text)?;
         normalise(&segments)?;

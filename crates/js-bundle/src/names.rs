@@ -2,19 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A text that is not a valid name of its kind.
+/// A text that is not a valid tree name, diff id or dotted version.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid {what}: {text:?}")]
-pub struct ParseError {
+pub struct FieldParseError {
     /// What was being parsed.
     pub what: &'static str,
     /// The text, as given.
     pub text: String,
 }
 
-impl ParseError {
-    pub(crate) fn new(what: &'static str, text: &str) -> ParseError {
-        ParseError {
+impl FieldParseError {
+    pub(crate) fn new(what: &'static str, text: &str) -> FieldParseError {
+        FieldParseError {
             what,
             text: text.to_string(),
         }
@@ -32,14 +32,14 @@ impl TreeName {
     pub const MAX_LEN: usize = 32;
 
     /// Parses a tree name.
-    pub fn parse(text: &str) -> Result<TreeName, ParseError> {
+    pub fn parse(text: &str) -> Result<TreeName, FieldParseError> {
         let mut bytes = text.bytes();
         let first_ok = bytes.next().is_some_and(|b| b.is_ascii_lowercase());
         let rest_ok = bytes.all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'));
         if first_ok && rest_ok && text.len() <= TreeName::MAX_LEN {
             Ok(TreeName(text.to_string()))
         } else {
-            Err(ParseError::new("tree name", text))
+            Err(FieldParseError::new("tree name", text))
         }
     }
 
@@ -50,9 +50,9 @@ impl TreeName {
 }
 
 impl TryFrom<String> for TreeName {
-    type Error = ParseError;
+    type Error = FieldParseError;
 
-    fn try_from(text: String) -> Result<TreeName, ParseError> {
+    fn try_from(text: String) -> Result<TreeName, FieldParseError> {
         TreeName::parse(&text)
     }
 }
@@ -73,13 +73,13 @@ const DIFF_ID_PREFIX: &str = "sha256:";
 
 impl DiffId {
     /// Parses a diff id.
-    pub fn parse(text: &str) -> Result<DiffId, ParseError> {
+    pub fn parse(text: &str) -> Result<DiffId, FieldParseError> {
         let hex = text.strip_prefix(DIFF_ID_PREFIX).unwrap_or("");
         let hex_ok = hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         if hex_ok {
             Ok(DiffId(text.to_string()))
         } else {
-            Err(ParseError::new("diff id", text))
+            Err(FieldParseError::new("diff id", text))
         }
     }
 
@@ -95,9 +95,9 @@ impl DiffId {
 }
 
 impl TryFrom<String> for DiffId {
-    type Error = ParseError;
+    type Error = FieldParseError;
 
-    fn try_from(text: String) -> Result<DiffId, ParseError> {
+    fn try_from(text: String) -> Result<DiffId, FieldParseError> {
         DiffId::parse(&text)
     }
 }
