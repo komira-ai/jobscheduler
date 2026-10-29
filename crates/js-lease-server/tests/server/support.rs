@@ -493,3 +493,13 @@ pub async fn until(mut ready: impl FnMut() -> bool) {
     })
     .await;
 }
+
+/// Asserts that two scratch directories made with one name are two directories, so tests
+/// that run side by side and pick one name do not share files.
+#[test]
+fn scratch_directories_of_one_name_differ() {
+    let (first, second) = (Scratch::new("same"), Scratch::new("same"));
+    assert_ne!(first.dir, second.dir);
+    first.write("mine", "x", 0o600);
+    assert!(!second.path("mine").exists());
+}
