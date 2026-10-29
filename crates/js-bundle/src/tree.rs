@@ -384,7 +384,7 @@ impl Tree {
                             };
                         }
                         Some(Node::Link(next)) => {
-                            let _ = (&mut hops, next);
+                            let _ = (&mut hops, next, MAX_HOPS);
                             here.push(name);
                         }
                         None => {
