@@ -1,7 +1,9 @@
 //! That the agent sees the host its containers run on: the process the engine reports for a
 //! started container must be in the agent's own `/proc`.
 
-use js_agent::cli_runtime::{ProcLink, ProcRead, pid_in_proc, read_proc, read_proc_link};
+use js_agent::cli_runtime::{ProcLink, ProcRead};
+#[cfg(target_os = "linux")]
+use js_agent::cli_runtime::{pid_in_proc, read_proc, read_proc_link};
 use js_agent::lifecycle::ContainerRuntime;
 
 use super::super::scripted::Scripted;
