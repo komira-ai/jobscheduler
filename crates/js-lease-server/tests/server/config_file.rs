@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use clap::Parser;
-use js_elastic::ElasticProvider;
 use js_lease_server::{Cli, Config, Launch, Limits, NetworkPlan, run};
 use js_types::ExecMode;
 
