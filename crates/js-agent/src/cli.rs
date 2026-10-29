@@ -189,6 +189,18 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// The control group that holds every container the agent starts, as a directory of
+    /// the cgroup version 2 file system below `/sys/fs/cgroup` (such as
+    /// `/sys/fs/cgroup/jobscheduler.slice`). The operator makes and delegates it. The
+    /// agent starts each container in it (`--cgroup-parent`: the slice name for a
+    /// one-component path that ends in `.slice`, which the systemd cgroup driver takes,
+    /// and the path below `/sys/fs/cgroup` with a leading `/` otherwise, for the cgroupfs
+    /// driver) and reads the CPU and memory of the directory and of each container's
+    /// control group to send what each lease costs on the heartbeat. Without it containers
+    /// land where the engine puts them and the heartbeat carries no load. Needs
+    /// `--container-bin`.
+    #[arg(long, value_name = "PATH")]
+    pub actions_cgroup: Option<PathBuf>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe

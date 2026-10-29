@@ -58,6 +58,8 @@ struct State {
     blind: bool,
     /// The log tail `log_tail` answers for the container of a run.
     tails: BTreeMap<String, LogTail>,
+    /// The control group directory of the container of each run.
+    cgroups: BTreeMap<String, PathBuf>,
     /// How many times the scripted checks were told the host is idle.
     idles: u32,
 }
@@ -138,6 +140,15 @@ impl FakeRuntime {
     /// Every `create_and_start` takes `ms` on the test's clock.
     pub fn create_takes(&self, ms: u64) {
         self.state.borrow_mut().create_takes_ms = ms;
+    }
+
+    /// The runtime reports `dir` as the control group of the container of `run_id`.
+    pub fn set_cgroup(&self, run_id: &str, dir: &str) {
+        let dir = PathBuf::from(dir);
+        self.state
+            .borrow_mut()
+            .cgroups
+            .insert(run_id.to_owned(), dir);
     }
 
     /// The container of `run_id` exits with `code`.
@@ -329,6 +340,12 @@ impl ContainerRuntime for FakeRuntime {
         }
         self.state.borrow_mut().containers.remove(&id.0);
         Ok(())
+    }
+
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        let state = self.state.borrow();
+        let run = &state.containers.get(&id.0)?.run_id;
+        state.cgroups.get(run).cloned()
     }
 
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {

@@ -286,7 +286,8 @@ pub use args::{
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
+    CGROUP_ROOT, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings,
+    SettingsError,
 };
 pub use subid::{
     CLAIM_DIR, IdFiles, IdRange, JobUsers, Mapping, RANGE_LEN, RangeClaim, SubidError,
@@ -878,6 +879,24 @@ impl CliRuntime {
         matches!((theirs, own), (Some(theirs), Some(own)) if theirs != own)
     }
 
+    /// The control group directory of the started container `id`: the unified (`0::`) line of
+    /// its process's `/proc/<pid>/cgroup`, below [`CGROUP_ROOT`]. `None` without
+    /// `--actions-cgroup`, when the container is over, when its process or control group
+    /// cannot be read, and when the control group is not strictly below `--actions-cgroup`
+    /// (the engine ignored the parent, so the node's counter would not hold the lease).
+    fn cgroup_of(&self, id: &ContainerId) -> Option<PathBuf> {
+        let actions = Path::new(self.settings.actions_cgroup()?);
+        let text = self
+            .inspect(id, "{{.State.Pid}} {{.State.Status}}")
+            .ok()??;
+        let pid = parse_pid(&text)
+            .filter(|(pid, ended)| *pid != 0 && !ended)?
+            .0;
+        let table = (self.proc_read)(&format!("/proc/{pid}/cgroup"))?;
+        let dir = Path::new(CGROUP_ROOT).join(unified_path(&table)?);
+        (dir.starts_with(actions) && dir != actions).then_some(dir)
+    }
+
     /// Gives the run's scratch directory to the container's user, when the agent is root:
     /// to the host ids the user's ids are mapped onto, when the jobs are mapped.
     fn hand_over_scratch(&self, spec: &ContainerSpec) -> Result<(), CliError> {
@@ -1186,6 +1205,15 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
+/// The path of the unified (`0::<path>`) line of a `/proc/<pid>/cgroup`, without its leading
+/// `/`. `None` when there is no such line, or its path has an empty, `.` or `..` component
+/// (a process in a control group the agent's namespace cannot name).
+fn unified_path(table: &str) -> Option<&str> {
+    let path = table.lines().find_map(|line| line.strip_prefix("0::/"))?;
+    let plain = |part: &str| !matches!(part, "" | "." | "..");
+    path.split('/').all(plain).then_some(path)
+}
+
 /// The entries of the JSON `.Mounts` of an `inspect` (`null` is none). `None` when the
 /// text is not a list or `null`.
 fn mount_entries(text: &str) -> Option<Vec<Value>> {
@@ -1343,5 +1371,9 @@ impl ContainerRuntime for CliRuntime {
 
     fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
         self.read_logs(id).map_err(RuntimeError::from)
+    }
+
+    fn cgroup(&mut self, id: &ContainerId) -> Option<PathBuf> {
+        self.cgroup_of(id)
     }
 }
