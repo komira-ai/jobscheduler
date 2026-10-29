@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::cli_runtime::Settings;
-use js_agent::lifecycle::{Capacity, Config, MountRoots, ScratchRoot, StateRoot};
+use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
 use js_agent::usage::Outbox;
 use js_agent::{Plan, Platform, Rescue, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
