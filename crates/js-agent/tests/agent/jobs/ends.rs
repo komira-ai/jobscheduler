@@ -223,6 +223,24 @@ fn a_rescue_that_cannot_reach_the_engine_says_so() {
     assert!(!world.log().contains(&"stop r1".to_owned()));
 }
 
+/// Asserts that the rescue stops a container although the egress check would fail (the
+/// firewall is gone): the check belongs to starting jobs, not to ending them. It catches a
+/// rescue that leaves containers running because the network rules are missing.
+#[test]
+fn a_rescue_does_not_run_the_egress_check() {
+    let (world, _held, dir) = world_with_r1("jobs-ends-egress");
+    let machine = FakeMachine::of(&world);
+    let rescuing = rescue(&dir, &machine);
+    let worker = Worker::orphaned(machine.clock.clone(), running("r1"), rescuing);
+    world.fail("egress", 5);
+    let lines = worker.rescue();
+    assert!(
+        lines.iter().all(|line| !line.contains("no runtime")),
+        "{lines:?}"
+    );
+    assert_eq!(stops_in(&world), 1);
+}
+
 /// Asserts that a rescue stops at most its limit of containers and names the ones it did
 /// not try. It catches a rescue with no bound on its calls.
 #[test]

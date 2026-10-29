@@ -20,8 +20,10 @@
 //!   takes it back ([`Action::Undrain`]) instead of launching.
 //!   [`Offer::fit`](js_elastic::Offer::fit) judges every fit, so a request never lands on
 //!   an offer of another operating system or architecture.
-//! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer, when the
-//!   pool is in `Live` mode, its checks pass, its list of machines was read, it is not
+//! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer that has a
+//!   price above zero (an offer with no price, or a price of zero, is never launched: zero
+//!   would pass both spend caps; a request that fits only such an offer shows
+//!   [`Blocked::Unpriced`]), when the pool is in `Live` mode, its checks pass, its list of machines was read, it is not
 //!   cooling off, no launch of it is waiting for the time its provider named, and the caps
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
@@ -39,17 +41,26 @@
 //!   nothing: drained and marked for release, which the registry checks when the actions
 //!   run, then released when the mark is read back; [`State::silent_released`] names it for
 //!   the shell to log. A host that shows a lease, a run, a stream or a `Held` or `Reserved`
-//!   mark is never released. A registered host never heard from since its hello
-//!   ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books nothing is a
-//!   failed boot, released at `boot_timeout` after its launch with the boot-failure cooldown,
-//!   unless it was seen live and heard from on an earlier step ([`Record::seen_live`]): a
-//!   host whose agent restarted and said hello again is not a lost Welcome.
-//!   Hosts the scaler did not launch are never released. One the
-//!   registry no longer shows is released too, but only on a complete registry view
+//!   mark is never released, except that a silent host whose leases the registry gave up
+//!   ([`HostFacts::lease_given_up`]) is not kept by the runs and streams it lists, which a
+//!   job that can no longer report leaves behind. A registered host never heard from since
+//!   its hello ([`HostFacts::heard_since_hello`] false: its Welcome was lost) that books
+//!   nothing is a failed boot, released at `boot_timeout` after its launch with the
+//!   boot-failure cooldown, unless it was seen live and heard from on an earlier step
+//!   ([`Record::seen_live`]): a host whose agent restarted and said hello again is not a
+//!   lost Welcome. Hosts the scaler did not launch are never released. One the registry no
+//!   longer shows is released too, but only on a complete registry view
 //!   ([`Input::registry_complete`], the shell's duty to vouch for) with the machine missing
-//!   on two steps `unknown_hold` apart; otherwise it is held and counted. A booting
-//!   machine is given up on at `boot_timeout` on a complete view only. One the provider
-//!   says it no longer has ([`Input::not_found`]) is settled.
+//!   on complete views `unknown_hold` apart; otherwise it is held and counted. A booting
+//!   machine is given up on at `boot_timeout` on a complete view only, and only once its
+//!   host has been missing on complete views for a third of `boot_timeout`, so a restart
+//!   does not release a machine whose agent is about to say hello. The times a silent host
+//!   was first seen silent and a machine was first seen missing are in [`Records`] with the
+//!   time of the step that wrote them, so a scaler whose restarts are further apart than the save
+//!   interval (the lesser of a sixth of `unknown_hold` and five minutes) still reaches the
+//!   hold by the time it observed; a faster crash loop keeps the host held and counted. The
+//!   time it was down is not counted.
+//!   One the provider says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is
 //!   revoked and the machine released, every step, until a read by id says gone. There is
@@ -95,8 +106,8 @@ pub use input::{
     AcquireResult, HostFacts, HostState, Input, Mark, PoolInput, ReleaseResult, Waiting,
 };
 pub use record::{
-    Cooldown, CooldownReason, Phase, Record, Records, RecordsError, StoredExec, StoredOffer,
-    VERSION,
+    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, RecordsError, StoredExec,
+    StoredOffer, VERSION,
 };
 pub use settings::{Blocked, Health, LaunchMode, Settings};
 pub use state::{AcquirePlan, Action, PlanLine, State};
