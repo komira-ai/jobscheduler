@@ -326,7 +326,7 @@ impl UsageSetup {
         };
         let keys = self
             .keys
-            .unwrap_or_else(|| Arc::new(RegistryKeys(registry.clone())));
+            .unwrap_or_else(|| Arc::new(crate::usage::NoKeys));
         let usage = Usage::new(sink, keys, clock.clone(), limits);
         Ok(Some(Arc::new(usage)))
     }
