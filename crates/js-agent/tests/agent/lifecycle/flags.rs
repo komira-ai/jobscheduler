@@ -107,7 +107,14 @@ fn the_state_root_and_the_watched_directories_are_checked_at_start() {
     let (watched, plain, whole) = (s(&dir.path("watched")), s(&plain), s(&dir.path("")));
     let (data_s, inner) = (format!("data={}", data.display()), s(&data.join("inner")));
     let missing = s(&dir.path("missing"));
-    let containers: Vec<&str> = vec!["--container-bin", &exec, "--container-user", &user];
+    let containers: Vec<&str> = vec![
+        "--container-bin",
+        &exec,
+        "--container-user",
+        &user,
+        "--container-subuid",
+        "jobmap",
+    ];
     fn with<'a>(base: &[&'a str], extra: &[&'a str]) -> Vec<&'a str> {
         [base, extra].concat()
     }
@@ -329,6 +336,8 @@ fn container_jobs_are_refused_on_a_mac() {
         &exec,
         "--container-user",
         &user,
+        "--container-subuid",
+        "jobmap",
         "--state-root",
         &state,
         "--scratch-root",
