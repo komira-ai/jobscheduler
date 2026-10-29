@@ -522,8 +522,11 @@ impl Config {
     /// in place of binding `--listen`. The caller owns the socket: the server makes its
     /// copy non-blocking and closes only that copy when it stops, so a clone of the
     /// listener (`try_clone`) the caller kept still holds the port afterwards. The
-    /// caller must not accept on a clone while the server runs, since the copies share
-    /// one queue of connections. `Running::addr` is the address of `listener`.
+    /// server sets the socket non-blocking (a flag of the open file description, which
+    /// clones share), so a clone the caller kept is non-blocking too until it calls
+    /// `set_nonblocking(false)` on it, which it should do only once the server has
+    /// stopped. The caller must not accept on a clone while the server runs, since the
+    /// copies share one queue of connections. `Running::addr` is the address of `listener`.
     pub fn with_listener(mut self, listener: std::net::TcpListener) -> Self {
         self.bound = Some(listener);
         self

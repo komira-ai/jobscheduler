@@ -427,7 +427,13 @@ async fn a_server_on_a_listener_the_caller_bound_leaves_the_port_with_the_caller
     let h = Harness::over(scratch, config.with_listener(listener)).await;
     assert_eq!(h.addr(), addr);
     assert_eq!(h.call("GET", "/v1/leases", None).await.status, 200);
+    // The flag is shared with the clone: with nothing waiting, an accept returns at once.
+    assert_eq!(
+        kept.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     h.running.shutdown().await.unwrap();
+    kept.set_nonblocking(false).unwrap();
     let err = std::net::TcpListener::bind(addr).unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
     let client = std::net::TcpStream::connect(addr).unwrap();

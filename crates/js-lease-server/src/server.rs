@@ -55,11 +55,13 @@ async fn bind(
     flag: &'static str,
     bound: Option<std::net::TcpListener>,
 ) -> Result<(TcpListener, SocketAddr), StartupError> {
-    let opened = match bound {
-        Some(std) => std
-            .set_nonblocking(true)
-            .and_then(|()| TcpListener::from_std(std)),
-        None => TcpListener::bind(addr).await,
+    let (opened, flag) = match bound {
+        Some(std) => (
+            std.set_nonblocking(true)
+                .and_then(|()| TcpListener::from_std(std)),
+            "the listener given by the caller",
+        ),
+        None => (TcpListener::bind(addr).await, flag),
     };
     let bound = opened.and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
     bound.map_err(|err| StartupError::new(flag, err))

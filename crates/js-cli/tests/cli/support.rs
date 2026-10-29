@@ -480,10 +480,17 @@ impl Harness {
     /// rest of the process by the harness's clone of the server's listener, on which a
     /// thread, started only once the server's accept loop is gone, drops every
     /// connection. No other test's server can take the port and answer in its place.
+    ///
+    /// The server made its listener non-blocking, and a clone shares that flag (it lives on
+    /// the open file description), so the kept copy is non-blocking too. It is made
+    /// blocking again only here, after `shutdown()` has returned and the server's copy is
+    /// gone: earlier, it would make the server's own accept loop blocking. Left
+    /// non-blocking, the thread would spin on `WouldBlock` instead of waiting in accept.
     pub fn stop(&mut self) {
         let running = self.running.take().unwrap();
         self.rt.block_on(running.shutdown()).unwrap();
         let kept = self.kept.take().unwrap();
+        kept.set_nonblocking(false).unwrap();
         std::thread::spawn(move || {
             for stream in kept.incoming() {
                 drop(stream);
