@@ -88,6 +88,8 @@ async fn a_bundle_is_pulled_whole_and_each_sink_is_finished() {
     let client = fx.client();
     let repo = client.repository(fx.location(REPO)).expect("repository");
     let kind = Kind::bundle();
+    assert!(format!("{repo:?}").contains("Repository"));
+    assert!(format!("{client:?}").contains("Client"));
     let manifest = repo
         .fetch_manifest(&artifact.digest, &kind)
         .await
