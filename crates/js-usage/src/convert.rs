@@ -366,6 +366,9 @@ mod tests {
         node.minutes[1].minute = u32::from(u16::MAX);
         assert_eq!(LoadIn::try_from(&node).unwrap().minutes[1].minute, u16::MAX);
         let msg = MinuteTooLarge { minute: u32::MAX }.to_string();
-        assert!(msg.contains("4294967295") && msg.contains("65535"), "{msg}");
+        assert_eq!(
+            msg,
+            "lease minute 4294967295 does not fit a reading's minute index (at most 65535)"
+        );
     }
 }
