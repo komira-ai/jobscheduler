@@ -218,6 +218,7 @@ fn releasing(name: &str) -> Records {
             condemned: false,
             clean_lists: 0,
             last_clean: None,
+            seen_live: false,
         }],
         cooldowns: BTreeMap::new(),
     }

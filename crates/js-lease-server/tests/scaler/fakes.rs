@@ -453,6 +453,7 @@ pub fn record(name: &str, phase: Phase) -> Record {
         condemned: false,
         clean_lists: 0,
         last_clean: None,
+        seen_live: false,
     }
 }
 

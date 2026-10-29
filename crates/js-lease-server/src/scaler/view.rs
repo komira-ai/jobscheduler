@@ -78,6 +78,9 @@ pub(super) fn host_facts(
         busy: host.lease.is_some() | host.releasing,
         lease_given_up: (host.state != HostState::Live) & host.lease.is_none(),
         id: host.id,
+        // The registry does not say whether the host has beaten since its hello, so the
+        // scaler is told yes: the lost-Welcome rule stays off.
+        heard_since_hello: true,
     }
 }
 
