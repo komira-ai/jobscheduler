@@ -271,6 +271,36 @@ fn hardening_follows_the_settings() {
     assert_eq!(value("--tmpfs"), "/tmp:rw,noexec,nosuid,nodev,size=2g");
 }
 
+/// Asserts the golden tail of the hardening list with `--actions-cgroup`: `--cgroup-parent`
+/// comes last with the slice name for a slice and the path with a leading `/` otherwise, on
+/// both engines, and the list without the flag has none. It catches a configured control
+/// group that is checked and never reaches `create`, which leaves the containers outside
+/// the cgroup the node's usage is read from.
+#[test]
+fn the_actions_cgroup_becomes_the_cgroup_parent() {
+    let with = |dir: &str| {
+        Settings::new(Path::new(BIN), None, None)
+            .unwrap()
+            .with_actions_cgroup(Some(Path::new(dir)))
+            .unwrap()
+    };
+    let rows = [
+        ("/sys/fs/cgroup/jobscheduler.slice", "jobscheduler.slice"),
+        ("/sys/fs/cgroup/js/actions", "/js/actions"),
+    ];
+    for (dir, parent) in rows {
+        for engine in [Engine::Docker, Engine::Podman] {
+            let args = hardening_args(&with(dir), engine, PROFILE);
+            assert_eq!(
+                args[args.len() - 2..],
+                strings(&["--cgroup-parent", parent])
+            );
+        }
+    }
+    let plain = hardening_args(&settings(), Engine::Docker, PROFILE);
+    assert!(!plain.iter().any(|arg| arg == "--cgroup-parent"));
+}
+
 /// Asserts that the Docker flag names the exact indices and nothing else, that Podman
 /// is given one CDI device for each index, that no job without a GPU gets a GPU flag,
 /// and that no spelling of "all" is ever produced. It catches a job given every GPU of
@@ -482,4 +512,31 @@ fn labels_are_pairs_and_keys_are_checked() {
         assert_eq!(label_args(&bad), Err(ArgsError::LabelKey), "{key:?}");
     }
     assert!(label_args(&BTreeMap::new()).unwrap().is_empty());
+}
+
+/// Asserts that each `--container-add-host` entry reaches `create` as its own
+/// `--add-host <name>:<ip>` pair, for both engines, in the order given, and that none is
+/// passed when none is configured. It catches an entry that is checked and dropped, one
+/// merged into another argument, and a stray `--add-host` by default.
+#[test]
+fn add_hosts_reach_create() {
+    let none = hardening_args(&settings(), Engine::Podman, PROFILE);
+    assert!(!none.iter().any(|a| a == "--add-host"));
+    let entries = strings(&["store.example:192.0.2.10", "kbf.example:2001:db8::1"]);
+    let set = Settings::new(Path::new(BIN), Some("jobs"), None)
+        .unwrap()
+        .with_add_hosts(&entries)
+        .unwrap();
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&set, engine, PROFILE);
+        let pairs: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-host")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            pairs,
+            ["store.example:192.0.2.10", "kbf.example:2001:db8::1"]
+        );
+    }
 }

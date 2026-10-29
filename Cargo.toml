@@ -21,6 +21,8 @@ base64 = "0.23.1"
 # macOS only (js-vmm): Virtualization.framework and the block and dispatch types its
 # completion handlers and queues use.
 block2 = "0.6.2"
+# The registry client (js-oci): response bodies are chunks of `Bytes`.
+bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # macOS only (js-mac-session): CFData for the caller's audit token.
 core-foundation = "0.10.1"
@@ -29,6 +31,8 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2.17"
 hex = "0.4.3"
+# Bodies of the registry client (js-oci): the empty request body and the frame reader.
+http-body-util = { version = "0.1.5", default-features = false }
 # The lease server serves its listener with hyper directly (axum's own `serve` has no
 # header-read timeout and cannot bound the connections it holds).
 hyper = { version = "1.12.0", default-features = false }

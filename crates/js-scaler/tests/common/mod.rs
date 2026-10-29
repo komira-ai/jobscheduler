@@ -103,15 +103,22 @@ pub fn host(name: &str, pool: &str) -> HostFacts {
         id: HostId::new(name).unwrap(),
         pool: pool.to_owned(),
         state: HostState::Live,
-        shape: Offer {
+        shape: Some(Offer {
             price_cents_per_hour: None,
             ..offer("a10", 0)
-        },
+        }),
         mark: None,
         busy: false,
         lease_given_up: false,
         heard_since_hello: true,
     }
+}
+
+/// The shape a fixture host announced, to change it.
+pub fn shape(host: &mut HostFacts) -> &mut Offer {
+    host.shape
+        .as_mut()
+        .expect("the fixture hosts announce a shape")
 }
 
 /// An input with one pool and nothing waiting.
@@ -198,6 +205,12 @@ pub fn kinds(actions: &[Action]) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+/// Whether every action is a `Save`, none else: the step did nothing but write the records,
+/// as a step does while a silent or missing time is pending and a while has passed.
+pub fn only_saves(actions: &[Action]) -> bool {
+    kinds(actions).iter().all(|each| each == "Save")
 }
 
 /// How many actions are of `kind`.
