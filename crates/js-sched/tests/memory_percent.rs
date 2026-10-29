@@ -171,3 +171,27 @@ fn a_percent_outside_one_to_a_hundred_is_refused_naming_the_key() {
     assert_eq!(MemoryPercent::new(1).map(MemoryPercent::get), Ok(1));
     assert_eq!(MemoryPercent::new(100).map(MemoryPercent::get), Ok(100));
 }
+
+/// Catches: the plausibility of a reading judged against the cut capacity. At 20% the cut
+/// is about 50 GiB, four times it about 201 GiB, yet a working set of the whole 251 GiB
+/// is one the machine can have: it is taken. Four times the reported memory is still the
+/// bound (exactly that is taken, a byte more is dropped).
+#[test]
+fn a_reading_is_judged_plausible_against_the_reported_memory() {
+    let mut r = rig(20);
+    let accepted = r.s.load_counters().readings_accepted;
+
+    r.window("a", 1_000, 251 * GIB, &[]);
+    let counters = r.s.load_counters();
+    assert_eq!(counters.readings_dropped, 0, "the whole machine in use");
+    assert_eq!(counters.readings_accepted, accepted + 1);
+
+    r.window("a", 1_000, 4 * 251 * GIB, &[]);
+    assert_eq!(
+        r.s.load_counters().readings_dropped,
+        0,
+        "exactly four times"
+    );
+    r.window("a", 1_000, 4 * 251 * GIB + 1, &[]);
+    assert_eq!(r.s.load_counters().readings_dropped, 1, "a byte more");
+}

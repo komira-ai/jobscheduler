@@ -14,6 +14,10 @@ use crate::load::Load;
 #[derive(Clone, Debug)]
 pub(crate) struct Worker {
     pub(crate) capacity: Resources,
+    /// The memory the worker reported, before the cut to the share admission books
+    /// ([`crate::MemoryPercent`]). Only the plausibility of a reading is judged against it:
+    /// a working set is measured on the whole machine.
+    pub(crate) raw_memory_bytes: u64,
     pub(crate) caps: NodeCaps,
     pub(crate) booked: Resources,
     /// How many leases it holds.
