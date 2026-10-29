@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use js_agent::{FileReader, Machine, Platform, RuntimeBuild, System};
+use js_agent::{Machine, Platform, RuntimeBuild, System};
 
 use crate::support::Scratch;
 
@@ -43,6 +43,8 @@ fn the_system_usage_clock_shares_the_jobs_zero() {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_system_cgroup_files_are_this_machines() {
+    use js_agent::FileReader;
+
     assert!(
         System::new()
             .cgroup_files()
