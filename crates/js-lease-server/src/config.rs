@@ -77,7 +77,9 @@ pub struct Cli {
     #[arg(long)]
     pub agent_pool_config: Option<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
-    /// `--agent-hello-interval`. Needs `--agent-pool-config`.
+    /// `--agent-hello-interval`. Needs `--agent-pool-config`. The scaler's wait to hear from
+    /// the hosts after a restart assumes the default burst and interval; a smaller burst or
+    /// a longer interval is bounded by its ten minute quiet period only.
     #[arg(
         long,
         default_value_t = js_agent_wire::DEFAULT_HELLO_BURST,
@@ -85,7 +87,7 @@ pub struct Cli {
     )]
     pub agent_hello_burst: u32,
     /// How often a join token that spent its burst is allowed one more hello. Needs
-    /// `--agent-pool-config`.
+    /// `--agent-pool-config`. See `--agent-hello-burst` for what the scaler assumes of it.
     #[arg(
         long,
         default_value = "1s",

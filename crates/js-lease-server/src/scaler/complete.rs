@@ -60,6 +60,16 @@ const fn hello_drain_ms(herd: u64, burst: u32, interval: Duration) -> u64 {
 /// connection and TLS handshake may take 25 s; and a fleet of 200 agents on one
 /// credential restarting together is admitted at the hello limiter's default 60 at once
 /// and then one a second, so the last needs 140 s more. The sum is 300 s, 5 minutes.
+///
+/// The floor is built from the defaults of the hello limiter (`--agent-hello-burst`,
+/// `--agent-hello-interval`) and of the grace (`grace` of the pool file), and is not
+/// derived from the server's own settings. An operator who sets a smaller burst or a longer
+/// interval, or a grace above the default, is not covered by it: for such a server
+/// [`REGISTRY_QUIET`] is the only bound that holds, 200 agents at a burst of 1 and an
+/// interval of 5 s need 995 s to be admitted, and the view can complete before the last of
+/// them has said hello. The effect is bounded: the step then judges a host it has not heard
+/// from by the boot timeout, and a machine that is still launching is released only after
+/// that.
 pub const REGISTRY_FLOOR: Duration = Duration::from_millis(
     RETRY_AFTER_CAP.as_millis() as u64
         + DEFAULT_GRACE_MS
@@ -165,9 +175,12 @@ mod tests {
     use js_lease::{Clock, ManualClock, Timestamp};
     use js_registry::Credential;
 
-    /// The floor covers each wait before a hello it is made of, for the limits the flags
-    /// default to; a change to one of them breaks this and not the settle. Checked at
-    /// compile time.
+    /// Only the second assert is an inequality that can fail: the floor is below the quiet
+    /// period. The first holds whatever the constants are, because `REGISTRY_FLOOR` is
+    /// defined as that very sum, so it pins nothing; it is kept as a statement of what the
+    /// floor is made of. The pins that catch a limiter default or a constant that moved are
+    /// the equalities of `the_floor_is_built_from_the_limiters_defaults`: the drain of the
+    /// herd is 140 s, and the floor is 300 s. Checked at compile time.
     const _: () = {
         let drain = (HERD - DEFAULT_HELLO_BURST as u64) * DEFAULT_HELLO_INTERVAL.as_millis() as u64;
         assert!(
