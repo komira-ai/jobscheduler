@@ -291,18 +291,20 @@ mod tests {
 
     /// Catches: a curve that starts at 0 cores when the first clean value comes after the
     /// dilation reach: minutes 0 to 2 are recorded by no clean run (a pressured run reached
-    /// them), so the start is the first clean value, not the default.
+    /// them), so the start is the first clean value, not the default. Three missing minutes
+    /// of 15 is the most a run may lack (a fifth) and still be admitted.
     #[test]
     fn a_start_no_clean_run_recorded_takes_the_first_clean_value() {
         let mut ring = Ring::new();
         for _ in 0..3 {
-            let mut s = series(&[(0, 0), (0, 0), (0, 0), (400, 4), (400, 4), (400, 4)]);
+            let mut s = series(&[(400, 4); 15]);
             s.minutes.retain(|m| m.minute >= 3);
             ring.push(&s);
         }
-        ring.push(&pressured(&[(900, 9); 6]));
+        ring.push(&pressured(&[(900, 9); 15]));
         let f = fit(&ring).unwrap();
-        assert_eq!(cores(&f), vec![400; 6]);
+        assert_eq!(f.points.len(), 15);
+        assert_eq!(cores(&f), vec![400; 15]);
     }
 
     /// Catches: the life being a mean or a floor P90, and a life under a minute.
