@@ -392,10 +392,10 @@ impl Engine {
     /// queued operations it did not enqueue.
     fn runnable_elsewhere(&self, operation: OperationId) -> bool {
         self.sched.request(operation).is_some_and(|request| {
-            self.remote.iter().any(|(caps, capacity)| {
-                let capacity = self.sched.memory_percent().of_capacity(*capacity);
-                request.runnable_on(caps, &capacity)
-            })
+            let percent = self.sched.memory_percent();
+            self.remote
+                .iter()
+                .any(|(caps, capacity)| percent.runnable_on(request, caps, capacity))
         })
     }
 

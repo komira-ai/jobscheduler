@@ -1,6 +1,9 @@
 //! The share of a worker's memory capacity that admission may book.
 
+use js_caps::NodeCaps;
 use js_types::sched::Resources;
+
+use crate::Request;
 
 /// The name of the key, as errors and logs spell it.
 pub const MEMORY_SCHEDULABLE_PERCENT: &str = "memory_schedulable_percent";
@@ -68,6 +71,16 @@ impl MemoryPercent {
             memory_bytes: self.of_bytes(capacity.memory_bytes),
             ..capacity
         }
+    }
+}
+
+impl MemoryPercent {
+    /// Whether a worker with `caps` and the reported `capacity` could run `request` under
+    /// this share: [`Request::runnable_on`] against the cut capacity. The one test that
+    /// every look at another frontend's daemons uses, so none judges the raw figure.
+    #[must_use]
+    pub fn runnable_on(self, request: &Request, caps: &NodeCaps, capacity: &Resources) -> bool {
+        request.runnable_on(caps, &self.of_capacity(*capacity))
     }
 }
 
