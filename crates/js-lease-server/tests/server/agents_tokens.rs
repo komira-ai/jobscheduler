@@ -6,7 +6,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
-use clap::Parser;
 use js_lease_server::{Cli, run};
 use serde_json::json;
 
@@ -88,9 +87,15 @@ fn agent_flags_come_together() {
     assert!(config(only_pool).is_ok());
 
     let burst = with_flag(base_args(&scratch), "--agent-hello-burst", "5");
-    assert!(Cli::try_parse_from(burst).is_err());
+    assert_eq!(
+        config(burst).err().unwrap().to_string(),
+        "--agent-hello-burst: requires --agent-pool-config"
+    );
     let interval = with_flag(base_args(&scratch), "--agent-hello-interval", "5s");
-    assert!(Cli::try_parse_from(interval).is_err());
+    assert_eq!(
+        config(interval).err().unwrap().to_string(),
+        "--agent-hello-interval: requires --agent-pool-config"
+    );
     let zero = with_flag(full.clone(), "--agent-hello-burst", "0");
     assert!(Cli::try_parse_from(zero).is_err());
     let limited = with_flag(full, "--agent-hello-burst", "5");
