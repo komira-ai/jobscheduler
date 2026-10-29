@@ -27,9 +27,21 @@ pub fn edited(edit: impl FnOnce(&mut Value)) -> Result<BundleConfig, ConfigError
     BundleConfig::parse(&serde_json::to_vec(&value).unwrap())
 }
 
-/// Replaces the value at a JSON pointer.
+/// Replaces the value at a JSON pointer, or adds the key when the parent is an object.
 pub fn set(value: &mut Value, pointer: &str, new: Value) {
-    *value.pointer_mut(pointer).unwrap() = new;
+    let (parent, key) = pointer.rsplit_once('/').unwrap();
+    let target = if parent.is_empty() {
+        value
+    } else {
+        value.pointer_mut(parent).unwrap()
+    };
+    match target {
+        Value::Object(map) => {
+            map.insert(key.to_string(), new);
+        }
+        Value::Array(items) => items[key.parse::<usize>().unwrap()] = new,
+        other => panic!("cannot set {key} in {other}"),
+    }
 }
 
 pub fn hex(c: char) -> String {
