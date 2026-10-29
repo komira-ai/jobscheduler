@@ -509,6 +509,12 @@ pub fn canned(reply: &str) -> String {
                 seen.push(byte[0]);
             }
             let _ = stream.write_all(reply.as_bytes());
+            // End the reply with a FIN, then read what the client still sends (a request
+            // body) until it hangs up: closing with that unread would reset the
+            // connection, which macOS reports to the client as EINVAL on its next call.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let mut rest = [0u8; 1024];
+            while stream.read(&mut rest).unwrap_or(0) > 0 {}
         }
     });
     format!("http://{addr}")

@@ -23,7 +23,7 @@
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused, but for the usage flags below (`--usage-db`, `--usage-off`, `--profile-store-bytes`), which the file has no keys for and which apply on top of it. The one secret,
+//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
 //! the bearer token, is read from a file that only its owner can use.
 //!
 //! | flag | meaning |
@@ -58,7 +58,7 @@
 //! # The configuration file
 //!
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
-//! above, and no flag but the usage flags may be given beside it: the first one on the command line is refused,
+//! above, and no flag may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
 //! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
@@ -82,6 +82,8 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
+//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //!
 //! [[pool]]
 //! name     = "gpu-static"
@@ -128,7 +130,7 @@
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
