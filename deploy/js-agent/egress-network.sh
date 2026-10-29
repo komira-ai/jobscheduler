@@ -47,6 +47,7 @@ NETWORK=""
 SUBNET=""
 IFACE="jsbr0"
 TMPFILES=()
+MKTMP=""
 ALLOW=()
 APPLY=0
 
@@ -328,12 +329,12 @@ network_state() {
 	fi
 }
 
-# mktmp_for PATH: a temporary file next to PATH, removed when the script ends.
+# mktmp_for PATH: makes a temporary file next to PATH and sets MKTMP to its name. It is
+# called in the parent shell (never inside $(...), a subshell whose TMPFILES would be lost)
+# so the EXIT trap removes the file.
 mktmp_for() {
-	local tmp
-	tmp=$(mktemp "$1.XXXXXX")
-	TMPFILES+=("$tmp")
-	printf '%s' "$tmp"
+	MKTMP=$(mktemp "$1.XXXXXX")
+	TMPFILES+=("$MKTMP")
 }
 
 # install_file TMP PATH MODE: moves TMP to PATH when it differs, and prints whether it did.
@@ -386,10 +387,12 @@ apply() {
 	*) die "network ${NETWORK} exists and ${state}; this script never changes an existing network" ;;
 	esac
 	mkdir -p "$(dirname "$RULES_FILE")"
-	rules_tmp=$(mktmp_for "$RULES_FILE")
+	mktmp_for "$RULES_FILE"
+	rules_tmp=$MKTMP
 	ruleset >"$rules_tmp"
 	"$NFT" -c -f "$rules_tmp" || die "nft rejected the ruleset; nothing was changed"
-	unit_tmp=$(mktmp_for "$UNIT_FILE")
+	mktmp_for "$UNIT_FILE"
+	unit_tmp=$MKTMP
 	unit >"$unit_tmp"
 
 	if [[ $state == absent ]]; then

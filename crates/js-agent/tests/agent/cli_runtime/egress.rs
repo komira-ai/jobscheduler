@@ -719,3 +719,26 @@ fn a_named_network_disables_ipv6_in_the_container() {
     let id = rt.create_and_start(&spec("r1")).unwrap();
     assert!(!plain.create_of(&id.0).iter().any(|a| a == "--sysctl"));
 }
+
+/// Asserts that a host-isolation start is not subject to the egress check: the call log
+/// holds no `network inspect` and no `nft` for it (it has no container network; the
+/// runtime refuses it on its own). It catches the check moved above the isolation test,
+/// where a host job would depend on a firewall it does not use.
+#[test]
+fn a_host_job_skips_the_egress_check() {
+    let dir = Scratch::new("cli-egress-host");
+    let world = world();
+    let (mut life, _) = Lifecycle::adopt(
+        config_in(&dir, true),
+        Box::new(runtime(&world)),
+        Box::new(NoChecks),
+        Box::new(ManualClock::default()),
+    )
+    .unwrap();
+    let mut host = job("h1");
+    host.isolation = js_agent_wire::Isolation::Host;
+    life.apply(&reply(vec![Command::Start(Box::new(host))]));
+    assert!(sequence(&world).iter().all(|sub| sub == "create"), "{:?}", sequence(&world));
+    assert!(world.calls_of("network").is_empty());
+    assert!(world.calls_of("-j").is_empty());
+}
