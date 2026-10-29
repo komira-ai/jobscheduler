@@ -254,6 +254,7 @@ impl OldJobSpec {
             heartbeat_seq: self.heartbeat_seq,
             valid_for_ms: self.valid_for_ms,
             bundle: None,
+            native: None,
         };
         Command::Start(Box::new(spec)).validate()
     }

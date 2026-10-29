@@ -2,7 +2,7 @@
 
 use js_agent::lifecycle::ContainerRuntime;
 
-use super::super::scripted::{Bind, Change};
+use super::super::scripted::{Bind, Change, Volume};
 use super::super::{docker, mount, open, spec};
 use super::{start, strings};
 
@@ -22,16 +22,12 @@ fn the_mounts_are_read_back_before_the_start() {
     let cases: Vec<(&str, Change)> = vec![
         (
             "source swapped",
-            Box::new(swap(1, |b| b.0 = "/etc".to_owned())),
+            Box::new(swap(0, |b| b.0 = "/etc".to_owned())),
         ),
-        (
-            "scratch moved",
-            Box::new(swap(0, |b| b.0 = "/home/x".to_owned())),
-        ),
-        ("made writable", Box::new(swap(1, |b| b.2 = true))),
+        ("made writable", Box::new(swap(0, |b| b.2 = true))),
         (
             "other target",
-            Box::new(swap(1, |b| b.1 = "/mnt/data/x".to_owned())),
+            Box::new(swap(0, |b| b.1 = "/mnt/data/x".to_owned())),
         ),
         (
             "extra bind",
@@ -99,6 +95,9 @@ fn the_mount_read_back_and_its_failures() {
         "[{\"Type\":\"bind\",\"Source\":\"/a\",\"Destination\":\"/b\",\"RW\":\"yes\"}]",
         "[{\"Type\":\"bind\",\"Source\":\"/a\",\"RW\":true,\"Destination\":5}]",
         "[{\"Type\":1,\"Source\":\"/a\",\"Destination\":\"/b\",\"RW\":true}]",
+        "[{\"Type\":\"volume\"}]",
+        "[{\"Type\":\"volume\",\"Name\":\"v\",\"Destination\":\"/scratch\",\"Driver\":\"local\"}]",
+        "[{\"Type\":\"volume\",\"Name\":5,\"Destination\":\"/scratch\",\"Driver\":\"local\",\"RW\":true}]",
     ] {
         let world = docker();
         let mut rt = open(&world);
@@ -135,7 +134,11 @@ fn the_mount_read_back_and_its_failures() {
 
     let world = docker();
     let mut rt = open(&world);
-    world.tamper(|binds| binds[0].0 = "/etc".to_owned());
+    world.tamper_volume(|volume| {
+        volume
+            .options
+            .insert("device".to_owned(), "/etc".to_owned());
+    });
     world.fail("rm", 1);
     let said = rt.create_and_start(&spec("r5")).unwrap_err();
     assert!(
@@ -145,6 +148,7 @@ fn the_mount_read_back_and_its_failures() {
         said.0
     );
     assert_eq!(world.ids().len(), 1, "the leak is reported, not hidden");
+    assert_eq!(world.volumes().len(), 1, "and so is its volume");
 }
 
 /// Asserts that the read-back compares the binds as a set: an engine that lists them in
@@ -163,4 +167,139 @@ fn the_order_of_the_binds_does_not_matter() {
         rt.create_and_start(&job).unwrap();
         assert_eq!(world.calls_of("start").len(), 1);
     }
+}
+
+/// Asserts that the scratch directory is read back as the volume the agent asked for: the
+/// one mount at `/scratch`, of the local driver, writable, whose options (read with
+/// `volume inspect`) are exactly `type=none`, the scratch directory as `device` and
+/// `o=bind,nosuid,nodev`. A volume that binds without `nosuid` or `nodev`, binds another
+/// directory, adds an option, is of another driver, is read-only or is at another
+/// destination leaves the container removed, with its volume, and `start` not called.
+/// It catches a scratch directory that is writable by a set-uid file or a device node
+/// because the engine did not apply what was asked, and one that is not the directory
+/// the agent resolved.
+#[test]
+fn the_scratch_volume_is_read_back_before_the_start() {
+    type Case = (&'static str, fn(&mut Volume));
+    let cases: [Case; 8] = [
+        ("no nosuid", |v| {
+            v.options.insert("o".to_owned(), "bind,nodev".to_owned());
+        }),
+        ("no nodev", |v| {
+            v.options.insert("o".to_owned(), "bind,nosuid".to_owned());
+        }),
+        ("device moved", |v| {
+            v.options.insert("device".to_owned(), "/etc".to_owned());
+        }),
+        ("other type", |v| {
+            v.options.insert("type".to_owned(), "nfs".to_owned());
+        }),
+        ("extra option", |v| {
+            v.options.insert("size".to_owned(), "1g".to_owned());
+        }),
+        ("other driver", |v| v.driver = "other".to_owned()),
+        ("read-only", |v| v.rw = false),
+        ("other destination", |v| v.dst = "/other".to_owned()),
+    ];
+    for (name, change) in cases {
+        let world = docker();
+        let mut rt = open(&world);
+        world.tamper_volume(change);
+        let said = rt.create_and_start(&spec("r1")).unwrap_err();
+        assert_eq!(
+            said.0, "the mounts of the container are not the ones the agent resolved",
+            "{name}"
+        );
+        assert!(world.ids().is_empty(), "{name}: the container was removed");
+        assert!(world.volumes().is_empty(), "{name}: and its volume");
+        assert!(world.calls_of("start").is_empty(), "{name}");
+        assert_eq!(world.calls_of("rm").len(), 1, "{name}");
+    }
+}
+
+/// Asserts the call that reads the options of the scratch volume back (`volume inspect`,
+/// the options as JSON, the volume's name after `--`, made after the mounts are read and
+/// before `start`), and its failures: a call that fails, and text that is not JSON, are
+/// errors that remove the container; options that are valid JSON and not the asked ones
+/// are a mismatch. It catches a read-back that passes when it could not look.
+#[test]
+fn the_scratch_volume_read_back_and_its_failures() {
+    let world = docker();
+    let mut rt = open(&world);
+    let id = start(&mut rt, &world, "r1");
+    let volume = world.volume_of(&id.0).unwrap();
+    assert_eq!(volume.driver, "local");
+    assert_eq!(volume.dst, "/scratch");
+    let name = world.volumes().pop().unwrap();
+    assert_eq!(
+        world.calls_of("volume"),
+        [strings(&[
+            "volume",
+            "inspect",
+            "--format",
+            "{{json .Options}}",
+            "--",
+            &name
+        ])]
+    );
+
+    for (printed, expected) in [
+        ("garbage", "volume: unreadable output"),
+        (
+            "null",
+            "the mounts of the container are not the ones the agent resolved",
+        ),
+        (
+            "{\"device\":5}",
+            "the mounts of the container are not the ones the agent resolved",
+        ),
+    ] {
+        let world = docker();
+        let mut rt = open(&world);
+        world.say("volume", printed);
+        let said = rt.create_and_start(&spec("r2")).unwrap_err();
+        assert_eq!(said.0, expected, "{printed:?}");
+        assert!(world.ids().is_empty(), "{printed:?}");
+        assert!(world.calls_of("start").is_empty(), "{printed:?}");
+    }
+
+    let world = docker();
+    let mut rt = open(&world);
+    world.fail("volume", 1);
+    let said = rt.create_and_start(&spec("r3")).unwrap_err();
+    assert_eq!(said.0, "volume: /bin/sh: exit status: 1");
+    assert!(world.ids().is_empty());
+}
+
+/// Asserts that the scratch volume is removed with the container: the volume exists
+/// while the container does, is the one the agent asked for, and is gone after `remove`,
+/// which is `rm --force --volumes` (the volume is anonymous, so no `volume rm` is
+/// needed and none is made). It catches a volume left behind for every job.
+#[test]
+fn the_scratch_volume_goes_with_the_container() {
+    let world = docker();
+    let mut rt = open(&world);
+    let id = start(&mut rt, &world, "r1");
+    assert_eq!(world.volumes().len(), 1);
+    let volume = world.volume_of(&id.0).unwrap();
+    let options: Vec<(&str, &str)> = volume
+        .options
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        options,
+        [
+            ("device", "/work/scratch/r1"),
+            ("o", "bind,nosuid,nodev"),
+            ("type", "none")
+        ]
+    );
+    rt.remove(&id).unwrap();
+    assert!(world.volumes().is_empty());
+    assert_eq!(
+        world.calls_of("rm"),
+        [strings(&["rm", "--force", "--volumes", "--", &id.0])]
+    );
+    assert!(world.calls_of("volume").len() == 1, "no `volume rm`");
 }

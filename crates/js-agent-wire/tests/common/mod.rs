@@ -76,6 +76,7 @@ pub fn job() -> JobSpec {
         heartbeat_seq: 7,
         valid_for_ms: 10_000,
         bundle: None,
+        native: None,
     }
 }
 

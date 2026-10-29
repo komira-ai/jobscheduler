@@ -49,6 +49,7 @@ pub fn job(run: &str) -> JobSpec {
         heartbeat_seq: 0,
         valid_for_ms: 0,
         bundle: None,
+        native: None,
     }
 }
 
