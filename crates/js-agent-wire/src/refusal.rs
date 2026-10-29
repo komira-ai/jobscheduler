@@ -21,6 +21,15 @@ pub const INVALID_IMAGE: &str = "invalid-image";
 /// `field` is `image`. Agents run with the pull policy `missing`, so a tag could change
 /// under a fleet; a name with a tag as well as a digest is accepted.
 pub const IMAGE_DIGEST_REQUIRED: &str = "image-digest-required";
+/// A native job whose `program` is empty, relative, climbs with `..`, or holds a
+/// character a path may not.
+pub const INVALID_PROGRAM: &str = "invalid-program";
+/// A native job whose environment has a bad name or value, too many entries, or a
+/// name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
+pub const INVALID_ENV: &str = "invalid-env";
+/// A start with a `native` body sent to an agent that cannot run native jobs. An agent
+/// that predates the field reads such a start as `invalid-image` instead.
+pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.

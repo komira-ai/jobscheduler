@@ -142,6 +142,8 @@ pub struct Rig {
     pub learned: Vec<LeaseId>,
     /// The floors the next poll of `lowered` hands to the core.
     pub to_lower: Vec<Lowered>,
+    /// How many times `lowered` was called.
+    pub lowered_asked: usize,
     /// The prediction the rig answers `predicted` with for each action it has one for.
     pub predictions: BTreeMap<WorkKey, Prediction>,
     /// The operations `predicted` was asked about, in order.
@@ -285,6 +287,7 @@ impl Adapter for Rig {
     }
 
     fn lowered(&mut self) -> Vec<Lowered> {
+        self.lowered_asked += 1;
         std::mem::take(&mut self.to_lower)
     }
 
