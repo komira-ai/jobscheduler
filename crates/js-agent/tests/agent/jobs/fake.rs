@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::Duration;
 
+use js_agent::cli_runtime::Mapping;
 use js_agent::integrity::{FakeHost, HostView, Mount, Process, Watched};
 use js_agent::lifecycle::{
     Clock, ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, RuntimeError, Status, label,
@@ -424,10 +425,15 @@ impl Machine for FakeMachine {
         match self.build {
             Build::RuntimeFails => Err("the engine does not answer".to_owned()),
             Build::Panics => panic!("the runtime panics while it is made"),
-            Build::Fine | Build::HostNotSeen => Ok((
-                Box::new(self.world.runtime(build.host_id)),
-                vec!["the fake engine is ready".to_owned()],
-            )),
+            Build::Fine | Build::HostNotSeen => {
+                // What opening the real runtime does for jobs mapped onto a range: the
+                // checks take the range from the settings (the fake engine maps nothing).
+                build.settings.resolve(Mapping::new(231_072, 462_144));
+                Ok((
+                    Box::new(self.world.runtime(build.host_id)),
+                    vec!["the fake engine is ready".to_owned()],
+                ))
+            }
         }
     }
 

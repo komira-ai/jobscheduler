@@ -1,7 +1,8 @@
 //! Release, list, the sweep and the choice of where to launch.
 
 use js_elastic::{
-    AcquireId, Claim, Demand, ElasticProvider, Held, HostStatus, Offer, ProviderError, Released,
+    AcquireId, Acquired, Claim, Demand, ElasticProvider, Held, HostRef, HostStatus, Offer,
+    ProviderError, Released,
 };
 use js_provider_lambdalabs::{
     ACQUIRE_TAG, ApiError, Architecture, Call, ErrorCode, SCHEDULER_TAG, TerminateEffect,
@@ -60,6 +61,49 @@ fn a_404_is_trusted_only_after_a_list_has_worked_once() {
     assert_eq!(rig.provider.release(&host("fake0009")), Released::Gone);
     assert_eq!(rig.provider.release(&host("fake0009")), Released::Gone);
     assert_eq!(rig.fake.count(Call::ListInstances), lists + 2);
+}
+
+/// Asserts `is_gone`: an instance that exists, in any state, is not gone; one the API
+/// answers with its documented 404 is gone once a list has worked; a failed read, a 404
+/// before a list has worked and a reference that is no id of the API are not. It catches
+/// a read that takes "no answer" or "terminated" for "gone", which would settle a machine
+/// that may still cost money.
+#[test]
+fn is_gone_is_only_a_trusted_404_on_a_read_by_id() {
+    let rig = launched();
+    assert!(!rig.provider.is_gone(&host("fake0001")));
+    rig.fake.set_status(&id("fake0001"), HostStatus::Terminated);
+    assert!(!rig.provider.is_gone(&host("fake0001")));
+    rig.fake
+        .fail_next(Call::GetInstance, ApiError::Transport("down".to_owned()));
+    assert!(!rig.provider.is_gone(&host("fake0001")));
+    assert!(!rig.provider.is_gone(&HostRef("not an id".to_owned())));
+    rig.fake
+        .fail_next(Call::ListInstances, ApiError::Transport("down".to_owned()));
+    assert!(!rig.provider.is_gone(&host("fake0009")));
+    assert!(rig.provider.is_gone(&host("fake0009")));
+}
+
+/// Asserts `unresolved`: nothing before any launch; the acquire id of a launch whose
+/// answer was lost, until the retry finds the instance; the ids of two such launches.
+/// It catches a gate that is not reported, which would let the scheduler forget a launch
+/// whose machine may exist.
+#[test]
+fn unresolved_names_the_launches_that_got_no_answer() {
+    let rig = rig(live(5));
+    assert!(rig.provider.unresolved().is_empty());
+    rig.fake
+        .fail_next(Call::Launch, ApiError::Transport("refused".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("a")), Acquired::Unknown);
+    assert_eq!(rig.provider.unresolved(), [AcquireId::new("a").unwrap()]);
+    rig.clock.advance(INTERVAL);
+    rig.fake
+        .fail_next(Call::Launch, ApiError::Transport("refused".to_owned()));
+    assert_eq!(rig.provider.acquire(&ask("b")), Acquired::Unknown);
+    assert_eq!(
+        rig.provider.unresolved(),
+        [AcquireId::new("a").unwrap(), AcquireId::new("b").unwrap()]
+    );
 }
 
 #[test]

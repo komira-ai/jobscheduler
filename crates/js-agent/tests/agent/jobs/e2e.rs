@@ -55,6 +55,8 @@ fn rig_over<C: js_agent::Connector + Send + 'static>(
         &exec,
         "--container-user",
         &user,
+        "--container-subuid",
+        "jobmap",
         "--state-root",
         &state,
         "--scratch-root",
