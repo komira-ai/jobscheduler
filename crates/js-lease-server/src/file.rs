@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_elastic::{Demand, ElasticProvider};
+use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 
@@ -26,13 +26,14 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
+use crate::file_checks::{check_listeners, check_live, https_url, sha256};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
 
 mod server;
 
 pub(crate) use server::Server;
-use server::{check_listeners, read_client_token, read_server};
+use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
 const MAX_INSTANCES: u64 = 255;
@@ -55,6 +56,7 @@ const POOL_KEYS: &[&str] = &[
     "idle",
     "boot_timeout",
     "launch",
+    "agent",
     "join_token_file",
     "provider",
     "network",
@@ -63,7 +65,7 @@ const POOL_KEYS: &[&str] = &[
 /// Whether an elastic pool launches. A pool starts in `Plan`: it checks and shows its
 /// plan and launches nothing. `Live` is the line that spends money; the scaler honours it,
 /// and until the scaler exists nothing launches in either.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Launch {
     /// Check and plan only.
     Plan,
@@ -92,6 +94,12 @@ pub enum NetworkPlan {
         client: OAuthClient,
         /// The tag every launched host carries, such as `tag:js-agent`.
         tag: String,
+        /// The Tailscale build the host downloads, with its hash. Required when the pool
+        /// launches.
+        binary: Option<Artifact>,
+        /// The address of the Tailscale API, when the file names one (for a test or a
+        /// proxy); the service's own default otherwise.
+        api_url: Option<String>,
     },
 }
 
@@ -132,10 +140,24 @@ pub struct ElasticPlan {
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
+    /// The agent the host downloads, with its hash, by CPU architecture (`x86_64`,
+    /// `aarch64`). A pool that launches needs at least one; an offer of an architecture
+    /// with no entry is never launched with another's.
+    pub agent: BTreeMap<String, Artifact>,
+    /// The id that marks what this scheduler launches (`server.scheduler_id`).
+    pub scheduler: SchedulerId,
+    /// The pool's name as the registry knows it.
+    pub(crate) id: ProviderId,
     pub(crate) provider: Arc<dyn ElasticProvider>,
 }
 
 impl ElasticPlan {
+    /// Takes the network table out of the plan, leaving `default` in its place, for the
+    /// one thing that builds the mode from it (the credential in it cannot be copied).
+    pub(crate) fn take_network(&mut self) -> NetworkPlan {
+        std::mem::replace(&mut self.network, NetworkPlan::Default)
+    }
+
     /// The provider the pool launches with.
     pub fn provider(&self) -> &dyn ElasticProvider {
         self.provider.as_ref()
@@ -156,6 +178,8 @@ impl fmt::Debug for ElasticPlan {
             .field("boot_timeout", &self.boot_timeout)
             .field("exec", &self.exec)
             .field("network", &self.network)
+            .field("agent", &self.agent)
+            .field("scheduler", &self.scheduler)
             .finish_non_exhaustive()
     }
 }
@@ -426,7 +450,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let mut registering = None;
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
-        let read = read_pool(table, index + 1, ld, &client_token)?;
+        let read = read_pool(table, index + 1, ld, (&client_token, &server.scheduler))?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -448,6 +472,9 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         }
     }
     let elastic = registering.is_some();
+    if let Some(registering) = &registering {
+        check_live(&server, &registering.plan)?;
+    }
     let hosts = match (static_pool, registering) {
         (static_pool, Some(registering)) => LoadedHosts::Registering {
             static_pool,
@@ -493,6 +520,7 @@ struct ElasticKeys {
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
+    agent: Option<toml::Table>,
 }
 
 impl ElasticKeys {
@@ -507,6 +535,7 @@ impl ElasticKeys {
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
+            ("agent", self.agent.is_some()),
         ];
         for (key, set) in given {
             if set {
@@ -521,7 +550,7 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    client: &Token,
+    (client, scheduler): (&Token, &SchedulerId),
 ) -> Result<Read, StartupError> {
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
@@ -553,6 +582,7 @@ fn read_pool(
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
+        agent: s.table("agent")?,
     };
     let launch = match s.string("launch")?.as_deref() {
         None | Some("plan") => Launch::Plan,
@@ -571,6 +601,9 @@ fn read_pool(
             class: &class,
             clock: ld.clock.clone(),
             files: ld.files,
+            scheduler,
+            max_instances: keys.max_instances.unwrap_or_default(),
+            launch,
         };
         ld.kinds.build(&kind, &p.map, &ctx)
     };
@@ -598,6 +631,7 @@ fn read_pool(
                 keys,
                 launch,
                 kind: &kind,
+                scheduler,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
@@ -614,6 +648,7 @@ struct Elastic<'a> {
     keys: ElasticKeys,
     launch: Launch,
     kind: &'a str,
+    scheduler: &'a SchedulerId,
 }
 
 impl Elastic<'_> {
@@ -626,6 +661,7 @@ impl Elastic<'_> {
             keys,
             launch,
             kind,
+            scheduler,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -656,6 +692,21 @@ impl Elastic<'_> {
             _ => {}
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
+        let agent = match keys.agent {
+            Some(table) => read_agents(table, format!("{}agent.", s.head))?,
+            None => BTreeMap::new(),
+        };
+        let live = launch == Launch::Live;
+        let unpinned = match &network {
+            NetworkPlan::Tailscale { binary: None, .. } => live,
+            _ => false,
+        };
+        if unpinned {
+            return Err(s.fail("network.binary", LIVE_NEEDS));
+        }
+        if live & agent.is_empty() {
+            return Err(s.fail("agent", LIVE_NEEDS));
+        }
         let tokens = match &keys.join_token_file {
             Some(path) => match AgentTokens::open(path, client) {
                 Ok(tokens) => tokens,
@@ -682,7 +733,7 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id, &class, shape, max, exec)?;
+        let pool = registry_pool(s, id.clone(), &class, shape, max, exec)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
@@ -696,9 +747,57 @@ impl Elastic<'_> {
             boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
             exec,
             network,
+            agent,
+            scheduler: scheduler.clone(),
+            id,
             provider: Arc::from(built.provider),
         };
         Ok(Registering { plan, pool, tokens })
+    }
+}
+
+/// What a file with no pin for something a launched host downloads is told.
+const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
+
+/// The agent pins by architecture: each key of `table` is an architecture (lower-case
+/// letters, digits and `_`) and holds a pin.
+fn read_agents(
+    table: toml::Table,
+    head: String,
+) -> Result<BTreeMap<String, Artifact>, StartupError> {
+    let mut agents = BTreeMap::new();
+    for (arch, value) in table {
+        let place = format!("{head}{arch}");
+        let letters = arch
+            .chars()
+            .all(|c| c.is_ascii_lowercase() | c.is_ascii_digit() | (c == '_'));
+        if !letters | arch.is_empty() {
+            return Err(StartupError::at(
+                place,
+                "an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64",
+            ));
+        }
+        let toml::Value::Table(pin) = value else {
+            return Err(StartupError::at(place, "must be a table { url, sha256 }"));
+        };
+        let artifact = read_artifact(pin, format!("{head}{arch}."))?;
+        agents.insert(arch, artifact);
+    }
+    Ok(agents)
+}
+
+/// A file a launched host downloads: an `https://` `url` and its `sha256`.
+fn read_artifact(table: toml::Table, head: String) -> Result<Artifact, StartupError> {
+    let mut s = Section::open(table, head);
+    s.only(&["url", "sha256"])?;
+    let url = s.required_string("url")?;
+    if !https_url(&url) {
+        return Err(s.fail("url", "must be an https:// URL: the host refuses any other"));
+    }
+    let hash = s.required_string("sha256")?;
+    match sha256(&hash) {
+        Some(sha256) => Ok(Artifact { url, sha256 }),
+        None => Err(s.fail("sha256", "must be 64 lower-case hex digits")),
     }
 }
 
@@ -747,14 +846,24 @@ fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan,
             Ok(NetworkPlan::Default)
         }
         "tailscale" => {
-            s.only(&["kind", "oauth_client_file", "tag"])?;
+            s.only(&["kind", "oauth_client_file", "tag", "binary", "api_url"])?;
             let file = s.required_path("oauth_client_file")?;
             let tag = s.required_string("tag")?;
             if !valid_tag(&tag) {
                 return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
             }
+            let binary = match s.table("binary")? {
+                Some(table) => Some(read_artifact(table, format!("{}binary.", s.head))?),
+                None => None,
+            };
+            let api_url = s.string("api_url")?;
             match OAuthClient::from_file(&file) {
-                Ok(client) => Ok(NetworkPlan::Tailscale { client, tag }),
+                Ok(client) => Ok(NetworkPlan::Tailscale {
+                    client,
+                    tag,
+                    binary,
+                    api_url,
+                }),
                 Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
             }
         }

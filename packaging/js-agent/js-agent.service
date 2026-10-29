@@ -1,0 +1,98 @@
+# js-agent on a Linux host, installed by the js-agent deb (packaging/js-agent). Read it on the
+# host with `systemctl cat js-agent`; crates/xtask/tests/js_agent_package.rs pins the settings described here.
+#
+# The package has no maintainer script: `dpkg --install` only unpacks files, and nothing
+# starts or configures the agent. The sequence, as root:
+#   1. systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
+#        makes the directories below (dpkg does not run systemd-tmpfiles; a reboot would)
+#   2. write the pool's join token to /etc/js-agent/token, mode 0600
+#   3. mount a disk of its own at /var/lib/js-agent/scratch (an /etc/fstab line, then
+#        `systemctl daemon-reload`, then `mount`)
+#   4. systemctl edit js-agent: clear ExecStart= and set the whole line again with this
+#        host's --server and --pool (the shipped --server is a placeholder the agent refuses)
+#   5. systemctl enable --now js-agent
+#        With the mount of step 3 missing this exits 0 and starts nothing, silently:
+#        `systemctl status js-agent` shows the unmet ConditionPathIsMountPoint.
+# Upgrade: there is no maintainer script, so after installing a newer deb run
+# `systemctl daemon-reload && systemctl restart js-agent`.
+# The container engine (the program at --container-bin, docker by default) is assumed to be
+# installed and running: the unit is ordered after docker.service and containerd.service and
+# does not pull them in, because podman is a valid engine and the agent exits 2 when the
+# engine does not answer.
+#
+# js-agent is configured by flags only (it reads no environment variable and no config
+# file), so the host's values are the flags of ExecStart below.
+#
+# Files the agent uses, all owned by root and closed to group and others:
+#   /etc/js-agent/token             the pool's join token (mode 0600); the agent refuses a token
+#                                   file that is not a regular file of its own user with mode
+#                                   0600 or 0400. (The elastic boot payload of the lease server
+#                                   keeps its token in /etc/jobscheduler/token, beside an
+#                                   instance file: that host gets a one-time token for its
+#                                   instance, while a host of this package joins with the
+#                                   pool's token.)
+#   /var/lib/js-agent/state         the state root (mode 0700): the taint marker and, once the
+#                                   server has admitted the host, `host-credential` (mode 0600,
+#                                   written by the agent), which replaces the token
+#   /var/lib/js-agent/scratch       the scratch root (mode 0700): a private directory per run
+# The agent refuses a state root on the same disk as the scratch root, which is why step 3
+# exists. ConditionPathIsMountPoint keeps a host without that mount from starting the agent: the
+# unit then shows "start condition failed" in `systemctl status` and does not loop.
+# RequiresMountsFor orders the start after the mount at boot. ExecStartPre makes the
+# directories again before every start, so their modes are right when a disk was mounted
+# after step 1.
+#
+# The host credential and the token: the agent reads the token file at every start, also after
+# the server has retired the token and the agent holds a host credential. Keep
+# /etc/js-agent/token, or clear --token-file in the drop-in once
+# /var/lib/js-agent/state/host-credential exists. The credential cannot be recovered from the
+# retired token: a host that lost it needs a new token.
+#
+# Removing the package (`remove` or `purge`) deletes the binary, this unit and the tmpfiles
+# file and nothing else: /etc/js-agent and /var/lib/js-agent stay, with the token and the
+# credential. To wipe a host, run `systemctl disable --now js-agent`, remove the package,
+# unmount the scratch disk, then delete /etc/js-agent and /var/lib/js-agent.
+#
+# User=root, and no sandboxing: the agent must read /proc/1/ns, share init's pid and mount
+# namespaces, and own the state and scratch roots, and it refuses to start under ProtectSystem=,
+# PrivateMounts= or PrivatePIDs=. Add none of the Protect*, Private*, NoNewPrivileges=,
+# Restrict* or Capability* settings.
+#
+# Restart=always, and not on-failure, and no RestartPreventExitStatus=2: the agent exits 0
+# after SIGTERM or SIGINT (it announced `draining`), 1 when its signal handlers or job worker
+# fail, and 2 for a wrong flag or file, a job engine it cannot use, or a server that refuses
+# the host for good. After any exit it may leave containers of its jobs behind, and only the
+# next process adopts them (or stops them), so the supervisor must start the agent after every
+# exit, 0 and 2 included. A refusal restarts every RestartSec seconds and is read from the
+# journal; the restart does not hide it. RestartSec is 30 so that a permanent refusal (a
+# retired token, an unknown pool) sends the server two hellos a minute, not twelve.
+# RestartSteps= would back off further but needs systemd 254, and Debian 12 has 252.
+[Unit]
+Description=jobscheduler agent
+Documentation=https://github.com/komira-ai/jobscheduler
+After=network-online.target docker.service containerd.service
+Wants=network-online.target
+RequiresMountsFor=/var/lib/js-agent/scratch
+ConditionPathIsMountPoint=/var/lib/js-agent/scratch
+
+[Service]
+Type=simple
+ExecStartPre=+systemd-tmpfiles --create /usr/lib/tmpfiles.d/js-agent.conf
+# TimeoutStopSec bounds the drain that SIGTERM starts: the agent lets the running jobs finish
+# for --drain-wait, stops them (up to --stop-grace), and waits up to 30 s more for the server to
+# acknowledge their results. TimeoutStopSec must be at least --drain-wait + --stop-grace + 30 s
+# plus the time of the engine calls. The defaults, 10 + 10 + 30 s, leave 70 s of the 120 s. A host
+# that sets either flag (each at most 3600) sets TimeoutStopSec in the same drop-in; a SIGKILL at
+# the timeout loses no container (the next start adopts them) but leaves results unacknowledged.
+# The bound covers the normal drain, not the rescue path after the job worker failed (the agent
+# bounds that separately); a SIGKILL there leaves containers for the next start to adopt.
+# KillMode=control-group and KillSignal=SIGTERM, the defaults, stay unset: the agent starts
+# containers detached under the engine's own cgroup, so KillMode=process would save none of
+# them and would orphan the agent's readiness and GPU hook processes.
+TimeoutStopSec=120
+ExecStart=/usr/bin/js-agent --server SET-THE-SERVER-WITH-SYSTEMCTL-EDIT --token-file /etc/js-agent/token --pool default --container-bin /usr/bin/docker --state-root /var/lib/js-agent/state --scratch-root /var/lib/js-agent/scratch
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

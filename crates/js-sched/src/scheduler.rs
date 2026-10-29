@@ -45,6 +45,7 @@ use js_whole::WholeNodeConfig;
 use crate::admission::{Admission, Blocked, LoadConfig, Profile};
 use crate::cordon::Cordons;
 use crate::fence::HANDOVER_GRACE;
+use crate::headroom::MemoryPercent;
 use crate::input::Request;
 use crate::requeue::{Requeue, RequeueReason};
 use crate::servable::{Attempt, Placed, Servable, Verdict};
@@ -263,6 +264,9 @@ pub struct Scheduler {
     loss_cap: u32,
     /// The load predicate's settings, counters and cost predictions ([`crate::admission`]).
     admission: Admission,
+    /// The share of a worker's reported memory that is its capacity here
+    /// ([`Scheduler::with_memory_percent`]).
+    memory_percent: MemoryPercent,
     /// The worker each blocked head of the queue holds (see [`Scheduler::place`]); the
     /// last round's, kept so the hold does not wander.
     head_holds: BTreeMap<OperationId, WorkerId>,
@@ -308,6 +312,7 @@ impl Scheduler {
             grace_until: FarmTime::default(),
             loss_cap: u32::MAX,
             admission: Admission::default(),
+            memory_percent: MemoryPercent::FULL,
             head_holds: BTreeMap::new(),
             whole_node: None,
             max_walls: BTreeMap::new(),
@@ -332,6 +337,25 @@ impl Scheduler {
     pub fn with_load_config(mut self, config: LoadConfig) -> Self {
         self.admission.configure(config);
         self
+    }
+
+    /// This scheduler, taking `percent` of the memory a worker reports as that worker's
+    /// capacity: `floor(memory * percent / 100)` bytes, once, when the worker registers or
+    /// its report changes. Every admission path reads the capacity so cut (the load
+    /// predicate, the flat-memory guard, the memory ladder's cap, the whole-host test, VM
+    /// booking, the unservable check) and [`Scheduler::capacity`] shows it. Cores, GPUs,
+    /// VM slots and the lease cap are not cut, and neither is any figure an agent
+    /// measures or a job's learned memory. Set it before the first worker registers.
+    #[must_use]
+    pub const fn with_memory_percent(mut self, percent: MemoryPercent) -> Self {
+        self.memory_percent = percent;
+        self
+    }
+
+    /// The share of a worker's reported memory this scheduler takes as its capacity.
+    #[must_use]
+    pub const fn memory_percent(&self) -> MemoryPercent {
+        self.memory_percent
     }
 
     /// This scheduler, holding `curves` for the rule that charges a lease by a curve over
