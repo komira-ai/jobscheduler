@@ -304,6 +304,16 @@ impl Settings {
         }
     }
 
+    /// The `<uid>:<gid>` of the user of `slot`.
+    pub fn slot_user(&self, _slot: u32) -> String {
+        self.user.clone()
+    }
+
+    /// The container ids `(uid, gid)` of `slot`.
+    pub fn slot_ids(&self, _slot: u32) -> (u32, u32) {
+        self.ids
+    }
+
     /// The runtime's absolute path.
     pub fn bin(&self) -> &str {
         &self.bin

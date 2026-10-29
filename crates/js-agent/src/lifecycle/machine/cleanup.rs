@@ -135,6 +135,8 @@ impl Lifecycle {
                 Stage::Checks => match checks.run(&Finished {
                     run_id: &run_id,
                     live: &live,
+                    slot: None,
+                    live_slots: &[],
                 }) {
                     // A marker that is not on disk yet (it could not be written when the
                     // host was tainted) holds the slot, whatever the job left; so does a

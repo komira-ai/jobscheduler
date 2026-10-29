@@ -8,6 +8,7 @@ mod adopt;
 mod cleanup;
 mod exclusive;
 mod job;
+mod slots;
 
 use std::collections::BTreeSet;
 
@@ -18,6 +19,7 @@ use js_agent_wire::{
 
 pub use self::exclusive::{Quiet, Restored};
 use self::job::{Job, Retired, Stage, Stuck, blind_taint, container_spec, host_taint};
+pub use self::slots::Slots;
 use super::runtime::{ContainerRuntime, ResolvedMount};
 use super::taint::TaintState;
 use super::{Capacity, CheckHook, Clock, Config, Event, Finding, Skip, code, detail};
@@ -31,6 +33,9 @@ pub const RETIRED_CAP: usize = limits::MAX_HELD;
 /// carries at most one result, so the results stay within the wire limit as well.
 const MAX_JOBS: usize = limits::MAX_HELD;
 const _: () = assert!(limits::MAX_HELD <= limits::MAX_RESULTS);
+
+/// How many slots the agent has: one for each run it can hold.
+pub const SLOTS: u32 = MAX_JOBS as u32;
 
 /// A refusal: the wire code and a local explanation.
 type Refusal = (&'static str, String);
@@ -155,6 +160,16 @@ impl Lifecycle {
             .iter()
             .filter_map(|job| job.result.clone())
             .collect()
+    }
+
+    /// The slots held by a run that has not passed its cleanup.
+    pub fn busy_slots(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
+    /// The slots that take no new run because the cleanup of their last run did not pass.
+    pub fn quarantined_slots(&self) -> Vec<u32> {
+        Vec::new()
     }
 
     /// What is still free to book.

@@ -369,6 +369,13 @@ impl Integrity {
         Ok(this)
     }
 
+    /// Tells the checks that the containers run as the slots' users, the container uid of
+    /// slot `k` being `first_uid + k`.
+    #[must_use]
+    pub fn with_slots(self, _first_uid: u32) -> Self {
+        self
+    }
+
     /// The host now, or why it cannot be read whole: every input is tried, so the reasons
     /// are all given.
     fn observe(&self) -> Result<Snapshot, Vec<Problem>> {

@@ -382,6 +382,7 @@ pub(super) fn container_spec(
         gpu_indices: spec.gpu_indices.clone(),
         mounts,
         scratch,
+        slot: 0,
         isolation: spec.isolation,
         labels,
     }

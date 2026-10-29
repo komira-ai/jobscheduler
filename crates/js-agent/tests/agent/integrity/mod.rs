@@ -27,7 +27,28 @@ pub fn started(host: &FakeHost, watch: Vec<PathBuf>) -> Integrity {
 
 /// The check after the run `run_id`, with no other container on the host.
 pub fn after(checks: &mut Integrity, run_id: &str) -> Result<(), CheckFinding> {
-    checks.run(&Finished { run_id, live: &[] })
+    checks.run(&Finished {
+        run_id,
+        live: &[],
+        slot: None,
+        live_slots: &[],
+    })
+}
+
+/// The check after the run `run_id` that held `slot`, with the jobs of `live_slots` still
+/// running (their containers are not named, so only their slots tell them from strays).
+pub fn after_slot(
+    checks: &mut Integrity,
+    run_id: &str,
+    slot: u32,
+    live_slots: &[u32],
+) -> Result<(), CheckFinding> {
+    checks.run(&Finished {
+        run_id,
+        live: &[],
+        slot: Some(slot),
+        live_slots,
+    })
 }
 
 /// The check after `run_id`, with the containers `live` still on the host.
@@ -39,6 +60,8 @@ pub fn beside(checks: &mut Integrity, run_id: &str, live: &[&str]) -> Result<(),
     checks.run(&Finished {
         run_id,
         live: &live,
+        slot: None,
+        live_slots: &[],
     })
 }
 

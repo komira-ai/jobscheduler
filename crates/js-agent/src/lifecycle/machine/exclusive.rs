@@ -120,7 +120,12 @@ impl Lifecycle {
     /// Runs the post-job checks once with nothing live. A finding taints the host and is
     /// returned with its text.
     fn recheck(&mut self, run_id: &str, events: &mut Vec<Event>) -> Result<(), String> {
-        let verdict = self.checks.run(&Finished { run_id, live: &[] });
+        let verdict = self.checks.run(&Finished {
+            run_id,
+            live: &[],
+            slot: None,
+            live_slots: &[],
+        });
         let Err(found) = verdict else { return Ok(()) };
         let message = match &found {
             CheckFinding::Residue { .. } => found.detail().to_owned(),

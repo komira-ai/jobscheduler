@@ -15,6 +15,7 @@ mod reach;
 mod results;
 mod rules;
 mod scratch;
+mod slots;
 mod taint;
 
 use std::collections::BTreeSet;

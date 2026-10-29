@@ -162,7 +162,7 @@ use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
-pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored};
+pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
 pub use runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
@@ -234,6 +234,10 @@ pub struct Finished<'a> {
     /// exited and not yet removed), and those that could not be removed. What they run and
     /// mount is not the finished job's, so a check must not count it against the job.
     pub live: &'a [ContainerId],
+    /// The slot the finished run held, when it held one.
+    pub slot: Option<u32>,
+    /// The slots of the jobs in `live` (those whose container is still on the host).
+    pub live_slots: &'a [u32],
 }
 
 /// Runs after every job, after cleanup and before the slot is freed (design 5.12). The
