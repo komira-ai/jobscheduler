@@ -11,7 +11,9 @@ use js_agent::lifecycle::{Quiet, Restored};
 use js_agent::{HookRunner, HookWindow, LeaseAnswers, Ran, ReadinessHook, WorkerHook};
 use js_agent_wire::{HeartbeatReply, JobSpec};
 
-use crate::lifecycle::{Harness, job};
+use serde_json::json;
+
+use crate::lifecycle::{Harness, job, reply_json};
 
 const LEASE: &str = "whole-1";
 const OTHER: &str = "whole-2";
@@ -146,7 +148,12 @@ fn the_hook_runs_for_a_fresh_lease_after_a_restart_that_adopted_another() {
 
     h.fake.exit("a", 0);
     h.life.step();
-    h.ack("a", "ACCEPTED");
+    // Acknowledged under a reply that still names `OTHER`: a reply naming no lease would end
+    // the hold, and the prepare would then answer for a lease no longer followed.
+    h.life.apply(&reply_json(&json!({
+        "exclusive": OTHER,
+        "result_acks": [{ "run_id": "a", "ack": "ACCEPTED" }]
+    })));
     answers.prepare(
         &mut h.life,
         Some(&hook),
