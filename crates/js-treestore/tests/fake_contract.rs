@@ -151,3 +151,36 @@ fn updating_a_handle_changes_the_bytes_counted() {
     );
     assert_eq!(Holder::new("ok").unwrap().as_str(), "ok");
 }
+
+#[test]
+fn ending_a_lease_leaves_no_admission_for_it_and_ends_its_pins() {
+    let rig = Rig::new();
+    let l = sized("f", 10, 1);
+    rig.have(&l);
+    let store = rig.open(Config::default());
+    store.ensure(&wanted(&l)).unwrap();
+    let other = Principal("lease-2".into());
+    let mut second = wanted(&l);
+    second.blob.principal = other.clone();
+    rig.fake
+        .ensure(&second.blob, &Holder::new("other").unwrap())
+        .unwrap();
+    let lease = Principal("lease-1".into());
+    assert_eq!(rig.fake.admissions_of(&lease), 1);
+    let handle = store.pin(&l.diff_id, &run("job-1")).unwrap();
+    let pin_file = rig.root().join("pins").join(l.diff_id.hex()).join("job-1");
+    store.end_lease(&lease, vec![handle]);
+    assert_eq!(rig.fake.admissions_of(&lease), 0);
+    assert_eq!(rig.fake.admissions_of(&other), 1);
+    assert!(!pin_file.exists());
+    assert_eq!(store.stats().pinned, 0);
+    // A put is admitted for its lease too.
+    let holder = Holder::new("putter").unwrap();
+    let key = BlobKey::parse(&format!("sha256:{}", "1".repeat(64))).unwrap();
+    rig.fake
+        .put(&key, 0, &mut std::io::empty(), &holder, &lease)
+        .unwrap();
+    assert_eq!(rig.fake.admissions_of(&lease), 1);
+    rig.fake.end_principal(&lease);
+    assert_eq!(rig.fake.admissions_of(&lease), 0);
+}

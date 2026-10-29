@@ -45,6 +45,7 @@ struct FakeInner {
     tick: u64,
     files: u64,
     gc_started: bool,
+    admitted: BTreeMap<BlobKey, BTreeSet<Principal>>,
 }
 
 /// A gate the fake's `ensure` waits at until it is opened.
@@ -175,6 +176,15 @@ impl FakeStore {
         self.start_gc();
     }
 
+    pub fn admissions_of(&self, principal: &Principal) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .admitted
+            .values()
+            .filter(|set| set.contains(principal))
+            .count()
+    }
+
     pub fn gc_started(&self) -> bool {
         self.inner.lock().unwrap().gc_started
     }
@@ -255,6 +265,11 @@ impl BlobStore for FakeStore {
             return Err(StoreError::Forbidden);
         }
         let mut inner = self.inner.lock().unwrap();
+        inner
+            .admitted
+            .entry(want.key.clone())
+            .or_default()
+            .insert(want.principal.clone());
         let size = match inner.blobs.get(&want.key) {
             Some(bytes) => bytes.len() as u64,
             None => return Err(UpstreamError("no such blob".into()).into()),
@@ -285,10 +300,18 @@ impl BlobStore for FakeStore {
         size: u64,
         r: &mut dyn Read,
         holder: &Holder,
+        principal: &Principal,
     ) -> Result<Pinned, StoreError> {
         if reentrant() {
             return Err(StoreError::Reentrant);
         }
+        self.inner
+            .lock()
+            .unwrap()
+            .admitted
+            .entry(key.clone())
+            .or_default()
+            .insert(principal.clone());
         let mut bytes = Vec::new();
         r.read_to_end(&mut bytes)?;
         self.add_blob(key, bytes);
@@ -330,6 +353,14 @@ impl BlobStore for FakeStore {
         }
         self.inner.lock().unwrap().pins.remove(holder);
         Ok(())
+    }
+
+    fn end_principal(&self, principal: &Principal) {
+        let mut inner = self.inner.lock().unwrap();
+        for set in inner.admitted.values_mut() {
+            set.remove(principal);
+        }
+        inner.admitted.retain(|_, set| !set.is_empty());
     }
 
     fn stats(&self) -> Stats {

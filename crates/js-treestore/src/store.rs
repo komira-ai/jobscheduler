@@ -13,7 +13,7 @@ use js_bundle::media::LayerEncoding;
 use js_bundle::{DiffId, Limits, unpack_layer};
 
 use crate::blobstore::{
-    AccountHandle, BlobKey, BlobStore, Busy, Holder, LabelError, Release, Wanted,
+    AccountHandle, BlobKey, BlobStore, Busy, Holder, LabelError, Principal, Release, Wanted,
 };
 use crate::error::{Error, Step, ctx};
 use crate::record::Record;
@@ -508,6 +508,15 @@ impl<S: Sealer, B: BlobStore> TreeStore<S, B> {
             .join(tree.diff_id.hex())
             .join(tree.run.as_str());
         let _ = std::fs::remove_file(pin);
+    }
+
+    /// A job's lease ended: ends the pins of its trees and tells the blob store, so the
+    /// lease leaves its admission sets.
+    pub fn end_lease(&self, principal: &Principal, trees: Vec<TreeHandle>) {
+        for tree in trees {
+            self.unpin(tree);
+        }
+        self.inner.blobs.end_principal(principal);
     }
 
     /// Counters.

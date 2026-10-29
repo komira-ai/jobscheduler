@@ -270,6 +270,7 @@ pub trait BlobStore: Send + Sync + 'static {
         size: u64,
         r: &mut dyn Read,
         holder: &Holder,
+        principal: &Principal,
     ) -> Result<Pinned, StoreError>;
     /// Opens a pinned blob, checking its digest first.
     ///
@@ -281,6 +282,8 @@ pub trait BlobStore: Send + Sync + 'static {
     /// # Errors
     /// As [`StoreError`].
     fn release(&self, holder: &Holder) -> Result<(), StoreError>;
+    /// A lease ended: prunes it from the admission sets.
+    fn end_principal(&self, principal: &Principal);
     /// The counters.
     fn stats(&self) -> Stats;
     /// Counts `bytes` the caller owns on the store's volume in the one budget. Under
