@@ -738,7 +738,11 @@ fn a_host_job_skips_the_egress_check() {
     let mut host = job("h1");
     host.isolation = js_agent_wire::Isolation::Host;
     life.apply(&reply(vec![Command::Start(Box::new(host))]));
-    assert!(sequence(&world).iter().all(|sub| sub == "create"), "{:?}", sequence(&world));
+    assert!(
+        sequence(&world).iter().all(|sub| sub == "create"),
+        "{:?}",
+        sequence(&world)
+    );
     assert!(world.calls_of("network").is_empty());
     assert!(world.calls_of("-j").is_empty());
 }

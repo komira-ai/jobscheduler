@@ -1,12 +1,13 @@
 //! The container flags: `--container-bin`, `--container-network`, `--container-user`,
-//! `--container-host`, `--container-pull` and `--container-tmp-size`.
+//! `--container-host`, `--container-pull`, `--container-tmp-size` and
+//! `--container-subuid`.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use js_agent::cli_runtime::{
-    ADD_HOST_MAX, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings,
+    ADD_HOST_MAX, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, JobUsers, Pull, Settings,
     SettingsError,
 };
 
@@ -278,6 +279,10 @@ fn network_and_user_need_the_runtime() {
             nft: Some("/bin/sh"),
             ..Flags::default()
         },
+        Flags {
+            subuid: Some("jobmap"),
+            ..Flags::default()
+        },
     ];
     for flags in alone {
         let said = Settings::from_flags(&flags, AGENT);
@@ -294,6 +299,7 @@ fn network_and_user_need_the_runtime() {
             add_hosts: &["store.example:192.0.2.10".to_owned()],
             egress_allow: &["198.51.100.10:443".to_owned()],
             nft: Some("/bin/sh"),
+            subuid: Some("jobmap"),
         },
         AGENT,
     )
@@ -307,10 +313,13 @@ fn network_and_user_need_the_runtime() {
     assert_eq!(egress.allow().len(), 1);
     assert_eq!(egress.nft(), "/bin/sh");
     assert_eq!(on.chown_scratch(), None);
+    assert_eq!(on.subuid(), Some("jobmap"));
+    assert!(matches!(on.uid(), JobUsers::Mapped(_)));
     let root = Settings::from_flags(
         &Flags {
             bin: Some(bin()),
             user: Some("5:6"),
+            subuid: Some("jobmap"),
             ..Flags::default()
         },
         (0, 0),
@@ -343,6 +352,45 @@ fn network_and_user_need_the_runtime() {
     }
 }
 
+/// Asserts that a container runtime without `--container-subuid` is refused (every job
+/// runs in a user namespace mapped onto that user's range), that the user must be a name
+/// the id files can hold, that the container user must be an id of the namespace (below
+/// 65536), and that settings built without the mapping name the one host uid. It catches
+/// a runtime that starts jobs in the host's user namespace and a user that could not be
+/// found in `/etc/subuid`.
+#[test]
+fn the_containers_need_a_subordinate_user() {
+    let flags = |subuid, user| Flags {
+        bin: Some(bin()),
+        user,
+        subuid,
+        ..Flags::default()
+    };
+    assert_eq!(
+        Settings::from_flags(&flags(None, None), (0, 0)),
+        Err(SettingsError::NoSubuid)
+    );
+    for name in ["", "a b", "a:b", "a\nb", "ü"] {
+        let said = Settings::from_flags(&flags(Some(name), None), (0, 0));
+        assert_eq!(said, Err(SettingsError::Subuid), "{name:?}");
+    }
+    for user in ["65536:1", "1:65536"] {
+        let said = Settings::from_flags(&flags(Some("jobmap"), Some(user)), (0, 0));
+        assert_eq!(said, Err(SettingsError::UserOutsideMap), "{user}");
+    }
+    let edge = Settings::from_flags(&flags(Some("jobmap"), Some("65535:65535")), (0, 0));
+    assert_eq!(edge.unwrap().unwrap().chown_scratch(), Some((65535, 65535)));
+    let plain = Settings::new(bin(), None, None).unwrap();
+    assert_eq!((plain.subuid(), plain.uid()), (None, JobUsers::Uid(65534)));
+    for (why, flag) in [
+        (SettingsError::NoSubuid, "--container-subuid"),
+        (SettingsError::Subuid, "--container-subuid"),
+        (SettingsError::UserOutsideMap, "--container-user"),
+    ] {
+        assert!(why.to_string().starts_with(flag), "{why}");
+    }
+}
+
 /// Asserts that each error names its flag, since the text is what the operator reads.
 #[test]
 fn errors_name_their_flag() {
@@ -360,6 +408,7 @@ fn errors_name_their_flag() {
         "--container-user",
     );
     starts(SettingsError::Host, "--container-host");
+    starts(SettingsError::NoSubuid, "--container-subuid");
     starts(SettingsError::Pull, "--container-pull");
     starts(SettingsError::TmpSize, "--container-tmp-size");
     starts(SettingsError::AddHost, "--container-add-host");
@@ -423,6 +472,8 @@ fn container_flags_are_checked_when_the_agent_starts() {
             exec,
             "--container-user",
             &own,
+            "--container-subuid",
+            "jobmap",
             "--container-host",
             "unix:///run/engine.sock",
             "--container-pull",
@@ -433,7 +484,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert_eq!(status, code(0), "{err}");
         assert_eq!(sent, 2, "the hello, and the draining heartbeat of the stop");
 
-        let (status, err, sent) = start(&["--container-bin", exec]);
+        let (status, err, sent) = start(&["--container-bin", exec, "--container-subuid", "jobmap"]);
         assert_eq!(
             status,
             code(2),
@@ -443,7 +494,7 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert_eq!(sent, 0);
     }
 
-    let cases: [(&[&str], &str); 12] = [
+    let cases: [(&[&str], &str); 15] = [
         (
             &["--container-bin", "docker"],
             "--container-bin: not an absolute",
@@ -492,18 +543,36 @@ fn container_flags_are_checked_when_the_agent_starts() {
         ),
         (&["--container-network", "jobs"], "need --container-bin"),
         (
-            &["--container-bin", exec, "--container-network", "jobs"],
+            &[
+                "--container-bin",
+                exec,
+                "--container-subuid",
+                "jobmap",
+                "--container-network",
+                "jobs",
+            ],
             "a named network needs at least one --container-egress-allow",
         ),
         (
             &[
                 "--container-bin",
                 exec,
+                "--container-subuid",
+                "jobmap",
                 "--container-egress-allow",
                 "198.51.100.10:443",
             ],
             "need a named --container-network",
         ),
+        (
+            &["--container-bin", exec],
+            "--container-subuid: required with --container-bin",
+        ),
+        (
+            &["--container-bin", exec, "--container-subuid", "a:b"],
+            "--container-subuid: not a user name",
+        ),
+        (&["--container-subuid", "jobmap"], "need --container-bin"),
     ];
     for (extra, text) in cases {
         let (status, err, sent) = start(extra);

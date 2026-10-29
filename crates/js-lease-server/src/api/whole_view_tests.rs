@@ -130,8 +130,15 @@ impl Rig {
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
         let shared = Shared::new(table, token, Some(Arc::new(agents)));
-        let served =
-            status.then(|| Arc::new(Status::new(None, None, Vec::new(), shared_clock.clone())));
+        let served = status.then(|| {
+            Arc::new(Status::new(
+                None,
+                None,
+                None,
+                Vec::new(),
+                shared_clock.clone(),
+            ))
+        });
         let shared = Arc::new(shared.with_status(served));
         Self {
             shared,

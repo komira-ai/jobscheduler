@@ -543,6 +543,7 @@ impl Local {
                 add_hosts: &cli.container_add_host,
                 egress_allow: &cli.container_egress_allow,
                 nft: cli.container_nft.as_deref(),
+                subuid: cli.container_subuid.as_deref(),
             },
             (
                 rustix::process::geteuid().as_raw(),
