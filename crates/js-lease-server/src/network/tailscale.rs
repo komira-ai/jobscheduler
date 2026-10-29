@@ -32,6 +32,12 @@ const BIN_DIR: &str = "/usr/local/bin";
 /// Where `tailscaled` keeps its state.
 const STATE_PATH: &str = "/var/lib/tailscale/tailscaled.state";
 
+/// Where `tailscaled` listens for `tailscale` by default; the wait polls for it.
+pub const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
+
+/// How many one-second checks the wait makes for the socket before it fails the boot.
+pub const SOCKET_WAIT_ATTEMPTS: u32 = 30;
+
 /// What the mode needs besides an API client.
 #[derive(Debug, Clone)]
 pub struct TailscaleSettings {
@@ -81,19 +87,23 @@ impl TailscaleMode {
         }
     }
 
-    /// The mode for a pool's `network` table: Tailscale's own API at [`API_BASE`], the
-    /// credential's own tailnet, every call bounded by [`API_TIMEOUT`]. Makes no request.
+    /// The mode for a pool's `network` table: Tailscale's API at `api_url` when the table
+    /// names one (a proxy, or a test), else at [`API_BASE`]; the credential's own tailnet;
+    /// every call bounded by [`API_TIMEOUT`]. Makes no request.
     ///
     /// # Errors
     ///
-    /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
+    /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name, or `api_url`
+    /// is not an address the client can use.
     pub fn for_client(
         client: OAuthClient,
         tag: String,
         binary: Artifact,
+        api_url: Option<&str>,
         clock: SharedClock,
     ) -> Result<Self, NetworkError> {
-        let api = TailscaleApi::new(API_BASE, "-", client, clock, API_TIMEOUT)?;
+        let base = api_url.unwrap_or(API_BASE);
+        let api = TailscaleApi::new(base, "-", client, clock, API_TIMEOUT)?;
         Self::new(api, TailscaleSettings { tag, binary })
     }
 
@@ -102,6 +112,7 @@ impl TailscaleMode {
         let run = |argv: &[&str]| BootStep::Run(argv.iter().map(|&a| a.to_owned()).collect());
         let tailscaled = format!("{BIN_DIR}/tailscaled");
         let tailscale = format!("{BIN_DIR}/tailscale");
+        let wait = socket_wait_script();
         vec![
             BootStep::Fetch {
                 url: self.settings.binary.url.clone(),
@@ -126,16 +137,29 @@ impl TailscaleMode {
                 tailscaled.as_str(),
                 format!("--state={STATE_PATH}").as_str(),
             ]),
+            run(&["sh", "-c", wait.as_str(), "sh", SOCKET_PATH]),
             run(&[
                 tailscale.as_str(),
                 "up",
                 format!("--auth-key=file:{AUTH_KEY_PATH}").as_str(),
                 format!("--hostname={host}").as_str(),
-                "--accept-dns=false",
+                "--accept-dns=true",
             ]),
             run(&["rm", "-f", "--", AUTH_KEY_PATH]),
         ]
     }
+}
+
+/// The program of the socket wait: a constant, run as `sh -c <this> sh <socket>`, so the
+/// socket path is an argument (`$1`) and no value is ever spliced into the text. It checks
+/// once a second, at most [`SOCKET_WAIT_ATTEMPTS`] times, then logs and exits non-zero,
+/// which stops the boot under `set -eu`.
+fn socket_wait_script() -> String {
+    format!(
+        "i=0; until [ -S \"$1\" ]; do i=$((i+1)); if [ \"$i\" -gt {SOCKET_WAIT_ATTEMPTS} ]; then \
+         logger -t jobscheduler \"tailscaled socket $1 not up after {SOCKET_WAIT_ATTEMPTS} s\"; \
+         exit 1; fi; sleep 1; done"
+    )
 }
 
 /// The description of a launch's key: the host's name, cut to [`KEY_DESCRIPTION_MAX`]

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use js_agent_wire::{DEFAULT_HELLO_BURST, DEFAULT_HELLO_INTERVAL};
 use js_lease::Clock;
 use js_registry::Credential;
 
@@ -15,6 +16,16 @@ use crate::adapt::SharedClock;
 pub(crate) struct HelloLimit {
     pub(crate) burst: u32,
     pub(crate) interval: Duration,
+}
+
+impl Default for HelloLimit {
+    /// What the flags default to: a burst of 60, then one hello a second.
+    fn default() -> Self {
+        Self {
+            burst: DEFAULT_HELLO_BURST,
+            interval: DEFAULT_HELLO_INTERVAL,
+        }
+    }
 }
 
 /// What one credential has left.

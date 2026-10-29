@@ -933,6 +933,7 @@ name = "js-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "getrandom 0.2.17",
  "hex",
  "js-agent-usage",
  "js-agent-wire",
@@ -977,6 +978,7 @@ name = "js-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "getrandom 0.2.17",
  "js-client",
  "js-lease",
  "js-lease-server",
@@ -1116,6 +1118,7 @@ dependencies = [
  "js-provider-fake",
  "js-provider-lambdalabs",
  "js-registry",
+ "js-scaler",
  "js-sched",
  "js-testkit",
  "js-types",
@@ -1134,6 +1137,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+]
+
+[[package]]
+name = "js-mac-probe"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1221,6 +1234,7 @@ dependencies = [
  "js-lease",
  "js-pool-static",
  "js-provider",
+ "js-sim",
  "js-types",
  "js-whole",
  "serde_json",
@@ -3041,6 +3055,9 @@ dependencies = [
  "clap",
  "flate2",
  "hex",
+ "js-agent",
+ "js-client",
+ "js-elastic",
  "rcgen",
  "rustls",
  "rustls-native-certs",

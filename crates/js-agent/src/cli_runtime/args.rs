@@ -29,6 +29,18 @@ pub enum ArgsError {
         "a mount path must be absolute UTF-8 without a comma, a colon, a quote or a control character"
     )]
     MountPath,
+    /// A read-only mount that holds another mount point, on an engine without recursive
+    /// read-only: the mount below it would stay writable.
+    #[error(
+        "a read-only mount holds another mount, which this engine would leave writable: use Docker 25 or later, or mount a directory without mount points"
+    )]
+    NestedMount,
+    /// A read-only mount on an engine without recursive read-only, and no way to see
+    /// whether it holds another mount.
+    #[error(
+        "/proc/self/mountinfo cannot be read, so a read-only mount cannot be checked for mounts below it"
+    )]
+    MountinfoUnreadable,
     /// A label whose key is empty or holds `=`.
     #[error("a label key must not be empty or hold '='")]
     LabelKey,
@@ -54,7 +66,9 @@ pub type Bind = (String, String, bool);
 /// because `-v` splits on `:`. With `recursive_ro` a read-only bind also gets
 /// `bind-recursive=readonly,bind-propagation=rprivate`, so a mount below it is read-only
 /// too (Docker 25 and later; the engine refuses the container on a kernel before 5.12
-/// rather than leave the submount writable).
+/// rather than leave the submount writable). Podman gets `nosuid,nodev` on every mount; on
+/// Docker, whose bind takes neither, the scratch directory is instead a volume of the local
+/// driver that binds it with them ([`scratch_volume_options`]).
 ///
 /// # Errors
 ///
@@ -81,13 +95,13 @@ pub fn limits_to_args(
         spec.pids.unwrap_or(DEFAULT_PIDS).to_string(),
     ];
     args.extend(gpu_args(engine, &spec.gpu_indices));
-    let scratch = (spec.scratch.as_path(), SCRATCH_TARGET, false);
-    let jobs = spec
-        .mounts
-        .iter()
-        .map(|mount| (mount.host.as_path(), mount.target.as_str(), mount.ro));
-    for (host, target, ro) in std::iter::once(scratch).chain(jobs) {
-        let value = mount_value(host, target, ro, recursive_ro)?;
+    let scratch = match engine {
+        Engine::Docker => scratch_volume(&spec.scratch)?,
+        Engine::Podman => mount_value(engine, &spec.scratch, SCRATCH_TARGET, false, recursive_ro)?,
+    };
+    args.extend(["--mount".to_owned(), scratch]);
+    for mount in &spec.mounts {
+        let value = mount_value(engine, &mount.host, &mount.target, mount.ro, recursive_ro)?;
         args.extend(["--mount".to_owned(), value]);
     }
     Ok(args)
@@ -123,10 +137,115 @@ fn gpu_args(engine: Engine, indices: &[u32]) -> Vec<String> {
     }
 }
 
-/// A bind mount, as the value of `--mount`.
-fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<String, ArgsError> {
-    let plain = |text: &str| text.starts_with('/') && !text.contains([',', '"', ':']);
-    let clean = |text: &str| plain(text) && !text.chars().any(char::is_control);
+/// `field` of a `/proc/self/mountinfo` line with every `\NNN` octal escape (a space, tab,
+/// newline, `#` or backslash in a path) turned back into its byte; an escape that is not
+/// one byte, and a backslash that starts none, stay as written.
+fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let digits = (bytes[at] == b'\\')
+            .then(|| bytes.get(at + 1..at + 4))
+            .flatten()
+            .filter(|digits| digits.iter().all(|digit| (b'0'..=b'7').contains(digit)));
+        let byte = digits.and_then(|digits| {
+            let value = digits
+                .iter()
+                .fold(0_u32, |sum, digit| sum * 8 + u32::from(digit - b'0'));
+            u8::try_from(value).ok()
+        });
+        match byte {
+            Some(byte) => {
+                out.push(byte);
+                at += 4;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Whether a mount point other than `host` itself is below it, in the text of a
+/// `/proc/self/mountinfo` (the mount point is the fifth field).
+pub fn has_submount(mountinfo: &str, host: &Path) -> bool {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(unescape)
+        .any(|point| Path::new(&point) != host && Path::new(&point).starts_with(host))
+}
+
+/// Refuses a read-only mount of `spec` that holds a mount point, for an engine that
+/// cannot make the mounts below it read-only too. `mountinfo` is the agent's
+/// `/proc/self/mountinfo`, `None` when it could not be read: then a read-only mount is
+/// refused, because the check could not look (a job without one does not need the file).
+///
+/// It sees the mounts of the agent's own mount namespace, as they are when it looks: an
+/// engine in another mount namespace is not covered (the agent supports only a local
+/// rootful engine), and a mount added below the directory afterwards (only root can add
+/// one) is not seen.
+///
+/// # Errors
+///
+/// [`ArgsError::NestedMount`], or [`ArgsError::MountinfoUnreadable`].
+pub fn check_submounts(spec: &ContainerSpec, mountinfo: Option<&str>) -> Result<(), ArgsError> {
+    let mut read_only = spec.mounts.iter().filter(|mount| mount.ro).peekable();
+    match (read_only.peek().is_some(), mountinfo) {
+        (false, _) => Ok(()),
+        (true, None) => Err(ArgsError::MountinfoUnreadable),
+        (true, Some(text)) => match read_only.any(|mount| has_submount(text, &mount.host)) {
+            true => Err(ArgsError::NestedMount),
+            false => Ok(()),
+        },
+    }
+}
+
+/// The options of the local driver that make the scratch volume a `nosuid,nodev` bind of
+/// the directory: what `volume inspect` must print as `.Options` for it.
+pub fn scratch_volume_options(scratch: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "none",
+        "device": scratch.to_string_lossy(),
+        "o": "bind,nosuid,nodev",
+    })
+}
+
+/// The scratch directory as Docker's `--mount` value: a volume of the local driver that
+/// binds the directory with `nosuid,nodev` (a `type=bind` mount of Docker takes neither),
+/// anonymous so that `rm --volumes` removes it with the container, and `volume-nocopy` so
+/// that the image's own `/scratch` is not copied into the host directory. The option list
+/// holds commas, so that field is in double quotes: the value is read as CSV.
+fn scratch_volume(scratch: &Path) -> Result<String, ArgsError> {
+    let host = scratch.to_str().filter(|text| clean(text));
+    host.map(|host| {
+        format!(
+            "type=volume,dst={SCRATCH_TARGET},volume-driver=local,volume-nocopy,\
+             volume-opt=type=none,volume-opt=device={host},\"volume-opt=o=bind,nosuid,nodev\""
+        )
+    })
+    .ok_or(ArgsError::MountPath)
+}
+
+/// Whether `text` can be given in a `--mount` list as it is: absolute, with no comma,
+/// double quote, colon or control character.
+fn clean(text: &str) -> bool {
+    text.starts_with('/') && !text.contains([',', '"', ':']) && !text.chars().any(char::is_control)
+}
+
+/// A bind mount, as the value of `--mount`. Podman's `--mount` takes `nosuid,nodev` for a
+/// bind, so there a set-uid file or a device node on the mount has no effect; Docker's
+/// takes neither.
+fn mount_value(
+    engine: Engine,
+    host: &Path,
+    target: &str,
+    ro: bool,
+    recursive: bool,
+) -> Result<String, ArgsError> {
     let host = host.to_str().filter(|text| clean(text));
     let target = Some(target).filter(|text| clean(text));
     let access = match (ro, recursive) {
@@ -134,8 +253,12 @@ fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<S
         (true, false) => ",readonly",
         (true, true) => ",readonly,bind-recursive=readonly,bind-propagation=rprivate",
     };
+    let unprivileged = match engine {
+        Engine::Podman => ",nosuid,nodev",
+        Engine::Docker => "",
+    };
     host.zip(target)
-        .map(|(host, target)| format!("type=bind,src={host},dst={target}{access}"))
+        .map(|(host, target)| format!("type=bind,src={host},dst={target}{access}{unprivileged}"))
         .ok_or(ArgsError::MountPath)
 }
 
@@ -148,13 +271,16 @@ fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<S
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
-pub fn hardening_args(settings: &Settings, engine: Engine) -> Vec<String> {
+pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = format!("/tmp:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
+    let profile = format!("seccomp={seccomp}");
     let mut args: Vec<String> = [
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        &profile,
         "--network",
         settings.network(),
         "--read-only",

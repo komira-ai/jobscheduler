@@ -55,7 +55,9 @@ pub fn job() -> JobSpec {
     JobSpec {
         run_id: "run-1".into(),
         lease_id: "1-1".into(),
-        image: "ubuntu:24.04".into(),
+        image:
+            "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
         args: vec!["make".into(), "all".into()],
         limits: Limits {
             cpu_millis: 2000,
@@ -73,6 +75,8 @@ pub fn job() -> JobSpec {
         labels: map(&[("team", "infra")]),
         heartbeat_seq: 7,
         valid_for_ms: 10_000,
+        bundle: None,
+        native: None,
     }
 }
 

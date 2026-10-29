@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_elastic::{
-    AcquireRequest, Acquired, Artifact, BootStep, ElasticProvider, GpuClass, Held, HostRef, Offer,
-    PriceUnit, ProviderError, Released, Secret, SlotName,
+    AcquireRequest, Acquired, Artifact, BootStep, CheckResult, ElasticProvider, GpuClass, Held,
+    HostRef, Offer, PriceUnit, ProviderError, Released, Secret, SlotName,
 };
 use js_lease::{ManualClock, Timestamp};
 use js_lease_server::network::{Contribution, LaunchCtx, NetworkError, NetworkMode};
@@ -81,6 +81,7 @@ pub struct FakeCloud {
     catalog: Mutex<Result<Vec<Offer>, String>>,
     prep: Mutex<Vec<BootStep>>,
     panics: AtomicBool,
+    delegate: Mutex<Option<Arc<dyn ElasticProvider>>>,
     catalogs: AtomicUsize,
     others: AtomicUsize,
 }
@@ -96,9 +97,16 @@ impl FakeCloud {
                 "fake-driver".to_owned(),
             ])]),
             panics: AtomicBool::new(false),
+            delegate: Mutex::new(None),
             catalogs: AtomicUsize::new(0),
             others: AtomicUsize::new(0),
         })
+    }
+
+    /// Has the catalog call and the provider's own checks answered by `provider` from now
+    /// on; the other calls stay counted and unanswered.
+    pub fn delegate(&self, provider: Arc<dyn ElasticProvider>) {
+        *self.delegate.lock().unwrap() = Some(provider);
     }
 
     /// The catalog from now on.
@@ -126,8 +134,9 @@ impl FakeCloud {
         self.catalogs.load(Ordering::SeqCst)
     }
 
-    /// How many calls other than the catalog and the host preparation (acquire, list,
-    /// release) were made: a pool in `plan` makes none.
+    /// How many calls other than the catalog, the host preparation and the list (acquire,
+    /// release) were made: a pool in `plan` makes none. A list reads and changes nothing,
+    /// and the scaler reads it to show what a plan pool would launch.
     pub fn others(&self) -> usize {
         self.others.load(Ordering::SeqCst)
     }
@@ -141,8 +150,16 @@ impl ElasticProvider for Handle {
         if self.0.panics.load(Ordering::SeqCst) {
             panic!("the fake cloud was told to panic");
         }
+        if let Some(provider) = self.0.delegate.lock().unwrap().clone() {
+            return provider.catalog();
+        }
         let answer = self.0.catalog.lock().unwrap().clone();
         answer.map_err(ProviderError::new)
+    }
+
+    fn checks(&self) -> Vec<CheckResult> {
+        let delegate = self.0.delegate.lock().unwrap().clone();
+        delegate.map_or_else(Vec::new, |provider| provider.checks())
     }
 
     fn host_prep(&self, _offer: &Offer) -> Vec<BootStep> {
@@ -159,7 +176,6 @@ impl ElasticProvider for Handle {
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
-        self.0.others.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
 
@@ -167,6 +183,15 @@ impl ElasticProvider for Handle {
         self.0.others.fetch_add(1, Ordering::SeqCst);
         Released::Unknown
     }
+}
+
+/// The pin of the agent for x86_64: an `https` address and a hash.
+fn agent_pin() -> String {
+    format!(
+        "{{ x86_64 = {{ url = {}, sha256 = {} }} }}",
+        quote("https://js.example:7301/agent"),
+        quote(&"ab".repeat(32))
+    )
 }
 
 thread_local! {
@@ -304,7 +329,7 @@ pub enum Net {
 pub struct Options {
     /// `server.advertise_url`.
     pub advertise: Option<&'static str>,
-    /// Whether the agent binary's digest is known.
+    /// Whether the pool pins an agent binary for x86_64 (a `live` pool needs it).
     pub digest: bool,
     /// The network mode.
     pub net: Net,
@@ -347,10 +372,14 @@ pub struct Rig {
 impl Rig {
     /// Starts a server named `name` over a cloud with `offers`.
     pub async fn start(name: &str, offers: Vec<Offer>, options: Options) -> Self {
+        Self::start_over(name, FakeCloud::new(offers), options).await
+    }
+
+    /// Starts a server named `name` over `cloud`, which the test may have given a delegate.
+    pub async fn start_over(name: &str, cloud: Arc<FakeCloud>, options: Options) -> Self {
         let logs = LogCapture::start();
         quiet_logs();
         let scratch = Scratch::new(name);
-        let cloud = FakeCloud::new(offers);
         let net = FakeNet::new();
         let (extra, tls) = Self::listeners(&scratch, options);
         let advertise = options
@@ -372,6 +401,10 @@ impl Rig {
             true => pool.set("launch", &quote("live")),
             false => pool,
         };
+        let pool = match options.digest {
+            true => pool.set("agent", &agent_pin()),
+            false => pool,
+        };
         let pool = match options.net {
             Net::Tailscale { .. } => pool.set(
                 "network",
@@ -386,9 +419,6 @@ impl Rig {
         NEXT.with(|next| *next.borrow_mut() = Some(cloud.clone()));
         let config = Config::from_config_file(&path, &kinds(), &OwnerOnlyFiles, clock()).unwrap();
         let mut inputs = LaunchInputs::default();
-        if options.digest {
-            inputs.agent_sha256.insert("x86_64".to_owned(), [0xab; 32]);
-        }
         match options.net {
             Net::Fake => inputs.network = Some(net.clone()),
             Net::Tailscale { pinned: true } => {

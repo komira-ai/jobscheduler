@@ -8,7 +8,7 @@
 //!   refuse a start (a token file anyone can read, a listen address off the loopback
 //!   without TLS).
 //! - [`Kinds`]: the provider kinds a `[[pool]]` of the configuration file may name,
-//!   compiled in (`static` today).
+//!   compiled in (`static` and `lambdalabs`).
 //! - [`CapacitySource`]: where the hosts come from. [`StaticPoolSource`] reads the
 //!   operator's pool file. With agent registration on (see "Agents" below), the static
 //!   pool and the hosts agents register are two sources of the same trait, layered
@@ -16,14 +16,20 @@
 //! - [`network`]: how a machine the service launches reaches it (the `default` and
 //!   `tailscale` modes), and [`bootstrap`]: the script such a machine boots with, rendered
 //!   from a plan with its secrets masked or filled. A provider receives the rendered
-//!   payload and no network type. Nothing in the server's routes calls either yet.
+//!   payload and no network type. The scaler's launch step ([`Launcher`]) is the one place
+//!   that holds both a mode and a provider.
+//! - [`Scaler`]: the shell that runs [`js_scaler::step`] on the server's tick for an
+//!   elastic pool: it reads the registry and the provider, runs the step's actions in
+//!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
+//!   only and written whole before the call a record describes.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
 //! # Flags
 //!
-//! Configuration is flags only; the one secret, the bearer token, is read from a file
-//! that only its owner can use.
+//! Configuration is these flags, or one file (`--config`, below), never both: every flag
+//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
+//! the bearer token, is read from a file that only its owner can use.
 //!
 //! | flag | meaning |
 //! |---|---|
@@ -47,24 +53,29 @@
 //! | `--max-requests` | requests served on one connection before its last answer closes it, `100` |
 //! | `--drain-timeout` | how long a stop waits for requests in flight before it cuts the rest, `10s` |
 //!
-//! A start that is refused prints the flag at fault and exits with status 2.
+//! A start that is refused prints the flag at fault and exits with status 2. The
+//! hello limit flags and `--require-host-credential` need `--agent-pool-config`, and are
+//! refused without it.
 //!
 //! # The configuration file
 //!
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
-//! above. Every table refuses a field it does not know, and the file holds no secret: a
+//! above, and no flag may be given beside it: the first one on the command line is refused,
+//! such as `--listen: not allowed with --config; set server.listen`, before the file is read
+//! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
+//! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
+//! `join_token_file`, and every other flag is the `[server]` key of its name with `_` for `-`. Every table refuses a field it does not know, and the file holds no secret: a
 //! secret is the path of a file that only its owner can use. A refusal names where it is,
 //! `server.listen: ...` or `pool "gpu": provider.api_key_file: ...`, and never repeats a
 //! value of the file; a syntax error says the line. Nothing is checked over the network
 //! at start.
 //!
-//! Until the flags are refused beside `--config`, a flag given with it has no effect.
-//!
 //! ```toml
 //! [server]
 //! listen            = "100.64.0.1:7300"   # default 127.0.0.1:7300; off the loopback it needs tls_cert and tls_key
 //! agent_listen      = "100.64.0.1:7301"   # agent routes only; required with an elastic pool
-//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool
+//! advertise_url     = "https://js.example.ts.net:7301"   # what agents dial; http:// off the loopback is refused with an elastic pool; required when a pool is live
+//! scheduler_id      = "js"                               # default "js": marks what this scheduler launches; give each scheduler on one cloud account its own
 //! state_file        = "/var/lib/jobscheduler/state"      # required
 //! boot              = "resume"                           # required: "initialise" or "resume"
 //! client_token_file = "/run/credentials/js/client-token" # required: the file --token-file names
@@ -72,6 +83,8 @@
 //! tls_key           = "/run/credentials/js/tls-key"
 //! # tick, default_ttl, max_ttl, handshake_timeout, header_timeout, read_timeout,
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
+//! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
+//! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
 //!
 //! [[pool]]
 //! name     = "gpu-static"
@@ -82,8 +95,17 @@
 //! A pool whose provider launches machines (an elastic pool) also has `max_instances`
 //! (1 to 255), `max_spend_per_hour` and `max_spend_per_day` (strings: a decimal with at
 //! most two places, above zero, the day cap not below the hour cap), and optionally `idle`,
-//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file` and `network`.
-//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing.
+//! `boot_timeout` (`15m`), `launch`, `exec`, `join_token_file`, `agent` and `network`.
+//! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
+//! one that is `live` launches machines for requests that wait, within `max_instances`,
+//! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
+//! idle for `idle` (ten minutes unless the file says). A `live` pool also needs `agent =
+//! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
+//! the launched machine downloads and checks, one for each CPU architecture its offers
+//! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale
+//! network it needs `binary = { url = ..., sha256 = ... }` for the Tailscale build too
+//! (`api_url` there names another Tailscale API, for a test). After a boot that fails
+//! the pool launches nothing for ten minutes.
 //! `exec` is `container` unless the file says `sandbox-exec`, or `none` for a pool whose
 //! hosts predate the host contract: the hosts must report a `runtime` of that mode, and
 //! `gpu-toolkit` when the pool has GPUs. `network` is `{ kind = "default" }`, which is
@@ -118,7 +140,7 @@
 //! | `GET /v1/leases` | 200 `{leases: [{id, state, host?, acquired_at_ms, expires_at_ms, ends_at_ms, labels}]}` |
 //! | `GET /v1/hosts` | 200 `{hosts: [{id, source, shape, capabilities, labels, lease?, state?, lost?, phase?, agent_version?, releasing?, taint?}]}`; `source` is `static` or `registered`, and `state` (`live`, `lost`, `awaiting`), `lost`, `phase`, `agent_version`, `releasing` (no lease, runs still to finish) and `taint` (`{reason, run_id?, check?}`, once the host reported one), `mark` (`reserved` for a waiting request, `held` while a whole-node lease is committed, `draining` and `releasing` while the host is being scaled away), `reserved_for` (the request id) and `drain_deadline_ms` (when a reservation draining a busy host is given up) are those of a registered host |
 //! | `GET /healthz` | 200 `ok`, no token; 503 once the tick loop has stopped |
-//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
+//! | `GET /v1/pools` | 200 `{pools: [{name, kind, network, exec, launch, state, reasons, credentials, network_check, instances, blocked, no_offer, last_launch, machines, orphans, next_launch}], warnings}`; `state` is `checking` (no pass yet), `available` or `unavailable`; `provider_checks` is the provider's own checks of the last pass, each `{name, ok, reason, note, checked_at_ms}`; `next_launch` holds the launch plan with every secret printed as `***`; no token, on `server.listen` only, and not served (404) when that is not a private address, nor to a peer that is not a private address (an IPv4-mapped IPv6 peer counts as its IPv4 form) |
 //! | `GET /status` | 200 the same data as a page; same rules |
 //!
 //! An unknown route is a 404, a known route with another method a 405, a body that is
@@ -237,7 +259,7 @@
 //!
 //! | request | answers |
 //! |---|---|
-//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
+//! | `POST /v1/leases/{id}/runs` | body: `image`, `args?`, `limits {cpu_millis, memory_bytes, pids?, wall_ms?}`, `gpu_indices?`, `mounts?`, `isolation?`, `labels?`. 202 `{run_id, state: "queued"}`; 404 `unknown-lease`; 409 `not-held`, `host-lost`, `host-tainted`, `not-ready` (a whole-node lease whose agent has not reported `exclusive_ready`), `no-capacity`, `host-not-registered` (a lease on a static host); 422 `limits-exceed-shape`, `invalid-image`, `image-digest-required` (the image has no `@sha256:<64 lower case hex>` digest; `name:tag@sha256:...` is accepted), `invalid-mount`, `invalid-job`, `wall-time-not-positive`, `host-jobs-not-allowed`; 400 for a body that is not this |
 //! | `GET /v1/leases/{id}/runs` | 200 `{runs: [{run_id, state, outcome?, exit_code?, detail?}]}`, oldest first; `state` is `queued`, `starting`, `running`, `exited` (the container has exited and its result is held, a stop asked for or not), `stopping`, `ended` or `never-started` |
 //! | `GET /v1/leases/{id}/runs/{run_id}` | 200 one entry of the list; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
 //! | `DELETE /v1/leases/{id}/runs/{run_id}` | 202 `{run_id, state}`; 404 `unknown-lease` or `unknown-run`; 410 `run-forgotten` |
@@ -376,6 +398,8 @@ mod checks;
 mod config;
 mod error;
 mod file;
+mod file_checks;
+mod flags;
 mod hosts;
 mod io_timeout;
 mod join_api;
@@ -387,6 +411,7 @@ pub mod network;
 mod pool;
 mod rate;
 mod run_api;
+mod scaler;
 mod sched;
 mod server;
 mod status;
@@ -399,7 +424,6 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::Parser;
 use js_lease::SystemClock;
 use tokio::runtime::Builder;
 use tokio::signal::unix::{SignalKind, signal};
@@ -420,6 +444,10 @@ pub use kinds::{
 #[doc(hidden)]
 pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
+pub use scaler::{
+    Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
+    RecordsFile, Scaler,
+};
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};
 

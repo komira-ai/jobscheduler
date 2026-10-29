@@ -22,6 +22,7 @@ fn refusal_codes_snapshot() {
         refusal::WALL_TIME_NOT_POSITIVE,
         refusal::INVALID_JOB,
         refusal::INVALID_IMAGE,
+        refusal::IMAGE_DIGEST_REQUIRED,
         refusal::INVALID_MOUNT,
         refusal::HOST_LIVE,
         refusal::HOST_TAINTED,
@@ -52,15 +53,20 @@ fn refusal_codes_snapshot() {
         refusal::NO_CAPABLE_HOST,
         refusal::NO_MATCHING_POOL,
         refusal::NOT_READY,
+        refusal::INVALID_PROGRAM,
+        refusal::INVALID_ENV,
+        refusal::NATIVE_UNSUPPORTED,
+        refusal::INVALID_BUNDLE,
+        refusal::BUNDLE_DIGEST_REQUIRED,
     ];
     assert_eq!(
         codes.join(" "),
         "invalid-hello reserved-label wall-time-not-positive invalid-job invalid-image \
-         invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
+         image-digest-required invalid-mount host-live host-tainted stale-epoch unknown-host not-held host-lost \
          no-capacity host-not-registered limits-exceed-shape host-jobs-not-allowed \
          unsupported-protocol invalid-heartbeat invalid-welcome invalid-reply unknown-pool \
          shape-not-accepted host-contract execution-mismatch pool-full host-bound session-mismatch session-unavailable host-listed rate-limited \
-         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready"
+         body-too-large exclusive-not-ready no-capable-host no-matching-pool not-ready invalid-program invalid-env native-unsupported invalid-bundle bundle-digest-required"
     );
 }
 

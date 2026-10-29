@@ -11,14 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::Uri;
-use js_elastic::{Demand, ElasticProvider};
-use js_lease::Settings;
+use js_elastic::{Artifact, Demand, ElasticProvider, SchedulerId};
 use js_registry::{PoolConfig, WholeNodeConfig};
 use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 
@@ -26,10 +24,16 @@ use crate::adapt::SharedClock;
 use crate::agent_pool::{MIXED_UNSERVED, shipped_class};
 use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
-use crate::config::{BootMode, Limits, TlsFiles, Token, parse_duration, parse_token};
+use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
+use crate::file_checks::{check_listeners, check_live, https_url, sha256};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
 use crate::network::{OAuthClient, valid_tag};
+
+mod server;
+
+pub(crate) use server::Server;
+use server::{read_client_token, read_server};
 
 /// The most instances one pool may allow: the join-token table holds 256 waiting tokens.
 const MAX_INSTANCES: u64 = 255;
@@ -42,27 +46,6 @@ const FLOOR_MEMORY_BYTES: u64 = 1 << 30;
 
 const ROOT_KEYS: &[&str] = &["server", "pool"];
 
-const SERVER_KEYS: &[&str] = &[
-    "listen",
-    "agent_listen",
-    "advertise_url",
-    "state_file",
-    "boot",
-    "client_token_file",
-    "tls_cert",
-    "tls_key",
-    "tick",
-    "default_ttl",
-    "max_ttl",
-    "max_connections",
-    "handshake_timeout",
-    "header_timeout",
-    "read_timeout",
-    "write_timeout",
-    "max_requests",
-    "drain_timeout",
-];
-
 const POOL_KEYS: &[&str] = &[
     "name",
     "class",
@@ -73,6 +56,7 @@ const POOL_KEYS: &[&str] = &[
     "idle",
     "boot_timeout",
     "launch",
+    "agent",
     "join_token_file",
     "provider",
     "network",
@@ -81,7 +65,7 @@ const POOL_KEYS: &[&str] = &[
 /// Whether an elastic pool launches. A pool starts in `Plan`: it checks and shows its
 /// plan and launches nothing. `Live` is the line that spends money; the scaler honours it,
 /// and until the scaler exists nothing launches in either.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Launch {
     /// Check and plan only.
     Plan,
@@ -110,6 +94,12 @@ pub enum NetworkPlan {
         client: OAuthClient,
         /// The tag every launched host carries, such as `tag:js-agent`.
         tag: String,
+        /// The Tailscale build the host downloads, with its hash. Required when the pool
+        /// launches.
+        binary: Option<Artifact>,
+        /// The address of the Tailscale API, when the file names one (for a test or a
+        /// proxy); the service's own default otherwise.
+        api_url: Option<String>,
     },
 }
 
@@ -150,10 +140,24 @@ pub struct ElasticPlan {
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
+    /// The agent the host downloads, with its hash, by CPU architecture (`x86_64`,
+    /// `aarch64`). A pool that launches needs at least one; an offer of an architecture
+    /// with no entry is never launched with another's.
+    pub agent: BTreeMap<String, Artifact>,
+    /// The id that marks what this scheduler launches (`server.scheduler_id`).
+    pub scheduler: SchedulerId,
+    /// The pool's name as the registry knows it.
+    pub(crate) id: ProviderId,
     pub(crate) provider: Arc<dyn ElasticProvider>,
 }
 
 impl ElasticPlan {
+    /// Takes the network table out of the plan, leaving `default` in its place, for the
+    /// one thing that builds the mode from it (the credential in it cannot be copied).
+    pub(crate) fn take_network(&mut self) -> NetworkPlan {
+        std::mem::replace(&mut self.network, NetworkPlan::Default)
+    }
+
     /// The provider the pool launches with.
     pub fn provider(&self) -> &dyn ElasticProvider {
         self.provider.as_ref()
@@ -174,22 +178,10 @@ impl fmt::Debug for ElasticPlan {
             .field("boot_timeout", &self.boot_timeout)
             .field("exec", &self.exec)
             .field("network", &self.network)
+            .field("agent", &self.agent)
+            .field("scheduler", &self.scheduler)
             .finish_non_exhaustive()
     }
-}
-
-/// What the `[server]` table says.
-pub(crate) struct Server {
-    pub(crate) listen: SocketAddr,
-    pub(crate) agent_listen: Option<SocketAddr>,
-    pub(crate) advertise_url: Option<String>,
-    pub(crate) state_file: PathBuf,
-    pub(crate) boot: BootMode,
-    pub(crate) client_token_file: PathBuf,
-    pub(crate) tls: Option<TlsFiles>,
-    pub(crate) tick: Duration,
-    pub(crate) settings: Settings,
-    pub(crate) limits: Limits,
 }
 
 /// The registering pool: the plan, what the registry is built from, and the join tokens.
@@ -297,6 +289,22 @@ impl Section {
         }
     }
 
+    /// The integer `key` when the file gives it, which must be from `low` to `high`.
+    fn bounded_given(
+        &mut self,
+        key: &str,
+        low: u64,
+        high: u64,
+    ) -> Result<Option<u64>, StartupError> {
+        let Some(number) = self.integer(key)? else {
+            return Ok(None);
+        };
+        match (low..=high).contains(&number) {
+            true => Ok(Some(number)),
+            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
+        }
+    }
+
     /// The integer `key`, or `default`, which must be from `low` to `high`.
     fn bounded(
         &mut self,
@@ -305,10 +313,14 @@ impl Section {
         high: u64,
         default: u64,
     ) -> Result<u64, StartupError> {
-        let number = self.integer(key)?.unwrap_or(default);
-        match (low..=high).contains(&number) {
-            true => Ok(number),
-            false => Err(self.fail(key, &format!("must be from {low} to {high}"))),
+        Ok(self.bounded_given(key, low, high)?.unwrap_or(default))
+    }
+
+    fn boolean(&mut self, key: &str) -> Result<Option<bool>, StartupError> {
+        match self.map.remove(key) {
+            None => Ok(None),
+            Some(toml::Value::Boolean(flag)) => Ok(Some(flag)),
+            Some(_) => Err(self.fail(key, "must be true or false")),
         }
     }
 
@@ -438,7 +450,7 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
     let mut registering = None;
     let mut names = BTreeSet::new();
     for (index, table) in pools.into_iter().enumerate() {
-        let read = read_pool(table, index + 1, ld, &client_token)?;
+        let read = read_pool(table, index + 1, ld, (&client_token, &server.scheduler))?;
         let pool = format!("pool {:?}", read.name);
         if !names.insert(read.name.clone()) {
             let reason = "also the name of an earlier pool";
@@ -460,6 +472,9 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         }
     }
     let elastic = registering.is_some();
+    if let Some(registering) = &registering {
+        check_live(&server, &registering.plan)?;
+    }
     let hosts = match (static_pool, registering) {
         (static_pool, Some(registering)) => LoadedHosts::Registering {
             static_pool,
@@ -471,6 +486,10 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
             return Err(StartupError::at("pool", reason));
         }
     };
+    if let (false, Some(key)) = (elastic, server.agents.first_given()) {
+        let reason = "needs an elastic pool, whose hosts register agents";
+        return Err(StartupError::at(format!("server.{key}"), reason));
+    }
     let warnings = check_listeners(&server, elastic)?;
     Ok(Loaded {
         server,
@@ -478,147 +497,6 @@ pub(crate) fn load(path: &Path, ld: &Load<'_>) -> Result<Loaded, StartupError> {
         hosts,
         warnings,
     })
-}
-
-/// What the listeners and the advertised address must be, given whether a pool launches
-/// hosts; the warnings the server shows.
-fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<String>, StartupError> {
-    if elastic {
-        let apart = match server.agent_listen {
-            Some(agent) => agent != server.listen,
-            None => false,
-        };
-        if !apart {
-            return Err(StartupError::at(
-                "server.agent_listen",
-                "required with an elastic pool; must differ from server.listen",
-            ));
-        }
-        let refused = match &server.advertise_url {
-            Some(url) => plain_http(url),
-            None => false,
-        };
-        if refused {
-            return Err(StartupError::at(
-                "server.advertise_url",
-                "http:// is refused by agents; use https (or loopback)",
-            ));
-        }
-    }
-    let mut listeners = vec![("server.listen", server.listen)];
-    if let Some(agent) = server.agent_listen {
-        listeners.push(("server.agent_listen", agent));
-    }
-    let mut warnings = Vec::new();
-    for (key, addr) in listeners {
-        if server.tls.is_none() & !addr.ip().is_loopback() {
-            return Err(StartupError::at(
-                key,
-                format!(
-                    "{addr} is not a loopback address, so server.tls_cert and server.tls_key are required: a bearer token never crosses a network in clear"
-                ),
-            ));
-        }
-        if addr.ip().is_unspecified() {
-            // The status pages are on `server.listen` alone.
-            let pages = match key == "server.listen" {
-                true => "; /v1/pools and /status are served only to private peers",
-                false => "",
-            };
-            warnings.push(format!(
-                "server: warning: binds all interfaces ({key} {addr}){pages}"
-            ));
-        }
-    }
-    Ok(warnings)
-}
-
-/// Whether `url` is `http://` to a host that is not loopback, which an agent refuses.
-fn plain_http(url: &str) -> bool {
-    let Ok(uri) = url.parse::<Uri>() else {
-        return false;
-    };
-    let host = uri.host().unwrap_or_default();
-    let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let address = match bare.parse::<IpAddr>() {
-        Ok(ip) => ip.is_loopback(),
-        Err(_) => false,
-    };
-    let loopback = (host == "localhost") | address;
-    let plain = uri.scheme_str() == Some("http");
-    plain & !loopback
-}
-
-fn read_server(table: toml::Table) -> Result<Server, StartupError> {
-    let mut s = Section::open(table, "server.".to_owned());
-    s.only(SERVER_KEYS)?;
-    let listen = s.address("listen")?;
-    let listen = listen.unwrap_or(SocketAddr::from(([127, 0, 0, 1], 7300)));
-    let agent_listen = s.address("agent_listen")?;
-    let advertise_url = s.string("advertise_url")?;
-    let state_file = s.required_path("state_file")?;
-    let boot = s.required_string("boot")?;
-    let boot = match boot.as_str() {
-        "initialise" => BootMode::Initialise,
-        "resume" => BootMode::Resume,
-        _ => return Err(s.fail("boot", "must be initialise or resume")),
-    };
-    let client_token_file = s.required_path("client_token_file")?;
-    let tls = match (s.path("tls_cert")?, s.path("tls_key")?) {
-        (Some(cert), Some(key)) => Some(TlsFiles { cert, key }),
-        (None, None) => None,
-        (Some(_), None) => return Err(s.fail("tls_key", "required with server.tls_cert")),
-        (None, Some(_)) => return Err(s.fail("tls_cert", "required with server.tls_key")),
-    };
-    let secs = Duration::from_secs;
-    let tick = s.duration_or("tick", secs(5))?;
-    let default_ttl = s.duration_or("default_ttl", secs(600))?;
-    let max_ttl = s.duration_or("max_ttl", secs(3600))?;
-    let defaults = Limits::default();
-    let connections = s.bounded("max_connections", 1, u64::from(u16::MAX), 256)?;
-    let requests = s.bounded("max_requests", 1, u64::from(u32::MAX), 100)?;
-    let limits = Limits {
-        max_connections: u16::try_from(connections).unwrap_or(defaults.max_connections),
-        handshake_timeout: s.duration_or("handshake_timeout", defaults.handshake_timeout)?,
-        header_timeout: s.duration_or("header_timeout", defaults.header_timeout)?,
-        read_timeout: s.duration_or("read_timeout", defaults.read_timeout)?,
-        write_timeout: s.duration_or("write_timeout", defaults.write_timeout)?,
-        max_requests: u32::try_from(requests).unwrap_or(defaults.max_requests),
-        drain_timeout: s.duration_or("drain_timeout", defaults.drain_timeout)?,
-    };
-    // The same check as `--default-ttl` and `--max-ttl`.
-    let settings = match Settings::new(default_ttl, max_ttl) {
-        Ok(settings) => settings,
-        Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
-    };
-    Ok(Server {
-        listen,
-        agent_listen,
-        advertise_url,
-        state_file,
-        boot,
-        client_token_file,
-        tls,
-        tick,
-        settings,
-        limits,
-    })
-}
-
-fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token, StartupError> {
-    let place = "server.client_token_file";
-    let path = &server.client_token_file;
-    let bytes = match ld.files.read(path) {
-        Ok(bytes) => bytes,
-        Err(reason) => return Err(StartupError::at(place, reason)),
-    };
-    match parse_token(&bytes) {
-        Ok(token) => Ok(token),
-        Err(reason) => {
-            let reason = format!("{} {reason}", path.display());
-            Err(StartupError::at(place, reason))
-        }
-    }
 }
 
 /// A pool of the file, built.
@@ -642,6 +520,7 @@ struct ElasticKeys {
     boot_timeout: Option<Duration>,
     join_token_file: Option<PathBuf>,
     network: Option<toml::Table>,
+    agent: Option<toml::Table>,
 }
 
 impl ElasticKeys {
@@ -656,6 +535,7 @@ impl ElasticKeys {
             ("boot_timeout", self.boot_timeout.is_some()),
             ("join_token_file", self.join_token_file.is_some()),
             ("network", self.network.is_some()),
+            ("agent", self.agent.is_some()),
         ];
         for (key, set) in given {
             if set {
@@ -670,7 +550,7 @@ fn read_pool(
     table: toml::Table,
     number: usize,
     ld: &Load<'_>,
-    client: &Token,
+    (client, scheduler): (&Token, &SchedulerId),
 ) -> Result<Read, StartupError> {
     // The name, when it is one, so that every refusal below names the pool; otherwise the
     // pool is its number, and the value is not repeated.
@@ -702,6 +582,7 @@ fn read_pool(
         boot_timeout: s.duration("boot_timeout")?,
         join_token_file: s.path("join_token_file")?,
         network: s.table("network")?,
+        agent: s.table("agent")?,
     };
     let launch = match s.string("launch")?.as_deref() {
         None | Some("plan") => Launch::Plan,
@@ -720,6 +601,9 @@ fn read_pool(
             class: &class,
             clock: ld.clock.clone(),
             files: ld.files,
+            scheduler,
+            max_instances: keys.max_instances.unwrap_or_default(),
+            launch,
         };
         ld.kinds.build(&kind, &p.map, &ctx)
     };
@@ -747,6 +631,7 @@ fn read_pool(
                 keys,
                 launch,
                 kind: &kind,
+                scheduler,
             };
             Pool::Elastic(Box::new(elastic.finish(built, client)?))
         }
@@ -763,6 +648,7 @@ struct Elastic<'a> {
     keys: ElasticKeys,
     launch: Launch,
     kind: &'a str,
+    scheduler: &'a SchedulerId,
 }
 
 impl Elastic<'_> {
@@ -775,6 +661,7 @@ impl Elastic<'_> {
             keys,
             launch,
             kind,
+            scheduler,
         } = self;
         let max_instances = require(s, "max_instances", keys.max_instances)?;
         if max_instances == 0 {
@@ -805,6 +692,21 @@ impl Elastic<'_> {
             _ => {}
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
+        let agent = match keys.agent {
+            Some(table) => read_agents(table, format!("{}agent.", s.head))?,
+            None => BTreeMap::new(),
+        };
+        let live = launch == Launch::Live;
+        let unpinned = match &network {
+            NetworkPlan::Tailscale { binary: None, .. } => live,
+            _ => false,
+        };
+        if unpinned {
+            return Err(s.fail("network.binary", LIVE_NEEDS));
+        }
+        if live & agent.is_empty() {
+            return Err(s.fail("agent", LIVE_NEEDS));
+        }
         let tokens = match &keys.join_token_file {
             Some(path) => match AgentTokens::open(path, client) {
                 Ok(tokens) => tokens,
@@ -831,7 +733,7 @@ impl Elastic<'_> {
         };
         let shape = Shape::new(resources, BTreeMap::new());
         let max = usize::try_from(max_instances).unwrap_or(usize::MAX);
-        let pool = registry_pool(s, id, &class, shape, max, exec)?;
+        let pool = registry_pool(s, id.clone(), &class, shape, max, exec)?;
         let plan = ElasticPlan {
             name: name.to_owned(),
             kind: kind.to_owned(),
@@ -845,9 +747,57 @@ impl Elastic<'_> {
             boot_timeout: keys.boot_timeout.unwrap_or(Duration::from_secs(900)),
             exec,
             network,
+            agent,
+            scheduler: scheduler.clone(),
+            id,
             provider: Arc::from(built.provider),
         };
         Ok(Registering { plan, pool, tokens })
+    }
+}
+
+/// What a file with no pin for something a launched host downloads is told.
+const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
+
+/// The agent pins by architecture: each key of `table` is an architecture (lower-case
+/// letters, digits and `_`) and holds a pin.
+fn read_agents(
+    table: toml::Table,
+    head: String,
+) -> Result<BTreeMap<String, Artifact>, StartupError> {
+    let mut agents = BTreeMap::new();
+    for (arch, value) in table {
+        let place = format!("{head}{arch}");
+        let letters = arch
+            .chars()
+            .all(|c| c.is_ascii_lowercase() | c.is_ascii_digit() | (c == '_'));
+        if !letters | arch.is_empty() {
+            return Err(StartupError::at(
+                place,
+                "an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64",
+            ));
+        }
+        let toml::Value::Table(pin) = value else {
+            return Err(StartupError::at(place, "must be a table { url, sha256 }"));
+        };
+        let artifact = read_artifact(pin, format!("{head}{arch}."))?;
+        agents.insert(arch, artifact);
+    }
+    Ok(agents)
+}
+
+/// A file a launched host downloads: an `https://` `url` and its `sha256`.
+fn read_artifact(table: toml::Table, head: String) -> Result<Artifact, StartupError> {
+    let mut s = Section::open(table, head);
+    s.only(&["url", "sha256"])?;
+    let url = s.required_string("url")?;
+    if !https_url(&url) {
+        return Err(s.fail("url", "must be an https:// URL: the host refuses any other"));
+    }
+    let hash = s.required_string("sha256")?;
+    match sha256(&hash) {
+        Some(sha256) => Ok(Artifact { url, sha256 }),
+        None => Err(s.fail("sha256", "must be 64 lower-case hex digits")),
     }
 }
 
@@ -896,14 +846,24 @@ fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan,
             Ok(NetworkPlan::Default)
         }
         "tailscale" => {
-            s.only(&["kind", "oauth_client_file", "tag"])?;
+            s.only(&["kind", "oauth_client_file", "tag", "binary", "api_url"])?;
             let file = s.required_path("oauth_client_file")?;
             let tag = s.required_string("tag")?;
             if !valid_tag(&tag) {
                 return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
             }
+            let binary = match s.table("binary")? {
+                Some(table) => Some(read_artifact(table, format!("{}binary.", s.head))?),
+                None => None,
+            };
+            let api_url = s.string("api_url")?;
             match OAuthClient::from_file(&file) {
-                Ok(client) => Ok(NetworkPlan::Tailscale { client, tag }),
+                Ok(client) => Ok(NetworkPlan::Tailscale {
+                    client,
+                    tag,
+                    binary,
+                    api_url,
+                }),
                 Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
             }
         }

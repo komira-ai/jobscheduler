@@ -12,7 +12,11 @@
 //! | ids (`run_id`, `lease_id`, `host_id`, `pool`, `instance_id`, taint `run_id`) | [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `session` | [`MAX_SESSION_LEN`] bytes of `[A-Za-z0-9._-]`, leading alphanumeric |
 //! | `image` | at most [`MAX_IMAGE_LEN`] bytes in all (not docker's 255-character name limit) of the `name[:tag][@digest]` reference grammar (see `JobSpec::image`), no transport prefix |
+//! | `bundle` | the same grammar and cap as `image` (see `JobSpec::bundle`); absent when the job has none |
 //! | `args` | [`MAX_ARGS`] entries of [`MAX_ARG_LEN`] bytes, [`MAX_ARGS_TOTAL_BYTES`] in all, no NUL |
+//! | native `program` | [`MAX_PROGRAM_LEN`] bytes, an absolute path |
+//! | native `env` | [`MAX_ENV`] entries; key [`MAX_ENV_KEY_LEN`] bytes; value [`MAX_ENV_VALUE_LEN`]; [`MAX_ENV_TOTAL_BYTES`] in all |
+//! | native `inputs`, `outputs` | [`MAX_INPUTS`], [`MAX_OUTPUTS`] entries; paths as a mount's `rel`, [`MAX_REL_LEN`] bytes |
 //! | mounts | [`MAX_MOUNTS`] entries; root name [`MAX_ROOT_NAME_LEN`] bytes; `rel` [`MAX_REL_LEN`] bytes |
 //! | labels | [`MAX_LABELS`] entries; key [`MAX_LABEL_KEY_LEN`] bytes in all, its name at most [`MAX_LABEL_NAME_LEN`] and each dot-separated label of its prefix at most [`MAX_DNS_LABEL_LEN`]; value [`MAX_LABEL_VALUE_LEN`] bytes |
 //! | capabilities | [`MAX_CAPABILITIES`] entries; key [`MAX_CAPABILITY_KEY_LEN`]; value [`MAX_CAPABILITY_VALUE_LEN`] |
@@ -35,6 +39,20 @@ pub const MAX_ARGS: usize = 1024;
 pub const MAX_ARG_LEN: usize = 16 * 1024;
 /// Most bytes all arguments of one job may hold together.
 pub const MAX_ARGS_TOTAL_BYTES: usize = 256 * 1024;
+/// Longest `program` of a native job, in bytes.
+pub const MAX_PROGRAM_LEN: usize = 4096;
+/// Most environment entries on a native job.
+pub const MAX_ENV: usize = 256;
+/// Longest environment variable name, in bytes.
+pub const MAX_ENV_KEY_LEN: usize = 128;
+/// Longest environment variable value, in bytes.
+pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
+/// Most bytes the names and values of one native job's environment may hold together.
+pub const MAX_ENV_TOTAL_BYTES: usize = 128 * 1024;
+/// Most inputs on a native job.
+pub const MAX_INPUTS: usize = 256;
+/// Most declared outputs on a native job.
+pub const MAX_OUTPUTS: usize = 256;
 /// Most mounts on one job.
 pub const MAX_MOUNTS: usize = 64;
 /// Longest mount root name, in bytes.

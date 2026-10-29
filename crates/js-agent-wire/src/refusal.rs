@@ -16,6 +16,30 @@ pub const WALL_TIME_NOT_POSITIVE: &str = "wall-time-not-positive";
 pub const INVALID_JOB: &str = "invalid-job";
 /// A job whose image name is empty, too long or outside the image alphabet.
 pub const INVALID_IMAGE: &str = "invalid-image";
+/// A job whose image is not pinned by digest: it has no `@sha256:<64 lower case hex>`
+/// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's
+/// `field` is `image`. Agents run with the pull policy `missing`, so a tag could change
+/// under a fleet; a name with a tag as well as a digest is accepted.
+pub const IMAGE_DIGEST_REQUIRED: &str = "image-digest-required";
+/// A job whose bundle is malformed or contradicts the rest of the spec: a name outside
+/// the image alphabet, a digest that breaks the grammar (upper case hex, fewer than 32
+/// digits), a bundle without a native body (a bundle needs `native`), or a bundle beside a native body (not yet supported). The refusal's `field` is `bundle`.
+pub const INVALID_BUNDLE: &str = "invalid-bundle";
+/// A job whose bundle is not pinned by digest: it has no `@sha256:<64 lower case hex>`
+/// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's
+/// `field` is `bundle`. A bundle is a toolchain a host unpacks once and keeps, so a tag
+/// that moves would change the tools under a fleet; a name with a tag as well as a
+/// digest is accepted and the tag is not read.
+pub const BUNDLE_DIGEST_REQUIRED: &str = "bundle-digest-required";
+/// A native job whose `program` is empty, relative, climbs with `..`, or holds a
+/// character a path may not.
+pub const INVALID_PROGRAM: &str = "invalid-program";
+/// A native job whose environment has a bad name or value, too many entries, or a
+/// name the agent reserves (`DYLD_`, `LD_`, `SANDBOX_`, `JS_AGENT_`).
+pub const INVALID_ENV: &str = "invalid-env";
+/// A start with a `native` body sent to an agent that cannot run native jobs. An agent
+/// that predates the field reads such a start as `invalid-image` instead.
+pub const NATIVE_UNSUPPORTED: &str = "native-unsupported";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.

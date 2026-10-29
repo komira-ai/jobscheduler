@@ -25,3 +25,4 @@ mod session;
 mod settings;
 mod shared;
 mod stored;
+mod walled;
