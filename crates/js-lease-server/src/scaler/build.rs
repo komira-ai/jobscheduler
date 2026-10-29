@@ -29,6 +29,9 @@ pub(crate) struct Parts<'a> {
     /// What the pool's checks have found: the scaler launches only while they pass, and
     /// launches from the offers they read.
     pub(crate) health: Arc<Mutex<Health>>,
+    /// Whether the operator said this is the first start (`--boot initialise`): only then
+    /// does a live pool start with no records file.
+    pub(crate) first_start: bool,
     /// The pool's network mode, or why it could not be built.
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
 }
@@ -73,11 +76,15 @@ fn settings(plan: &ElasticPlan) -> Settings {
 ///
 /// # Errors
 ///
-/// [`StartupError`] when the records file cannot be read, or a live pool's network mode
-/// could not be built.
+/// [`StartupError`] when the records file cannot be read, when it is missing for a live
+/// pool that is not at its first start, or when a live pool's network mode could not be
+/// built.
 pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, StartupError> {
     let file = RecordsFile::new(state_path(parts.state_file, ".scaler"));
-    let records = file.load()?;
+    let records = match (plan.launch, parts.first_start) {
+        (Launch::Live, false) => file.load_existing()?,
+        _ => file.load()?,
+    };
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
     let launcher = Launcher::new(

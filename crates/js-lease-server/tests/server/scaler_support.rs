@@ -2,14 +2,18 @@
 //! account in memory (never a network), the text of a file for it, and the messages of a
 //! launched agent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_elastic::{GpuClass, HostName};
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootStep, ElasticProvider, GpuClass, Held, HostName,
+    HostRef, Offer, ProviderError, Released,
+};
 use js_lease_server::{
     BuildCtx, Built, Config, ElasticBuilt, Floor, KindError, Kinds, Launch, OwnerOnlyFiles,
+    channel_ticker, start_with_checks,
 };
 use js_provider::StartSpec;
 use js_provider_lambdalabs::{
@@ -28,6 +32,52 @@ use crate::support::{Harness, Reply, Scratch, request};
 /// The accounts in memory, by the path of the key file that names them: a kind is a plain
 /// function and holds nothing, so a test leaves the account here for it to find.
 static ACCOUNTS: Mutex<BTreeMap<String, Arc<FakeLambda>>> = Mutex::new(BTreeMap::new());
+
+/// The key files whose pool has a provider that panics when the scaler lists its machines.
+static PANICKY: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Makes the provider of the pool whose key file `scratch` makes panic at its next `list`.
+pub fn panic_on_list(scratch: &Scratch) {
+    let key = scratch.path("api-key").display().to_string();
+    PANICKY.lock().unwrap().insert(key);
+}
+
+/// A provider that is another one in every call but `list`, which panics.
+struct PanicOnList(Box<dyn ElasticProvider>);
+
+impl ElasticProvider for PanicOnList {
+    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+        self.0.catalog()
+    }
+
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
+        self.0.host_prep(offer)
+    }
+
+    fn payload_limit(&self) -> usize {
+        self.0.payload_limit()
+    }
+
+    fn acquire(&self, request: &AcquireRequest) -> Acquired {
+        self.0.acquire(request)
+    }
+
+    fn list(&self) -> Result<Vec<Held>, ProviderError> {
+        panic!("the provider panicked in list");
+    }
+
+    fn release(&self, id: &HostRef) -> Released {
+        self.0.release(id)
+    }
+
+    fn unresolved(&self) -> Vec<AcquireId> {
+        self.0.unresolved()
+    }
+
+    fn is_gone(&self, id: &HostRef) -> bool {
+        self.0.is_gone(id)
+    }
+}
 
 /// The one instance type of the fake account.
 const OPTIONS: &str = r#"
@@ -66,8 +116,14 @@ fn fake_cloud(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindErro
     };
     let options = OptionTable::parse(OPTIONS).unwrap();
     let clock = Arc::new(ManualClock::new());
+    let provider = LambdaProvider::new(account, clock, options, config);
+    let panicky = PANICKY.lock().unwrap().contains(path.unwrap_or_default());
+    let provider: Box<dyn ElasticProvider> = match panicky {
+        true => Box::new(PanicOnList(Box::new(provider))),
+        false => Box::new(provider),
+    };
     Ok(Built::Elastic(ElasticBuilt {
-        provider: Box::new(LambdaProvider::new(account, clock, options, config)),
+        provider,
         floor: Floor {
             gpus: 1,
             gpu_class: Some(GpuClass::parse("nvidia-a100").unwrap()),
@@ -152,6 +208,18 @@ pub async fn start(scratch: Scratch, text: &str) -> Harness {
     let harness = Harness::over(scratch, config.unwrap()).await;
     harness.checks.step().await;
     harness
+}
+
+/// Starts a server on `text` that must be refused at start, and says why. The tickers are
+/// not stepped.
+pub async fn start_refused(scratch: &Scratch, text: &str) -> String {
+    let path = scratch.write("js.toml", text, 0o644);
+    let clock = crate::config_support::clock();
+    let config = Config::from_config_file(&path, &cloud_kinds(), &OwnerOnlyFiles, clock.clone());
+    let (_ticks, ticker) = channel_ticker();
+    let (_checks, check_ticker) = channel_ticker();
+    let refused = start_with_checks(config.unwrap(), clock, ticker, check_ticker).await;
+    refused.err().unwrap().to_string()
 }
 
 /// The start of a whole-node request `id` for one a100, under the lease `lease`.

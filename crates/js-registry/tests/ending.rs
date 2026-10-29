@@ -167,3 +167,18 @@ fn a_silent_host_that_still_holds_a_lease_is_not_drained() {
     assert_eq!(view(&fx, "a").mark, None);
     assert_eq!(view(&fx, "b").mark, None);
 }
+
+/// Asserts that `snapshot` answers what `hosts` and `waiting` answer, one after the other,
+/// when nothing moves between them: the host with its mark, and the wait list. It catches a
+/// snapshot that drops a part of either, or reads a host without the marks.
+#[test]
+fn a_snapshot_holds_the_hosts_and_the_wait_list() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    assert_eq!(fx.registry.drain(&host("a")), Ok(()));
+    let (hosts, waiting) = fx.registry.snapshot();
+    assert_eq!(hosts, fx.registry.hosts());
+    assert_eq!(waiting, fx.registry.waiting());
+    assert_eq!(hosts.len(), 1);
+    assert_eq!(hosts[0].mark, Some(HostMark::Draining));
+}

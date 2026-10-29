@@ -4,7 +4,9 @@
 //! runs the actions it returns in order. Everything it does to the world goes through
 //! [`Effects`], and every tick runs on the pool for blocking calls, because the calls block
 //! (a file sync, a provider's HTTP request). No lock of the registry or the lease table is
-//! held across any of them.
+//! held across any of them, and neither is the shell's own memory: a tick works on a copy
+//! of it and swaps the copy in when it is done, so the status page and the checks never
+//! wait for a provider's call.
 //!
 //! What the shell keeps between ticks, besides the step's [`State`] (whose records are the
 //! only part on disk):
@@ -55,7 +57,7 @@ mod view;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use js_elastic::{Acquired, HostRef, SchedulerId, Secret};
+use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::Clock;
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
@@ -84,12 +86,17 @@ struct Snapshot {
 }
 
 /// What the shell keeps between ticks.
+#[derive(Clone)]
 struct Memory {
     state: State,
     acquired: Vec<AcquireResult>,
     released: Vec<ReleaseResult>,
     unrevoked: BTreeSet<String>,
-    alerted: BTreeSet<String>,
+    /// The hosts of machines that are confirmed gone and that the registry still holds
+    /// (it refused to remove them); removed again at the start of every tick.
+    unremoved: BTreeSet<String>,
+    /// The alerts that hold now, by key, with their text.
+    alerts: BTreeMap<String, String>,
     save_errors: u64,
 }
 
@@ -107,7 +114,11 @@ struct Core {
     scheduler: SchedulerId,
     exec: ExecMode,
     settings: Settings,
+    /// What decides whether the registry's view is complete (the `complete` module).
     gate: Mutex<complete::Gate>,
+    /// Held for the whole of a tick, so that two ticks never work on the same copy.
+    one_tick: Mutex<()>,
+    /// Held only to copy [`Memory`] out and to swap it back in, never across a call.
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
 }
@@ -152,7 +163,8 @@ impl Scaler {
             acquired: Vec::new(),
             released: Vec::new(),
             unrevoked,
-            alerted: BTreeSet::new(),
+            unremoved: BTreeSet::new(),
+            alerts: BTreeMap::new(),
             save_errors: 0,
         };
         let gate = complete::Gate::starting(Millis::new(clock.now().millis()));
@@ -164,6 +176,7 @@ impl Scaler {
             exec,
             settings,
             gate: Mutex::new(gate),
+            one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
         };
@@ -222,6 +235,12 @@ impl Scaler {
         self.core.memory().state.clone()
     }
 
+    /// What an operator must act on now, one line each: what the shell logs once while it
+    /// holds, as of the last tick.
+    pub fn alerts(&self) -> Vec<String> {
+        self.core.memory().alerts.values().cloned().collect()
+    }
+
     /// How many times the records could not be written since the scaler started.
     pub fn save_errors(&self) -> u64 {
         self.core.memory().save_errors
@@ -233,19 +252,25 @@ impl Core {
         self.memory.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// One tick, on a copy of the memory: the lock of the memory is taken to copy it and
+    /// to put the copy back, and not while a call is made.
     fn tick(&self) {
-        let mut memory = self.memory();
+        let _one = self.one_tick.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Millis::new(self.clock.now().millis());
-        self.retry_revokes(&mut memory);
-        let input = self.input(&memory, now);
-        let (next, actions) = step(memory.state.clone(), &input, now);
-        let Some(answers) = self.run(&mut memory, actions) else {
+        let mut work = self.memory().clone();
+        self.retry_revokes(&mut work);
+        self.retry_removes(&mut work);
+        let input = self.input(&work, now);
+        let (next, actions) = step(work.state.clone(), &input, now);
+        let Some(answers) = self.run(&mut work, actions) else {
+            *self.memory() = work;
             return;
         };
-        self.report(&mut memory, (&next, &input), now);
-        memory.state = next.clone();
-        memory.acquired = answers.acquired;
-        memory.released = answers.released;
+        self.report(&mut work, (&next, &input), now);
+        work.state = next.clone();
+        work.acquired = answers.acquired;
+        work.released = answers.released;
+        *self.memory() = work;
         let seen = Snapshot {
             state: next,
             input,
@@ -264,20 +289,30 @@ impl Core {
         }
     }
 
+    /// Tries again the removals of hosts from the registry that it refused.
+    fn retry_removes(&self, memory: &mut Memory) {
+        let pending: Vec<String> = memory.unremoved.iter().cloned().collect();
+        for host in pending {
+            if self.effects.remove(&host) {
+                memory.unremoved.remove(&host);
+            }
+        }
+    }
+
     /// Says what the step did that an operator should see: each machine released because
     /// its host was silent, and each alert that was not already said.
     fn report(&self, memory: &mut Memory, (next, input): (&State, &Input), now: Millis) {
         for name in &next.silent_released {
             warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
-        let hold = self.settings.unknown_hold;
-        let found = alert::alerts(next, input, now, hold);
-        memory.alerted.retain(|key| found.contains_key(key));
-        for (key, message) in found {
-            if memory.alerted.insert(key) {
+        let pending = (&memory.unrevoked, &memory.unremoved);
+        let found = alert::alerts((next, input), now, &self.settings, pending);
+        for (key, message) in &found {
+            if !memory.alerts.contains_key(key) {
                 warn!("{message}");
             }
         }
+        memory.alerts = found;
     }
 
     /// The machines the provider no longer has, as far as the records and the registry
@@ -313,12 +348,13 @@ impl Core {
             }
         };
         let pool = &self.settings.pool;
-        let views = self.effects.hosts();
+        let (views, waiting) = self.effects.registry();
         let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
+        let known = |name: &str| view::stored_shape(&memory.state.records, name);
         let hosts = views
             .into_iter()
-            .map(|host| view::host_facts(host, pool, self.exec));
+            .map(|host| view::host_facts(host, pool, self.exec, known));
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
         Input {
             scheduler: self.scheduler.clone(),
@@ -329,12 +365,7 @@ impl Core {
                 held,
                 unresolved: self.effects.unresolved(),
             }],
-            waiting: self
-                .effects
-                .waiting()
-                .into_iter()
-                .map(view::waiting)
-                .collect(),
+            waiting: waiting.into_iter().map(view::waiting).collect(),
             hosts: hosts.collect(),
             registry_complete: complete,
             acquired: memory.acquired.clone(),
@@ -383,13 +414,20 @@ impl Core {
                 Action::Release { host, id } => {
                     if memory.unrevoked.contains(&host) {
                         debug!(%host, "the token is not revoked yet; the machine is not released");
+                    } else if self.effects.leased(&host) {
+                        warn!(%host, "the registry books a lease on the host; the machine is not released until it ends");
                     } else {
                         let answer = self.effects.release(&id);
+                        say_release(&host, &answer);
                         answers.released.push(ReleaseResult { host, answer });
                     }
                 }
                 Action::ForgetNetwork(host) => self.effects.forget(&host),
-                Action::RemoveHost(host) => self.effects.call(Call::Remove, &host),
+                Action::RemoveHost(host) => {
+                    if !self.effects.remove(&host) {
+                        memory.unremoved.insert(host);
+                    }
+                }
             }
         }
         Some(answers)
@@ -399,6 +437,21 @@ impl Core {
         if !self.effects.revoke(&host) {
             memory.unrevoked.insert(host);
         }
+    }
+}
+
+/// Says an answer to a release that is neither "gone" nor "being terminated": the step
+/// repeats the release at every tick, and the machine stays up and is paid for until the
+/// provider says otherwise.
+fn say_release(host: &str, answer: &Released) {
+    match answer {
+        Released::Refused(claim) => {
+            warn!(%host, ?claim, "the provider refused to release the machine; it is tried again");
+        }
+        Released::Unknown => {
+            warn!(%host, "the provider gave no answer to a release; it is tried again")
+        }
+        Released::Gone | Released::Terminating(_) => {}
     }
 }
 

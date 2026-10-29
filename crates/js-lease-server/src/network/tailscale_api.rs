@@ -134,16 +134,18 @@ impl TailscaleApi {
         timeout: Duration,
     ) -> Result<Self, NetworkError> {
         let bad_url = || {
-            NetworkError::Misconfigured(format!(
-                "{base_url:?} must be https://host[:port], or http:// with a loopback host, with no path"
-            ))
+            NetworkError::Misconfigured(
+                "api_url must be https://host[:port], or http:// with a loopback host, with no path or credentials"
+                    .to_owned(),
+            )
         };
         let uri: Uri = base_url.parse().map_err(|_| bad_url())?;
         let host = uri.host().unwrap_or_default();
-        // Nothing follows the authority: no path, query or trailing slash.
-        let no_path = uri
-            .authority()
-            .is_some_and(|authority| base_url.ends_with(authority.as_str()));
+        // Nothing follows the authority (no path, query or trailing slash) and nothing
+        // precedes the host in it (no `user:password@`).
+        let no_path = uri.authority().is_some_and(|authority| {
+            base_url.ends_with(authority.as_str()) && !authority.as_str().contains('@')
+        });
         let https = match uri.scheme_str() {
             Some("https") if no_path => true,
             Some("http") if no_path && loopback(host) => false,

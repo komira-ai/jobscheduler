@@ -19,7 +19,10 @@
 //!
 //! The unit registers the agent under the machine's name (`--host-id`), which is how the
 //! scaler finds the host of a record; pulls an image only when it is missing
-//! (`--container-pull missing`); and names a hook program the bootstrap writes
+//! (`--container-pull missing`: a machine the scaler launches is new and holds no image, so
+//! the agent's default of `never` would fail every job on it; a run's image must be pinned
+//! by a sha256 digest, so what is pulled is the content the submitter named, and the host
+//! reaches the registry that name gives only over the pool's network); and names a hook program the bootstrap writes
 //! ([`GPU_TOOLKIT_HOOK_PATH`], mode 0700, which runs `nvidia-container-cli info`, so it
 //! fails without a working driver and toolkit). The flag is on every offer: the agent runs
 //! the hook only when the host offers a GPU. The unit names the container program, the state root and the scratch root

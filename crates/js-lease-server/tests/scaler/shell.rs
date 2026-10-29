@@ -2,6 +2,9 @@
 //! fails, what it remembers for the next tick, and what it does before the first tick of a
 //! restarted server. Time is an injected clock; nothing sleeps.
 
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use js_elastic::HostStatus;
@@ -9,7 +12,7 @@ use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
 use js_scaler::{Blocked, Health, LaunchMode, Phase, Records, Settings, State};
 
-use crate::fakes::{live, record, records, request, rig, view};
+use crate::fakes::{Gate, live, logged, record, records, request, rig, view};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -292,7 +295,7 @@ async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
     let release_host = at(format!("ReleaseHost:{name}")).unwrap();
     let revoke = at(format!("revoke:{name}")).unwrap();
     let release = at(format!("release:{name}")).unwrap();
-    let remove = at(format!("Remove:{name}")).unwrap();
+    let remove = at(format!("remove:{name}")).unwrap();
     assert!(drain < release_host && release_host < revoke && revoke < release);
     assert!(release < remove);
     assert!(at(format!("forget:{name}")).is_some());
@@ -413,5 +416,67 @@ async fn silent_hosts_that_hold_leases_and_hosts_it_did_not_launch_are_left_alon
             .instances
             .iter()
             .all(|r| r.phase == Phase::Registered)
+    );
+}
+
+/// Asserts that a host whose token cannot be revoked is said once, however many ticks it
+/// holds for, and that its machine is not terminated meanwhile. It catches a stuck revoke
+/// that only a debug line mentions, and one that is said on every tick.
+#[tokio::test]
+async fn a_revoke_that_keeps_failing_is_said_once() {
+    let rig = rig(
+        records(vec![record("js-revoke-alert", Phase::Booting)]),
+        live(),
+    );
+    rig.advance(mins(16));
+    rig.world().revoke_ok = false;
+    for _ in 0..4 {
+        rig.scaler.tick().await;
+        rig.advance(secs(5));
+    }
+    let said = "the join token of host js-revoke-alert cannot be revoked";
+    assert_eq!(logged().matches(said).count(), 1, "{}", logged());
+    assert!(
+        !rig.log().iter().any(|call| call.starts_with("release:")),
+        "{:?}",
+        rig.log()
+    );
+}
+
+/// Asserts that the scaler's state and its count of failed saves, which the status page and
+/// the checks read, are answered while a tick is inside a provider's call: the call is held
+/// at a gate the test opens, and the reads must finish within five seconds before it does.
+/// It catches a tick that holds the lock of the shell's memory across a provider call,
+/// which stalls the status page for as long as the call takes.
+#[tokio::test]
+async fn the_state_is_read_while_a_provider_call_is_blocked() {
+    let rig = rig(records(vec![]), live());
+    let (entered, in_list) = mpsc::channel();
+    let (open, release) = mpsc::channel();
+    rig.world().gate = Some(Arc::new(Gate {
+        entered: Mutex::new(entered),
+        release: Mutex::new(release),
+    }));
+    let scaler = rig.scaler.clone();
+    let tick = tokio::spawn(async move { scaler.tick().await });
+    let waited = tokio::task::spawn_blocking(move || in_list.recv_timeout(secs(5)));
+    waited
+        .await
+        .unwrap()
+        .expect("the tick reached the provider");
+
+    let reader = rig.scaler.clone();
+    let (read, answered) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = (reader.state(), reader.save_errors());
+        let _ = read.send(());
+    });
+    let waited = tokio::task::spawn_blocking(move || answered.recv_timeout(secs(5)));
+    let answer = waited.await.unwrap();
+    open.send(()).unwrap();
+    tick.await.unwrap();
+    assert!(
+        answer.is_ok(),
+        "the state was not read while the call was held"
     );
 }
