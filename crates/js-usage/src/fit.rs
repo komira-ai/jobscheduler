@@ -11,10 +11,11 @@
 //!
 //! A run flagged as under node pressure ([`crate::ring::RunSeries::NODE_PRESSURE`]) showed less CPU
 //! than it needed, so it does not shape the cores: they come from the other runs, and a
-//! key with fewer than [`MIN_RUNS_FOR_CURVE`] of those has no curve. Its working set is
-//! still real (memory does not shrink under CPU pressure), so it counts toward the
-//! memory maximum, the reach of a minute, and the wall minutes. The censored bit is not
-//! read.
+//! key with fewer than [`MIN_RUNS_FOR_CURVE`] of those has no learned cores
+//! ([`Fit::cores_learned`] is false and the cores of every point are 0). Its working set
+//! is still real (memory does not shrink under CPU pressure), so it counts toward the
+//! memory maximum, the reach of a minute, and the wall minutes, and the memory is learned
+//! from any [`MIN_RUNS_FOR_CURVE`] runs. The censored bit is not read.
 //!
 //! A minute at the start that no clean run recorded takes the first clean value; later
 //! ones hold the previous minute.
@@ -27,8 +28,8 @@ use js_types::sched::usage::MinutePoint;
 
 use crate::ring::{BUCKETS, Ring};
 
-/// The fewest runs, not under node pressure, in the ring for a curve: with fewer, the key
-/// is charged flat.
+/// The fewest runs in the ring for the memory of a curve, and the fewest of them not under
+/// node pressure for its cores: with fewer, the key is charged flat in that resource.
 pub const MIN_RUNS_FOR_CURVE: usize = 3;
 
 /// How many minutes each side a value is widened by.
@@ -46,8 +47,12 @@ pub fn p90(sorted: &[u64]) -> u64 {
 /// A key's fitted curve and the life of its runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fit {
-    /// Minute `i` is point `i`; at most [`BUCKETS`] points, at least one.
+    /// Minute `i` is point `i`; at most [`BUCKETS`] points, at least one. The cores are 0
+    /// when `cores_learned` is false.
     pub points: Vec<MinutePoint>,
+    /// Whether the cores were learned: at least [`MIN_RUNS_FOR_CURVE`] of the ring's runs
+    /// were not under node pressure. When false only the working sets mean anything.
+    pub cores_learned: bool,
     /// How many runs the ring held, those under node pressure included.
     pub runs: u16,
     /// The P90 of the runs' wall minutes (rounded up per run), at least 1: how long a new
@@ -55,14 +60,16 @@ pub struct Fit {
     pub wall_minutes_p90: u32,
 }
 
-/// The fit of `ring`, or `None` when it holds fewer than [`MIN_RUNS_FOR_CURVE`] runs that
-/// were not under node pressure.
+/// The fit of `ring`, or `None` when it holds fewer than [`MIN_RUNS_FOR_CURVE`] runs. Its
+/// cores are learned only when that many of them were not under node pressure.
 #[must_use]
 pub fn fit(ring: &Ring) -> Option<Fit> {
     let runs = ring.len();
-    if ring.runs().filter(|r| !r.under_node_pressure()).count() < MIN_RUNS_FOR_CURVE {
+    if runs < MIN_RUNS_FOR_CURVE {
         return None;
     }
+    let cores_learned =
+        ring.runs().filter(|r| !r.under_node_pressure()).count() >= MIN_RUNS_FOR_CURVE;
     let mut raw: Vec<MinutePoint> = Vec::new();
     // Leading minutes no clean run recorded: they take the first clean value below.
     let mut lead = 0;
@@ -75,7 +82,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         // Reached but never recorded: hold the previous minute, for each figure apart.
         let mut cores: Vec<u64> = ring
             .runs()
-            .filter(|r| !r.under_node_pressure())
+            .filter(|r| cores_learned && !r.under_node_pressure())
             .filter_map(|r| r.buckets.get(t).copied().flatten())
             .map(|b| u64::from(b.cores_milli))
             .collect();
@@ -123,6 +130,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
     lives.sort_unstable();
     Some(Fit {
         points,
+        cores_learned,
         // The ring holds at most 32 runs.
         runs: u16::try_from(runs).unwrap_or(u16::MAX),
         wall_minutes_p90: u32::try_from(p90(&lives)).unwrap_or(u32::MAX).max(1),
@@ -381,20 +389,53 @@ mod tests {
         assert_eq!(cores(&f), vec![800, 800]);
     }
 
-    /// Catches: pressured runs counting toward the three needed for a curve.
+    /// Catches: pressured runs counting toward the three clean runs the cores need, and
+    /// the memory being withheld from a key with fewer than three clean runs: the memory
+    /// is learned from any three runs, the cores only from three clean ones.
     #[test]
-    fn a_key_whose_runs_are_all_under_node_pressure_has_no_curve() {
+    fn memory_needs_three_runs_of_any_kind_and_cores_three_clean_ones() {
         let mut ring = Ring::new();
-        for _ in 0..3 {
-            ring.push(&pressured(&[(100, 1)]));
-        }
-        assert_eq!(fit(&ring), None);
+        ring.push(&pressured(&[(100, 7)]));
+        ring.push(&pressured(&[(100, 8)]));
+        assert_eq!(fit(&ring), None, "two runs in all");
+        ring.push(&pressured(&[(100, 9)]));
+        let f = fit(&ring).unwrap();
+        assert!(!f.cores_learned, "no clean run");
+        assert_eq!(mem(&f), vec![9]);
+        assert_eq!(cores(&f), vec![0]);
+        assert_eq!(f.runs, 3);
         let clean: &[(u32, u64)] = &[(100, 1)];
         ring.push(&series(clean));
         ring.push(&series(clean));
-        assert_eq!(fit(&ring), None, "two clean runs among five");
+        let f = fit(&ring).unwrap();
+        assert!(!f.cores_learned, "two clean runs among five");
+        assert_eq!((mem(&f), cores(&f)), (vec![9], vec![0]));
         ring.push(&series(clean));
-        assert!(fit(&ring).is_some());
+        let f = fit(&ring).unwrap();
+        assert!(f.cores_learned);
+        assert_eq!((mem(&f), cores(&f)), (vec![9], vec![100]));
+    }
+
+    /// Catches: the memory curve of a memory-only fit differing from the one the same
+    /// runs give once their cores are learned (reach, dilation, and the maximum).
+    #[test]
+    fn the_memory_of_a_fit_without_cores_is_the_memory_of_one_with_them() {
+        let runs: [&[(u32, u64)]; 3] = [
+            &[(100, 1), (100, 5), (100, 1), (100, 1)],
+            &[(100, 2), (100, 2)],
+            &[(100, 3), (100, 3), (100, 3)],
+        ];
+        let clean = fit(&ring_of(&runs)).unwrap();
+        let mut ring = Ring::new();
+        for r in runs {
+            ring.push(&pressured(r));
+        }
+        let pressed = fit(&ring).unwrap();
+        assert!(clean.cores_learned);
+        assert!(!pressed.cores_learned);
+        assert_eq!(mem(&pressed), mem(&clean));
+        assert_eq!(pressed.wall_minutes_p90, clean.wall_minutes_p90);
+        assert_eq!(pressed.runs, clean.runs);
     }
 
     /// Catches: a pressured run's working set being dropped from the memory maximum, its
