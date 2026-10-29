@@ -5,7 +5,7 @@ use js_provider::{Provider, StartSpec};
 use js_types::{LeaseId, Request};
 
 use crate::book::{self, Book, Seen, Step};
-use crate::clock::{Clock, Monotonic, SystemMonotonic, Timestamp};
+use crate::clock::{Clock, Monotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
 use crate::timings::Timings;
@@ -89,15 +89,16 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     }
 
     /// Measures each save of the lease file with `clock` instead of the system's
-    /// monotonic clock. Tests use it to say how long a save took.
+    /// monotonic clock, into a new record (see [`Self::timings`]). Tests use it to say
+    /// how long a save took.
     pub fn watch_saves(&mut self, clock: impl Monotonic + 'static) {
-        self.book.watch_saves(Box::new(clock));
+        self.book.watch_saves(clock);
     }
 
     /// The record of how long the table's steps took, shared with the table: a caller
     /// keeps the handle and reads [`Timings::report`] whenever it wants.
     pub fn timings(&self) -> Timings {
-        Timings::new(SystemMonotonic::default())
+        self.book.timings()
     }
 
     /// Extends a held lease and returns its new expiry: `now + ttl` clamped as in

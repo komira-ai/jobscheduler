@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Monotonic, Settings};
+use js_lease::{Boot, Monotonic, Settings, SystemMonotonic};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
@@ -261,6 +261,7 @@ pub struct Config {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) limits: Limits,
     pub(crate) hosts: Hosts,
+    pub(crate) monotonic: Arc<dyn Monotonic>,
 }
 
 /// Where the hosts come from: the operator's pool file alone, or that file (when given)
@@ -306,6 +307,7 @@ impl Config {
             tls,
             limits,
             hosts,
+            monotonic: Arc::new(SystemMonotonic::default()),
         })
     }
 
@@ -329,8 +331,8 @@ impl Config {
     }
 
     /// The same configuration timing the lease table's steps on `clock`.
-    pub fn with_monotonic(self, clock: Arc<dyn Monotonic>) -> Self {
-        let _ = clock;
+    pub fn with_monotonic(mut self, clock: Arc<dyn Monotonic>) -> Self {
+        self.monotonic = clock;
         self
     }
 

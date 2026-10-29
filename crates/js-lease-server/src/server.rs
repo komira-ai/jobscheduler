@@ -53,7 +53,7 @@ pub async fn start<T: Ticker>(
         .await
         .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
     let (listener, addr) = bound.map_err(|err| StartupError::new("--listen", err))?;
-    let table = LeaseTable::open(
+    let mut table = LeaseTable::open(
         BoxedProvider(provider),
         clock,
         config.settings,
@@ -64,6 +64,7 @@ pub async fn start<T: Ticker>(
         js_lease::OpenError::Missing { .. } => StartupError::new("--boot", err),
         _ => StartupError::new("--state-file", err),
     })?;
+    table.watch_saves(config.monotonic);
     for lost in &unseated {
         warn!(
             lease = %lost.booking.lease,
@@ -148,7 +149,7 @@ impl Running {
 
     /// How long the lease table's steps took since the server started.
     pub fn timings(&self) -> js_lease::Timings {
-        js_lease::Timings::new(js_lease::SystemMonotonic::default())
+        self.shared.timings()
     }
 
     /// How many ticks failed to write the lease file since the server started.

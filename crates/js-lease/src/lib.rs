@@ -107,15 +107,17 @@
 //! file never held is found pending (or missing) and resolved by observing it, which is
 //! why a start is never called before its pending record is written.
 //!
-//! # A slow save
+//! # Slow steps
 //!
 //! Every save writes, fsyncs and renames the file, and a caller holds the table's lock
-//! meanwhile, so a slow disk stalls every call on the table. A save that takes longer
-//! than one second (a save of exactly one second is not) is logged as a warning, through
-//! `tracing`, naming the step that saved (`open`, `acquire`, `acquire-settled`, `renew`,
-//! `release`, `release-settled`, `tick`) and the time in milliseconds. The save is timed
-//! on a monotonic clock, [`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
-//! another.
+//! meanwhile, so a slow disk stalls every call on the table. [`Timings`] times each save
+//! on a monotonic clock ([`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
+//! another) under the step that made it (`open`, `acquire`, `acquire-settled`, `renew`,
+//! `release`, `release-settled`, `tick`), and the server's handlers time their wait for
+//! the table's lock under `wait-` and the call's name. A step that takes over one second
+//! (exactly one second is not) is logged as a warning, `slow lease step`, naming the
+//! operation and `took_ms`. [`Timings::report`] gives, per operation, how many steps were
+//! timed, how many took over a second and the longest, whether or not any was slow.
 //!
 //! # The lock
 //!
