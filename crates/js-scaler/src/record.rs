@@ -346,7 +346,10 @@ pub struct Records {
     /// so that span says nothing about them: the first step moves every silent and missing
     /// time forward by it, and only time the scaler observed counts toward the holds. It is
     /// written with every save and by no step on its own, so it is a lower bound on the
-    /// last step the old process ran, which errs toward counting less. `None` in a file
+    /// last step the old process ran, which errs toward counting less. While a silent or
+    /// missing time is pending the records are saved at least every sixth of `unknown_hold`
+    /// (at most five minutes) of observed time, so the bound is that close; with none
+    /// pending nothing is written for it. `None` in a file
     /// that has none: the whole span back to each time is taken as downtime.
     pub last_step: Option<Millis>,
 }

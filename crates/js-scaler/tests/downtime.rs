@@ -80,7 +80,7 @@ fn records_without_a_last_step_begin_the_count_at_the_first_step() {
     let back = 3 * HOUR;
     assert_eq!(count(&again.tick(at(back)), "Drain"), 0);
     assert_eq!(again.state.silent.values().copied().next(), Some(at(back)));
-    assert!(again.tick(at(back + 30 * MINUTE - 1)).is_empty());
+    assert!(only_saves(&again.tick(at(back + 30 * MINUTE - 1))));
     let actions = again.tick(at(back + 30 * MINUTE));
     assert_eq!(count(&actions, "Drain"), 1);
 }

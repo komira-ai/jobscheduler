@@ -48,6 +48,21 @@ fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = 
     [Some(mint), acquire].into_iter().flatten()
 }
 
+/// The most a restart may lose of the time the scaler observed a pending silent or missing
+/// time: the records are written at least this often, or a sixth of the shortest
+/// `unknown_hold` among the pools if that is less. Derived, not a setting.
+const HOLD_SAVE_MOST: Duration = Duration::from_secs(5 * 60);
+
+/// How often the records are written while a silent or missing time is pending and
+/// nothing else changed. `None` when no pool is configured.
+fn hold_save_every(input: &Input) -> Option<Duration> {
+    input
+        .pools
+        .iter()
+        .map(|pool| (pool.settings.unknown_hold / 6).min(HOLD_SAVE_MOST))
+        .min()
+}
+
 impl Pass<'_> {
     /// The second half of a step for one pool, once every request has been matched to what
     /// covers it: notes the silent hosts, takes back the hosts whose undrain was lost,
@@ -590,12 +605,22 @@ impl Pass<'_> {
         self.records.silent_since = self.silent_now.clone();
         self.records.missing_since = self.missing_now.clone();
         // The time of the step is written with the records and never alone, so a restart
-        // reads a time that is no later than the last step the old process took.
-        let changed = self.records != *before;
-        if changed {
+        // reads a time that is no later than the last step the old process took. While a
+        // silent or missing time is pending the records are also written once every
+        // `hold_save_every` of observed time, so a restart loses at most that much of it.
+        let pending = [!self.silent_now.is_empty(), !self.missing_now.is_empty()];
+        let stale = hold_save_every(input).is_some_and(|every| {
+            self.records
+                .last_step
+                .is_none_or(|last| now.since(last) >= every)
+        });
+        let due = [pending.into_iter().any(|each| each), stale];
+        let changed = [self.records != *before, due.into_iter().all(|each| each)];
+        let write = changed.into_iter().any(|each| each);
+        if write {
             self.records.last_step = Some(now);
         }
-        let save = changed.then(|| Action::Save(Box::new(self.records.clone())));
+        let save = write.then(|| Action::Save(Box::new(self.records.clone())));
         let mut actions: Vec<Action> = save.into_iter().collect();
         actions.append(&mut self.actions);
         let no_offer = uncovered

@@ -122,7 +122,7 @@ fn a_silent_host_with_stale_runs_is_released_once_its_lease_is_given_up() {
     for state in [HostState::Lost, HostState::Awaiting] {
         let (mut rig, name) = lost_mid_job(state, true);
         assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
-        assert!(rig.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
+        assert!(only_saves(&rig.tick(at(3 * SECOND + 30 * MINUTE - 1))));
         let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
         assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
         assert_eq!(rig.phase(0), Phase::Draining);
@@ -150,7 +150,7 @@ fn a_silent_host_that_still_books_a_lease_or_is_set_aside_is_held() {
         assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
         for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR, 2 * DAY] {
             let actions = rig.tick(at(later));
-            assert!(actions.is_empty(), "{:?}", kinds(&actions));
+            assert!(only_saves(&actions), "{:?}", kinds(&actions));
             assert_eq!(rig.phase(0), Phase::Registered);
         }
     }
@@ -271,7 +271,7 @@ fn the_silent_time_is_saved_when_it_starts_and_when_it_ends() {
     let (mut rig, name) = silent_registered();
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     assert_eq!(rig.state.records.silent_since[&name], at(3 * SECOND));
-    assert!(rig.tick(at(10 * MINUTE)).is_empty());
+    assert!(only_saves(&rig.tick(at(10 * MINUTE))));
     assert_eq!(rig.state.records.silent_since[&name], at(3 * SECOND));
 
     rig.input.hosts[0].state = HostState::Live;
@@ -310,7 +310,7 @@ fn a_silent_host_is_released_when_the_time_seen_before_and_after_a_restart_adds_
     let seen = 14 * MINUTE - 3 * SECOND;
     let last = back + 30 * MINUTE - seen;
     assert_eq!(second.state.silent[&name], at(back - seen));
-    assert!(second.tick(at(last - 1)).is_empty());
+    assert!(only_saves(&second.tick(at(last - 1))));
     let actions = second.tick(at(last));
     assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
 }
@@ -354,7 +354,7 @@ fn the_hold_is_reached_by_time_seen_across_several_restarts() {
     assert_eq!(count(&third.tick(at(9 * HOUR)), "Drain"), 0);
     let seen = 2 * (10 * MINUTE) - 3 * SECOND;
     let last = 9 * HOUR + 30 * MINUTE - seen;
-    assert!(third.tick(at(last - 1)).is_empty());
+    assert!(only_saves(&third.tick(at(last - 1))));
     let actions = third.tick(at(last));
     assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
 }

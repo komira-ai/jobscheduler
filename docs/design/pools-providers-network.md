@@ -884,7 +884,10 @@ Rules, each tied to a requirement or to existing behaviour:
   every saved silent and missing time forward by the span since `last_step`, and records
   with no `last_step` begin the counts again at that step. `last_step` is written only with
   the records, never alone, so it is a lower bound on the last step the old process ran,
-  and a restart errs toward counting less.
+  and a restart errs toward counting less. While a silent or missing time is pending, the
+  step saves the records at least every `min(unknown_hold / 6, 5 minutes)` of observed time
+  (derived, not a setting), so a restart loses at most that much; with none pending it
+  writes nothing for `last_step`.
   A registered host that said hello and has not been heard from since
   (`heard_since_hello` false in the host facts: the shell sets it from the registry; a lost Welcome leaves a host that cannot
   heartbeat) and books nothing is a failed boot, not a silent host: it is released at `boot_timeout` after the launch and the boot-failure

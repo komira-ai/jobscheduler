@@ -207,6 +207,12 @@ pub fn kinds(actions: &[Action]) -> Vec<String> {
         .collect()
 }
 
+/// Whether every action is a `Save`, none else: the step did nothing but write the records,
+/// as a step does while a silent or missing time is pending and a while has passed.
+pub fn only_saves(actions: &[Action]) -> bool {
+    kinds(actions).iter().all(|each| each == "Save")
+}
+
 /// How many actions are of `kind`.
 pub fn count(actions: &[Action], kind: &str) -> usize {
     kinds(actions).iter().filter(|each| *each == kind).count()

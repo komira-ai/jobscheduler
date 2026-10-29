@@ -117,11 +117,11 @@ fn a_silent_host_is_held_and_its_age_is_shown() {
     rig.input.hosts[0].state = HostState::Lost;
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     assert_eq!(rig.state.silent[&plan.name], at(3 * SECOND));
-    assert!(rig.tick(at(HOUR)).is_empty());
+    assert!(only_saves(&rig.tick(at(HOUR))));
     assert_eq!(rig.state.silent[&plan.name], at(3 * SECOND));
 
     rig.input.hosts[0].state = HostState::Awaiting;
-    assert!(rig.tick(at(2 * HOUR)).is_empty());
+    assert!(only_saves(&rig.tick(at(2 * HOUR))));
     assert_eq!(rig.state.silent[&plan.name], at(3 * SECOND));
     assert_eq!(rig.phase(0), Phase::Registered);
 
@@ -296,7 +296,7 @@ fn a_silent_host_with_leases_still_held_is_not_released() {
 fn a_silent_host_with_its_leases_given_up_is_drained_then_released_after_the_hold() {
     let (mut rig, name) = silent_for_a_while(true);
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
-    assert!(rig.tick(at(3 * SECOND + 30 * MINUTE - 1)).is_empty());
+    assert!(only_saves(&rig.tick(at(3 * SECOND + 30 * MINUTE - 1))));
     let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
     assert_eq!(kinds(&actions), ["Save", "Drain", "ReleaseHost"]);
     assert_eq!(rig.phase(0), Phase::Draining);
@@ -465,7 +465,7 @@ fn a_draining_machine_with_a_lost_welcome_waits_for_the_unknown_hold() {
     rig.state.records.instances[0].phase = Phase::Draining;
     rig.input.hosts[0].lease_given_up = true;
     assert_eq!(kinds(&rig.tick(at(15 * MINUTE))), ["Save"]);
-    assert!(rig.tick(at(45 * MINUTE - 1)).is_empty());
+    assert!(only_saves(&rig.tick(at(45 * MINUTE - 1))));
     assert_eq!(rig.phase(0), Phase::Draining);
     let actions = rig.tick(at(45 * MINUTE));
     assert_eq!(kinds(&actions), ["Drain", "ReleaseHost"]);

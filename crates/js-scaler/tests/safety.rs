@@ -55,7 +55,7 @@ fn assert_left_alone(mut rig: Rig) {
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR] {
         let actions = rig.tick(at(later));
-        assert!(actions.is_empty(), "{:?}", kinds(&actions));
+        assert!(only_saves(&actions), "{:?}", kinds(&actions));
         assert_eq!(rig.phase(0), Phase::Registered);
     }
 }
@@ -95,7 +95,7 @@ fn a_silent_host_marked_reserved_is_left_alone() {
     let mut rig = silent_given_up(|host| host.mark = Some(Mark::Reserved));
     assert_eq!(kinds(&rig.tick(at(3 * SECOND))), ["Save"]);
     for later in [3 * SECOND + 30 * MINUTE, 2 * HOUR] {
-        assert!(rig.tick(at(later)).is_empty());
+        assert!(only_saves(&rig.tick(at(later))));
     }
     assert_eq!(rig.phase(0), Phase::Registered);
 }
