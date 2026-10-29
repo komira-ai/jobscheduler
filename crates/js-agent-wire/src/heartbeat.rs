@@ -334,7 +334,7 @@ impl RunResult {
                 (at.field("results.log_tail.stderr"), &tail.stderr),
             ];
             for (field, text) in streams {
-                if text.len() > limits::MAX_LOG_STREAM_LEN {
+                if text.len() >= limits::MAX_LOG_STREAM_LEN {
                     return Err(field.fail(Rule::TooLong));
                 }
             }
