@@ -248,7 +248,7 @@ impl LambdaProvider {
             ) => RefusalCode::Denied,
             (true, _) => return Acquired::Unknown,
         };
-        Self::refuse(refusal, Reason::Api(code.clone()))
+        Self::refuse(refusal, Reason::Api(code.to_string()))
     }
 
     /// Trusts a 404 on a read by id only after a list has worked: a key that cannot see
