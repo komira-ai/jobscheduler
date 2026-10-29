@@ -34,6 +34,7 @@ fn built() -> Vec<String> {
         ("FLOOR", keys::FLOOR),
         ("KEY_FLOOR", keys::KEY_FLOOR),
         ("OPKEY", keys::OPKEY),
+        ("OPWALL", keys::OPWALL),
         ("INFLIGHT", keys::INFLIGHT),
         ("EPOCH", keys::EPOCH),
         ("ALIVE", keys::ALIVE),
@@ -59,6 +60,7 @@ fn built() -> Vec<String> {
         ("fate", keys::fate(op(4))),
         ("opkey", keys::opkey(op(4))),
         ("opkey", keys::opkey(op(8))),
+        ("opwall", keys::opwall(op(8))),
         ("floor", keys::floor(&main(1, 1))),
         ("key_floor", keys::key_floor(7)),
         ("inflight", keys::inflight(&main(1, 1))),
@@ -121,6 +123,7 @@ fn no_kind_of_row_is_a_prefix_of_another() {
         keys::FLOOR,
         keys::KEY_FLOOR,
         keys::OPKEY,
+        keys::OPWALL,
         keys::INFLIGHT,
     ];
     for (i, prefix) in prefixes.iter().enumerate() {
@@ -143,6 +146,7 @@ fn the_operation_a_key_names_is_read_back() {
             (keys::LOSS, keys::loss(operation)),
             (keys::FATE, keys::fate(operation)),
             (keys::OPKEY, keys::opkey(operation)),
+            (keys::OPWALL, keys::opwall(operation)),
             (keys::DONE, keys::done(operation)),
             (keys::LEASE_BY_OP, keys::lease_by_op(operation)),
         ];
