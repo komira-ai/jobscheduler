@@ -144,7 +144,7 @@ pub struct NativeSpec {
 }
 
 /// Name prefixes the agent keeps for itself and the dynamic loader and sandbox read.
-const RESERVED_ENV_PREFIXES: [&str; 4] = ["DYLD_", "LD_", "SANDBOX_", "JS_AGENT_"];
+const RESERVED_ENV_PREFIXES: [&str; 3] = ["LD_", "SANDBOX_", "JS_AGENT_"];
 
 impl NativeSpec {
     /// Checks the body alone, without the job around it.
