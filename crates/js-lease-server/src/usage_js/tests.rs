@@ -266,7 +266,7 @@ impl NodeUsage {
 #[test]
 fn the_sink_reads_back_rows_and_profiles() {
     let (sink, _) = sink();
-    let key = key_map(&work()).unwrap();
+    let key = ProfileKey::parse("est.row-1").unwrap();
     assert_eq!(sink.key_profile(&key), Ok(None));
     finished(&sink, &key, 10);
     finished(&sink, &key, 11);
