@@ -57,7 +57,7 @@ fn a_device_already_gone_is_not_an_error_and_every_match_is_deleted() {
         Reply::json(
             200,
             &format!(
-                r#"{{"devices":[{{"id":"d1","hostname":"{host}"}},{{"id":"d2","hostname":"{host}"}},{{"id":"d3"}}]}}"#
+                r#"{{"devices":[{{"id":"d1","hostname":"{host}","tags":["tag:js-agent"]}},{{"id":"d2","hostname":"{host}","tags":["tag:other","tag:js-agent"]}},{{"id":"d3"}}]}}"#
             ),
         ),
     );
@@ -123,7 +123,9 @@ fn forget_failures_are_typed() {
         (
             Reply::json(
                 200,
-                &format!(r#"{{"devices":[{{"id":"../keys","hostname":"{host}"}}]}}"#),
+                &format!(
+                    r#"{{"devices":[{{"id":"../keys","hostname":"{host}","tags":["tag:js-agent"]}}]}}"#
+                ),
             ),
             ApiFailure::Malformed,
         ),
@@ -150,4 +152,27 @@ fn forget_failures_are_typed() {
     let err = mode(&fake, shared).forget(&host).unwrap_err();
     assert_eq!(err, NetworkError::Credentials(ApiFailure::Rejected(401)));
     assert_eq!(fake.count("POST /api/v2/oauth/token"), 1);
+}
+
+/// Asserts that a device with the host's name but without the configured tag (no tags, or
+/// other tags) is left alone and no delete is sent for it, while the host's own tagged
+/// device is deleted.
+#[test]
+fn a_device_without_our_tag_is_not_deleted() {
+    let host = host();
+    let fake = Fake::tailscale(host.as_str());
+    fake.set(
+        DEVICES,
+        Reply::json(
+            200,
+            &format!(
+                r#"{{"devices":[{{"id":"d1","hostname":"{host}","tags":["tag:js-agent"]}},{{"id":"d2","hostname":"{host}"}},{{"id":"d3","hostname":"{host}","tags":["tag:other"]}}]}}"#
+            ),
+        ),
+    );
+    let (_, shared) = clock();
+    mode(&fake, shared).forget(&host).unwrap();
+    assert_eq!(fake.count(DELETE_D1), 1);
+    assert_eq!(fake.count("DELETE /api/v2/device/d2"), 0);
+    assert_eq!(fake.count("DELETE /api/v2/device/d3"), 0);
 }

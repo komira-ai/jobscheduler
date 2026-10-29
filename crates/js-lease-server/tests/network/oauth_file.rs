@@ -82,18 +82,18 @@ fn content_that_is_not_a_client_is_refused_without_quoting_it() {
         (
             "syntax",
             format!("client_id = \"cid\"\nclient_secret = {CLIENT_SECRET}\n").into_bytes(),
-            "",
+            "not a valid client file (line 2)",
         ),
         (
             "unknown",
             format!("client_id = \"c\"\nclient_secret = \"{CLIENT_SECRET}\"\nextra = 1\n")
                 .into_bytes(),
-            "extra",
+            "not a valid client file",
         ),
         (
             "missing",
             format!("client_secret = \"{CLIENT_SECRET}\"\n").into_bytes(),
-            "client_id",
+            "not a valid client file",
         ),
         (
             "empty-id",
@@ -112,4 +112,23 @@ fn content_that_is_not_a_client_is_refused_without_quoting_it() {
         assert!(why.contains(expect), "{name}: {why}");
         assert!(!why.contains(CLIENT_SECRET), "{name}: {why}");
     }
+}
+
+/// Asserts that a client secret of the wrong type (an unquoted number, which the parser's
+/// own message would quote) is refused with a message and a `Debug` that hold no part of
+/// the digits, and that the line of the fault is named.
+#[test]
+fn a_secret_of_the_wrong_type_is_not_quoted_back() {
+    let scratch = Scratch::new("oauth-type");
+    let digits = "918273645";
+    let text = format!("client_id = \"cid\"\nclient_secret = {digits}\n");
+    let path = scratch.write("typed", text.as_bytes(), 0o600);
+    let result = OAuthClient::from_file(&path);
+    let shown = format!("{result:?}");
+    let why = refusal(result);
+    for part in [digits, "9182", "73645"] {
+        assert!(!why.contains(part), "{why}");
+        assert!(!shown.contains(part), "{shown}");
+    }
+    assert!(why.contains("(line 2)"), "{why}");
 }

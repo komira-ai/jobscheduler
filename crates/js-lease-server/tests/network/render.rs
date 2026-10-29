@@ -160,7 +160,7 @@ fn the_script_is_hardened() {
     for (at, line) in lines.iter().enumerate() {
         if let Some(rest) = line.strip_prefix("printf '%s' ") {
             let path = rest.rsplit_once("> ").unwrap().1;
-            assert_eq!(lines[at + 1], format!("chmod 0600 {path}"));
+            assert_eq!(lines[at + 1], format!("chmod 0600 -- {path}"));
         }
         if line.starts_with("curl ") {
             assert!(
@@ -258,4 +258,33 @@ fn render_errors_and_secrets_never_print_a_secret() {
     shown.push_str(&format!("{err} {err:?}\n"));
     assert!(!shown.contains(JOIN) && !shown.contains(KEY), "{shown}");
     assert!(shown.contains("***"));
+}
+
+/// Asserts that a fetch URL or a path that starts with `-` cannot become an option: the
+/// URL follows `--url`, the destination follows `--output`, and the secret file's path
+/// follows `--` for `chmod`, as does each path of the cleanup's `rm`.
+#[test]
+fn a_url_or_path_that_starts_with_a_dash_is_not_an_option() {
+    let mut plan = plan_without_network();
+    plan.host_prep = vec![
+        BootStep::Fetch {
+            url: "--config=/x".to_owned(),
+            sha256: [1; 32],
+            dest: "-o".to_owned(),
+        },
+        BootStep::SecretFile {
+            path: "-k".to_owned(),
+            slot: SlotName("k".to_owned()),
+        },
+    ];
+    let text = render(&plan, Fill::Mask).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.contains(
+            &"curl --fail --silent --show-error --location --proto =https --output -o --url --config=/x"
+        ),
+        "{text}"
+    );
+    assert!(lines.contains(&"chmod 0600 -- -k"), "{text}");
+    assert!(lines.contains(&"  rm -f -- -k"), "{text}");
 }

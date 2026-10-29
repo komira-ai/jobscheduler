@@ -55,8 +55,17 @@ impl OAuthClient {
             return Err(refuse("is longer than the limit"));
         }
         let text = std::str::from_utf8(&bytes).map_err(|_| refuse("is not UTF-8 text"))?;
-        // `message`, not `Display`: the latter quotes the line it stopped at.
-        let content: FileContent = toml::from_str(text).map_err(|err| refuse(err.message()))?;
+        // Neither `message` nor `Display`: both can quote the value the parser stopped at
+        // (a type error repeats it), and the value may be the secret. Only the line is said.
+        let content: FileContent = toml::from_str(text).map_err(|err| {
+            // The line the parser stopped at; the first when it gives no position.
+            let start = err.span().map_or(0, |span| span.start.min(text.len()));
+            let line = 1 + text.as_bytes()[..start]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count();
+            refuse(&format!("is not a valid client file (line {line})"))
+        })?;
         if content.client_id.is_empty() || content.client_secret.is_empty() {
             return Err(refuse("client_id and client_secret must not be empty"));
         }

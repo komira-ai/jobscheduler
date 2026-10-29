@@ -133,5 +133,5 @@ fn a_host_prep_secret_file_is_filled_and_cleaned_up_too() {
     .unwrap();
     let text = render(&p, Fill::Real(&secrets)).unwrap();
     assert!(text.contains("  rm -f -- '/etc/prep key'\n"), "{text}");
-    assert!(text.contains("printf '%s' 'k' > '/etc/prep key'\nchmod 0600 '/etc/prep key'\n"));
+    assert!(text.contains("printf '%s' 'k' > '/etc/prep key'\nchmod 0600 -- '/etc/prep key'\n"));
 }

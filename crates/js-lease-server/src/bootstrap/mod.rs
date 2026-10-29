@@ -170,7 +170,7 @@ impl<'a> Writer<'a> {
         let secret = self.secret(slot)?;
         let path = word(path);
         self.line(&format!("printf '%s' {secret} > {path}"));
-        self.line(&format!("chmod 0600 {path}"));
+        self.line(&format!("chmod 0600 -- {path}"));
         Ok(())
     }
 
@@ -178,7 +178,7 @@ impl<'a> Writer<'a> {
     fn fetch(&mut self, url: &str, sha256: &[u8; 32], dest: &str) {
         let (url, dest) = (word(url), word(dest));
         self.line(&format!(
-            "curl --fail --silent --show-error --location --proto =https --output {dest} {url}"
+            "curl --fail --silent --show-error --location --proto =https --output {dest} --url {url}"
         ));
         self.line(&format!(
             "printf '%s  %s\\n' {} {dest} | sha256sum --check --status -",

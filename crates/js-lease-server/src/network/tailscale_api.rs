@@ -72,6 +72,8 @@ struct Device {
     id: String,
     #[serde(default)]
     hostname: String,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 /// The client of one tailnet, bound to one base URL and one OAuth client. The access
@@ -326,14 +328,16 @@ impl TailscaleApi {
         }
     }
 
-    /// Deletes every device of the tailnet whose hostname is `hostname`. A device that
-    /// is already gone is not an error, so a repeat of a delete that happened succeeds.
+    /// Deletes every device of the tailnet whose hostname is `hostname` and whose tags
+    /// include `tag`: a device that only shares the name is not ours and is left alone. A
+    /// device that is already gone is not an error, so a repeat of a delete that
+    /// happened succeeds.
     ///
     /// # Errors
     ///
     /// [`NetworkError::Credentials`] when there is no access token;
     /// [`NetworkError::DeviceDelete`] when the list or a delete fails.
-    pub fn delete_devices(&self, hostname: &str) -> Result<(), NetworkError> {
+    pub fn delete_devices(&self, hostname: &str, tag: &str) -> Result<(), NetworkError> {
         let failed = NetworkError::DeviceDelete;
         let bearer = self.bearer().map_err(NetworkError::Credentials)?;
         let listed = self
@@ -341,7 +345,11 @@ impl TailscaleApi {
             .map_err(failed)?;
         let list: Devices =
             serde_json::from_slice(&listed).map_err(|_| failed(ApiFailure::Malformed))?;
-        for device in list.devices.iter().filter(|d| d.hostname == hostname) {
+        for device in list
+            .devices
+            .iter()
+            .filter(|d| d.hostname == hostname && d.tags.iter().any(|t| t == tag))
+        {
             if !path_segment(&device.id) {
                 return Err(failed(ApiFailure::Malformed));
             }

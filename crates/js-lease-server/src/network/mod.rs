@@ -11,6 +11,13 @@
 //! - [`TailscaleMode`] joins the host to a tailnet with an auth key minted for that
 //!   launch ([`TailscaleApi`] speaks to the Tailscale API with an [`OAuthClient`]).
 //!
+//! # Operator setup for the tailscale mode
+//!
+//! The OAuth client needs two scopes, both bound to the configured tag: `auth_keys`
+//! (to mint a key for a launch) and `devices:core` (to list and delete the devices of
+//! released hosts). The service deletes only a device whose hostname is the host's and
+//! whose tags include that tag.
+//!
 //! [`prepare`]: NetworkMode::prepare
 //! [`describe`]: NetworkMode::describe
 //! [`check`]: NetworkMode::check

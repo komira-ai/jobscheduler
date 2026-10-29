@@ -60,7 +60,7 @@ fn the_key_request_is_ephemeral_single_use_tagged_and_authorised() {
                 "tags": [TAG],
             }}},
             "expirySeconds": 600,
-            "description": format!("jobscheduler gpu {host}"),
+            "description": host.to_string(),
         })
     );
 }
@@ -119,6 +119,7 @@ fn the_contribution_names_the_key_by_slot_and_describe_is_the_same_steps() {
         Some(&BootStep::Run(vec![
             "rm".to_owned(),
             "-f".to_owned(),
+            "--".to_owned(),
             AUTH_KEY_PATH.to_owned()
         ]))
     );

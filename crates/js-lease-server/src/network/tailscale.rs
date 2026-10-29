@@ -16,6 +16,9 @@ pub const AUTH_KEY_PATH: &str = "/etc/jobscheduler/ts-authkey";
 /// The longest an auth key may be asked to stay valid. A key is for one boot: minutes.
 pub const MAX_KEY_VALID_FOR: Duration = Duration::from_secs(60 * 60);
 
+/// The most characters Tailscale accepts in an auth key's description.
+pub const KEY_DESCRIPTION_MAX: usize = 50;
+
 /// Where the Tailscale archive is downloaded to.
 const ARCHIVE_PATH: &str = "/usr/local/lib/tailscale.tgz";
 
@@ -106,9 +109,15 @@ impl TailscaleMode {
                 format!("--hostname={host}").as_str(),
                 "--accept-dns=false",
             ]),
-            run(&["rm", "-f", AUTH_KEY_PATH]),
+            run(&["rm", "-f", "--", AUTH_KEY_PATH]),
         ]
     }
+}
+
+/// The description of a launch's key: the host's name, cut to [`KEY_DESCRIPTION_MAX`]
+/// characters.
+fn key_description(host: &str) -> String {
+    host.chars().take(KEY_DESCRIPTION_MAX).collect()
 }
 
 impl NetworkMode for TailscaleMode {
@@ -126,7 +135,7 @@ impl NetworkMode for TailscaleMode {
                 max: MAX_KEY_VALID_FOR.as_secs(),
             });
         }
-        let description = format!("jobscheduler {} {}", launch.pool, launch.host);
+        let description = key_description(launch.host.as_str());
         let key = self.api.mint_key(&self.settings.tag, &description, secs)?;
         Ok(Contribution {
             steps: self.steps(launch.host),
@@ -146,13 +155,29 @@ impl NetworkMode for TailscaleMode {
     /// Deletes the host's device, trying again up to [`FORGET_ATTEMPTS`] times while the
     /// failure may pass.
     fn forget(&self, host: &HostName) -> Result<(), NetworkError> {
-        let mut result = self.api.delete_devices(host.as_str());
+        let mut result = self.api.delete_devices(host.as_str(), &self.settings.tag);
         for _ in 1..FORGET_ATTEMPTS {
             if !result.as_ref().is_err_and(NetworkError::transient) {
                 break;
             }
-            result = self.api.delete_devices(host.as_str());
+            result = self.api.delete_devices(host.as_str(), &self.settings.tag);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a description of exactly the limit is kept whole and one character
+    /// more is cut to the limit.
+    #[test]
+    fn a_key_description_is_cut_at_the_limit() {
+        let at = "h".repeat(KEY_DESCRIPTION_MAX);
+        assert_eq!(key_description(&at), at);
+        let over = "h".repeat(KEY_DESCRIPTION_MAX + 1);
+        assert_eq!(key_description(&over), at);
+        assert_eq!(KEY_DESCRIPTION_MAX, 50);
     }
 }

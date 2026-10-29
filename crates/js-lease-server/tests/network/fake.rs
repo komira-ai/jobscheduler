@@ -146,7 +146,7 @@ impl Fake {
             Reply::json(
                 200,
                 &format!(
-                    r#"{{"devices":[{{"id":"d1","hostname":"{host}"}},{{"id":"d9","hostname":"other"}}]}}"#
+                    r#"{{"devices":[{{"id":"d1","hostname":"{host}","tags":["tag:js-agent"]}},{{"id":"d9","hostname":"other","tags":["tag:js-agent"]}}]}}"#
                 ),
             ),
         );
