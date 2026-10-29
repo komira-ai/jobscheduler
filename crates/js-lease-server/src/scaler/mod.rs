@@ -59,7 +59,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
-use js_lease::Clock;
+use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
     AcquireResult, Action, Input, Millis, Phase, PoolInput, Records, ReleaseResult, Settings,
@@ -187,17 +187,17 @@ impl Scaler {
     }
 
     /// The server's listeners are bound: the time before the scaler vouches for the
-    /// registry's view counts from now, and `leased`, the hosts of the lease file at start
+    /// registry's view counts from now, and `leased`, the bookings of the lease file at start
     /// (refused seats included), are hosts it waits to hear from first. No tick adds more
     /// than `cap` to the time counted, when given: a leap of the wall clock is not uptime.
-    pub fn listening<I: IntoIterator<Item = String>>(&self, cap: Option<Duration>, leased: I) {
+    pub fn listening(&self, cap: Option<Duration>, leased: &[Booking]) {
         let now = Millis::new(self.core.clock.now().millis());
         let mut gate = self
             .core
             .gate
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        gate.bound((now, cap), leased);
+        gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
     }
 
     /// Whether the last tick vouched for the registry's view; false before the first.

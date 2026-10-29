@@ -7,10 +7,11 @@
 use std::time::Duration;
 
 use js_elastic::SchedulerId;
+use js_lease::{Booking, LeaseState};
 use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, Scaler, SharedClock};
 use js_registry::SequentialSessions;
 use js_scaler::{Phase, Records};
-use js_types::ExecMode;
+use js_types::{ExecMode, HostId, LeaseId};
 
 use crate::fakes::{Handle, Rig, live, record, records, rig, view};
 
@@ -33,7 +34,16 @@ fn restart_capped(rig: &Rig, records: Records, leased: &[&str], cap: Option<Dura
         live(),
         records,
     );
-    scaler.listening(cap, leased.iter().map(|host| (*host).to_owned()));
+    let booked: Vec<Booking> = leased
+        .iter()
+        .enumerate()
+        .map(|(n, host)| Booking {
+            lease: LeaseId::new(1, n as u64 + 1),
+            host: HostId::new(host).unwrap(),
+            state: LeaseState::Held,
+        })
+        .collect();
+    scaler.listening(cap, &booked);
     scaler
 }
 

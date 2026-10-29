@@ -124,8 +124,7 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
         None => None,
     };
     if let Some(scaler) = &scaler {
-        let leased = bookings.iter().map(|booking| booking.host.to_string());
-        scaler.listening(Some(2 * tick), leased);
+        scaler.listening(Some(2 * tick), &bookings);
     }
     let table = LeaseTable::open(
         BoxedProvider(provider),
