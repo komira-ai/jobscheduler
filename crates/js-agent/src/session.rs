@@ -327,6 +327,7 @@ fn code_of(body: &Value) -> String {
             .unwrap_or_default()
             .to_owned(),
         supported: None,
+        field: None,
     };
     match refused.validate() {
         Ok(()) => refused.code,
