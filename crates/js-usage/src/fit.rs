@@ -9,15 +9,23 @@
 //! is then dilated by [`DILATE_MINUTES`] on both sides, so a busy phase that starts a
 //! little early or late is still covered.
 //!
+//! A run flagged as under node pressure ([`RunSeries::NODE_PRESSURE`]) showed less CPU
+//! than it needed, so it does not shape the cores: they come from the other runs, and a
+//! key with fewer than [`MIN_RUNS_FOR_CURVE`] of those has no curve. Its working set is
+//! still real (memory does not shrink under CPU pressure), so it counts toward the
+//! memory maximum, the reach of a minute, and the wall minutes. The censored bit is not
+//! read.
+//!
 //! A minute reached by fewer than a quarter of the runs, and every later one, is not
 //! emitted: [`js_types::sched::usage::Curve`] charges its last point to every later
 //! minute, which is the "holds the previous value" tail. All arithmetic is integer.
 
 use js_types::sched::usage::MinutePoint;
 
-use crate::ring::{BUCKETS, Ring};
+use crate::ring::{BUCKETS, Ring, RunSeries};
 
-/// The fewest runs in the ring for a curve: with fewer, the key is charged flat.
+/// The fewest runs, not under node pressure, in the ring for a curve: with fewer, the key
+/// is charged flat.
 pub const MIN_RUNS_FOR_CURVE: usize = 3;
 
 /// How many minutes each side a value is widened by.
@@ -37,18 +45,19 @@ pub fn p90(sorted: &[u64]) -> u64 {
 pub struct Fit {
     /// Minute `i` is point `i`; at most [`BUCKETS`] points, at least one.
     pub points: Vec<MinutePoint>,
-    /// How many runs the fit is made from.
+    /// How many runs the ring held, those under node pressure included.
     pub runs: u16,
     /// The P90 of the runs' wall minutes (rounded up per run), at least 1: how long a new
     /// lease of the key is expected to last.
     pub wall_minutes_p90: u32,
 }
 
-/// The fit of `ring`, or `None` when it holds fewer than [`MIN_RUNS_FOR_CURVE`] runs.
+/// The fit of `ring`, or `None` when it holds fewer than [`MIN_RUNS_FOR_CURVE`] runs that
+/// were not under node pressure.
 #[must_use]
 pub fn fit(ring: &Ring) -> Option<Fit> {
     let runs = ring.len();
-    if runs < MIN_RUNS_FOR_CURVE {
+    if ring.runs().filter(|r| !r.under_node_pressure()).count() < MIN_RUNS_FOR_CURVE {
         return None;
     }
     let mut raw: Vec<MinutePoint> = Vec::new();
@@ -57,20 +66,28 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         if reached * 4 < runs {
             break;
         }
-        let at: Vec<_> = ring
+        let prev = raw.last().copied().unwrap_or_default();
+        // Reached but never recorded: hold the previous minute, for each figure apart.
+        let mut cores: Vec<u64> = ring
+            .runs()
+            .filter(|r| !r.under_node_pressure())
+            .filter_map(|r| r.buckets.get(t).copied().flatten())
+            .map(|b| u64::from(b.cores_milli))
+            .collect();
+        cores.sort_unstable();
+        let working_set_bytes = ring
             .runs()
             .filter_map(|r| r.buckets.get(t).copied().flatten())
-            .collect();
-        let mut cores: Vec<u64> = at.iter().map(|b| u64::from(b.cores_milli)).collect();
-        cores.sort_unstable();
-        let point = if at.is_empty() {
-            // Reached but never recorded: hold the previous minute.
-            raw.last().copied().unwrap_or_default()
-        } else {
-            MinutePoint {
-                cores_milli: u32::try_from(p90(&cores)).unwrap_or(u32::MAX),
-                working_set_bytes: at.iter().map(|b| b.ws_bytes).max().unwrap_or(0),
-            }
+            .map(|b| b.ws_bytes)
+            .max()
+            .unwrap_or(prev.working_set_bytes);
+        let point = MinutePoint {
+            cores_milli: if cores.is_empty() {
+                prev.cores_milli
+            } else {
+                u32::try_from(p90(&cores)).unwrap_or(u32::MAX)
+            },
+            working_set_bytes,
         };
         raw.push(point);
     }
@@ -102,6 +119,12 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
 mod tests {
     use super::*;
     use crate::ring::tests::series;
+
+    fn pressured(minutes: &[(u32, u64)]) -> crate::ring::RunSeries {
+        let mut s = series(minutes);
+        s.flags = RunSeries::NODE_PRESSURE;
+        s
+    }
 
     fn ring_of(runs: &[&[(u32, u64)]]) -> Ring {
         let mut ring = Ring::new();
@@ -275,5 +298,58 @@ mod tests {
             "bucket 63 is the maximum from minute 63 on"
         );
         assert_eq!(f.wall_minutes_p90, 100);
+    }
+
+    /// Catches: a run under node pressure pulling the cores down (or up), or the minimum
+    /// run count being met by such runs.
+    #[test]
+    fn runs_under_node_pressure_do_not_shape_the_cores() {
+        let clean: &[(u32, u64)] = &[(800, 8), (800, 8)];
+        let mut with = ring_of(&[clean, clean, clean]);
+        let alone = fit(&with).unwrap();
+        for _ in 0..5 {
+            with.push(&pressured(&[(100, 8), (100, 8)]));
+        }
+        let f = fit(&with).unwrap();
+        assert_eq!(f.points, alone.points);
+        assert_eq!(cores(&f), vec![800, 800]);
+    }
+
+    /// Catches: pressured runs counting toward the three needed for a curve.
+    #[test]
+    fn a_key_whose_runs_are_all_under_node_pressure_has_no_curve() {
+        let mut ring = Ring::new();
+        for _ in 0..3 {
+            ring.push(&pressured(&[(100, 1)]));
+        }
+        assert_eq!(fit(&ring), None);
+        let clean: &[(u32, u64)] = &[(100, 1)];
+        ring.push(&series(clean));
+        ring.push(&series(clean));
+        assert_eq!(fit(&ring), None, "two clean runs among five");
+        ring.push(&series(clean));
+        assert!(fit(&ring).is_some());
+    }
+
+    /// Catches: a pressured run's working set being dropped from the memory maximum, its
+    /// wall time from the life, or its minutes from the reach; and a minute only pressured
+    /// runs reached taking its cores from them.
+    #[test]
+    fn a_run_under_node_pressure_still_counts_for_memory_and_life() {
+        let clean: &[(u32, u64)] = &[(100, 1)];
+        let mut ring = ring_of(&[clean, clean, clean]);
+        ring.push(&pressured(&[
+            (900, 9),
+            (900, 9),
+            (900, 9),
+            (900, 9),
+            (900, 90),
+            (900, 9),
+        ]));
+        let f = fit(&ring).unwrap();
+        assert_eq!(mem(&f), vec![9, 9, 90, 90, 90, 90]);
+        assert_eq!(cores(&f), vec![100; 6], "held, never the pressured 900");
+        assert_eq!(f.wall_minutes_p90, 6);
+        assert_eq!(f.runs, 4);
     }
 }
