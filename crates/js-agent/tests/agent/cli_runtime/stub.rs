@@ -28,6 +28,11 @@ case "$1" in
 --version) echo "Docker version 27.3.1, build ce12230" ;;
 create|ps) echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ;;
 info) echo true ;;
+network)
+  case "$*" in
+  "network inspect --format {{.Name}} -- jobs") echo jobs ;;
+  *) echo "Error: network not found" >&2; exit 1 ;;
+  esac ;;
 volume) echo '{"device":"/work/scratch/r1","o":"bind,nosuid,nodev","type":"none"}' ;;
 inspect)
   case "$*" in
@@ -270,4 +275,49 @@ fn a_runtime_error_carries_the_call_and_the_status_only() {
     };
     assert!(why.contains("exit status: 3"), "{why}");
     assert!(!why.contains("secret-output"), "{why}");
+}
+
+/// Asserts that the network check asks the runtime with `network inspect` for exactly the
+/// configured name, passes when the runtime knows it, and fails with a typed error that
+/// names the flag and the network when it does not; and that the default `none` is never
+/// looked up. It catches a missing network surfacing only as failed jobs at `create`, a
+/// check that passes whatever the runtime says, and a lookup of the built-in `none`.
+#[test]
+fn a_missing_network_is_refused_at_start_and_a_present_one_passes() {
+    let dir = Scratch::new("cli-stub-network");
+    let bin = dir.write("podman", STUB, 0o755);
+    settle(&bin);
+    let open = |network: Option<&str>| {
+        let settings = Settings::new(&bin, network, Some("1000:1000")).unwrap();
+        let runner = Box::new(system_runner(Duration::from_secs(10)));
+        CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner)
+            .ok()
+            .unwrap()
+    };
+    open(Some("jobs")).check_network().unwrap();
+    let Err(CliError::NoNetwork { name, why }) = open(Some("absent")).check_network() else {
+        panic!("a missing network passed");
+    };
+    assert_eq!(name, "absent");
+    assert!(why.contains("exit status: 1"), "{why}");
+    assert!(!why.contains("network not found"), "{why}");
+    let message = open(Some("absent"))
+        .check_network()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.starts_with("--container-network absent: "),
+        "{message}"
+    );
+
+    fs::remove_file(format!("{}.log", bin.display())).unwrap();
+    open(None).check_network().unwrap();
+    let calls = logged(&bin);
+    assert!(calls.iter().all(|call| call[0] != "network"), "{calls:?}");
+    open(Some("jobs")).check_network().unwrap();
+    let last = logged(&bin).pop().unwrap();
+    assert_eq!(
+        last,
+        strings(&["network", "inspect", "--format", "{{.Name}}", "--", "jobs"])
+    );
 }

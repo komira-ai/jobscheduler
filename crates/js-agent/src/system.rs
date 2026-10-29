@@ -101,6 +101,9 @@ impl Machine for System {
         let (settings, host_id) = (build.settings.clone(), build.host_id);
         let opened = CliRuntime::open(settings, host_id, build.platform, unix_ms, runner);
         let runtime = opened.map_err(|why| format!("{}: {why}", build.settings.bin()))?;
+        runtime
+            .check_network()
+            .map_err(|why| format!("{}: {why}", build.settings.bin()))?;
         let warnings = runtime.warnings().to_vec();
         Ok((Box::new(runtime), warnings))
     }

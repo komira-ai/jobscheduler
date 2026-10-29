@@ -530,6 +530,7 @@ impl Local {
                 host: cli.container_host.as_deref(),
                 pull: cli.container_pull.as_deref(),
                 tmp_size: cli.container_tmp_size.as_deref(),
+                add_hosts: &cli.container_add_host,
             },
             (
                 rustix::process::geteuid().as_raw(),

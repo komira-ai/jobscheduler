@@ -6,7 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use js_agent::cli_runtime::{
-    DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
+    ADD_HOST_MAX, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings,
+    SettingsError,
 };
 
 use super::BIN;
@@ -279,6 +280,10 @@ fn network_and_user_need_the_runtime() {
             tmp_size: Some("1g"),
             ..Flags::default()
         },
+        Flags {
+            add_hosts: &["store.example:192.0.2.10".to_owned()],
+            ..Flags::default()
+        },
     ];
     for flags in alone {
         let said = Settings::from_flags(&flags, AGENT);
@@ -292,6 +297,7 @@ fn network_and_user_need_the_runtime() {
             host: Some("unix:///run/engine.sock"),
             pull: Some("missing"),
             tmp_size: Some("128m"),
+            add_hosts: &["store.example:192.0.2.10".to_owned()],
         },
         AGENT,
     )
@@ -300,6 +306,7 @@ fn network_and_user_need_the_runtime() {
     assert_eq!((on.network(), on.user()), ("jobs", "1000:1000"));
     assert_eq!(on.host(), Some("unix:///run/engine.sock"));
     assert_eq!((on.pull(), on.tmp_size()), (Pull::Missing, "128m"));
+    assert_eq!(on.add_hosts(), ["store.example:192.0.2.10"]);
     assert_eq!(on.chown_scratch(), None);
     let root = Settings::from_flags(
         &Flags {
@@ -356,6 +363,8 @@ fn errors_name_their_flag() {
     starts(SettingsError::Host, "--container-host");
     starts(SettingsError::Pull, "--container-pull");
     starts(SettingsError::TmpSize, "--container-tmp-size");
+    starts(SettingsError::AddHost, "--container-add-host");
+    starts(SettingsError::AddHostCount, "--container-add-host");
     assert!(
         SettingsError::NoBin
             .to_string()
@@ -485,4 +494,57 @@ fn container_flags_are_checked_when_the_agent_starts() {
         assert!(err.contains(text), "{extra:?}: {err}");
         assert_eq!(sent, 0, "{extra:?}");
     }
+}
+
+/// Asserts the `--container-add-host` rules: DNS names (any case, lower-cased) with an
+/// IPv4 or IPv6 address are kept in the canonical form, in the order given; `host-gateway`
+/// and every other non-address, a missing colon, a bad name (empty, underscore, leading or
+/// trailing hyphen, empty label, over 253 bytes or a 64-byte label), a name twice and more
+/// than the maximum are refused. It catches an entry that lets the engine resolve a magic
+/// word (`host-gateway` reaches the host) or smuggle an option, and an unbounded list.
+#[test]
+fn add_host_entries_are_checked() {
+    let set = |entries: &[&str]| {
+        let entries: Vec<String> = entries.iter().map(|e| (*e).to_owned()).collect();
+        Settings::new(bin(), None, None)
+            .unwrap()
+            .with_add_hosts(&entries)
+    };
+    let kept = set(&["Store.Example:192.0.2.10", "kbf:2001:DB8:0:0:0:0:0:1"]).unwrap();
+    assert_eq!(
+        kept.add_hosts(),
+        ["store.example:192.0.2.10", "kbf:2001:db8::1"]
+    );
+    assert!(set(&[]).unwrap().add_hosts().is_empty());
+    let long_name = format!("{}.example:192.0.2.1", "a".repeat(250));
+    let long_label = format!("{}:192.0.2.1", "a".repeat(64));
+    for bad in [
+        "store:host-gateway",
+        "host-gateway:192.0.2.1",
+        "store:example.com",
+        "store:192.0.2.0/24",
+        "store:[2001:db8::1]",
+        "store",
+        ":192.0.2.1",
+        "a_b:192.0.2.1",
+        "-a:192.0.2.1",
+        "a-:192.0.2.1",
+        "a..b:192.0.2.1",
+        "a b:192.0.2.1",
+        "a:192.0.2.1:80",
+        &long_name,
+        &long_label,
+    ] {
+        assert_eq!(set(&[bad]), Err(SettingsError::AddHost), "{bad}");
+    }
+    assert_eq!(
+        set(&["a:192.0.2.1", "A:192.0.2.2"]),
+        Err(SettingsError::AddHost)
+    );
+    let many: Vec<String> = (0..=ADD_HOST_MAX)
+        .map(|n| format!("h{n}:192.0.2.1"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(set(&many[..ADD_HOST_MAX]).is_ok());
+    assert_eq!(set(&many), Err(SettingsError::AddHostCount));
 }

@@ -269,7 +269,8 @@ fn mount_value(
 /// private IPC namespace against a daemon whose default is to share it, the pull policy
 /// the agent was configured with (never by default), and a user that is not root. For
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
-/// container there, and its default is private. There is no `--rm`: the lifecycle
+/// container there, and its default is private. A `--add-host <name>:<ip>` follows the
+/// network for each static host entry the agent was configured with. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
 pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = format!("/tmp:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
@@ -293,6 +294,9 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     ]
     .map(str::to_owned)
     .to_vec();
+    for entry in settings.add_hosts() {
+        args.extend(["--add-host".to_owned(), entry.clone()]);
+    }
     if engine == Engine::Podman {
         args.extend(["--pid", "private"].map(str::to_owned));
     }

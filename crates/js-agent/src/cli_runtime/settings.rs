@@ -17,6 +17,15 @@ pub const DEFAULT_TMP_SIZE: &str = "64m";
 /// The longest network name accepted.
 const NETWORK_NAME_MAX: usize = 64;
 
+/// The most `--container-add-host` entries accepted.
+pub const ADD_HOST_MAX: usize = 16;
+
+/// The longest host name accepted in `--container-add-host` (a DNS name).
+const DNS_NAME_MAX: usize = 253;
+
+/// The longest label of a DNS name.
+const DNS_LABEL_MAX: usize = 63;
+
 /// The longest engine host accepted.
 const HOST_MAX: usize = 256;
 
@@ -40,6 +49,15 @@ pub enum SettingsError {
     /// would let `container:<id>` or an option pass as one).
     #[error("--container-network: not a network name the agent will use")]
     Network,
+    /// A `--container-add-host` is not `<name>:<ip>` with a DNS name and an IPv4 or IPv6
+    /// address (`host-gateway` and any other word is refused), or names a host twice.
+    #[error(
+        "--container-add-host: not <dns-name>:<ip> (an IPv4 or IPv6 address), or a name given twice"
+    )]
+    AddHost,
+    /// More than [`ADD_HOST_MAX`] `--container-add-host` entries.
+    #[error("--container-add-host: at most 16 entries")]
+    AddHostCount,
     /// `--container-user` is not `<uid>:<gid>` with both numbers above zero.
     #[error("--container-user: not <uid>:<gid> of a user that is not root")]
     User,
@@ -114,6 +132,8 @@ pub struct Flags<'a> {
     pub pull: Option<&'a str>,
     /// `--container-tmp-size`.
     pub tmp_size: Option<&'a str>,
+    /// `--container-add-host`, each `<name>:<ip>`.
+    pub add_hosts: &'a [String],
 }
 
 /// The checked container flags: where the runtime is, which network jobs get, which user
@@ -128,6 +148,7 @@ pub struct Settings {
     host: Option<String>,
     pull: Pull,
     tmp_size: String,
+    add_hosts: Vec<String>,
     chown: Option<(u32, u32)>,
 }
 
@@ -148,7 +169,8 @@ impl Settings {
                 flags.pull,
                 flags.tmp_size,
             ];
-            return match others.iter().any(Option::is_some) {
+            let given = others.iter().any(Option::is_some) || !flags.add_hosts.is_empty();
+            return match given {
                 true => Err(SettingsError::NoBin),
                 false => Ok(None),
             };
@@ -157,6 +179,7 @@ impl Settings {
             .with_host(flags.host)?
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
+            .with_add_hosts(flags.add_hosts)?
             .with_agent(agent.0, agent.1)
             .map(Some)
     }
@@ -192,6 +215,7 @@ impl Settings {
             host: None,
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
+            add_hosts: Vec::new(),
             chown: None,
         })
     }
@@ -224,6 +248,34 @@ impl Settings {
     pub fn with_tmp_size(self, size: Option<&str>) -> Result<Self, SettingsError> {
         let tmp_size = size.map_or(Ok(self.tmp_size.clone()), tmp_size)?;
         Ok(Self { tmp_size, ..self })
+    }
+
+    /// The static name-to-address entries every container gets (`--add-host`), each
+    /// `<name>:<ip>`. A network without DNS resolves nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::AddHostCount`] for more than [`ADD_HOST_MAX`];
+    /// [`SettingsError::AddHost`] for an entry that is not a DNS name and an IP address,
+    /// or a name given twice.
+    pub fn with_add_hosts(self, entries: &[String]) -> Result<Self, SettingsError> {
+        if entries.len() > ADD_HOST_MAX {
+            return Err(SettingsError::AddHostCount);
+        }
+        let add_hosts = entries
+            .iter()
+            .map(|entry| add_host(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut names: Vec<String> = add_hosts
+            .iter()
+            .filter_map(|entry| entry.split_once(':').map(|(n, _)| n.to_owned()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        match names.len() == add_hosts.len() {
+            true => Ok(Self { add_hosts, ..self }),
+            false => Err(SettingsError::AddHost),
+        }
     }
 
     /// Settles who owns the run's scratch directory. It is private to the agent (`0700`),
@@ -288,6 +340,11 @@ impl Settings {
         &self.tmp_size
     }
 
+    /// The `<name>:<ip>` entries of `--container-add-host`, lower-cased names.
+    pub fn add_hosts(&self) -> &[String] {
+        &self.add_hosts
+    }
+
     /// The `(uid, gid)` to give the scratch directory of a run before its container is
     /// created: set when the agent runs as root, none when the container's user is the
     /// agent's own.
@@ -320,6 +377,29 @@ fn network_name(name: &str) -> Result<&str, SettingsError> {
     Some(name)
         .filter(|name| shaped && !name.eq_ignore_ascii_case("host"))
         .ok_or(SettingsError::Network)
+}
+
+/// `<name>:<ip>` with a DNS name (labels of letters, digits and inner hyphens) and an
+/// IPv4 or IPv6 address; the name is lower-cased, the address is written back in its
+/// canonical form. `host-gateway` is an IP position word of the engines and is refused
+/// because it is not an address.
+fn add_host(text: &str) -> Result<String, SettingsError> {
+    let (name, ip) = text.split_once(':').ok_or(SettingsError::AddHost)?;
+    let label = |label: &str| {
+        (1..=DNS_LABEL_MAX).contains(&label.len())
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    };
+    let sound = name.len() <= DNS_NAME_MAX
+        && name.split('.').all(label)
+        && !name.eq_ignore_ascii_case("host-gateway");
+    let ip: std::net::IpAddr = ip.parse().map_err(|_| SettingsError::AddHost)?;
+    sound
+        .then(|| format!("{}:{ip}", name.to_ascii_lowercase()))
+        .ok_or(SettingsError::AddHost)
 }
 
 /// `<uid>:<gid>` of numbers above zero.

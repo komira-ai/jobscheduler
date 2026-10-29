@@ -235,7 +235,8 @@ pub use args::{
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
-    DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
+    ADD_HOST_MAX, DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings,
+    SettingsError,
 };
 
 use crate::facts::{CommandRunner, Platform, SystemCommands};
@@ -344,6 +345,17 @@ pub enum CliError {
     Blind {
         /// The process id the engine reported (`State.Pid`).
         pid: u32,
+    },
+    /// `--container-network` names a network the runtime does not have (or the runtime
+    /// could not look: `why` is its exit).
+    #[error(
+        "--container-network {name}: the runtime has no such network ({why}); create it on the host before the agent starts"
+    )]
+    NoNetwork {
+        /// The network the flag named.
+        name: String,
+        /// The runner's reason.
+        why: String,
     },
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
@@ -539,6 +551,28 @@ impl CliRuntime {
     /// The engine found.
     pub fn engine(&self) -> Engine {
         self.engine
+    }
+
+    /// Confirms that the network containers join exists, by `network inspect`. The default
+    /// (`none`) is the runtime's own and is not looked up. Without this, a network that
+    /// was never created fails every job at `create`; with it the agent refuses to start.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::NoNetwork`] when the runtime fails to inspect the network.
+    pub fn check_network(&self) -> Result<(), CliError> {
+        let name = self.settings.network();
+        if name == DEFAULT_NETWORK {
+            return Ok(());
+        }
+        let args = ["network", "inspect", "--format", "{{.Name}}", "--", name];
+        self.runner
+            .run_in(self.settings.bin(), &args, &engine_env(&self.settings))
+            .map(drop)
+            .map_err(|why| CliError::NoNetwork {
+                name: name.to_owned(),
+                why,
+            })
     }
 
     fn call(&self, call: &'static str, args: &[&str]) -> Result<String, CliError> {

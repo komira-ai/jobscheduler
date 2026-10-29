@@ -172,6 +172,13 @@ pub struct Cli {
     /// `--container-bin`.
     #[arg(long, value_name = "SIZE")]
     pub container_tmp_size: Option<String>,
+    /// A static host entry for every container, `<dns-name>:<ip>` (IPv4 or IPv6); repeatable,
+    /// at most 16; passed at create as `--add-host`. A network made without DNS resolves
+    /// nothing, and a presigned URL names its host (the signature covers it), so each
+    /// endpoint a job may reach is given here. `host-gateway` and anything that is not an
+    /// address are refused. Needs `--container-bin`.
+    #[arg(long, value_name = "NAME:IP")]
+    pub container_add_host: Vec<String>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe
