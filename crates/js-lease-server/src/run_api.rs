@@ -78,8 +78,12 @@ struct RunBody {
     labels: std::collections::BTreeMap<String, String>,
     /// What work the run does, when the client knows: the key its cost curve is learned
     /// under. Absent means the run teaches the server nothing.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "not_null")]
     work_key: Option<WorkKeyBody>,
+}
+
+fn not_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<WorkKeyBody>, D::Error> {
+    WorkKeyBody::deserialize(d).map(Some)
 }
 
 /// The longest part of a work key (class or dedup text), in bytes. Keys are kept in
