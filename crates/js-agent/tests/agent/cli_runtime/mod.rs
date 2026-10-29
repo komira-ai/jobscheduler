@@ -10,6 +10,7 @@ mod runtime;
 mod scripted;
 mod settings;
 mod stub;
+mod subid;
 
 use std::collections::BTreeMap;
 use std::fs;
