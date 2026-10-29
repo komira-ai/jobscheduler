@@ -6,8 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{
-    ArgsError, DEFAULT_PIDS, Engine, SCRATCH_TARGET, Settings, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, DEFAULT_PIDS, Engine, FILES_TARGET, SCRATCH_TARGET, Settings, binds_of,
+    hardening_args, label_args, limits_to_args,
 };
 
 use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
@@ -436,6 +436,43 @@ fn podman_mounts_are_nosuid_nodev() {
     let docker = mounts_of(&docker);
     assert_eq!(docker[0], DOCKER_SCRATCH);
     assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
+}
+
+/// Asserts that the run's files directory is mounted read-only at `/run/js-files` after
+/// the job's own mounts, with the recursive read-only options when the engine takes them
+/// and `nosuid,nodev` on Podman, and that a run without files has no such mount. It
+/// catches a files mount that is writable, one that skips the Podman options every other
+/// mount has, and one added to every run.
+#[test]
+fn the_files_mount_is_read_only_at_the_fixed_path() {
+    let mut job = spec("r1");
+    assert!(
+        !mounts_of(&limits_to_args(Engine::Podman, &job, false).unwrap())
+            .iter()
+            .any(|m| m.contains("/run/js-files"))
+    );
+    job.mounts = vec![mount("/srv/data/in", "/mnt/data/in", true)];
+    job.files = Some("/work/scratch/r1@files".into());
+    assert_eq!(FILES_TARGET, "/run/js-files");
+    let podman = limits_to_args(Engine::Podman, &job, true).unwrap();
+    assert_eq!(
+        mounts_of(&podman).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly,bind-recursive=readonly,bind-propagation=rprivate,nosuid,nodev"
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&docker).last().unwrap().as_str(),
+        "type=bind,src=/work/scratch/r1@files,dst=/run/js-files,readonly"
+    );
+    let binds = binds_of(&job);
+    assert_eq!(
+        binds.last().unwrap(),
+        &(
+            "/work/scratch/r1@files".to_owned(),
+            "/run/js-files".to_owned(),
+            false
+        )
+    );
 }
 
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`
