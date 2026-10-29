@@ -121,7 +121,7 @@ fn dir(name: &str) -> TestDir {
     )
 }
 
-fn resources(cpu: u32, memory: u64) -> Resources {
+fn resources(cpu: u64, memory: u64) -> Resources {
     Resources::new(cpu, memory, 1, Some("nvidia-a10".to_owned())).unwrap()
 }
 
