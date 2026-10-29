@@ -97,6 +97,9 @@ fn a_pool_that_says_nothing_launches_nothing_and_requires_the_container_contract
     assert_eq!(plan.exec, Some(ExecMode::Container));
     assert_eq!(plan.idle, None);
     assert!(matches!(plan.network, NetworkPlan::Default));
+    let shown = format!("{plan:?}");
+    assert!(shown.contains("launch: Plan"), "{shown}");
+    assert!(shown.contains("network: Default"), "{shown}");
     assert_eq!(config.listen().to_string(), "127.0.0.1:0");
 }
 
@@ -115,6 +118,7 @@ fn exec_can_be_opted_out_and_launch_can_be_live() {
     let plan = config.elastic_pool().unwrap();
     assert_eq!(plan.exec, None);
     assert_eq!(plan.launch, Launch::Live);
+    assert!(format!("{plan:?}").contains("launch: Live"));
     let mac = PoolText::elastic(&scratch)
         .set("class", "\"gpu-host\"")
         .set("exec", "\"sandbox-exec\"")

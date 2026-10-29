@@ -79,7 +79,7 @@ const POOL_KEYS: &[&str] = &[
 /// Whether an elastic pool launches. A pool starts in `Plan`: it checks and shows its
 /// plan and launches nothing. `Live` is the line that spends money; the scaler honours it,
 /// and until the scaler exists nothing launches in either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Launch {
     /// Check and plan only.
     Plan,
