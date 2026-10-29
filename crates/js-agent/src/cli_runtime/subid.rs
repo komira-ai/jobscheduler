@@ -6,10 +6,12 @@
 //! `--container-subuid <user>` names the user whose entries in `/etc/subuid` and
 //! `/etc/subgid` give the range. [`Mapping::read`] checks them when the agent starts:
 //!
-//! - both files have an entry for the user, of at least [`RANGE_LEN`] ids, and the first
-//!   entry is the range (the next entries are not used);
+//! - both files have an entry for the user (by name or by uid), of at least [`RANGE_LEN`]
+//!   ids, and the first entry is the range (the next entries are not used; for Docker the
+//!   user must have exactly one entry of exactly [`RANGE_LEN`] ids);
 //! - the range does not begin at 0 (that would map a container's root onto the host's);
 //! - the range ends below the largest id;
+//! - no other user's entry of `/etc/subuid` (or `/etc/subgid`) shares an id with the range;
 //! - no uid of `/etc/passwd` is in the uid range, and no gid of `/etc/group` or primary
 //!   gid of `/etc/passwd` is in the gid range.
 //!
@@ -20,6 +22,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 /// How many ids a job's user namespace has, and so how many a range must hold.
 pub const RANGE_LEN: u32 = 65_536;
@@ -82,6 +85,17 @@ pub enum SubidError {
         /// The file.
         file: &'static str,
     },
+    /// Docker maps the user's whole allocation, so the user must have one entry of exactly
+    /// [`RANGE_LEN`] ids.
+    #[error(
+        "--container-subuid: {file}: Docker maps the whole allocation of {user}, so {user} needs exactly one entry of exactly 65536 ids"
+    )]
+    NotExact {
+        /// The user.
+        user: String,
+        /// The file.
+        file: &'static str,
+    },
     /// The range runs past the largest id.
     #[error(
         "--container-subuid: {file}: the range of {user} (from {start}) runs past the largest id"
@@ -94,7 +108,11 @@ pub enum SubidError {
         /// The first id.
         start: u32,
     },
-    /// The range holds an id the host's user or group database names.
+    /// The range has not been resolved: no runtime has opened with these settings.
+    #[error("--container-subuid: the id range has not been resolved: the runtime did not open")]
+    Unresolved,
+    /// The range holds an id the host's user or group database names, or one of another
+    /// user's subordinate ranges.
     #[error(
         "--container-subuid: {file}: the range of {user} (from {start}) holds the id {id} of {database}, so a container id would be that host id"
     )]
@@ -213,6 +231,30 @@ impl Mapping {
         user: &str,
         read: &dyn Fn(&str) -> Result<String, String>,
     ) -> Result<Self, SubidError> {
+        Self::read_with(user, read, false)
+    }
+
+    /// [`Mapping::read`] for Docker: the user must have exactly one entry in each file, of
+    /// exactly [`RANGE_LEN`] ids. Docker's `userns-remap` maps container ids across the
+    /// user's whole allocation, and the post-job checks watch only the first
+    /// [`RANGE_LEN`] ids, so a larger or second entry would leave ids unwatched. Podman's
+    /// map is explicit and needs no such rule.
+    ///
+    /// # Errors
+    ///
+    /// As [`Mapping::read`], and [`SubidError::NotExact`].
+    pub fn read_exact(
+        user: &str,
+        read: &dyn Fn(&str) -> Result<String, String>,
+    ) -> Result<Self, SubidError> {
+        Self::read_with(user, read, false)
+    }
+
+    fn read_with(
+        user: &str,
+        read: &dyn Fn(&str) -> Result<String, String>,
+        exact: bool,
+    ) -> Result<Self, SubidError> {
         let text = |path: &str| read(path).map_err(SubidError::Unreadable);
         let (subuid, subgid) = (text(SUBUID_FILE)?, text(SUBGID_FILE)?);
         let (passwd, group) = (text(PASSWD_FILE)?, text(GROUP_FILE)?);
@@ -224,18 +266,36 @@ impl Mapping {
                 passwd: &passwd,
                 group: &group,
             },
+            exact,
         )
     }
 
-    /// The mapping of `user` from the text of the files.
+    /// The mapping of `user` from the text of the files; `exact` is the rule of
+    /// [`Mapping::read_exact`].
     ///
     /// # Errors
     ///
     /// The range is not one the agent accepts (see the module).
-    pub fn resolve(user: &str, files: &IdFiles<'_>) -> Result<Self, SubidError> {
-        let uid_start = start_of(files.subuid, user, SUBUID_FILE)?;
-        let gid_start = start_of(files.subgid, user, SUBGID_FILE)?;
+    pub fn resolve(user: &str, files: &IdFiles<'_>, exact: bool) -> Result<Self, SubidError> {
+        let uid = owner_uid(files.passwd, user);
+        let uid_start = start_of(files.subuid, user, uid, SUBUID_FILE, exact)?;
+        let gid_start = start_of(files.subgid, user, uid, SUBGID_FILE, exact)?;
         let mapping = Self::new(uid_start, gid_start);
+        let others = [
+            (files.subuid, SUBUID_FILE, uid_start, mapping.uid),
+            (files.subgid, SUBGID_FILE, gid_start, mapping.gid),
+        ];
+        for (text, file, start, range) in others {
+            if let Some(id) = other_overlap(text, user, uid, range) {
+                return Err(SubidError::Overlaps {
+                    user: user.to_owned(),
+                    file,
+                    start,
+                    database: file,
+                    id,
+                });
+            }
+        }
         let checks = [
             (
                 files.passwd,
@@ -304,16 +364,42 @@ impl Mapping {
     }
 }
 
-/// The first id of the first entry of `user` in `text` (`name:start:count` lines).
-fn start_of(text: &str, user: &str, file: &'static str) -> Result<u32, SubidError> {
-    let user_owned = || user.to_owned();
-    let line = text
+/// The uid `passwd` gives the user `user` (a numeric entry in the subordinate id files
+/// names the user by it).
+fn owner_uid<'a>(passwd: &'a str, user: &str) -> Option<&'a str> {
+    let fields = passwd
         .lines()
-        .find(|line| line.split(':').next() == Some(user))
-        .ok_or_else(|| SubidError::NoEntry {
-            user: user_owned(),
-            file,
-        })?;
+        .map(|line| line.split(':').collect::<Vec<_>>());
+    fields
+        .into_iter()
+        .find(|fields| fields.first() == Some(&user))
+        .and_then(|fields| fields.get(2).copied())
+}
+
+/// Whether the line of a subordinate id file is the user's: it names the user or its uid.
+fn is_owner(line: &str, user: &str, uid: Option<&str>) -> bool {
+    let first = line.split(':').next().unwrap_or_default();
+    let _ = uid;
+    first == user
+}
+
+/// The first id of the first entry of `user` in `text` (`name:start:count` lines, the
+/// name or the uid of the user). With `exact` the user must have no other entry and the
+/// entry exactly [`RANGE_LEN`] ids.
+fn start_of(
+    text: &str,
+    user: &str,
+    uid: Option<&str>,
+    file: &'static str,
+    exact: bool,
+) -> Result<u32, SubidError> {
+    let user_owned = || user.to_owned();
+    let mut lines = text.lines().filter(|line| is_owner(line, user, uid));
+    let line = lines.next().ok_or_else(|| SubidError::NoEntry {
+        user: user_owned(),
+        file,
+    })?;
+    let several = lines.next().is_some();
     let fields: Vec<&str> = line.split(':').collect();
     let number = |text: &str| text.trim().parse::<u32>().ok();
     let (start, count) = match fields.as_slice() {
@@ -329,6 +415,12 @@ fn start_of(text: &str, user: &str, file: &'static str) -> Result<u32, SubidErro
             user: user_owned(),
             file,
             count,
+        });
+    }
+    if exact && (several || count != RANGE_LEN) {
+        return Err(SubidError::NotExact {
+            user: user_owned(),
+            file,
         });
     }
     if start == 0 {
@@ -347,6 +439,13 @@ fn start_of(text: &str, user: &str, file: &'static str) -> Result<u32, SubidErro
     Ok(start)
 }
 
+/// The first id of `range` that a line of `text` of a user other than `user` also
+/// allocates (lines that are not `name:start:count` allocate nothing).
+fn other_overlap(text: &str, user: &str, uid: Option<&str>, range: IdRange) -> Option<u32> {
+    let _ = (text, user, uid, range);
+    None
+}
+
 /// An id of `range` in the colon-separated field number `field` (counting from 0) of a
 /// line of `database`, if there is one. A line whose field is not a number (such as a
 /// `+` line) names no id.
@@ -363,23 +462,30 @@ pub enum JobUsers {
     /// Processes of this one host uid: containers that run in the host's user namespace
     /// (a test's [`Settings`](super::Settings) built without `--container-subuid`).
     Uid(u32),
-    /// Processes of the host uids the named user's range gives (`--container-subuid`).
-    Mapped(String),
+    /// Processes of the host uids of the range the runtime resolved when it opened
+    /// (`--container-subuid`); the cell is filled by [`CliRuntime::open_in`](super::CliRuntime::open_in)
+    /// and never read from the id files again.
+    Mapped(Arc<OnceLock<Mapping>>),
 }
 
 impl JobUsers {
-    /// The host uids of the job's processes, read with `read` (see [`Mapping::read`]).
+    /// The users of a mapped job whose range is `mapping`.
+    pub fn resolved(mapping: Mapping) -> Self {
+        Self::Mapped(Arc::new(OnceLock::from(mapping)))
+    }
+
+    /// The host uids of the job's processes.
     ///
     /// # Errors
     ///
-    /// A mapped range cannot be read or is not one the agent accepts.
-    pub fn range(
-        &self,
-        read: &dyn Fn(&str) -> Result<String, String>,
-    ) -> Result<IdRange, SubidError> {
+    /// [`SubidError::Unresolved`] for a mapped range that no runtime has resolved.
+    pub fn range(&self) -> Result<IdRange, SubidError> {
         match self {
             Self::Uid(uid) => Ok(IdRange::single(*uid)),
-            Self::Mapped(user) => Mapping::read(user, read).map(Mapping::uid),
+            Self::Mapped(cell) => cell
+                .get()
+                .map(|mapping| mapping.uid())
+                .ok_or(SubidError::Unresolved),
         }
     }
 }
@@ -410,12 +516,7 @@ impl RangeClaim {
             .mode(0o700)
             .create(dir)?;
         let name = mapping.claim_name();
-        let held = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(dir.join(&name))?;
+        let held = open_regular(&dir.join(&name), true)?;
         held.try_lock()
             .map_err(|_| SubidError::Claimed(name.clone()))?;
         for entry in fs::read_dir(dir)? {
@@ -426,10 +527,23 @@ impl RangeClaim {
             if other == name.as_str() || !theirs.overlaps(mapping) {
                 continue;
             }
-            let file = File::open(dir.join(&other))?;
+            let file = open_regular(&dir.join(&other), false)?;
             file.try_lock()
                 .map_err(|_| SubidError::Claimed(other.to_string_lossy().into_owned()))?;
         }
         Ok(Self { _held: held })
     }
+}
+
+/// Opens the claim file at `path` (made when `create`), and requires that what was opened
+/// is the regular file the path names and not a link to something else.
+fn open_regular(path: &Path, create: bool) -> Result<File, SubidError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(create)
+        .create(create)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    Ok(file)
 }

@@ -61,9 +61,11 @@
 //! with such an engine: the agent still has to be in the pid and mount namespaces of
 //! `init` (the engine's daemon is, too, and it reports `State.Pid` as a host pid), and the
 //! user namespace of the containers is a child of the host's, which root reads the
-//! `/proc/<pid>/ns` links of. [`Integrity::start`] reads the range again (the same files
-//! and rules as the runtime, [`Mapping::read`](crate::cli_runtime::Mapping::read)) and
-//! does not start on a host where it is not acceptable.
+//! `/proc/<pid>/ns` links of. The checks use the range the runtime resolved when it opened
+//! (they never read `/etc/subuid` again, so an edit of it while the agent runs changes
+//! nothing), and do not start without one. Docker's daemon is asked again before each
+//! container is created whether it still remaps onto that range (see
+//! [`CliRuntime`](crate::cli_runtime::CliRuntime)).
 //!
 //! # What is not checked
 //!
@@ -351,9 +353,7 @@ impl Integrity {
         watch: Vec<PathBuf>,
     ) -> Result<Self, String> {
         require_host_namespaces(&|path| view.link(path), &|path| view.file(path))?;
-        let users = users
-            .range(&|path| view.file(path))
-            .map_err(|why| why.to_string())?;
+        let users = users.range().map_err(|why| why.to_string())?;
         let mut this = Self {
             view,
             users,

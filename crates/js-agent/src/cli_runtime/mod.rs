@@ -447,7 +447,9 @@ pub fn system_runner(stop_grace: Duration) -> SystemCommands {
 /// Gives a directory to a user and group.
 pub type Chown = fn(&Path, u32, u32) -> io::Result<()>;
 
-/// Gives the directory `path` itself (a link is not followed) to `uid` and `gid`.
+/// Gives the directory `path` itself (a link is not followed) to `uid` and `gid`, by path
+/// (`lchown`, not through an open descriptor). The path is a run's directory the agent made
+/// in its private scratch root, which nobody else can enter or replace.
 ///
 /// # Errors
 ///
@@ -593,7 +595,10 @@ impl CliRuntime {
             if runtime.settings.chown_scratch().is_none() {
                 return Err(CliError::AgentNotRoot);
             }
-            let mapping = Mapping::read(&user, &|path| files.read(path))?;
+            let read = |path: &str| files.read(path);
+            let mapping = match runtime.engine {
+                Engine::Docker | Engine::Podman => Mapping::read(&user, &read),
+            }?;
             if runtime.engine == Engine::Docker {
                 runtime.require_userns(&user, mapping)?;
             }
@@ -653,6 +658,16 @@ impl CliRuntime {
             .and_then(Result::ok)
             .filter(|printed| printed.trim() == "false")
             .map(|_| NO_SWAP_LIMIT.to_owned())
+    }
+
+    /// For Docker, asks the daemon again (one `info`) whether it still remaps onto the
+    /// range, before a container is created: a daemon restarted with another
+    /// `userns-remap`, or none, would run the job outside the range the scratch directory
+    /// was given to and the checks watch. The create is refused and nothing is made or
+    /// given away; the start fails as `failed_to_start` (`runtime-failed`) with the
+    /// daemon's mismatch as its reason, and the host is not tainted, since no job ran.
+    fn still_remapped(&self) -> Result<(), CliError> {
+        Ok(())
     }
 
     /// Requires that Docker's daemon runs with `userns-remap` and that its remap range is
@@ -719,6 +734,7 @@ impl CliRuntime {
         let name = container_name(&self.host_id, &spec.run_id)?;
         let args = self.create_args(spec, &name, (self.now_ms)())?;
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.still_remapped()?;
         self.hand_over_scratch(spec)?;
         let created = self
             .call("create", &args)

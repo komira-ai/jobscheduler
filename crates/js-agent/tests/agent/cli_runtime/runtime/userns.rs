@@ -7,6 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use js_agent::cli_runtime::{CliError, CliRuntime, Settings, SubidError};
+use js_agent::integrity::{FakeHost, Integrity};
 use js_agent::lifecycle::ContainerRuntime;
 
 use super::super::scripted::Scripted;
@@ -376,4 +377,105 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
 
     drop(first);
     open_in(&world, other, &two_users, &claims).unwrap();
+}
+
+/// Asserts that Docker is refused when the user's allocation is not exactly one entry of
+/// exactly 65536 ids in each file (a larger count, a second entry), since Docker maps the
+/// whole allocation and the checks watch 65536 ids, and that Podman, whose map is
+/// explicit, takes the same files. It catches Docker container ids that no check watches.
+#[test]
+fn docker_refuses_an_allocation_larger_than_the_range_and_podman_takes_it() {
+    let larger = host().with("/etc/subuid", "jobmap:231072:65537\n");
+    let two = host().with("/etc/subgid", "jobmap:462144:65536\njobmap:1000000:65536\n");
+    for (files, file) in [(larger, "/etc/subuid"), (two, "/etc/subgid")] {
+        let world = docker();
+        world.say("info", REMAPPED);
+        let dir = Scratch::new("userns-docker-exact");
+        let said = open_in(&world, mapped(), &files, &dir.path("claims"))
+            .err()
+            .unwrap();
+        assert_eq!(
+            said,
+            CliError::Subid(SubidError::NotExact {
+                user: "jobmap".to_owned(),
+                file
+            })
+        );
+        assert!(!dir.path("claims").exists(), "nothing was claimed");
+        let world = podman();
+        open_in(&world, mapped(), &files, &dir.path("claims")).unwrap();
+    }
+}
+
+/// Asserts that Docker's daemon is asked again before every create: after the daemon
+/// stops remapping (or remaps elsewhere) the next create is refused with the reason, no
+/// container is made and the scratch directory is not given away; the first container,
+/// made while it remapped, is untouched. It catches jobs started outside the range after
+/// a daemon restart.
+#[test]
+fn docker_is_asked_again_before_every_create() {
+    let world = docker();
+    world.say("info", REMAPPED);
+    let dir = Scratch::new("userns-docker-again");
+    let mut rt = open_mapped(&world, &dir).unwrap().with_chown(record);
+    let before = GIVEN.with(|given| given.borrow().len());
+    rt.create_and_start(&spec("r1")).unwrap();
+    assert_eq!(GIVEN.with(|given| given.borrow().len()), before + 1);
+    let asked = world.calls_of("info").len();
+
+    world.say(
+        "info",
+        "[\"name=seccomp,profile=builtin\"] /var/lib/docker\n",
+    );
+    let said = rt.create_and_start(&spec("r2")).unwrap_err();
+    assert!(
+        said.0.contains("\"userns-remap\": \"jobmap\""),
+        "{}",
+        said.0
+    );
+    assert_eq!(
+        world.calls_of("info").len(),
+        asked + 1,
+        "one call per create"
+    );
+    assert_eq!(world.calls_of("create").len(), 1);
+    assert_eq!(world.ids().len(), 1);
+    assert_eq!(GIVEN.with(|given| given.borrow().len()), before + 1);
+
+    world.say("info", "[\"name=userns\"] /var/lib/docker/100000.100000\n");
+    assert!(rt.create_and_start(&spec("r3")).is_err());
+    world.say("info", REMAPPED);
+    rt.create_and_start(&spec("r4")).unwrap();
+}
+
+/// Asserts that the checks watch the range the runtime resolved when it opened: the id
+/// files read afterwards (here, edited to name another range) are not consulted, so a
+/// process in the opened range is found and one in the edited range is not. It catches
+/// checks that follow an edit of /etc/subuid while jobs run in the old range.
+#[test]
+fn the_checks_keep_the_range_the_runtime_opened_with() {
+    let world = podman();
+    let dir = Scratch::new("userns-resolved");
+    let set = mapped();
+    let _rt = open_in(&world, set.clone(), &host(), &dir.path("claims")).unwrap();
+
+    let edited = FakeHost::quiet();
+    edited.set_file("/etc/subuid", "jobmap:900000:65536\n");
+    edited.set_file("/etc/subgid", "jobmap:900000:65536\n");
+    let mut checks = Integrity::start(Box::new(edited.clone()), set.uid(), vec![]).unwrap();
+    let leftover = |pid, uid| js_agent::integrity::Process {
+        pid,
+        ppid: 100,
+        uid,
+        start: 900,
+        cgroup: "0::/user.slice".to_owned(),
+    };
+    edited.start_process(leftover(730, 900_005));
+    let clean = js_agent::lifecycle::Finished {
+        run_id: "r1",
+        live: &[],
+    };
+    assert!(js_agent::lifecycle::CheckHook::run(&mut checks, &clean).is_ok());
+    edited.start_process(leftover(731, 231_072 + 5));
+    assert!(js_agent::lifecycle::CheckHook::run(&mut checks, &clean).is_err());
 }

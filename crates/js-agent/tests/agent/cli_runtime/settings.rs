@@ -308,7 +308,7 @@ fn network_and_user_need_the_runtime() {
     assert_eq!((on.pull(), on.tmp_size()), (Pull::Missing, "128m"));
     assert_eq!(on.chown_scratch(), None);
     assert_eq!(on.subuid(), Some("jobmap"));
-    assert_eq!(on.uid(), JobUsers::Mapped("jobmap".to_owned()));
+    assert!(matches!(on.uid(), JobUsers::Mapped(_)));
     let root = Settings::from_flags(
         &Flags {
             bin: Some(bin()),

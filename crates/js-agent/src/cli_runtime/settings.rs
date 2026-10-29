@@ -3,8 +3,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
-use super::subid::{JobUsers, RANGE_LEN};
+use super::subid::{JobUsers, Mapping, RANGE_LEN};
 
 /// The user and group containers run as when `--container-user` is not given: `nobody`
 /// and `nogroup` on the common Linux distributions.
@@ -146,6 +147,8 @@ pub struct Settings {
     pull: Pull,
     tmp_size: String,
     subuid: Option<String>,
+    /// The mapping the runtime resolved when it opened; shared by the clones.
+    resolved: Arc<OnceLock<Mapping>>,
     chown: Option<(u32, u32)>,
 }
 
@@ -213,6 +216,7 @@ impl Settings {
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
             subuid: None,
+            resolved: Arc::new(OnceLock::new()),
             chown: None,
         })
     }
@@ -315,13 +319,19 @@ impl Settings {
         &self.user
     }
 
-    /// Who the processes of the containers are on the host: the mapped range of
-    /// `--container-subuid`, or the one uid of [`Settings::user`] for settings built
+    /// Who the processes of the containers are on the host: the range the runtime resolved
+    /// from `--container-subuid` when it opened (not read again), or the one uid of [`Settings::user`] for settings built
     /// without it. The post-job checks look for leftover processes of these users.
     pub fn uid(&self) -> JobUsers {
-        self.subuid
-            .clone()
-            .map_or(JobUsers::Uid(self.ids.0), JobUsers::Mapped)
+        self.subuid.as_ref().map_or(JobUsers::Uid(self.ids.0), |_| {
+            JobUsers::Mapped(self.resolved.clone())
+        })
+    }
+
+    /// Records the mapping the runtime resolved, for [`Settings::uid`] (the settings and
+    /// their clones share it; the first one recorded stays).
+    pub fn resolve(&self, mapping: Mapping) {
+        let _ = self.resolved.set(mapping);
     }
 
     /// The user whose subordinate ids the jobs are mapped onto (`--container-subuid`), if

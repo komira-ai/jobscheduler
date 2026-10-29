@@ -1,7 +1,7 @@
 //! The check for a job's leftover processes when the jobs run in a user namespace mapped
 //! onto a subordinate range: it looks for the whole range of host uids.
 
-use js_agent::cli_runtime::JobUsers;
+use js_agent::cli_runtime::{JobUsers, Mapping, Settings};
 use js_agent::integrity::{FakeHost, Integrity, code};
 
 use super::{after, beside, process, said};
@@ -9,19 +9,14 @@ use super::{after, beside, process, said};
 /// The first uid of the range of `jobmap` in these tests.
 const START: u32 = 231_072;
 
-/// The users of the jobs: the range of `jobmap`.
+/// The users of the jobs: the range the runtime resolved, from `START`.
 fn jobmap() -> JobUsers {
-    JobUsers::Mapped("jobmap".to_owned())
+    JobUsers::resolved(Mapping::new(START, 462_144))
 }
 
-/// A quiet host whose id files give `jobmap` the uids from `START` and the gids from 462144.
+/// A quiet host.
 fn host() -> FakeHost {
-    let host = FakeHost::quiet();
-    host.set_file("/etc/subuid", "jobmap:231072:65536\n");
-    host.set_file("/etc/subgid", "jobmap:462144:65536\n");
-    host.set_file("/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n");
-    host.set_file("/etc/group", "root:x:0:\n");
-    host
+    FakeHost::quiet()
 }
 
 fn started(host: &FakeHost) -> Integrity {
@@ -87,24 +82,29 @@ fn a_process_outside_the_mapped_range_is_not_found() {
     assert!(beside(&mut checks, "r2", &["c2"]).is_ok());
 }
 
-/// Asserts that the checks do not start on a host where the range is not acceptable (the
-/// files give the user no range, or the range begins at 0, or holds a user of the host),
-/// with the reason, since they would look for the wrong users. It catches a baseline taken
-/// for a range that maps container ids onto host users.
+/// Asserts that the checks do not start for jobs whose range no runtime resolved (the
+/// settings were not used to open one), and that they take the range from what was
+/// resolved and not from the id files of the host: files that name another range are not
+/// read, so a process in the resolved range is found and one in the files' range is not.
+/// It catches checks that watch a range the jobs do not run in.
 #[test]
-fn the_checks_do_not_start_on_an_unusable_range() {
-    let refused = |host: &FakeHost| {
-        Integrity::start(Box::new(host.clone()), jobmap(), vec![])
-            .err()
-            .unwrap()
-    };
+fn the_checks_use_the_resolved_range_and_never_read_the_id_files() {
+    let unresolved = Settings::new(std::path::Path::new("/bin/sh"), None, None)
+        .unwrap()
+        .with_subuid("jobmap")
+        .unwrap();
     let host = host();
-    host.remove_file("/etc/subuid");
-    assert!(refused(&host).starts_with("--container-subuid: cannot read"));
-    let host = self::host();
-    host.set_file("/etc/subuid", "jobmap:0:65536\n");
-    assert!(refused(&host).contains("begins at 0"));
-    let host = self::host();
-    host.set_file("/etc/passwd", "alice:x:231100:1000::/:/bin/sh\n");
-    assert!(refused(&host).contains("holds the id 231100"));
+    let said = Integrity::start(Box::new(host.clone()), unresolved.uid(), vec![]);
+    assert!(said.err().unwrap().contains("not been resolved"));
+
+    host.set_file("/etc/subuid", "jobmap:900000:65536\n");
+    host.set_file("/etc/subgid", "jobmap:900000:65536\n");
+    let mut checks = started(&host);
+    host.start_process(process(720, 100, 900_000 + 5, 900, "0::/user.slice"));
+    assert!(
+        after(&mut checks, "r1").is_ok(),
+        "the files' range is not watched"
+    );
+    host.start_process(process(721, 100, START + 5, 901, "0::/user.slice"));
+    assert!(after(&mut checks, "r2").is_err(), "the resolved range is");
 }

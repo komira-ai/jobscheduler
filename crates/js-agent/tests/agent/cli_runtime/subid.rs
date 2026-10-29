@@ -287,24 +287,163 @@ fn a_run_of_ids_has_exact_edges() {
     assert!(!top.overlaps(job));
 }
 
-/// Asserts that the users of the jobs are the one uid for settings without a mapping and
-/// the whole uid range for settings with one, read from the files it is given, and that a
-/// range the files do not give is an error. It catches the post-job checks looking for the
-/// wrong users.
+/// Asserts that the users of the jobs are the one uid for settings without a mapping, the
+/// whole uid range of the mapping for users that were resolved, and an error for a mapped
+/// range that no runtime resolved. It catches the post-job checks looking for the wrong
+/// users, or for none.
 #[test]
 fn the_job_users_are_the_uid_range() {
-    let files = host();
-    let read_file = |path: &str| files.read(path);
+    assert_eq!(JobUsers::Uid(65534).range(), Ok(IdRange::single(65534)));
+    let mapped = JobUsers::resolved(Mapping::new(231_072, 462_144));
+    assert_eq!(mapped.range(), Ok(IdRange::of_job(231_072)));
+    let unresolved =
+        js_agent::cli_runtime::Settings::new(std::path::Path::new("/bin/sh"), None, None)
+            .unwrap()
+            .with_subuid("jobmap")
+            .unwrap()
+            .uid();
+    let said = unresolved.range().unwrap_err();
+    assert!(said.to_string().contains("not been resolved"), "{said}");
+}
+
+/// Asserts that the rule for Docker is one entry of exactly 65536 ids in each file: a
+/// larger count and a second entry are refused with the user and the file named (Docker
+/// maps the user's whole allocation, and the checks watch 65536 ids), the exact entry is
+/// accepted, and the rule for Podman (at least 65536, the first entry) still takes both.
+/// It catches ids of a Docker container that no check watches.
+#[test]
+fn docker_needs_exactly_one_entry_of_exactly_65536_ids() {
+    let exact = |files: &FakeFiles| Mapping::read_exact("jobmap", &|path| files.read(path));
+    let not_exact = |file: &'static str| SubidError::NotExact {
+        user: "jobmap".to_owned(),
+        file,
+    };
     assert_eq!(
-        JobUsers::Uid(65534).range(&read_file),
-        Ok(IdRange::single(65534))
+        exact(&with_subids(
+            "jobmap:231072:65536\n",
+            "jobmap:462144:65536\n"
+        )),
+        Ok(Mapping::new(231_072, 462_144))
     );
-    let mapped = JobUsers::Mapped("jobmap".to_owned());
-    assert_eq!(mapped.range(&read_file), Ok(IdRange::of_job(231_072)));
-    let unknown = JobUsers::Mapped("nobody-here".to_owned());
+    let cases = [
+        (
+            with_subids("jobmap:231072:65537\n", "jobmap:462144:65536\n"),
+            not_exact("/etc/subuid"),
+        ),
+        (
+            with_subids("jobmap:231072:65536\njobmap:900000:65536\n", SUBGID),
+            not_exact("/etc/subuid"),
+        ),
+        (
+            with_subids("jobmap:231072:65536\n", "jobmap:462144:131072\n"),
+            not_exact("/etc/subgid"),
+        ),
+        (
+            with_subids(
+                "jobmap:231072:65536\n",
+                "jobmap:462144:65536\njobmap:1:65536\n",
+            ),
+            not_exact("/etc/subgid"),
+        ),
+    ];
+    for (files, expected) in cases {
+        assert_eq!(exact(&files), Err(expected.clone()));
+        assert!(
+            expected.to_string().contains("exactly one entry"),
+            "{expected}"
+        );
+        assert!(read(&files, "jobmap").is_ok(), "Podman takes it");
+    }
+    let small = with_subids("jobmap:231072:65535\n", SUBGID);
+    assert!(matches!(exact(&small), Err(SubidError::TooSmall { .. })));
+}
+
+/// Asserts that a range which shares an id with a line of another user in `/etc/subuid`
+/// or `/etc/subgid` is refused, at its first and its last id, naming the first shared id,
+/// while ranges that touch it, the user's own further entries and lines that are not
+/// entries are not in the way. It catches a job container that shares ids with another
+/// user's (a rootless user's) containers and files.
+#[test]
+fn a_range_that_shares_ids_with_another_user_is_refused() {
+    let overlaps = |file: &'static str, id: u32, subuid: &str, subgid: &str| {
+        assert_eq!(
+            read(&with_subids(subuid, subgid), "jobmap"),
+            Err(SubidError::Overlaps {
+                user: "jobmap".to_owned(),
+                file,
+                start: if file == "/etc/subuid" {
+                    231_072
+                } else {
+                    462_144
+                },
+                database: file,
+                id,
+            })
+        );
+    };
+    let (uid, gid) = ("jobmap:231072:65536\n", "jobmap:462144:65536\n");
+    overlaps(
+        "/etc/subuid",
+        231_072,
+        &format!("{uid}alice:231071:2\n"),
+        gid,
+    );
+    overlaps(
+        "/etc/subuid",
+        296_607,
+        &format!("{uid}alice:296607:5\n"),
+        gid,
+    );
+    overlaps(
+        "/etc/subuid",
+        231_072,
+        &format!("{uid}alice:1:4294967295\n"),
+        gid,
+    );
+    overlaps(
+        "/etc/subgid",
+        462_144,
+        uid,
+        &format!("{gid}alice:462143:2\n"),
+    );
+    overlaps(
+        "/etc/subgid",
+        527_679,
+        uid,
+        &format!("{gid}alice:527679:1\n"),
+    );
+    let fine =
+        format!("{uid}alice:231071:1\nalice:296608:10\njobmap:231072:100\ngarbage\nalice:x:y\n");
+    let fine_gid = format!("{gid}alice:462143:1\nalice:527680:10\n# comment\n");
+    assert_eq!(
+        read(&with_subids(&fine, &fine_gid), "jobmap"),
+        Ok(Mapping::new(231_072, 462_144))
+    );
+}
+
+/// Asserts that an entry may name the user by uid as well as by name (as shadow-utils
+/// reads them): a numeric entry that comes first is the first entry, one for another uid
+/// is another user's, and a user without a passwd line is found by name only. It catches
+/// the wrong range when a user's entry is numeric.
+#[test]
+fn an_entry_may_name_the_user_by_uid() {
+    let files = host().with(
+        "/etc/passwd",
+        &format!("{PASSWD}jobmap:x:1500:1500::/:/bin/sh\n"),
+    );
+    let numeric = files
+        .clone()
+        .with("/etc/subuid", "1500:231072:65536\njobmap:900000:65536\n")
+        .with("/etc/subgid", "jobmap:462144:65536\n1500:700000:65536\n");
+    assert_eq!(
+        read(&numeric, "jobmap"),
+        Ok(Mapping::new(231_072, 462_144)),
+        "the numeric entry is first in one file, the named one in the other"
+    );
+    let other = files.with("/etc/subuid", "1501:231000:65536\njobmap:231072:65536\n");
     assert!(matches!(
-        unknown.range(&read_file),
-        Err(SubidError::NoEntry { .. })
+        read(&other, "jobmap"),
+        Err(SubidError::Overlaps { id: 231_072, .. })
     ));
 }
 
@@ -380,4 +519,49 @@ fn a_claim_directory_that_cannot_be_made_is_an_error() {
             .to_string()
             .starts_with("--container-subuid")
     );
+}
+
+/// Asserts that a claim directory that already exists is used only when it is a directory
+/// of the agent's user with mode 0700 (a group-writable one, and a link to a directory,
+/// are refused), and that a claim file that is a link is refused, whether it is the
+/// agent's own or the one of an overlapping range it would lock. It catches claims kept
+/// where another user could replace them, and a lock taken on whatever a link names.
+#[test]
+fn the_claim_directory_and_files_must_be_private_and_not_links() {
+    let dir = Scratch::new("subid-claim-private");
+    let mapping = Mapping::new(100_000, 100_000);
+    let open = dir.path("open");
+    fs::create_dir(&open).unwrap();
+    fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).unwrap();
+    let said = RangeClaim::take(&open, mapping).unwrap_err();
+    assert!(matches!(said, SubidError::Claim(_)), "{said:?}");
+
+    let real = dir.path("real");
+    fs::create_dir(&real).unwrap();
+    fs::set_permissions(&real, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path("link")).unwrap();
+    let said = RangeClaim::take(&dir.path("link"), mapping).unwrap_err();
+    assert!(matches!(said, SubidError::Claim(_)), "{said:?}");
+
+    let own_link = dir.path("own");
+    fs::create_dir(&own_link).unwrap();
+    fs::set_permissions(&own_link, fs::Permissions::from_mode(0o700)).unwrap();
+    dir.write("elsewhere", "x", 0o600);
+    std::os::unix::fs::symlink(dir.path("elsewhere"), own_link.join("100000-100000")).unwrap();
+    let said = RangeClaim::take(&own_link, mapping).unwrap_err();
+    assert!(
+        said.to_string().contains("a link is not accepted"),
+        "{said}"
+    );
+
+    let theirs = dir.path("theirs");
+    fs::create_dir(&theirs).unwrap();
+    fs::set_permissions(&theirs, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(dir.path("elsewhere"), theirs.join("100010-100010")).unwrap();
+    let said = RangeClaim::take(&theirs, mapping).unwrap_err();
+    assert!(
+        said.to_string().contains("a link is not accepted"),
+        "{said}"
+    );
+    RangeClaim::take(&real, mapping).unwrap();
 }
