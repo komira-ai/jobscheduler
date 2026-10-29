@@ -66,7 +66,9 @@ pub type Bind = (String, String, bool);
 /// because `-v` splits on `:`. With `recursive_ro` a read-only bind also gets
 /// `bind-recursive=readonly,bind-propagation=rprivate`, so a mount below it is read-only
 /// too (Docker 25 and later; the engine refuses the container on a kernel before 5.12
-/// rather than leave the submount writable). Podman gets `nosuid,nodev` on every mount.
+/// rather than leave the submount writable). Podman gets `nosuid,nodev` on every mount; on
+/// Docker, whose bind takes neither, the scratch directory is instead a volume of the local
+/// driver that binds it with them ([`scratch_volume_options`]).
 ///
 /// # Errors
 ///
@@ -93,13 +95,13 @@ pub fn limits_to_args(
         spec.pids.unwrap_or(DEFAULT_PIDS).to_string(),
     ];
     args.extend(gpu_args(engine, &spec.gpu_indices));
-    let scratch = (spec.scratch.as_path(), SCRATCH_TARGET, false);
-    let jobs = spec
-        .mounts
-        .iter()
-        .map(|mount| (mount.host.as_path(), mount.target.as_str(), mount.ro));
-    for (host, target, ro) in std::iter::once(scratch).chain(jobs) {
-        let value = mount_value(engine, host, target, ro, recursive_ro)?;
+    let scratch = match engine {
+        Engine::Docker => scratch_volume(&spec.scratch)?,
+        Engine::Podman => mount_value(engine, &spec.scratch, SCRATCH_TARGET, false, recursive_ro)?,
+    };
+    args.extend(["--mount".to_owned(), scratch]);
+    for mount in &spec.mounts {
+        let value = mount_value(engine, &mount.host, &mount.target, mount.ro, recursive_ro)?;
         args.extend(["--mount".to_owned(), value]);
     }
     Ok(args)
@@ -202,6 +204,38 @@ pub fn check_submounts(spec: &ContainerSpec, mountinfo: Option<&str>) -> Result<
     }
 }
 
+/// The options of the local driver that make the scratch volume a `nosuid,nodev` bind of
+/// the directory: what `volume inspect` must print as `.Options` for it.
+pub fn scratch_volume_options(scratch: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "type": "none",
+        "device": scratch.to_string_lossy(),
+        "o": "bind,nosuid,nodev",
+    })
+}
+
+/// The scratch directory as Docker's `--mount` value: a volume of the local driver that
+/// binds the directory with `nosuid,nodev` (a `type=bind` mount of Docker takes neither),
+/// anonymous so that `rm --volumes` removes it with the container, and `volume-nocopy` so
+/// that the image's own `/scratch` is not copied into the host directory. The option list
+/// holds commas, so that field is in double quotes: the value is read as CSV.
+fn scratch_volume(scratch: &Path) -> Result<String, ArgsError> {
+    let host = scratch.to_str().filter(|text| clean(text));
+    host.map(|host| {
+        format!(
+            "type=volume,dst={SCRATCH_TARGET},volume-driver=local,volume-nocopy,\
+             volume-opt=type=none,volume-opt=device={host},\"volume-opt=o=bind,nosuid,nodev\""
+        )
+    })
+    .ok_or(ArgsError::MountPath)
+}
+
+/// Whether `text` can be given in a `--mount` list as it is: absolute, with no comma,
+/// double quote, colon or control character.
+fn clean(text: &str) -> bool {
+    text.starts_with('/') && !text.contains([',', '"', ':']) && !text.chars().any(char::is_control)
+}
+
 /// A bind mount, as the value of `--mount`. Podman's `--mount` takes `nosuid,nodev` for a
 /// bind, so there a set-uid file or a device node on the mount has no effect; Docker's
 /// takes neither.
@@ -212,8 +246,6 @@ fn mount_value(
     ro: bool,
     recursive: bool,
 ) -> Result<String, ArgsError> {
-    let plain = |text: &str| text.starts_with('/') && !text.contains([',', '"', ':']);
-    let clean = |text: &str| plain(text) && !text.chars().any(char::is_control);
     let host = host.to_str().filter(|text| clean(text));
     let target = Some(target).filter(|text| clean(text));
     let access = match (ro, recursive) {
