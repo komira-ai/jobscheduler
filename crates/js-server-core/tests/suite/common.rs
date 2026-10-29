@@ -15,7 +15,7 @@ use js_caps::NodeCaps;
 use js_sched::{DaemonInstance, NodePhase, OpState, Prediction, Request, Requeue};
 use js_server_core::{
     Adapter, Admitted, Attempt, Beat, Config, Core, Delivery, Denied, Lowered, NotQueued, Report,
-    Reported, Settles, Stage, Stream, Taken, View, Writer,
+    Reported, Settles, Stage, Stream, Taken, View, Writer, log_finished_line,
 };
 use js_store::Ending;
 use js_types::sched::{
@@ -125,6 +125,9 @@ pub struct Rig {
     pub no_ending: bool,
     /// The names the core asked for, in order.
     pub named: Mutex<Vec<String>>,
+    /// The `log_finished` calls: the operation name, how the report was taken, and whether
+    /// the `after_report` hook of the same report had been called already.
+    pub finished: Vec<(String, Taken, bool)>,
     /// The callers that gave up: no longer listening.
     pub gone: BTreeSet<WaiterId>,
     /// What each caller of an operation another frontend runs was last shown.
@@ -199,6 +202,15 @@ impl Adapter for Rig {
             taken,
             open: view.sched().state(report.operation).is_some_and(open),
         });
+    }
+
+    fn log_finished(&mut self, operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+        let after_seen = matches!(
+            self.hooks.lock().expect("hooks").last(),
+            Some(Hook::After { .. })
+        );
+        self.finished.push((operation.to_owned(), taken, after_seen));
+        log_finished_line(operation, worker, report, taken);
     }
 
     fn stream_open(&self, worker: &WorkerId, stream: Stream) -> bool {
