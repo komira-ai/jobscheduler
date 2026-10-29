@@ -13,8 +13,8 @@ use js_agent::cli_runtime::{CliError, CliRuntime, Settings, system_runner};
 use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
 
 use super::{
-    HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform, profile_dir,
-    profile_option, sees_the_engines_pid, spec,
+    DOCKER_SCRATCH, HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform,
+    profile_dir, profile_option, sees_the_engines_pid, spec,
 };
 use crate::support::Scratch;
 
@@ -28,10 +28,11 @@ case "$1" in
 --version) echo "Docker version 27.3.1, build ce12230" ;;
 create|ps) echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ;;
 info) echo true ;;
+volume) echo '{"device":"/work/scratch/r1","o":"bind,nosuid,nodev","type":"none"}' ;;
 inspect)
   case "$*" in
   *Config.Labels*) echo 'running {"jobscheduler.dev/run-id":"r1","jobscheduler.dev/created-ms":"1000000"}' ;;
-  *Mounts*) echo '[{"Type":"bind","Source":"/work/scratch/r1","Destination":"/scratch","Mode":"","RW":true},{"Type":"bind","Source":"/srv/in","Destination":"/mnt/data/in","Mode":"","RW":false}]' ;;
+  *Mounts*) echo '[{"Type":"volume","Name":"vol1","Driver":"local","Source":"/var/lib/engine/volumes/vol1/_data","Destination":"/scratch","Mode":"z","RW":true},{"Type":"bind","Source":"/srv/in","Destination":"/mnt/data/in","Mode":"","RW":false}]' ;;
   *State.Pid*) echo "4000 running" ;;
   *) echo "exited 3 false" ;;
   esac ;;
@@ -135,7 +136,7 @@ fn cli_runtime_argv_snapshot() {
             "--gpus",
             "\"device=1\"",
             "--mount",
-            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            DOCKER_SCRATCH,
             "--mount",
             "type=bind,src=/srv/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
             "--cap-drop",
@@ -170,6 +171,14 @@ fn cli_runtime_argv_snapshot() {
             "{{json .Mounts}}",
             "--",
             ID,
+        ]),
+        strings(&[
+            "volume",
+            "inspect",
+            "--format",
+            "{{json .Options}}",
+            "--",
+            "vol1",
         ]),
         strings(&["start", "--", ID]),
         strings(&[
