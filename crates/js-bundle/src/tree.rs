@@ -365,7 +365,7 @@ impl Tree {
             match part {
                 "." => {}
                 ".." => {
-                    here.pop().ok_or(LinkDefect::Escapes)?;
+                    here.pop();
                 }
                 name => {
                     let path = here
