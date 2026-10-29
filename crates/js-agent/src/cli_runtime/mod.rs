@@ -597,12 +597,14 @@ impl CliRuntime {
             }
             let read = |path: &str| files.read(path);
             let mapping = match runtime.engine {
-                Engine::Docker | Engine::Podman => Mapping::read(&user, &read),
+                Engine::Docker => Mapping::read_exact(&user, &read),
+                Engine::Podman => Mapping::read(&user, &read),
             }?;
             if runtime.engine == Engine::Docker {
                 runtime.require_userns(&user, mapping)?;
             }
             runtime._claim = Some(RangeClaim::take(claims, mapping)?);
+            runtime.settings.resolve(mapping);
             runtime.mapping = Some(mapping);
         }
         Ok(runtime)
@@ -667,7 +669,10 @@ impl CliRuntime {
     /// given away; the start fails as `failed_to_start` (`runtime-failed`) with the
     /// daemon's mismatch as its reason, and the host is not tainted, since no job ran.
     fn still_remapped(&self) -> Result<(), CliError> {
-        Ok(())
+        match (self.engine, self.mapping, self.settings.subuid()) {
+            (Engine::Docker, Some(mapping), Some(user)) => self.require_userns(user, mapping),
+            _ => Ok(()),
+        }
     }
 
     /// Requires that Docker's daemon runs with `userns-remap` and that its remap range is

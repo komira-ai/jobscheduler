@@ -20,7 +20,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -247,7 +247,7 @@ impl Mapping {
         user: &str,
         read: &dyn Fn(&str) -> Result<String, String>,
     ) -> Result<Self, SubidError> {
-        Self::read_with(user, read, false)
+        Self::read_with(user, read, true)
     }
 
     fn read_with(
@@ -379,8 +379,7 @@ fn owner_uid<'a>(passwd: &'a str, user: &str) -> Option<&'a str> {
 /// Whether the line of a subordinate id file is the user's: it names the user or its uid.
 fn is_owner(line: &str, user: &str, uid: Option<&str>) -> bool {
     let first = line.split(':').next().unwrap_or_default();
-    let _ = uid;
-    first == user
+    first == user || Some(first) == uid
 }
 
 /// The first id of the first entry of `user` in `text` (`name:start:count` lines, the
@@ -442,8 +441,21 @@ fn start_of(
 /// The first id of `range` that a line of `text` of a user other than `user` also
 /// allocates (lines that are not `name:start:count` allocate nothing).
 fn other_overlap(text: &str, user: &str, uid: Option<&str>, range: IdRange) -> Option<u32> {
-    let _ = (text, user, uid, range);
-    None
+    text.lines()
+        .filter(|line| !is_owner(line, user, uid))
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            let [_, start, count] = fields.as_slice() else {
+                return None;
+            };
+            let start = start.trim().parse::<u32>().ok()?;
+            let other = IdRange {
+                start,
+                len: count.trim().parse::<u32>().ok()?,
+            };
+            other.overlaps(range).then(|| start.max(range.start))
+        })
+        .next()
 }
 
 /// An id of `range` in the colon-separated field number `field` (counting from 0) of a
@@ -515,6 +527,14 @@ impl RangeClaim {
             .recursive(true)
             .mode(0o700)
             .create(dir)?;
+        let made = fs::symlink_metadata(dir)?;
+        let euid = rustix::process::geteuid().as_raw();
+        if (made.is_dir(), made.uid(), made.mode() & 0o777) != (true, euid, 0o700) {
+            return Err(SubidError::Claim(format!(
+                "{}: not a directory (not a link) of the agent's user with mode 0700",
+                dir.display()
+            )));
+        }
         let name = mapping.claim_name();
         let held = open_regular(&dir.join(&name), true)?;
         held.try_lock()
@@ -545,5 +565,12 @@ fn open_regular(path: &Path, create: bool) -> Result<File, SubidError> {
         .truncate(false)
         .mode(0o600)
         .open(path)?;
+    let (named, opened) = (fs::symlink_metadata(path)?, file.metadata()?);
+    if (named.is_file(), named.dev(), named.ino()) != (true, opened.dev(), opened.ino()) {
+        return Err(SubidError::Claim(format!(
+            "{}: not a regular file (a link is not accepted)",
+            path.display()
+        )));
+    }
     Ok(file)
 }
