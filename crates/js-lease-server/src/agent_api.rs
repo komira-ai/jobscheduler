@@ -157,7 +157,8 @@ async fn heartbeat(
             let holds = |lease: &js_types::LeaseId, host: &js_types::HostId| {
                 registry.host_of(lease).as_ref() == Some(host)
             };
-            usage.on_beat(&heartbeat, load, &acks, &holds);
+            let _ = load;
+            usage.on_beat(&heartbeat, None, &acks, &holds);
         })
         .await;
     }
