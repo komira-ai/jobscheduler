@@ -42,20 +42,21 @@ pub struct Cli {
     #[arg(long, value_enum)]
     pub boot: BootMode,
     /// The TOML file listing the hosts to lease. Optional when agents register hosts
-    /// (`--agent-token-file`); one of the two sources is required.
+    /// (`--agent-pool-config`); one of the two sources is required.
     #[arg(long)]
     pub pool_config: Option<PathBuf>,
     /// A file holding the bearer token. It must be owner-only (mode 0600 or 0400).
     #[arg(long)]
     pub token_file: PathBuf,
-    /// Turns agent registration on: a file holding the join tokens agents present, one
-    /// per line (several while one is being replaced), each at least 32 bytes and the
-    /// file owner-only like `--token-file`. Read again at every tick. Needs
-    /// `--agent-pool-config`.
+    /// The pool's shared join tokens: a file holding the tokens agents present, one per
+    /// line (several while one is being replaced), each at least 32 bytes and the file
+    /// owner-only like `--token-file`. Read again at every tick. Needs
+    /// `--agent-pool-config`. Without it the pool admits only hosts whose one-time join
+    /// token verifies (`POST /v1/agent/join-tokens`).
     #[arg(long)]
     pub agent_token_file: Option<PathBuf>,
-    /// The TOML file describing the pool that registering hosts join: its name, class,
-    /// machine limit, shape, capabilities and timing. Needs `--agent-token-file`.
+    /// Turns agent registration on: the TOML file describing the pool that registering
+    /// hosts join (its name, class, machine limit, shape, capabilities and timing).
     #[arg(long)]
     pub agent_pool_config: Option<PathBuf>,
     /// The hellos one join token may say in a burst before it is held to one per
@@ -64,7 +65,7 @@ pub struct Cli {
         long,
         default_value = "60",
         value_parser = clap::value_parser!(u32).range(1..),
-        requires = "agent_token_file"
+        requires = "agent_pool_config"
     )]
     pub agent_hello_burst: u32,
     /// How often a join token that spent its burst is allowed one more hello.
@@ -72,7 +73,7 @@ pub struct Cli {
         long,
         default_value = "1s",
         value_parser = parse_duration,
-        requires = "agent_token_file"
+        requires = "agent_pool_config"
     )]
     pub agent_hello_interval: Duration,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
@@ -276,7 +277,8 @@ pub(crate) enum Hosts {
     },
 }
 
-/// What `--agent-token-file`, `--agent-pool-config` and the hello limit decided.
+/// What `--agent-pool-config`, `--agent-token-file` (when given) and the hello limit
+/// decided.
 pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
@@ -357,8 +359,8 @@ fn with_whole_node(
         .map_err(|err| StartupError::new("--agent-pool-config", err))
 }
 
-/// The sources of hosts the flags name. At least one is required; the two agent flags
-/// come together.
+/// The sources of hosts the flags name. At least one is required; the shared join token
+/// file needs the agent pool file, which alone turns registration on.
 fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
     let static_pool = cli
         .pool_config
@@ -368,27 +370,29 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
         (None, None) => static_pool.map(Hosts::Static).ok_or_else(|| {
             StartupError::new(
                 "--pool-config",
-                "required unless agents register hosts (--agent-token-file and --agent-pool-config)",
+                "required unless agents register hosts (--agent-pool-config)",
             )
         }),
-        (Some(tokens), Some(pool)) => Ok(Hosts::Layered {
-            static_pool,
-            agents: Box::new(AgentSetup {
-                tokens: AgentTokens::open(tokens, client)?,
-                pool: agent_pool::read(pool)?,
-                hello_limit: HelloLimit {
-                    burst: cli.agent_hello_burst,
-                    interval: cli.agent_hello_interval,
-                },
-            }),
-        }),
+        (tokens, Some(pool)) => {
+            let tokens = match tokens {
+                Some(path) => AgentTokens::open(path, client)?,
+                None => AgentTokens::none(),
+            };
+            Ok(Hosts::Layered {
+                static_pool,
+                agents: Box::new(AgentSetup {
+                    tokens,
+                    pool: agent_pool::read(pool)?,
+                    hello_limit: HelloLimit {
+                        burst: cli.agent_hello_burst,
+                        interval: cli.agent_hello_interval,
+                    },
+                }),
+            })
+        }
         (Some(_), None) => Err(StartupError::new(
             "--agent-pool-config",
             "required with --agent-token-file",
-        )),
-        (None, Some(_)) => Err(StartupError::new(
-            "--agent-token-file",
-            "required with --agent-pool-config",
         )),
     }
 }
