@@ -239,7 +239,9 @@ fn tls_files_come_together_and_a_public_listener_needs_them() {
     let config = load(&scratch, &text).unwrap();
     assert_eq!(
         config.warnings(),
-        ["server: warning: binds all interfaces (server.listen 0.0.0.0:7300); /v1/pools and /status are served only to private peers"]
+        [
+            "server: warning: binds all interfaces (server.listen 0.0.0.0:7300); /v1/pools and /status are served only to private peers"
+        ]
     );
 }
 

@@ -17,7 +17,7 @@ js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
 js-types = { path = "../js-types" }
-axum = { workspace = true, features = ["http1", "json"] }
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }

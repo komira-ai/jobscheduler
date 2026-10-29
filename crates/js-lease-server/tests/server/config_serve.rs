@@ -220,7 +220,9 @@ async fn a_wildcard_listener_starts_with_a_warning() {
     let config = load(&scratch, &file(&server(&scratch, &extra), &[&hosts])).unwrap();
     assert_eq!(
         config.warnings(),
-        ["server: warning: binds all interfaces (server.listen 0.0.0.0:0); /v1/pools and /status are served only to private peers"]
+        [
+            "server: warning: binds all interfaces (server.listen 0.0.0.0:0); /v1/pools and /status are served only to private peers"
+        ]
     );
     let h = Harness::over(scratch, config).await;
     assert!(h.addr().ip().is_unspecified());
