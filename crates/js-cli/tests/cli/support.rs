@@ -367,6 +367,8 @@ impl CapacitySource for Scripted {
 pub struct Harness {
     pub rt: Runtime,
     pub running: Option<Running>,
+    /// A clone of the server's listener, never accepted on while the server runs.
+    kept: Option<TcpListener>,
     pub clock: ManualClock,
     pub ticks: TickHandle,
     pub scratch: Scratch,
@@ -432,6 +434,9 @@ impl Harness {
         let clock = ManualClock::new(Timestamp::from_millis(T0));
         let (ticks, ticker) = channel_ticker();
         let shared = SharedClock::new(clock.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let kept = listener.try_clone().unwrap();
+        let config = config.with_listener(listener);
         let running = rt.block_on(start(config, shared, ticker)).unwrap();
         let scheme = if extra.contains(&"--tls-cert") {
             "https"
@@ -443,6 +448,7 @@ impl Harness {
         Self {
             rt,
             running: Some(running),
+            kept: Some(kept),
             clock,
             ticks,
             scratch,
@@ -470,16 +476,16 @@ impl Harness {
         Driven::new(move || tick_on(&handle, &ticks))
     }
 
-    /// Stops the server; later requests fail to talk to it. Its port stays owned for the
-    /// rest of the process by a listener that drops every connection at once, so no other
-    /// test's server can take the port and answer in its place.
+    /// Stops the server; later requests fail to talk to it. The port stays owned for the
+    /// rest of the process by the harness's clone of the server's listener, on which a
+    /// thread, started only once the server's accept loop is gone, drops every
+    /// connection. No other test's server can take the port and answer in its place.
     pub fn stop(&mut self) {
         let running = self.running.take().unwrap();
-        let addr = running.addr();
         self.rt.block_on(running.shutdown()).unwrap();
-        let listener = TcpListener::bind(addr).unwrap();
+        let kept = self.kept.take().unwrap();
         std::thread::spawn(move || {
-            for stream in listener.incoming() {
+            for stream in kept.incoming() {
                 drop(stream);
             }
         });

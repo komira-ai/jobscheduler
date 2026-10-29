@@ -48,14 +48,20 @@ struct AgentPort {
     serving: JoinHandle<()>,
 }
 
-/// Binds `addr`, refusing the start naming `flag` when it cannot.
+/// Binds `addr`, or takes over `bound` (a listener the caller bound) when there is one,
+/// refusing the start naming `flag` when it cannot.
 async fn bind(
     addr: SocketAddr,
     flag: &'static str,
+    bound: Option<std::net::TcpListener>,
 ) -> Result<(TcpListener, SocketAddr), StartupError> {
-    let bound = TcpListener::bind(addr)
-        .await
-        .and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
+    let opened = match bound {
+        Some(std) => std
+            .set_nonblocking(true)
+            .and_then(|()| TcpListener::from_std(std)),
+        None => TcpListener::bind(addr).await,
+    };
+    let bound = opened.and_then(|listener| listener.local_addr().map(|addr| (listener, addr)));
     bound.map_err(|err| StartupError::new(flag, err))
 }
 
@@ -118,9 +124,9 @@ pub async fn start_with_checks<T: Ticker, C: Ticker>(
     };
     let Seated { provider, unseated } = source.provider(&bookings)?;
     let acceptor = config.tls.as_ref().map(tls::acceptor).transpose()?;
-    let (listener, addr) = bind(config.listen, config.listen_flag).await?;
+    let (listener, addr) = bind(config.listen, config.listen_flag, config.bound.take()).await?;
     let agent_listener = match config.agent_listen {
-        Some(agent) => Some(bind(agent, "server.agent_listen").await?),
+        Some(agent) => Some(bind(agent, "server.agent_listen", None).await?),
         None => None,
     };
     if let Some(scaler) = &scaler {
