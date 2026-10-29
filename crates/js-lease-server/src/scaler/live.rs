@@ -316,7 +316,8 @@ mod tests {
         let token = Secret::new("token".to_owned());
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
         let (hosts, waiting) = live.registry();
-        assert!(hosts.is_empty() && waiting.is_empty());
+        assert!(hosts.is_empty());
+        assert!(waiting.is_empty());
         assert!(!live.leased("js-nobody"));
         assert_eq!(live.checks(), (Health::Checking, Vec::new()));
         assert!(
