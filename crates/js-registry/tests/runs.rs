@@ -34,6 +34,7 @@ fn job(run: &str, cpu: u64) -> JobSpec {
         heartbeat_seq: 0,
         files: Vec::new(),
         valid_for_ms: 0,
+        native: None,
     }
 }
 

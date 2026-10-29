@@ -609,6 +609,7 @@ mod tests {
             heartbeat_seq: 0,
             files: Vec::new(),
             valid_for_ms: 0,
+            native: None,
         }
     }
 

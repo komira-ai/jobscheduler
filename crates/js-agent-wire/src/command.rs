@@ -10,6 +10,7 @@ use crate::files::{self, RunFile};
 use crate::hello::WireShape;
 use crate::image;
 use crate::limits;
+use crate::native::{self, NativeSpec};
 use crate::refusal;
 
 /// Whether a job is confined to a container or may change the machine (design 5.12).
@@ -151,7 +152,8 @@ pub struct JobSpec {
     pub run_id: String,
     /// The lease the run belongs to.
     pub lease_id: String,
-    /// The container image; the agent holds no registry credential, so it must be
+    /// The container image, empty for a native job (see [`JobSpec::native`]); a decoded start
+    /// may leave it out. The agent holds no registry credential, so it must be
     /// present on the host or pullable without one. A registry reference
     /// `name[:tag][@digest]` as the OCI distribution grammar defines it (a domain with an
     /// optional port only in the first component, lower-case path components, a tag of
@@ -159,7 +161,15 @@ pub struct JobSpec {
     /// `dir:`, `docker-archive:`, `containers-storage:` or `docker://` is refused, and a
     /// reference starts with a letter or digit, so it is never read as an option. A
     /// start must also pin the image: [`JobSpec::require_pinned`].
+    #[serde(default)]
     pub image: String,
+    /// What to run on the host instead of a container. A start has exactly one of a
+    /// non-empty `image` and this body; `image` is empty (and still sent) for a native job,
+    /// so an agent that predates the body refuses the start as `invalid-image` and never
+    /// runs it as a container. A native job is contained, and its `args`, `gpu_indices`
+    /// and `mounts` are empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<NativeSpec>,
     /// The command line after the image: at most [`limits::MAX_ARGS`] entries, no NUL.
     #[serde(default)]
     pub args: Vec<String>,
@@ -201,10 +211,27 @@ impl JobSpec {
     /// before it queues a start and the agent before it acts on one, so no host pulls an
     /// image whose content can move.
     pub fn require_pinned(&self) -> Result<(), ValidationError> {
+        if self.native.is_some() {
+            return Ok(());
+        }
         image::pinned(
             At::new("image", refusal::IMAGE_DIGEST_REQUIRED),
             &self.image,
         )
+    }
+
+    /// Exactly one of the image and the native body names what runs; a native job also
+    /// leaves the container-only fields unused.
+    fn check_body(&self) -> Result<(), ValidationError> {
+        let at = At::new("image", refusal::INVALID_IMAGE);
+        let Some(native) = &self.native else {
+            return image::image(at, &self.image);
+        };
+        if !self.image.is_empty() {
+            return Err(at.fail(Rule::Inconsistent));
+        }
+        native.validate()?;
+        native::check_job(self)
     }
 
     /// Checks the start contract and every bound: ids, image, arguments, limits, GPU
@@ -214,8 +241,8 @@ impl JobSpec {
         let at = At::new("job", refusal::INVALID_JOB);
         check::ident(at.field("run_id"), &self.run_id)?;
         check::ident(at.field("lease_id"), &self.lease_id)?;
-        image::image(At::new("image", refusal::INVALID_IMAGE), &self.image)?;
-        self.check_args(at.field("args"))?;
+        self.check_body()?;
+        check::args(at.field("args"), &self.args)?;
         self.limits.check(at)?;
         let gpus = at.field("gpu_indices");
         check::count(gpus, self.gpu_indices.len(), limits::MAX_GPUS as usize)?;
@@ -242,24 +269,6 @@ impl JobSpec {
             0,
             limits::MAX_VALID_FOR_MS,
         )
-    }
-
-    fn check_args(&self, at: At) -> Result<(), ValidationError> {
-        check::count(at, self.args.len(), limits::MAX_ARGS)?;
-        let mut total = 0usize;
-        for arg in &self.args {
-            if arg.len() > limits::MAX_ARG_LEN {
-                return Err(at.fail(Rule::TooLong));
-            }
-            if arg.contains('\0') {
-                return Err(at.fail(Rule::BadChars));
-            }
-            total += arg.len();
-        }
-        if total > limits::MAX_ARGS_TOTAL_BYTES {
-            return Err(at.fail(Rule::TooLong));
-        }
-        Ok(())
     }
 
     /// Whether the job's limits and the number of its GPU indices fit one host's offered

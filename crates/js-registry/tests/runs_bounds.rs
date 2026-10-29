@@ -36,6 +36,7 @@ fn job(run: &str, valid: u64, wall: u64) -> JobSpec {
         heartbeat_seq: 0,
         files: Vec::new(),
         valid_for_ms: valid,
+        native: None,
     }
 }
 
