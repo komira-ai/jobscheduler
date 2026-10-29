@@ -358,7 +358,7 @@ fn welcome_lost() -> (Rig, String) {
 #[test]
 fn a_lost_welcome_is_released_at_boot_timeout_and_starts_the_cooldown() {
     let (mut rig, _) = welcome_lost();
-    assert!(rig.tick(at(15 * MINUTE - 1)).is_empty());
+    assert_eq!(kinds(&rig.tick(at(15 * MINUTE - 1))), ["Save"]);
     assert_eq!(rig.phase(0), Phase::Registered);
     assert!(rig.state.records.cooldowns.is_empty());
 
@@ -444,7 +444,7 @@ fn a_lost_welcome_host_shown_live_before_it_lapsed_is_still_released_at_boot_tim
     rig.tick(at(5 * MINUTE));
     assert!(!rig.record(0).seen_live);
     rig.input.hosts[0].state = HostState::Lost;
-    assert!(rig.tick(at(15 * MINUTE - 1)).is_empty());
+    assert_eq!(kinds(&rig.tick(at(15 * MINUTE - 1))), ["Save"]);
     let actions = rig.tick(at(15 * MINUTE));
     assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
@@ -464,7 +464,7 @@ fn a_draining_machine_with_a_lost_welcome_waits_for_the_unknown_hold() {
     let (mut rig, _) = welcome_lost();
     rig.state.records.instances[0].phase = Phase::Draining;
     rig.input.hosts[0].lease_given_up = true;
-    assert!(rig.tick(at(15 * MINUTE)).is_empty());
+    assert_eq!(kinds(&rig.tick(at(15 * MINUTE))), ["Save"]);
     assert!(rig.tick(at(45 * MINUTE - 1)).is_empty());
     assert_eq!(rig.phase(0), Phase::Draining);
     let actions = rig.tick(at(45 * MINUTE));
