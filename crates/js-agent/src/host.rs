@@ -144,6 +144,8 @@ pub fn offer(
             labels: cli.labels.iter().cloned().collect(),
             phase: Phase::Serving,
             held: Vec::new(),
+            // The credential has a home only under a state root.
+            accepts_host_credential: cli.state_root.is_some(),
         },
         warnings: detected.warnings,
     })

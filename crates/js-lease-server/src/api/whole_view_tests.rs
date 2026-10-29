@@ -103,6 +103,7 @@ impl Rig {
             labels: Default::default(),
             phase: Phase::Serving,
             held: Vec::new(),
+            accepts_host_credential: false,
         };
         registry.hello(&hello, &Credential::of_token("t")).unwrap();
         let classes = vec![share_class(), ResourceClass::whole_node()];
