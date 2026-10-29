@@ -37,12 +37,14 @@ const BLOCK: u64 = 512;
 pub const END_BLOCKS: u64 = 2 * BLOCK;
 /// The longest name or link name a header holds without a long-name record.
 const HEADER_NAME_BYTES: usize = 100;
+/// The most bytes a long-name or PAX record may hold (the tar reader would otherwise read
+/// as many bytes as the header declares into memory).
+const MAX_RECORD_BYTES: u64 = 8192;
 /// The PAX keys an entry may carry; anything else (an extended attribute, an ACL, a
-/// sparse map) is refused.
-const ALLOWED_KEYS: [&[u8]; 8] = [
+/// sparse map, a `size` that would override the header's) is refused.
+const ALLOWED_KEYS: [&[u8]; 7] = [
     b"path",
     b"linkpath",
-    b"size",
     b"mtime",
     b"uid",
     b"gid",

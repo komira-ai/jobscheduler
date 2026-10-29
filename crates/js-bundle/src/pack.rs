@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 
 use crate::names::DiffId;
 use crate::stream::compress;
-use crate::tree::{Defect, Node, Tree, TreeRefusal, check_path, check_target, show};
+use crate::tree::{NameDefect, Node, Tree, TreeRefusal, check_path, check_target, show};
 use crate::unpack::END_BLOCKS;
 
 /// The set-user-id, set-group-id and sticky bits.
@@ -161,7 +161,7 @@ fn collect(dir: &Path, prefix: &str, out: &mut BTreeMap<String, Item>) -> Result
         } else if kind.is_symlink() {
             let target = at(&source, std::fs::read_link(&source))?;
             let checked = check_target(target.as_os_str().as_bytes());
-            let target = checked.map_err(|defect: Defect| TreeRefusal::Target {
+            let target = checked.map_err(|defect: NameDefect| TreeRefusal::Target {
                 path: shown.clone(),
                 defect,
             })?;

@@ -33,7 +33,7 @@ const ROOT_RESERVED: [&str; 6] = [
 
 /// Why a path or a symlink target is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum Defect {
+pub enum NameDefect {
     /// There is nothing in it.
     #[error("is empty")]
     Empty,
@@ -111,7 +111,7 @@ pub enum TreeRefusal {
         /// The path.
         path: String,
         /// The rule.
-        defect: Defect,
+        defect: NameDefect,
     },
     /// The target of a symlink breaks a naming rule.
     #[error("target of the symlink {path:?} {defect}")]
@@ -119,7 +119,7 @@ pub enum TreeRefusal {
         /// The symlink's path.
         path: String,
         /// The rule.
-        defect: Defect,
+        defect: NameDefect,
     },
     /// The entry cannot join the tree.
     #[error("entry {path:?} {defect}")]
@@ -163,7 +163,7 @@ fn printable(text: &str) -> bool {
 ///
 /// # Errors
 /// The first rule the path breaks.
-pub fn check_path(path: &[u8]) -> Result<&str, Defect> {
+pub fn check_path(path: &[u8]) -> Result<&str, NameDefect> {
     todo!("{path:?}")
 }
 
@@ -175,7 +175,7 @@ pub fn check_path(path: &[u8]) -> Result<&str, Defect> {
 ///
 /// # Errors
 /// The first rule the target breaks.
-pub fn check_target(target: &[u8]) -> Result<&str, Defect> {
+pub fn check_target(target: &[u8]) -> Result<&str, NameDefect> {
     todo!("{target:?}")
 }
 

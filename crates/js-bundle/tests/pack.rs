@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use js_bundle::{Defect, LinkDefect, PackError, TreeRefusal, pack_layer, pack_tar};
+use js_bundle::{LinkDefect, NameDefect, PackError, TreeRefusal, pack_layer, pack_tar};
 use layer::{Scratch, Seen, fixture, link, snapshot, write};
 
 /// The digest of the fixture tree's tar stream.
@@ -230,10 +230,10 @@ fn sockets_and_fifos_are_refused() {
 #[test]
 fn names_outside_the_rules_are_refused() {
     let cases = [
-        ("caf\u{e9}", Defect::ForbiddenByte),
-        ("a b", Defect::ForbiddenByte),
-        (".Trashes", Defect::RootReserved),
-        ("._x", Defect::AppleDouble),
+        ("caf\u{e9}", NameDefect::ForbiddenByte),
+        ("a b", NameDefect::ForbiddenByte),
+        (".Trashes", NameDefect::RootReserved),
+        ("._x", NameDefect::AppleDouble),
     ];
     for (name, expected) in cases {
         let scratch = Scratch::new();
@@ -265,7 +265,7 @@ fn symlinks_are_held_to_the_walker() {
     assert!(matches!(
         pack_error(&scratch.root()),
         PackError::Tree(TreeRefusal::Target {
-            defect: Defect::Absolute,
+            defect: NameDefect::Absolute,
             ..
         })
     ));

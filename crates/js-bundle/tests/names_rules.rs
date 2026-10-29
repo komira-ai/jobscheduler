@@ -1,6 +1,6 @@
 //! The naming rules both the packer and the extractor apply.
 
-use js_bundle::{Defect, check_path, check_target};
+use js_bundle::{NameDefect, check_path, check_target};
 
 fn long(count: usize) -> String {
     "a".repeat(count)
@@ -30,26 +30,26 @@ fn each_broken_path_rule_is_named() {
     let too_long = format!("{}/{}/ab", long(255), long(254));
     let too_deep = vec!["a"; 65].join("/");
     let long_component = long(256);
-    let cases: Vec<(&[u8], Defect)> = vec![
-        (b"", Defect::Empty),
-        (b"/etc/passwd", Defect::Absolute),
-        (b"a/../b", Defect::DotComponent),
-        (b"../a", Defect::DotComponent),
-        (b"./a", Defect::DotComponent),
-        (b".", Defect::DotComponent),
-        (b"a//b", Defect::EmptyComponent),
-        (b"a/", Defect::EmptyComponent),
-        (b"a b", Defect::ForbiddenByte),
-        (b"a\tb", Defect::ForbiddenByte),
-        (b"a\x7fb", Defect::ForbiddenByte),
-        (b"a\0b", Defect::ForbiddenByte),
-        (b"\xff\xfe", Defect::ForbiddenByte),
-        ("caf\u{e9}".as_bytes(), Defect::ForbiddenByte),
-        (long_component.as_bytes(), Defect::ComponentTooLong),
-        (too_long.as_bytes(), Defect::TooLong),
-        (too_deep.as_bytes(), Defect::TooDeep),
-        (b"._x", Defect::AppleDouble),
-        (b"a/._x", Defect::AppleDouble),
+    let cases: Vec<(&[u8], NameDefect)> = vec![
+        (b"", NameDefect::Empty),
+        (b"/etc/passwd", NameDefect::Absolute),
+        (b"a/../b", NameDefect::DotComponent),
+        (b"../a", NameDefect::DotComponent),
+        (b"./a", NameDefect::DotComponent),
+        (b".", NameDefect::DotComponent),
+        (b"a//b", NameDefect::EmptyComponent),
+        (b"a/", NameDefect::EmptyComponent),
+        (b"a b", NameDefect::ForbiddenByte),
+        (b"a\tb", NameDefect::ForbiddenByte),
+        (b"a\x7fb", NameDefect::ForbiddenByte),
+        (b"a\0b", NameDefect::ForbiddenByte),
+        (b"\xff\xfe", NameDefect::ForbiddenByte),
+        ("caf\u{e9}".as_bytes(), NameDefect::ForbiddenByte),
+        (long_component.as_bytes(), NameDefect::ComponentTooLong),
+        (too_long.as_bytes(), NameDefect::TooLong),
+        (too_deep.as_bytes(), NameDefect::TooDeep),
+        (b"._x", NameDefect::AppleDouble),
+        (b"a/._x", NameDefect::AppleDouble),
     ];
     for (path, defect) in cases {
         assert_eq!(
@@ -72,9 +72,9 @@ fn volume_names_are_refused_at_the_tree_root_only() {
         ".TemporaryItems",
         ".metadata_never_index",
     ] {
-        assert_eq!(check_path(name.as_bytes()), Err(Defect::RootReserved));
+        assert_eq!(check_path(name.as_bytes()), Err(NameDefect::RootReserved));
         let below = format!("{name}/x");
-        assert_eq!(check_path(below.as_bytes()), Err(Defect::RootReserved));
+        assert_eq!(check_path(below.as_bytes()), Err(NameDefect::RootReserved));
         let nested = format!("dir/{name}");
         assert_eq!(check_path(nested.as_bytes()), Ok(nested.as_str()));
     }
@@ -100,16 +100,16 @@ fn targets_are_checked_for_shape_only() {
     }
     let too_long = format!("{longest}b");
     let long_component = long(256);
-    let cases: Vec<(&[u8], Defect)> = vec![
-        (b"", Defect::Empty),
-        (b"/etc", Defect::Absolute),
-        (b"a//b", Defect::EmptyComponent),
-        (b"a/", Defect::EmptyComponent),
-        (b"a b", Defect::ForbiddenByte),
-        (b"a\0b", Defect::ForbiddenByte),
-        (b"\xff", Defect::ForbiddenByte),
-        (long_component.as_bytes(), Defect::ComponentTooLong),
-        (too_long.as_bytes(), Defect::TooLong),
+    let cases: Vec<(&[u8], NameDefect)> = vec![
+        (b"", NameDefect::Empty),
+        (b"/etc", NameDefect::Absolute),
+        (b"a//b", NameDefect::EmptyComponent),
+        (b"a/", NameDefect::EmptyComponent),
+        (b"a b", NameDefect::ForbiddenByte),
+        (b"a\0b", NameDefect::ForbiddenByte),
+        (b"\xff", NameDefect::ForbiddenByte),
+        (long_component.as_bytes(), NameDefect::ComponentTooLong),
+        (too_long.as_bytes(), NameDefect::TooLong),
     ];
     for (target, defect) in cases {
         assert_eq!(
@@ -128,7 +128,7 @@ fn a_refusal_shows_the_path_escaped() {
     use js_bundle::TreeRefusal;
     let refusal = TreeRefusal::Path {
         path: "a\nb".to_string(),
-        defect: Defect::ForbiddenByte,
+        defect: NameDefect::ForbiddenByte,
     };
     assert_eq!(
         refusal.to_string(),

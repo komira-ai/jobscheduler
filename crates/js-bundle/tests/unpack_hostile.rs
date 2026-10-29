@@ -4,7 +4,9 @@
 
 mod layer;
 
-use js_bundle::{Defect, EntryDefect, Limits, LinkDefect, StreamError, TreeRefusal, UnpackError};
+use js_bundle::{
+    EntryDefect, Limits, LinkDefect, NameDefect, StreamError, TreeRefusal, UnpackError,
+};
 use layer::{Entry, Tar, mode_of, run, run_with, snapshot};
 
 macro_rules! refused {
@@ -14,7 +16,7 @@ macro_rules! refused {
     };
 }
 
-fn path_defect(run: &layer::Run) -> Defect {
+fn path_defect(run: &layer::Run) -> NameDefect {
     match run.err() {
         UnpackError::Tree(TreeRefusal::Path { defect, .. }) => *defect,
         other => panic!("not a path refusal: {other:?}"),
@@ -27,7 +29,7 @@ fn path_defect(run: &layer::Run) -> Defect {
 #[test]
 fn absolute_paths_are_refused() {
     let run = run(&Tar::new().file("/etc/passwd", b"x").end());
-    assert_eq!(path_defect(&run), Defect::Absolute);
+    assert_eq!(path_defect(&run), NameDefect::Absolute);
     run.scratch.assert_contained();
 }
 
@@ -36,7 +38,7 @@ fn absolute_paths_are_refused() {
 fn dot_dot_components_are_refused() {
     for name in ["../outside/x", "a/../../outside/x", "a/..", ".."] {
         let run = run(&Tar::new().dir("a").file(name, b"x").end());
-        assert_eq!(path_defect(&run), Defect::DotComponent, "{name}");
+        assert_eq!(path_defect(&run), NameDefect::DotComponent, "{name}");
         run.scratch.assert_contained();
     }
 }
@@ -53,7 +55,7 @@ fn names_outside_the_allowed_bytes_are_refused() {
     ];
     for name in names {
         let run = run(&Tar::new().entry(Entry::new(name, b'0').data(b"x")).end());
-        assert_eq!(path_defect(&run), Defect::ForbiddenByte, "{name:?}");
+        assert_eq!(path_defect(&run), NameDefect::ForbiddenByte, "{name:?}");
     }
 }
 
@@ -68,22 +70,22 @@ fn special_and_over_long_names_are_refused() {
         ".metadata_never_index",
     ] {
         let run = run(&Tar::new().dir(name).end());
-        assert_eq!(path_defect(&run), Defect::RootReserved, "{name}");
+        assert_eq!(path_defect(&run), NameDefect::RootReserved, "{name}");
     }
     let run = run(&Tar::new().dir("d").file("d/._x", b"x").end());
-    assert_eq!(path_defect(&run), Defect::AppleDouble);
+    assert_eq!(path_defect(&run), NameDefect::AppleDouble);
 
     let component = "a".repeat(256);
     let run = run(&Tar::new().long_file(&component, b"x").end());
-    assert_eq!(path_defect(&run), Defect::ComponentTooLong);
+    assert_eq!(path_defect(&run), NameDefect::ComponentTooLong);
 
     let path = format!("{}/{}/ab", "a".repeat(255), "a".repeat(254));
     let run = run(&Tar::new().long_file(&path, b"x").end());
-    assert_eq!(path_defect(&run), Defect::TooLong);
+    assert_eq!(path_defect(&run), NameDefect::TooLong);
 
     let deep = vec!["a"; 65].join("/");
     let run = run(&Tar::new().long_file(&deep, b"x").end());
-    assert_eq!(path_defect(&run), Defect::TooDeep);
+    assert_eq!(path_defect(&run), NameDefect::TooDeep);
 }
 
 /// A name that differs only in ASCII case, and a path that appears twice, are refused.
@@ -238,18 +240,18 @@ fn bad_symlink_targets_are_refused() {
     };
     assert_eq!(
         target_defect(Tar::new().symlink("abs", "/etc/passwd").end()),
-        Defect::Absolute
+        NameDefect::Absolute
     );
     assert_eq!(
         target_defect(Tar::new().symlink("empty", "").end()),
-        Defect::Empty
+        NameDefect::Empty
     );
     let long = format!("{}/{}", "b".repeat(1000), "c".repeat(25));
     let tar = Tar::new()
         .long_link(long.as_bytes())
         .symlink("long", &long)
         .end();
-    assert_eq!(target_defect(tar), Defect::TooLong);
+    assert_eq!(target_defect(tar), NameDefect::TooLong);
     let mut nul = vec![b'a'; 120];
     nul.push(0);
     nul.push(b'b');
@@ -257,7 +259,7 @@ fn bad_symlink_targets_are_refused() {
         .long_link(&nul)
         .entry(Entry::new(b"nul", b'2').link(&nul))
         .end();
-    assert_eq!(target_defect(tar), Defect::ForbiddenByte);
+    assert_eq!(target_defect(tar), NameDefect::ForbiddenByte);
 }
 
 /// The walker: a dangling link is fine while the part that exists is inside and the rest
@@ -497,7 +499,7 @@ fn a_pax_path_is_the_effective_path() {
         .pax(&[("path", path.as_bytes())])
         .entry(Entry::new(path.as_bytes(), b'0').data(b"x"))
         .end();
-    assert_eq!(path_defect(&run(&tar)), Defect::DotComponent);
+    assert_eq!(path_defect(&run(&tar)), NameDefect::DotComponent);
 }
 
 /// Extended attributes, sparse maps, ACLs and size overrides in a PAX record are refused, as
