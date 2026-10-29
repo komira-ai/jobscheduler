@@ -2,8 +2,10 @@
 //! same data in a page.
 //!
 //! Both are served on `server.listen` only, never on the agent port, and only when that
-//! address is a private one (see [`crate::Config::serves_status`]). They take no token:
-//! who may reach them is the network's to decide, as for `/healthz`. Nothing here holds a
+//! address is a private one (see [`crate::Config::serves_status`]), and then only to a
+//! peer whose address is private too: the check is on each request, by the address of
+//! the connection, so a wildcard listener does not serve them to the internet. They take
+//! no token: who may reach them is the network's to decide, as for `/healthz`. Nothing here holds a
 //! secret to leak: the plan of the next launch is the masked render of a plan that has
 //! no secret in it, and the checks' reasons are messages written to be shown.
 //!

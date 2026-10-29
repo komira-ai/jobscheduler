@@ -1,5 +1,5 @@
-//! Who may read the status: the routes are on the listen port only, take no token, and
-//! exist only on a private address.
+//! Who may read the status: the routes are on the listen port only, take no token, exist
+//! only on a private address, and answer only a private peer.
 
 use std::net::IpAddr;
 
@@ -126,7 +126,9 @@ fn a_public_bind_omits_the_status_and_says_so() {
     assert!(wide.serves_status());
     assert_eq!(
         wide.warnings(),
-        ["server: warning: binds all interfaces (server.listen 0.0.0.0:7300)"]
+        [
+            "server: warning: binds all interfaces (server.listen 0.0.0.0:7300); /v1/pools and /status are served only to private peers"
+        ]
     );
 }
 
@@ -139,7 +141,7 @@ async fn a_wildcard_listener_shows_its_warning_in_the_status() {
         ..Options::default()
     };
     let rig = Rig::start("policy_wildcard", vec![a10("gpu_1x_a10", 1, 129)], options).await;
-    let line = "server: warning: binds all interfaces (server.listen 0.0.0.0:0)";
+    let line = "server: warning: binds all interfaces (server.listen 0.0.0.0:0); /v1/pools and /status are served only to private peers";
     assert_eq!(rig.pools().await["warnings"], json!([line]));
     let page = rig.get("/status").await;
     assert!(page.body.contains(line), "{}", page.body);

@@ -62,6 +62,15 @@ pub(super) struct Rig {
 
 impl Rig {
     pub(super) async fn new(name: &str) -> Self {
+        Self::build(name, false).await
+    }
+
+    /// A rig whose server serves the status routes (to private peers).
+    pub(super) async fn serving_status(name: &str) -> Self {
+        Self::build(name, true).await
+    }
+
+    async fn build(name: &str, status: bool) -> Self {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/whole_view_unit")
             .join(name);
@@ -120,7 +129,10 @@ impl Rig {
         .unwrap();
         let agents = Agents::over(registry.clone(), &shared_clock, &dir);
         let token = parse_token(&[b'c'; 40]).unwrap();
-        let shared = Arc::new(Shared::new(table, token, Some(Arc::new(agents))));
+        let shared = Shared::new(table, token, Some(Arc::new(agents)));
+        let served =
+            status.then(|| Arc::new(Status::new(None, None, Vec::new(), shared_clock.clone())));
+        let shared = Arc::new(shared.with_status(served));
         Self {
             shared,
             clock,

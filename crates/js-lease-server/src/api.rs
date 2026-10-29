@@ -1,11 +1,13 @@
 //! The routes, the authentication in front of them, and the state they share.
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError};
 
+use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -20,7 +22,7 @@ use tracing::{error, info};
 use crate::adapt::{BoxedProvider, SharedClock};
 use crate::agent_api;
 use crate::agents::Agents;
-use crate::config::Token;
+use crate::config::{Token, is_private_address};
 use crate::hosts::HostList;
 use crate::join_api;
 use crate::run_api;
@@ -44,7 +46,8 @@ pub(crate) struct Shared {
     token: Token,
     agents: Option<Arc<Agents>>,
     /// What `/v1/pools` and `/status` read; `None` when the listen address is not a
-    /// private one and the routes answer as if they did not exist.
+    /// private one and the routes answer as if they did not exist. A request whose peer
+    /// is not a private address is answered so too.
     status: Option<Arc<Status>>,
     save_errors: AtomicU64,
     ticking: AtomicBool,
@@ -228,17 +231,40 @@ async fn healthz(State(shared): State<Arc<Shared>>) -> Response {
     }
 }
 
+/// The peer of the connection a request came in on, as the listener sets it. Absent when
+/// the listener could not name the peer; a status route then refuses.
+type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+
+/// Whether a peer may read the status pages, which take no token: only a private address
+/// ([`is_private_address`]; an IPv4-mapped IPv6 address counts as its IPv4 form). An
+/// unknown peer may not.
+pub(crate) fn peer_may_read_status(peer: &Peer) -> bool {
+    peer.as_ref()
+        .is_some_and(|Extension(ConnectInfo(addr))| is_private_address(addr.ip()))
+}
+
+impl Shared {
+    /// What the status routes read for `peer`: `None` when the listen address is not a
+    /// private one or the peer is not.
+    fn status_for(&self, peer: &Peer) -> Option<&Arc<Status>> {
+        self.status.as_ref().filter(|_| peer_may_read_status(peer))
+    }
+}
+
 /// `GET /v1/pools`: the elastic pools as JSON. No token: who may reach it is the
 /// network's to say (see [`crate::status`]). Not served, and a 404 like any unknown route,
-/// when the server listens on an address that is not private.
-async fn pools(State(shared): State<Arc<Shared>>) -> Response {
+/// when the server listens on an address that is not private or the peer is not a
+/// private address.
+async fn pools(State(shared): State<Arc<Shared>>, peer: Peer) -> Response {
     let served = |status: &Arc<Status>| json(StatusCode::OK, &status.view());
-    shared.status.as_ref().map_or_else(not_found, served)
+    shared.status_for(&peer).map_or_else(not_found, served)
 }
 
 /// `GET /status`: the same data as a page.
-async fn status_page(State(shared): State<Arc<Shared>>) -> Response {
-    shared.status.as_ref().map_or_else(not_found, page_response)
+async fn status_page(State(shared): State<Arc<Shared>>, peer: Peer) -> Response {
+    shared
+        .status_for(&peer)
+        .map_or_else(not_found, page_response)
 }
 
 fn page_response(status: &Arc<Status>) -> Response {

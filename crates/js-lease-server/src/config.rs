@@ -491,7 +491,9 @@ impl Config {
     /// Whether the server serves `GET /v1/pools` and `GET /status`. They take no token, so
     /// they are served only when the listen address is a private one
     /// ([`is_private_address`]); on any other the routes do not exist, and the server says
-    /// so in [`warnings`](Self::warnings).
+    /// so in [`warnings`](Self::warnings). Where they are served, a request is answered
+    /// only when its peer is a private address too; any other peer gets the reply of an
+    /// unknown route.
     pub fn serves_status(&self) -> bool {
         self.status
     }
