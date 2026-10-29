@@ -68,6 +68,8 @@ impl From<RequestError> for RefusalCode {
             RequestError::WallTimeNotPositive => Self::WallTimeNotPositive,
             RequestError::Label(LabelError::Reserved(_)) => Self::ReservedLabel,
             RequestError::Label(_) => Self::InvalidLabel,
+            // A `disk-gib` or `exec` that is not a requirement names no host.
+            RequestError::Requirements(_) => Self::NoFit,
         }
     }
 }
@@ -184,6 +186,21 @@ mod tests {
             spec.labels().get("jobscheduler.dev/validation-run"),
             Some("val-1")
         );
+    }
+
+    /// Asserts that a request whose `disk-gib` or `exec` is not a requirement is refused
+    /// as one no host could serve, and that good values build a spec.
+    #[test]
+    fn a_bad_disk_or_exec_names_no_host() {
+        for (key, value) in [("disk-gib", "lots"), ("exec", "vm")] {
+            let mut r = request();
+            r.capabilities.insert(key.into(), value.into());
+            assert_eq!(make(r), Err(RefusalCode::NoFit), "{key}");
+        }
+        let mut r = request();
+        r.capabilities.insert("disk-gib".into(), "10".into());
+        r.capabilities.insert("exec".into(), "container".into());
+        assert!(make(r).is_ok());
     }
 
     /// Asserts that each start-contract rule maps to its own code.
