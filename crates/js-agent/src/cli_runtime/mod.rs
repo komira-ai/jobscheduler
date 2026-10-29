@@ -27,7 +27,7 @@
 //!   --network none --read-only
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m
 //!   [--tmpfs /var/tmp:rw,noexec,nosuid,nodev,size=64m --tmpfs /run:rw,noexec,nosuid,nodev,size=64m] (Podman)
-//!   --ulimit core=0 --ipc private
+//!   --ulimit core=0 --ipc private --cgroupns private
 //!   [--pid private] --pull never --user <base uid + slot>:<base gid + slot>
 //!   [Podman: --uidmap 0:<subuid start>:65536 --gidmap 0:<subgid start>:65536] -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>

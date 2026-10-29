@@ -106,7 +106,8 @@ pub trait HostView {
     fn link(&self, path: &str) -> Result<String, String>;
 
     /// The text of the file at `path` (`/proc/2/stat` and `/proc/1/cgroup`, which tell a
-    /// host's `/proc` from a container's).
+    /// host's `/proc` from a container's, and `/proc/self/cgroup`, the agent's own control
+    /// group).
     ///
     /// # Errors
     ///
@@ -199,6 +200,10 @@ impl FakeHost {
                     "2 (kthreadd) S 0 0 0 0".to_owned(),
                 ),
                 ("/proc/1/cgroup".to_owned(), "0::/init.scope\n".to_owned()),
+                (
+                    "/proc/self/cgroup".to_owned(),
+                    "0::/system.slice/agent.service\n".to_owned(),
+                ),
             ]);
         }
         host
