@@ -231,7 +231,10 @@ impl TailscaleApi {
         let body = response
             .body_mut()
             .with_config()
-            .limit(ANSWER_LIMIT)
+            // The reader errors when it is asked for more after `limit` bytes, even to
+            // learn that the body ended, so a limit of `ANSWER_LIMIT + 1` reads an answer
+            // of exactly `ANSWER_LIMIT` bytes and refuses one byte more.
+            .limit(ANSWER_LIMIT + 1)
             .read_to_vec()
             .map_err(transport)?;
         match status {
