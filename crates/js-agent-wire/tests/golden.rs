@@ -146,6 +146,31 @@ fn start_command_wire_form() {
     assert_eq!(contained, json!("contained"));
 }
 
+/// Asserts the exact JSON of a start that pins a bundle: `bundle` is a plain string beside
+/// `image`, and it is absent (see `start_command_wire_form`) when there is none. It catches
+/// a renamed field or a bundle written as an object.
+#[test]
+fn start_command_with_bundle_wire_form() {
+    let mut spec = job();
+    spec.image = String::new();
+    spec.bundle = Some(
+        "toolchain:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
+    );
+    let value = serde_json::to_value(Command::Start(Box::new(spec.clone()))).unwrap();
+    assert_eq!(value["type"], json!("start"));
+    assert_eq!(value["image"], json!(""));
+    assert_eq!(
+        value["bundle"],
+        json!(
+            "toolchain:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+    );
+    assert_eq!(value.as_object().unwrap().len(), 13);
+    let decoded: Command = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, Command::Start(Box::new(spec)));
+}
+
 /// Asserts the exact JSON of a heartbeat that carries a held run, a run result and a
 /// taint, and the spelling of every outcome. It catches a renamed heartbeat, result or
 /// taint field and a changed outcome spelling.
