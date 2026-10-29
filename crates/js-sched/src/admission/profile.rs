@@ -226,9 +226,10 @@ impl Profile {
         p
     }
 
-    /// CPU is charged by the curve.
+    /// CPU is charged by the curve: not by one whose cores are unknown, which leaves the
+    /// request's own cores booked.
     pub(crate) fn cpu_by_curve(&self) -> bool {
-        self.cpu && self.curve.is_some()
+        self.cpu && self.curve.as_deref().is_some_and(Curve::cores_known)
     }
 
     /// Memory is charged by the curve.
@@ -530,5 +531,42 @@ mod tests {
         assert!(!flat.cpu_misfit(0, 9_999_999));
         assert!(!flat.mem_misfit(0, u64::MAX));
         assert!(!flat.timed());
+    }
+
+    /// Catches: a curve whose cores are unknown charging its (meaningless) cores, or
+    /// dropping the learned memory: a new lease is charged the request's cores and the
+    /// curve's memory, and its cores never count as a misfit.
+    #[test]
+    fn a_curve_without_cores_charges_the_requests_cores_and_the_learned_memory() {
+        let points = vec![
+            MinutePoint {
+                cores_milli: 0,
+                working_set_bytes: 2 * GIB,
+            },
+            MinutePoint {
+                cores_milli: 0,
+                working_set_bytes: 3 * GIB,
+            },
+        ];
+        let p = Profile::new(
+            Choice {
+                curve: Some(Curve::memory_only(points, 5).expect("short curve")),
+                cpu: true,
+                mem: true,
+                demoted_cpu: false,
+                demoted_mem: false,
+                life: None,
+                floor_permille: 750,
+                guard_key: 7,
+            },
+            &cost(10_000, 8 * GIB),
+        );
+        assert!(!p.cpu_by_curve());
+        assert!(p.mem_by_curve());
+        assert!(p.by_curve());
+        assert_eq!(p.new_cpu(0), 10_000, "the request's cores, booked");
+        assert_eq!(p.new_mem(0), 3 * GIB, "the learned memory");
+        assert!(!p.cpu_misfit(0, 9_999_999));
+        assert!(p.mem_misfit(0, 3 * GIB + 1));
     }
 }

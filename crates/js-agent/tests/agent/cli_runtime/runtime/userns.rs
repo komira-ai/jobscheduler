@@ -287,8 +287,8 @@ fn the_scratch_is_given_to_the_mapped_ids() {
         [
             (
                 PathBuf::from("/work/scratch/r1"),
-                231_072 + 65_534,
-                462_144 + 65_534
+                231_072 + 1000,
+                462_144 + 1000
             ),
             (
                 PathBuf::from("/work/scratch/r2"),
@@ -297,6 +297,41 @@ fn the_scratch_is_given_to_the_mapped_ids() {
             ),
         ]
     );
+}
+
+/// Asserts that two runs in slots 0 and 1 on one runtime are created as `1000:1000` and
+/// `1001:1001` and that their scratch directories are given to the host ids those users
+/// are mapped onto (the start of the range plus 1000 and plus 1001, for the uid and for the
+/// gid), and a run in a later slot to its own ids. It catches runs that share a host uid
+/// and a scratch directory given to the wrong slot.
+#[test]
+fn each_slots_scratch_goes_to_its_own_host_ids() {
+    let world = podman();
+    let dir = Scratch::new("userns-slots");
+    let mut rt = open_mapped(&world, &dir).unwrap().with_chown(record);
+    for (run, slot) in [("r1", 0), ("r2", 1), ("r3", 7)] {
+        let mut job = spec(run);
+        job.slot = slot;
+        rt.create_and_start(&job).unwrap();
+    }
+    let given = GIVEN.with(|given| given.borrow().clone());
+    let at = |run: &str, slot: u32| {
+        (
+            PathBuf::from("/work/scratch").join(run),
+            231_072 + 1000 + slot,
+            462_144 + 1000 + slot,
+        )
+    };
+    assert_eq!(given, [at("r1", 0), at("r2", 1), at("r3", 7)]);
+    for (run, user) in [
+        ("r1", "1000:1000"),
+        ("r2", "1001:1001"),
+        ("r3", "1007:1007"),
+    ] {
+        let args = created(&world, run);
+        let flag = args.iter().position(|arg| arg == "--user").unwrap();
+        assert_eq!(args[flag + 1], user, "{run}");
+    }
 }
 
 /// Asserts that an agent that is not root cannot map its jobs: it could not give the
@@ -309,7 +344,7 @@ fn a_mapped_runtime_needs_an_agent_that_is_root() {
     let own = settings()
         .with_subuid("jobmap")
         .unwrap()
-        .with_agent(65534, 65534)
+        .with_agent(1000, 1000)
         .unwrap();
     let said = open_in(&world, own, &exact_host(), &dir.path("claims"))
         .err()
@@ -502,6 +537,8 @@ fn the_checks_keep_the_range_the_runtime_opened_with() {
     let clean = js_agent::lifecycle::Finished {
         run_id: "r1",
         live: &[],
+        slot: None,
+        live_slots: &[],
     };
     assert!(js_agent::lifecycle::CheckHook::run(&mut checks, &clean).is_ok());
     edited.start_process(leftover(731, 231_072 + 5));

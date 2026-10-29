@@ -159,6 +159,7 @@ pub fn spec(run_id: &str) -> RunSpec {
         gpu_indices: Vec::new(),
         mounts: Vec::new(),
         scratch: PathBuf::from("/work/scratch").join(run_id),
+        slot: 0,
         isolation: Isolation::Contained,
         labels,
     }
