@@ -1228,6 +1228,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-scaler"
+version = "0.1.0"
+dependencies = [
+ "js-elastic",
+ "js-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "js-sched"
 version = "0.1.0"
 dependencies = [

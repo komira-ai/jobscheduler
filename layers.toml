@@ -22,7 +22,7 @@ crates = ["js-types"]
 [[layer]]
 name = "pure"
 pure = true
-crates = ["js-agent-usage", "js-agent-wire", "js-caps", "js-elastic", "js-guest-wire", "js-pool-static", "js-provider", "js-provider-fake", "js-sizing", "js-whole"]
+crates = ["js-agent-usage", "js-agent-wire", "js-caps", "js-elastic", "js-guest-wire", "js-pool-static", "js-provider", "js-provider-fake", "js-scaler", "js-sizing", "js-whole"]
 planned = ["js-sim", "js-sched"]
 
 # Code that keeps state, reads a clock or does I/O, and is used by servers and nodes.
