@@ -10,7 +10,7 @@ use std::time::Duration;
 use js_elastic::HostStatus;
 use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
-use js_scaler::{Blocked, Health, LaunchMode, Phase, Records, Settings, State};
+use js_scaler::{Blocked, CooldownReason, Health, LaunchMode, Phase, Records, Settings, State};
 
 use crate::fakes::{Gate, live, logged, only_saves, record, records, request, rig, view};
 
@@ -513,4 +513,55 @@ async fn an_unannounced_host_reaches_the_step_with_no_shape() {
     assert_eq!(log[0], "save");
     assert!(log[1].starts_with("mint:"), "{log:?}");
     assert!(log[2].starts_with("acquire:"), "{log:?}");
+}
+
+/// A rig whose machine was launched at the start of the clock, said hello and has not been
+/// heard from since: the host reads silent, and `heard_since_hello` is `heard`.
+fn hello_admitted(heard: bool) -> crate::fakes::Rig {
+    let mut lost = record("js-lost", Phase::Registered);
+    lost.seen_live = false;
+    let rig = rig(records(vec![lost]), live());
+    let mut host = view("js-lost");
+    host.state = HostState::Lost;
+    host.heard_since_hello = heard;
+    rig.world().hosts = vec![host];
+    rig
+}
+
+/// Asserts that a machine whose hello was admitted but whose Welcome was lost, so it never
+/// heartbeats, is left alone until `boot_timeout` after its launch and is then released
+/// with the boot-failure cooldown started. It catches a shell that tells the step every
+/// host has been heard since its hello, which holds the machine for `unknown_hold` instead.
+#[tokio::test]
+async fn a_lost_welcome_is_released_at_boot_timeout() {
+    let rig = hello_admitted(false);
+    let boot_timeout = live().boot_timeout;
+    rig.advance(boot_timeout - Duration::from_millis(1));
+    rig.scaler.tick().await;
+    assert_eq!(
+        rig.scaler.state().records.instances[0].phase,
+        Phase::Registered
+    );
+    assert!(rig.scaler.state().records.cooldowns.is_empty());
+
+    rig.advance(Duration::from_millis(1));
+    rig.scaler.tick().await;
+    let state = rig.scaler.state();
+    assert_eq!(state.records.instances[0].phase, Phase::Releasing);
+    assert_eq!(
+        state.records.cooldowns["gpu"].reason,
+        CooldownReason::BootFailed
+    );
+}
+
+/// Asserts that the same silent host, once it has heartbeated since its hello, is not
+/// released at `boot_timeout`. It catches a shell that reads silence alone as a failed boot.
+#[tokio::test]
+async fn a_host_heard_since_its_hello_is_not_released_at_boot_timeout() {
+    let rig = hello_admitted(true);
+    rig.advance(live().boot_timeout);
+    rig.scaler.tick().await;
+    let state = rig.scaler.state();
+    assert_eq!(state.records.instances[0].phase, Phase::Registered);
+    assert!(state.records.cooldowns.is_empty());
 }

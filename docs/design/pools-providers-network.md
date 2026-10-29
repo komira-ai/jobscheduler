@@ -1540,6 +1540,13 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   hangs or bills past `boot_timeout`, and a `default` render that still contains a Tailscale step.
 - Status at each step carries state and the masked plan and none of the test secrets.
 
+The tests of this section run from `crates/js-lease-server/tests/server/lambda_e2e.rs` and
+`lambda_e2e_failures.rs`, over `FakeLambda`, the server's Tailscale mode and an HTTP server on
+127.0.0.1 that plays the Tailscale API. The agent's hello is built from the rendered unit's
+`ExecStart` flags (host id, container binary, GPU toolkit hook), so a flag the unit does not pass
+shows as a refused or misnamed host. The pool status does not list machines yet, so the tests assert
+that the status routes show no secret, not the machine's state.
+
 ### 13.4 Live (not in CI)
 
 After the operator's go: one launch, `max_instances = 1`. Before it, a person checks that the instance
