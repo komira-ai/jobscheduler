@@ -477,11 +477,15 @@ mod tests {
             ("10", 10_000),
         ];
         for (text, millis) in cases {
-            let got = parse(&with(&format!("heartbeat_interval = \"{text}\""))).unwrap();
-            let want = base.clone().with_timing(millis, DEFAULT_GRACE_MS).unwrap();
+            let got = parse(&with(&format!(
+                "heartbeat_interval = \"{text}\"\ngrace = \"1m\""
+            )))
+            .unwrap();
+            let want = base.clone().with_timing(millis, 60_000).unwrap();
             assert_eq!(got, want, "{text}");
         }
-        let refused = parse(&with("heartbeat_interval = \"249ms\"")).unwrap_err();
+        let low = "heartbeat_interval = \"249ms\"\ngrace = \"1m\"";
+        let refused = parse(&with(low)).unwrap_err();
         assert!(refused.contains("heartbeat_interval"), "{refused}");
     }
 
