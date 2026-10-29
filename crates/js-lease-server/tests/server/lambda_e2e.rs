@@ -308,3 +308,18 @@ async fn a_refused_oauth_client_leaves_the_pool_unavailable_until_it_is_accepted
     assert_eq!(rig.account.launched(), 1);
     rig.assert_status_is_clean(&[]).await;
 }
+
+/// Asserts that the unit the machine boots with gives the agent the name the scaler's
+/// record has (`--host-id <name>`), so the host registers under the name the scaler looks
+/// for, and that the registry then lists the host under it. It catches a unit whose agent
+/// registers under a name of its own, which the scaler never sees: the machine is then
+/// Booting until `boot_timeout` however well it boots.
+#[tokio::test]
+async fn the_unit_names_the_host_the_scaler_looks_for() {
+    let rig = Rig::start("e2e_host_id").await;
+    let (name, token) = rig.launch().await;
+    assert_eq!(rig.unit_host_id(0).as_deref(), Some(name.as_str()));
+    rig.join(&token, &name).await;
+    let listing = crate::agents_support::hosts(&rig.h).await;
+    assert_eq!(crate::agents_support::listed(&listing), [name.as_str()]);
+}

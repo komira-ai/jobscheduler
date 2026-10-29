@@ -256,6 +256,34 @@ impl Rig {
             let at = words.iter().position(|word| *word == wanted);
             at.map(|at| words.get(at + 1).copied().unwrap_or_default())
         };
+        // Without `--host-id` the agent would register under a name of its own; that is
+        // asserted by `the_unit_names_the_host_the_scaler_looks_for`, and the other tests
+        // go on under the record's name.
+        let host = flag("--host-id").map_or(name, |host| host.trim_matches('"'));
+        let mut body = hello_body_of(host);
+        body["instance"] = json!({ "provider": "burst", "instance_id": instance });
+        body["accepts_host_credential"] = json!(true);
+        let bytes = body.to_string().into_bytes();
+        let addr = self.h.running.agent_addr().unwrap();
+        request(addr, "POST", "/v1/agent/hello", Some(token), Some(&bytes)).await
+    }
+
+    /// The hello the agent the `n`th launch booted would send, derived from the rendered
+    /// unit and nothing else: the host id is the one the unit's `ExecStart` gives with
+    /// `--host-id`, the capabilities are the ones the agent reports for the flags it is
+    /// given (a runtime and a mode with `--container-bin`, the GPU toolkit only with
+    /// `--gpu-toolkit-hook`).
+    pub fn agent_hello(&self, n: usize, name: &str) -> serde_json::Value {
+        let script = self.script(n);
+        let line = script
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("ExecStart="))
+            .expect("the unit has an ExecStart");
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let flag = |wanted: &str| {
+            let at = words.iter().position(|word| *word == wanted);
+            at.map(|at| words.get(at + 1).copied().unwrap_or_default())
+        };
         let host = flag("--host-id")
             .unwrap_or_else(|| panic!("the unit passes no --host-id, so the agent registers under a name of its own, not {name}: {line}"));
         let mut body = hello_body_of(host);
@@ -269,6 +297,19 @@ impl Rig {
             body["capabilities"]["gpu-toolkit"] = json!("true");
         }
         body
+    }
+
+    /// The `--host-id` the `n`th launch's unit gives the agent, if it gives one.
+    pub fn unit_host_id(&self, n: usize) -> Option<String> {
+        let script = self.script(n);
+        let line = script
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let at = words.iter().position(|word| *word == "--host-id")?;
+        words
+            .get(at + 1)
+            .map(|host| host.trim_matches('"').to_owned())
     }
 
     /// A hello of the first launch's agent with `token`.
