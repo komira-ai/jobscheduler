@@ -24,6 +24,10 @@
 //! of its host after the one that carried its acknowledgement.
 //! The key is asked for when the acknowledgement is read and held with the run through
 //! its grace, so a run the registry evicts or forgets in the meantime is still learned.
+//! Tracks are per lease: if two runs of one lease name different keys, the first accepted
+//! result takes the whole lease series under its own key. The server has one trust domain,
+//! so any holder of the client token can name any key, and a wrong or hostile run can skew
+//! that key's curve.
 //!
 //! **Locks.** The one mutex here is a leaf: nothing is called while it is held but the
 //! key source (which must answer from memory and not call back into the server), and it

@@ -706,9 +706,10 @@ fn states_have_stable_names() {
 
 /// Asserts that a run queued with a work key answers it, by id and in its view, and that a
 /// run queued without one, and a run the registry does not know, answer none; and that the
-/// start the host is sent is the same job whether or not a key was named. It catches a key
-/// lost between the queue and the result, a key given to the wrong run, and a key that
-/// leaks onto the wire to the agent.
+/// start the host is sent is, whole, the start of the same run queued without a key. It
+/// catches a key lost between the queue and the result, a key given to the wrong run, and
+/// a key that reaches the agent by any route (a label, an argument, the environment, the
+/// image or a field of its own).
 #[test]
 fn a_work_key_stays_with_its_run_and_never_reaches_the_host() {
     let (fx, epoch) = leased();
@@ -728,14 +729,11 @@ fn a_work_key_stays_with_its_run_and_never_reaches_the_host() {
     assert_eq!(listed[1].work_key, None);
     let reply = beat(&fx, "a", epoch, &[]);
     assert_eq!(words(&reply), ["start r1", "start r2"]);
-    for command in &reply.commands {
-        let Command::Start(spec) = command else {
-            panic!("a start was expected");
-        };
-        let wire = serde_json::to_string(spec).unwrap();
-        assert!(
-            !wire.contains("work_key") && !wire.contains("builds"),
-            "{wire}"
-        );
-    }
+    // The same run id submitted without a key, on a registry of its own: what the host
+    // receives for it must be equal to the start of the keyed run, whole.
+    let (other, other_epoch) = leased();
+    queue(&other, "r1", 500).unwrap();
+    let unkeyed = beat(&other, "a", other_epoch, &[]);
+    assert_eq!(words(&unkeyed), ["start r1"]);
+    assert_eq!(reply.commands[0], unkeyed.commands[0]);
 }

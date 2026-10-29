@@ -78,11 +78,16 @@ struct RunBody {
     labels: std::collections::BTreeMap<String, String>,
     /// What work the run does, when the client knows: the key its cost curve is learned
     /// under. Absent means the run teaches the server nothing.
+    ///
+    /// Usage tracks are per lease: when runs of one lease name different keys, the first
+    /// accepted result takes the whole lease series under its own key. The server has one
+    /// trust domain: any holder of the client token can name any key, so a wrong or hostile
+    /// run can skew that key's curve.
     #[serde(default)]
     work_key: Option<WorkKeyBody>,
 }
 
-/// The longest part of a work key (class or dedup text), in bytes. Keys are kept in
+/// The longest part of a work key (class or dedup text), in bytes (not characters). Keys are kept in
 /// memory beside the run, so they are bounded like the rest of a body.
 const MAX_WORK_KEY_PART: usize = 256;
 
@@ -96,7 +101,7 @@ struct WorkKeyBody {
 
 impl WorkKeyBody {
     /// The key, or the 422 `invalid-work-key` when the class is empty or a part is longer
-    /// than [`MAX_WORK_KEY_PART`].
+    /// than [`MAX_WORK_KEY_PART`] bytes.
     fn into_key(self) -> Result<WorkKey, ApiError> {
         let fits = |part: &str| part.len() <= MAX_WORK_KEY_PART;
         match !self.class.is_empty() && fits(&self.class) && fits(&self.dedup) {

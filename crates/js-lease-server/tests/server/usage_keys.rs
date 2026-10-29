@@ -196,4 +196,15 @@ async fn a_work_key_the_server_cannot_keep_is_refused_and_queues_nothing() {
     let edge = "x".repeat(256);
     let reply = queue(&h, &lease, &keyed(&edge, &edge)).await;
     assert_eq!(reply.status, 202, "{}", reply.body);
+    // The limit counts bytes: 128 two-byte characters fit, and one more byte does not.
+    let wide = "é".repeat(128);
+    assert_eq!(wide.len(), 256);
+    let reply = queue(&h, &lease, &keyed(&wide, &wide)).await;
+    assert_eq!(reply.status, 202, "{}", reply.body);
+    let over = format!("{wide}x");
+    for body in [keyed(&over, "d"), keyed("c", &over)] {
+        let reply = queue(&h, &lease, &body).await;
+        assert_eq!(reply.status, 422, "{}", reply.body);
+        assert_eq!(reply.json()["error"], "invalid-work-key");
+    }
 }
