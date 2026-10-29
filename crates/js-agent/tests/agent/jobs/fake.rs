@@ -290,6 +290,13 @@ impl ContainerRuntime for Runtime {
         Some(base.join(format!("docker-{run}.scope")))
     }
 
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        match self.0.lock().fails("egress") {
+            true => Err(failed("egress")),
+            false => Ok(()),
+        }
+    }
+
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError> {
         let world = &self.0;
         let mut state = world.lock();

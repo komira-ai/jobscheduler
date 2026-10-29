@@ -8,6 +8,8 @@ use std::sync::{Arc, OnceLock};
 use super::subid::{JobUsers, Mapping, RANGE_LEN};
 use crate::lifecycle::SLOTS;
 
+use super::egress::{ALLOW_MAX as EGRESS_MAX, Allow, DEFAULT_NFT, Egress};
+
 /// The base user and group of the slots when `--container-user` is not given. The user of
 /// slot `k` is this plus `k`, for the uid and the gid: `1000:1000` for slot 0, `1001:1001`
 /// for slot 1. These are ids of the job's user namespace, which the agent maps onto the
@@ -32,6 +34,15 @@ const CGROUP_MAX: usize = 256;
 /// The longest network name accepted.
 const NETWORK_NAME_MAX: usize = 64;
 
+/// The most `--container-add-host` entries accepted.
+pub const ADD_HOST_MAX: usize = 16;
+
+/// The longest host name accepted in `--container-add-host` (a DNS name).
+const DNS_NAME_MAX: usize = 253;
+
+/// The longest label of a DNS name.
+const DNS_LABEL_MAX: usize = 63;
+
 /// The longest engine host accepted.
 const HOST_MAX: usize = 256;
 
@@ -55,6 +66,32 @@ pub enum SettingsError {
     /// would let `container:<id>` or an option pass as one).
     #[error("--container-network: not a network name the agent will use")]
     Network,
+    /// A `--container-add-host` is not `<name>:<ip>` with a DNS name and an IPv4 or IPv6
+    /// address (`host-gateway` and any other word is refused), or names a host twice.
+    #[error(
+        "--container-add-host: not <dns-name>:<ip> (an IPv4 or IPv6 address), or a name given twice"
+    )]
+    AddHost,
+    /// More than [`ADD_HOST_MAX`] `--container-add-host` entries.
+    #[error("--container-add-host: at most 16 entries")]
+    AddHostCount,
+    /// A `--container-egress-allow` is not `IPv4[/24..32]:port` (no host bits, a port above
+    /// zero, nothing in 169.254.0.0/16).
+    #[error("--container-egress-allow: not <ipv4>[/24-32]:<port> outside 169.254.0.0/16")]
+    EgressAllow,
+    /// More than the most `--container-egress-allow` entries.
+    #[error("--container-egress-allow: at most 16 entries")]
+    EgressCount,
+    /// A named `--container-network` without any `--container-egress-allow`: a named network
+    /// is never run unchecked.
+    #[error("--container-network: a named network needs at least one --container-egress-allow")]
+    EgressMissing,
+    /// `--container-egress-allow` or `--container-nft` without a named `--container-network`.
+    #[error("--container-egress-allow and --container-nft: need a named --container-network")]
+    EgressNoNetwork,
+    /// `--container-nft` is not an absolute path to an executable file.
+    #[error("--container-nft: not an absolute UTF-8 path to an executable file")]
+    Nft,
     /// `--container-user` is not `<uid>:<gid>` with both numbers above zero.
     #[error("--container-user: not <uid>:<gid> of a user that is not root")]
     User,
@@ -152,6 +189,12 @@ pub struct Flags<'a> {
     pub pull: Option<&'a str>,
     /// `--container-tmp-size`.
     pub tmp_size: Option<&'a str>,
+    /// `--container-add-host`, each `<name>:<ip>`.
+    pub add_hosts: &'a [String],
+    /// `--container-egress-allow`, each `IP:PORT` or `CIDR:PORT`.
+    pub egress_allow: &'a [String],
+    /// `--container-nft`.
+    pub nft: Option<&'a str>,
     /// `--actions-cgroup`.
     pub actions_cgroup: Option<&'a Path>,
     /// `--container-subuid`.
@@ -170,6 +213,8 @@ pub struct Settings {
     host: Option<String>,
     pull: Pull,
     tmp_size: String,
+    add_hosts: Vec<String>,
+    egress: Option<Egress>,
     actions: Option<ActionsCgroup>,
     subuid: Option<String>,
     /// The mapping the runtime resolved when it opened; shared by the clones.
@@ -203,8 +248,12 @@ impl Settings {
                 flags.tmp_size,
                 flags.subuid,
             ];
-            let alone = others.iter().any(Option::is_some) || flags.actions_cgroup.is_some();
-            return match alone {
+            let given = others.iter().any(Option::is_some)
+                || !flags.add_hosts.is_empty()
+                || !flags.egress_allow.is_empty()
+                || flags.nft.is_some()
+                || flags.actions_cgroup.is_some();
+            return match given {
                 true => Err(SettingsError::NoBin),
                 false => Ok(None),
             };
@@ -213,6 +262,8 @@ impl Settings {
             .with_host(flags.host)?
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
+            .with_add_hosts(flags.add_hosts)?
+            .with_egress(flags.egress_allow, flags.nft)?
             .with_actions_cgroup(flags.actions_cgroup)?
             .with_subuid(flags.subuid.ok_or(SettingsError::NoSubuid)?)?
             .with_agent(agent.0, agent.1)
@@ -250,6 +301,8 @@ impl Settings {
             host: None,
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
+            add_hosts: Vec::new(),
+            egress: None,
             actions: None,
             subuid: None,
             resolved: Arc::new(OnceLock::new()),
@@ -285,6 +338,73 @@ impl Settings {
     pub fn with_tmp_size(self, size: Option<&str>) -> Result<Self, SettingsError> {
         let tmp_size = size.map_or(Ok(self.tmp_size.clone()), tmp_size)?;
         Ok(Self { tmp_size, ..self })
+    }
+
+    /// The static name-to-address entries every container gets (`--add-host`), each
+    /// `<name>:<ip>`. A network without DNS resolves nothing else.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::AddHostCount`] for more than [`ADD_HOST_MAX`];
+    /// [`SettingsError::AddHost`] for an entry that is not a DNS name and an IP address,
+    /// or a name given twice.
+    pub fn with_add_hosts(self, entries: &[String]) -> Result<Self, SettingsError> {
+        if entries.len() > ADD_HOST_MAX {
+            return Err(SettingsError::AddHostCount);
+        }
+        let add_hosts = entries
+            .iter()
+            .map(|entry| add_host(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut names: Vec<String> = add_hosts
+            .iter()
+            .filter_map(|entry| entry.split_once(':').map(|(n, _)| n.to_owned()))
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        match names.len() == add_hosts.len() {
+            true => Ok(Self { add_hosts, ..self }),
+            false => Err(SettingsError::AddHost),
+        }
+    }
+
+    /// The endpoints a named network is limited to (`--container-egress-allow`) and the
+    /// `nft` program that reads the firewall back (`--container-nft`, by default
+    /// [`DEFAULT_NFT`]). With a named network at least one endpoint is required, so such a
+    /// network never runs unchecked; with the default network there is nothing to check
+    /// and neither flag may be given. [`Settings::new`] leaves the check off: a test's
+    /// builder.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::EgressMissing`], [`SettingsError::EgressNoNetwork`],
+    /// [`SettingsError::EgressAllow`], [`SettingsError::EgressCount`] or
+    /// [`SettingsError::Nft`].
+    pub fn with_egress(self, allow: &[String], nft: Option<&str>) -> Result<Self, SettingsError> {
+        let named = self.network != DEFAULT_NETWORK;
+        match (named, allow.is_empty(), nft.is_some()) {
+            (false, true, false) => return Ok(self),
+            (false, ..) => return Err(SettingsError::EgressNoNetwork),
+            (true, true, _) => return Err(SettingsError::EgressMissing),
+            (true, false, _) => {}
+        }
+        if allow.len() > EGRESS_MAX {
+            return Err(SettingsError::EgressCount);
+        }
+        let allow = allow
+            .iter()
+            .map(|text| Allow::parse(text).ok_or(SettingsError::EgressAllow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let nft = nft.unwrap_or(DEFAULT_NFT);
+        fs::metadata(nft)
+            .ok()
+            .filter(|meta| nft.starts_with('/') && meta.is_file())
+            .filter(|meta| meta.permissions().mode() & 0o111 != 0)
+            .ok_or(SettingsError::Nft)?;
+        Ok(Self {
+            egress: Some(Egress::new(allow, nft)),
+            ..self
+        })
     }
 
     /// The control group that holds the containers, when one is given. It is checked as
@@ -421,6 +541,16 @@ impl Settings {
         &self.tmp_size
     }
 
+    /// The `<name>:<ip>` entries of `--container-add-host`, lower-cased names.
+    pub fn add_hosts(&self) -> &[String] {
+        &self.add_hosts
+    }
+
+    /// The egress check, when the network is a named one.
+    pub fn egress(&self) -> Option<&Egress> {
+        self.egress.as_ref()
+    }
+
     /// The control group directory that holds the containers (`--actions-cgroup`), when one
     /// is given.
     pub fn actions_cgroup(&self) -> Option<&str> {
@@ -443,21 +573,6 @@ impl Settings {
     pub fn chown_scratch(&self) -> Option<(u32, u32)> {
         self.chown
     }
-
-    /// What the operator should know about this configuration, one sentence each, for the
-    /// agent to print when it starts.
-    pub fn warnings(&self) -> Vec<String> {
-        let reach = self.network != DEFAULT_NETWORK;
-        reach
-            .then(|| {
-                format!(
-                    "--container-network {}: a job can reach whatever that network reaches, the host's metadata endpoint and the internal network included, unless the network or the host's firewall stops it",
-                    self.network
-                )
-            })
-            .into_iter()
-            .collect()
-    }
 }
 
 /// `name` when it is a plain network name other than `host`.
@@ -469,6 +584,29 @@ fn network_name(name: &str) -> Result<&str, SettingsError> {
     Some(name)
         .filter(|name| shaped && !name.eq_ignore_ascii_case("host"))
         .ok_or(SettingsError::Network)
+}
+
+/// `<name>:<ip>` with a DNS name (labels of letters, digits and inner hyphens) and an
+/// IPv4 or IPv6 address; the name is lower-cased, the address is written back in its
+/// canonical form. `host-gateway` is an IP position word of the engines and is refused
+/// because it is not an address.
+fn add_host(text: &str) -> Result<String, SettingsError> {
+    let (name, ip) = text.split_once(':').ok_or(SettingsError::AddHost)?;
+    let label = |label: &str| {
+        (1..=DNS_LABEL_MAX).contains(&label.len())
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    };
+    let sound = name.len() <= DNS_NAME_MAX
+        && name.split('.').all(label)
+        && !name.eq_ignore_ascii_case("host-gateway");
+    let ip: std::net::IpAddr = ip.parse().map_err(|_| SettingsError::AddHost)?;
+    sound
+        .then(|| format!("{}:{ip}", name.to_ascii_lowercase()))
+        .ok_or(SettingsError::AddHost)
 }
 
 /// `<uid>:<gid>` of numbers above zero.
