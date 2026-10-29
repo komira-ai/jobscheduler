@@ -123,7 +123,7 @@ fn start_command_wire_form() {
         "type": "start",
         "run_id": "run-1",
         "lease_id": "1-1",
-        "image": "ubuntu:24.04",
+        "image": "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "args": ["make", "all"],
         "limits": {
             "cpu_millis": 2000,

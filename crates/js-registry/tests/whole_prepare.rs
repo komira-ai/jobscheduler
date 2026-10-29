@@ -484,7 +484,8 @@ fn job(run: &str) -> JobSpec {
     JobSpec {
         run_id: run.into(),
         lease_id: String::new(),
-        image: "busybox:1".into(),
+        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
         args: Vec::new(),
         limits: Limits {
             cpu_millis: 1000,

@@ -113,7 +113,7 @@ fn the_contribution_names_the_key_by_slot_and_describe_is_the_same_steps() {
     };
     assert!(argv.contains(&format!("--auth-key=file:{AUTH_KEY_PATH}")));
     assert!(argv.contains(&format!("--hostname={host}")));
-    assert!(argv.contains(&"--accept-dns=false".to_owned()));
+    assert!(argv.contains(&"--accept-dns=true".to_owned()));
     assert_eq!(
         steps.last(),
         Some(&BootStep::Run(vec![

@@ -954,7 +954,10 @@ D65 with no gaps; D26 (no recommendation yet) is open. A superseded decision say
 - **K5. One tenant fills a pool.** Without tenant caps in jobscheduler, one tenant's leases can drive a pool to its `max_machines`. `max_machines` is the
   overload bound; the cloud's quotas are the second, and they refuse an `acquire` (`Refused(quota)`). jobscheduler adds no third limit.
 - **K6. Secrets.** `secret_env` references must never reach the run record, labels or logs. The record stores references only. No secret
-  goes in user data or in an instance tag; an agent's join credential is short-lived or read from a file the host already has.
+  goes in an instance tag or an image. User data carries a secret only for a kind with no signed instance identity (Lambda), and
+  then only a one-time join token that lives minutes and a network key that lives ten minutes, crossing TLS to the provider, never logged,
+  the token dead after the first hello (registration.md, Host credential); an agent's join credential is otherwise short-lived or read
+  from a file the host already has. Why: pools-providers-network.md, 9.
 - **K7. Tenancy and identity.** The scheduler has no tenant concept (3, 4.1). A tenant must come from an authenticated caller, not a
   request field. kbf already authenticates frontends and nodes (`crates/kbf-auth`, `crates/kbf-oidc`); the design reuses that identity
   path and does not add a second. Scheduled triggers, pool scaling and the reaper run with no caller present, so they need a delegated
