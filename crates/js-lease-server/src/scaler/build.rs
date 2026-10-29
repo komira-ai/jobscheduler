@@ -4,7 +4,6 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use js_elastic::Artifact;
 use js_registry::OsSessions;
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
@@ -32,16 +31,6 @@ pub(crate) struct Parts<'a> {
     pub(crate) health: Arc<Mutex<Health>>,
     /// The pool's network mode, or why it could not be built.
     pub(crate) mode: Result<Arc<dyn NetworkMode>, NetworkError>,
-}
-
-/// What a plan-mode pool is given where a live pool needs a pin it has not been given. A
-/// plan launches nothing, so nothing renders it; a live pool without one is refused when
-/// the file is read.
-fn unpinned() -> Artifact {
-    Artifact {
-        url: String::new(),
-        sha256: [0; 32],
-    }
 }
 
 /// The network mode the scaler launches with. A pool in `plan` mode launches nothing, so
@@ -91,13 +80,12 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
     let records = file.load()?;
     let mode = network_mode(parts.mode, plan)?;
     let url = parts.advertise_url.unwrap_or_default();
-    let agent = plan.agent.clone().unwrap_or_else(unpinned);
     let launcher = Launcher::new(
         Arc::clone(&plan.provider),
         mode,
         plan.scheduler.clone(),
         url.to_owned(),
-        agent,
+        plan.agent.clone(),
     );
     let registry = parts.agents.registry.clone();
     let live = Live::new(

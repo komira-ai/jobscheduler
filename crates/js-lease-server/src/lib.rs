@@ -93,8 +93,9 @@
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been
 //! idle for `idle` (ten minutes unless the file says). A `live` pool also needs `agent =
-//! { url = "https://...", sha256 = "<64 hex digits>" }`, the build of the agent the
-//! launched machine downloads and checks, and `server.advertise_url`; with a Tailscale
+//! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
+//! the launched machine downloads and checks, one for each CPU architecture its offers
+//! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale
 //! network it needs `binary = { url = ..., sha256 = ... }` for the Tailscale build too
 //! (`api_url` there names another Tailscale API, for a test). After a boot that fails
 //! the pool launches nothing for ten minutes.

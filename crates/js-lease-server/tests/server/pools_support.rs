@@ -169,10 +169,10 @@ impl ElasticProvider for Handle {
     }
 }
 
-/// The pin of the agent a `live` pool needs: an `https` address and a hash.
+/// The pin of the agent for x86_64: an `https` address and a hash.
 fn agent_pin() -> String {
     format!(
-        "{{ url = {}, sha256 = {} }}",
+        "{{ x86_64 = {{ url = {}, sha256 = {} }} }}",
         quote("https://js.example:7301/agent"),
         quote(&"ab".repeat(32))
     )
@@ -313,7 +313,7 @@ pub enum Net {
 pub struct Options {
     /// `server.advertise_url`.
     pub advertise: Option<&'static str>,
-    /// Whether the agent binary's digest is known.
+    /// Whether the pool pins an agent binary for x86_64 (a `live` pool needs it).
     pub digest: bool,
     /// The network mode.
     pub net: Net,
@@ -378,9 +378,11 @@ impl Rig {
             .set("provider", &provider)
             .set("join_token_file", &quoted(&joins));
         let pool = match options.live {
-            true => pool
-                .set("launch", &quote("live"))
-                .set("agent", &agent_pin()),
+            true => pool.set("launch", &quote("live")),
+            false => pool,
+        };
+        let pool = match options.digest {
+            true => pool.set("agent", &agent_pin()),
             false => pool,
         };
         let pool = match options.net {
@@ -397,9 +399,6 @@ impl Rig {
         NEXT.with(|next| *next.borrow_mut() = Some(cloud.clone()));
         let config = Config::from_config_file(&path, &kinds(), &OwnerOnlyFiles, clock()).unwrap();
         let mut inputs = LaunchInputs::default();
-        if options.digest {
-            inputs.agent_sha256.insert("x86_64".to_owned(), [0xab; 32]);
-        }
         match options.net {
             Net::Fake => inputs.network = Some(net.clone()),
             Net::Tailscale { pinned: true } => {

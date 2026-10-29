@@ -158,8 +158,10 @@ pub struct ElasticPlan {
     pub exec: Option<ExecMode>,
     /// How a launched host reaches the server.
     pub network: NetworkPlan,
-    /// The agent the host downloads, with its hash. Required when the pool launches.
-    pub agent: Option<Artifact>,
+    /// The agent the host downloads, with its hash, by CPU architecture (`x86_64`,
+    /// `aarch64`). A pool that launches needs at least one; an offer of an architecture
+    /// with no entry is never launched with another's.
+    pub agent: BTreeMap<String, Artifact>,
     /// The id that marks what this scheduler launches (`server.scheduler_id`).
     pub scheduler: SchedulerId,
     /// The pool's name as the registry knows it.
@@ -778,8 +780,8 @@ impl Elastic<'_> {
         }
         let network = read_network(keys.network, format!("{}network.", s.head))?;
         let agent = match keys.agent {
-            Some(table) => Some(read_artifact(table, format!("{}agent.", s.head))?),
-            None => None,
+            Some(table) => read_agents(table, format!("{}agent.", s.head))?,
+            None => BTreeMap::new(),
         };
         let live = launch == Launch::Live;
         let unpinned = match &network {
@@ -789,7 +791,7 @@ impl Elastic<'_> {
         if unpinned {
             return Err(s.fail("network.binary", LIVE_NEEDS));
         }
-        if live & agent.is_none() {
+        if live & agent.is_empty() {
             return Err(s.fail("agent", LIVE_NEEDS));
         }
         let tokens = match &keys.join_token_file {
@@ -843,6 +845,32 @@ impl Elastic<'_> {
 
 /// What a file with no pin for something a launched host downloads is told.
 const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
+
+/// The agent pins by architecture: each key of `table` is an architecture (lower-case
+/// letters, digits and `_`) and holds a pin.
+fn read_agents(
+    table: toml::Table,
+    head: String,
+) -> Result<BTreeMap<String, Artifact>, StartupError> {
+    let mut agents = BTreeMap::new();
+    for (arch, value) in table {
+        let place = format!("{head}{arch}");
+        let letters = arch
+            .chars()
+            .all(|c| c.is_ascii_lowercase() | c.is_ascii_digit() | (c == '_'));
+        if !letters | arch.is_empty() {
+            return Err(StartupError::at(
+                place,
+                "an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64",
+            ));
+        }
+        let toml::Value::Table(pin) = value else {
+            return Err(StartupError::at(place, "must be a table { url, sha256 }"));
+        };
+        agents.insert(arch, read_artifact(pin, format!("{head}{arch}."))?);
+    }
+    Ok(agents)
+}
 
 /// A file a launched host downloads: an `https://` `url` and its `sha256`.
 fn read_artifact(table: toml::Table, head: String) -> Result<Artifact, StartupError> {

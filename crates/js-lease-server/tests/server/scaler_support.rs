@@ -120,7 +120,7 @@ pub fn text_with(scratch: &Scratch, launch: &str, boot: &str, more: &[(&str, &st
         quoted(&key)
     );
     let agent = format!(
-        "{{ url = {}, sha256 = {} }}",
+        "{{ x86_64 = {{ url = {}, sha256 = {} }} }}",
         quote(AGENT_URL),
         quote(AGENT_SHA256)
     );
@@ -180,6 +180,14 @@ pub fn token_in(script: &str) -> String {
         .find(|line| line.starts_with(head) && line.ends_with("/etc/jobscheduler/token"))
         .expect("the script writes the token");
     line[head.len()..].split("' > ").next().unwrap().to_owned()
+}
+
+/// The id the agent of a launch registers under, as the unit in the user data names it
+/// (`--host-id "<id>"`).
+pub fn host_id_in(script: &str) -> String {
+    let head = "--host-id \"";
+    let at = script.find(head).expect("the unit names the host id") + head.len();
+    script[at..].split('"').next().unwrap().to_owned()
 }
 
 /// The name `scheduler` gives the machine of `acquire`.

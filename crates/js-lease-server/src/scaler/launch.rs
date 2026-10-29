@@ -2,6 +2,7 @@
 //! provider. This is the only place that holds both a network mode and a provider; neither
 //! knows the other. The provider receives the payload and nothing else.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,25 +29,25 @@ pub struct Launcher {
     mode: Arc<dyn NetworkMode>,
     scheduler: SchedulerId,
     scheduler_url: String,
-    agent: Artifact,
+    agents: BTreeMap<String, Artifact>,
 }
 
 impl Launcher {
-    /// A launcher for the machines of `scheduler`: each is told to download `agent`, to
+    /// A launcher for the machines of `scheduler`: each is told to download the entry of `agents` for its offer's architecture, to
     /// dial `scheduler_url`, and to join the network as `mode` says.
     pub fn new(
         provider: Arc<dyn ElasticProvider>,
         mode: Arc<dyn NetworkMode>,
         scheduler: SchedulerId,
         scheduler_url: String,
-        agent: Artifact,
+        agents: BTreeMap<String, Artifact>,
     ) -> Self {
         Self {
             provider,
             mode,
             scheduler,
             scheduler_url,
-            agent,
+            agents,
         }
     }
 
@@ -59,6 +60,9 @@ impl Launcher {
     /// slot twice) is a [`RefusalCode::Shape`] refusal, which nothing retries.
     pub fn acquire(&self, plan: &AcquirePlan, token: Secret) -> Acquired {
         let host = HostName::derive(&self.scheduler, &plan.acquire);
+        let Some(agent) = self.agents.get(&plan.offer.arch) else {
+            return Self::unpinned(&plan.offer.arch);
+        };
         let launch = LaunchCtx {
             pool: &plan.pool,
             host: &host,
@@ -69,7 +73,7 @@ impl Launcher {
             Err(err) => return self.deferred(&plan.pool, &err),
         };
         let boot = BootPlan {
-            agent: self.agent.clone(),
+            agent: agent.clone(),
             scheduler_url: self.scheduler_url.clone(),
             pool: plan.pool.clone(),
             host: host.clone(),
@@ -101,6 +105,15 @@ impl Launcher {
         if let Err(err) = self.mode.forget(host) {
             warn!(%host, %err, "cannot forget the network device of a released host");
         }
+    }
+
+    /// The refusal of a launch of an architecture the pool has no agent for: never another
+    /// architecture's binary. Nothing retries it.
+    fn unpinned(arch: &str) -> Acquired {
+        Acquired::Refused(Refusal {
+            code: RefusalCode::Shape,
+            reason: Reason::Boot(format!("no agent is pinned for the architecture {arch:?}")),
+        })
     }
 
     fn deferred(&self, pool: &str, err: &NetworkError) -> Acquired {

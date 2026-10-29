@@ -17,7 +17,12 @@
 //! agent's unit. The first command is a `trap` on `EXIT` that removes the secret files
 //! the steps wrote and the traces cloud-init leaves of the script.
 //!
-//! The unit names the container program, the state root and the scratch root
+//! The unit registers the agent under the machine's name (`--host-id`), which is how the
+//! scaler finds the host of a record; pulls an image only when it is missing
+//! (`--container-pull missing`); and names a hook program the bootstrap writes
+//! ([`GPU_TOOLKIT_HOOK_PATH`], mode 0700, which runs `nvidia-container-cli info`, so it
+//! fails without a working driver and toolkit). The flag is on every offer: the agent runs
+//! the hook only when the host offers a GPU. The unit names the container program, the state root and the scratch root
 //! ([`CONTAINER_BIN`], [`STATE_ROOT`], [`SCRATCH_ROOT`] of `js-elastic`), and requires the
 //! scratch root's mount (`RequiresMountsFor=`), so a machine whose provider did not mount
 //! it does not start the agent. The script makes the two roots' directories; what puts a
@@ -59,6 +64,9 @@ pub const INSTANCE_PATH: &str = "/etc/jobscheduler/instance";
 
 /// Where the agent is installed.
 pub const AGENT_PATH: &str = "/usr/local/bin/js-agent";
+
+/// Where the GPU toolkit hook is installed.
+pub const GPU_TOOLKIT_HOOK_PATH: &str = "/usr/local/lib/js-agent/gpu-toolkit-hook";
 
 /// What cloud-init leaves of the script and its user data, removed by the `EXIT` trap.
 /// Each entry is a fixed, shell-safe word and some are globs, so the list is written
@@ -283,6 +291,13 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     ));
     w.fetch(&plan.agent.url, &plan.agent.sha256, AGENT_PATH);
     w.line(&format!("chmod 0755 {AGENT_PATH}"));
+    w.line("# gpu toolkit hook");
+    w.line("install -d -m 0755 -- /usr/local/lib/js-agent");
+    w.line(&format!("cat > {GPU_TOOLKIT_HOOK_PATH} <<'HOOK'"));
+    w.line("#!/bin/sh");
+    w.line("exec nvidia-container-cli info");
+    w.line("HOOK");
+    w.line(&format!("chmod 0700 {GPU_TOOLKIT_HOOK_PATH}"));
     w.line("cat > /etc/systemd/system/js-agent.service <<'UNIT'");
     w.line("[Unit]");
     w.line("Description=jobscheduler agent");
@@ -293,9 +308,10 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("[Service]");
     let _ = writeln!(
         w.out,
-        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --container-bin {CONTAINER_BIN} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
+        "ExecStart={AGENT_PATH} --server {} --token-file {TOKEN_PATH} --instance-file {INSTANCE_PATH} --pool {} --host-id {} --container-bin {CONTAINER_BIN} --container-pull missing --gpu-toolkit-hook {GPU_TOOLKIT_HOOK_PATH} --state-root {STATE_ROOT} --scratch-root {SCRATCH_ROOT}",
         unit_quoted(&plan.scheduler_url),
-        unit_quoted(&plan.pool)
+        unit_quoted(&plan.pool),
+        unit_quoted(plan.host.as_str())
     );
     w.line("Restart=always");
     w.line("RestartSec=5");

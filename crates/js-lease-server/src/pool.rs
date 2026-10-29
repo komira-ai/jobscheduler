@@ -23,7 +23,7 @@ use serde::Serialize;
 
 use crate::adapt::SharedClock;
 use crate::bootstrap::{Fill, JOIN_TOKEN_SLOT, render};
-use crate::checks::{Checker, Health};
+use crate::checks::{AgentPins, Checker, Health};
 use crate::config::TlsFiles;
 use crate::file::{ElasticPlan, NetworkPlan};
 use crate::kinds::Floor;
@@ -43,9 +43,6 @@ const PREVIEW: &str = "preview";
 /// it from what it ships; a test or an embedder may replace any of it.
 #[derive(Default)]
 pub struct LaunchInputs {
-    /// The SHA-256 of the agent binary the service serves, by CPU architecture. An offer
-    /// of an architecture with no entry has no plan shown: it says why.
-    pub agent_sha256: BTreeMap<String, [u8; 32]>,
     /// The Tailscale static build a `tailscale` pool fetches onto its hosts. None is
     /// pinned in this release, so without one a `tailscale` pool is unavailable and says
     /// so.
@@ -79,7 +76,7 @@ pub(crate) struct Pool {
     floor: Floor,
     pub(crate) floor_demand: Demand,
     advertise: Option<String>,
-    agent_sha256: BTreeMap<String, [u8; 32]>,
+    agents: BTreeMap<String, Artifact>,
 }
 
 /// The network mode of a pool: the stand-in when one is given, else the mode the table
@@ -160,7 +157,7 @@ impl Pool {
             floor: plan.floor.clone(),
             floor_demand: plan.floor_demand.clone(),
             advertise: setup.advertise,
-            agent_sha256: setup.inputs.agent_sha256,
+            agents: plan.agent.clone(),
         }
     }
 
@@ -176,6 +173,7 @@ impl Pool {
             provider: self.provider.clone(),
             mode: self.mode.clone(),
             floor: self.floor.clone(),
+            pins: (self.launch == "live").then(|| AgentPins(self.agents.keys().cloned().collect())),
             clock,
             health: self.health.clone(),
         }
@@ -214,7 +212,7 @@ impl Pool {
         let Some(base) = self.advertise.as_deref() else {
             return Err("server.advertise_url is not set".to_owned());
         };
-        let Some(sha256) = self.agent_sha256.get(&offer.arch) else {
+        let Some(agent) = self.agents.get(&offer.arch) else {
             return Err(format!(
                 "the agent binary for {} is not available",
                 offer.arch
@@ -231,10 +229,7 @@ impl Pool {
             valid_for: KEY_VALID_FOR,
         };
         let plan = BootPlan {
-            agent: Artifact {
-                url: format!("{base}/v1/bootstrap/agent/{}", offer.arch),
-                sha256: *sha256,
-            },
+            agent: agent.clone(),
             scheduler_url: base.to_owned(),
             pool: self.name.clone(),
             network: mode.describe(&ctx),

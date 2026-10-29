@@ -116,7 +116,7 @@ fn exec_can_be_opted_out_and_launch_can_be_live() {
         "listen = \"127.0.0.1:0\"\nagent_listen = \"127.0.0.2:0\"\nadvertise_url = \"https://js.example:7301\"",
     );
     let pin = format!(
-        "{{ url = \"https://pkgs.example.org/agent\", sha256 = \"{}\" }}",
+        "{{ x86_64 = {{ url = \"https://pkgs.example.org/agent\", sha256 = \"{}\" }} }}",
         "5a".repeat(32)
     );
     let pool = PoolText::elastic(&scratch).set("exec", "\"none\"");
