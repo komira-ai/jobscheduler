@@ -114,7 +114,14 @@ impl Lifecycle {
         let owned: Vec<&str> = kept.chain(held).collect();
         this.config.scratch.sweep(owned.iter().copied());
         if let Some(files) = &this.config.files {
-            files.sweep(owned.iter().copied());
+            // A root that cannot be listed leaves earlier runs' secrets in place; say so.
+            if let Err(why) = files.sweep(owned.iter().copied()) {
+                events.push(Event::Finding(Finding {
+                    run_id: None,
+                    code: code::SCRATCH_FAILED,
+                    message: format!("the run files root cannot be swept: {why}"),
+                }));
+            }
         }
         Ok((this, events))
     }

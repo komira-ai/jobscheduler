@@ -21,7 +21,7 @@
 //!
 //! | code | what | kind |
 //! |---|---|---|
-//! | `process-as-job-user` | a process that was not there at the baseline, owned by the user the containers run as, outside the containers of the agent's other jobs | residue |
+//! | `process-as-job-user` | a process that was not there at the baseline whose host uid is in the range the jobs' user namespaces are mapped onto (`--container-subuid`: 65536 uids, so any process of any job's user, root included), outside the containers of the agent's other jobs | residue |
 //! | `daemonised-child` | a process that was not there at the baseline and whose parent is `init` (pid 1), outside the containers of the agent's other jobs: what a child that outlived its parent looks like | residue |
 //! | `new-mount` | a mount that was not there at the baseline (file system, mount point and source), other than those of the agent's other jobs' containers | residue |
 //! | `user-changed`, `group-changed` | a line added to, removed from or changed in `/etc/passwd` or `/etc/group` | residue |
@@ -60,9 +60,18 @@
 //! is tainted as unchecked (see [`CliRuntime`](crate::cli_runtime::CliRuntime)). A
 //! container that has already exited when the agent looks has no process left to find and
 //! is not checked this way. `--container-host` takes only a socket on this machine, for the
-//! same reason. An
-//! engine with user-namespace remapping (`userns-remap`) is not supported: the container
-//! user shows as another uid on the host, and `process-as-job-user` would miss it.
+//! same reason.
+//!
+//! Every job runs in a user namespace mapped onto a subordinate range of the host, so the
+//! processes of a job have host uids in that range and no other. These requirements hold
+//! with such an engine: the agent still has to be in the pid and mount namespaces of
+//! `init` (the engine's daemon is, too, and it reports `State.Pid` as a host pid), and the
+//! user namespace of the containers is a child of the host's, which root reads the
+//! `/proc/<pid>/ns` links of. The checks use the range the runtime resolved when it opened
+//! (they never read `/etc/subuid` again, so an edit of it while the agent runs changes
+//! nothing), and do not start without one. Docker's daemon is asked again before each
+//! container is created whether it still remaps onto that range (see
+//! [`CliRuntime`](crate::cli_runtime::CliRuntime)).
 //!
 //! # What is not checked
 //!
@@ -158,6 +167,7 @@ mod view;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use crate::cli_runtime::{IdRange, JobUsers};
 use crate::lifecycle::{CheckFinding, CheckHook, Finished};
 
 pub use proc::{DirLister, Entry, Listing, PROCESS_CAP, ProcHost, SystemDirs, WATCH_ENTRY_CAP};
@@ -421,24 +431,30 @@ fn hosts_own_mount(mount: &Mount) -> bool {
 /// directories, and the baseline.
 pub struct Integrity {
     view: Box<dyn HostView>,
-    uid: u32,
+    users: IdRange,
     watch: Vec<PathBuf>,
     baseline: Snapshot,
 }
 
 impl Integrity {
-    /// The checks for a host read through `view`, whose containers run as the user `uid`,
-    /// with the directories `watch` watched, and the baseline taken now.
+    /// The checks for a host read through `view`, whose containers' processes are those of
+    /// `users`, with the directories `watch` watched, and the baseline taken now.
     ///
     /// # Errors
     ///
     /// The host cannot be read whole, so there is nothing to compare with later: the text
-    /// says which input failed.
-    pub fn start(view: Box<dyn HostView>, uid: u32, watch: Vec<PathBuf>) -> Result<Self, String> {
+    /// says which input failed. A mapped range that `view` shows is not acceptable is one
+    /// too.
+    pub fn start(
+        view: Box<dyn HostView>,
+        users: JobUsers,
+        watch: Vec<PathBuf>,
+    ) -> Result<Self, String> {
         require_host_namespaces(&|path| view.link(path), &|path| view.file(path))?;
+        let users = users.range().map_err(|why| why.to_string())?;
         let mut this = Self {
             view,
-            uid,
+            users,
             watch,
             baseline: Snapshot::default(),
         };
@@ -504,7 +520,7 @@ impl Integrity {
                     && !hosts_own_process(&process.cgroup)
             })
             .collect();
-        let as_job = strays.iter().filter(|stray| stray.uid == self.uid);
+        let as_job = strays.iter().filter(|stray| self.users.contains(stray.uid));
         let daemonised = strays.iter().filter(|stray| stray.ppid == 1);
         let new_mounts = now
             .mounts

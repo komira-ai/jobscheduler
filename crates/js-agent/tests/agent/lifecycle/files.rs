@@ -289,3 +289,76 @@ fn an_agent_without_a_files_root_refuses_files() {
     assert_eq!(events, ["refused r1 files-unsupported"]);
     assert!(h.fake.created().is_empty());
 }
+
+/// A restart whose files root cannot be listed (it was replaced by a file) records a
+/// finding instead of passing silently, and the agent still starts. Catches a failed sweep
+/// that leaves earlier runs' secrets in place with nothing in the log.
+#[test]
+fn a_restart_that_cannot_sweep_the_files_root_says_so() {
+    let mut h = Harness::new("files-sweep-fails");
+    let root = files_root(&h).path().to_owned();
+    fs::remove_dir(&root).unwrap();
+    fs::write(&root, "in the way").unwrap();
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["finding - scratch-failed"]);
+}
+
+/// A check hook that notes, whenever the host is idle, what the files and scratch roots
+/// hold at that moment.
+struct Probe {
+    roots: std::rc::Rc<std::cell::RefCell<Vec<std::path::PathBuf>>>,
+    idle_saw: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+impl js_agent::lifecycle::CheckHook for Probe {
+    fn run(
+        &mut self,
+        _job: &js_agent::lifecycle::Finished<'_>,
+    ) -> Result<(), js_agent::lifecycle::CheckFinding> {
+        Ok(())
+    }
+
+    fn idle(&mut self) {
+        let held: usize = self
+            .roots
+            .borrow()
+            .iter()
+            .map(|root| fs::read_dir(root).unwrap().count())
+            .sum();
+        self.idle_saw.borrow_mut().push(held);
+    }
+}
+
+/// The order of a start on an idle host is: the baseline is retaken (`idle`), then the
+/// scratch directory is made, then the files are written, then the container is created.
+/// The probe sees both roots empty when the baseline is taken, and the files directory
+/// exists by the time the runtime is called. Catches files written before the baseline,
+/// which would become part of what the post-job checks treat as the host's own.
+#[test]
+fn the_baseline_is_retaken_before_the_scratch_directory_and_the_files_exist() {
+    let roots = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let idle_saw = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let probe = Probe {
+        roots: roots.clone(),
+        idle_saw: idle_saw.clone(),
+    };
+    let mut h = Harness::with(
+        "files-order",
+        Options {
+            hook: Some(Box::new(probe)),
+            ..Options::default()
+        },
+    );
+    roots.borrow_mut().extend([
+        files_root(&h).path().to_owned(),
+        h.config.scratch.path().to_owned(),
+    ]);
+    h.start(with_files("r1"));
+    assert_eq!(
+        *idle_saw.borrow(),
+        [0],
+        "both roots were empty at the baseline"
+    );
+    assert!(files_dir(&h, "r1").is_dir() && h.scratch_of("r1").is_dir());
+    assert_eq!(h.fake.created().len(), 1);
+}

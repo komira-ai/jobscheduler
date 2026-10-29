@@ -136,6 +136,19 @@ pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 /// configuration says otherwise, in milliseconds.
 pub const DEFAULT_GRACE_MS: u64 = 15_000;
 
+/// The longest `Retry-After` an agent obeys: a server that asks for more is not allowed
+/// to silence the host for longer. It bounds the wait before an agent's next hello, so a
+/// server that restarts must allow for it before it reads a missing host as gone.
+pub const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The hellos one credential may say in a burst, unless the server's configuration says
+/// otherwise (`--agent-hello-burst`).
+pub const DEFAULT_HELLO_BURST: u32 = 60;
+
+/// How often a credential that spent its burst is allowed one more hello, unless the
+/// server's configuration says otherwise (`--agent-hello-interval`).
+pub const DEFAULT_HELLO_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Whether a grace period is long enough for the heartbeat interval: more than two
 /// intervals, so one lost heartbeat never makes a live host look lost.
 pub const fn grace_covers_heartbeats(heartbeat_interval_ms: u64, grace_ms: u64) -> bool {

@@ -228,6 +228,8 @@ impl Run {
     fn ask_stop(&mut self) {
         if let (Life::Queued | Life::Held(_), Stop::No) = (self.life, self.stop) {
             self.stop = Stop::Wanted;
+            // A stopped run's start is never sent, so its files are not kept.
+            self.spec.files = Vec::new();
         }
     }
 
@@ -693,5 +695,42 @@ mod tests {
         let reply = runs.answer(&host, &listed, open, (&book, 0));
         assert!(reply.commands.is_empty());
         assert!(runs.map["r1"].spec.files.is_empty());
+    }
+
+    /// Asserts that a queued run that is stopped before the host lists it drops its files
+    /// at once and its start is never sent. It catches secrets kept in memory for a run
+    /// that can no longer start.
+    #[test]
+    fn a_stopped_queued_run_drops_its_files() {
+        use js_agent_wire::RunFile;
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let lease = LeaseId::new(1, 1);
+        let mut runs = Runs::default();
+        runs.admit(&host, &lease, spec, &shape, (0, 0)).unwrap();
+        runs.stop_run(&lease, "r1").unwrap();
+        assert!(runs.map["r1"].spec.files.is_empty());
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        let reply = runs.answer(&host, &beat(), open, (&book, 0));
+        assert!(
+            reply
+                .commands
+                .iter()
+                .all(|c| !matches!(c, Command::Start(_))),
+            "{:?}",
+            reply.commands
+        );
     }
 }

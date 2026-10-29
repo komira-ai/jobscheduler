@@ -111,9 +111,13 @@ impl FilesRoot {
     /// Removes every directory of the root that is not a run in `kept`, and returns how
     /// many it removed. For the start of the agent: what an earlier process left for a run
     /// that no longer has a container is garbage, and a kept run keeps its files.
-    pub fn sweep<'a>(&self, kept: impl IntoIterator<Item = &'a str>) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// The root cannot be listed. An entry that cannot be removed stays and is not counted.
+    pub fn sweep<'a>(&self, kept: impl IntoIterator<Item = &'a str>) -> io::Result<usize> {
         let kept: Vec<&str> = kept.into_iter().collect();
         let keep = |name: &[u8]| kept.iter().any(|run| run.as_bytes() == name);
-        sweep_entries(&self.path, &keep).unwrap_or_default()
+        sweep_entries(&self.path, &keep)
     }
 }
