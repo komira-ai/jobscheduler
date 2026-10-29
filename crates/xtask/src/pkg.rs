@@ -146,7 +146,9 @@ fn tar_entries(gz: &[u8]) -> Result<Vec<(String, tar::Header, Vec<u8>)>, Error> 
         .map_err(|e| Error::Malformed(format!("a member that is not gzip: {e}")))?;
     let bad = |e: std::io::Error| Error::Malformed(format!("a member that is not a tar: {e}"));
     let mut entries = Vec::new();
-    for entry in tar::Archive::new(&raw[..]).entries().map_err(bad)? {
+    // Only an archive already read from has no entries to list.
+    let mut archive = tar::Archive::new(&raw[..]);
+    for entry in archive.entries().expect("a fresh archive") {
         let mut entry = entry.map_err(bad)?;
         let path = String::from_utf8_lossy(&entry.path_bytes())
             .trim_start_matches("./")
