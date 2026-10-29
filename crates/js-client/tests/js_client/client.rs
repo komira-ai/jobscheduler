@@ -173,16 +173,14 @@ fn the_flags_are_checked_in_order() {
     );
 }
 
-/// Asserts that an `https://` server needs a readable `--ca-cert` holding a certificate,
-/// and that `--ca-cert` is not read for plain http.
+/// Asserts that an `https://` server without `--ca-cert` connects (it then trusts the
+/// bundled public roots), that a `--ca-cert` file which is missing or holds no certificate
+/// is refused naming `--ca-cert`, and that `--ca-cert` is not read for plain http.
 #[test]
 fn the_ca_cert_rules() {
     let dir = Scratch::new("client_ca_rules");
     let token = token_file(&dir);
-    assert_eq!(
-        refused(Client::connect("https://localhost:1", &token, None, LIMIT)),
-        "--ca-cert: required for an https:// server"
-    );
+    assert!(Client::connect("https://localhost:1", &token, None, LIMIT).is_ok());
     let missing = dir.path("missing.pem");
     let said = refused(Client::connect(
         "https://localhost:1",
@@ -232,6 +230,21 @@ fn tls_trusts_only_the_given_certificate() {
     let err = client.get("/v1/leases").err().unwrap();
     assert!(matches!(err, ClientError::Server(_)), "{err:?}");
     // The handshake failed, so the server read no request and never saw the token.
+    assert_eq!(fake.requests(), vec![String::new()]);
+}
+
+/// Asserts that without `--ca-cert` a server whose certificate comes from a private
+/// authority is refused at the handshake and never sees the token. It proves the
+/// public-roots mode does not trust everything.
+#[test]
+fn without_a_ca_cert_a_private_certificate_is_refused() {
+    let dir = Scratch::new("client_tls_no_ca");
+    let token = token_file(&dir);
+    let cert = Cert::new();
+    let fake = Fake::tls(vec![json_reply(200, "{}")], &cert);
+    let client = Client::connect(&fake.url("https"), &token, None, LIMIT).unwrap();
+    let err = client.get("/v1/leases").err().unwrap();
+    assert!(matches!(err, ClientError::Server(_)), "{err:?}");
     assert_eq!(fake.requests(), vec![String::new()]);
 }
 

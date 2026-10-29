@@ -224,8 +224,9 @@ fn usage_errors_and_help() {
 }
 
 /// Asserts that plain http to a host off the loopback is refused naming `--server`, and
-/// https without `--ca-cert` naming `--ca-cert`, before any fact is probed or anything is
-/// sent. It catches a token that would cross a network in clear.
+/// an https `--ca-cert` file that is missing naming `--ca-cert`, before any fact is probed
+/// or anything is sent. (https without `--ca-cert` is no longer refused: it trusts the
+/// bundled public roots.) It catches a token that would cross a network in clear.
 #[test]
 fn plain_http_off_loopback_refused() {
     let dir = Scratch::new("flags_http");
@@ -251,12 +252,28 @@ fn plain_http_off_loopback_refused() {
         plain.err
     );
     assert!(plain.err.contains("plain http"), "{}", plain.err);
-    let no_ca = go("https://leases.example.com:7300");
-    assert_eq!(no_ca.status(), code(2));
+    let missing = dir.path("absent.pem");
+    let no_file = run(
+        &[
+            "--server",
+            "https://leases.example.com:7300",
+            "--token-file",
+            token.to_str().unwrap(),
+            "--pool",
+            "macs",
+            "--ca-cert",
+            missing.to_str().unwrap(),
+        ],
+        &host,
+        &Dialer,
+        &mut CountingSleeper::stopping_at(1),
+        &mut Highest,
+    );
+    assert_eq!(no_file.status(), code(2));
     assert!(
-        no_ca.err.starts_with("js-agent: --ca-cert: "),
+        no_file.err.starts_with("js-agent: --ca-cert: "),
         "{}",
-        no_ca.err
+        no_file.err
     );
     assert!(
         host.commands.ran.borrow().is_empty(),
