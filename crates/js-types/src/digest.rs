@@ -44,7 +44,7 @@ impl DigestRef {
         let (name, digest) = text.split_once('@').ok_or(DigestRefError::NoDigest)?;
         let hex = digest.strip_prefix(DIGEST_PREFIX).unwrap_or_default();
         let digest_ok = [
-            hex.len() == DIGEST_HEX_LEN,
+            (DIGEST_HEX_LEN - 1..=DIGEST_HEX_LEN).contains(&hex.len()),
             hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
         ];
         if !digest_ok.into_iter().all(|ok| ok) {
