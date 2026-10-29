@@ -44,7 +44,7 @@ pub const MAX_PROGRAM_LEN: usize = 4096;
 /// Most environment entries on a native job.
 pub const MAX_ENV: usize = 256;
 /// Longest environment variable name, in bytes.
-pub const MAX_ENV_KEY_LEN: usize = 128;
+pub const MAX_ENV_KEY_LEN: usize = js_types::env::MAX_ENV_NAME_LEN;
 /// Longest environment variable value, in bytes.
 pub const MAX_ENV_VALUE_LEN: usize = 16 * 1024;
 /// Most bytes the names and values of one native job's environment may hold together.

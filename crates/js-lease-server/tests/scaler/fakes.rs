@@ -425,6 +425,7 @@ pub fn view(name: &str) -> HostView {
         labels: BTreeMap::new(),
         agent_version: None,
         epoch: 1,
+        heard_since_hello: true,
         releasing: false,
         taint: None,
         mark: None,

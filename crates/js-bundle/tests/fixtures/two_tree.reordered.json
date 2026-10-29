@@ -1,0 +1,25 @@
+{
+  "built": { "tool": "js-bundle 0.1.0", "deployment_target": "14.0.0" },
+  "xcode": { "components": ["clang", "swift"], "min": "27.1" },
+  "seatbelt": { "network_max": "on", "reads": ["system-certs", "timezone"] },
+  "writable_trees": [],
+  "entrypoints": {
+    "zig": { "path": "${tree:zig}/zig" },
+    "kbf-job": { "path": "${tree:job}/bin/kbf-job" }
+  },
+  "system_path": true,
+  "env": [
+    { "locked": false, "values": ["${tree:job}/bin", "${tree:zig}"], "op": "prepend", "name": "PATH" },
+    { "name": "ZIG_LIB_DIR", "op": "set", "values": ["${tree:zig}/lib"], "locked": true }
+  ],
+  "layers": [
+    { "tree": "job", "diff_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "uncompressed_bytes": 88214331, "entries": 412, "license": "Apache-2.0", "source_url": "https://example.invalid/job-source" },
+    { "tree": "zig", "diff_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "uncompressed_bytes": 701234999, "entries": 9120, "license": "MIT", "source_url": "https://example.invalid/zig-source" }
+  ],
+  "version": "2026.11.0",
+  "name": "toolchain",
+  "os.version": "14.0.0",
+  "architecture": "arm64",
+  "os": "darwin",
+  "schema": 1
+}
