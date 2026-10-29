@@ -333,7 +333,7 @@ impl Recorder {
     /// recorder holds nothing for, forgets nothing more (the latter is still remembered as
     /// ended). The same on a [`Recorder::leases_only`] recorder.
     pub fn lease_ended(&mut self, lease: &LeaseId) {
-        for state in self.hosts.values_mut() {
+        for state in self.hosts.values_mut().take(1) {
             let keys: Vec<(LeaseId, u16)> = state
                 .seen
                 .range((*lease, 0)..=(*lease, u16::MAX))
