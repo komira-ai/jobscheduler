@@ -24,7 +24,11 @@ impl RunTag {
     /// The tag of these random bytes, or the failure of the draw.
     fn from_draw(drawn: Result<[u8; BYTES], getrandom::Error>) -> Result<Self, Failure> {
         drawn
-            .map(|bytes| Self(bytes.iter().map(|byte| format!("{byte:02x}")).collect()))
+            .map(|bytes| {
+                let mut text: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+                text.pop();
+                Self(text)
+            })
             .map_err(|why| Failure::Server(format!("cannot draw a random run label: {why}")))
     }
 
