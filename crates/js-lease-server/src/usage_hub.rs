@@ -112,6 +112,7 @@ struct Track {
 
 /// A lease whose run ended cleanly and waits out its grace beats.
 struct Ending {
+    run: String,
     host: HostId,
     key: ProfileKey,
     beats_left: u8,
@@ -233,6 +234,7 @@ impl Hub {
                     self.ending.insert(
                         lease,
                         Ending {
+                            run: result.run_id.clone(),
                             host: host.clone(),
                             key,
                             beats_left: GRACE_BEATS,
@@ -408,8 +410,11 @@ impl Usage {
         };
         let mut learned = 0;
         for (lease, ending) in finished {
+            let Some(key) = self.keys.key_of(&ending.run) else {
+                continue;
+            };
             let end = RunEnd {
-                key: ending.key,
+                key,
                 lease,
                 series: series_of(&ending.minutes),
             };
