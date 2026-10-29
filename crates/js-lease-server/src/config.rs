@@ -377,7 +377,7 @@ const MILLIS_PER_DAY: u64 = 86_400_000;
 impl UsageSetup {
     /// Usage on, beside the lease file at `state_file`, with the default store size: what
     /// a configuration file gives, since it has no usage keys; `--usage-db`, `--usage-off`
-    /// and `--profile-store-bytes` still apply on top of it.
+    /// and `--profile-store-bytes` are refused beside `--config` like every other flag.
     fn unconfigured(state_file: &Path) -> Self {
         Self {
             db: Some(state_file.with_file_name("usage.db")),

@@ -67,6 +67,9 @@ pub(crate) fn beside_config(flag: &str) -> StartupError {
         "--pool-config" => "add a [[pool]] with provider kind static".to_owned(),
         "--agent-pool-config" => "add a [[pool]] with an elastic provider".to_owned(),
         "--agent-token-file" => "set join_token_file of the [[pool]]".to_owned(),
+        "--usage-db" | "--usage-off" | "--profile-store-bytes" => {
+            "the file has no usage keys; usage is on, beside the lease file".to_owned()
+        }
         other => format!(
             "set server.{}",
             other.trim_start_matches("--").replace('-', "_")
