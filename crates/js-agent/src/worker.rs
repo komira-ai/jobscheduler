@@ -95,6 +95,10 @@ pub fn stall_bound(stop_grace: Duration, calls: usize) -> Duration {
     each.saturating_mul(calls).saturating_add(STALL_MARGIN)
 }
 
+/// The calls a start is counted as: the create, and the egress check's `network inspect`
+/// and `nft` before it (the other calls of a start are inside the margin, as before).
+pub const CALLS_PER_START: usize = 3;
+
 /// The most calls [`stall_bound`] allows time for.
 pub const STALL_CALLS_MAX: usize = 64;
 
@@ -636,7 +640,7 @@ fn work(
         let mut settle = None;
         let order = inbox.recv_timeout(step_every);
         let asked = order.as_ref().map_or(0, |order| match order {
-            Order::Reply { reply, .. } => reply.commands.len(),
+            Order::Reply { reply, .. } => reply.commands.len().saturating_mul(CALLS_PER_START),
             _ => 0,
         });
         // A run held may cost two calls (a stop, then an inspect or a remove).

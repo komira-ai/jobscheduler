@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::{Engine, Settings};
+use super::{DEFAULT_NETWORK, Engine, Settings};
 use crate::lifecycle::ContainerSpec;
 
 /// Where the run's scratch directory is mounted, read-write, inside the container.
@@ -294,6 +294,12 @@ pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec
     ]
     .map(str::to_owned)
     .to_vec();
+    // A job on a named network has no IPv6 at all, not even the link-local address of its
+    // veth (the egress rules drop IPv6 too; this removes it at the source). The network
+    // namespace is the container's own, so the engine takes the sysctl.
+    if settings.network() != DEFAULT_NETWORK {
+        args.extend(["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"].map(str::to_owned));
+    }
     for entry in settings.add_hosts() {
         args.extend(["--add-host".to_owned(), entry.clone()]);
     }

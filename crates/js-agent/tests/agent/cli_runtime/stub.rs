@@ -152,6 +152,8 @@ fn cli_runtime_argv_snapshot() {
             &profile_option(),
             "--network",
             "jobs",
+            "--sysctl",
+            "net.ipv6.conf.all.disable_ipv6=1",
             "--read-only",
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,nodev,size=64m",

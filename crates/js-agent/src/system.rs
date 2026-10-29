@@ -103,6 +103,7 @@ impl Machine for System {
         let runtime = opened.map_err(|why| format!("{}: {why}", build.settings.bin()))?;
         runtime
             .check_network()
+            .and_then(|()| runtime.egress_enforced())
             .map_err(|why| format!("{}: {why}", build.settings.bin()))?;
         let warnings = runtime.warnings().to_vec();
         Ok((Box::new(runtime), warnings))

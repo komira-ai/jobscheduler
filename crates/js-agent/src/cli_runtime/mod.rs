@@ -229,9 +229,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use js_agent_wire::Isolation;
 use serde_json::Value;
 
+mod egress;
 pub use args::{
     ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
     label_args, limits_to_args, scratch_volume_options,
+};
+pub use egress::{
+    ALLOW_MAX as EGRESS_ALLOW_MAX, Allow, DEFAULT_NFT, Egress, EgressError, TABLE as EGRESS_TABLE,
 };
 pub use seccomp::{PROFILE, PROFILE_FILE, install_profile};
 pub use settings::{
@@ -357,6 +361,14 @@ pub enum CliError {
         /// The runner's reason.
         why: String,
     },
+    /// The egress check failed: the network or the firewall is not as
+    /// `--container-egress-allow` requires.
+    #[error("{0}")]
+    Egress(#[from] EgressError),
+    /// Egress flags with Docker: the check reads netavark's network and the host's nftables
+    /// table; Docker keeps its own iptables chains, which it does not read.
+    #[error("--container-egress-allow: only Podman is supported")]
+    EgressDocker,
     /// A step of starting a container failed after the engine may have made it, and the
     /// container was removed again (`note` says so when it could not be).
     #[error("{why}{note}")]
@@ -486,6 +498,9 @@ impl CliRuntime {
                 why,
             })?;
         let engine = Engine::of_version(&printed).ok_or(CliError::NotAnEngine)?;
+        if engine == Engine::Docker && settings.egress().is_some() {
+            return Err(CliError::EgressDocker);
+        }
         let docker_major = major_of(&printed).filter(|_| engine == Engine::Docker);
         let mut runtime = Self {
             settings,
@@ -573,6 +588,29 @@ impl CliRuntime {
                 name: name.to_owned(),
                 why,
             })
+    }
+
+    /// Confirms that the named network is limited to the endpoints of
+    /// `--container-egress-allow`: see [`EgressError`]. Nothing is checked for the default
+    /// network. The agent calls this at start and before every job is created.
+    ///
+    /// # Errors
+    ///
+    /// [`CliError::Egress`].
+    pub fn egress_enforced(&self) -> Result<(), CliError> {
+        let Some(egress) = self.settings.egress() else {
+            return Ok(());
+        };
+        let env = engine_env(&self.settings);
+        let proc = |path: &str| (self.proc_read)(path);
+        egress::check(
+            &*self.runner,
+            (self.settings.bin(), &env),
+            self.settings.network(),
+            egress,
+            &proc,
+        )
+        .map_err(CliError::Egress)
     }
 
     fn call(&self, call: &'static str, args: &[&str]) -> Result<String, CliError> {
@@ -1133,5 +1171,9 @@ impl ContainerRuntime for CliRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus
+    }
+
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        self.egress_enforced().map_err(RuntimeError::from)
     }
 }

@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use super::egress::{ALLOW_MAX as EGRESS_MAX, Allow, DEFAULT_NFT, Egress};
+
 /// The user and group containers run as when `--container-user` is not given: `nobody`
 /// and `nogroup` on the common Linux distributions.
 pub const DEFAULT_USER: &str = "65534:65534";
@@ -58,6 +60,23 @@ pub enum SettingsError {
     /// More than [`ADD_HOST_MAX`] `--container-add-host` entries.
     #[error("--container-add-host: at most 16 entries")]
     AddHostCount,
+    /// A `--container-egress-allow` is not `IPv4[/24..32]:port` (no host bits, a port above
+    /// zero, nothing in 169.254.0.0/16).
+    #[error("--container-egress-allow: not <ipv4>[/24-32]:<port> outside 169.254.0.0/16")]
+    EgressAllow,
+    /// More than the most `--container-egress-allow` entries.
+    #[error("--container-egress-allow: at most 16 entries")]
+    EgressCount,
+    /// A named `--container-network` without any `--container-egress-allow`: a named network
+    /// is never run unchecked.
+    #[error("--container-network: a named network needs at least one --container-egress-allow")]
+    EgressMissing,
+    /// `--container-egress-allow` or `--container-nft` without a named `--container-network`.
+    #[error("--container-egress-allow and --container-nft: need a named --container-network")]
+    EgressNoNetwork,
+    /// `--container-nft` is not an absolute path to an executable file.
+    #[error("--container-nft: not an absolute UTF-8 path to an executable file")]
+    Nft,
     /// `--container-user` is not `<uid>:<gid>` with both numbers above zero.
     #[error("--container-user: not <uid>:<gid> of a user that is not root")]
     User,
@@ -134,6 +153,10 @@ pub struct Flags<'a> {
     pub tmp_size: Option<&'a str>,
     /// `--container-add-host`, each `<name>:<ip>`.
     pub add_hosts: &'a [String],
+    /// `--container-egress-allow`, each `IP:PORT` or `CIDR:PORT`.
+    pub egress_allow: &'a [String],
+    /// `--container-nft`.
+    pub nft: Option<&'a str>,
 }
 
 /// The checked container flags: where the runtime is, which network jobs get, which user
@@ -149,6 +172,7 @@ pub struct Settings {
     pull: Pull,
     tmp_size: String,
     add_hosts: Vec<String>,
+    egress: Option<Egress>,
     chown: Option<(u32, u32)>,
 }
 
@@ -169,7 +193,10 @@ impl Settings {
                 flags.pull,
                 flags.tmp_size,
             ];
-            let given = others.iter().any(Option::is_some) || !flags.add_hosts.is_empty();
+            let given = others.iter().any(Option::is_some)
+                || !flags.add_hosts.is_empty()
+                || !flags.egress_allow.is_empty()
+                || flags.nft.is_some();
             return match given {
                 true => Err(SettingsError::NoBin),
                 false => Ok(None),
@@ -180,6 +207,7 @@ impl Settings {
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
             .with_add_hosts(flags.add_hosts)?
+            .with_egress(flags.egress_allow, flags.nft)?
             .with_agent(agent.0, agent.1)
             .map(Some)
     }
@@ -216,6 +244,7 @@ impl Settings {
             pull: Pull::Never,
             tmp_size: DEFAULT_TMP_SIZE.to_owned(),
             add_hosts: Vec::new(),
+            egress: None,
             chown: None,
         })
     }
@@ -276,6 +305,45 @@ impl Settings {
             true => Ok(Self { add_hosts, ..self }),
             false => Err(SettingsError::AddHost),
         }
+    }
+
+    /// The endpoints a named network is limited to (`--container-egress-allow`) and the
+    /// `nft` program that reads the firewall back (`--container-nft`, by default
+    /// [`DEFAULT_NFT`]). With a named network at least one endpoint is required, so such a
+    /// network never runs unchecked; with the default network there is nothing to check
+    /// and neither flag may be given. [`Settings::new`] leaves the check off: a test's
+    /// builder.
+    ///
+    /// # Errors
+    ///
+    /// [`SettingsError::EgressMissing`], [`SettingsError::EgressNoNetwork`],
+    /// [`SettingsError::EgressAllow`], [`SettingsError::EgressCount`] or
+    /// [`SettingsError::Nft`].
+    pub fn with_egress(self, allow: &[String], nft: Option<&str>) -> Result<Self, SettingsError> {
+        let named = self.network != DEFAULT_NETWORK;
+        match (named, allow.is_empty(), nft.is_some()) {
+            (false, true, false) => return Ok(self),
+            (false, ..) => return Err(SettingsError::EgressNoNetwork),
+            (true, true, _) => return Err(SettingsError::EgressMissing),
+            (true, false, _) => {}
+        }
+        if allow.len() > EGRESS_MAX {
+            return Err(SettingsError::EgressCount);
+        }
+        let allow = allow
+            .iter()
+            .map(|text| Allow::parse(text).ok_or(SettingsError::EgressAllow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let nft = nft.unwrap_or(DEFAULT_NFT);
+        fs::metadata(nft)
+            .ok()
+            .filter(|meta| nft.starts_with('/') && meta.is_file())
+            .filter(|meta| meta.permissions().mode() & 0o111 != 0)
+            .ok_or(SettingsError::Nft)?;
+        Ok(Self {
+            egress: Some(Egress::new(allow, nft)),
+            ..self
+        })
     }
 
     /// Settles who owns the run's scratch directory. It is private to the agent (`0700`),
@@ -345,6 +413,11 @@ impl Settings {
         &self.add_hosts
     }
 
+    /// The egress check, when the network is a named one.
+    pub fn egress(&self) -> Option<&Egress> {
+        self.egress.as_ref()
+    }
+
     /// The `(uid, gid)` to give the scratch directory of a run before its container is
     /// created: set when the agent runs as root, none when the container's user is the
     /// agent's own.
@@ -355,7 +428,7 @@ impl Settings {
     /// What the operator should know about this configuration, one sentence each, for the
     /// agent to print when it starts.
     pub fn warnings(&self) -> Vec<String> {
-        let reach = self.network != DEFAULT_NETWORK;
+        let reach = self.network != DEFAULT_NETWORK && self.egress.is_none();
         reach
             .then(|| {
                 format!(

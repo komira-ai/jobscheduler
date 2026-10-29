@@ -179,6 +179,19 @@ pub struct Cli {
     /// address are refused. Needs `--container-bin`.
     #[arg(long, value_name = "NAME:IP")]
     pub container_add_host: Vec<String>,
+    /// An endpoint a named network may reach, `IPV4:PORT` or `CIDR:PORT` (a prefix of 24
+    /// to 32, outside 169.254.0.0/16 and the network's own subnet); repeatable, at most 16.
+    /// Required with a named `--container-network`. Before every job is created the agent
+    /// reads back the network (a bridge, DNS off, no IPv6) and the nftables table
+    /// `inet js_egress` that `deploy/js-agent/egress-network.sh` installs, and refuses the
+    /// job (`egress-unchecked`) unless the table holds exactly the rules for these
+    /// endpoints. Podman only; `br_netfilter` must be active.
+    #[arg(long, value_name = "IP:PORT")]
+    pub container_egress_allow: Vec<String>,
+    /// The absolute path of the `nft` program the egress check runs, by default
+    /// `/usr/sbin/nft`. Needs `--container-egress-allow`.
+    #[arg(long, value_name = "PATH")]
+    pub container_nft: Option<String>,
     /// The absolute path of a program that checks the host's GPU container toolkit, run
     /// once at start when the host offers a GPU. Exit 0 makes the hello report
     /// `gpu-toolkit`; any other outcome (another exit status, no output within the probe

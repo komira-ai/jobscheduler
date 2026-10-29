@@ -227,4 +227,15 @@ pub trait ContainerRuntime {
     fn supports_gpus(&self) -> bool {
         true
     }
+
+    /// Whether the network a contained job gets is limited as the agent was told. Called
+    /// before every contained start; a start whose check fails is refused
+    /// (`egress-unchecked`) and creates nothing. A runtime with nothing to check passes.
+    ///
+    /// # Errors
+    ///
+    /// What is wrong with the network or the firewall; the text stays on the host.
+    fn check_egress(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
