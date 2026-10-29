@@ -355,6 +355,9 @@ fn a_header_with_a_field_that_is_not_a_number_is_malformed() {
         let mut h = tar::Header::new_old();
         h.set_path("usr/bin/js-agent").expect("path");
         h.set_size(0);
+        h.set_mode(0o644);
+        h.set_uid(0);
+        h.set_gid(0);
         let old = h.as_old_mut();
         let target = match field {
             0 => &mut old.mode,
