@@ -521,6 +521,7 @@ fn this_repositorys_shipped_crates() {
         .expect("shipped");
     for member in [
         "js-agent",
+        "js-agent-usage",
         "js-agent-wire",
         "js-cli",
         "js-client",

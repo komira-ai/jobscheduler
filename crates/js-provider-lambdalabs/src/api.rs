@@ -1,9 +1,9 @@
-//! The read calls the provider makes.
+//! The calls the provider makes.
 
 use crate::error::ApiError;
-use crate::model::{Instance, InstanceId, InstanceTypeOffer};
+use crate::model::{Instance, InstanceId, InstanceTypeOffer, LaunchRequest};
 
-/// The read side of Lambda's API. Every call blocks, answers or fails within a bound, and
+/// Lambda's API. Every call blocks, answers or fails within a bound, and
 /// makes exactly one request: nothing is retried here, and a failure is never turned into
 /// an empty answer.
 pub trait LambdaApi: Send + Sync {
@@ -34,4 +34,25 @@ pub trait LambdaApi: Send + Sync {
     ///
     /// [`ApiError`] when the call fails or the answer cannot be read.
     fn get_instance(&self, id: &InstanceId) -> Result<Instance, ApiError>;
+
+    /// Launches one instance. The answer lists the ids the API says it started; a lost
+    /// answer is an error even though the instance may exist, so the caller lists before
+    /// it asks again. The call checks nothing about what it launches: the guards live in
+    /// [`Elastic`](crate::Elastic).
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read.
+    fn launch(&self, request: &LaunchRequest) -> Result<Vec<InstanceId>, ApiError>;
+
+    /// Asks the API to terminate one instance (one id per call: a bad id in a batch may
+    /// fail the whole call). The answer lists the ids the API says it terminated, which
+    /// may be none; it is not proof that the instance is gone. The call does not check
+    /// that the instance is the caller's: [`Elastic::release`](crate::Elastic::release)
+    /// does.
+    ///
+    /// # Errors
+    ///
+    /// [`ApiError`] when the call fails or the answer cannot be read.
+    fn terminate(&self, id: &InstanceId) -> Result<Vec<InstanceId>, ApiError>;
 }
