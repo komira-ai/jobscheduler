@@ -414,6 +414,9 @@ mod tests {
             ("2001:0:4136:e378:8000:63bf:80ff:fffe", "loopback"),
             ("2001:0:1:2:3:4:f5ff:fffe", "private"),
             ("2001::ffff:ffff", "unspecified"),
+            // The metadata address is exact: its neighbours are plain unique-local.
+            ("fd00:ec2::255", "unique-local"),
+            ("fd00:ec3::254", "unique-local"),
         ] {
             assert_eq!(class_name(text).as_deref(), Some(want), "{text}");
         }
@@ -434,8 +437,6 @@ mod tests {
             "2003::1",
             "2002:808:808::1",
             "2001:0:1:2:3:4:f7f7:f7f7",
-            "fd00:ec2::255",
-            "fd00:ec3::254",
         ] {
             assert_eq!(class_name(public), None, "{public}");
         }
