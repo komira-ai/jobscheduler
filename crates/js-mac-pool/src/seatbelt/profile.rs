@@ -88,8 +88,7 @@ impl Profile {
         let mut params: Vec<(String, String)> = Vec::new();
         push_all(&mut lines, &HEAD);
 
-        let mut grant = String::from("(allow file-write* (subpath (param \"RUN\"))");
-        params.push(("RUN".to_owned(), policy.run().as_str().to_owned()));
+        let mut grant = format!("(allow file-write* (subpath \"{}\")", policy.run().as_str());
         if let Some(entry) = policy.uid_entry() {
             grant.push_str(" (subpath (param \"UENTRY\"))");
             params.push(("UENTRY".to_owned(), entry.as_str().to_owned()));
