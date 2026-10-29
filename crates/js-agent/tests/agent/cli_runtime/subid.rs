@@ -447,6 +447,24 @@ fn an_entry_may_name_the_user_by_uid() {
     ));
 }
 
+/// Takes the claim of `mapping` once the lock of whoever held it is gone, and returns it.
+///
+/// A lock lasts as long as any process holds a copy of the descriptor. Other tests of this
+/// process start programs, and a child holds a copy from its fork until its exec, so a claim
+/// that was just dropped can still read as held for a moment. The tests that ask whether a
+/// drop released a claim retry while it reads as held, a bounded number of times and with
+/// no clock; a claim that is never released still fails them.
+pub fn take_released(dir: &std::path::Path, mapping: Mapping) -> RangeClaim {
+    for _ in 0..100_000 {
+        match RangeClaim::take(dir, mapping) {
+            Ok(claim) => return claim,
+            Err(SubidError::Claimed(_)) => std::thread::yield_now(),
+            Err(other) => panic!("{other}"),
+        }
+    }
+    RangeClaim::take(dir, mapping).unwrap()
+}
+
 /// Asserts that a second claim of the same range is refused while the first is held, that
 /// the range can be claimed again once the first is dropped, and that the directory is
 /// made private. It catches two agents mapping their jobs onto one range.
@@ -463,7 +481,7 @@ fn a_range_is_claimed_by_one_agent_at_a_time() {
         SubidError::Claimed("100000-100000".to_owned())
     );
     drop(first);
-    RangeClaim::take(&claims, mapping).unwrap();
+    take_released(&claims, mapping);
 }
 
 /// Asserts that a claim of a range that overlaps one that is held is refused, whichever
@@ -503,7 +521,7 @@ fn overlapping_ranges_are_refused_and_neighbours_are_not() {
     dir.write("claims/300000-300000", "", 0o600);
     let stale = RangeClaim::take(&claims, Mapping::new(300_010, 700_000)).unwrap();
     drop((held, kept, stale));
-    RangeClaim::take(&claims, Mapping::new(100_001, 400_001)).unwrap();
+    take_released(&claims, Mapping::new(100_001, 400_001));
 }
 
 /// Asserts that a claim directory that cannot be made is an error that says so, and not a

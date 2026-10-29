@@ -75,6 +75,25 @@ fn open_mapped(world: &Scripted, claims: &Scratch) -> Result<CliRuntime, CliErro
     open_in(world, mapped(), &exact_host(), &claims.path("claims"))
 }
 
+/// Opens the runtime once the claim of whoever held its range is gone (see
+/// `subid::take_released`: a dropped claim can read as held while another test's child
+/// process is between fork and exec).
+fn open_when_released(
+    world: &Scripted,
+    set: Settings,
+    files: &FakeFiles,
+    claims: &Path,
+) -> CliRuntime {
+    for _ in 0..100_000 {
+        match open_in(world, set.clone(), files, claims) {
+            Ok(rt) => return rt,
+            Err(CliError::Subid(SubidError::Claimed(_))) => std::thread::yield_now(),
+            Err(other) => panic!("{other}"),
+        }
+    }
+    open_in(world, set, files, claims).unwrap()
+}
+
 thread_local! {
     static GIVEN: RefCell<Vec<(PathBuf, u32, u32)>> = const { RefCell::new(Vec::new()) };
 }
@@ -260,9 +279,7 @@ fn the_scratch_is_given_to_the_mapped_ids() {
         .with_agent(0, 0)
         .unwrap();
     drop(rt);
-    let mut rt = open_in(&world, other, &exact_host(), &claims)
-        .unwrap()
-        .with_chown(record);
+    let mut rt = open_when_released(&world, other, &exact_host(), &claims).with_chown(record);
     rt.create_and_start(&spec("r2")).unwrap();
     let given = GIVEN.with(|given| given.borrow().clone());
     assert_eq!(
@@ -387,7 +404,7 @@ fn a_second_runtime_on_an_overlapping_range_is_refused() {
     );
 
     drop(first);
-    open_in(&world, other, &other_files, &claims).unwrap();
+    open_when_released(&world, other, &other_files, &claims);
 }
 
 /// Asserts that Docker is refused when the user's allocation is not exactly one entry of
