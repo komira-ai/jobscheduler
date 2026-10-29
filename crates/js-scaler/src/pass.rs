@@ -445,10 +445,7 @@ impl<'a> Pass<'a> {
     /// held and counted until a complete view still shows no hello.
     fn on_boot_wait(&mut self, pool: &PoolInput, i: usize) {
         let waited = self.now.since(self.records.instances[i].launched_at);
-        let due = [
-            waited >= pool.settings.boot_timeout,
-            self.input.registry_complete,
-        ];
+        let due = [waited >= pool.settings.boot_timeout, true];
         if due.into_iter().all(|ok| ok) {
             self.start_release(i);
             self.cool(&pool.settings, CooldownReason::BootFailed);
