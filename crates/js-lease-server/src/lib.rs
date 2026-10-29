@@ -23,7 +23,7 @@
 //! # Flags
 //!
 //! Configuration is these flags, or one file (`--config`, below), never both: every flag
-//! below has a key in the file, and a flag given beside `--config` is refused, but for the usage flags below (`--usage-db`, `--usage-off`, `--profile-store-bytes`), which the file has no keys for and which apply on top of it. The one secret,
+//! below has a key in the file, and a flag given beside `--config` is refused. The one secret,
 //! the bearer token, is read from a file that only its owner can use.
 //!
 //! | flag | meaning |
@@ -58,7 +58,7 @@
 //! # The configuration file
 //!
 //! `--config <path>` reads a `[server]` table and `[[pool]]` tables instead of the flags
-//! above, and no flag but the usage flags may be given beside it: the first one on the command line is refused,
+//! above, and no flag may be given beside it: the first one on the command line is refused,
 //! such as `--listen: not allowed with --config; set server.listen`, before the file is read
 //! and with exit status 2. `--token-file` is `server.client_token_file`, `--pool-config` and
 //! `--agent-pool-config` are `[[pool]]` tables, `--agent-token-file` is a pool's
@@ -82,6 +82,8 @@
 //! # write_timeout, drain_timeout, max_connections, max_requests: the flags' names and defaults
 //! # agent_hello_burst (60), agent_hello_interval ("1s"), require_host_credential (false):
 //! # the flags' names and defaults; refused unless a pool registers agents (an elastic pool)
+//! # usage_db (usage.db beside state_file), usage_off (false), profile_store_bytes (268435456):
+//! # the flags' names, defaults and rules; usage_db is refused beside usage_off = true
 //!
 //! [[pool]]
 //! name     = "gpu-static"

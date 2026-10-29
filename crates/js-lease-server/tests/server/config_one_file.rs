@@ -16,9 +16,6 @@ use crate::support::{Harness, Reply, Scratch, request};
 
 const MINT: &str = "/v1/agent/join-tokens";
 
-/// The flags that are allowed beside `--config`: the file has no keys for them.
-const USAGE_FLAGS: [&str; 3] = ["--profile-store-bytes", "--usage-db", "--usage-off"];
-
 /// An elastic pool that admits agents with [`JOIN`] and asks nothing of a host's contract.
 fn pool(scratch: &Scratch) -> PoolText {
     let joins = scratch.write("joins", &format!("{JOIN}\n"), 0o600);
@@ -178,7 +175,7 @@ fn the_registration_keys_need_an_elastic_pool_and_a_valid_value() {
 }
 
 /// The flags beside `--config`, with the refusal each gets. Every flag of the command
-/// line but `--config` and the usage flags is here (the next test checks that).
+/// line but `--config` is here (the next test checks that).
 fn beside() -> Vec<(Vec<&'static str>, String)> {
     let key = |flag: &'static str, value: &'static str| {
         let at = flag.trim_start_matches("--").replace('-', "_");
@@ -203,7 +200,13 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--write-timeout", "6s"),
         key("--max-requests", "9"),
         key("--drain-timeout", "7s"),
+        key("--usage-db", "/usage.db"),
+        key("--profile-store-bytes", "5"),
     ];
+    rows.push((
+        vec!["--usage-off"],
+        "--usage-off: not allowed with --config; set server.usage_off".to_owned(),
+    ));
     rows.push((
         vec!["--require-host-credential"],
         "--require-host-credential: not allowed with --config; set server.require_host_credential"
@@ -270,8 +273,8 @@ fn every_flag_beside_config_is_refused_by_name() {
 }
 
 /// Asserts that the table of the test above is every flag there is: the long flags of the
-/// command line less `--config` and the usage flags (the next-but-one test) are exactly the
-/// flags it refuses. It catches a flag added later that the refusal test does not cover.
+/// command line less `--config` are exactly the flags it refuses. It catches a flag added
+/// later that the refusal test does not cover.
 #[test]
 fn the_refused_flags_are_every_flag() {
     let asked: BTreeSet<String> = Cli::command()
@@ -279,45 +282,12 @@ fn the_refused_flags_are_every_flag() {
         .filter_map(|arg| arg.get_long())
         .filter(|long| *long != "config")
         .map(|long| format!("--{long}"))
-        .filter(|flag| !USAGE_FLAGS.contains(&flag.as_str()))
         .collect();
     let tried: BTreeSet<String> = beside()
         .into_iter()
         .map(|(flag, _)| flag[0].to_owned())
         .collect();
     assert_eq!(tried, asked);
-}
-
-/// Asserts that the three usage flags are not refused beside `--config` (the file has no
-/// usage keys, so they are how usage is set on a server that reads a file): without them
-/// usage is on in `usage.db` beside the lease file with the default store size, and
-/// `--usage-off`, `--usage-db` and `--profile-store-bytes` each apply on top of the file.
-/// It catches a refusal of them (the file path would then have no way to turn usage off or
-/// move its file) and a flag that is read and ignored.
-#[test]
-fn the_usage_flags_apply_on_top_of_the_file() {
-    let scratch = Scratch::new("one_file_usage");
-    let base = with_file(&scratch);
-    let with = |extra: &[&str]| {
-        let mut args = base.clone();
-        args.extend(extra.iter().map(OsString::from));
-        Config::from_cli(Cli::try_parse_from(args).unwrap()).unwrap()
-    };
-    let plain = with(&[]);
-    assert_eq!(plain.usage_db().unwrap().file_name().unwrap(), "usage.db");
-    assert_eq!(plain.profile_store_bytes(), 268_435_456);
-    assert!(with(&["--usage-off"]).usage_db().is_none());
-    let moved = with(&[
-        "--usage-db",
-        "/elsewhere/u.db",
-        "--profile-store-bytes",
-        "4096",
-    ]);
-    assert_eq!(
-        moved.usage_db().unwrap(),
-        std::path::Path::new("/elsewhere/u.db")
-    );
-    assert_eq!(moved.profile_store_bytes(), 4096);
 }
 
 /// Asserts that the first conflicting flag on the command line is the one named: with

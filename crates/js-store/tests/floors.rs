@@ -624,3 +624,119 @@ fn the_floors_held_now_are_read_as_their_rows_say() {
     let error = rows.floors().expect_err("not a floor");
     assert!(error.to_string().contains("floor/zz"), "{error}");
 }
+
+/// The key floor `ask` of size key 9, as a decay lowered it.
+fn lowered_to(ask: u64) -> KeyFloor {
+    KeyFloor {
+        key: 9,
+        ask,
+        stamp: 1,
+    }
+}
+
+/// The ask and name of the key floor row of size key 9.
+fn held_9(rows: &Rows) -> (u64, Option<String>) {
+    let stored = rows.load().expect("load");
+    let name = stored.key_names.first().map(|(_, name)| name.clone());
+    (stored.key_floors[0].ask, name)
+}
+
+/// Asserts that a lowering writes over the row it read when the row holds no more than the
+/// floor the estimator lowered from, keeps the name the row has, and deletes the row of a
+/// forgotten floor. Catches: a lowering that is not written, one that loses the summary
+/// name, and a forgotten floor whose row stays.
+#[test]
+fn a_lowering_writes_the_row_it_read_and_keeps_its_name() {
+    let (store, rows) = handle();
+    rows.put_key_floor(&a_key_floor(9, 1), Some("est/x"))
+        .expect("written");
+
+    rows.lower_key_floor(&lowered_to(4 << 30), 16 << 30, None)
+        .expect("lowered");
+    assert_eq!(held_9(&rows), (4 << 30, Some("est/x".to_owned())));
+
+    rows.lower_key_floor(&lowered_to(2 << 30), 4 << 30, Some("est/y"))
+        .expect("lowered");
+    assert_eq!(held_9(&rows), (2 << 30, Some("est/y".to_owned())));
+
+    rows.lower_key_floor(&lowered_to(0), 2 << 30, None)
+        .expect("forgotten");
+    assert_eq!(count(&store, "keyfloor/"), 0);
+}
+
+/// Asserts that a lowering leaves the row alone when it holds more than the floor the
+/// estimator lowered from (another frontend raised it), when it already holds the ask or
+/// less (another frontend lowered it as far), for a forgotten floor too; with no row it
+/// writes the floor (an earlier write of it was refused) and deletes nothing. Catches: a
+/// lowering that undoes a raise it never saw, one that raises a row, a floor the store never
+/// took that stays unwritten, and a forgotten floor that writes a row.
+#[test]
+fn a_lowering_leaves_a_row_that_holds_more_than_it_saw_or_less_than_it_asks() {
+    let (store, rows) = handle();
+
+    rows.lower_key_floor(&lowered_to(0), 8 << 30, None)
+        .expect("no row");
+    assert_eq!(count(&store, "keyfloor/"), 0, "nothing to delete");
+    rows.lower_key_floor(&lowered_to(4 << 30), 8 << 30, None)
+        .expect("no row");
+    assert_eq!(held_9(&rows).0, 4 << 30, "written where there was no row");
+    rows.put_key_floor(&a_key_floor(9, 1), Some("est/x"))
+        .expect("written");
+    rows.lower_key_floor(&lowered_to(4 << 30), 8 << 30, None)
+        .expect("kept");
+    rows.lower_key_floor(&lowered_to(0), 8 << 30, None)
+        .expect("kept");
+    assert_eq!(held_9(&rows).0, 16 << 30, "raised past what the decay saw");
+
+    rows.lower_key_floor(&lowered_to(32 << 30), 64 << 30, None)
+        .expect("kept");
+    rows.lower_key_floor(&lowered_to(16 << 30), 64 << 30, None)
+        .expect("kept");
+    assert_eq!(held_9(&rows).0, 16 << 30, "never raised by a lowering");
+}
+
+/// Asserts that a lowering writes over a row that cannot be read. Catches: a lowering
+/// refused for good by a damaged row.
+#[test]
+fn a_lowering_writes_over_a_row_that_cannot_be_read() {
+    let (store, rows) = handle();
+    put(&store, &keys::key_floor(9), vec![9]);
+
+    rows.lower_key_floor(&lowered_to(4 << 30), 16 << 30, None)
+        .expect("written over");
+
+    assert_eq!(held_9(&rows).0, 4 << 30);
+}
+
+/// Asserts that a lowering whose row another frontend changed between the read and the write
+/// reads it again: a row the other raised past the floor the estimator lowered from is kept,
+/// and one it changed within that is lowered all the same. Catches: a lowering written
+/// without a condition on the row it read (it overwrites the other's higher floor), and one
+/// that gives up at the first conflict.
+#[test]
+fn a_lowering_that_loses_a_race_reads_the_row_again() {
+    let (store, rows) = handle();
+    rows.put_key_floor(&a_key_floor(9, 1), None)
+        .expect("written");
+    let row = keys::key_floor(9);
+    let other = |ask: u64| {
+        let value = key_floor_row_of(
+            &KeyFloor {
+                ask,
+                ..a_key_floor(9, 2)
+            },
+            None,
+        );
+        Txn::new().put(row.clone(), value, Cond::Any)
+    };
+
+    store.land(&row, other(64 << 30));
+    rows.lower_key_floor(&lowered_to(4 << 30), 16 << 30, None)
+        .expect("the other's floor is kept");
+    assert_eq!(held_9(&rows).0, 64 << 30);
+
+    store.land(&row, other(12 << 30));
+    rows.lower_key_floor(&lowered_to(4 << 30), 64 << 30, None)
+        .expect("lowered over the other's row");
+    assert_eq!(held_9(&rows).0, 4 << 30);
+}

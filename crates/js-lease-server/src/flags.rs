@@ -10,10 +10,6 @@ use clap::{ArgMatches, Command, CommandFactory, FromArgMatches};
 use crate::config::Cli;
 use crate::error::StartupError;
 
-/// The usage flags, which the file has no keys for: they are allowed beside `--config` and
-/// apply on top of it.
-const USAGE_FLAGS: [&str; 3] = ["--profile-store-bytes", "--usage-db", "--usage-off"];
-
 /// The flags that mean something only beside `--agent-pool-config`.
 const NEED_AGENT_POOL: [&str; 3] = [
     "--agent-hello-burst",
@@ -42,16 +38,12 @@ impl Cli {
     }
 }
 
-/// The flags of `command` that `matches` got from the command line, `--config` and
-/// [`USAGE_FLAGS`] aside, in the order they were written.
+/// The flags of `command` that `matches` got from the command line, `--config` aside, in
+/// the order they were written.
 fn given(command: &Command, matches: &ArgMatches) -> Vec<String> {
     let mut found: Vec<(usize, String)> = command
         .get_arguments()
         .filter(|arg| arg.get_id().as_str() != "config")
-        .filter(|arg| {
-            let long = arg.get_long().map(|long| format!("--{long}"));
-            !long.is_some_and(|long| USAGE_FLAGS.contains(&long.as_str()))
-        })
         .filter(|arg| {
             let typed = matches.value_source(arg.get_id().as_str());
             typed == Some(ValueSource::CommandLine)
