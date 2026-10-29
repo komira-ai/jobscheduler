@@ -313,7 +313,7 @@ What the agent trusts, and who trusts it:
   session, authenticated by a token the scheduler minted for that lease. It obeys no other caller.
 - The agent proves itself to the scheduler with the join credential of its pool, or on aws the instance proof (5.8), and sends it only
   on a TLS stream whose server identity it has pinned. A credential admits a host to one pool only.
-- **(Superseded in part by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md): there is no trusted `kbf-executor` beside the agent; the agent holds a per-run upload grant (one presigned PUT per pack slot), redacted, never persisted, and used only by the agent's own post-exit upload step; the job never sees a URL.)** The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
+- **(Superseded in part by [design/kbf-on-js-agent.md](design/kbf-on-js-agent.md): there is no trusted `kbf-executor` beside the agent; the agent writes a per-run upload grant (one presigned PUT per pack slot) as a 0400 file on a per-run tmpfs, redacted and never persisted elsewhere, and the task's own tool uploads with it; the owner ruled on 2026-10-29 that the whole task holds the URL.)** The agent holds no storage credential, no registry credential and no REAPI type. Inputs reach a container as a mounted directory and
   outputs leave as a mounted directory. The component that fetches inputs, uploads outputs and reports to a frontend is the consumer's
   trusted executor (for kbf, `kbf-executor`, 9.2). It runs on the host beside the agent, in its own process and identity, and shares the
   mounted input, output and cache directories with it; it is part of the host image or package, so the aws launch template and the
@@ -665,7 +665,7 @@ Consequences:
 ### 9.2 The daemon splits three ways
 
 > **Superseded by [kbf-on-js-agent.md](kbf-on-js-agent.md).** The split is now `js-agent` (standalone, no kbf process beside it), ordered steps in
-> one lease (fetch and run steps, then a trusted post-exit upload step inside the agent that writes kbf packs to presigned PUTs), and a frontend CommitPack in kbf that verifies the packs and builds the cache entry. There is
+> one lease (a task that fetches, runs and then writes kbf packs to presigned PUTs itself through the kbf task tool in its container, with the agent relaying its report), and a frontend CommitPack in kbf that verifies the packs and builds the cache entry. There is
 > no `kbf-executor` and no mounted input/output contract. The text below is the earlier plan.
 Today's daemon (`crates/kbf-daemon/src/daemon.rs`) becomes:
 

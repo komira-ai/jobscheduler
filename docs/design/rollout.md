@@ -52,10 +52,10 @@ one shared Postgres, a task spec and the fetch image it names, and the agent's p
    agent exits with status 2 and keeps its containers for adoption, so a host left behind fails closed and visibly (K35).
 4. **Security fields are gated on `Hello.capabilities`, never on version text.** An old receiver silently ignores unknown fields, so a field
    that carries a secret, a network profile or an upload grant is sent only to an agent that advertises it. An old agent that ignores `upload` returns no upload outcome, which the frontend treats as a failed action, never as "no outputs".
-5. **Task spec versus the fetch image.** The frontend names the fetch image digest in the task; a host without that image refuses the task with a
+5. **Task spec versus the fetch image.** The frontend names the task image digest (and a fetch image only if one is used) in the task; a host without that image refuses the task with a
    plain constant code. This replaces the version-pair check between the agent and an executor.
-6. **One pack format, one crate.** The agent writes and the frontend verifies the same `js-pack-format`. The frontend verifies versions N and N-1,
-   the agent advertises the versions it writes in `Hello`, and the frontend sends an upload grant only to a compatible agent.
+6. **One pack format, one crate.** The task tool writes and the frontend verifies the same `js-pack-format`. The frontend verifies versions N and N-1
+   and sends an upload grant only with a task image whose tool writes a format it verifies.
 
 ## Rollout order
 
@@ -84,6 +84,6 @@ digest; no rollback needs a format change, because formats change additively (R3
 
 ## What stays open
 
-The storage branch (tierstore with Silo, presigned-PUT writes) and the Mac packaging direction are decided; the credential holder, the fetch step, the Mac default, the elastic provisioner's home, and the other remaining decisions are in
+The storage branch (tierstore with Silo, presigned-PUT writes) and the Mac packaging direction are decided; the credential holder (the whole task holds the presigned URL: decided 2026-10-29), how the task gets its inputs, the Mac default, the elastic provisioner's home, and the other remaining decisions are in
 [kbf-on-js-agent.md](kbf-on-js-agent.md), section 15. Deploying a service, installing a package on hosts and any registry upload are
 operator acts that need the project owner's go for that action (R7).
