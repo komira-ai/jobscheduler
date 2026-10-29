@@ -81,7 +81,8 @@ fn creation_order_times_and_modes_do_not_change_the_layer() {
 #[test]
 fn content_execute_bit_targets_and_names_change_the_layer() {
     let base = pack_layer(&fixture_tree(false).root()).unwrap().diff_id;
-    let changes: [(&str, fn(&Path)); 4] = [
+    type Change = fn(&Path);
+    let changes: [(&str, Change); 4] = [
         ("content", |r| write(r, "lib/data.txt", b"hello!\n", 0o644)),
         ("execute bit", |r| {
             write(r, "lib/data.txt", b"hello\n", 0o755)

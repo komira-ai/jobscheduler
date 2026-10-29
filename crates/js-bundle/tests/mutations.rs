@@ -63,13 +63,13 @@ fn assert_links_inside(root: &Path) {
     let canonical_root = root.canonicalize().unwrap();
     for path in layer::snapshot(root).keys() {
         let full = root.join(path);
-        if std::fs::symlink_metadata(&full).unwrap().is_symlink() {
-            if let Ok(resolved) = full.canonicalize() {
-                assert!(
-                    resolved.starts_with(&canonical_root),
-                    "{path} -> {resolved:?}"
-                );
-            }
+        if std::fs::symlink_metadata(&full).unwrap().is_symlink()
+            && let Ok(resolved) = full.canonicalize()
+        {
+            assert!(
+                resolved.starts_with(&canonical_root),
+                "{path} -> {resolved:?}"
+            );
         }
     }
 }

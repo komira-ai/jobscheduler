@@ -7,7 +7,7 @@ mod layer;
 use js_bundle::{
     EntryDefect, Limits, LinkDefect, NameDefect, StreamError, TreeRefusal, UnpackError,
 };
-use layer::{Entry, Tar, mode_of, run, run_with, snapshot};
+use layer::{Entry, Tar, extract, extract_with, mode_of, snapshot};
 
 macro_rules! refused {
     ($run:expr, $($pattern:tt)+) => {
@@ -28,7 +28,7 @@ fn path_defect(run: &layer::Run) -> NameDefect {
 /// An absolute path never reaches the file system.
 #[test]
 fn absolute_paths_are_refused() {
-    let run = run(&Tar::new().file("/etc/passwd", b"x").end());
+    let run = extract(&Tar::new().file("/etc/passwd", b"x").end());
     assert_eq!(path_defect(&run), NameDefect::Absolute);
     run.scratch.assert_contained();
 }
@@ -37,7 +37,7 @@ fn absolute_paths_are_refused() {
 #[test]
 fn dot_dot_components_are_refused() {
     for name in ["../outside/x", "a/../../outside/x", "a/..", ".."] {
-        let run = run(&Tar::new().dir("a").file(name, b"x").end());
+        let run = extract(&Tar::new().dir("a").file(name, b"x").end());
         assert_eq!(path_defect(&run), NameDefect::DotComponent, "{name}");
         run.scratch.assert_contained();
     }
@@ -54,7 +54,7 @@ fn names_outside_the_allowed_bytes_are_refused() {
         b"a\x7fb",
     ];
     for name in names {
-        let run = run(&Tar::new().entry(Entry::new(name, b'0').data(b"x")).end());
+        let run = extract(&Tar::new().entry(Entry::new(name, b'0').data(b"x")).end());
         assert_eq!(path_defect(&run), NameDefect::ForbiddenByte, "{name:?}");
     }
 }
@@ -69,22 +69,22 @@ fn special_and_over_long_names_are_refused() {
         ".Trashes",
         ".metadata_never_index",
     ] {
-        let run = run(&Tar::new().dir(name).end());
+        let run = extract(&Tar::new().dir(name).end());
         assert_eq!(path_defect(&run), NameDefect::RootReserved, "{name}");
     }
-    let run = run(&Tar::new().dir("d").file("d/._x", b"x").end());
+    let run = extract(&Tar::new().dir("d").file("d/._x", b"x").end());
     assert_eq!(path_defect(&run), NameDefect::AppleDouble);
 
     let component = "a".repeat(256);
-    let run = run(&Tar::new().long_file(&component, b"x").end());
+    let run = extract(&Tar::new().long_file(&component, b"x").end());
     assert_eq!(path_defect(&run), NameDefect::ComponentTooLong);
 
     let path = format!("{}/{}/ab", "a".repeat(255), "a".repeat(254));
-    let run = run(&Tar::new().long_file(&path, b"x").end());
+    let run = extract(&Tar::new().long_file(&path, b"x").end());
     assert_eq!(path_defect(&run), NameDefect::TooLong);
 
     let deep = vec!["a"; 65].join("/");
-    let run = run(&Tar::new().long_file(&deep, b"x").end());
+    let run = extract(&Tar::new().long_file(&deep, b"x").end());
     assert_eq!(path_defect(&run), NameDefect::TooDeep);
 }
 
@@ -93,7 +93,7 @@ fn special_and_over_long_names_are_refused() {
 fn duplicate_and_case_colliding_paths_are_refused() {
     let tar = Tar::new().file("a", b"1").file("a", b"2").end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::Duplicate,
             ..
@@ -101,7 +101,7 @@ fn duplicate_and_case_colliding_paths_are_refused() {
     );
     let tar = Tar::new().dir("a").file("a", b"2").end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::Duplicate,
             ..
@@ -109,7 +109,7 @@ fn duplicate_and_case_colliding_paths_are_refused() {
     );
     let tar = Tar::new().file("a", b"1").file("A", b"2").end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::CaseCollision,
             ..
@@ -121,7 +121,7 @@ fn duplicate_and_case_colliding_paths_are_refused() {
         .file("d/x", b"2")
         .end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::CaseCollision,
             ..
@@ -135,7 +135,7 @@ fn duplicate_and_case_colliding_paths_are_refused() {
 fn a_child_before_its_parent_is_refused() {
     let tar = Tar::new().file("d/f", b"x").dir("d").end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::ParentMissing,
             ..
@@ -143,7 +143,7 @@ fn a_child_before_its_parent_is_refused() {
     );
     let tar = Tar::new().dir("a").file("a/b/c", b"x").end();
     refused!(
-        run(&tar),
+        extract(&tar),
         UnpackError::Tree(TreeRefusal::Entry {
             defect: EntryDefect::ParentMissing,
             ..
@@ -160,7 +160,7 @@ fn a_symlink_made_earlier_in_the_archive_is_not_written_through() {
         .symlink("link", "../outside")
         .file("link/pwned", b"x")
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     refused!(
         run,
         UnpackError::Tree(TreeRefusal::Entry {
@@ -179,7 +179,7 @@ fn a_symlink_that_leaves_the_tree_is_refused() {
         ("d/link", "../.."),
         ("d/up", "../../x"),
     ] {
-        let run = run(&Tar::new().dir("d").symlink(name, target).end());
+        let run = extract(&Tar::new().dir("d").symlink(name, target).end());
         refused!(
             run,
             UnpackError::Tree(TreeRefusal::Link {
@@ -200,7 +200,7 @@ fn a_symlink_that_stays_inside_is_admitted() {
         .symlink("d/up", "..")
         .symlink("d/f", "../f")
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     run.ok();
     assert_eq!(
         std::fs::read_link(run.root().join("d/up"))
@@ -215,13 +215,13 @@ fn a_symlink_that_stays_inside_is_admitted() {
 #[test]
 fn a_symlink_chain_that_climbs_through_another_symlink_is_refused() {
     let first = Tar::new().dir("d").symlink("d/s", "..");
-    run(&first.end()).ok();
+    extract(&first.end()).ok();
     let tar = Tar::new()
         .dir("d")
         .symlink("d/s", "..")
         .symlink("t", "d/s/..")
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     match run.err() {
         UnpackError::Tree(TreeRefusal::Link { path, defect }) => {
             assert_eq!(path, "t");
@@ -234,7 +234,7 @@ fn a_symlink_chain_that_climbs_through_another_symlink_is_refused() {
 /// Absolute and over-long targets, empty targets and targets with a NUL are refused.
 #[test]
 fn bad_symlink_targets_are_refused() {
-    let target_defect = |tar: Vec<u8>| match run(&tar).err() {
+    let target_defect = |tar: Vec<u8>| match extract(&tar).err() {
         UnpackError::Tree(TreeRefusal::Target { defect, .. }) => *defect,
         other => panic!("not a target refusal: {other:?}"),
     };
@@ -267,11 +267,11 @@ fn bad_symlink_targets_are_refused() {
 /// eight hops are refused.
 #[test]
 fn the_walker_follows_the_kernel_through_dangling_files_and_loops() {
-    run(&Tar::new().symlink("a", "missing/x").end()).ok();
-    run(&Tar::new().file("f", b"x").symlink("s", "f").end()).ok();
-    run(&Tar::new().symlink("here", ".").end()).ok();
+    extract(&Tar::new().symlink("a", "missing/x").end()).ok();
+    extract(&Tar::new().file("f", b"x").symlink("s", "f").end()).ok();
+    extract(&Tar::new().symlink("here", ".").end()).ok();
 
-    let link_defect = |tar: Vec<u8>| match run(&tar).err() {
+    let link_defect = |tar: Vec<u8>| match extract(&tar).err() {
         UnpackError::Tree(TreeRefusal::Link { defect, .. }) => *defect,
         other => panic!("not a link refusal: {other:?}"),
     };
@@ -299,7 +299,7 @@ fn the_walker_follows_the_kernel_through_dangling_files_and_loops() {
         }
         tar.end()
     };
-    run(&chain(9)).ok();
+    extract(&chain(9)).ok();
     assert_eq!(link_defect(chain(10)), LinkDefect::TooManyHops);
 }
 
@@ -313,7 +313,7 @@ fn hardlinks_are_refused() {
             .file("f", b"x")
             .entry(Entry::new(b"h", b'1').link(target.as_bytes()))
             .end();
-        refused!(run(&tar), UnpackError::EntryType { kind: '1', .. });
+        refused!(extract(&tar), UnpackError::EntryType { kind: '1', .. });
     }
 }
 
@@ -330,7 +330,7 @@ fn devices_fifos_sockets_and_unknown_types_are_refused() {
         (b'S', 'S'),
         (b's', 's'),
     ] {
-        let run = run(&Tar::new().entry(Entry::new(b"n", flag)).end());
+        let run = extract(&Tar::new().entry(Entry::new(b"n", flag)).end());
         match run.err() {
             UnpackError::EntryType { kind: got, .. } => assert_eq!(*got, kind),
             other => panic!("{other:?}"),
@@ -351,7 +351,7 @@ fn set_id_and_sticky_bits_never_reach_the_disk() {
         .entry(Entry::new(b"other-x", b'0').mode(0o001).data(b"x"))
         .entry(Entry::new(b"dir", b'5').mode(0o4777))
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     run.ok();
     for (name, mode) in [
         ("suid", 0o755),
@@ -369,11 +369,11 @@ fn set_id_and_sticky_bits_never_reach_the_disk() {
 #[test]
 fn a_directory_or_symlink_with_a_size_is_refused() {
     let tar = Tar::new().entry(Entry::new(b"d", b'5').data(b"junk")).end();
-    refused!(run(&tar), UnpackError::SizeOnNonFile { .. });
+    refused!(extract(&tar), UnpackError::SizeOnNonFile { .. });
     let tar = Tar::new()
         .entry(Entry::new(b"l", b'2').link(b"x").data(b"junk"))
         .end();
-    refused!(run(&tar), UnpackError::SizeOnNonFile { .. });
+    refused!(extract(&tar), UnpackError::SizeOnNonFile { .. });
 }
 
 // ---- limits ----
@@ -389,7 +389,7 @@ fn oversize_entries_and_totals_are_refused() {
     let tar = Tar::new()
         .entry(Entry::new(b"big", b'0').size(0o77777777777))
         .end();
-    let run = run_with(&tar, &limits);
+    let run = extract_with(&tar, &limits);
     refused!(run, UnpackError::TooManyBytes { max } if *max == 1 << 20);
     assert!(snapshot(&run.root()).is_empty());
 
@@ -399,7 +399,7 @@ fn oversize_entries_and_totals_are_refused() {
         .file("b", &chunk)
         .file("c", &chunk)
         .end();
-    let run = run_with(&tar, &limits);
+    let run = extract_with(&tar, &limits);
     refused!(run, UnpackError::TooManyBytes { .. });
     assert_eq!(snapshot(&run.root()).len(), 2);
 }
@@ -411,10 +411,10 @@ fn too_many_entries_are_refused() {
         entries: 3,
         bytes: 1 << 20,
     };
-    run_with(&Tar::new().dir("a").dir("b").dir("c").end(), &limits).ok();
+    extract_with(&Tar::new().dir("a").dir("b").dir("c").end(), &limits).ok();
     let tar = Tar::new().dir("a").dir("b").dir("c").dir("d").end();
     refused!(
-        run_with(&tar, &limits),
+        extract_with(&tar, &limits),
         UnpackError::TooManyEntries { max: 3 }
     );
 }
@@ -430,13 +430,13 @@ fn trailing_bytes_after_the_end_marker_are_bounded_by_the_raw_ceiling() {
     };
     let mut exact = body.clone();
     exact.resize(body.len() + 1024, 0);
-    let run_exact = run_with(&exact, &tight);
+    let run_exact = extract_with(&exact, &tight);
     assert_eq!(run_exact.ok().stream_bytes, exact.len() as u64);
     assert_eq!(run_exact.ok().diff_id, layer::diff_id_of(&exact));
 
     let mut over = exact.clone();
     over.push(0);
-    let run_over = run_with(&over, &tight);
+    let run_over = extract_with(&over, &tight);
     refused!(run_over, UnpackError::Stream(StreamError::Ceiling { max }) if *max == body.len() as u64 + 1024);
 
     let roomy = Limits {
@@ -445,7 +445,7 @@ fn trailing_bytes_after_the_end_marker_are_bounded_by_the_raw_ceiling() {
     };
     let mut padded = exact;
     padded.resize(padded.len() + 3000, 0);
-    let run_padded = run_with(&padded, &roomy);
+    let run_padded = extract_with(&padded, &roomy);
     assert_eq!(run_padded.ok().stream_bytes, padded.len() as u64);
     assert_eq!(run_padded.ok().diff_id, layer::diff_id_of(&padded));
 }
@@ -461,33 +461,33 @@ fn a_header_and_its_records_must_agree() {
         .pax(&[("path", b"dir/a")])
         .entry(Entry::new(b"dir/b", b'0').data(b"x"))
         .end();
-    refused!(run(&tar), UnpackError::Disagree { .. });
+    refused!(extract(&tar), UnpackError::Disagree { .. });
 
     let long = format!("{}/f", "a".repeat(150));
     let tar = Tar::new()
         .long_name(long.as_bytes())
         .entry(Entry::new(b"zzz", b'0').data(b"x"))
         .end();
-    refused!(run(&tar), UnpackError::Disagree { .. });
+    refused!(extract(&tar), UnpackError::Disagree { .. });
 
     let tar = Tar::new()
         .pax(&[("linkpath", b"y")])
         .entry(Entry::new(b"l", b'2').link(b"x"))
         .end();
-    refused!(run(&tar), UnpackError::Disagree { .. });
+    refused!(extract(&tar), UnpackError::Disagree { .. });
 
     let tar = Tar::new()
         .long_name(long.as_bytes())
         .pax(&[("path", b"other")])
         .entry(Entry::new(long.as_bytes(), b'0').data(b"x"))
         .end();
-    refused!(run(&tar), UnpackError::Disagree { .. });
+    refused!(extract(&tar), UnpackError::Disagree { .. });
 
     let tar = Tar::new()
         .pax(&[("linkpath", b"y")])
         .entry(Entry::new(b"f", b'0').data(b"x"))
         .end();
-    refused!(run(&tar), UnpackError::Disagree { .. });
+    refused!(extract(&tar), UnpackError::Disagree { .. });
 }
 
 /// The path that counts is the long one: a `..` in a PAX path whose header holds only the
@@ -499,7 +499,7 @@ fn a_pax_path_is_the_effective_path() {
         .pax(&[("path", path.as_bytes())])
         .entry(Entry::new(path.as_bytes(), b'0').data(b"x"))
         .end();
-    assert_eq!(path_defect(&run(&tar)), NameDefect::DotComponent);
+    assert_eq!(path_defect(&extract(&tar)), NameDefect::DotComponent);
 }
 
 /// Extended attributes, sparse maps, ACLs and size overrides in a PAX record are refused, as
@@ -514,7 +514,7 @@ fn pax_records_that_carry_more_than_a_name_are_refused() {
         "size",
     ] {
         let tar = Tar::new().pax(&[(key, b"1")]).file("f", b"x").end();
-        match run(&tar).err() {
+        match extract(&tar).err() {
             UnpackError::Extension { key: got, .. } => assert_eq!(got, key),
             other => panic!("{other:?}"),
         }
@@ -523,7 +523,7 @@ fn pax_records_that_carry_more_than_a_name_are_refused() {
         .pax(&[("path", b"f"), ("path", b"f")])
         .file("f", b"x")
         .end();
-    refused!(run(&tar), UnpackError::Extension { .. });
+    refused!(extract(&tar), UnpackError::Extension { .. });
 }
 
 /// The harmless PAX keys are accepted and ignored.
@@ -539,7 +539,7 @@ fn harmless_pax_records_are_accepted() {
         ])
         .file("f", b"x")
         .end();
-    run(&tar).ok();
+    extract(&tar).ok();
 }
 
 /// A record over 8 KiB, two records of one kind for one entry, and a record at the end of
@@ -548,7 +548,7 @@ fn harmless_pax_records_are_accepted() {
 fn malformed_record_sequences_are_refused() {
     let big = vec![b'a'; 8193];
     refused!(
-        run(&Tar::new().record(b'x', &big).file("f", b"x").end()),
+        extract(&Tar::new().record(b'x', &big).file("f", b"x").end()),
         UnpackError::Record { .. }
     );
     let tar = Tar::new()
@@ -556,11 +556,11 @@ fn malformed_record_sequences_are_refused() {
         .long_name(b"f")
         .file("f", b"x")
         .end();
-    refused!(run(&tar), UnpackError::Record { .. });
+    refused!(extract(&tar), UnpackError::Record { .. });
     let tar = Tar::new().file("f", b"x").long_name(b"g").end();
-    refused!(run(&tar), UnpackError::Record { .. });
+    refused!(extract(&tar), UnpackError::Record { .. });
     let tar = Tar::new().record(b'L', b"f").file("f", b"x").end();
-    run(&tar).ok();
+    extract(&tar).ok();
 }
 
 // ---- the stream ----
@@ -572,7 +572,7 @@ fn a_malformed_pax_record_is_refused() {
         .record(b'x', b"not a record\n")
         .file("f", b"x")
         .end();
-    refused!(run(&tar), UnpackError::Tar(_));
+    refused!(extract(&tar), UnpackError::Tar(_));
 }
 
 /// Anything but a zero block after the first end block is refused.
@@ -581,7 +581,7 @@ fn a_second_end_block_that_is_not_zero_is_refused() {
     let mut tar = Tar::new().file("f", b"x").body();
     tar.resize(tar.len() + 512, 0);
     tar.extend_from_slice(&[1u8; 512]);
-    refused!(run(&tar), UnpackError::EndMarker);
+    refused!(extract(&tar), UnpackError::EndMarker);
 }
 
 /// A stream cut anywhere is refused as truncated: inside a header, inside data, between
@@ -610,10 +610,10 @@ fn a_truncated_archive_is_refused_wherever_it_is_cut() {
         tar.len() - 1,
     ]);
     for cut in cuts {
-        let run = run(&tar[..cut]);
+        let run = extract(&tar[..cut]);
         refused!(run, UnpackError::Stream(StreamError::Truncated));
     }
-    run(&tar).ok();
+    extract(&tar).ok();
 }
 
 /// A reader that fails is a refusal, not a panic.

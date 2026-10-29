@@ -2,7 +2,7 @@
 
 mod layer;
 
-use layer::{Seen, Tar, mode_of, run, snapshot};
+use layer::{Seen, Tar, extract, mode_of, snapshot};
 
 /// Directories, files, executables and symlinks come out as written, with the modes the
 /// format fixes (0755 for directories and executables, 0644 for other files).
@@ -18,7 +18,7 @@ fn a_layer_extracts_to_the_tree_it_describes() {
         .symlink("lib/up", "../bin")
         .dir("share")
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     let done = run.ok();
     assert_eq!(done.entries, 8);
     assert_eq!(done.file_bytes, 16);
@@ -61,7 +61,7 @@ fn a_layer_extracts_to_the_tree_it_describes() {
 /// An archive with no entries is a valid, empty layer.
 #[test]
 fn an_empty_layer_extracts_to_nothing() {
-    let run = run(&Tar::new().end());
+    let run = extract(&Tar::new().end());
     assert_eq!(run.ok().entries, 0);
     assert!(snapshot(&run.root()).is_empty());
 }
@@ -86,7 +86,7 @@ fn a_long_name_record_gives_the_path() {
     }
     let file = format!("{dir}/file.txt");
     let tar = tar.long_file(&file, b"deep\n").end();
-    let run = run(&tar);
+    let run = extract(&tar);
     run.ok();
     assert_eq!(std::fs::read(run.root().join(&file)).unwrap(), b"deep\n");
 }
@@ -99,7 +99,7 @@ fn a_pax_path_record_gives_the_path() {
         .pax(&[("path", path.as_bytes())])
         .file(&path, b"x")
         .end();
-    let run = run(&tar);
+    let run = extract(&tar);
     run.ok();
     assert!(run.root().join(&path).is_file());
 }

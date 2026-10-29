@@ -73,11 +73,11 @@ pub struct Run {
     pub scratch: Scratch,
 }
 
-pub fn run(tar: &[u8]) -> Run {
-    run_with(tar, &limits())
+pub fn extract(tar: &[u8]) -> Run {
+    extract_with(tar, &limits())
 }
 
-pub fn run_with(tar: &[u8], limits: &Limits) -> Run {
+pub fn extract_with(tar: &[u8], limits: &Limits) -> Run {
     let scratch = Scratch::new();
     let fd = scratch.root_fd();
     let result = unpack_tar(tar, fd.as_fd(), limits);
