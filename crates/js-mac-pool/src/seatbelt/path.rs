@@ -52,8 +52,15 @@ impl AbsPath {
     ///
     /// # Errors
     /// A [`PathError`] naming the first rule the path breaks.
-    pub fn new(path: impl AsRef<Path>) -> Result<Self, PathError> {
-        let text = path.as_ref().to_str().ok_or(PathError::NotUtf8)?;
+    pub fn new(path: &Path) -> Result<Self, PathError> {
+        Self::parse(path.to_str().ok_or(PathError::NotUtf8)?)
+    }
+
+    /// Checks `text` as a path.
+    ///
+    /// # Errors
+    /// A [`PathError`] naming the first rule the text breaks.
+    pub fn parse(text: &str) -> Result<Self, PathError> {
         if text.len() > MAX_PATH_BYTES {
             return Err(PathError::TooLong);
         }

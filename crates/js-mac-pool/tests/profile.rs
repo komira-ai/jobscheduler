@@ -9,7 +9,7 @@ use js_mac_pool::seatbelt::{
 };
 
 fn path(text: &str) -> AbsPath {
-    AbsPath::new(text).expect("a good path")
+    AbsPath::parse(text).expect("a good path")
 }
 
 fn layout() -> SlotLayout {
@@ -48,7 +48,7 @@ fn text_of(policy: &Policy) -> String {
 }
 
 fn ports(list: &[u16]) -> Ports {
-    Ports::new(list.iter().copied()).expect("ports")
+    Ports::new(list).expect("ports")
 }
 
 /// The last eight lines of every profile, written out here on its own.

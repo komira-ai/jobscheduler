@@ -75,7 +75,7 @@ impl Scene {
 
     fn sandboxed_with(&self, policy: &Policy, program: &str, args: &[OsString]) -> Output {
         let profile = Profile::for_policy(policy).expect("profile");
-        let argv = profile.argv(&AbsPath::new(program).expect("program"), args);
+        let argv = profile.argv(&AbsPath::parse(program).expect("program"), args);
         Command::new(&argv[0])
             .args(&argv[1..])
             .output()
@@ -224,7 +224,7 @@ fn each_network_level_allows_what_it_names_and_refuses_the_rest() {
 
     let connects =
         |net: Net, to: &[OsString]| scene.sandboxed(net, "/usr/bin/nc", to).status.success();
-    let only_one = Net::Ports(Ports::new([port_one]).expect("ports"));
+    let only_one = Net::Ports(Ports::new(&[port_one]).expect("ports"));
     assert!(!connects(Net::Off, &to_one), "Off refuses loopback");
     assert!(
         connects(only_one.clone(), &to_one),

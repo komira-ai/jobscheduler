@@ -30,8 +30,8 @@ impl Ports {
     /// # Errors
     /// [`PortsError`] for an empty list, a zero port or more than [`MAX_PORTS`] distinct
     /// ports.
-    pub fn new(ports: impl IntoIterator<Item = u16>) -> Result<Self, PortsError> {
-        let set: BTreeSet<u16> = ports.into_iter().collect();
+    pub fn new(ports: &[u16]) -> Result<Self, PortsError> {
+        let set: BTreeSet<u16> = ports.iter().copied().collect();
         if set.is_empty() {
             return Err(PortsError::Empty);
         }
@@ -79,8 +79,8 @@ impl Net {
     pub fn narrow(self, other: Self) -> Self {
         match (self, other) {
             (Self::Ports(a), Self::Ports(b)) => {
-                let shared: BTreeSet<u16> = a.0.intersection(&b.0).copied().collect();
-                Ports::new(shared).map_or(Self::Off, Self::Ports)
+                let shared: Vec<u16> = a.0.intersection(&b.0).copied().collect();
+                Ports::new(&shared).map_or(Self::Off, Self::Ports)
             }
             (a, b) if a.rank() <= b.rank() => a,
             (_, b) => b,

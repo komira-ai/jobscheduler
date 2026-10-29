@@ -3,6 +3,7 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 use js_mac_pool::seatbelt::{
     AbsPath, Caps, MAX_PATH_BYTES, MAX_PORTS, Net, PathError, Policy, Ports, PortsError, Profile,
@@ -34,28 +35,28 @@ fn paths_that_are_not_plain_absolute_normal_text_are_refused() {
         ("/etc/hosts", PathError::Linked("etc".to_owned())),
     ];
     for (text, expected) in table {
-        assert_eq!(AbsPath::new(text), Err(expected), "{text:?}");
+        assert_eq!(AbsPath::parse(text), Err(expected), "{text:?}");
     }
-    assert_eq!(AbsPath::new(&long), Err(PathError::TooLong));
+    assert_eq!(AbsPath::parse(&long), Err(PathError::TooLong));
 }
 
 #[test]
 fn a_path_that_is_not_utf8_is_refused() {
     let bytes = OsStr::from_bytes(b"/Volumes/a\xffb");
-    assert_eq!(AbsPath::new(bytes), Err(PathError::NotUtf8));
+    assert_eq!(AbsPath::new(Path::new(bytes)), Err(PathError::NotUtf8));
 }
 
 #[test]
 fn the_longest_path_and_non_ascii_text_are_accepted() {
     let longest = format!("/{}", "a".repeat(MAX_PATH_BYTES - 1));
     assert_eq!(
-        AbsPath::new(&longest).expect("at the limit").as_str(),
+        AbsPath::parse(&longest).expect("at the limit").as_str(),
         longest
     );
-    let accented = AbsPath::new("/Volumes/w\u{f6}rk/\u{fc}ber").expect("text");
+    let accented = AbsPath::parse("/Volumes/w\u{f6}rk/\u{fc}ber").expect("text");
     assert_eq!(accented.as_str(), "/Volumes/w\u{f6}rk/\u{fc}ber");
     assert_eq!(
-        AbsPath::new("/private/var/folders/ab")
+        AbsPath::new(Path::new("/private/var/folders/ab"))
             .expect("canonical")
             .as_str(),
         "/private/var/folders/ab"
@@ -107,10 +108,10 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
         deny_egress: vec![],
     };
     let layout = |run: &str, entry: &str, input: &str, deny: &str| SlotLayout {
-        run: AbsPath::new(run).expect("run"),
-        uid_entry: AbsPath::new(entry).expect("entry"),
-        inputs: vec![AbsPath::new(input).expect("input")],
-        read_denies: vec![AbsPath::new(deny).expect("deny")],
+        run: AbsPath::parse(run).expect("run"),
+        uid_entry: AbsPath::parse(entry).expect("entry"),
+        inputs: vec![AbsPath::parse(input).expect("input")],
+        read_denies: vec![AbsPath::parse(deny).expect("deny")],
     };
     let plain = Policy::base(
         layout("/Volumes/r", "/Volumes/e", "/Volumes/i", "/Volumes/d"),
@@ -134,16 +135,19 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
 
 #[test]
 fn port_lists_that_are_empty_zero_or_too_long_are_refused() {
-    assert_eq!(Ports::new([]), Err(PortsError::Empty));
-    assert_eq!(Ports::new([80, 0]), Err(PortsError::Zero));
+    assert_eq!(Ports::new(&[]), Err(PortsError::Empty));
+    assert_eq!(Ports::new(&[80, 0]), Err(PortsError::Zero));
     let many = u16::try_from(MAX_PORTS).expect("small") + 1;
-    assert_eq!(Ports::new(1..=many), Err(PortsError::TooMany));
-    let at_bound = Ports::new(1..many).expect("at the bound");
+    assert_eq!(
+        Ports::new(&(1..=many).collect::<Vec<u16>>()),
+        Err(PortsError::TooMany)
+    );
+    let at_bound = Ports::new(&(1..many).collect::<Vec<u16>>()).expect("at the bound");
     assert_eq!(at_bound.iter().count(), MAX_PORTS);
 }
 
 #[test]
 fn a_port_list_keeps_each_port_once_lowest_first() {
-    let ports = Ports::new([9000, 80, 9000, 443]).expect("ports");
+    let ports = Ports::new(&[9000, 80, 9000, 443]).expect("ports");
     assert_eq!(ports.iter().collect::<Vec<u16>>(), [80, 443, 9000]);
 }
