@@ -107,6 +107,16 @@
 //! file never held is found pending (or missing) and resolved by observing it, which is
 //! why a start is never called before its pending record is written.
 //!
+//! # A slow save
+//!
+//! Every save writes, fsyncs and renames the file, and a caller holds the table's lock
+//! meanwhile, so a slow disk stalls every call on the table. A save that takes longer
+//! than one second (a save of exactly one second is not) is logged as a warning, through
+//! `tracing`, naming the step that saved (`open`, `acquire`, `acquire-settled`, `renew`,
+//! `release`, `release-settled`, `tick`) and the time in milliseconds. The save is timed
+//! on a monotonic clock, [`SystemMonotonic`] unless [`LeaseTable::watch_saves`] gives
+//! another.
+//!
 //! # The lock
 //!
 //! The lock beside the file is an advisory lock (`flock`) on `<file>.lock`. It keeps
@@ -168,7 +178,7 @@ mod store;
 mod table;
 mod types;
 
-pub use clock::{Clock, ManualClock, Monotonic, SystemClock, Timestamp};
+pub use clock::{Clock, ManualClock, Monotonic, SystemClock, SystemMonotonic, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};

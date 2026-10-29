@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use js_provider::{Observed, StartAck, StartSpec, StopAck};
 use js_types::{Admission, HostId, LabelError, Labels, LeaseId, ReservedKey};
+use tracing::warn;
 
-use crate::clock::Timestamp;
+use crate::clock::{Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, RenewError, SaveError};
 use crate::reservations;
 use crate::state::LeaseState;
@@ -247,6 +248,9 @@ pub(crate) fn bookings(path: &Path) -> Result<Vec<Booking>, OpenError> {
     Ok(named.collect())
 }
 
+/// A save of the lease file that takes longer than this is logged as slow.
+const SLOW_SAVE: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 pub(crate) struct Book {
     settings: Settings,
@@ -266,6 +270,8 @@ pub(crate) struct Book {
     /// Set when a save failed and not yet cleared by one that worked: the file is
     /// behind the table.
     unsaved: bool,
+    /// Times each save of the file, for the slow-save warning.
+    saves: Box<dyn Monotonic>,
 }
 
 impl Book {
@@ -316,11 +322,18 @@ impl Book {
             version: document.version,
             extra: document.extra,
             unsaved: false,
+            saves: Box::new(SystemMonotonic::default()),
         })
     }
 
-    /// Writes the table to its file, and remembers whether that worked.
-    pub(crate) fn save(&mut self) -> Result<(), SaveError> {
+    /// Times the saves that follow with `clock`.
+    pub(crate) fn watch_saves(&mut self, clock: Box<dyn Monotonic>) {
+        self.saves = clock;
+    }
+
+    /// Writes the table to its file, and remembers whether that worked. A write that took
+    /// longer than a second is logged as a warning naming `operation`, the step that saved.
+    pub(crate) fn save(&mut self, operation: &'static str) -> Result<(), SaveError> {
         let document = Document {
             version: self.version.max(FORMAT_VERSION),
             term: self.term,
@@ -333,7 +346,12 @@ impl Book {
                 .collect(),
             extra: self.extra.clone(),
         };
+        let began = self.saves.reading();
         let saved = store::write(&self.path, &document);
+        let took = self.saves.reading().saturating_sub(began);
+        if took > SLOW_SAVE {
+            warn!(%operation, took_ms = took.as_millis(), "lease file save was slow");
+        }
         self.unsaved = saved.is_err();
         saved
     }
