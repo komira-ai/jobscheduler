@@ -75,7 +75,6 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
         // Reached but never recorded: hold the previous minute, for each figure apart.
         let mut cores: Vec<u64> = ring
             .runs()
-            .filter(|r| !r.under_node_pressure())
             .filter_map(|r| r.buckets.get(t).copied().flatten())
             .map(|b| u64::from(b.cores_milli))
             .collect();
