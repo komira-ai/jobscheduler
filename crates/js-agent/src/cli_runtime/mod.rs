@@ -25,6 +25,7 @@
 //!   --cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=<scratch root>/seccomp+pinned.json
 //!   --network none --read-only
 //!   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m --ulimit core=0 --ipc private
+//!   --cgroupns private
 //!   [--pid private] --pull never --user 65534:65534 -- <image> <args>...
 //! <bin> inspect --type container --format "{{json .Mounts}}" -- <id>
 //! <bin> volume inspect --format "{{json .Options}}" -- <scratch volume>   (Docker)

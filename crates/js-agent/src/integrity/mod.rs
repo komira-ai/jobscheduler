@@ -116,7 +116,9 @@
 //!   the unified hierarchy is read; a path that names a container (`libpod-<id>`,
 //!   `docker-<id>`, `crio-`, `cri-containerd-`, `/docker/`, `libpod_parent`,
 //!   `machine.slice`) always counts, wherever it is, and so does a scope under a system
-//!   service. A job's process left in its own container's control group counts.
+//!   service. A job's process left in its own container's control group counts, and so
+//!   does a process in the agent's own control group (read from `/proc/self/cgroup` when
+//!   the agent starts; an agent that cannot read it does not start) or below it.
 //! - **A network namespace Podman pins** (`nsfs` at `/run/netns/<name>`: one per container,
 //!   a neighbour's included, named without the container id), **the bind of `/run/netns`
 //!   onto itself** (`tmpfs`, root `/netns`) that the first container after a boot makes,
@@ -361,13 +363,23 @@ fn is_live(job: &Finished<'_>, text: &str) -> bool {
 /// move a process out of it: the control group file system is read-only in the container.
 /// A path that holds such a name is never the host's, wherever it is, so a container placed
 /// under the system or the user slice still counts.
-fn hosts_own_process(cgroup: &str) -> bool {
-    let Some(path) = cgroup
-        .split_whitespace()
-        .find_map(|line| line.strip_prefix("0::"))
-    else {
+///
+/// The agent's own control group (`own`, its unified path) and every group below it are
+/// not the host's: a child of the agent that outlives it is in the agent's service, and is
+/// judged like any other process.
+fn hosts_own_process(cgroup: &str, own: Option<&str>) -> bool {
+    let Some(path) = unified(cgroup) else {
         return false;
     };
+    let agents = own.is_some_and(|own| {
+        path == own
+            || path
+                .strip_prefix(own)
+                .is_some_and(|rest| rest.starts_with('/'))
+    });
+    if agents {
+        return false;
+    }
     let units: Vec<&str> = path.split('/').filter(|unit| !unit.is_empty()).collect();
     let monitor = units
         .last()
@@ -385,6 +397,14 @@ fn hosts_own_process(cgroup: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// The path of the unified hierarchy (`0::`) in the control groups `cgroup` (the lines of
+/// `/proc/<pid>/cgroup`), if there is one.
+fn unified(cgroup: &str) -> Option<&str> {
+    cgroup
+        .split_whitespace()
+        .find_map(|line| line.strip_prefix("0::"))
 }
 
 /// Whether the control group `unit` is one a container engine makes for a container.
@@ -424,6 +444,8 @@ pub struct Integrity {
     uid: u32,
     watch: Vec<PathBuf>,
     baseline: Snapshot,
+    /// The agent's own control group (its unified path), which is never the host's.
+    own: Option<String>,
 }
 
 impl Integrity {
@@ -432,15 +454,23 @@ impl Integrity {
     ///
     /// # Errors
     ///
-    /// The host cannot be read whole, so there is nothing to compare with later: the text
-    /// says which input failed.
+    /// The host cannot be read whole, so there is nothing to compare with later, or the
+    /// agent's own control group (`/proc/self/cgroup`) cannot be read: the text says which
+    /// input failed.
     pub fn start(view: Box<dyn HostView>, uid: u32, watch: Vec<PathBuf>) -> Result<Self, String> {
         require_host_namespaces(&|path| view.link(path), &|path| view.file(path))?;
+        let own = view
+            .file("/proc/self/cgroup")
+            .map_err(|why| format!("cannot read the agent's own control group: {why}"))?;
+        let own = unified(&own)
+            .filter(|path| !path.trim_matches('/').is_empty())
+            .map(|path| path.trim_end_matches('/').to_owned());
         let mut this = Self {
             view,
             uid,
             watch,
             baseline: Snapshot::default(),
+            own,
         };
         this.baseline = this.observe().map_err(|problems| {
             format!(
@@ -501,7 +531,7 @@ impl Integrity {
             .filter(|process| {
                 !known.contains(&process.key())
                     && !mine(&process.cgroup)
-                    && !hosts_own_process(&process.cgroup)
+                    && !hosts_own_process(&process.cgroup, self.own.as_deref())
             })
             .collect();
         let as_job = strays.iter().filter(|stray| stray.uid == self.uid);
