@@ -458,7 +458,7 @@ async fn the_hosts_the_registry_refused_are_written_when_they_change_and_a_failu
         "{log:?}"
     );
     let host = BTreeSet::from(["js-unremoved-file".to_owned()]);
-    assert_eq!(rig.world().unremoved_writes, [host.clone()]);
+    assert_eq!(rig.world().unremoved_writes, std::slice::from_ref(&host));
     assert_eq!(rig.world().saved_unremoved, Some(host.clone()));
 
     rig.scaler.tick().await;
