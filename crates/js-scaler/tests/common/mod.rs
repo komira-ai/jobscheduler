@@ -118,6 +118,7 @@ pub fn input(pool: PoolInput) -> Input {
         pools: vec![pool],
         waiting: Vec::new(),
         hosts: Vec::new(),
+        registry_complete: true,
         acquired: Vec::new(),
         released: Vec::new(),
         not_found: Vec::new(),

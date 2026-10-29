@@ -193,3 +193,66 @@ fn a_request_takes_back_a_registered_host_still_shown_draining() {
     assert_eq!(kinds(&actions), ["Undrain"]);
     assert_eq!(rig.phase(0), Phase::Registered);
 }
+
+/// A rig as `registered` leaves it, whose registry then stops showing the host.
+fn forgotten() -> Rig {
+    let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
+    rig.input.hosts = Vec::new();
+    rig
+}
+
+/// Asserts that a view the shell cannot vouch for releases nothing: the machine is held
+/// and counted however long the registry shows nothing, and a step on an incomplete
+/// view starts the count of missing steps over.
+#[test]
+fn an_incomplete_registry_view_releases_nothing() {
+    let mut rig = forgotten();
+    rig.input.registry_complete = false;
+    for later in [3 * SECOND, HOUR, 2 * HOUR] {
+        let actions = rig.tick(at(later));
+        assert_eq!(count(&actions, "Release") + count(&actions, "Revoke"), 0);
+        assert_eq!(rig.phase(0), Phase::Registered);
+        assert!(rig.record(0).counts());
+    }
+
+    let mut reset = forgotten();
+    reset.tick(at(3 * SECOND));
+    reset.input.registry_complete = false;
+    reset.tick(at(10 * MINUTE));
+    reset.input.registry_complete = true;
+    let actions = reset.tick(at(3 * SECOND + 30 * MINUTE));
+    assert_eq!(count(&actions, "Release"), 0);
+    assert_eq!(reset.phase(0), Phase::Registered);
+}
+
+/// Asserts that a host missing on one step is not released, and that one missing on two
+/// complete steps `unknown_hold` apart is, to the millisecond.
+#[test]
+fn a_host_missing_on_two_complete_steps_is_released() {
+    let mut rig = forgotten();
+    assert_eq!(count(&rig.tick(at(3 * SECOND)), "Release"), 0);
+    assert_eq!(rig.phase(0), Phase::Registered);
+    assert_eq!(
+        count(&rig.tick(at(3 * SECOND + 30 * MINUTE - 1)), "Release"),
+        0
+    );
+    let actions = rig.tick(at(3 * SECOND + 30 * MINUTE));
+    assert_eq!(count(&actions, "Revoke"), 1);
+    assert_eq!(count(&actions, "Release"), 1);
+    assert_eq!(rig.phase(0), Phase::Releasing);
+}
+
+/// Asserts that a host that reappears between the two steps starts the count over.
+#[test]
+fn a_host_that_reappears_resets_the_count() {
+    let (mut rig, plan) = registered(settings("gpu"), "i-1", 2 * SECOND);
+    rig.input.hosts = Vec::new();
+    rig.tick(at(3 * SECOND));
+    rig.input.hosts = vec![host(&plan.name, "gpu")];
+    rig.tick(at(10 * MINUTE));
+    rig.input.hosts = Vec::new();
+    assert_eq!(count(&rig.tick(at(3 * SECOND + 30 * MINUTE)), "Release"), 0);
+    assert_eq!(rig.phase(0), Phase::Registered);
+    let actions = rig.tick(at(3 * SECOND + 60 * MINUTE));
+    assert_eq!(count(&actions, "Release"), 1);
+}

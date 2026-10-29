@@ -117,6 +117,12 @@ pub struct Input {
     pub waiting: Vec<Waiting>,
     /// The hosts the registry knows.
     pub hosts: Vec<HostFacts>,
+    /// Whether `hosts` is the registry's whole, settled view: every host it holds, read
+    /// after it finished loading its state. The shell sets it `false` for a view it cannot
+    /// vouch for (the registry has just started, a read failed or was partial). A machine
+    /// missing from `hosts` is released only on a complete view, seen missing twice at
+    /// least `unknown_hold` apart; on an incomplete one everything is held and counted.
+    pub registry_complete: bool,
     /// Answers to acquires.
     pub acquired: Vec<AcquireResult>,
     /// Answers to releases.
