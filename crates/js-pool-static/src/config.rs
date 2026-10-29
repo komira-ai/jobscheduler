@@ -65,7 +65,6 @@ struct RawHost {
 
 /// What a hosts file lists: the hosts, as the operator wrote them, and the share of their
 /// memory the file books.
-#[derive(Debug)]
 pub(crate) struct Parsed {
     /// The hosts in file order, with the memory as written.
     pub(crate) hosts: Vec<(HostId, Shape)>,
@@ -132,7 +131,9 @@ mod tests {
     /// Asserts that a syntax error names its line.
     #[test]
     fn syntax_error_names_the_line() {
-        let err = parse("[[host]]\nid = \"a\"\nresources = = 3\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\nresources = = 3\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Parse(_)));
         assert!(err.to_string().contains("line 3"), "{err}");
     }
@@ -141,9 +142,11 @@ mod tests {
     /// does not pass as a default.
     #[test]
     fn type_error_and_unknown_key_name_their_line() {
-        let err = parse("[[host]]\nid = 7\n").unwrap_err();
+        let err = parse("[[host]]\nid = 7\n").err().unwrap();
         assert!(err.to_string().contains("line 2"), "{err}");
-        let err = parse("[[host]]\nid = \"a\"\nspeed = 1\n[host.resources]\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\nspeed = 1\n[host.resources]\n")
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("line 3"), "{err}");
         assert!(err.to_string().contains("speed"), "{err}");
     }
@@ -151,14 +154,18 @@ mod tests {
     /// Asserts that a malformed host id is refused.
     #[test]
     fn bad_host_id_is_refused() {
-        let err = parse("[[host]]\nid = \"Gpu One\"\n[host.resources]\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"Gpu One\"\n[host.resources]\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Id(_)));
     }
 
     /// Asserts that an unknown dimension is refused by name, with the host.
     #[test]
     fn unknown_dimension_is_refused_by_name() {
-        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\nvms = 2\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\nvms = 2\n")
+            .err()
+            .unwrap();
         assert_eq!(
             err.to_string(),
             "host a: unknown resource dimension \"vms\""
@@ -168,7 +175,9 @@ mod tests {
     /// Asserts that gpus without a gpu_class is refused.
     #[test]
     fn gpus_without_a_class_are_refused() {
-        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\ngpus = 1\n").unwrap_err();
+        let err = parse("[[host]]\nid = \"a\"\n[host.resources]\ngpus = 1\n")
+            .err()
+            .unwrap();
         assert!(matches!(err, ConfigError::Resources { .. }));
     }
 
@@ -177,7 +186,7 @@ mod tests {
     fn duplicate_and_empty_are_refused() {
         let twice = format!("{ONE}{ONE}");
         assert_eq!(
-            parse(&twice).unwrap_err().to_string(),
+            parse(&twice).err().unwrap().to_string(),
             "host a is listed twice"
         );
         assert!(matches!(parse(""), Err(ConfigError::NoHosts)));
