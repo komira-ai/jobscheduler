@@ -5,9 +5,9 @@
 mod support;
 
 use js_agent_wire::refusal;
-use js_caps::{Breach, ExecMode};
+use js_caps::Breach;
 use js_registry::{PoolConfig, Refusal};
-use js_types::{Resources, Shape};
+use js_types::{ExecMode, Resources, Shape};
 use support::*;
 
 /// A pool of macOS hosts that declares `exec`.

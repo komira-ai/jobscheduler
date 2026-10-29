@@ -12,9 +12,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use js_agent_wire::{DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, limits};
-use js_caps::ExecMode;
 use js_registry::{DEFAULT_LOST_RETENTION_MS, PoolConfig, WholeNodeConfig};
-use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+use js_types::{Admission, ClassId, ExecMode, ProviderId, ResourceClass, Resources, Shape};
 use serde::Deserialize;
 use tracing::warn;
 

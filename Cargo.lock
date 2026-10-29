@@ -941,6 +941,7 @@ dependencies = [
  "js-lease-server",
  "js-pool-static",
  "js-testkit",
+ "js-types",
  "rustix",
  "serde_json",
  "sha2 0.11.1",
@@ -966,6 +967,7 @@ dependencies = [
 name = "js-caps"
 version = "0.1.0"
 dependencies = [
+ "js-types",
  "thiserror",
 ]
 

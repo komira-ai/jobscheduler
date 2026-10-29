@@ -19,7 +19,8 @@
 use std::path::Path;
 
 use js_agent_wire::Hello;
-use js_caps::{EXEC, ExecMode, FLAG_SET, GPU_TOOLKIT, RUNTIME};
+use js_caps::{EXEC, FLAG_SET, GPU_TOOLKIT, RUNTIME};
+use js_types::ExecMode;
 
 use crate::cli::Cli;
 use crate::facts::CommandRunner;

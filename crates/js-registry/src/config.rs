@@ -1,8 +1,7 @@
 use js_agent_wire::{
     DEFAULT_GRACE_MS, DEFAULT_HEARTBEAT_INTERVAL_MS, PROTOCOL_MAJOR, ValidationError, Welcome,
 };
-use js_caps::ExecMode;
-use js_types::{Admission, ProviderId, ResourceClass, Shape};
+use js_types::{Admission, ExecMode, ProviderId, ResourceClass, Shape};
 
 use crate::WholeNodeConfig;
 

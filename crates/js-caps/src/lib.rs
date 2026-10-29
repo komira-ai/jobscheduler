@@ -42,10 +42,7 @@ pub use gpu::{
     GPU_KIND_NATIVE, PciFunction, gpu_cores_from_macos_ioreg, gpus_from_linux_pci,
     gpus_from_macos_sysctl, metal_family_of_apple_chip,
 };
-pub use host::{
-    Breach, DETECTED_KEYS, EXEC, ExecMode, FLAG_SET, GPU_TOOLKIT, HostContract, RUNTIME,
-    UnknownExecMode,
-};
+pub use host::{Breach, DETECTED_KEYS, EXEC, FLAG_SET, GPU_TOOLKIT, HostContract, RUNTIME};
 pub use level::{ArmVersion, IsaLevel, UnknownIsaLevel, X86Level};
 pub use matching::{
     Consumable, DEVICE_ATTRIBUTES, NodeCaps, REPORT_ONLY_KEYS, RESERVED_KEYS, Request,

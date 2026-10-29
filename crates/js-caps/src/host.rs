@@ -17,8 +17,8 @@
 //! predates the contract reports none of them.
 
 use std::collections::BTreeMap;
-use std::fmt;
-use std::str::FromStr;
+
+use js_types::ExecMode;
 
 /// The capability key of the program the agent runs jobs with.
 pub const RUNTIME: &str = "runtime";
@@ -34,49 +34,6 @@ pub const FLAG_SET: &str = "true";
 
 /// The keys an agent detects and an operator cannot set with a flag.
 pub const DETECTED_KEYS: [&str; 3] = [RUNTIME, GPU_TOOLKIT, EXEC];
-
-/// How a host runs jobs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ExecMode {
-    /// In a container, with Docker or Podman.
-    Container,
-    /// As a process under a `sandbox-exec` profile (macOS).
-    SandboxExec,
-}
-
-impl ExecMode {
-    /// The text that names the mode in a pool's `exec` and in a hello.
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Container => "container",
-            Self::SandboxExec => "sandbox-exec",
-        }
-    }
-}
-
-impl fmt::Display for ExecMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
-/// A string that names no execution mode.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("unknown execution mode {0:?}; known: container, sandbox-exec")]
-pub struct UnknownExecMode(pub String);
-
-impl FromStr for ExecMode {
-    type Err = UnknownExecMode;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "container" => Ok(Self::Container),
-            "sandbox-exec" => Ok(Self::SandboxExec),
-            _ => Err(UnknownExecMode(s.to_owned())),
-        }
-    }
-}
 
 /// How a report fails a [`HostContract`]. Each names the capability at fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -162,18 +119,6 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
-    }
-
-    /// Asserts that both modes parse from and print as the names a pool and a hello use,
-    /// and that any other text is refused naming what is known.
-    #[test]
-    fn modes_round_trip_and_unknown_is_refused() {
-        for mode in [ExecMode::Container, ExecMode::SandboxExec] {
-            assert_eq!(mode.to_string().parse::<ExecMode>(), Ok(mode));
-        }
-        let err = "Container".parse::<ExecMode>().unwrap_err();
-        assert_eq!(err, UnknownExecMode("Container".to_owned()));
-        assert!(err.to_string().contains("known: container, sandbox-exec"));
     }
 
     /// Asserts each step of the check on its own, so the order of the list in
