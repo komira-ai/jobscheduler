@@ -35,6 +35,8 @@ pub struct Scratch {
 }
 
 impl Scratch {
+    /// A new, empty directory named for `name`. Tests run side by side, so a name that two
+    /// tests use must not be the same directory: every call gets a directory of its own.
     pub fn new(name: &str) -> Self {
         let owner = TestDir::under(
             Path::new(env!("CARGO_TARGET_TMPDIR")).join("js-lease-server"),
@@ -84,15 +86,47 @@ fn scratches_of_one_name_are_separate_and_each_removes_only_itself() {
     assert_eq!(fs::read(kept).unwrap(), b"one");
 }
 
-/// Installs a subscriber that discards what the server logs, so the log calls of the
-/// server run (a call with no subscriber skips evaluating its fields).
+/// Everything any test's server has logged on a thread with no capture of its own,
+/// through [`quiet_logs`]'s subscriber.
+static EVERYTHING: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// A writer into [`EVERYTHING`].
+struct Everything;
+
+impl std::io::Write for Everything {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        EVERYTHING.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Installs the process-wide subscriber, so the log calls of the server run (a call with
+/// no subscriber skips evaluating its fields) and so a line logged from any thread,
+/// the pool for blocking calls included, can be read back with [`logged_with`]. A test
+/// that starts a [`LogCapture`] reads its own thread's lines there instead.
 pub fn quiet_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = tracing_subscriber::fmt()
-            .with_writer(std::io::sink)
+            .with_ansi(false)
+            .with_writer(|| Everything)
             .try_init();
     });
+}
+
+/// The lines logged by the process-wide subscriber that contain `needle`. Tests run side
+/// by side, so a test names something only it logs (a host id of its own).
+pub fn logged_with(needle: &str) -> Vec<String> {
+    let all = EVERYTHING.lock().unwrap();
+    String::from_utf8_lossy(&all)
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The flags every test server gets: ephemeral loopback port, a first boot, the shipped
@@ -547,4 +581,14 @@ pub async fn until(mut ready: impl FnMut() -> bool) {
         }
     })
     .await;
+}
+
+/// Asserts that two scratch directories made with one name are two directories, so tests
+/// that run side by side and pick one name do not share files.
+#[test]
+fn scratch_directories_of_one_name_differ() {
+    let (first, second) = (Scratch::new("same"), Scratch::new("same"));
+    assert_ne!(first.dir, second.dir);
+    first.write("mine", "x", 0o600);
+    assert!(!second.path("mine").exists());
 }
