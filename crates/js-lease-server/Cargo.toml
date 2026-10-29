@@ -17,7 +17,7 @@ js-provider = { path = "../js-provider" }
 js-registry = { path = "../js-registry" }
 js-sched = { path = "../js-sched" }
 js-types = { path = "../js-types" }
-axum = { workspace = true, features = ["http1", "json"] }
+axum = { workspace = true, features = ["http1", "json", "tokio"] }
 clap.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["service", "tokio"] }
@@ -44,6 +44,8 @@ js-testkit = { path = "../js-testkit" }
 # `log` output.
 log.workspace = true
 rcgen.workspace = true
+# `oneshot` on the router, for the tests that set the peer of a request.
+tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 
 [lints]

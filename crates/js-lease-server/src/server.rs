@@ -19,7 +19,9 @@ use crate::capacity::Seated;
 use crate::config::Config;
 use crate::error::StartupError;
 use crate::listener::{Slots, serve};
-use crate::ticker::Ticker;
+use crate::pool::{Pool, Setup};
+use crate::status::Status;
+use crate::ticker::{IntervalTicker, Ticker};
 use crate::tls;
 
 /// A running server. Dropping it stops serving and ticking; [`Running::shutdown`] stops
@@ -33,6 +35,7 @@ pub struct Running {
     slots: Arc<Slots>,
     serving: JoinHandle<()>,
     ticking: Ticking,
+    _checking: Checking,
 }
 
 /// The listener that serves the agent routes alone (`server.agent_listen`).
@@ -54,7 +57,8 @@ async fn bind(
 }
 
 /// Starts a server: builds the provider from the capacity source, opens the lease table
-/// over the state file, binds the listener and begins serving and ticking.
+/// over the state file, binds the listener and begins serving and ticking. The checks of
+/// an elastic pool run on a timer of `--tick`; see [`start_with_checks`].
 ///
 /// Time comes from `clock` and ticks from `ticker`, so a test decides both. Each
 /// failure to start names the flag at fault.
@@ -62,6 +66,21 @@ pub async fn start<T: Ticker>(
     config: Config,
     clock: SharedClock,
     ticker: T,
+) -> Result<Running, StartupError> {
+    let checks = IntervalTicker::new(config.tick_period());
+    start_with_checks(config, clock, ticker, checks).await
+}
+
+/// [`start`] with the ticker of the pool checks given too. At each tick of `checks` the
+/// check loop of the elastic pool (if the configuration has one) asks the injected clock
+/// whether a pass is due, runs it if so, and finishes the tick when the pass is done, so a
+/// test steps the checks as it steps the table. Without an elastic pool `checks` is
+/// dropped.
+pub async fn start_with_checks<T: Ticker, C: Ticker>(
+    mut config: Config,
+    clock: SharedClock,
+    ticker: T,
+    checks: C,
 ) -> Result<Running, StartupError> {
     let bookings =
         read_bookings(&config.state_file).map_err(|err| StartupError::new("--state-file", err))?;
@@ -75,7 +94,7 @@ pub async fn start<T: Ticker>(
     };
     let table = LeaseTable::open(
         BoxedProvider(provider),
-        clock,
+        clock.clone(),
         config.settings,
         &config.state_file,
         config.boot,
@@ -103,7 +122,20 @@ pub async fn start<T: Ticker>(
     for warning in &config.warnings {
         warn!("{warning}");
     }
-    let shared = Arc::new(Shared::new(table, config.token, agents));
+    let registry = agents.as_ref().map(|agents| agents.registry.clone());
+    let pool = config.elastic.take().map(|plan| {
+        let setup = Setup {
+            advertise: config.advertise_url.clone(),
+            tls: config.tls.clone(),
+            inputs: std::mem::take(&mut config.launch_inputs),
+            clock: clock.clone(),
+        };
+        Pool::new(plan, setup)
+    });
+    let checker = pool.as_ref().map(|pool| pool.checker(clock.clone()));
+    let status = Status::new(pool, registry, config.warnings.clone(), clock.clone());
+    let status = config.status.then(|| Arc::new(status));
+    let shared = Arc::new(Shared::new(table, config.token, agents).with_status(status));
     let split = agent_listener.is_some();
     let (stop, stopped) = oneshot::channel::<()>();
     let slots = Arc::new(Slots::new(config.limits.max_connections));
@@ -128,6 +160,7 @@ pub async fn start<T: Ticker>(
         }
     });
     let ticking = Ticking(tokio::spawn(tick_loop(shared.clone(), ticker)));
+    let checking = Checking(checker.map(|checker| tokio::spawn(checker.run(checks))));
     Ok(Running {
         addr,
         agent,
@@ -137,6 +170,7 @@ pub async fn start<T: Ticker>(
         slots,
         serving: tokio::spawn(serving),
         ticking,
+        _checking: checking,
     })
 }
 
@@ -147,6 +181,15 @@ struct Ticking(JoinHandle<()>);
 impl Drop for Ticking {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// The check loop of the elastic pool, ended when it is dropped.
+struct Checking(Option<JoinHandle<()>>);
+
+impl Drop for Checking {
+    fn drop(&mut self) {
+        self.0.iter().for_each(JoinHandle::abort);
     }
 }
 
