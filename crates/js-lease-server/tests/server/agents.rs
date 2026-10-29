@@ -10,7 +10,7 @@ use crate::agents_support::{
     JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
     post_raw, session, start_agents,
 };
-use crate::support::{Harness, LogCapture, TOKEN, guard, ids, lease_body, request};
+use crate::support::{Harness, LogCapture, TOKEN, guard, guard_tasks, ids, lease_body, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -472,42 +472,49 @@ async fn heartbeats_hammered_during_lease_calls_complete() {
     let sessions = [join(&h, "burst-1").await, join(&h, "burst-2").await];
     let addr = h.addr();
     let mut tasks = Vec::new();
-    for session in sessions.iter().chain(sessions.iter()) {
+    for (name, session) in ["beat-1", "beat-2", "beat-1-again", "beat-2-again"]
+        .into_iter()
+        .zip(sessions.iter().chain(sessions.iter()))
+    {
         let body = session.beat().to_string().into_bytes();
-        tasks.push(tokio::spawn(async move {
-            for _ in 0..40 {
-                let path = "/v1/agent/heartbeat";
-                let reply = request(addr, "POST", path, Some(JOIN), Some(&body)).await;
-                assert_eq!(reply.status, 200, "{}", reply.body);
-            }
-        }));
+        tasks.push((
+            name,
+            tokio::spawn(async move {
+                for _ in 0..40 {
+                    let path = "/v1/agent/heartbeat";
+                    let reply = request(addr, "POST", path, Some(JOIN), Some(&body)).await;
+                    assert_eq!(reply.status, 200, "{}", reply.body);
+                }
+            }),
+        ));
     }
-    tasks.push(tokio::spawn(async move {
-        for _ in 0..30 {
-            let body = lease_body().to_string().into_bytes();
-            let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
-            assert_eq!(made.status, 201, "{}", made.body);
-            let id = made.json()["id"].as_str().unwrap().to_string();
-            let renew = format!("/v1/leases/{id}/renew");
-            let renewed = request(addr, "POST", &renew, Some(TOKEN), None).await;
-            assert_eq!(renewed.status, 200);
-            let path = format!("/v1/leases/{id}");
-            let freed = request(addr, "DELETE", &path, Some(TOKEN), None).await;
-            assert_eq!(freed.status, 200);
-        }
-    }));
-    tasks.push(tokio::spawn(async move {
-        for _ in 0..30 {
-            let listing = request(addr, "GET", "/v1/hosts", Some(TOKEN), None).await;
-            assert_eq!(listing.status, 200);
-        }
-    }));
-    guard(async {
-        for task in tasks {
-            task.await.unwrap();
-        }
-    })
-    .await;
+    tasks.push((
+        "lease-calls",
+        tokio::spawn(async move {
+            for _ in 0..30 {
+                let body = lease_body().to_string().into_bytes();
+                let made = request(addr, "POST", "/v1/leases", Some(TOKEN), Some(&body)).await;
+                assert_eq!(made.status, 201, "{}", made.body);
+                let id = made.json()["id"].as_str().unwrap().to_string();
+                let renew = format!("/v1/leases/{id}/renew");
+                let renewed = request(addr, "POST", &renew, Some(TOKEN), None).await;
+                assert_eq!(renewed.status, 200);
+                let path = format!("/v1/leases/{id}");
+                let freed = request(addr, "DELETE", &path, Some(TOKEN), None).await;
+                assert_eq!(freed.status, 200);
+            }
+        }),
+    ));
+    tasks.push((
+        "host-listings",
+        tokio::spawn(async move {
+            for _ in 0..30 {
+                let listing = request(addr, "GET", "/v1/hosts", Some(TOKEN), None).await;
+                assert_eq!(listing.status, 200);
+            }
+        }),
+    ));
+    guard_tasks(tasks).await;
 }
 
 /// Asserts the hello rate limit at the transport, per credential, on the injected clock:

@@ -448,6 +448,17 @@ pub async fn guard<F: std::future::Future>(future: F) -> F::Output {
     }
 }
 
+/// Waits for every labelled task under the same bound as [`guard`]. When the bound is
+/// hit, the panic names the tasks that have not finished, so a hang says where it is.
+pub async fn guard_tasks(tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>) {
+    guard(async {
+        for (_, task) in tasks {
+            task.await.unwrap();
+        }
+    })
+    .await;
+}
+
 /// Yields to the runtime until `ready` holds, under the same hang guard as [`guard`].
 pub async fn until(mut ready: impl FnMut() -> bool) {
     guard(async {

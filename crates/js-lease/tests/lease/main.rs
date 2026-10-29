@@ -8,5 +8,6 @@ mod ids;
 mod persistence;
 mod renew_release;
 mod reservations;
+mod slow_save;
 mod support;
 mod whole;

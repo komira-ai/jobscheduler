@@ -12,6 +12,7 @@ mod agents_whole;
 mod auth;
 mod binary;
 mod gpu_path_pin;
+mod guard_names;
 mod joins;
 mod limits;
 mod restart;

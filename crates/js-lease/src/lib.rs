@@ -168,7 +168,7 @@ mod store;
 mod table;
 mod types;
 
-pub use clock::{Clock, ManualClock, SystemClock, Timestamp};
+pub use clock::{Clock, ManualClock, Monotonic, SystemClock, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};

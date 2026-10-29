@@ -41,6 +41,14 @@ pub trait Clock {
     fn now(&self) -> Timestamp;
 }
 
+/// A source of elapsed time that never runs backwards, for measuring how long a step
+/// took. It reads a duration from an origin of its own, so only the difference of two
+/// readings means anything.
+pub trait Monotonic: Send + Sync + std::fmt::Debug {
+    /// The time since this clock's origin.
+    fn reading(&self) -> Duration;
+}
+
 /// The system's wall clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;

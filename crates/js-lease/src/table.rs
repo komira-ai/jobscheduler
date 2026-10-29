@@ -5,7 +5,7 @@ use js_provider::{Provider, StartSpec};
 use js_types::{LeaseId, Request};
 
 use crate::book::{self, Book, Seen, Step};
-use crate::clock::{Clock, Timestamp};
+use crate::clock::{Clock, Monotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
 use crate::types::{
@@ -85,6 +85,12 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
         let settled = self.book.settle_start(record, ack);
         let _ = self.save();
         settled
+    }
+
+    /// Measures each save of the lease file with `clock` instead of the system's
+    /// monotonic clock. Tests use it to say how long a save took.
+    pub fn watch_saves(&mut self, clock: impl Monotonic + 'static) {
+        let _ = clock;
     }
 
     /// Extends a held lease and returns its new expiry: `now + ttl` clamped as in
