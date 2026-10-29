@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use js_agent_wire::Phase;
+use js_agent_wire::Phase as WirePhase;
 use js_elastic::AcquireId;
 use js_elastic::{
     Acquired, GpuClass, Held, HostRef, HostStatus, Offer, PriceUnit, ProviderError, Released,
@@ -306,7 +306,7 @@ pub fn view(name: &str) -> HostView {
     HostView {
         id: HostId::new(name).unwrap(),
         state: HostState::Live,
-        phase: Phase::Serving,
+        phase: WirePhase::Serving,
         lease: None,
         shape: Shape::new(resources, BTreeMap::new()),
         claim: Some(Shape::new(announced, BTreeMap::new())),
