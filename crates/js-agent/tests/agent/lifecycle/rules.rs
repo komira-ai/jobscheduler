@@ -264,6 +264,35 @@ fn an_invalid_start_costs_the_commands_beside_it_nothing() {
     assert_eq!(h.fake.created().len(), 1);
 }
 
+/// Asserts that a start whose image is a tag alone (or a digest that is not sha256 of 64
+/// hex digits) is reported `image-digest-required`, creates nothing, and costs the start
+/// beside it nothing; a tag with a digest starts. It catches an agent that pulls an image
+/// whose content can move because an older server sent it.
+#[test]
+fn a_start_without_a_pinned_image_is_refused() {
+    let mut h = Harness::new("unpinned");
+    let mut tag = job("tag");
+    tag.image = "registry.example/job:1".to_owned();
+    let mut short = job("short");
+    short.image = format!("registry.example/job@sha256:{}", "ab".repeat(20));
+    let mut both = job("both");
+    both.image = format!("registry.example/job:1@sha256:{}", "ab".repeat(32));
+    let events = h.apply(vec![
+        Command::Start(Box::new(tag)),
+        Command::Start(Box::new(short)),
+        Command::Start(Box::new(both)),
+    ]);
+    assert_eq!(
+        names(&events),
+        [
+            "invalid #0 image-digest-required",
+            "invalid #1 image-digest-required",
+            "started both"
+        ]
+    );
+    assert_eq!(h.fake.created().len(), 1);
+}
+
 /// Asserts the refusals of a start that does not fit, each with its code and each
 /// creating nothing: more CPU than is free, more memory than is free, a GPU index a
 /// running job holds, and, with the machine idle, a job larger than the machine and a GPU
@@ -615,7 +644,10 @@ fn the_container_is_created_with_the_jobs_limits_and_the_agents_labels() {
     spec.labels.insert("team".to_owned(), "infra".to_owned());
     h.start(spec);
     let made = &h.fake.created()[0];
-    assert_eq!(made.image, "registry.example/job:1");
+    assert_eq!(
+        made.image,
+        "registry.example/job:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
     assert_eq!(made.args, ["--go"]);
     assert_eq!((made.cpu_millis, made.memory_bytes), (1000, 1 << 30));
     assert_eq!(made.pids, Some(100));

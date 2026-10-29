@@ -139,7 +139,9 @@ impl Requirements { pub fn from_request(request: &Request) -> Self; }  // os, ar
 `js-elastic::Demand` is an alias of `Requirements`, so the scaler and the matcher read one
 definition. `ContainerSpec` maps onto the existing run body: `RunBody` gains no field in the
 first slice, its `image` is parsed into `ImageDigestRef` at the edge, and a digest-less image is
-refused at run start only for pools with `require_digest = true` (PROPOSAL, 14 Q16).
+refused at run start with `image-digest-required` (422), for every pool: agents pull what a host
+lacks, so a tag could change under a fleet. This is unconditional and not the `require_digest` pool
+setting of 14 Q16; the agent refuses a tag-only start as well.
 
 Deferred, plainly: in the first slice the lease request still carries `Resources` plus
 `Capabilities`, so disk and exec are `None` in every `Requirements` built from it. `os` and
