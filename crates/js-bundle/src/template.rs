@@ -48,7 +48,6 @@ pub(crate) fn check_components(rest: &str) -> Result<(), TemplateError> {
         match component {
             "" => return Err(TemplateError::EmptyComponent),
             "." => return Err(TemplateError::CurrentDir),
-            ".." => return Err(TemplateError::ParentDir),
             _ => {}
         }
     }
