@@ -377,10 +377,9 @@ impl Core {
         let (views, waiting) = self.effects.registry();
         let complete = self.registry_complete(&memory.state.records, &views, now);
         let not_found = self.not_found(&memory.state, &views);
-        let known = |name: &str| view::stored_shape(&memory.state.records, name);
         let hosts = views
             .into_iter()
-            .map(|host| view::host_facts(host, pool, self.exec, known));
+            .map(|host| view::host_facts(host, pool, self.exec));
         let draws = (0..self.settings.max_step).filter_map(|_| self.entropy.fresh());
         Input {
             scheduler: self.scheduler.clone(),

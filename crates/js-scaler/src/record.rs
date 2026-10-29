@@ -333,8 +333,9 @@ pub struct Records {
     /// The pools that are waiting out a failure, by name.
     pub cooldowns: BTreeMap<String, Cooldown>,
     /// Since when each registered machine whose host the registry shows but does not hear
-    /// from has been silent, as the scaler first saw it. Written so that a scaler that
-    /// restarts more often than `unknown_hold` still reaches the hold. The time the scaler
+    /// from has been silent, as the scaler first saw it. Written so that a scaler whose
+    /// restarts are further apart than the save interval still reaches the hold; a faster
+    /// crash loop keeps the host held and counted. The time the scaler
     /// was down is not part of it: see [`Records::last_step`].
     pub silent_since: BTreeMap<String, Millis>,
     /// Since when each registered machine the registry does not show has been missing from

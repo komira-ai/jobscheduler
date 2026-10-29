@@ -677,8 +677,9 @@ pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>);
 
 What the shell owes the host facts, because the step cannot tell otherwise:
 
-- `shape` is `None` for a host that has not announced one since the registry was put back
-  after a restart (`Awaiting`). The shell never fills it with a stand-in such as the pool floor:
+- `shape` is `Some` only for a host that announced one (the registry's `claim`), and `None`
+  for a host that has not since the registry was put back after a restart (`Awaiting`). The
+  shell never fills it with a stand-in such as the pool floor or the shape a record stored:
   the first hello is compared with the offer, and a floor below the offer would condemn a
   healthy machine and start the boot cooldown. A host with no shape covers no request.
 - `busy` for a host that is not `Live` is a booked lease, read from the lease table. It is
@@ -897,8 +898,10 @@ Rules, each tied to a requirement or to existing behaviour:
   gone and the hold (`unknown_hold` of silence, no booked lease, no `Held` or `Reserved`
   mark) is the only guard against releasing a host that is alive. The time a host was first
   seen silent is kept in the records (`silent_since`), with the time of the step that wrote
-  them (`last_step`). A scaler that restarts more often than `unknown_hold` still reaches
-  the hold, because the time it observed before and after adds up. The time it was down does
+  them (`last_step`). A scaler whose restarts are further apart than the save interval
+  below still reaches the hold, because the time it observed before and after adds up. A
+  crash loop faster than that interval loses each run's observed time, so the host stays
+  held and counted and is never released on silence: the safe direction. The time it was down does
   not count: no host could say hello meanwhile, so the first step after a restart moves
   every saved silent and missing time forward by the span since `last_step`, and records
   with no `last_step` begin the counts again at that step. `last_step` is written only with

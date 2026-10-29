@@ -282,6 +282,13 @@ impl Rig {
     }
 }
 
+/// Whether every entry of `log` is a `save`, none else: the tick wrote the records and did
+/// nothing to a machine or a host, as a tick does while a silent or missing time is pending
+/// and a while has passed. Unlike an empty log it fails on any drain, release or revoke.
+pub fn only_saves(log: &[String]) -> bool {
+    log.iter().all(|entry| entry == "save")
+}
+
 /// Live settings with room: four machines, 1000 cents an hour, 100000 a day.
 pub fn live() -> Settings {
     Settings {
@@ -463,5 +470,6 @@ pub fn records(each: Vec<Record>) -> Records {
     Records {
         instances: each,
         cooldowns: Default::default(),
+        ..Default::default()
     }
 }

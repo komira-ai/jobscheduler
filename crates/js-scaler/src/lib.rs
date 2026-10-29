@@ -56,8 +56,10 @@
 //!   host has been missing on complete views for a third of `boot_timeout`, so a restart
 //!   does not release a machine whose agent is about to say hello. The times a silent host
 //!   was first seen silent and a machine was first seen missing are in [`Records`] with the
-//!   time of the step that wrote them, so a scaler restarted more often than `unknown_hold`
-//!   still reaches the hold by the time it observed; the time it was down is not counted.
+//!   time of the step that wrote them, so a scaler whose restarts are further apart than the save
+//!   interval (the lesser of a sixth of `unknown_hold` and five minutes) still reaches the
+//!   hold by the time it observed; a faster crash loop keeps the host held and counted. The
+//!   time it was down is not counted.
 //!   One the provider says it no longer has ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is

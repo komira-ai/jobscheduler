@@ -12,7 +12,7 @@ use js_lease_server::RETRY_AFTER;
 use js_registry::{HostMark, HostState};
 use js_scaler::{Blocked, Health, LaunchMode, Phase, Records, Settings, State};
 
-use crate::fakes::{Gate, live, logged, record, records, request, rig, view};
+use crate::fakes::{Gate, live, logged, only_saves, record, records, request, rig, view};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
@@ -408,7 +408,7 @@ async fn silent_hosts_that_hold_leases_and_hosts_it_did_not_launch_are_left_alon
     rig.scaler.tick().await;
     rig.advance(mins(600));
     rig.scaler.tick().await;
-    assert!(rig.log().is_empty(), "{:?}", rig.log());
+    assert!(only_saves(&rig.log()), "{:?}", rig.log());
     assert!(
         rig.scaler
             .state()
@@ -479,4 +479,31 @@ async fn the_state_is_read_while_a_provider_call_is_blocked() {
         answer.is_ok(),
         "the state was not read while the call was held"
     );
+}
+
+/// Asserts that a live host which has announced no shape reaches the step with none, not
+/// with the pool's floor: a host that announced a shape which fits the waiting request
+/// covers it and nothing is launched, and the same host unannounced covers nothing, so a
+/// machine is launched for the request. The floor of the view would fit this request, so a
+/// stand-in for the missing shape would show as a request covered. It catches a shell that
+/// falls back to the floor for a host it has not heard announce.
+#[tokio::test]
+async fn an_unannounced_host_reaches_the_step_with_no_shape() {
+    let announced = rig(Records::default(), live());
+    announced.world().hosts = vec![view("js-announced")];
+    announced.world().waiting = vec![request("r1")];
+    announced.scaler.tick().await;
+    assert!(announced.log().is_empty(), "{:?}", announced.log());
+
+    let silent = rig(Records::default(), live());
+    let mut unannounced = view("js-unannounced");
+    unannounced.claim = None;
+    silent.world().hosts = vec![unannounced];
+    silent.world().waiting = vec![request("r1")];
+    silent.scaler.tick().await;
+    let log = silent.log();
+    assert_eq!(log.len(), 3, "{log:?}");
+    assert_eq!(log[0], "save");
+    assert!(log[1].starts_with("mint:"), "{log:?}");
+    assert!(log[2].starts_with("acquire:"), "{log:?}");
 }

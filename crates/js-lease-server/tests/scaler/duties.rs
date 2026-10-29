@@ -14,7 +14,7 @@ use js_scaler::{Blocked, Millis, Phase, Record, Records};
 use js_types::LeaseId;
 
 use crate::complete::run_for;
-use crate::fakes::{live, logged, record, records, request, rig, rig_with, view};
+use crate::fakes::{live, logged, only_saves, record, records, request, rig, rig_with, view};
 
 fn mins(n: u64) -> Duration {
     Duration::from_secs(60 * n)
@@ -121,16 +121,16 @@ async fn a_machine_missing_from_the_registry_is_released_only_on_a_view_the_shel
     let rig = rig(records(vec![registered("js-missing", "i-m")]), live());
     rig.scaler.tick().await;
     run_for(&rig, &rig.scaler, REGISTRY_QUIET - Duration::from_secs(5)).await;
-    assert!(rig.log().is_empty(), "{:?}", rig.log());
+    assert!(only_saves(&rig.log()), "{:?}", rig.log());
 
     run_for(&rig, &rig.scaler, Duration::from_secs(5)).await;
     assert!(
-        rig.log().is_empty(),
+        only_saves(&rig.log()),
         "the first complete view only starts the count"
     );
     rig.advance(mins(30) - Duration::from_secs(1));
     rig.scaler.tick().await;
-    assert!(rig.log().is_empty(), "{:?}", rig.log());
+    assert!(only_saves(&rig.log()), "{:?}", rig.log());
     rig.advance(Duration::from_secs(1));
     rig.scaler.tick().await;
     rig.scaler.tick().await;
@@ -162,12 +162,15 @@ async fn a_silent_host_that_books_nothing_is_released_and_one_that_books_a_lease
     rig.scaler.tick().await;
     rig.advance(mins(30) - Duration::from_secs(1));
     rig.scaler.tick().await;
-    assert!(rig.log().is_empty(), "{:?}", rig.log());
+    assert!(only_saves(&rig.log()), "{:?}", rig.log());
 
     rig.advance(Duration::from_secs(1));
     rig.scaler.tick().await;
+    let log = rig.log();
+    let (saved, acted) = log.split_at(log.len() - 3);
+    assert!(only_saves(saved), "{log:?}");
     assert_eq!(
-        rig.log(),
+        acted,
         ["save", "Drain:js-silent-free", "ReleaseHost:js-silent-free"]
     );
     assert!(rig.scaler.state().silent_released.is_empty());
@@ -406,12 +409,12 @@ async fn a_release_the_provider_does_not_confirm_is_said() {
 }
 
 /// Asserts that a booting machine whose host was put back after a restart and has not
-/// announced itself again (it holds a lease) is not condemned as short: it is judged by
-/// the shape its record stored, not by the pool's floor, which is below every offer. It
-/// catches a healthy machine released, and the pool put in cooldown, after every restart
-/// that finds a lease on a host that has not said hello yet.
+/// announced itself again (it holds a lease) is not condemned as short: it reaches the
+/// step with no shape, and a host with no shape is below nothing, where the pool's floor
+/// would be below every offer. It catches a healthy machine released, and the pool put in
+/// cooldown, after every restart that finds a lease on a host that has not said hello yet.
 #[tokio::test]
-async fn a_host_that_has_not_announced_itself_again_is_judged_by_its_stored_shape() {
+async fn a_host_that_has_not_announced_itself_again_is_not_condemned_as_short() {
     let rig = rig(
         records(vec![record("js-awaiting-shape", Phase::Booting)]),
         live(),
