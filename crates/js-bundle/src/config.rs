@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::ConfigError;
 use crate::names::{DiffId, TreeName};
 use crate::template::Template;
-use crate::validate::{self, MAX_CONFIG_BYTES};
+use crate::validate;
 use crate::version::DottedVersion;
 
 /// The config of a bundle, `application/vnd.komira.js.bundle.config.v1+json`.
@@ -219,12 +219,6 @@ impl BundleConfig {
     /// Reads a config: refuses a document over [`MAX_CONFIG_BYTES`] unread, parses it
     /// (refusing unknown fields and repeated keys of the structs), and validates it.
     pub fn parse(bytes: &[u8]) -> Result<BundleConfig, ConfigError> {
-        if bytes.len() > MAX_CONFIG_BYTES {
-            return Err(ConfigError::TooLarge {
-                len: bytes.len(),
-                max: MAX_CONFIG_BYTES,
-            });
-        }
         let config: BundleConfig =
             serde_json::from_slice(bytes).map_err(|err| ConfigError::Json(err.to_string()))?;
         config.validate()?;
