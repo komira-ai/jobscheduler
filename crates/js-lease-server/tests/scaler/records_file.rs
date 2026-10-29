@@ -96,7 +96,7 @@ fn a_file_that_cannot_be_read_as_records_stops_the_start() {
         "{refused}"
     );
 
-    let versioned = b"{\"version\": 2, \"instances\": [], \"cooldowns\": {}}".to_vec();
+    let versioned = b"{\"version\": 99, \"instances\": [], \"cooldowns\": {}}".to_vec();
     let cases: Vec<(Vec<u8>, &str)> = vec![
         (vec![0xff, 0xfe, 0x00], "it is not text"),
         (b"not json".to_vec(), "records:"),
