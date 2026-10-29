@@ -410,6 +410,7 @@ impl Usage {
         };
         let mut learned = 0;
         for (lease, ending) in finished {
+            let _held = &ending.key;
             let Some(key) = self.keys.key_of(&ending.run) else {
                 continue;
             };
