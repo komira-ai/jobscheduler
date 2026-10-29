@@ -11,7 +11,7 @@ use js_elastic::{
 use js_registry::{HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::{Call, Effects, Launcher, RecordsFile};
 use crate::agents::Agents;
@@ -56,12 +56,15 @@ impl Live {
 }
 
 impl Effects for Live {
-    fn waiting(&self) -> Vec<Waiting> {
-        self.agents.registry.waiting()
+    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        self.agents.registry.snapshot()
     }
 
-    fn hosts(&self) -> Vec<HostView> {
-        self.agents.registry.hosts()
+    fn leased(&self, host: &str) -> bool {
+        let (hosts, _) = self.agents.registry.snapshot();
+        hosts
+            .iter()
+            .any(|view| view.id.as_str() == host && view.lease.is_some())
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {
@@ -135,14 +138,28 @@ impl Effects for Live {
             Call::Drain => registry.drain(&id),
             Call::Undrain => registry.undrain(&id),
             Call::ReleaseHost => registry.release_host(&id),
-            Call::Remove => registry.remove(&id),
             Call::MarkEnding => {
                 registry.mark_ending(&id);
                 Ok(())
             }
         };
         if let Err(busy) = done {
-            debug!(%host, %busy, ?call, "the registry did not do it");
+            warn!(%host, %busy, ?call, "the registry did not do it");
+        }
+    }
+
+    fn remove(&self, host: &str) -> bool {
+        let Ok(id) = HostId::new(host) else {
+            return true;
+        };
+        let registry = &self.agents.registry;
+        registry.mark_ending(&id);
+        match registry.remove(&id) {
+            Ok(()) => true,
+            Err(busy) => {
+                warn!(%host, %busy, "the registry did not remove the host of a machine that is gone; it is tried again");
+                false
+            }
         }
     }
 }
@@ -303,8 +320,9 @@ mod tests {
         };
         let token = Secret::new("token".to_owned());
         assert_eq!(live.acquire(&plan, token), Acquired::Unknown);
-        assert!(live.waiting().is_empty());
-        assert!(live.hosts().is_empty());
+        let (hosts, waiting) = live.registry();
+        assert!(hosts.is_empty() && waiting.is_empty());
+        assert!(!live.leased("js-nobody"));
         assert_eq!(live.checks(), (Health::Checking, Vec::new()));
         assert!(
             live.provider.catalog().is_err(),
@@ -375,7 +393,7 @@ mod tests {
     }
 
     /// Asserts each call on the registry for a host it does not hold: the busy answers
-    /// are logged and nothing fails, a remove of a host it never held is fine, a mark of
+    /// are logged and nothing fails, a remove of a host it never held is fine (and so is text that is no host id), a mark of
     /// ending is kept for the host's first hello, and text that is no host id is ignored.
     #[test]
     fn registry_calls_for_an_unknown_host_are_harmless() {
@@ -385,11 +403,12 @@ mod tests {
             Call::Drain,
             Call::Undrain,
             Call::ReleaseHost,
-            Call::Remove,
             Call::MarkEnding,
         ] {
             live.call(call, &host);
             live.call(call, "Not A Host Id");
         }
+        assert!(live.remove(&host));
+        assert!(live.remove("Not A Host Id"));
     }
 }

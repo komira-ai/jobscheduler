@@ -295,7 +295,7 @@ async fn a_machine_is_launched_registered_idle_drained_released_and_removed() {
     let release_host = at(format!("ReleaseHost:{name}")).unwrap();
     let revoke = at(format!("revoke:{name}")).unwrap();
     let release = at(format!("release:{name}")).unwrap();
-    let remove = at(format!("Remove:{name}")).unwrap();
+    let remove = at(format!("remove:{name}")).unwrap();
     assert!(drain < release_host && release_host < revoke && revoke < release);
     assert!(release < remove);
     assert!(at(format!("forget:{name}")).is_some());

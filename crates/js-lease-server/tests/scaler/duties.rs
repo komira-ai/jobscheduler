@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use js_elastic::{Claim, Released};
 use js_lease_server::REGISTRY_SETTLE;
 use js_registry::{HostState, SessionSource};
 use js_scaler::{Blocked, Millis, Phase, Record, Records};
@@ -206,7 +207,7 @@ async fn a_machine_the_provider_no_longer_has_is_settled_when_its_host_is_silent
     rig.scaler.tick().await;
     assert_eq!(rig.world().gone_asked, ["i-gone"]);
     let log = rig.log();
-    for call in ["revoke:", "forget:", "Remove:"] {
+    for call in ["revoke:", "forget:", "remove:"] {
         let wanted = format!("{call}js-gone-lost");
         assert!(log.contains(&wanted), "{wanted} in {log:?}");
     }
@@ -285,4 +286,129 @@ async fn orphans_records_of_unknown_pools_and_stuck_silent_hosts_are_said_once()
     assert_eq!(times("i-orphan-alert"), 1);
     assert_eq!(times("js-stray-alert"), 1);
     assert_eq!(times("host js-stuck-alert has been silent"), 1);
+}
+
+/// Asserts that a host the registry will not remove is removed again at every tick, and
+/// said once. The machine is read gone while its silent host is in the registry, and the
+/// registry refuses (a lease is booked on it): the removal is tried at each tick after
+/// that, the alert says the host's slot is not free, and when the registry takes it the
+/// tries and the alert stop. It catches a removal sent once and forgotten, which keeps the
+/// host's slot in the registry and makes every replacement launch refused as full.
+#[tokio::test]
+async fn a_host_the_registry_will_not_remove_is_removed_again_and_said_once() {
+    let rig = rig(
+        records(vec![registered("js-remove-alert", "i-gone")]),
+        live(),
+    );
+    let mut lost = view("js-remove-alert");
+    lost.state = HostState::Lost;
+    rig.world().hosts = vec![lost];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    for _ in 0..3 {
+        rig.scaler.tick().await;
+    }
+    let tries = |rig: &crate::fakes::Rig| {
+        let log = rig.log();
+        log.iter()
+            .filter(|each| *each == "remove:js-remove-alert")
+            .count()
+    };
+    assert_eq!(tries(&rig), 3, "{:?}", rig.log());
+    let said = "the registry still holds the host js-remove-alert";
+    assert_eq!(times(said), 1);
+    assert_eq!(rig.scaler.alerts().len(), 1);
+
+    rig.world().remove_ok = true;
+    for _ in 0..2 {
+        rig.scaler.tick().await;
+    }
+    assert_eq!(tries(&rig), 4);
+    assert!(rig.world().hosts.is_empty());
+    assert!(rig.scaler.alerts().is_empty());
+}
+
+/// Asserts that a machine is not released while the registry books a lease on its host,
+/// whatever the step decided from an older read: a machine past its boot timeout is marked
+/// ending and its token revoked, and a hello with a booked lease appears in the registry
+/// after the records were written. No release is sent that tick, the refusal is logged,
+/// and the release goes out at the first tick after the lease is over. It catches the
+/// window between the read of the registry and the release, in which a host says hello
+/// and is booked.
+#[tokio::test]
+async fn a_machine_is_not_released_while_its_host_holds_a_lease() {
+    let rig = rig(
+        records(vec![record("js-leased-late", Phase::Booting)]),
+        live(),
+    );
+    rig.advance(mins(16));
+    let said = times("the registry books a lease on the host");
+    let mut booked = view("js-leased-late");
+    booked.lease = Some(LeaseId::new(1, 4));
+    rig.world().after_save = Some(vec![booked]);
+    rig.scaler.tick().await;
+    let released = |rig: &crate::fakes::Rig| {
+        let log = rig.log();
+        log.iter()
+            .filter(|each| each.starts_with("release:"))
+            .count()
+    };
+    assert_eq!(released(&rig), 0, "{:?}", rig.log());
+    assert!(times("the registry books a lease on the host") > said);
+
+    rig.world().hosts[0].lease = None;
+    rig.advance(Duration::from_secs(5));
+    rig.scaler.tick().await;
+    assert_eq!(released(&rig), 1, "{:?}", rig.log());
+}
+
+/// Asserts what is said of a release the provider does not carry out: a refused release
+/// and one with no answer are each logged at every tick, and a record that has been
+/// releasing for longer than the boot timeout and the hold together is an alert, said once,
+/// shown in the scaler's alerts. It catches a machine that stays up and paid for with
+/// nothing an operator can see.
+#[tokio::test]
+async fn a_release_the_provider_does_not_confirm_is_said() {
+    let stuck = Record {
+        since: Millis::new(crate::fakes::START),
+        ..record("js-stuck-release", Phase::Releasing)
+    };
+    let rig = rig(records(vec![stuck]), live());
+    rig.world().release_answer = Some(Released::Refused(Claim::Foreign));
+    rig.scaler.tick().await;
+    assert_eq!(times("the provider refused to release the machine"), 1);
+    assert!(rig.scaler.alerts().is_empty());
+
+    rig.world().release_answer = Some(Released::Unknown);
+    rig.advance(mins(60));
+    for _ in 0..2 {
+        rig.scaler.tick().await;
+    }
+    assert!(times("the provider gave no answer to a release") >= 2);
+    let alert = "a machine whose release the provider does not confirm";
+    assert_eq!(times(alert), 1);
+    assert_eq!(rig.scaler.alerts().len(), 1);
+}
+
+/// Asserts that a booting machine whose host was put back after a restart and has not
+/// announced itself again (it holds a lease) is not condemned as short: it is judged by
+/// the shape its record stored, not by the pool's floor, which is below every offer. It
+/// catches a healthy machine released, and the pool put in cooldown, after every restart
+/// that finds a lease on a host that has not said hello yet.
+#[tokio::test]
+async fn a_host_that_has_not_announced_itself_again_is_judged_by_its_stored_shape() {
+    let rig = rig(
+        records(vec![record("js-awaiting-shape", Phase::Booting)]),
+        live(),
+    );
+    let mut waiting = view("js-awaiting-shape");
+    waiting.state = HostState::Awaiting;
+    waiting.claim = None;
+    waiting.lease = Some(LeaseId::new(1, 5));
+    rig.world().hosts = vec![waiting];
+    rig.scaler.tick().await;
+    let state = rig.scaler.state();
+    assert_eq!(state.records.instances[0].phase, Phase::Registered);
+    assert!(!state.records.instances[0].condemned);
+    assert!(state.records.cooldowns.is_empty());
 }

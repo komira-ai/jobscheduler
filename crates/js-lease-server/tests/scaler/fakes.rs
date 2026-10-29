@@ -44,6 +44,12 @@ pub struct World {
     pub save_ok: bool,
     pub mint_ok: bool,
     pub revoke_ok: bool,
+    pub remove_ok: bool,
+    /// The registry's hosts as they are after the next save: a host that says hello and is
+    /// booked between the shell's read of the registry and its calls.
+    pub after_save: Option<Vec<HostView>>,
+    /// When set, every release is answered with this and the machine is left as it is.
+    pub release_answer: Option<Released>,
     /// When set, the provider's `list` says it has been called and then waits to be let go.
     pub gate: Option<Arc<Gate>>,
 }
@@ -85,12 +91,24 @@ impl World {
 }
 
 impl Effects for Handle {
-    fn waiting(&self) -> Vec<Waiting> {
-        self.world().waiting.clone()
+    fn registry(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        let world = self.world();
+        (world.hosts.clone(), world.waiting.clone())
     }
 
-    fn hosts(&self) -> Vec<HostView> {
-        self.world().hosts.clone()
+    fn leased(&self, host: &str) -> bool {
+        let world = self.world();
+        let on = world.hosts.iter().find(|view| view.id.as_str() == host);
+        on.is_some_and(|view| view.lease.is_some())
+    }
+
+    fn remove(&self, host: &str) -> bool {
+        let mut world = self.world();
+        world.log.push(format!("remove:{host}"));
+        if world.remove_ok {
+            world.hosts.retain(|view| view.id.as_str() != host);
+        }
+        world.remove_ok
     }
 
     fn checks(&self) -> (Health, Vec<Offer>) {
@@ -126,6 +144,9 @@ impl Effects for Handle {
         match world.save_ok {
             true => {
                 world.saved = Some(records.clone());
+                if let Some(hosts) = world.after_save.take() {
+                    world.hosts = hosts;
+                }
                 Ok(())
             }
             false => Err("the disk is full".to_owned()),
@@ -179,6 +200,9 @@ impl Effects for Handle {
                 .push("UNSAFE: released a host that could take work".to_owned());
         }
         let at = world.machines.iter().position(|held| held.id == *id);
+        if let Some(answer) = world.release_answer.clone() {
+            return answer;
+        }
         match at {
             None => Released::Gone,
             Some(at) if world.machines[at].status == HostStatus::Terminating => {
@@ -211,7 +235,6 @@ impl Effects for Handle {
             Call::ReleaseHost => {
                 world.mark(host, &[Some(HostMark::Draining)], Some(HostMark::Releasing));
             }
-            Call::Remove => world.hosts.retain(|view| view.id.as_str() != host),
             Call::MarkEnding => {
                 let ending = Some(HostMark::Releasing);
                 world.mark(host, &[None, Some(HostMark::Draining)], ending);
@@ -282,6 +305,9 @@ pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSo
         save_ok: true,
         mint_ok: true,
         revoke_ok: true,
+        remove_ok: true,
+        after_save: None,
+        release_answer: None,
         gate: None,
     }));
     let clock = ManualClock::new(Timestamp::from_millis(START));

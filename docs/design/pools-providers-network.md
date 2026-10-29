@@ -587,7 +587,7 @@ pub enum NetworkStep { Run(Vec<String>),                       // argv, never a 
     Fetch { url: String, sha256: [u8; 32], dest: String } }
 ```
 
-The launch path in the shell (`scaler.rs`) is `mode.prepare` to `BootPlan` to `render` to
+The launch path in the shell (`scaler/launch.rs`) is `mode.prepare` to `BootPlan` to `render` to
 `provider.acquire(payload)`. The shell is the only place that holds both a mode and a provider;
 neither knows the other. The renderer quotes every argv element, so no step can add shell syntax.
 `default` returns an empty `Contribution`; its `check` confirms `advertise_url` parses and, for
@@ -601,9 +601,16 @@ neither knows the other. The renderer quotes every argv element, so no step can 
 
 Crate `js-scaler` is pure: no clock reads, no I/O, no threads. It takes the previous `State`, one
 `Input` and the time now, and returns the next `State` and the `Vec<Action>`. The shell lives in
-`crates/js-lease-server/src/scaler.rs` and runs on the existing tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots, calls
-`step`, runs the actions on a `blocking()` task (`util.rs`), and feeds the answers into the
-next step. No lock is held across a provider call. Lambda allows one launch per 12 s
+`crates/js-lease-server/src/scaler/` and runs on the tick (`--tick`, `ticker.rs`, 5 s default): once per tick it snapshots the registry
+(hosts and wait list under one lock), calls `step`, runs the actions on a `blocking()` task
+(`util.rs`), and feeds the answers into the next step. The scaler ticks on a task of its own, so a
+slow provider call does not hold back the table's lease expiry, and a tick that finds the scaler
+still at the last one skips it. No lock is held across a provider call, nor the lock of the shell's
+own memory (a tick works on a copy and swaps it in), so the status page is answered during one. A
+panic in the scaler's tick ends its task: `/healthz` answers 503 and the supervisor of the process
+must restart the server (the records are on disk before any call they describe, so a restart launches
+nothing twice). A registry refusal to remove the host of a machine that is gone is kept and tried
+again at every tick, and alerted. Lambda allows one launch per 12 s
 (`ElasticConfig::launch_interval`); `Acquired::Deferred { wait }` is honoured by skipping
 the pool until the injected clock passes it.
 
@@ -1042,7 +1049,11 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    Needs one live test (Open questions 5).
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--host-id` (the machine's `HostName`, which is how the scaler finds the host of
-   a record), `--container-bin`, `--container-pull missing`, `--gpu-toolkit-hook` (on every
+   a record), `--container-bin`, `--container-pull missing` (a launched machine is new and holds no image, so
+   the agent's default `never`, which exists so that a job cannot make a host reach a registry of
+   its choosing, would fail every job on it; the server refuses a run whose image is not pinned by
+   a sha256 digest, so a pull fetches the content the submitter named, and the host reaches the
+   registry only over the pool's network; a pool-level setting is Later), `--gpu-toolkit-hook` (on every
    offer; the agent runs the hook only when the host offers a GPU, and a pool with GPUs refuses
    a host without it as `host-contract` on `gpu-toolkit`), `--state-root`, `--scratch-root`, the
    `--watch-dir` list the agent's help suggests, and labels.
@@ -1159,7 +1170,7 @@ boot is Open questions 11.
 The service does not join the tailnet. The deployment does (the host's own `tailscaled`, or
 a sidecar), and `advertise_url` names it. Nothing in `js-lease-server`'s core modules,
 `js-scaler`, `js-elastic`, `js-registry` or any provider crate names `network::`; only `kinds.rs`
-and the launch shell (`scaler.rs`, through the trait) do. A CI check greps for the path and fails
+and the launch shell (`scaler/`, through the trait) do. A CI check greps for the path and fails
 if a file other than those and `network/` names it
 (PR 10). Nothing depends on our hosts either (requirement 5): no address, name or path of ours
 appears in a default.

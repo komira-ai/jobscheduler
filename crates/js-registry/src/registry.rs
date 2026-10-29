@@ -28,6 +28,7 @@ mod marks;
 mod provider_side;
 mod start;
 
+use demand::waiting_rows;
 pub use demand::{Launchable, Waiting};
 pub use marks::Busy;
 
@@ -904,6 +905,19 @@ impl Registry {
     pub fn hosts(&self) -> Vec<HostView> {
         let now = self.shared.clock.now();
         let state = self.lock_at(now);
+        self.host_views(&state, now)
+    }
+
+    /// The hosts ([`Registry::hosts`]) and the wait list ([`Registry::waiting`]) as of one
+    /// moment, read under one lock: a request is not shown as reserved on a host that the
+    /// hosts do not show as set aside, nor the other way round.
+    pub fn snapshot(&self) -> (Vec<HostView>, Vec<Waiting>) {
+        let now = self.shared.clock.now();
+        let state = self.lock_at(now);
+        (self.host_views(&state, now), waiting_rows(&state))
+    }
+
+    fn host_views(&self, state: &State, now: Timestamp) -> Vec<HostView> {
         let booked = state.book.booked();
         let shape = self.shared.config.shape();
         let marks = state.marks.reservations();

@@ -141,3 +141,53 @@ async fn the_status_lists_the_machines_the_orphans_and_the_newest_launch_of_the_
     let launch = json!({ "at_ms": T0 + 2000, "outcome": "pending", "host": "js-new" });
     assert_eq!(view["last_launch"], launch);
 }
+
+/// Asserts that what the scaler cannot clear itself is on the status, as JSON and as the
+/// page: a machine of ours that no record knows (an orphan) is an alert on the pool, with
+/// the provider's id, and the page shows it as a row. It catches alerts that only a log
+/// line carries, which an operator who does not read the log never sees.
+#[tokio::test]
+async fn the_alerts_are_on_the_status() {
+    let scratch = Scratch::new("scaler_status_alerts");
+    account(&scratch);
+    let first = text(&scratch, "live", "initialise");
+    let h = start(scratch, &first).await;
+    let Harness {
+        running, scratch, ..
+    } = h;
+    running.shutdown().await.unwrap();
+    let orphan = record(
+        "burst",
+        ("js-orphan", Some("i-stray-alert")),
+        Phase::Orphan,
+        10,
+    );
+    let records = Records {
+        instances: vec![orphan],
+        cooldowns: BTreeMap::new(),
+    };
+    RecordsFile::new(records_path(&scratch))
+        .save(&records)
+        .unwrap();
+
+    let again = text(&scratch, "live", "resume");
+    let h = start(scratch, &again).await;
+    let (before, _) = pool(&h).await;
+    assert_eq!(before["alerts"], json!([]));
+    h.ticks.step().await;
+    let (after, body) = pool(&h).await;
+    let alerts = after["alerts"].as_array().unwrap();
+    assert_eq!(alerts.len(), 1, "{body}");
+    assert!(
+        alerts[0].as_str().unwrap().contains("i-stray-alert"),
+        "{body}"
+    );
+    let page = h.call("GET", "/status", None).await;
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        page.body.contains("<th align=\"left\">alert</th>"),
+        "{}",
+        page.body
+    );
+    assert!(page.body.contains("i-stray-alert"), "{}", page.body);
+}

@@ -67,6 +67,10 @@ struct PoolView {
     last_launch: Option<LaunchView>,
     machines: Vec<MachineView>,
     orphans: Vec<OrphanView>,
+    /// What an operator must act on, as the scaler's last tick left it: a stuck revoke or
+    /// removal, a release the provider does not confirm, an orphan, a silent host that
+    /// nothing releases.
+    alerts: Vec<String>,
     next_launch: Option<NextLaunch>,
 }
 
@@ -282,6 +286,7 @@ impl Status {
             last_launch,
             machines,
             orphans,
+            alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
             next_launch,
         }
     }
@@ -368,6 +373,9 @@ fn pool_section(out: &mut String, pool: &PoolView) {
     );
     row(out, "instances", &held);
     row(out, "blocked", pool.blocked.unwrap_or("no"));
+    for alert in &pool.alerts {
+        row(out, "alert", alert);
+    }
     if let Some(none) = &pool.no_offer {
         row(
             out,
