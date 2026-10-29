@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
 use js_cli::{Clock, ForwardedSignal, Services, SignalSource, Signaller, Waiter};
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
@@ -510,6 +509,12 @@ pub fn canned(reply: &str) -> String {
                 seen.push(byte[0]);
             }
             let _ = stream.write_all(reply.as_bytes());
+            // End the reply with a FIN, then read what the client still sends (a request
+            // body) until it hangs up: closing with that unread would reset the
+            // connection, which macOS reports to the client as EINVAL on its next call.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let mut rest = [0u8; 1024];
+            while stream.read(&mut rest).unwrap_or(0) > 0 {}
         }
     });
     format!("http://{addr}")
