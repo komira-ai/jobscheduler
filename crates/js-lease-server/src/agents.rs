@@ -15,7 +15,7 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{AgentSetup, Hosts};
 use crate::error::StartupError;
-use crate::join_tokens::{Admission, JoinRefusal, JoinTokens};
+use crate::join_tokens::{Admitted, JoinRefusal, JoinTokens};
 use crate::layered::LayeredSource;
 use crate::rate::HelloLimiter;
 use crate::util::blocking;
@@ -131,21 +131,24 @@ impl Agents {
         }
     }
 
-    /// Lets the hello of `host` register with the one-time token `who`, consuming the
-    /// token on its first use. The check and the file write run on the pool for blocking
+    /// Lets the hello of `host` register with the one-time token or host credential `who`
+    /// (the digest of what the request carried), consuming the token on its first use. With
+    /// `issue`, that first use also retires the token for a new host credential (see
+    /// [`JoinTokens::admit_with`]). The check and the file write run on the pool for blocking
     /// calls.
     pub(crate) async fn admit_join(
         self: &Arc<Self>,
         who: Credential,
         host: String,
         instance: Option<InstanceIdentity>,
-    ) -> Result<Admission, JoinRefusal> {
+        issue: bool,
+    ) -> Result<Admitted, JoinRefusal> {
         let this = Arc::clone(self);
-        blocking(move || this.joins.admit(&who, &host, instance.as_ref())).await
+        blocking(move || this.joins.admit_with(&who, &host, instance.as_ref(), issue)).await
     }
 
-    /// Gives back the use that [`Agents::admit_join`] made for `host`, after the registry
-    /// refused its hello.
+    /// Gives back the use that [`Agents::admit_join`] made for `host`, and the credential it
+    /// issued, after the registry refused its hello.
     pub(crate) async fn release_join(self: &Arc<Self>, who: Credential, host: String) {
         let this = Arc::clone(self);
         blocking(move || this.joins.release(&who, &host)).await;

@@ -26,5 +26,6 @@ pub fn hello(host: &str, shape: &Shape) -> Hello {
         labels: BTreeMap::new(),
         phase: Phase::Serving,
         held: Vec::new(),
+        accepts_host_credential: false,
     }
 }

@@ -5,6 +5,7 @@
 //! runs a lease holder queues on a registered host.
 
 mod agents;
+mod agents_contract;
 mod agents_restart;
 mod agents_support;
 mod agents_tokens;
@@ -13,6 +14,7 @@ mod auth;
 mod binary;
 mod gpu_path_pin;
 mod joins;
+mod joins_credential;
 mod joins_revoke;
 mod limits;
 mod restart;

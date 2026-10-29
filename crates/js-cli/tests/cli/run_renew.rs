@@ -29,6 +29,9 @@ fn the_period_follows_the_ttl_the_server_grants() {
         let (got, expiries) = scope(|s| {
             let run = s.spawn(|| h.js.with(&words, services));
             let _ends = EndsRun(signals.recv().unwrap(), ForwardedSignal::Terminate);
+            // The lease is held and the first wait is asked, with the period read at
+            // the clock's start: only then does the test move the clock.
+            waiter.running();
             let mut expiries = Vec::new();
             for _ in 0..2 {
                 h.advance(secs(period));
