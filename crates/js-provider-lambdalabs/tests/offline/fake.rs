@@ -235,7 +235,10 @@ fn a_ruleset_is_made_with_no_rules_once_per_name_and_region() {
         .create_firewall_ruleset("region-a", "js-x-noinbound")
         .unwrap();
     assert_eq!((made.rules, made.region.as_str()), (0, "region-a"));
-    assert_eq!(fake.list_firewall_rulesets().unwrap(), [made.clone()]);
+    assert_eq!(
+        fake.list_firewall_rulesets().unwrap(),
+        std::slice::from_ref(&made)
+    );
     assert_eq!(fake.firewall_rulesets(), [made]);
     // The same name in the same region is the 409; in another region it is a new ruleset.
     let again = fake.create_firewall_ruleset("region-a", "js-x-noinbound");
@@ -256,7 +259,7 @@ fn a_key_is_made_once_per_name() {
     let fake = FakeLambda::new();
     let made = fake.create_ssh_key("js-x").unwrap();
     assert_eq!(made.name, "js-x");
-    assert_eq!(fake.list_ssh_keys().unwrap(), [made.clone()]);
+    assert_eq!(fake.list_ssh_keys().unwrap(), std::slice::from_ref(&made));
     assert_eq!(fake.ssh_keys(), [made]);
     for bad in ["js-x", "", &"n".repeat(65)] {
         let result = fake.create_ssh_key(bad);

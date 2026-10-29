@@ -96,7 +96,7 @@ fn a_ruleset_is_found_before_one_is_made_and_settled_once_per_region() {
     rig.clock.advance(INTERVAL);
     assert!(accepted(&rig.provider.acquire(&ask("b"))));
     for sent in rig.fake.launches() {
-        assert_eq!(sent.firewall_ruleset_ids, [ours.clone()]);
+        assert_eq!(sent.firewall_ruleset_ids, std::slice::from_ref(&ours));
     }
     assert_eq!(rig.fake.count(Call::CreateFirewallRuleset), 0);
     assert_eq!(rig.fake.count(Call::ListFirewallRulesets), 1);
