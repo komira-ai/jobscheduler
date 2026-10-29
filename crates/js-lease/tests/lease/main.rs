@@ -9,5 +9,6 @@ mod persistence;
 mod renew_release;
 mod reservations;
 mod slow_save;
+mod timings;
 mod support;
 mod whole;

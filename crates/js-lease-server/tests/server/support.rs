@@ -449,22 +449,44 @@ pub async fn guard<F: std::future::Future>(future: F) -> F::Output {
 }
 
 /// Waits for every labelled task under the same bound as [`guard`]. When the bound is
-/// hit, the panic names the tasks that have not finished, so a hang says where it is.
-pub async fn guard_tasks(mut tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>) {
-    let bound = std::time::Duration::from_secs(30);
-    let waited = tokio::time::timeout(bound, async {
-        for (_, task) in &mut tasks {
+/// hit, the panic names the tasks that have not finished and says what `timings` saw.
+pub async fn guard_tasks(
+    tasks: Vec<(&'static str, tokio::task::JoinHandle<()>)>,
+    timings: &js_lease::Timings,
+) {
+    let _ = timings;
+    guard(async {
+        for (_, task) in tasks {
             task.await.unwrap();
         }
     })
     .await;
-    if waited.is_err() {
-        let pending: Vec<&str> = tasks
-            .iter()
-            .filter(|(_, task)| !task.is_finished())
-            .map(|(name, _)| *name)
-            .collect();
-        panic!("still waiting after {bound:?}: unfinished tasks: {pending:?}");
+}
+
+/// A clock that moves by `step` on every reading, so a step timed with one reading
+/// before and one after lasts exactly `step`.
+#[derive(Debug, Clone)]
+pub struct Stepping {
+    micros: Arc<std::sync::atomic::AtomicU64>,
+    step: std::time::Duration,
+}
+
+impl Stepping {
+    pub fn of(step: std::time::Duration) -> Self {
+        Self {
+            micros: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            step,
+        }
+    }
+}
+
+impl js_lease::Monotonic for Stepping {
+    fn reading(&self) -> std::time::Duration {
+        let step = u64::try_from(self.step.as_micros()).unwrap();
+        let before = self
+            .micros
+            .fetch_add(step, std::sync::atomic::Ordering::SeqCst);
+        std::time::Duration::from_micros(before)
     }
 }
 

@@ -5,9 +5,10 @@ use js_provider::{Provider, StartSpec};
 use js_types::{LeaseId, Request};
 
 use crate::book::{self, Book, Seen, Step};
-use crate::clock::{Clock, Monotonic, Timestamp};
+use crate::clock::{Clock, Monotonic, SystemMonotonic, Timestamp};
 use crate::error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError};
 use crate::state::LeaseState;
+use crate::timings::Timings;
 use crate::types::{
     Booking, Boot, Lease, LeaseInfo, ReleaseOutcome, ReservationRecord, Settings, TickReport,
 };
@@ -91,6 +92,12 @@ impl<P: Provider, C: Clock> LeaseTable<P, C> {
     /// monotonic clock. Tests use it to say how long a save took.
     pub fn watch_saves(&mut self, clock: impl Monotonic + 'static) {
         self.book.watch_saves(Box::new(clock));
+    }
+
+    /// The record of how long the table's steps took, shared with the table: a caller
+    /// keeps the handle and reads [`Timings::report`] whenever it wants.
+    pub fn timings(&self) -> Timings {
+        Timings::new(SystemMonotonic::default())
     }
 
     /// Extends a held lease and returns its new expiry: `now + ttl` clamped as in

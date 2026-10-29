@@ -176,12 +176,14 @@ mod reservations;
 mod state;
 mod store;
 mod table;
+mod timings;
 mod types;
 
 pub use clock::{Clock, ManualClock, Monotonic, SystemClock, SystemMonotonic, Timestamp};
 pub use error::{AcquireError, OpenError, ReleaseError, RenewError, SaveError, SettingsError};
 pub use state::LeaseState;
 pub use table::{LeaseTable, read_bookings};
+pub use timings::{Timer, Timings};
 pub use types::{
     Booking, Boot, Exclusion, ExclusionEnd, Held, Lease, LeaseInfo, ReleaseOutcome,
     ReservationRecord, Settings, TickReport,

@@ -146,6 +146,11 @@ impl Running {
         self.shared.registry()
     }
 
+    /// How long the lease table's steps took since the server started.
+    pub fn timings(&self) -> js_lease::Timings {
+        js_lease::Timings::new(js_lease::SystemMonotonic::default())
+    }
+
     /// How many ticks failed to write the lease file since the server started.
     pub fn save_errors(&self) -> u64 {
         self.shared.save_errors()

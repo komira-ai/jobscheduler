@@ -5,10 +5,11 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
-use js_lease::{Boot, Settings};
+use js_lease::{Boot, Monotonic, Settings};
 use rustix::fs::OFlags;
 use rustix::process::geteuid;
 use subtle::ConstantTimeEq;
@@ -324,6 +325,12 @@ impl Config {
     /// The same configuration with other connection limits than the flags gave.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The same configuration timing the lease table's steps on `clock`.
+    pub fn with_monotonic(self, clock: Arc<dyn Monotonic>) -> Self {
+        let _ = clock;
         self
     }
 

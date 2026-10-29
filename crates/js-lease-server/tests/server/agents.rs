@@ -514,7 +514,7 @@ async fn heartbeats_hammered_during_lease_calls_complete() {
             }
         }),
     ));
-    guard_tasks(tasks).await;
+    guard_tasks(tasks, &h.running.timings()).await;
 }
 
 /// Asserts the hello rate limit at the transport, per credential, on the injected clock:

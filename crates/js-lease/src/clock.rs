@@ -49,6 +49,12 @@ pub trait Monotonic: Send + Sync + std::fmt::Debug {
     fn reading(&self) -> Duration;
 }
 
+impl<T: Monotonic + ?Sized> Monotonic for Arc<T> {
+    fn reading(&self) -> Duration {
+        (**self).reading()
+    }
+}
+
 /// The system's wall clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
