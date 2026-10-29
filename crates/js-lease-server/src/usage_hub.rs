@@ -41,7 +41,10 @@ pub(crate) struct Usage {
 /// on its own. Killed, timed out, out of memory, failed to start and an outcome this
 /// version does not know are not.
 fn finish_of(outcome: Outcome) -> Finish {
-    match matches!(outcome, Outcome::Succeeded | Outcome::Failed | Outcome::Killed) {
+    match matches!(
+        outcome,
+        Outcome::Succeeded | Outcome::Failed | Outcome::Killed
+    ) {
         true => Finish::Clean,
         false => Finish::Unclean,
     }
