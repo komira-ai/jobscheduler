@@ -17,6 +17,16 @@ pub(crate) struct HelloLimit {
     pub(crate) interval: Duration,
 }
 
+impl Default for HelloLimit {
+    /// What the flags default to: a burst of 60, then one hello a second.
+    fn default() -> Self {
+        Self {
+            burst: 60,
+            interval: Duration::from_secs(1),
+        }
+    }
+}
+
 /// What one credential has left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Bucket {

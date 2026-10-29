@@ -146,7 +146,8 @@ impl Rows {
         let txn = txn.delete(key.clone(), Cond::Version(row.version));
         let txn = self.unpin(txn, operation)?;
         let txn = self.noting(txn, operation, ending)?;
-        let settled = self.settle_with(ending, txn, operation);
+        let walled = self.has_wall(operation)?;
+        let settled = self.settle_with(ending, txn, operation, walled);
         let committed = self.commit_owned(&worker, settled);
         if matches!(committed, Err(StateError::Conflict(_))) && self.store.get(&key)?.is_none() {
             return self.end_queued(operation, ending, &key, |_| true);
@@ -194,7 +195,8 @@ impl Rows {
                 .delete(op, Cond::Version(unfinished.version));
             let txn = self.unpin(txn, operation)?;
             let txn = self.noting(txn, operation, ending)?;
-            let settled = self.settle_rest(ending, txn, operation, Cond::Absent);
+            let walled = self.has_wall(operation)?;
+            let settled = self.settle_rest(ending, txn, operation, walled, Cond::Absent);
             let committed = self.commit(settled);
             if !matches!(committed, Err(StateError::Conflict(_))) {
                 return committed;
@@ -219,39 +221,58 @@ impl Rows {
         Ok(self.ext.ended(txn, operation, parcel, ending.ttl()))
     }
 
+    /// Whether the store holds an `opwall/` row for `operation`: only then does the finish
+    /// delete one, so an operation with no wall time ends in the transaction it always did.
+    fn has_wall(&self, operation: OperationId) -> Result<bool, StateError> {
+        Ok(self.store.get(&keys::opwall(operation))?.is_some())
+    }
+
     /// `txn`, then the removal of the operation's `op/`, `queue/`, `loss/`, `fate/` and
     /// `opkey/` rows (and the rows the embedder's [`crate::Ext::settled`] removes, between
-    /// the `fate/` and `opkey/` deletes) and the put of its result, so one transaction
-    /// carries all of it. The `opkey/` delete is made whether or not size keys are read
-    /// ([`Rows::set_read_size_keys`]): an operation queued while they were on has the row,
-    /// and a later run with them off cleans it up as the operation ends. The result goes
-    /// over whatever is there: the transaction also deletes the lease row at the version
-    /// read, which no other writer can have deleted first and written a result after.
-    fn settle_with(&self, ending: &Ending, txn: Txn, operation: OperationId) -> Txn {
+    /// the `fate/` and `opkey/` deletes), its `opwall/` row if `walled`, and the put of its
+    /// result, so one transaction carries all of it. The `opkey/` delete is made whether or
+    /// not size keys are read ([`Rows::set_read_size_keys`]): an operation queued while they
+    /// were on has the row, and a later run with them off cleans it up as the operation ends.
+    /// The result goes over whatever is there: the transaction also deletes the lease row at
+    /// the version read, which no other writer can have deleted first and written a result
+    /// after.
+    fn settle_with(&self, ending: &Ending, txn: Txn, operation: OperationId, walled: bool) -> Txn {
         let txn = txn
             .delete(keys::operation(operation), Cond::Any)
             .delete(keys::queue(operation), Cond::Any);
-        self.settle_rest(ending, txn, operation, Cond::Any)
+        self.settle_rest(ending, txn, operation, walled, Cond::Any)
     }
 
     /// `txn`, which already deletes the operation's `op/` and `queue/` rows at the versions
     /// it read, then the removal of the rest of its rows (its `lease-by-op/` row among them,
-    /// whoever left it) and the put of its result where `done` allows: [`Cond::Absent`] for a
-    /// result no other writer has put.
-    fn settle_rest(&self, ending: &Ending, txn: Txn, operation: OperationId, done: Cond) -> Txn {
+    /// whoever left it, and its `opwall/` row if `walled`) and the put of its result where
+    /// `done` allows: [`Cond::Absent`] for a result no other writer has put.
+    fn settle_rest(
+        &self,
+        ending: &Ending,
+        txn: Txn,
+        operation: OperationId,
+        walled: bool,
+        done: Cond,
+    ) -> Txn {
         let txn = txn
             .delete(keys::loss(operation), Cond::Any)
             .delete(keys::fate(operation), Cond::Any);
-        self.ext
+        let txn = self
+            .ext
             .settled(txn, operation)
-            .delete(keys::opkey(operation), Cond::Any)
-            .delete(keys::lease_by_op(operation), Cond::Any)
-            .put_ttl(
-                keys::done(operation),
-                ending.done.clone(),
-                ending.ttl(),
-                done,
-            )
+            .delete(keys::opkey(operation), Cond::Any);
+        let txn = if walled {
+            txn.delete(keys::opwall(operation), Cond::Any)
+        } else {
+            txn
+        };
+        txn.delete(keys::lease_by_op(operation), Cond::Any).put_ttl(
+            keys::done(operation),
+            ending.done.clone(),
+            ending.ttl(),
+            done,
+        )
     }
 
     /// The value of `operation`'s `done/` row, if the row is still there: how it ended. The

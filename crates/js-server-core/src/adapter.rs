@@ -21,8 +21,8 @@ use std::time::Duration;
 use js_sched::{DaemonInstance, NodePhase, Prediction, Request, Requeue, Scheduler};
 use js_store::Ending;
 use js_types::sched::{
-    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId,
-    WorkerId,
+    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Outcome, Refusal, StartLease,
+    WaiterId, WorkerId,
 };
 
 use crate::host::Stream;
@@ -126,6 +126,20 @@ impl Lowered {
     }
 }
 
+/// The `lease finished` line with the fields the core knows: `operation`, `lease`, `node`,
+/// whether the scheduler took the report (`accepted`), and for a failure its kind.
+pub fn log_finished_line(operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+    let (lease, node, accepted) = (report.lease, worker, taken == Taken::Accepted);
+    match report.outcome {
+        Outcome::Completed { .. } => {
+            tracing::info!(%operation, %lease, %node, accepted, "lease finished ok");
+        }
+        Outcome::Failed(failure) => {
+            tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
+        }
+    }
+}
+
 /// Everything the core asks of the server around it. See the module documentation.
 pub trait Adapter: Send {
     /// The farm time of the feed about to start, called at the top of every feed that is
@@ -173,6 +187,18 @@ pub trait Adapter: Send {
         _answers: &[Answer],
         _taken: Taken,
     ) {
+    }
+
+    /// Writes the one log line for a report that was fed: `lease finished ok` (INFO) or
+    /// `lease finished failed` (WARN), naming the operation, lease and node, and whether the
+    /// scheduler took the report (`accepted`). Called once for each
+    /// [`Core::report`](crate::Core::report), right after the matching
+    /// [`Adapter::after_report`], so the line follows whatever that hook logged. `operation`
+    /// is the name [`Adapter::name`] gave before the feed. An adapter that has more to say
+    /// on the line (the exit code of the run, say) overrides this and writes the line itself,
+    /// with the same words; the default is [`log_finished_line`], the fields the core knows.
+    fn log_finished(&mut self, operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+        log_finished_line(operation, worker, report, taken);
     }
 
     /// Whether the connection of `worker`'s stream `stream` is still open. Asked when the
