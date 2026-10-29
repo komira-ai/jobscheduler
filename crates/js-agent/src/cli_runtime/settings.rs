@@ -176,7 +176,7 @@ impl Settings {
             .with_host(flags.host)?
             .with_pull(flags.pull)?
             .with_tmp_size(flags.tmp_size)?
-            .with_subuid(flags.subuid.unwrap_or_default())?
+            .with_subuid(flags.subuid.ok_or(SettingsError::NoSubuid)?)?
             .with_agent(agent.0, agent.1)
             .map(Some)
     }
@@ -258,8 +258,17 @@ impl Settings {
     /// `/etc/subuid`; [`SettingsError::UserOutsideMap`] when the container user has an id
     /// of 65536 or more.
     pub fn with_subuid(self, user: &str) -> Result<Self, SettingsError> {
-        let _ = (user, RANGE_LEN);
-        Ok(self)
+        let plain = |c: char| c.is_ascii_graphic() && c != ':';
+        let named = !user.is_empty() && user.chars().all(plain);
+        let inside = self.ids.0 < RANGE_LEN && self.ids.1 < RANGE_LEN;
+        match (named, inside) {
+            (false, _) => Err(SettingsError::Subuid),
+            (true, false) => Err(SettingsError::UserOutsideMap),
+            (true, true) => Ok(Self {
+                subuid: Some(user.to_owned()),
+                ..self
+            }),
+        }
     }
 
     /// Settles who owns the run's scratch directory. It is private to the agent (`0700`),

@@ -422,6 +422,13 @@ impl From<CliError> for RuntimeError {
     }
 }
 
+/// The `(uid, gid)` a Docker data root names: `<dir>/<uid>.<gid>`, which the daemon makes of
+/// its data root when `userns-remap` is on.
+fn remap_of(root: &str) -> Option<(u32, u32)> {
+    let (uid, gid) = root.rsplit('/').next()?.split_once('.')?;
+    uid.parse().ok().zip(gid.parse().ok())
+}
+
 /// Milliseconds since the Unix epoch on the system clock: what [`CliRuntime`] stamps a
 /// container with, and measures its age against after a restart.
 pub fn unix_ms() -> u64 {
@@ -582,7 +589,17 @@ impl CliRuntime {
             _claim: None,
         };
         runtime.warnings = runtime.swap_warning().into_iter().collect();
-        let _ = (files, claims);
+        if let Some(user) = runtime.settings.subuid().map(str::to_owned) {
+            if runtime.settings.chown_scratch().is_none() {
+                return Err(CliError::AgentNotRoot);
+            }
+            let mapping = Mapping::read(&user, &|path| files.read(path))?;
+            if runtime.engine == Engine::Docker {
+                runtime.require_userns(&user, mapping)?;
+            }
+            runtime._claim = Some(RangeClaim::take(claims, mapping)?);
+            runtime.mapping = Some(mapping);
+        }
         Ok(runtime)
     }
 
@@ -636,6 +653,38 @@ impl CliRuntime {
             .and_then(Result::ok)
             .filter(|printed| printed.trim() == "false")
             .map(|_| NO_SWAP_LIMIT.to_owned())
+    }
+
+    /// Requires that Docker's daemon runs with `userns-remap` and that its remap range is
+    /// `mapping`: Docker has no map per container, so the daemon's own is the only one the
+    /// jobs can run in. The engine tells both in one call: its security options name
+    /// `userns` when the daemon remaps, and its data root is then `<root>/<uid>.<gid>`, the
+    /// first ids of the range it remaps to.
+    fn require_userns(&self, user: &str, mapping: Mapping) -> Result<(), CliError> {
+        let format = "{{json .SecurityOptions}} {{.DockerRootDir}}";
+        let printed = self.call("info", &["info", "--format", format])?;
+        let unreadable = || CliError::Unreadable { call: "info" };
+        let (options, root) = printed.trim().split_once(' ').ok_or_else(unreadable)?;
+        let options: Option<Vec<String>> =
+            serde_json::from_str(options).map_err(|_| unreadable())?;
+        let options = options.unwrap_or_default();
+        let remaps = (options.iter())
+            .flat_map(|option| option.split(','))
+            .any(|part| part == "name=userns");
+        if !remaps {
+            return Err(CliError::NoUserns {
+                user: user.to_owned(),
+            });
+        }
+        let want = (mapping.uid().start(), mapping.gid().start());
+        match remap_of(root) {
+            Some(found) if found == want => Ok(()),
+            _ => Err(CliError::RemapDiffers {
+                user: user.to_owned(),
+                want: format!("{}.{}", want.0, want.1),
+                root: root.to_owned(),
+            }),
+        }
     }
 
     /// The argv of `create` for `spec`, named `name` and made `created_ms`.

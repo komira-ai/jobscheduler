@@ -16,8 +16,9 @@
 //! [`RangeClaim`] keeps two agents of one host from using overlapping ranges: it holds a
 //! lock for as long as the runtime lives.
 
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
 /// How many ids a job's user namespace has, and so how many a range must hold.
@@ -153,14 +154,13 @@ impl IdRange {
 
     /// Whether `id` is one of the ids.
     pub fn contains(self, id: u32) -> bool {
-        let _ = (self.len, id);
-        false
+        id.checked_sub(self.start).is_some_and(|at| at < self.len)
     }
 
     /// Whether the two runs share an id.
     pub fn overlaps(self, other: Self) -> bool {
-        let _ = other;
-        false
+        let end = |range: Self| u64::from(range.start) + u64::from(range.len);
+        u64::from(self.start) < end(other) && u64::from(other.start) < end(self)
     }
 }
 
@@ -233,15 +233,128 @@ impl Mapping {
     ///
     /// The range is not one the agent accepts (see the module).
     pub fn resolve(user: &str, files: &IdFiles<'_>) -> Result<Self, SubidError> {
-        let _ = (user, files);
-        Ok(Self::new(0, 0))
+        let uid_start = start_of(files.subuid, user, SUBUID_FILE)?;
+        let gid_start = start_of(files.subgid, user, SUBGID_FILE)?;
+        let mapping = Self::new(uid_start, gid_start);
+        let checks = [
+            (
+                files.passwd,
+                PASSWD_FILE,
+                2,
+                SUBUID_FILE,
+                uid_start,
+                mapping.uid,
+            ),
+            (
+                files.passwd,
+                PASSWD_FILE,
+                3,
+                SUBGID_FILE,
+                gid_start,
+                mapping.gid,
+            ),
+            (
+                files.group,
+                GROUP_FILE,
+                2,
+                SUBGID_FILE,
+                gid_start,
+                mapping.gid,
+            ),
+        ];
+        for (database, name, field, file, start, range) in checks {
+            if let Some(id) = id_in(database, field, range) {
+                return Err(SubidError::Overlaps {
+                    user: user.to_owned(),
+                    file,
+                    start,
+                    database: name,
+                    id,
+                });
+            }
+        }
+        Ok(mapping)
     }
 
     /// The `--uidmap` and `--gidmap` arguments of Podman's `create`.
     pub fn podman_args(self) -> [String; 4] {
-        let _ = (self.uid, self.gid);
-        [const { String::new() }; 4]
+        let map = |range: IdRange| format!("0:{}:{RANGE_LEN}", range.start);
+        [
+            "--uidmap".to_owned(),
+            map(self.uid),
+            "--gidmap".to_owned(),
+            map(self.gid),
+        ]
     }
+
+    /// Whether the two mappings share a uid or a gid.
+    fn overlaps(self, other: Self) -> bool {
+        self.uid.overlaps(other.uid) || self.gid.overlaps(other.gid)
+    }
+
+    /// The name of this mapping's claim: `<uid start>-<gid start>`.
+    fn claim_name(self) -> String {
+        format!("{}-{}", self.uid.start, self.gid.start)
+    }
+
+    /// The mapping a claim name stands for.
+    fn of_claim(name: &str) -> Option<Self> {
+        let (uid, gid) = name.split_once('-')?;
+        Some(Self::new(uid.parse().ok()?, gid.parse().ok()?))
+    }
+}
+
+/// The first id of the first entry of `user` in `text` (`name:start:count` lines).
+fn start_of(text: &str, user: &str, file: &'static str) -> Result<u32, SubidError> {
+    let user_owned = || user.to_owned();
+    let line = text
+        .lines()
+        .find(|line| line.split(':').next() == Some(user))
+        .ok_or_else(|| SubidError::NoEntry {
+            user: user_owned(),
+            file,
+        })?;
+    let fields: Vec<&str> = line.split(':').collect();
+    let number = |text: &str| text.trim().parse::<u32>().ok();
+    let (start, count) = match fields.as_slice() {
+        [_, start, count] => number(start).zip(number(count)),
+        _ => None,
+    }
+    .ok_or_else(|| SubidError::Malformed {
+        user: user_owned(),
+        file,
+    })?;
+    if count < RANGE_LEN {
+        return Err(SubidError::TooSmall {
+            user: user_owned(),
+            file,
+            count,
+        });
+    }
+    if start == 0 {
+        return Err(SubidError::Identity {
+            user: user_owned(),
+            file,
+        });
+    }
+    if start.checked_add(RANGE_LEN).is_none() {
+        return Err(SubidError::PastTheEnd {
+            user: user_owned(),
+            file,
+            start,
+        });
+    }
+    Ok(start)
+}
+
+/// An id of `range` in the colon-separated field number `field` (counting from 0) of a
+/// line of `database`, if there is one. A line whose field is not a number (such as a
+/// `+` line) names no id.
+fn id_in(database: &str, field: usize, range: IdRange) -> Option<u32> {
+    database
+        .lines()
+        .filter_map(|line| line.split(':').nth(field)?.trim().parse::<u32>().ok())
+        .find(|id| range.contains(*id))
 }
 
 /// Who the job's processes are, as the post-job checks look for them.
@@ -266,10 +379,7 @@ impl JobUsers {
     ) -> Result<IdRange, SubidError> {
         match self {
             Self::Uid(uid) => Ok(IdRange::single(*uid)),
-            Self::Mapped(user) => {
-                let _ = (user, read);
-                Ok(IdRange::single(0))
-            }
+            Self::Mapped(user) => Mapping::read(user, read).map(Mapping::uid),
         }
     }
 }
@@ -295,9 +405,31 @@ impl RangeClaim {
     /// [`SubidError::Claimed`] when another agent holds an overlapping mapping,
     /// [`SubidError::Claim`] when the directory or a file in it cannot be used.
     pub fn take(dir: &Path, mapping: Mapping) -> Result<Self, SubidError> {
-        let _ = (dir, mapping);
-        Ok(Self {
-            _held: File::open("/dev/null")?,
-        })
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        let name = mapping.claim_name();
+        let held = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(dir.join(&name))?;
+        held.try_lock()
+            .map_err(|_| SubidError::Claimed(name.clone()))?;
+        for entry in fs::read_dir(dir)? {
+            let other = entry?.file_name();
+            let Some(theirs) = other.to_str().and_then(Mapping::of_claim) else {
+                continue;
+            };
+            if other == name.as_str() || !theirs.overlaps(mapping) {
+                continue;
+            }
+            let file = File::open(dir.join(&other))?;
+            file.try_lock()
+                .map_err(|_| SubidError::Claimed(other.to_string_lossy().into_owned()))?;
+        }
+        Ok(Self { _held: held })
     }
 }
