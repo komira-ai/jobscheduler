@@ -1140,6 +1140,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-mac-probe"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "js-mac-session"
 version = "0.1.0"
 dependencies = [
