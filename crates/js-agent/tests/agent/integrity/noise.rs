@@ -133,8 +133,10 @@ fn a_mount_near_the_hosts_own_still_counts() {
 
 /// Asserts that a process left in the agent's own control group, or in a group below it,
 /// still counts, though the agent's group is a service of the system slice, while one in
-/// another service does not: a child of the agent that outlives it is judged like any
-/// other process. It catches an exemption of every service, the agent's included.
+/// another service, and a Podman monitor's scope below the agent's group (containers
+/// parented under the agent), do not: a child of the agent that outlives it is judged like
+/// any other process. It catches an exemption of every service, the agent's included, and
+/// a monitor counted because it sits under the agent.
 #[test]
 fn the_agents_own_service_is_not_the_hosts() {
     for cgroup in [
@@ -147,6 +149,19 @@ fn the_agents_own_service_is_not_the_hosts() {
         let found = after(&mut checks, "r1").unwrap_err();
         assert_eq!(found.code(), code::DAEMONISED_CHILD, "{cgroup}");
     }
+    let host = FakeHost::quiet();
+    let mut checks = started(&host, vec![]);
+    host.start_process(process(
+        300,
+        1,
+        0,
+        900,
+        "0::/system.slice/agent.service/libpod-conmon-4f3a9c.scope",
+    ));
+    assert!(
+        after(&mut checks, "r0").is_ok(),
+        "a Podman monitor under the agent's group"
+    );
     let host = FakeHost::quiet();
     let mut checks = started(&host, vec![]);
     host.start_process(process(
