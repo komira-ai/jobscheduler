@@ -109,6 +109,7 @@ fn job(image: &str, scratch: &Path) -> ContainerSpec {
         mounts: Vec::new(),
         scratch: scratch.to_path_buf(),
         isolation: Isolation::Contained,
+        slot: 0,
         labels,
     }
 }
