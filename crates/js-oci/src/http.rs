@@ -171,7 +171,7 @@ impl Http {
                 .await
                 .map_err(|e| Error::Transport {
                     what: host.to_string(),
-                    why: format!("resolving: {e}"),
+                    why: text::escape(&format!("resolving: {e}")),
                 })?
                 .collect(),
         };
@@ -224,7 +224,7 @@ impl Http {
         // What an error may say of the URL: no query, fragment or userinfo.
         let transport = |why: String| Error::Transport {
             what: text::url(url),
-            why,
+            why: text::escape(&why),
         };
         let uri: Uri = url.parse().map_err(|e| transport(format!("{e}")))?;
         let authority = Authority::of_uri(&uri).filter(|_| uri.scheme_str() == Some("https"));
@@ -233,7 +233,7 @@ impl Http {
         };
         if ![HTTPS_PORT, own.port()].contains(&authority.port()) {
             return Err(Error::Port {
-                host: authority.host().to_owned(),
+                host: text::escape(authority.host()),
                 port: authority.port(),
                 own: own.port(),
             });
@@ -307,7 +307,7 @@ impl Http {
             None => Ok(None),
             Some(Err(e)) => Err(Error::Transport {
                 what: text::url(what),
-                why: e.to_string(),
+                why: text::escape(&e.to_string()),
             }),
             // Trailers come after all the data: a trailers frame is the body's end.
             Some(Ok(frame)) => Ok(frame.into_data().ok()),
@@ -363,7 +363,7 @@ fn resolve(from: &str, location: &str) -> Result<String, Error> {
     let location = location.split('#').next().unwrap_or_default();
     let uri: Uri = from.parse().map_err(|e| Error::Transport {
         what: text::url(from),
-        why: format!("{e}"),
+        why: text::escape(&e.to_string()),
     })?;
     let (Some(scheme), Some(authority)) = (uri.scheme_str(), uri.authority()) else {
         return Err(Error::Transport {

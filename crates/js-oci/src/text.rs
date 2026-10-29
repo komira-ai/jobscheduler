@@ -36,11 +36,17 @@ pub(crate) fn url(url: &str) -> String {
         Some((scheme, rest)) if scheme.bytes().all(scheme_byte) => (format!("{scheme}://"), rest),
         _ => (String::new(), url),
     };
+    // A network-path reference (`//user:pass@host/path`) has its authority after the
+    // slashes; without a scheme the first slash would otherwise end an empty one.
+    let (slashes, rest) = match (scheme.is_empty(), rest.strip_prefix("//")) {
+        (true, Some(after)) => ("//", after),
+        _ => ("", rest),
+    };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(end);
     let host = authority.rsplit('@').next().unwrap_or_default();
     let path = &tail[..tail.find(['?', '#']).unwrap_or(tail.len())];
-    escape(&format!("{scheme}{host}{path}"))
+    escape(&format!("{scheme}{slashes}{host}{path}"))
 }
 
 /// Whether `byte` may be in a URI scheme after its first letter.

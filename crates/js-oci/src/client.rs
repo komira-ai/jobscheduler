@@ -143,11 +143,20 @@ impl Client {
 /// take `&self`, so blobs can be fetched concurrently. The client does not limit how
 /// many: a caller that fetches layers in parallel bounds them itself (four at a time,
 /// say), since each holds a connection and a sink open.
-#[derive(Debug)]
 pub struct Repository<'c> {
     http: &'c Http,
     location: Location,
     token: Mutex<Option<String>>,
+}
+
+/// Prints the repository and never the token: a caller logs `{repo:?}`, and the bearer
+/// token the registry issued is a credential.
+impl std::fmt::Debug for Repository<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Repository")
+            .field("location", &self.location)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Repository<'_> {

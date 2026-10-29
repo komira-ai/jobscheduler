@@ -9,7 +9,9 @@ use crate::policy::AddressClass;
 /// Text a registry supplied (a realm, a media type, a digest, a redirect target) is
 /// clipped to 128 bytes and, where it is shown unquoted, escaped; a URL carries no
 /// userinfo, query or fragment (a redirect to a CDN has its signature there). Nothing
-/// that can be printed from an error holds a credential.
+/// that can be printed from an error holds a credential. A host in [`Error::Port`] and
+/// [`Error::Address`] and the text of a transport failure are clipped and escaped the
+/// same way.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

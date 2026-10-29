@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::Error;
 use crate::location::{Authority, Location, path_ok};
-use crate::text::clip;
+use crate::text::{clip, escape};
 
 /// Why an address is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,8 @@ pub enum AddressClass {
     /// `169.254.0.0/16` (except the metadata address) and `fe80::/10`.
     LinkLocal,
     /// The addresses clouds serve instance metadata and credentials on: `169.254.169.254`,
-    /// `fd00:ec2::254` and Azure's `168.63.129.16`. Never exempt.
+    /// `fd00:ec2::254`, Azure's `168.63.129.16` and Alibaba's `100.100.100.200` (which sits in
+    /// the shared range and is judged as metadata first). Never exempt.
     Metadata,
     /// The RFC 1918 ranges.
     Private,
@@ -66,7 +67,10 @@ pub fn classify(ip: IpAddr) -> Option<AddressClass> {
 
 fn classify_v4(ip: Ipv4Addr) -> Option<AddressClass> {
     let octets = ip.octets();
-    if matches!(octets, [168, 63, 129, 16] | [169, 254, 169, 254]) {
+    if matches!(
+        octets,
+        [168, 63, 129, 16] | [169, 254, 169, 254] | [100, 100, 100, 200]
+    ) {
         Some(AddressClass::Metadata)
     } else if ip.is_loopback() {
         Some(AddressClass::Loopback)
@@ -168,10 +172,17 @@ impl Allow {
     ///
     /// The exemption covers the RFC 1918 ranges, the shared range `100.64.0.0/10` and
     /// IPv6 unique-local addresses, and only those. Loopback, link-local, the cloud
-    /// metadata addresses (`169.254.169.254`, `fd00:ec2::254`, `168.63.129.16`),
+    /// metadata addresses (`169.254.169.254`, `fd00:ec2::254`, `168.63.129.16`, `100.100.100.200`),
     /// unspecified and multicast addresses are refused for a host listed as private,
     /// whatever it resolves to; see [`Allow::loopback`] for the one of those a local
     /// registry needs.
+    ///
+    /// The exemption is per connect target, not per registry: it applies to this host
+    /// and port whoever asks to reach it. A public registry can therefore send a
+    /// redirect, or point its token realm, at a host listed here, on port 443 or on the
+    /// port of the registry that sent it, and the client will connect (a GET, with no
+    /// credentials of the registry's). List a private host knowing that every registry
+    /// the policy admits can name it that way.
     #[must_use]
     pub fn private(mut self) -> Self {
         self.private = true;
@@ -184,6 +195,8 @@ impl Allow {
     /// with it: a name that resolves to loopback would reach this machine's own
     /// services. It does not exempt link-local, metadata, unspecified or multicast
     /// addresses, and not the private ranges (that is [`Allow::private`]).
+    /// The same per-target rule applies as for [`Allow::private`]: any admitted registry
+    /// can redirect to this host.
     #[must_use]
     pub fn loopback(mut self) -> Self {
         self.loopback = true;
@@ -288,7 +301,7 @@ impl Policy {
             return Ok(());
         }
         Err(Error::Address {
-            host: host.host().to_owned(),
+            host: escape(host.host()),
             addr,
             class,
         })
