@@ -23,30 +23,32 @@ The design adds, in this order:
    release) plus `Offer`, `Demand`, `Bootstrap` and `Secret`. The lease-level
    `js_provider::Provider` trait does not change.
 2. In `js-types`: the job types (`ContainerSpec`, `Requirements`) of section 3.1.
-3. Launch-time secrets and a no-inbound firewall attach in the Lambda crate, and a
-   bundled-roots HTTPS client so a pool needs no CA file.
-4. A `network` module in `js-lease-server` (kinds `none`, `script`, `tailscale`). It becomes
-   its own crate only when a kind needs a dependency the server should not carry.
+3. A launch payload (`user_data` for Lambda) and a no-inbound firewall attach in the Lambda crate,
+   and a bundled-roots HTTPS client so a pool needs no CA file. The service renders the payload;
+   the provider only delivers it.
+4. A `network` module in `js-lease-server`: ONE service-level layer with modes `default` and
+   `tailscale`. A mode adds boot steps and a per-launch secret to the boot plan; no provider sees
+   it. It becomes its own crate only when a mode needs a dependency the server should not carry.
 5. A TOML config file (`--config`), a compiled-in kind registry, and start-up validation
    that names pool and field.
-6. A per-pool background check loop, and a status API and page.
+6. A per-pool background check loop, and a status API and page, served only on the private address.
 7. Registry changes: a read of waiting demand, a drain mark, a remove, a `Launchable`
    hook, and a pool that needs no shared join-token file.
 8. `js-scaler`: a pure step function with an injected clock, a durable record of every
    acquire written before the call, and a shell in `js-lease-server` on the existing tick.
    Two new crates in all (`js-elastic`, `js-scaler`).
-9. The Lambda bootstrap template and an end-to-end test with fakes.
+9. The bootstrap renderer (service side), the Lambda host-prep data, and an end-to-end test with fakes.
 10. Server flags move into `[server]`.
 
-Review cut (this revision): the first slice keeps what the requirements and the double-launch,
-spend and secret requirements need: record before acquire, caps, drain, revoke, a masked plan.
-Price-drift marking, offer suppression with backoff, the boot-failure brake, `zeroize`,
-`RLIMIT_CORE`, a panic hook, a loop-device state root as a default, a separate network crate
-and the orphan adoption machine beyond "count and report" are listed under "Later" in
-section 12, not built first.
+The first slice keeps what the requirements and the double-launch, spend and secret
+requirements need: record before acquire, caps, drain, revoke, a masked plan, and a separate
+agent port. Price-drift marking, offer suppression with backoff, the boot-failure brake,
+`zeroize`, `RLIMIT_CORE`, a panic hook, a loop-device state root as a default, a separate
+network crate and the orphan adoption machine beyond "count and report" are under "Later" in
+section 12.
 
 The first slice serves one elastic pool whose class books a whole host (`whole-node` or
-`gpu-host`). That is what kbf sends today and it keeps one waiting request equal to one
+`gpu-host`). That is what the consumer sends today and it keeps one waiting request equal to one
 machine. Several elastic pools in one server, and classes that book part of a host, are
 later work, refused at load with a message that says so (the way `agent_pool.rs` refuses a
 mixed pool today, `MIXED_UNSERVED`). Section 6.5 says what that costs and how it is lifted.
@@ -63,7 +65,7 @@ generic. Secrets are files mounted at run time and named by path in the config (
 | 3 host contract, reported values, never provider names | 3.6, 7.3, 6.2 (Booting) |
 | 4 macOS native under sandbox-exec; pool declares mode | 3.1, 3.6, 4.2 (`exec`) |
 | 5 agents dial out; no Tailscale or host dependency in the core | 3.4, 8.6 |
-| 6 `[network]` kinds none, tailscale, script | 3.4, 5.4, 4.2 |
+| 6 one network layer, modes `default` and `tailscale` | 3.4, 5.4, 4.2 |
 | 7 Tailscale OAuth client, per-launch key, ACL on tag | 8 |
 | 8 Lambda launch: user_data secrets, one ssh key, no-inbound ruleset, token binding | 5.3, 7 |
 | 9 config file only; refuse bad config; background checks; status | 4.4, 10 |
@@ -89,6 +91,8 @@ Deviations a reviewer should see (each is also under Open questions 20):
   and the "about ten lines" of requirement 10 depend on that row (4.1).
 - Requirement 8: "single-use" holds for registration only until the Welcome credential exists (7.2).
   The credential is in the first slice, before any live launch.
+- Requirements 6 and 9: modes are `default` and `tailscale` only; there is no status token, no new
+  client key and no public listener (3.4, 10.2).
 
 ## 2. Goals and non-goals
 
@@ -101,6 +105,8 @@ Goals: the fifteen requirements (table 1.1). Non-goals for the first slice:
 - Several elastic pools in one server, and part-host classes (6.5).
 - A job queue of our own (demand is the registry's wait list), a user-written bootstrap script
   (requirement 10), and spot or preemption policy beyond treating a preempted instance as lost.
+- Any new in-service client or status authentication (section 12). Network code in any provider:
+  there is none, by design (3.4, 5.4).
 
 ## 3. The model
 
@@ -154,7 +160,7 @@ provider is elastic or `agent`, plus any number of `static` pools.
 
 This replaces the provider hierarchy of `docs/design/providers.md` (`providers = [...]` per
 pool, `provider_max_machines`) for the first slice. A pool has one provider. Choosing among
-pools is the consumer's job through labels, as `docs/design/configuration.md` says for kbf.
+pools is the consumer's job through labels, as `docs/design/configuration.md` says for the consumer.
 See Open questions 7.
 
 The pool carries the host. For Lambda that is the provider table (instance types, regions)
@@ -181,21 +187,32 @@ the delivered whole-host `Provider` trait, which is called under the lease table
 
 ### 3.4 Network (requirements 5, 6)
 
-A pool's `[network]` decides how an agent on a new host reaches the scheduler. The agent
-always dials out (`--server`, `crates/js-agent/src/cli.rs`). The scheduler may have a public
-HTTPS address or sit on a private network; `advertise_url` in `[server]` is what agents
-dial, and it is the deployment's choice. Kinds:
+How an agent on a new host reaches the scheduler is decided by one service-level layer: the
+pool's network mode. The agent always dials out (`--server`, `crates/js-agent/src/cli.rs`). The
+scheduler has no public listener in this design. It listens on a private address (same LAN, a
+VPC, or a tailnet). Agent routes are served on their own port (`server.agent_listen`, required
+when an elastic pool exists) and `advertise_url` names that port. The client, operator and
+status routes are served only on `server.listen`. Who may reach each port is decided by the
+network around the service (tailnet ACLs, or a proxy in front), not by a new key or token inside
+it (9): the ACL gives a launched host the agent port and nothing else. The server cannot check
+that its bind address is private (a wildcard bind is normal in a VPC or a container); it logs a
+warning and shows it in status when `listen` or `agent_listen` is a wildcard, and keeping the
+network private is the operator's part. Modes:
 
-- `none` (default): the agent dials `advertise_url`, a public HTTPS address. Agents trust
-  public roots with no file (`--ca-cert` is optional since #195, `crates/js-agent/src/lib.rs`;
-  only the help comment in `cli.rs` is stale and is fixed in PR 10).
+- `default`: the host uses the network it already has: the same LAN, a VPC, or a VPN the image
+  joins on its own. The mode adds nothing: no boot step, no secret. Agents trust public roots
+  with no file (`--ca-cert` is optional since #195, `crates/js-agent/src/lib.rs`; only the help
+  comment in `cli.rs` is stale and is fixed in PR 10).
 - `tailscale`: the host joins a tailnet first with a key minted for that launch;
   `advertise_url` is then a tailnet name.
-- `script`: an operator program, called by the service, returns extra bootstrap steps and
-  the secrets for that launch (WireGuard, a VPN client, anything).
 
-A VPC user with their own relay uses `none` or `tailscale`. Nothing in the core imports a
-network kind (8.6).
+A mode contributes two things to a launch's `BootPlan`: boot steps, and a per-launch secret
+(5.4). The service-side layer also has two lifecycle hooks, `check` (can this mode issue what a
+launch needs) and `forget` (cleanup after release). They belong to the service, are not
+contributions to the plan, and never reach a provider. A provider receives one opaque boot payload
+rendered from the plan (for Lambda, `user_data`) and never branches on the mode. No provider crate
+contains network code, and a new provider gets every mode without writing any. Nothing in the
+core imports a mode (8.6).
 
 ### 3.5 Offers (requirement 13)
 
@@ -288,11 +305,12 @@ that `plan` is the default (14 Q14).
 
 ```toml
 [server]
-listen         = "0.0.0.0:7300"
-advertise_url  = "https://js.example.net:7300"           # what agents dial
+listen         = "100.64.0.1:7300"                       # client, operator, status routes; private or tailnet address
+agent_listen   = "100.64.0.1:7301"                       # agent routes only; required with an elastic pool (Q23)
+advertise_url  = "https://js.example.ts.net:7301"        # what agents dial: the agent port
 state_file     = "/var/lib/jobscheduler/state"
 boot           = "resume"                                # or "initialise"
-client_token_file = "/run/credentials/js/client-token"   # today --token-file
+client_token_file = "/run/credentials/js/client-token"   # the existing client token (today --token-file), same file and check; no new key or field
 tls_cert       = "/run/credentials/js/tls-cert"
 tls_key        = "/run/credentials/js/tls-key"
 # tick, default_ttl, max_ttl, timeouts: same names and defaults as today's flags
@@ -319,25 +337,10 @@ provider = { kind = "lambdalabs", api_key_file = "/run/credentials/js/lambda-key
 network  = { kind = "tailscale", oauth_client_file = "/run/credentials/js/ts-oauth", tag = "tag:js-agent" }
 ```
 
-A pool on a public scheduler omits `network` (kind `none`). A hook network:
-
-```toml
-network = { kind = "script", command = ["/etc/jobscheduler/net-hook"], timeout = "30s" }
-```
-
-The hook gets one JSON object on stdin (`{"api":1,"op":"prepare","pool":"gpu","host":"js-..."}`)
-and prints one (`{"steps":[["tailscale","up"]],"secrets":{"name":"value"}}`). Each step is an
-argv list (data), not a shell line: the bootstrap renderer quotes every element, so hook
-output cannot add shell syntax. Limits, checked before anything is rendered: stdout at most
-64 KiB; at most 32 steps; each element at most 1 KiB, UTF-8, no NUL or newline; a secret name
-`[a-z0-9_-]{1,32}`, a value at most 4 KiB. A violation fails the launch and the pool shows
-`network: hook output rejected: <which limit>`. `secrets` are written to 0600 files under
-`/etc/jobscheduler/` by the bootstrap. The command is an argv list, never a shell string. The
-hook is the operator's code and runs with the service's rights. Hook stderr is not logged
-and not kept: status shows the exit code and the hook's own `error` string from stdout (cut at
-200 bytes, and never a secret value, since secret values are only in the `secrets` map, which
-is masked in every plan and log). The service cannot mask a secret it does not know, so it
-does not log what it cannot classify. PROPOSAL for the JSON (14 Q19).
+A pool whose hosts already have a route to the scheduler omits `network` (mode `default`). The
+network mode is the same set for every provider: the pool names it in `network`, and no provider
+table has a network key. A Lambda pool in `default` mode works only if the operator's own image or
+VPN setup gives the host a route to `advertise_url` (section 7); Lambda pools use `tailscale`.
 
 A future AWS pool would put `launch_template` and `ami = "ami-0abc"` inside its provider
 table; that is the only place an AMI appears. Not built.
@@ -373,6 +376,7 @@ message naming pool and field:
 | `launch = "live"` on a pool whose provider cannot be built | `pool "gpu": launch: ...` |
 | two pools with one name; more than one registering pool; a class that books part of a host (first slice) | `pool "b": only one pool may register agents in this version` |
 | `exec` not `container` or `sandbox-exec`; `sandbox-exec` with an elastic kind that cannot launch macOS | `pool "mac": exec: ...` |
+| an elastic pool and no `server.agent_listen`; `agent_listen` equal to `listen` | `server.agent_listen: required with an elastic pool; must differ from server.listen` |
 | `advertise_url` that is `http://` and not loopback, whenever any elastic pool exists (the agent refuses it, `crates/js-agent/src/cli.rs`; a pool that passed start and then failed every boot would bill 15 minutes per launch with only "booting, no hello" to show) | `server.advertise_url: http:// is refused by agents; use https (or loopback)` |
 | with `--config`, any other flag (PR 10) | `--listen: not allowed with --config; set server.listen` |
 
@@ -410,8 +414,8 @@ impl Kinds {
 
 The core reads `kind` and hands the rest of the table to the constructor; it never looks
 inside. Each constructor owns a `#[serde(deny_unknown_fields)]` struct. Later kinds (`aws`,
-`gcp`, `azure`, `k8s`) are one line each in `standard()`. A network kind table does the
-same for `none`, `script`, `tailscale`.
+`gcp`, `azure`, `k8s`) are one line each in `standard()`. A network mode table does the
+same for `default` and `tailscale`; it is read by the launch shell, never by a provider.
 
 Constructors live in the provider crates:
 
@@ -430,7 +434,7 @@ an acquire id, list returns what is ours, release reads back and answers `Gone` 
 not-found by id, and `Unknown` is never `Gone`. What is Lambda-shaped is `Candidate {
 instance_type, region }`, `GpuRequest` and `InstanceId`; those become `Offer` and `HostRef`.
 The semantics of `Acquired`, `Released`, `Refusal` and `Held` stay word for word, so the
-tests in `provider.rs` move with them.
+crate's tests (`tests/offline`, `tests/http`, `tests/first_launch`) move with them.
 
 ```rust
 // crates/js-elastic/src/lib.rs
@@ -457,7 +461,9 @@ pub struct HostName(String);
 pub struct HostRef(pub String);      // the provider's own id for a machine
 
 pub struct AcquireRequest { pub acquire: AcquireId, pub pool: String, pub name: HostName,
-    pub offer: Offer, pub labels: Vec<(String, String)>, pub boot: BootPlan }
+    pub offer: Offer, pub labels: Vec<(String, String)>, pub payload: BootPayload }
+/// The rendered boot input, opaque to the provider (Lambda: `user_data`). A `Secret`.
+pub struct BootPayload(Secret);
 
 pub enum Acquired { Accepted { held: Held, extras: Vec<Extra> }, Refused(Refusal), Unknown,
     Deferred { wait: Duration } }                                  // unchanged; Deferred = nothing sent
@@ -465,21 +471,26 @@ pub enum Released { Gone, Terminating(HostStatus), Refused(Claim), Unknown }   /
 
 pub trait ElasticProvider: Send + Sync {
     fn catalog(&self) -> Result<Vec<Offer>, ProviderError>;   // also the credential check
-    fn acquire(&self, request: &AcquireRequest, secrets: &BootSecrets) -> Acquired; // idempotent on request.acquire
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep>;      // what this image lacks (7.3); data, from the offer only
+    fn payload_limit(&self) -> usize;                         // bytes the cloud accepts
+    fn acquire(&self, request: &AcquireRequest) -> Acquired;  // idempotent on request.acquire; delivers request.payload as is
     fn list(&self) -> Result<Vec<Held>, ProviderError>;       // an error is never an empty list
     fn release(&self, id: &HostRef) -> Released;              // terminates if ours, reads back
-    fn describe(&self, request: &AcquireRequest) -> PlanView; // the launch render with secrets masked
 }
+// No network type appears in this trait. The plan view on the status page is the service's (below).
 ```
 
-`BootPlan` is data with secret slots (not a string): the agent artifact (url, sha256), the
-scheduler url, pool, the instance line (`<pool>:<name>`), the network steps, and slots named
-`join_token` and `network.*` for secrets. `BootSecrets` fills the slots. The provider renders
-`BootPlan` into whatever its cloud takes (cloud-init user data for Lambda) through one
-function `render(&BootPlan, Fill) -> String` where `Fill` is `Mask` or `Real(&BootSecrets)`.
-`describe` calls it with `Mask`; `acquire` calls it with `Real`. The status page therefore
-shows exactly the plan the launch follows, and it cannot show a secret because it never
-holds one. A test renders both and asserts they differ only at the secret bytes (13.2).
+`BootPlan` is data with secret slots (not a string), built by the service, never by a provider:
+the agent artifact (url, sha256), the scheduler url, pool, the instance line (`<pool>:<name>`),
+the provider's `host_prep` steps, the network mode's steps, and slots named `join_token` and
+`network.*` for secrets. `BootSecrets` fills the slots. The service has one function
+`render(&BootPlan, Fill) -> String` where `Fill` is `Mask` or `Real(&BootSecrets)`; the `Real`
+render becomes the `BootPayload`. The service alone owns the plan view: the status page shows the
+`Mask` render of the `BootPlan` the launch follows (secret slots print `***`), so it cannot show a
+secret because it never holds one. The provider has no `describe`: it only sees the payload. A provider never sees a
+`BootPlan`, a network mode or `BootSecrets`: its trait takes the payload and delivers it in
+whatever field its cloud has (Lambda: `user_data`). It does not branch on the network mode. A
+test renders both fills and asserts they differ only at the secret bytes (13.2).
 
 Ownership marks (`own.rs`: tags `jobscheduler:scheduler/acquire/pool` and the `js-<hash>-`
 name prefix, both needed to terminate, either counted toward the cap) stay inside the
@@ -506,8 +517,10 @@ All in `crates/js-provider-lambdalabs`:
   checked against Lambda's current reference in PR 3 (Open questions 2).
 - `Debug`, `Display`, `FakeLambda`'s `Call` log and every error `cut()` quote must not
   print `user_data`. A test greps captured logs, as the existing test does for the API key.
-- A user_data size limit is a `Shape` refusal before the call. The limit is not verified
-  (Open questions 2); the render is measured against it in a unit test.
+- The service checks the render against `payload_limit()` and refuses `Shape` before the call.
+  The limit is not verified (Open questions 2); the render is measured against it in a unit test.
+  The Lambda crate returns `host_prep` (the stock-image package table of 7.3) and delivers the
+  payload as `user_data`; it holds no cloud-init template and no network code.
 - `LambdaApi` gains `list_firewall_rulesets` and `create_firewall_ruleset` (no inbound
   rules). `ensure_firewall` finds a ruleset named `js-<scheduler>-noinbound` or creates it,
   once per region, caches the id, and every launch attaches it. Rulesets can only be
@@ -534,30 +547,38 @@ All in `crates/js-provider-lambdalabs`:
 - `kind::build` as in 5.1. `ElasticConfig::max_machines` stays as the provider's backstop,
   set to `max_instances`.
 
-### 5.4 The network trait (module `network` of `js-lease-server`)
+### 5.4 The network layer (module `network` of `js-lease-server`)
 
-The trait and the three kinds live in `crates/js-lease-server/src/network/` (`mod.rs`,
-`none.rs`, `script.rs`, `tailscale.rs`). They split into crates only when a kind needs a
-dependency the server should not carry or a second consumer exists.
+One layer for the whole service. Providers do not implement it and do not see it. A mode
+contributes boot steps and a per-launch secret (`prepare`, `describe`); `check` and `forget` are
+service-side lifecycle hooks, not contributions. The trait and
+the two modes live in `crates/js-lease-server/src/network/` (`mod.rs`, `default.rs`,
+`tailscale.rs`). They split into crates only when a mode needs a dependency the server should not
+carry or a second consumer exists.
 
 ```rust
-pub trait Network: Send + Sync {
-    fn check(&self) -> Result<(), NetworkError>;   // can this network issue what a launch needs? creates nothing
-    fn prepare(&self, launch: &LaunchCtx) -> Result<NetworkPlan, NetworkError>; // per launch, never in plan mode
-    fn describe(&self, launch: &LaunchCtx) -> Vec<NetworkStep>;  // steps with empty secret slots
+pub trait NetworkMode: Send + Sync {
+    // contributions to a BootPlan
+    fn prepare(&self, launch: &LaunchCtx) -> Result<Contribution, NetworkError>; // per launch, never in plan mode
+    fn describe(&self, launch: &LaunchCtx) -> Vec<NetworkStep>;  // the same steps with empty secret slots (plan mode)
+    // service-side lifecycle hooks; not part of the plan, never passed to a provider
+    fn check(&self) -> Result<(), NetworkError>;   // can this mode issue what a launch needs? creates nothing
     fn forget(&self, host: &HostName) -> Result<(), NetworkError>; // after release; best effort, bounded retries
 }
 pub struct LaunchCtx<'a> { pub pool: &'a str, pub host: &'a HostName, pub valid_for: Duration }
-pub struct NetworkPlan { pub steps: Vec<NetworkStep>, pub secrets: BootSecretsPart }
+pub struct Contribution { pub steps: Vec<NetworkStep>, pub secrets: Vec<(SlotName, Secret)> } // the whole interface
 pub enum NetworkStep { Run(Vec<String>),                       // argv, never a shell line; never a Secret
     SecretFile { path: String, slot: SlotName },               // written 0600
     Fetch { url: String, sha256: [u8; 32], dest: String } }
 ```
 
-The renderer quotes every argv element, so no step can add shell syntax. `none` returns no steps; `check` confirms `advertise_url` parses and, for `https`, that the
-`[server]` certificate files are readable. `script` runs the argv with a timeout and reads
-JSON. In plan mode the service calls `describe` and never `prepare`, so a plan mints no key and calls no Tailscale
-endpoint (13.2). `tailscale` is section 8.
+The launch path in the shell (`scaler.rs`) is `mode.prepare` to `BootPlan` to `render` to
+`provider.acquire(payload)`. The shell is the only place that holds both a mode and a provider;
+neither knows the other. The renderer quotes every argv element, so no step can add shell syntax.
+`default` returns an empty `Contribution`; its `check` confirms `advertise_url` parses and, for
+`https`, that the `[server]` certificate files are readable. In plan mode the service calls
+`describe` and never `prepare`, so a plan mints no key and calls no Tailscale endpoint (13.2).
+`tailscale` is section 8.
 
 ## 6. Scaler and instance lifecycle (requirement 14)
 
@@ -596,7 +617,7 @@ pub struct Input<'a> { pub now: Instant /* injected */, pub pool: &'a PoolSettin
     pub waiting: &'a [Waiting], pub hosts: &'a [HostFacts],
     pub held: Option<&'a [Held]> /* None if list failed */, pub records: &'a Records }
 pub enum Action { Record(Record) /* written first */, Mint { host: HostName, valid_for: Duration },
-    Acquire(AcquireRequest) /* slots; the shell fills secrets */, Drain(HostName), Undrain(HostName),
+    Acquire(AcquireRequest) /* payload already rendered by the shell */, Drain(HostName), Undrain(HostName),
     ReleaseHost(HostName) /* registry mark, only if still quiet */, Revoke(HostName),
     Release { host: HostName, id: HostRef }, ForgetNetwork(HostName), RemoveHost(HostName) }
 pub fn step(input: &Input<'_>) -> Vec<Action>;
@@ -759,11 +780,13 @@ Rules, each tied to a requirement or to existing behaviour:
   scaler's call after a read-back `Gone`; `remove` on a host already forgotten is a no-op
   `Ok`; the scaler counts machines by its records and the provider's `list`, never by the
   registry, so a forgotten host that still exists in the cloud is still counted and still
-  released. The agent binding file keeps the binding (host id to instance) on purpose. It
-  cannot refuse a legitimate new host, because every launch has a fresh `HostName` (the
+  released. `forget_lost` drops a forgotten host's binding too (`registry.rs`: the binding
+  file is rewritten from live records only), so nothing on the scheduler side remembers a
+  forgotten host. That is safe here because every launch has a fresh `HostName` (the
   acquire id is random and unique per acquire, 5.2), so a name is never reused, even after
-  a lost state file. Only a hand-joined host that reuses an old name meets `host-bound`,
-  which is the existing, intended behaviour.
+  a lost state file; and a forgotten host's token is already spent and its credential is
+  revoked at release (7.2), so it cannot re-register under the old name. Only a hand-joined
+  host that reuses an old name meets `host-bound`, which is the existing behaviour.
 - `Launchable`, as in 6.1.
 - `Agents` today requires `AgentTokens::open(--agent-token-file)` for any registering pool
   (`config.rs::hosts`: both agent flags come together). An elastic pool needs only one-time
@@ -797,9 +820,15 @@ PR 11 and 12), after the live proof.
 
 ## 7. Lambda AI end to end
 
+A Lambda host has no private path to a scheduler, so a Lambda AI pool uses
+`network = { kind = "tailscale", ... }` (4.1). A Lambda pool in `default` mode works only if the
+operator's own image or VPN setup gives the host a route to `advertise_url`; the stock image does
+not, and the bootstrap of 7.3 adds none. Without a route the host never says hello and is
+released at `boot_timeout` (F22).
+
 ### 7.1 The sequence
 
-1. A kbf whole-node request finds no free host and waits in the registry; `Launchable` is true,
+1. A consumer's whole-node request finds no free host and waits in the registry; `Launchable` is true,
    so it is not refused `no-capable-host`.
 2. Next tick the scaler sees one uncovered request, takes offers from `catalog()`, picks the
    cheapest fit, passes the caps and writes the Launching record (6.2).
@@ -810,7 +839,7 @@ PR 11 and 12), after the live proof.
    the tailnet and the agent says hello to `advertise_url` with the token and its instance line.
 5. The registry admits the hello (token unused, unexpired, instance equals the name, shape
    satisfies the floor including `runtime`, pool below `max_machines`), answers `Welcome` with
-   the host credential (7.2) and the host registers with its real shape. The kbf poll arrives and the registry places the lease.
+   the host credential (7.2) and the host registers with its real shape. The consumer's poll arrives and the registry places the lease.
 6. After `idle` of quiet: Draining, then Releasing (the registry sets the mark only if the host is
    still quiet, 6.2), then revoke the token, terminate, read back, delete the tailnet device.
    Record: Gone.
@@ -844,11 +873,10 @@ The real defences against a stolen token, in the order they act:
    `MAX_TTL` (24 h). An unused token is dead after that.
 2. The host credential (below), issued at the first hello. After it, the token is dead.
 3. Revoke at release, before terminate (6.2), and at Failed.
-4. The Tailscale ACL: the host can reach the scheduler port only (8.3). Binding the first hello
-   to the source tailnet identity (the scheduler asks its own `tailscaled` who the peer is)
-   would make a stolen token useless from elsewhere on the tailnet. It needs the core to talk
-   to Tailscale, which requirement 5 forbids, so it is NOT done in the first slice. It could be a
-   `network` hook later (Open questions 22).
+4. The Tailscale ACL: the host can reach the agent port only (8.3). Binding the first hello to
+   the peer's tailnet identity is not part of this design. It would need the service to ask
+   `tailscaled` who the peer is, which is a service feature outside the mode layer (a mode is a
+   boot step plus a secret) and outside requirement 5.
 
 Single-use, stated precisely. Today the token is single-use for registration only: after the
 first hello it cannot register a second host id (`join-token-used`), but the first hello makes
@@ -878,9 +906,10 @@ in status; the loader rule on `max_instances` (4.4) keeps it from occurring.
 
 ### 7.3 The bootstrap (Lambda: stock image plus a built-in template)
 
-Lambda gives no custom images (requirement 2). The Lambda crate holds a cloud-init template
-(`crates/js-provider-lambdalabs/src/bootstrap.rs`) rendered from `BootPlan`. It does, in
-order:
+Lambda gives no custom images (requirement 2). The service renders a cloud-init script from the
+`BootPlan` (module `bootstrap` of `js-lease-server`: one renderer for every provider and mode).
+What is specific to the stock Lambda image is data the Lambda crate returns from `host_prep`
+(the package table of step 1); the script is delivered as `user_data`. It does, in order:
 
 1. Host contract (requirement 3). Check `nvidia-smi` exits 0 and the container binary at the path
    the template names exists. For each missing piece, install it only from the template's
@@ -892,8 +921,8 @@ order:
    finds (3.6), so a bootstrap that lied is caught at admission as `host-contract`.
 2. Write `/etc/jobscheduler/token` (0600) and `/etc/jobscheduler/instance`
    (`<pool>:<name>`, not secret).
-3. Run the network steps (Tailscale binary fetched with checksum, `tailscale up`; for
-   `none`, nothing).
+3. Run the network steps the pool's mode contributed (`tailscale`: binary fetched with checksum,
+   `tailscale up`; `default`: nothing).
 4. Fetch the agent for the offer's arch from `BootPlan.agent.url`, verify the sha256 before
    the agent ever starts, install to `/usr/local/bin/js-agent`.
 5. Make the agent's state root. `js-agent` with `--container-bin` requires `--state-root`
@@ -905,27 +934,22 @@ order:
 6. Write and start `js-agent.service` with `--server`, `--token-file`, `--instance-file`,
    `--pool`, `--container-bin`, `--state-root`, `--scratch-root`, the `--watch-dir` list the
    agent's help suggests, and labels.
-7. Cleanup, run from a `trap ... EXIT` installed as the first line of the script, so a failure
-   at any earlier step still runs it. It removes (with `rm`, and says so: on a journaling or
-   copy-on-write filesystem `rm` does not erase blocks, and nothing here claims it does) the
-   secret files that were used, and every cloud-init copy of the user data. The copies are not
-   only `/var/lib/cloud/instance/user-data.txt` and the rendered script. cloud-init also keeps
-   `/var/lib/cloud/instances/<id>/` (`user-data.txt*`, `cloud-config.txt`, `scripts/`,
-   `obj.pkl`), `/var/lib/cloud/data/`, the datasource cache and `/var/log/cloud-init*.log`. The
-   template's list is the output of a `find / -newer` pass on a live stock-image run, recorded in
-   the PR and re-checked on every stock-image change (Open questions 5); until that run exists
-   the design does not claim removal. Once the Welcome credential exists (7.2), a surviving copy
-   of the token is useless after the first hello, which is why cleanup is defence in depth, not
-   the guard.
-8. Block metadata for jobs. Any process that can reach the provider's metadata address can read
-   the user data again, and the host runs untrusted GPU jobs in containers. The template adds a
-   firewall rule that drops traffic from the container networks (and from the job user) to the
-   metadata address, before the agent starts, and the agent runs containers on a bridge, never the
-   host network. The address and the way to drop it on the stock Lambda image are not verified
-   (Open questions 5); the live checklist (13.4) tests that a container cannot read user data.
-   Until then the join token and the Tailscale key must be assumed readable by the host's jobs
-   in the window between boot and first hello. Both are single-use, and no job runs before the
-   first hello, so the window holds no job; after it, the token is retired.
+7. Cleanup, from a `trap ... EXIT` installed as the first line of the script, so a failure at any
+   earlier step still runs it. It removes (with `rm`; on a journaling or copy-on-write
+   filesystem that does not erase blocks, and nothing here claims it does) the secret files used
+   and every cloud-init copy of the user data: the rendered script, `/var/lib/cloud/instance/`
+   and `/var/lib/cloud/instances/<id>/`, `/var/lib/cloud/data/`, the datasource cache and
+   `/var/log/cloud-init*.log`. The template's list comes from a `find / -newer` pass on a live
+   stock-image run, recorded in the PR and re-checked on every stock-image change (Open questions
+   5); until that run exists the design does not claim removal. After the Welcome credential
+   (7.2) a surviving token copy is useless, so cleanup is defence in depth, not the guard.
+8. Block metadata for jobs. A process that reaches the provider's metadata address can read the
+   user data again, and the host runs untrusted GPU jobs in containers. The template drops traffic
+   from the container networks (and the job user) to the metadata address before the agent starts,
+   and the agent runs containers on a bridge, never the host network. The address and the way to
+   drop it on the stock image are not verified (Open questions 5); the live checklist (13.4) tests
+   that a container cannot read user data. No job runs before the first hello, and the token is
+   retired at it, so the window between boot and first hello holds no job.
 
 Hardening of the template, each a golden test of the rendered text with every secret
 masked: `write_files` mode 0600 for every secret; no `set -x` and no `echo` of a secret;
@@ -941,10 +965,10 @@ checksum in `user_data` guards against a corrupt or swapped download from a reac
 server; it does not guard against a compromised service, which can mint tokens anyway.
 
 The launch call carries: region and instance type from the offer, the one ssh key name, the
-one no-inbound ruleset id, `user_data` (the rendered bootstrap, a `Secret`), the `HostName` as
+one no-inbound ruleset id, `user_data` (the opaque payload from the service, a `Secret`), the `HostName` as
 name, and our ownership tags (`own.rs`).
 
-## 8. Tailscale network kind (requirement 7)
+## 8. Tailscale network mode (requirement 7)
 
 ### 8.1 Config
 
@@ -975,24 +999,32 @@ requirement 7 states.
 ### 8.3 Access control and cleanup
 
 The operator's tailnet policy puts the tag on a rule that allows `tag:js-agent` to reach the
-scheduler's node on the scheduler's port and nothing else. That is not our code; the docs ship the
+scheduler's node on the agent port (`server.agent_listen`) and nothing else. That is not our code; the docs ship the
 snippet. The service does not change the policy. Requirement 7 relies on that rule to keep a
-compromised GPU host to the scheduler port, so the design does not leave it unchecked:
+compromised GPU host to the agent port, so the design does not leave it unchecked:
 
 - The docs say the OAuth client must be created with only the scopes `auth_keys` (write) and
   `devices:core` (write), limited to the one tag; a client allowed to mint keys for other tags
   would let a compromised service (or a bug) put a host on a wider ACL. The service cannot see
   a client's tag limits, so this is documentation plus the live check below.
 - The live checklist (13.4) has two items: from a launched host, connect to another tailnet
-  node, and to a second port on the scheduler node; both must fail.
+  node, and to the scheduler's `listen` port (client, operator, status); both must fail, and the
+  agent port must succeed.
 - PROPOSAL (Open questions 22): if the OAuth client was also given the read scope for the policy
   file, `check()` reads the policy and shows `network: warning: no rule limits tag:js-agent to the
-  scheduler port` when it cannot find one. A warning, never a failure, since parsing a policy
+  agent port` when it cannot find one. A warning, never a failure, since parsing a policy
   correctly is the operator's tool's job.
-- The same port serves the scheduler's whole API to that host. The client-token routes need the
-  client token, which a host does not have. `/status` and `/v1/pools` need the client token or
-  the status token (10.2); there is no unauthenticated page, so a compromised host reads no
-  status. The bootstrap agent route is unauthenticated on purpose (a binary is not a secret).
+- The client, operator and status APIs get nothing new in the service. They are served on
+  `server.listen` and the network decides who reaches them (9). A launched host carries
+  `tag:js-agent`, and one port cannot tell agent routes from operator routes. So the split is in
+  the first slice (PR 4): `server.agent_listen` is required with an elastic pool and serves only
+  the agent routes (hello, heartbeat, bootstrap agent route); the agent routes are not served on
+  `listen`, and the other routes are not served on `agent_listen`. The policy snippet gives the tag
+  the agent port only. Without the split the network could not separate a launched host from the
+  operator routes, which is why it is not optional. The bootstrap agent route is unauthenticated
+  on purpose (a binary is not a secret). Open risk: the split holds only while the operator's
+  policy gives the tag the agent port alone; the service cannot verify the policy (the warning
+  above is best effort), so 13.4 checks it live.
 
 After release, `forget(host)` looks up the device by hostname and deletes it. The device is
 ephemeral and drops when offline anyway; the delete frees the name. A failed delete is logged and
@@ -1010,8 +1042,9 @@ boot is Open questions 11.
 
 The service does not join the tailnet. The deployment does (the host's own `tailscaled`, or
 a sidecar), and `advertise_url` names it. Nothing in `js-lease-server`'s core modules,
-`js-scaler`, `js-elastic` or `js-registry` uses `network::tailscale`; only `kinds.rs` does. A CI
-check greps for the path and fails if a file other than `kinds.rs` and `network/` names it
+`js-scaler`, `js-elastic`, `js-registry` or any provider crate names `network::`; only `kinds.rs`
+and the launch shell (`scaler.rs`, through the trait) do. A CI check greps for the path and fails
+if a file other than those and `network/` names it
 (PR 10). Nothing depends on our hosts either (requirement 5): no address, name or path of ours
 appears in a default.
 
@@ -1036,7 +1069,7 @@ appears in a default.
   (Open question 10).
 - In process: `Secret` has no `Serialize`, `Clone` or `Display`, and its `Debug` prints `***`; a
   panicking check is contained to its pool. Zeroing on drop, `RLIMIT_CORE` 0 and a panic hook that
-  strips payloads are Later (section 12), not asked for by a requirement. The status page never holds a secret (`describe` is the launch render with `Mask`), and a
+  strips payloads are Later (section 12), not asked for by a requirement. The status page never holds a secret (the plan view is the `Mask` render of the `BootPlan`), and a
   test greps the serialised status for known test secrets.
 - Spend is bounded five ways: `max_instances`, `max_spend_per_hour` on stored prices,
   `max_spend_per_day` on billed time including failed boots (6.2), the provider's `max_machines`
@@ -1044,8 +1077,13 @@ appears in a default.
 - The agent pins the scheduler (`--ca-cert` or bundled roots). It refuses non-loopback `http://`
   ("the join token never crosses a network in clear", `cli.rs`), also over a tailnet, so start-up
   refuses a non-loopback `http://` `advertise_url` for every elastic pool (4.4) and a tailnet
-  scheduler serves TLS on its tailnet name with an operator certificate. The `script` hook runs operator code with the service's rights and is off unless
-  the pool says `kind = "script"`.
+  scheduler serves TLS on its tailnet name with an operator certificate.
+- Client and operator authentication is built around the service, not in it. The scheduler has no
+  public listener; the status, client and operator APIs are reachable only on the private or
+  tailnet address, and tailnet ACLs or a proxy in front decide who gets there. This design adds no
+  client key and no status token. The client token that exists on main is kept as it is. Agent
+  registration auth (one-time join token, host credential at first hello, revoke on terminate) is
+  machine registration, not client auth, and stays (7.2).
 
 ## 10. Status and validation (requirement 9)
 
@@ -1072,11 +1110,11 @@ client bounds every call, `http.rs`), and a panic is caught per pool.
 
 ### 10.2 The status API
 
-`GET /v1/pools` and `GET /status`, an HTML rendering of the same data. Both need the client token
-or a status token (`server.status_token_file`, read-only, optional); there is no unauthenticated
-page, because a launched host can reach this port (8.3). A browser cannot send a bearer header, so
-`/status` also accepts HTTP Basic with the status token as the password. PROPOSAL (Open questions
-12). Only `/healthz` is open (`api.rs`).
+`GET /v1/pools` and `GET /status`, an HTML rendering of the same data. They are served only on
+`server.listen` (4.2), never on the agent port, and who may reach them is the network's job
+(tailnet ACL, or a proxy in front). This design adds no status token and no client key: the
+config has no `status_token_file`. The client token that exists on main stays as it is, with no new
+field. A launched host must not reach these routes: the ACL gives it the agent port only (8.3). `/healthz` is open, as today (`api.rs`).
 
 ```jsonc
 { "pools": [ { "name": "gpu", "kind": "lambdalabs", "network": "tailscale", "exec": "container",
@@ -1090,14 +1128,18 @@ page, because a launched host can reach this port (8.3). A browser cannot send a
     "machines": [ { "host": "js-ab12-cd34", "state": "registered", "offer": "gpu_1x_a10",
                     "zone": "us-west-1", "price_cents_per_hour": 129, "idle_since_ms": null } ],
     "orphans": [],
-    "next_launch": { "offer": "gpu_1x_a10", "name": "js-...", "user_data": "***",
-                     "ts_authkey": "***", "join_token": "***", "firewall": "js-ab12-noinbound" } } ] }
+    "next_launch": { "offer": "gpu_1x_a10", "zone": "us-west-1", "name": "js-...",
+                     "plan": "<Mask render of the BootPlan>",   // secret slots (join_token, network.*) print ***
+                     "secret_slots": ["join_token", "network.ts_authkey"] } } ] }
 ```
 
 `next_launch` is the plan for the head of the waiting queue, or for a one-request demand
-when the queue is empty. It is `describe` on the same `AcquireRequest` the live launch uses,
-so the page cannot show a plan the code would not follow. The existing `GET /v1/hosts`
-(`api.rs`, source `static` or `registered`) is unchanged and gains `pool` and `launch_name`.
+when the queue is empty. The service builds it from the same `BootPlan` the live launch renders
+(network steps from `NetworkMode::describe`, host-prep from the provider), so the page cannot
+show a plan the code would not follow. The provider supplies only the host-prep data. A wildcard
+`listen` or `agent_listen` shows as a top-level `server: warning: binds all interfaces` (3.4). The
+existing `GET /v1/hosts` (`api.rs`, source `static` or `registered`) is unchanged and gains `pool`
+and `launch_name`.
 
 ## 11. Failure table
 
@@ -1114,7 +1156,7 @@ so the page cannot show a plan the code would not follow. The existing `GET /v1/
 | F9 | stuck drain or Lost host accrues forever | `max_spend_per_day` on billed time stops launches; status shows age | 6.2, 6.4 |
 | F10 | credentials revoked mid-run | pool unavailable; running hosts still served and released; healthz 200 | 10.1 |
 | F11 | a check panics or hangs | contained per pool; client time limits | 10.1 |
-| F12 | secret leaks to log, Debug or status | `Secret` type, masked render, grep tests; hook stderr not logged | 4.2, 5.2, 9 |
+| F12 | secret leaks to log, Debug or status | `Secret` type, masked render, grep tests | 4.2, 5.2, 9 |
 | F12b | a job on the host reads user data from the metadata address | bootstrap blocks container access; token retired at first hello; live check | 7.2, 7.3, 13.4 |
 | F13 | user_data larger than the API accepts | `Shape` refusal before the call | 5.3 |
 | F14 | Tailscale key expires before boot | boot fails, `boot_timeout`, `boot_fail_cooldown` | 8.5 |
@@ -1124,7 +1166,8 @@ so the page cannot show a plan the code would not follow. The existing `GET /v1/
 | F18 | a burst of demand | `max_step` per tick, launch interval, caps, concurrency test | 6.2, 13.2 |
 | F19 | `list` lags past `unknown_hold`; a late instance and a new launch for one request | Failed-unsettled record counted until two clean lists; late instance released | 6.2 |
 | F20 | a request that holds a reserved host also buys a machine | `Waiting.reserved`; a reserved request is covered | 6.1, 6.2 |
-| F21 | hook prints a secret or shell syntax | argv steps, limits, stderr not logged | 4.2 |
+| F21 | a launched host reaches client, operator or status routes | no public listener; agent routes on their own required port (Q23); the network ACL gives a launched host that port only; no new in-service token. Open risk: the service cannot verify the operator's policy (live check 13.4) | 3.4, 8.3, 9 |
+| F22 | a `default`-mode pool whose hosts have no route to `advertise_url` | host never says hello; `boot_timeout`, release, cooldown; status shows "booting, no hello" | 6.2, 7 (intro) |
 
 ## 12. What changes in each crate and the PR sequence
 
@@ -1132,31 +1175,33 @@ Each PR is green alone, and `launch = "plan"` is the only reachable mode until P
 
 | # | PR | crates | content |
 |---|---|---|---|
-| 1 | elastic types | new `js-elastic`; `js-types`; `js-provider-lambdalabs` | trait, `Offer` (`fit` refuses os/arch mismatch), `Demand`, `Secret`, `HostName`, `BootPlan`, `Acquired`/`Released`/`Held` moved; `ContainerSpec`, `Requirements` (os, arch from the request); Lambda implements `ElasticProvider`; the existing provider tests move and stay |
-| 2 | networks | `js-lease-server` (module `network`) | trait, `none`, `script` (argv steps, limits), Tailscale OAuth, key mint, device delete, fake HTTP server |
-| 3 | Lambda launch inputs | `js-provider-lambdalabs` | `user_data`, firewall ids, `ensure_firewall`, ssh key rule, bundled roots, `catalog()` offers, `kind::build`, `bootstrap.rs`, fake updated, log-grep test |
-| 4 | config file | `js-lease-server`, `js-pool-static` | `--config`, `[server]`, `[[pool]]`, `kinds.rs`, static `kind::build`, offline validation, `StartupError` with pool and field; flags still work when `--config` is absent; one registering pool |
-| 5 | checks and status | `js-lease-server` | per-pool check loop, `Checking`, `/v1/pools`, `/status`, masked plan |
+| 1 | elastic types | new `js-elastic`; `js-types`; `js-provider-lambdalabs` | trait (`host_prep`, `payload_limit`, `acquire(payload)`), `Offer` (`fit` refuses os/arch mismatch), `Demand`, `Secret`, `BootPayload`, `HostName`, `BootPlan`, `Acquired`/`Released`/`Held` moved; `ContainerSpec`, `Requirements` (os, arch from the request); Lambda implements `ElasticProvider`; the existing provider tests move and stay |
+| 2 | network layer, renderer | `js-lease-server` (modules `network`, `bootstrap`) | `NetworkMode` trait, `default`, `tailscale` (OAuth, key mint, device delete), `render` with `Mask`/`Real`, template golden tests, fake HTTP server |
+| 3 | Lambda launch inputs | `js-provider-lambdalabs` | `user_data` as the opaque payload, firewall ids, `ensure_firewall`, ssh key rule, bundled roots, `catalog()` offers, `host_prep`, `payload_limit`, `kind::build`, fake updated, log-grep test |
+| 4 | config file | `js-lease-server`, `js-pool-static` | `--config`, `[server]`, `[[pool]]`, `kinds.rs`, static `kind::build`, offline validation, `StartupError` with pool and field; `listen` and required `agent_listen` (route split), wildcard-bind warning; flags still work when `--config` is absent; one registering pool |
+| 5 | checks and status | `js-lease-server` | per-pool check loop, `Checking`, `/v1/pools`, `/status` (private address only, no status token), masked plan |
 | 6 | host contract | `js-caps`, `js-agent`, `js-agent-wire`, `js-registry` | `runtime`, `gpu-toolkit`, `exec` capabilities, `host-contract` and `execution-mismatch` refusals, pool `exec` |
 | 7 | registry | `js-registry`, `js-lease-server` | `waiting` (with `reserved`), `HostMark::Draining`/`Releasing`, `drain`/`undrain`/`release_host`, `remove`, direct run start reads the marks, `Launchable`, optional shared token file, `mint_for`/`revoke_for` |
 | 7b | host credential | `js-agent-wire`, `js-agent`, `js-lease-server` | `Welcome.host_credential`, agent state file, token retired at first hello (7.2); before any live launch |
 | 8 | scaler | new `js-scaler`, `js-lease-server` | pure `step`, records file, shell on the tick, caps (hour and day), `boot_fail_cooldown`; `launch = "live"` honoured |
 | 9 | Lambda end to end | `js-lease-server` (tests), docs | e2e with `FakeLambda`, fake Tailscale and a hello through the real registry |
-| 10 | one config file; docs | `js-lease-server`, docs | server flags into `[server]`; flags refused beside `--config`; amend `providers.md` K6, `registration.md`, `configuration.md`; the path check of 8.6; fix the stale `--ca-cert` comment in `js-agent/src/cli.rs` |
+| 10 | one config file; docs | `js-lease-server`, docs | server flags into `[server]`; flags refused beside `--config`; amend `providers.md` K6, `registration.md`, `configuration.md`; the path check of 8.6 (no provider crate names a network type); fix the stale `--ca-cert` comment in `js-agent/src/cli.rs` |
 | 11 | disk and exec on jobs | `js-caps`, `js-agent`, `js-scaler`, `js-lease-server` | `disk-gib` and `exec` carried by the lease request; needed before any macOS pool and before disk-sized launches |
 | 12 | more pools | `js-registry`, `js-scaler` | several registering pools; part-host classes; first-fit packing |
 
 PR 7b is required before the go (7.2). Later, each behind its own need and not built first:
 price-drift marking; per-offer suppression and doubling backoff; counting boot failures;
 `zeroize`, `RLIMIT_CORE` and a panic hook; a separate `js-network` crate; orphan release
-(`release_orphans`); `max_age`; the tailnet-identity binding of the first hello; the `exec` kind.
+(`release_orphans`); `max_age`; the `exec` kind; a `script` network mode (needs limits and a
+review story for operator output); a public scheduler listener (it needs a full in-service
+client-auth story: client keys, rotation, rate limits, audit).
 
 Then, not a PR: the operator's go (requirement 15). The operator adds `launch = "live"` with
-`max_instances = 1` and a small `max_spend_per_hour`; one kbf GPU lease is requested; the
+`max_instances = 1` and a small `max_spend_per_hour`; one GPU lease is requested; the
 live checklist in 13.4 is watched.
 
-Smallest path to kbf GPU jobs on Lambda: PRs 1 to 9. PRs 2, 4, 5 and 6 can proceed in
-parallel with 3. PR 7 can start once the `Demand` type of PR 1 exists. kbf runs on flags
+Smallest path to GPU jobs on Lambda: PRs 1 to 9. PRs 2, 4, 5 and 6 can proceed in
+parallel with 3. PR 7 can start once the `Demand` type of PR 1 exists. The consumer runs on flags
 until PR 10 and its unit files move in the same change.
 
 Not changed: `js-provider` (the lease-level trait is not the elastic trait).
@@ -1184,11 +1229,22 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   over the size limit is refused `Shape`. Template golden tests cover the 7.3 hardening list.
 - Moved Lambda tests pass unchanged: idempotent acquire, `Unknown` is not `Gone`, `max_machines`,
   half-marked instances block launches.
-- A script hook that prints a secret on stderr: nothing of it is in any log or status. Output over
-  64 KiB, a step element with a newline, a secret name with `/`: each refused with the limit named.
-  Steps render quoted: a step element `a; rm -rf /` reaches the script as one quoted word.
+- One layer: a fake provider records the `AcquireRequest` it receives; the same launch under
+  `default` and under `tailscale` gives calls that differ only in the payload bytes, and the 8.6
+  path check finds no network type in any provider crate. `network.kind = "none"` or `"script"` is
+  refused with `known: default, tailscale`. A config with `status_token_file` is refused as an
+  unknown field.
 - `advertise_url` `http://js.example:7300` with an elastic pool: refused at start naming
-  `server.advertise_url`, for kinds `none`, `tailscale` and `script`.
+  `server.advertise_url`, for modes `default` and `tailscale`. An elastic pool with no
+  `agent_listen`, or `agent_listen` equal to `listen`, is refused naming `server.agent_listen`.
+  `listen = "0.0.0.0:7300"` is accepted and shows the `server: warning: binds all interfaces` status
+  line (default mode on a VPC stays supported).
+- Route split (PR 4), against a real server with both ports bound: `hello`, heartbeat and the
+  bootstrap agent route answer on `agent_listen` and get 404 on `listen`; `GET /v1/pools`,
+  `/status`, the client routes and the operator routes answer on `listen` and get 404 on
+  `agent_listen`. Catches a route left on the wrong port, which would let a tag that may reach
+  only the agent port reach operator routes. With one port in the test the same check cannot fail,
+  so the test fixture binds two.
 - A pool with no `max_spend_per_day` is refused; a render of the template with a forced failure
   at step 3 still runs the EXIT trap (the golden test asserts the trap is the script's first
   command and that it removes every path in the cleanup list).
@@ -1202,34 +1258,31 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
 
 - One waiting request: one `Acquire`; the same input plus the record: still one. 100 waiting
   requests with `max_instances = 3`: never more than 3 records and acquires over any ticks.
-- Reserved demand: one busy host, one waiting request that holds a reservation on it
-  (`reserved = Some(host)`): zero `Acquire`. The same request after the reservation is given up
-  (`reserved = None`): one `Acquire`. Two waiting requests and one reserved host: one `Acquire`.
-  A free host assigned to a request covers it. Catches buying a machine for a request that has one.
-- Restart between record and call: given a `list` showing the instance, no second `Acquire` and
-  no second token. Given a `list` lacking it: none before `unknown_hold`; after, Failed, and a new plan is allowed only while the Failed record is still
-  counted against the caps. The instance appears after Failed: it is adopted, released, never
-  uncounted, and no second launch went out while it was unseen beyond what the caps allow. A
-  Failed-unsettled record stops counting only after two clean lists `unknown_hold` apart.
-  `Unknown` then a list showing it: Booting, same cloud id.
+- Reserved demand: one busy host and one waiting request holding a reservation on it
+  (`reserved = Some(host)`): zero `Acquire`; after the reservation is given up: one. Two waiting
+  requests and one reserved host: one. A free host assigned to a request covers it. Catches buying
+  a machine for a request that has one.
+- Restart between record and call: a `list` showing the instance gives no second `Acquire` and no
+  second token. A `list` lacking it gives none before `unknown_hold`; after, Failed, still counted
+  against the caps until two clean lists `unknown_hold` apart. An instance appearing after Failed
+  is adopted, released and never uncounted. `Unknown` then a list showing it: Booting, same cloud id.
 - Caps: `max_instances` with an Unresolved record and an orphan counted; `held == None` blocks;
-  `max_spend_per_hour` just under sum-plus-candidate blocks; the stored price, not the current
-  catalog price, is summed; an unpriced offer is never chosen. `max_spend_per_day`: a failed boot
-  is counted for `boot_timeout`; a record that never reaches Gone keeps accruing and blocks the
-  next launch at the cap; records older than 24 hours leave the window.
+  `max_spend_per_hour` just under sum-plus-candidate blocks; the stored price is summed, not the
+  current catalog price; an unpriced offer is never chosen. `max_spend_per_day`: a failed boot counts
+  for `boot_timeout`; a record that never reaches Gone keeps accruing and blocks the next launch;
+  records older than 24 hours leave the window.
 - Choice: cheaper first, then fewer gpus, id, zone. A hello below its offer is released and starts
   `boot_fail_cooldown`. No fitting offer: no launch, `Launchable` false, `no_offer` names the dimension.
-- Idle and drain: a quiet host is drained; a request that arrives while it drains is not booked on it;
-  on the next tick the scaler emits `Undrain` (not `Acquire`) and the host serves it. A host with a
-  running job is never released whatever the clock does; `drain` and `release_host` fail `Busy` when a
-  lease, run or stream exists. `js-sim` interleavings: (a) lease placement vs `drain`; (b) lease
-  placement vs `release_host`; (c) a direct run start vs `release_host`; (d) a run started by a lease
-  booked before the mark. In every order either the work runs and the host is not released, or the
-  host is released and the work is refused; never work running on a terminated host.
+- Idle and drain: a quiet host is drained; a request arriving meanwhile is not booked on it, and the
+  next tick emits `Undrain` (not `Acquire`). A host with a running job is never released;
+  `drain` and `release_host` fail `Busy` with a lease, run or stream. `js-sim` interleavings:
+  (a) lease placement vs `drain`; (b) lease placement vs `release_host`; (c) a direct run start vs
+  `release_host`; (d) a run started by a lease booked before the mark. In every order either the work
+  runs and the host is kept, or the host is released and the work is refused.
 - Release: `Revoke` precedes `Release` and follows `ReleaseHost`; `Released::Unknown` retries every
   tick and never removes; `Gone` removes and revokes once. Booting past `boot_timeout` is released and
-  starts `boot_fail_cooldown`, which blocks launches with the reason. A Lost host the provider calls `terminated` is
-  removed and its slot freed. Failing health or `Checking`: no launch, running hosts still released.
+  starts `boot_fail_cooldown`. A Lost host the provider calls `terminated` is removed. Failing health
+  or `Checking`: no launch, running hosts still released.
 
 ### 13.3 End to end (PR 9), in process, with fakes
 
@@ -1244,6 +1297,13 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
   works. Welcome lost on the wire: the host is released at `boot_timeout`, no second host registers.
 - A refused OAuth client: the service starts, the pool is unavailable with the reason, `/healthz`
   is 200, a static pool still serves. Restart with a Launching record and `Unknown`: no second machine.
+- `default` mode (F22; Lambda needs `tailscale` unless the operator provides reachability). The
+  rendered plan for a `default` pool has no network steps and no network secret slot. (a) The fake
+  agent is not started (no route to `advertise_url`): the host is Booting with "no hello", released at
+  `boot_timeout` with the token revoked, `boot_fail_cooldown` blocks the next launch, status shows
+  "booting, no hello". (b) The fake agent is started (the operator's own route): hello, lease granted,
+  same path as the `tailscale` run without any Tailscale call. Catches a `default` pool that
+  hangs or bills past `boot_timeout`, and a `default` render that still contains a Tailscale step.
 - Status at each step carries state and the masked plan and none of the test secrets.
 
 ### 13.4 Live (not in CI)
@@ -1251,8 +1311,9 @@ lands), a new `FakeTailscale` (an HTTP fake like `tests/http`), and a fake agent
 After the operator's go: one launch, `max_instances = 1`. Before it, a person checks that the instance
 accepts no inbound connection, including port 22 under Lambda's account-wide rules. A person also
 records the cloud-init file list from the stock image (7.3 step 7). The checklist then asserts, from
-a launched host, that a connection to another tailnet node and to a second port on the scheduler node
-both fail (8.3); from inside a job container, that the metadata address cannot be read (7.3 step 8);
+a launched host, that a connection to another tailnet node and to the scheduler's `listen` port
+(client, operator, status routes) both fail while the agent port succeeds (8.3), which is the only
+test that the operator's policy and the route split work together; from inside a job container, that the metadata address cannot be read (7.3 step 8);
 that no cloud-init path in the cleanup list still holds the token; and from status and Lambda's list: our tags and name; a hello arrived; the lease ran; the
 instance terminated and read back `Gone`; the device gone from the tailnet; the token revoked.
 This proves the open items on the stock image, the state root, the API field names and the
@@ -1263,7 +1324,7 @@ user_data limit.
 Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in the text are here.
 
 1. Server flags into `[server]` (PR 10). Requirement 9 says configuration is a file plus starting the
-   service; flags and file coexist until PR 10 because kbf runs on flags. Recommendation: move
+   service; flags and file coexist until PR 10 because the consumer runs on flags. Recommendation: move
    them, refuse other flags beside `--config`. Every unit that passes flags changes once.
 2. Lambda API names for `user_data` and firewall rulesets, and the user_data size limit. The crate
    has fixtures only for launch, instances and instance types (`tests/fixtures`). Recommendation:
@@ -1271,10 +1332,10 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 3. ssh key (5.3, 4.1). Requirement 8 needs exactly one key name and requirement 10 wants no hand-made input.
    Without a requirement the pool is unavailable on an account with no key until a person adds one.
    Question: may the service create one key named `js-<scheduler>` from a throwaway public key
-   (private half never stored), when the account has none? It writes to the account. The earlier draft
-   recommended "never create"; that conflicts with requirement 10. Recommendation: yes, create it; the key is
+   (private half never stored), when the account has none? It writes to the account. "Never create"
+   conflicts with requirement 10. Recommendation: yes, create it; the key is
    inert because the attached ruleset has no inbound rule.
-4. Join token after first hello (7.2). Now in the first slice (PR 7b), not optional. Open point: the
+4. Join token after first hello (7.2). In the first slice (PR 7b). Open point: the
    `Welcome` wire change is additive, but is a host credential acceptable as a second
    secret type next to the token? Recommendation: yes.
 5. The stock Lambda image: driver, runtime, toolkit, and a state root on its own device (loop
@@ -1286,16 +1347,17 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
    label; add pool priority only if a consumer needs fall-through.
 8. Orphans: report-only, adopted and counted. Recommendation: a `release_orphans = true` pool
    setting only after the live run is clean; auto-delete by default needs a maintainers' decision.
-9. Stuck-drain cost: `max_spend_per_day` is now a required key (6.2). Remaining question: is a day
+9. Stuck-drain cost: `max_spend_per_day` is a required key (6.2). Remaining question: is a day
    window the right hard bound, or do the maintainers want a lifetime total per pool? Recommendation: keep
    the day window, add a lifetime figure only if asked. A tainted host is not cut either; it is shown
    for a person.
 10. Lambda's account-wide firewall rules and inbound 22: a human check before the first live
     launch (9, 13.4).
 11. The 10-minute Tailscale key against boot time. Recommendation: keep 10 minutes, measure live.
-12. Status page access (10.2): never unauthenticated, because launched hosts reach the port.
-    PROPOSAL: a read-only `status_token_file`, and `/status` accepts HTTP Basic with it as the password.
-13. Plain `http://` over a tailnet: the agent refuses non-loopback `http://` (`cli.rs`), so start-up now
+12. Status and client access (10.2): the status and client APIs are served only on the private or
+    tailnet address, and access is the network's job. No status token, no new client key; the
+    existing client token stays. Recommendation: accept.
+13. Plain `http://` over a tailnet: the agent refuses non-loopback `http://` (`cli.rs`), so start-up
     refuses it for every elastic pool (4.4). The cost: a tailnet scheduler needs a TLS certificate for
     its tailnet name from the operator. Recommendation: accept.
 14. Defaults no requirement sets: `launch = "plan"` default with the provider's second lock; `max_step`
@@ -1309,25 +1371,22 @@ Each has a recommendation. None is a requirement yet. Items marked PROPOSAL in t
 17. Amend `providers.md` K6 and `registration.md` "never in user data" for Lambda. The AWS path
     (signed instance identity) is unchanged.
 18. Several elastic pools and part-host classes (6.5). Recommendation: after the live proof.
-19. The `script` hook JSON (4.2). Recommendation: `"api": 1`, steps as argv lists, stdout capped at
-    64 KiB, stderr neither logged nor kept.
+19. Modes beyond `default` and `tailscale` are Later (section 12). Recommendation: none until a pool
+    needs one.
 20. Deviations from requirements (1.1): disk and `exec` on the job are `None` in the first slice, one
     registering pool instead of several, gpu class from a `types` row. Recommendation: accept for
     the first slice; PRs 11 and 12 lift the first two.
 21. A reservation counts as covering however long its `drain_deadline` is (6.2). Alternative: launch
     when the reservation's deadline is further away than `boot_timeout`. Recommendation: covering
     always in the first slice; revisit with live data, since the alternative can buy a second machine.
-22. Tailnet identity binding of the first hello, and a policy-read warning in `check()` (7.2, 8.3).
-    Neither is in the first slice. Recommendation: the warning later; the identity binding only if a
-    stolen token is a real concern after the Welcome credential.
-23. Review findings not taken as asked, with the reason. (a) Cut the `next_launch` plan for an empty
-    queue: kept, because in `plan` mode nothing is ever waiting and the operator cannot see the plan before
-    the go without it (requirement 9 asks for a next launch plan). (b) Fold `js-elastic` into
-    `js-lease-server`: kept as a crate, since `kinds.rs`, `js-scaler` and the Lambda crate all need the
-    trait and the Lambda crate must not depend on the server. (c) Drop the orphan record: kept the
-    minimum (count, report, no auto-release), since requirement 15's cap is unsound if a lost state file
-    hides machines. (d) Remove the loop-device state root: it stays a PROPOSAL tested live (Q5), because
-    the agent refuses to start without a state root on its own device.
+22. A policy-read warning in `check()` (8.3). Not in the first slice. Recommendation: the warning later.
+23. Two ports (3.4, 8.3, 4.4). The agent routes and the operator routes share one port today, so a
+    network ACL cannot give a launched host the first and not the second. Decision for the first
+    slice: `server.agent_listen` is required with an elastic pool and serves only the agent routes;
+    `listen` serves the rest. No wildcard-bind refusal: a wildcard is normal on a VPC or in a
+    container and an offline check cannot tell whether it is publicly reachable, so the server warns
+    and shows it in status. Open risk: separation depends on the operator's policy giving the tag the
+    agent port only. Recommendation: accept.
 
 ## 15. Not verified
 
