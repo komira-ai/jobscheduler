@@ -218,7 +218,9 @@ mod tests {
         let mut admitted: Vec<&str> = Vec::new();
         let mut last_hello = None;
         let records = Records::default();
-        let mut seconds = 0u64;
+        // Half seconds: an agent held for a second finds, half a second after it asks, that
+        // it is not yet due.
+        let mut halves = 0u64;
         loop {
             let now = clock.now().millis();
             pending.retain(|&n| {
@@ -228,7 +230,7 @@ mod tests {
                 match limiter.admit(&credential) {
                     Ok(()) => {
                         admitted.push(&names[n]);
-                        last_hello = Some(seconds);
+                        last_hello = Some(halves);
                         false
                     }
                     Err(held) => {
@@ -240,21 +242,24 @@ mod tests {
             let complete = gate.observe(Millis::new(now), &records, admitted.iter().copied());
             let everyone = admitted.len() == names.len();
             if !everyone {
-                assert!(!complete, "complete with hellos outstanding at {seconds} s");
+                assert!(
+                    !complete,
+                    "complete with hellos outstanding at {halves} half seconds"
+                );
             }
             if complete {
                 break;
             }
-            assert!(seconds < 3600, "never completed");
-            clock.advance(Duration::from_secs(1));
-            seconds += 1;
+            assert!(halves < 7200, "never completed");
+            clock.advance(Duration::from_millis(500));
+            halves += 1;
         }
         let last = last_hello.unwrap();
         assert!(
-            Duration::from_secs(last) > Duration::from_secs(120),
+            Duration::from_millis(500 * last) > Duration::from_secs(120),
             "the herd outlasts the old settle"
         );
-        assert!(Duration::from_secs(last) <= REGISTRY_FLOOR);
-        assert_eq!(Duration::from_secs(seconds), REGISTRY_FLOOR);
+        assert!(Duration::from_millis(500 * last) <= REGISTRY_FLOOR);
+        assert_eq!(Duration::from_millis(500 * halves), REGISTRY_FLOOR);
     }
 }
