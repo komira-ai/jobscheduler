@@ -1,6 +1,8 @@
 //! The lifecycle's rules, driven over `CliRuntime` and the scripted command line instead
 //! of the in-memory fake: the same jobs, the same results, the same order of cleanup.
 
+use std::os::unix::fs::PermissionsExt;
+
 use js_agent::lifecycle::{Config, Event, Lifecycle, NoChecks, label};
 use js_agent_wire::{Command, Outcome, RunFile};
 
@@ -371,8 +373,14 @@ fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
             .any(|arg| arg.contains(",dst=/run/js-files,readonly")),
         "{create:?}"
     );
-    // The files root becomes a file, so the second start cannot write its files.
+    // The files root becomes a file, so the second start cannot write its files. The
+    // first run's files directory is read-only (0555), so it is made writable first: a
+    // runner that is not root cannot unlink in it otherwise.
     let root = w._dir.path("files");
+    for entry in std::fs::read_dir(&root).unwrap() {
+        let dir = entry.unwrap().path();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     std::fs::remove_dir_all(&root).unwrap();
     std::fs::write(&root, "in the way").unwrap();
     shown.push(format!("{:?}", w.life.apply(&with_secret("r2"))));
