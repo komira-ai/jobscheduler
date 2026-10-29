@@ -17,7 +17,7 @@
 --max-ttl default=3600s required=false
 --pool-config default=none required=false
 --read-timeout default=30s required=false
---require-host-credential default=none required=false
+--require-host-credential default=none required=false values=true|false
 --state-file default=none required=true
 --tick default=5s required=false
 --tls-cert default=none required=false
