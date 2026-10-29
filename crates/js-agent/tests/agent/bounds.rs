@@ -22,6 +22,7 @@ pub const LOG_LIMIT: usize = 64 << 20;
 /// so it is far above what a healthy run uses. `RLIMIT_AS` counts the reservations glibc
 /// makes for each thread's malloc arena (64 MiB each, up to eight per core), so a runner
 /// with very many cores may need a higher cap.
+#[cfg(target_os = "linux")]
 pub const ADDRESS_SPACE: u64 = 8 << 30;
 
 /// How long the whole test binary may run before it is aborted.

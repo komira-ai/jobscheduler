@@ -14,7 +14,7 @@ use js_agent::lifecycle::{ContainerRuntime, Exit, Status};
 
 use super::{
     DOCKER_SCRATCH, HOST, NAME_R1, in_another_pid_namespace, made_at, mount, no_file, platform,
-    sees_the_engines_pid, spec,
+    profile_dir, profile_option, sees_the_engines_pid, spec,
 };
 use crate::support::Scratch;
 
@@ -86,6 +86,7 @@ fn cli_runtime_argv_snapshot() {
     let mut rt = CliRuntime::open(settings, HOST, &platform("linux"), made_at, runner)
         .ok()
         .unwrap()
+        .with_profile_dir(profile_dir())
         .with_pid_seen(sees_the_engines_pid)
         .with_proc_files(no_file, in_another_pid_namespace);
 
@@ -142,6 +143,8 @@ fn cli_runtime_argv_snapshot() {
             "ALL",
             "--security-opt",
             "no-new-privileges",
+            "--security-opt",
+            &profile_option(),
             "--network",
             "jobs",
             "--read-only",

@@ -28,7 +28,10 @@ hello in message metadata, never in a log line.
 - *One-time join token (an elastic kind with no signed identity).* A provider that cannot sign an instance identity (a GPU cloud that
   gives the instance nothing signed) proves it another way: the operator's tooling mints a token for the instance it launched
   (`POST /v1/agent/join-tokens`, behind the client token, with the provider and instance id and a short lifetime, 30 minutes unless asked,
-  at most a day) and delivers it to that instance after boot, never in user data, an argument or a commit. The server keeps only its digest, in
+  at most a day) and delivers it to that instance, never in an argument or a commit. A kind that has no channel to a new instance other
+  than its launch (Lambda) delivers it in the launch payload (user data), as pools-providers-network.md (7.2) designs it: the service mints
+  it just before the launch with a lifetime of the pool's `boot_timeout` plus a margin, it crosses TLS to the provider and is never logged, and the host credential below retires it
+  at the host's first hello (pools-providers-network.md, 7.2; K6 of design.md). The server keeps only its digest, in
   `<state file>.joins`, so a restart keeps an unused token valid and a used one used. The first hello that presents the token, names that
   instance in `instance`, and arrives before the expiry registers the host and consumes the token: it is then tied to that host id. It
   carries that host's later hellos and heartbeats and nothing else; a hello for another host id is refused `join-token-used`, an unused token
@@ -76,5 +79,12 @@ hello in message metadata, never in a log line.
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention
   window. A restarted agent registers again with the same id and re-announces its leases; the announcement is reconciled against the
   table, and a lease id not committed to this host id is answered `Cancel` and never adopted.
+- *Configuration.* With `--config` the registration settings are keys of the file and no flag may be given beside it. The rate limit on
+  hellos is `server.agent_hello_burst` (60) and `server.agent_hello_interval` (`1s`): one join credential may say a burst of hellos and then
+  one more per interval, counted per credential, refusals included. `server.require_host_credential` (false) refuses the first hello of a
+  one-time token that does not say the agent keeps a host credential. The pool that registers hosts is a `[[pool]]` table, its shared
+  tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
+  names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`), and the flags work as before when
+  `--config` is absent.
 - *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
   file records leases and agents re-announce them.

@@ -12,6 +12,9 @@ use js_agent::cli_runtime::{
 
 use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
 
+/// The profile option's file in these tests.
+const PROFILE: &str = "/scratch-root/seccomp+pinned.json";
+
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
@@ -130,12 +133,14 @@ fn a_limit_of_zero_is_refused() {
 /// itself before its result is read.
 #[test]
 fn hardening_flags_always_present() {
-    let docker = hardening_args(&settings(), Engine::Docker);
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
     let common = [
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        "seccomp=/scratch-root/seccomp+pinned.json",
         "--network",
         "none",
         "--read-only",
@@ -150,11 +155,42 @@ fn hardening_flags_always_present() {
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
-    let podman = hardening_args(&settings(), Engine::Podman);
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
     assert_eq!(
         podman,
         strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
     );
+}
+
+/// Asserts, for both engines, the properties of the hardening list that keep a job
+/// from gaining privilege: every capability dropped, `no-new-privileges`, and exactly one
+/// seccomp profile that names a file (never `unconfined`, never the engine's built-in
+/// default, which changes with the engine's version). It catches a job that runs with the
+/// engine's own syscall filter, and a list that loses either of the older flags when the
+/// profile is added.
+#[test]
+fn hardening_pins_privileges_and_the_syscall_filter() {
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&settings(), engine, PROFILE);
+        let values = |flag: &str| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        assert_eq!(values("--cap-drop"), ["ALL"], "{engine:?}");
+        let options = values("--security-opt");
+        assert!(
+            options.contains(&"no-new-privileges".to_owned()),
+            "{engine:?}"
+        );
+        let profiles: Vec<&String> = options
+            .iter()
+            .filter(|option| option.starts_with("seccomp="))
+            .collect();
+        assert_eq!(profiles.len(), 1, "{engine:?}");
+        assert_eq!(profiles[0], &format!("seccomp={PROFILE}"), "{engine:?}");
+    }
 }
 
 /// Asserts that the settings reach the hardening list: the network, the user, the pull
@@ -167,7 +203,7 @@ fn hardening_follows_the_settings() {
         .unwrap()
         .with_tmp_size(Some("2g"))
         .unwrap();
-    let args = hardening_args(&set, Engine::Docker);
+    let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
     assert_eq!(value("--user"), "5:6");

@@ -271,13 +271,16 @@ fn mount_value(
 /// Podman the PID namespace is named private too; Docker takes only `host` or another
 /// container there, and its default is private. There is no `--rm`: the lifecycle
 /// removes the container itself, after it has read the result.
-pub fn hardening_args(settings: &Settings, engine: Engine) -> Vec<String> {
+pub fn hardening_args(settings: &Settings, engine: Engine, seccomp: &str) -> Vec<String> {
     let tmpfs = format!("/tmp:rw,noexec,nosuid,nodev,size={}", settings.tmp_size());
+    let profile = format!("seccomp={seccomp}");
     let mut args: Vec<String> = [
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        &profile,
         "--network",
         settings.network(),
         "--read-only",

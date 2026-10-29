@@ -8,7 +8,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::Parser;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
