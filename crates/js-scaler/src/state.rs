@@ -102,18 +102,23 @@ pub struct State {
     /// restart the idle time counts again from the first step.
     pub(crate) quiet: BTreeMap<String, Millis>,
     /// Since when each registered host the registry does not hear from (lost, or waiting
-    /// to say hello again) has been silent, as this process first saw it. A silent host is
+    /// to say hello again) has been silent, as the scaler first saw it. A silent host is
     /// held and counted until it books nothing and has been silent for `unknown_hold`, so
-    /// this is the age a status page shows. Not written to disk: after a restart the age
-    /// counts again from the first step.
+    /// this is the age a status page shows. Kept in [`Records::silent_since`] too, so a
+    /// restart does not start it again; the downtime counts as silence.
     pub silent: BTreeMap<String, Millis>,
     /// The machines released this step because their host was silent for `unknown_hold`
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
     /// a paid machine was released on silence.
     pub silent_released: Vec<String>,
-    /// Since when each registered machine has been missing from a complete registry view,
-    /// unbroken. Not written to disk: after a restart the count starts again.
+    /// Since when each registered machine has been missing from complete registry views,
+    /// unbroken. Kept in [`Records::missing_since`] too.
     pub(crate) missing: BTreeMap<String, Millis>,
+    /// Since when each booting machine past `boot_timeout` has been unheard from on
+    /// complete registry views, unbroken. Not written to disk, on purpose: a booting
+    /// machine is given up on only after a hold in this process, so a restart gives it the
+    /// whole hold again, which is when its agent is about to say hello to the new registry.
+    pub(crate) unheard: BTreeMap<String, Millis>,
 }
 
 impl State {
@@ -121,6 +126,8 @@ impl State {
     #[must_use]
     pub fn new(records: Records) -> Self {
         Self {
+            silent: records.silent_since.clone(),
+            missing: records.missing_since.clone(),
             records,
             ..Self::default()
         }

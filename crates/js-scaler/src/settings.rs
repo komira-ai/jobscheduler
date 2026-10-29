@@ -43,7 +43,9 @@ pub struct Settings {
     pub max_spend_per_day: u64,
     /// How long a registered host holds no lease and no run before it is drained.
     pub idle: Duration,
-    /// How long a launched machine may take to say hello, counted from the launch.
+    /// How long a launched machine may take to say hello, counted from the launch. A
+    /// machine is given up on at this time only if the registry has also not shown its host
+    /// on complete views for a third of it (`boot_hold`); see the design, section 6.2.
     pub boot_timeout: Duration,
     /// How long past `boot_timeout` a join token lives, so a host that boots at the very
     /// limit still finds its token alive.
@@ -88,6 +90,21 @@ impl Settings {
     /// How long the join token of a launch lives: `boot_timeout` plus `token_margin`.
     pub(crate) fn token_life(&self) -> Duration {
         self.boot_timeout.saturating_add(self.token_margin)
+    }
+
+    /// How long a booting machine past `boot_timeout` must have been missing from complete
+    /// registry views before it is given up on: a third of `boot_timeout` (5 minutes by
+    /// default), and never more than `unknown_hold`.
+    ///
+    /// The registry keeps no host in memory across a restart; an agent that was waiting to
+    /// retry says hello again within its longest wait (two minutes) plus the time the
+    /// registry takes to admit it, so a machine launched before the restart can be past
+    /// `boot_timeout` at the very first complete view and be seconds from its hello. The hold
+    /// is longer than that wait and shorter than `boot_timeout`, so in steady state, where
+    /// the count has run since the launch, the machine is still given up on at
+    /// `boot_timeout`.
+    pub(crate) fn boot_hold(&self) -> Duration {
+        (self.boot_timeout / 3).min(self.unknown_hold)
     }
 }
 

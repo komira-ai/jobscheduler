@@ -578,6 +578,8 @@ impl Pass<'_> {
             .into_iter()
             .all(|keep| keep)
         });
+        self.records.silent_since = self.silent_now.clone();
+        self.records.missing_since = self.missing_now.clone();
         let save = (self.records != *before).then(|| Action::Save(Box::new(self.records.clone())));
         let mut actions: Vec<Action> = save.into_iter().collect();
         actions.append(&mut self.actions);
@@ -602,6 +604,7 @@ impl Pass<'_> {
             silent: self.silent_now,
             silent_released: self.silent_released,
             missing: self.missing_now,
+            unheard: self.unheard_now,
         };
         (state, actions)
     }

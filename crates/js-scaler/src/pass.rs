@@ -27,6 +27,10 @@ pub(crate) struct Pass<'a> {
     /// Since when each machine was missing from a complete view, at the last step and now.
     missing: BTreeMap<String, Millis>,
     pub(crate) missing_now: BTreeMap<String, Millis>,
+    /// Since when each booting machine was unheard from on complete views, at the last
+    /// step and now.
+    unheard: BTreeMap<String, Millis>,
+    pub(crate) unheard_now: BTreeMap<String, Millis>,
     /// Records for the machines an acquire answer named besides the one wanted, added when
     /// the lists have been read.
     extras: Vec<Record>,
@@ -67,9 +71,9 @@ fn listed(record: &Record, held: &Held) -> bool {
 }
 
 /// Whether a host's announced shape is below the offer its machine was launched from, in
-/// cpu, memory, gpus or gpu class.
+/// cpu, memory, gpus or gpu class. A host whose shape is not known is not below anything.
 fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
-    host.is_none_or(|host| {
+    host.is_some_and(|host| {
         let holds = [
             host.cpu_millis >= offer.cpu_millis,
             host.memory_bytes >= offer.memory_bytes,
@@ -97,6 +101,8 @@ impl<'a> Pass<'a> {
             silent_released: Vec::new(),
             missing: state.missing,
             missing_now: BTreeMap::new(),
+            unheard: state.unheard,
+            unheard_now: BTreeMap::new(),
             extras: Vec::new(),
             drawn: 0,
             blocked: BTreeMap::new(),
@@ -386,6 +392,7 @@ impl<'a> Pass<'a> {
                 .max_by_key(|each| each.zone == held.zone);
             let price = offer
                 .and_then(|each| each.price_cents_per_hour)
+                .filter(|price| *price > 0)
                 .unwrap_or(settings.max_spend_per_hour);
             let shape = offer.map_or_else(
                 || StoredOffer::nothing(&held.offer, held.zone.clone()),
@@ -441,15 +448,32 @@ impl<'a> Pass<'a> {
         }
     }
 
+    /// The instant a count of complete views that miss something began, given the instant
+    /// it began at an earlier step. A count starts at the first complete view; an incomplete
+    /// view proves nothing either way, so it leaves a count that has begun as it was and
+    /// starts none. The caller drops the count at any step on which the host is shown.
+    fn counted_since(&self, seen: Option<Millis>) -> Option<Millis> {
+        seen.or(self.input.registry_complete.then_some(self.now))
+    }
+
     /// A machine that has not said hello is given up on `boot_timeout` after its launch,
-    /// the instant its join token was minted from, and only on a complete registry view: on
-    /// an incomplete one its host may have said hello and be holding work, so the machine is
-    /// held and counted until a complete view still shows no hello.
+    /// the instant its join token was minted from, and only once its host has also been
+    /// unheard from on complete registry views for the pool's boot hold
+    /// ([`Settings::boot_hold`]). A hello shows the host and ends the count. The hold is
+    /// what keeps a machine launched before a restart, whose agent is waiting to retry
+    /// against a registry that has just loaded, from being given up on at the first
+    /// complete view; on an incomplete view its host may have said hello and be holding
+    /// work. The machine is held and counted until then.
     fn on_boot_wait(&mut self, pool: &PoolInput, i: usize) {
-        let waited = self.now.since(self.records.instances[i].launched_at);
+        let record = &self.records.instances[i];
+        let name = record.name.clone();
+        let waited = self.now.since(record.launched_at);
+        let since = self.counted_since(self.unheard.get(&name).copied());
+        self.unheard_now.extend(since.map(|since| (name, since)));
         let due = [
             waited >= pool.settings.boot_timeout,
             self.input.registry_complete,
+            since.is_some_and(|since| self.now.since(since) >= pool.settings.boot_hold()),
         ];
         if due.into_iter().all(|ok| ok) {
             self.start_release(i);
@@ -484,8 +508,10 @@ impl<'a> Pass<'a> {
     /// from. It is held and counted, and `silent` says since when, until the host books
     /// nothing and has been silent for `unknown_hold`; only then does the machine cost
     /// money for nothing. A host that holds a lease, a run or a stream, or is set aside
-    /// for work (`Held`, `Reserved`), is never released, whatever else the snapshot says.
-    /// Otherwise:
+    /// for work (`Held`, `Reserved`), is never released, whatever else the snapshot says;
+    /// except that once the registry has given up the host's leases
+    /// ([`HostFacts::lease_given_up`]) the runs and streams it lists are stale and do not
+    /// count, and only a `Held` or `Reserved` mark keeps it. Otherwise:
     ///
     /// * the registry marks the host `Releasing` (it booked nothing when it did): the
     ///   machine is released and named in `silent_released` for the shell to log;
@@ -501,8 +527,11 @@ impl<'a> Pass<'a> {
             .silent
             .get(&name)
             .is_some_and(|since| self.now.since(*since) >= hold);
+        // A run a silent host lists is no work once the registry has given up its lease:
+        // the job can no longer report, and the registry keeps the listing until the host
+        // is forgotten. Only the booked lease, or a mark, keeps the host.
         let working = [
-            host.busy,
+            (host.busy, host.lease_given_up) == (true, false),
             matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
         ];
         let due = [ripe, !working.into_iter().any(|work| work)];
@@ -524,17 +553,21 @@ impl<'a> Pass<'a> {
     }
 
     /// A machine the registry does not show. It is released only when the view is complete
-    /// and the machine has been missing from every step since one at least `unknown_hold`
-    /// ago: the registry may have restarted or been read in part, and releasing on that
-    /// would cut work. Any step on which the host is shown, or the view is incomplete,
-    /// starts the count over. Until then the machine is held and counted.
+    /// and the machine has been missing from every complete view since one at least
+    /// `unknown_hold` ago: the registry may have restarted or been read in part, and
+    /// releasing on that would cut work. Any step on which the host is shown starts the
+    /// count over; an incomplete view leaves it as it was and adds nothing to it. The time
+    /// the count began is in the records, so it survives a restart of the scaler. Until then
+    /// the machine is held and counted.
     fn on_forgotten(&mut self, pool: &PoolInput, i: usize, name: String) {
-        if self.input.registry_complete {
-            let since = self.missing.get(&name).copied().unwrap_or(self.now);
-            self.missing_now.insert(name, since);
-            if self.now.since(since) >= pool.settings.unknown_hold {
-                self.start_release(i);
-            }
+        let since = self.counted_since(self.missing.get(&name).copied());
+        self.missing_now.extend(since.map(|since| (name, since)));
+        let due = [
+            self.input.registry_complete,
+            since.is_some_and(|since| self.now.since(since) >= pool.settings.unknown_hold),
+        ];
+        if due.into_iter().all(|ok| ok) {
+            self.start_release(i);
         }
     }
 

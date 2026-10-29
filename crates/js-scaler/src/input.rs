@@ -70,9 +70,19 @@ pub struct HostFacts {
     /// How the host is set aside, if it is.
     pub mark: Option<Mark>,
     /// Whether the host holds a lease, a run or a stream.
+    ///
+    /// For a host that is not `Live` it means a booked lease: the shell sets it from the
+    /// lease table, not from the runs the host last listed. Those listings are stale once
+    /// the host stops talking and the registry keeps them until it forgets the host, so a
+    /// host that went lost in the middle of a job would otherwise look busy for a day. The
+    /// step also ignores `busy` for a silent host once [`lease_given_up`](Self::lease_given_up)
+    /// is `true`; a `Held` or `Reserved` mark still keeps it. For a `Live` host `busy` is
+    /// leases, runs and streams, as the registry's `releasing` reads them.
     pub busy: bool,
     /// Whether the registry books nothing on the host: its lease grace gave up the leases
-    /// it held, or it held none. The shell sets it for a silent host from the lease table,
+    /// it held, or it held none. Once it is `true` for a silent host, the host is not
+    /// busy for the step whatever `busy` says (see [`busy`](Self::busy)). The shell sets it
+    /// for a silent host from the lease table,
     /// and it is `true` for a silent host that has no bookings at all (one that never held
     /// a lease included); it is `false` for a host that still holds a lease or whose
     /// bookings the shell cannot read. A silent host marked `Releasing` needs no flag: the
@@ -137,11 +147,17 @@ pub struct Input {
     pub hosts: Vec<HostFacts>,
     /// Whether `hosts` is the registry's whole, settled view: every host it holds, read
     /// after it finished loading its state. The shell sets it `false` for a view it cannot
-    /// vouch for (the registry has just started, a read failed or was partial). A machine
-    /// missing from `hosts` is released only on a complete view, seen missing twice at
-    /// least `unknown_hold` apart, and a booting machine is given up on at `boot_timeout`
-    /// only on a complete view (its host may have said hello and be missing from a partial
-    /// one); on an incomplete one everything is held and counted.
+    /// vouch for (the registry has just started, a read failed or was partial). Settled
+    /// means more than loaded: the registry keeps no host in memory across a restart except
+    /// those with a booked lease, so an idle or booting host is absent until its agent says
+    /// hello again, which can take the agent's longest retry wait (two minutes) and longer
+    /// when many agents share a hello limit. The step does not rely on the view being
+    /// settled alone: a machine missing from `hosts` is released only on complete views
+    /// seen missing at least `unknown_hold` apart, and a booting machine is given up on at
+    /// `boot_timeout` only on a complete view and only after its host has been missing on
+    /// complete views for a third of `boot_timeout` (the pool's boot hold). An incomplete
+    /// view leaves those counts as they were and adds nothing to them; everything is held
+    /// and counted.
     pub registry_complete: bool,
     /// Answers to acquires.
     pub acquired: Vec<AcquireResult>,

@@ -295,8 +295,14 @@ pub struct Cooldown {
     pub reason: CooldownReason,
 }
 
-/// The version of the records file. A reader refuses any other.
-pub const VERSION: u32 = 1;
+/// The version of the records file this writer writes. Version 2 added the silent and
+/// missing times.
+pub const VERSION: u32 = 2;
+
+/// The oldest version a reader still reads. A file of an older version is read as if it
+/// had been written by this one with the fields it lacks empty, and the next save writes
+/// it as [`VERSION`].
+pub const OLDEST: u32 = 1;
 
 /// Everything the scaler remembers. The caller writes all of it, as one file, whenever a
 /// step returns [`Action::Save`](crate::Action::Save), before it runs any other action of
@@ -308,10 +314,13 @@ pub struct Records {
     /// The pools that are waiting out a failure, by name.
     pub cooldowns: BTreeMap<String, Cooldown>,
     /// Since when each registered machine whose host the registry shows but does not hear
-    /// from has been silent, as the scaler first saw it.
+    /// from has been silent, as the scaler first saw it. Written so that a scaler that
+    /// restarts more often than `unknown_hold` still reaches the hold: the time the
+    /// scaler was down counts as silence, since the host was not heard from then either.
     pub silent_since: BTreeMap<String, Millis>,
     /// Since when each registered machine the registry does not show has been missing from
-    /// complete views, unbroken.
+    /// complete views, unbroken, for the same reason. A restart of the scaler does not
+    /// reset it, and nor does an incomplete view; a step that shows the host does.
     pub missing_since: BTreeMap<String, Millis>,
 }
 
@@ -320,11 +329,26 @@ struct WireOut<'a> {
     version: u32,
     instances: &'a [Record],
     cooldowns: &'a BTreeMap<String, Cooldown>,
+    silent_since: &'a BTreeMap<String, Millis>,
+    missing_since: &'a BTreeMap<String, Millis>,
 }
 
+/// Version 2.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WireIn {
+    #[serde(rename = "version")]
+    _version: u32,
+    instances: Vec<Record>,
+    cooldowns: BTreeMap<String, Cooldown>,
+    silent_since: BTreeMap<String, Millis>,
+    missing_since: BTreeMap<String, Millis>,
+}
+
+/// Version 1: the same without the two times.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireV1 {
     #[serde(rename = "version")]
     _version: u32,
     instances: Vec<Record>,
@@ -337,8 +361,13 @@ pub enum RecordsError {
     /// The text is not records of this version's shape.
     #[error("records: {0}")]
     Format(#[from] serde_json::Error),
-    /// The file is of another version (or names none), so it is not read.
-    #[error("records: version {found:?}, this reader reads {}", VERSION)]
+    /// The file is of a version this reader does not read (or names none), so it is not
+    /// read.
+    #[error(
+        "records: version {found:?}, this reader reads {} to {}",
+        OLDEST,
+        VERSION
+    )]
     Version {
         /// The version the file names.
         found: Option<u64>,
@@ -356,11 +385,13 @@ impl Records {
             version: VERSION,
             instances: &self.instances,
             cooldowns: &self.cooldowns,
+            silent_since: &self.silent_since,
+            missing_since: &self.missing_since,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
 
-    /// The records in `text`.
+    /// The records in `text`. A file of version 1 is read with no silent or missing times.
     ///
     /// # Errors
     ///
@@ -369,14 +400,26 @@ impl Records {
     pub fn decode(text: &str) -> Result<Self, RecordsError> {
         let value: serde_json::Value = serde_json::from_str(text)?;
         let found = value.get("version").and_then(serde_json::Value::as_u64);
-        if found != Some(u64::from(VERSION)) {
-            return Err(RecordsError::Version { found });
+        // One arm for each version from `OLDEST` to `VERSION`.
+        match found {
+            Some(1) => {
+                let wire: WireV1 = serde_json::from_value(value)?;
+                Ok(Self {
+                    instances: wire.instances,
+                    cooldowns: wire.cooldowns,
+                    ..Self::default()
+                })
+            }
+            Some(2) => {
+                let wire: WireIn = serde_json::from_value(value)?;
+                Ok(Self {
+                    instances: wire.instances,
+                    cooldowns: wire.cooldowns,
+                    silent_since: wire.silent_since,
+                    missing_since: wire.missing_since,
+                })
+            }
+            _ => Err(RecordsError::Version { found }),
         }
-        let wire: WireIn = serde_json::from_value(value)?;
-        Ok(Self {
-            instances: wire.instances,
-            cooldowns: wire.cooldowns,
-            ..Self::default()
-        })
     }
 }

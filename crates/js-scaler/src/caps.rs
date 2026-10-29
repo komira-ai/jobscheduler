@@ -44,8 +44,10 @@ pub(crate) fn nearest_miss<'a>(
     misses.and_then(|all| all.into_iter().max_by_key(|each| depth(*each)))
 }
 
-/// The offer a launch for `demand` takes: available, priced, fitting, and not refused
-/// this step; the cheapest, then the one with fewest gpus, then by id, then by zone.
+/// The offer a launch for `demand` takes: available, priced above zero, fitting, and not
+/// refused this step; the cheapest, then the one with fewest gpus, then by id, then by
+/// zone. A price of zero is no price: it would pass both spend caps for any number of
+/// machines.
 pub(crate) fn choose<'a>(
     settings: &Settings,
     offers: &'a [Offer],
@@ -65,7 +67,7 @@ pub(crate) fn choose<'a>(
             });
             [
                 offer.available,
-                offer.price_cents_per_hour.is_some(),
+                offer.price_cents_per_hour.is_some_and(|price| price > 0),
                 offer.fit(demand).is_ok(),
                 !lately,
             ]
