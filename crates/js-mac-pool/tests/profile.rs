@@ -1,7 +1,6 @@
 //! The generated profile: a golden per network level, the order, the floor, narrowing.
 
 use std::ffi::OsString;
-use std::net::Ipv4Addr;
 
 use js_mac_pool::seatbelt::{
     AbsPath, BuildError, Caps, MAX_LISTED, Narrowing, Net, Policy, PolicyError, Ports, Profile,
@@ -36,7 +35,6 @@ fn caps(net: Net) -> Caps {
     Caps {
         net,
         read_model: ReadModel::Open,
-        deny_egress: vec![],
     }
 }
 
@@ -81,10 +79,8 @@ fn the_loopback_profile_matches_its_golden() {
 }
 
 #[test]
-fn the_on_profile_denies_the_metadata_address_and_the_listed_egress_in_order() {
-    let mut on = caps(Net::On);
-    on.deny_egress = vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(10, 0, 0, 5)];
-    let policy = Policy::base(layout(), on).unwrap();
+fn the_on_profile_has_no_network_rule() {
+    let policy = Policy::base(layout(), caps(Net::On)).unwrap();
     assert_eq!(text_of(&policy), include_str!("goldens/open_on.sb"));
 }
 
@@ -170,7 +166,6 @@ fn the_floor_is_last_in_every_profile() {
                     drop_uid_entry,
                     protect: vec![path("/Volumes/work/other")],
                     deny_read: vec![path("/Volumes/work/secret")],
-                    deny_egress: vec![Ipv4Addr::new(1, 2, 3, 4)],
                     ..Narrowing::default()
                 };
                 let policy = Policy::base(base, caps(net.clone()))
@@ -234,7 +229,7 @@ fn a_narrowing_with_no_level_keeps_the_level() {
 
 #[test]
 fn a_narrowing_adds_denies_and_protections_without_repeating_existing_ones() {
-    let policy = Policy::base(layout(), caps(Net::On)).unwrap();
+    let policy = Policy::base(layout(), caps(Net::Off)).unwrap();
     let narrowed = policy
         .narrowed(Narrowing {
             protect: vec![
@@ -242,7 +237,6 @@ fn a_narrowing_adds_denies_and_protections_without_repeating_existing_ones() {
                 path("/Volumes/work/slot1/run/ro"),
             ],
             deny_read: vec![path("/Users/Shared")],
-            deny_egress: vec![Ipv4Addr::new(169, 254, 169, 254), Ipv4Addr::new(8, 8, 8, 8)],
             ..Narrowing::default()
         })
         .unwrap();
@@ -256,9 +250,11 @@ fn a_narrowing_adds_denies_and_protections_without_repeating_existing_ones() {
         names,
         ["RUN", "UENTRY", "RD_0", "RD_1", "RD_2", "IN_0", "IN_1"]
     );
-    let text = profile.text();
-    assert_eq!(text.matches("169.254.169.254:*").count(), 1);
-    assert!(text.contains("(deny network-outbound (remote ip \"8.8.8.8:*\"))"));
+    assert!(
+        profile
+            .text()
+            .contains("(deny file-read* (subpath (param \"RD_1\")))")
+    );
 }
 
 #[test]
@@ -294,19 +290,23 @@ fn lists_over_the_bound_are_refused_where_they_grow() {
             .map(|i| path(&format!("/Volumes/{stem}/{i}")))
             .collect()
     };
-    let addrs = |n: u8| -> Vec<Ipv4Addr> { (0..n).map(|i| Ipv4Addr::new(10, 0, 0, i)).collect() };
-    let at_bound = u8::try_from(MAX_LISTED).unwrap();
-
-    let ok = SlotLayout {
+    let at_bound = SlotLayout {
         inputs: many(MAX_LISTED, "in"),
         read_denies: many(MAX_LISTED, "rd"),
         ..layout()
     };
-    let mut full = caps(Net::On);
-    full.deny_egress = addrs(at_bound - 1);
-    let policy = Policy::base(ok, full).expect("at the bound is fine");
-
+    let policy = Policy::base(at_bound, caps(Net::Off)).expect("at the bound is fine");
     let over = |narrowing: Narrowing| policy.clone().narrowed(narrowing);
+
+    let repeated = over(Narrowing {
+        protect: many(1, "in"),
+        deny_read: many(1, "rd"),
+        ..Narrowing::default()
+    });
+    assert!(
+        repeated.is_ok(),
+        "an entry already listed does not grow the list"
+    );
     assert_eq!(
         over(Narrowing {
             protect: many(1, "more"),
@@ -320,21 +320,6 @@ fn lists_over_the_bound_are_refused_where_they_grow() {
             ..Narrowing::default()
         }),
         Err(PolicyError::TooMany("read denies"))
-    );
-    // 63 listed plus the one new address is the bound; two new addresses is over it.
-    assert!(
-        over(Narrowing {
-            deny_egress: addrs(at_bound),
-            ..Narrowing::default()
-        })
-        .is_ok()
-    );
-    assert_eq!(
-        over(Narrowing {
-            deny_egress: vec![Ipv4Addr::new(11, 0, 0, 1), Ipv4Addr::new(11, 0, 0, 2)],
-            ..Narrowing::default()
-        }),
-        Err(PolicyError::TooMany("denied egress"))
     );
 }
 

@@ -1,7 +1,6 @@
 //! The typed policy of one run, and the only ways to change it.
 
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
 
 use super::net::Net;
 use super::path::AbsPath;
@@ -9,9 +8,6 @@ use super::path::AbsPath;
 /// The most entries any one list of a policy holds. Each is a rule and a `-D` parameter
 /// on the `sandbox-exec` command line.
 pub const MAX_LISTED: usize = 64;
-
-/// The cloud instance metadata address. Under [`Net::On`] it is always denied.
-pub const METADATA_ADDR: Ipv4Addr = Ipv4Addr::new(169, 254, 169, 254);
 
 /// Which reads the profile permits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +50,6 @@ pub struct Caps {
     pub net: Net,
     /// The read model of the pool.
     pub read_model: ReadModel,
-    /// Addresses denied under [`Net::On`] besides [`METADATA_ADDR`] (the scheduler
-    /// endpoint, the node's own addresses). Literal IPv4 addresses only: a host name
-    /// cannot be matched, so this is best effort and a packet filter is the real control.
-    pub deny_egress: Vec<Ipv4Addr>,
 }
 
 /// Everything a run may do that a caller can influence. A [`Policy`] is built once from
@@ -68,7 +60,6 @@ pub struct Policy {
     uid_entry: Option<AbsPath>,
     inputs: BTreeSet<AbsPath>,
     read_denies: BTreeSet<AbsPath>,
-    egress: BTreeSet<Ipv4Addr>,
     net: Net,
     read_model: ReadModel,
 }
@@ -84,7 +75,6 @@ impl Policy {
             uid_entry: Some(layout.uid_entry),
             inputs: layout.inputs.into_iter().collect(),
             read_denies: layout.read_denies.into_iter().collect(),
-            egress: caps.deny_egress.into_iter().collect(),
             net: caps.net,
             read_model: caps.read_model,
         };
@@ -105,7 +95,6 @@ impl Policy {
         }
         self.inputs.extend(narrowing.protect);
         self.read_denies.extend(narrowing.deny_read);
-        self.egress.extend(narrowing.deny_egress);
         self.check()?;
         Ok(self)
     }
@@ -124,8 +113,7 @@ impl Policy {
 
     fn check(&self) -> Result<(), PolicyError> {
         bounded(self.inputs.len(), "inputs")?;
-        bounded(self.read_denies.len(), "read denies")?;
-        bounded(self.egress.len(), "denied egress")
+        bounded(self.read_denies.len(), "read denies")
     }
 
     pub(super) fn run(&self) -> &AbsPath {
@@ -143,10 +131,6 @@ impl Policy {
     pub(super) fn read_denies(&self) -> &BTreeSet<AbsPath> {
         &self.read_denies
     }
-
-    pub(super) fn egress(&self) -> &BTreeSet<Ipv4Addr> {
-        &self.egress
-    }
 }
 
 fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
@@ -158,7 +142,7 @@ fn bounded(len: usize, what: &'static str) -> Result<(), PolicyError> {
 
 /// A request to narrow a policy. Every field can only take something away or add a
 /// deny: a level is met with the policy's level (the lower wins), the user-folder grant
-/// can be dropped, and paths and addresses can be added to the denies. There is no field
+/// can be dropped, and paths can be added to the denies. There is no field
 /// that adds a grant or raises a level.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Narrowing {
@@ -170,6 +154,4 @@ pub struct Narrowing {
     pub protect: Vec<AbsPath>,
     /// More paths to read-deny.
     pub deny_read: Vec<AbsPath>,
-    /// More addresses to deny under [`Net::On`].
-    pub deny_egress: Vec<Ipv4Addr>,
 }

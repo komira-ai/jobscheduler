@@ -5,7 +5,7 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::OsString;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -50,7 +50,7 @@ impl Scene {
         }
     }
 
-    fn policy(&self, net: Net, deny_egress: Vec<Ipv4Addr>) -> Policy {
+    fn policy(&self, net: Net) -> Policy {
         let layout = SlotLayout {
             run: AbsPath::new(&self.run).expect("run path"),
             uid_entry: AbsPath::new(&self.uid_entry).expect("entry path"),
@@ -62,7 +62,6 @@ impl Scene {
             Caps {
                 net,
                 read_model: ReadModel::Open,
-                deny_egress,
             },
         )
         .expect("policy")
@@ -70,7 +69,7 @@ impl Scene {
 
     /// Runs `program args` under the generated profile of `net`.
     fn sandboxed(&self, net: Net, program: &str, args: &[OsString]) -> Output {
-        self.sandboxed_with(&self.policy(net, vec![]), program, args)
+        self.sandboxed_with(&self.policy(net), program, args)
     }
 
     fn sandboxed_with(&self, policy: &Policy, program: &str, args: &[OsString]) -> Output {
@@ -158,7 +157,7 @@ fn a_policy_without_the_user_folder_grant_cannot_write_there() {
         .uid_entry
         .join(format!("js-mac-pool-drop-{}", std::process::id()));
     let policy = scene
-        .policy(Net::Off, vec![])
+        .policy(Net::Off)
         .narrowed(Narrowing {
             drop_uid_entry: true,
             ..Narrowing::default()
@@ -237,13 +236,6 @@ fn each_network_level_allows_what_it_names_and_refuses_the_rest() {
         "Loopback connects to any port"
     );
     assert!(connects(Net::On, &to_one), "On connects");
-
-    let denied = scene.policy(Net::On, vec![Ipv4Addr::LOCALHOST]);
-    let out = scene.sandboxed_with(&denied, "/usr/bin/nc", &to_one);
-    assert!(
-        !out.status.success(),
-        "a denied egress address is refused under On"
-    );
 }
 
 #[test]
@@ -304,4 +296,21 @@ fn a_c_toolchain_smoke_runs_under_the_profile_and_in_the_control() {
     let scene = Scene::new("clang", "run");
     hello(&scene, false);
     hello(&scene, true);
+}
+
+/// Seatbelt takes only `*` and `localhost` as the host of a `remote ip` filter, so the
+/// profile cannot deny a literal address; the builder offers no such rule.
+#[test]
+fn the_profile_compiler_refuses_a_literal_address_in_a_remote_ip_filter() {
+    let out = control(
+        "/usr/bin/sandbox-exec",
+        &args(&[
+            "-p",
+            "(version 1)(allow default)(deny network-outbound (remote ip \"10.0.0.1:*\"))",
+            "/usr/bin/true",
+        ]),
+    );
+    assert!(!out.status.success(), "compiled: {}", describe(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(stderr.contains("host must be * or localhost"), "{stderr}");
 }

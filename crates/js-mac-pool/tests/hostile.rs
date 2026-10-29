@@ -105,7 +105,6 @@ fn paths_that_look_like_profile_syntax_never_enter_the_profile_text() {
     let caps = || Caps {
         net: Net::Loopback,
         read_model: ReadModel::Open,
-        deny_egress: vec![],
     };
     let layout = |run: &str, entry: &str, input: &str, deny: &str| SlotLayout {
         run: AbsPath::parse(run).expect("run"),

@@ -68,7 +68,10 @@ pub enum Net {
     Ports(Ports),
     /// `Off` plus any loopback connect and loopback listeners.
     Loopback,
-    /// The network is open, minus the denied egress addresses of the policy.
+    /// The network is open: the profile has no network rule. Seatbelt cannot deny a
+    /// literal address (the compiler accepts only `*` and `localhost` as the host of a
+    /// `remote ip` filter), so egress control needs a packet filter keyed on the pool's
+    /// user range.
     On,
 }
 

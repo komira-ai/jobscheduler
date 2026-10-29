@@ -1,11 +1,10 @@
 //! The profile text and the `sandbox-exec` argument vector.
 
-use std::collections::BTreeSet;
 use std::ffi::OsString;
 
 use super::net::Net;
 use super::path::AbsPath;
-use super::policy::{METADATA_ADDR, Policy, ReadModel};
+use super::policy::{Policy, ReadModel};
 
 /// The program that applies a profile.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -154,13 +153,7 @@ fn push_all(lines: &mut Vec<String>, rules: &[&str]) {
 
 fn net_rules(policy: &Policy, lines: &mut Vec<String>) {
     match policy.net() {
-        Net::On => {
-            let mut denied: BTreeSet<_> = policy.egress().clone();
-            denied.insert(METADATA_ADDR);
-            for addr in denied {
-                lines.push(format!("(deny network-outbound (remote ip \"{addr}:*\"))"));
-            }
-        }
+        Net::On => {}
         Net::Off => push_all(lines, &OFF_RULES),
         Net::Ports(ports) => {
             push_all(lines, &OFF_RULES);

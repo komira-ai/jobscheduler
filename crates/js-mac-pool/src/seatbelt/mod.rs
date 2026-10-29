@@ -25,6 +25,10 @@
 //! - Loopback is shared by every user of the Mac; see [`Net`].
 //! - The profile compiler rejects `localhost:LOW-HIGH`, so per-port allows are
 //!   single `localhost:PORT` entries ([`Ports`]).
+//! - Under [`Net::On`] no address can be denied: the profile compiler takes only `*` and
+//!   `localhost` as the host of a `remote ip` filter (a runner test pins this). Blocking
+//!   the scheduler or the cloud metadata address needs a packet filter keyed on the
+//!   pool's user range.
 //! - It starts nothing; applying the profile is the caller's `exec` of
 //!   [`Profile::argv`].
 
@@ -35,7 +39,5 @@ mod profile;
 
 pub use net::{MAX_PORTS, Net, Ports, PortsError};
 pub use path::{AbsPath, MAX_PATH_BYTES, PathError};
-pub use policy::{
-    Caps, MAX_LISTED, METADATA_ADDR, Narrowing, Policy, PolicyError, ReadModel, SlotLayout,
-};
+pub use policy::{Caps, MAX_LISTED, Narrowing, Policy, PolicyError, ReadModel, SlotLayout};
 pub use profile::{BuildError, Profile, SANDBOX_EXEC};
