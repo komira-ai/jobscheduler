@@ -171,7 +171,7 @@ use crate::FileReader;
 use crate::cli::Cli;
 use crate::cli_runtime::{Flags, Settings};
 
-pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, SLOTS, Slots};
+pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored, RunningLease, SLOTS, Slots};
 pub use mounts::{MountError, MountRoots};
 pub use runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
@@ -556,6 +556,7 @@ impl Local {
                 add_hosts: &cli.container_add_host,
                 egress_allow: &cli.container_egress_allow,
                 nft: cli.container_nft.as_deref(),
+                actions_cgroup: cli.actions_cgroup.as_deref(),
                 subuid: cli.container_subuid.as_deref(),
             },
             (
