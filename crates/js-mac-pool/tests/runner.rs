@@ -600,5 +600,30 @@ fn mounting_is_refused() {
         "sandboxed mount: {}",
         describe(&refused)
     );
+    // The refusal is the sandbox's: sudo ran, `mount_devfs` was reached, and the kernel
+    // answered EPERM. A sudo that failed to start would not print both.
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("mount_devfs") && stderr.contains("Operation not permitted"),
+        "the mount was refused by the sandbox: {stderr}"
+    );
     assert!(!leaked, "the sandboxed mount is not listed");
+}
+
+/// Writing to `/dev/fd/1` opens the descriptor's file again, which needs the `/dev/fd`
+/// grant; without it the redirect is refused. The control writes without the sandbox.
+#[test]
+fn the_dev_fd_grant_lets_a_shell_write_through_a_descriptor_path() {
+    let scene = Scene::new("devfd", "run");
+    let script = args(&["-c", "echo x > /dev/fd/1"]);
+    let free = control("/bin/sh", &script);
+    assert!(free.status.success(), "control: {}", describe(&free));
+    assert_eq!(String::from_utf8_lossy(&free.stdout), "x\n");
+    let granted = scene.sandboxed(Net::Off, "/bin/sh", &script);
+    assert!(
+        granted.status.success(),
+        "sandboxed: {}",
+        describe(&granted)
+    );
+    assert_eq!(String::from_utf8_lossy(&granted.stdout), "x\n");
 }

@@ -15,9 +15,9 @@ pub enum ReadModel {
     /// Reads are open (toolchains read widely) except the listed denies. Writes and the
     /// network are denied first and granted back narrowly.
     Open,
-    /// Reads are an allow-list. Its builder is not written: it needs a trace on the
-    /// farm's macOS version, so [`Profile::for_policy`](super::Profile::for_policy)
-    /// refuses it.
+    /// Reads are an allow-list. Its builder is not written: it needs a trace on the macOS
+    /// version the hosts run, so [`Profile::for_policy`](super::Profile::for_policy) refuses
+    /// it.
     Allow,
 }
 
