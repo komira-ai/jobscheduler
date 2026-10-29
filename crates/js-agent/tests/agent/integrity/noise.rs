@@ -180,7 +180,7 @@ fn the_agents_own_service_is_not_the_hosts() {
 fn an_agent_that_cannot_read_its_own_control_group_does_not_start() {
     let host = FakeHost::quiet();
     host.remove_file("/proc/self/cgroup");
-    let why = Integrity::start(Box::new(host), super::JOB_UID, vec![])
+    let why = Integrity::start(Box::new(host), super::JOB_USERS, vec![])
         .err()
         .unwrap();
     assert!(
