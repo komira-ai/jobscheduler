@@ -1,0 +1,148 @@
+//! The registry of kinds: the provider kinds a `[[pool]]` of the configuration file may
+//! name, compiled into the server.
+//!
+//! The server reads a pool's `provider.kind`, removes it, and hands the rest of the table to
+//! the kind's constructor ([`Ctor`]). It never looks inside: each constructor owns the
+//! fields of its kind, refuses the ones it does not know, and reads the secret files
+//! through [`BuildCtx::files`]. A constructor makes no network call; what only the
+//! network can say is the business of the checks of a running server.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use js_elastic::{ElasticProvider, GpuClass};
+use js_types::{ExecMode, ResourceClass};
+
+use crate::adapt::SharedClock;
+use crate::capacity::{CapacitySource, StaticPoolSource};
+use crate::config::read_private_reason;
+
+/// A table that a constructor refused: the field at fault, relative to the provider table,
+/// and why. The reason holds nothing the table said, and no secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindError {
+    /// The field at fault, such as `api_key_file`, or `kind`.
+    pub field: String,
+    /// What is wrong with it.
+    pub reason: String,
+}
+
+/// Reads the files that hold secrets. The server reads them owner-only
+/// ([`OwnerOnlyFiles`]); a test injects its own.
+pub trait SecretFiles: Send + Sync {
+    /// The bytes of the file at `path`, or why it was not read. The reason names the
+    /// path and never the content.
+    fn read(&self, path: &Path) -> Result<Vec<u8>, String>;
+}
+
+/// The secret files of the server: a regular file owned by the user running the server
+/// that nobody else can read or write (mode 0600 or 0400), as `--token-file` is.
+#[derive(Debug, Clone, Copy)]
+pub struct OwnerOnlyFiles;
+
+impl SecretFiles for OwnerOnlyFiles {
+    fn read(&self, path: &Path) -> Result<Vec<u8>, String> {
+        read_private_reason(path)
+    }
+}
+
+/// What a constructor may use besides its table.
+pub struct BuildCtx<'a> {
+    /// The name of the pool being built.
+    pub pool: &'a str,
+    /// The class the pool serves.
+    pub class: &'a ResourceClass,
+    /// The server's clock.
+    pub clock: SharedClock,
+    /// How the constructor reads a secret file.
+    pub files: &'a dyn SecretFiles,
+}
+
+/// The least a host of an elastic pool brings, as far as the kind knows it offline:
+/// the fewest GPUs over the sizes the pool may launch, and their class. The registry
+/// refuses a hello below it (the pool floor); real capacity is what the agent reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Floor {
+    /// The fewest GPUs of any size.
+    pub gpus: u64,
+    /// The class of those GPUs; `Some` exactly when `gpus` is above zero.
+    pub gpu_class: Option<GpuClass>,
+}
+
+/// An elastic provider and what the server learns of it offline.
+pub struct ElasticBuilt {
+    /// The provider.
+    pub provider: Box<dyn ElasticProvider>,
+    /// The pool floor its sizes give.
+    pub floor: Floor,
+    /// The execution modes its hosts can run jobs in. A pool whose `exec` is not among
+    /// them is refused at start.
+    pub exec: Vec<ExecMode>,
+}
+
+/// What a constructor builds.
+pub enum Built {
+    /// Hosts that exist already, listed by the operator.
+    Static(Box<dyn CapacitySource>),
+    /// Hosts the scheduler launches.
+    Elastic(ElasticBuilt),
+}
+
+/// A constructor of a kind: the provider table without its `kind`.
+pub type Ctor = fn(&toml::Table, &BuildCtx<'_>) -> Result<Built, KindError>;
+
+/// The kinds the server knows, by name.
+#[derive(Clone, Default)]
+pub struct Kinds {
+    kinds: BTreeMap<&'static str, Ctor>,
+}
+
+impl Kinds {
+    /// The kinds compiled into the server: `static`.
+    pub fn standard() -> Self {
+        Self::default().with("static", static_kind)
+    }
+
+    /// These kinds and `name`, built by `ctor`.
+    #[must_use]
+    pub fn with(mut self, name: &'static str, ctor: Ctor) -> Self {
+        self.kinds.insert(name, ctor);
+        self
+    }
+
+    /// The names of the kinds, in order.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.kinds.keys().copied().collect()
+    }
+
+    /// Builds the kind `kind` from `table`.
+    ///
+    /// # Errors
+    ///
+    /// [`KindError`] on field `kind` when `kind` is not one of [`Kinds::names`], else the
+    /// constructor's.
+    pub fn build(
+        &self,
+        kind: &str,
+        table: &toml::Table,
+        ctx: &BuildCtx<'_>,
+    ) -> Result<Built, KindError> {
+        match self.kinds.get(kind) {
+            Some(ctor) => ctor(table, ctx),
+            None => Err(KindError {
+                field: "kind".to_owned(),
+                reason: format!("{kind:?} is not a kind; known: {}", self.names().join(", ")),
+            }),
+        }
+    }
+}
+
+/// The `static` kind: `js_pool_static::kind::build` over the operator's hosts file.
+fn static_kind(table: &toml::Table, ctx: &BuildCtx<'_>) -> Result<Built, KindError> {
+    let path = js_pool_static::kind::build(table).map_err(|refused| KindError {
+        field: refused.field,
+        reason: refused.reason,
+    })?;
+    let source = StaticPoolSource::new(path).with_classes(vec![ctx.class.clone()]);
+    Ok(Built::Static(Box::new(source)))
+}

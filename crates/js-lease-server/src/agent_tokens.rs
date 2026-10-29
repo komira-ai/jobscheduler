@@ -28,7 +28,7 @@ struct Accepted {
 /// that fails keeps the set in force, and the caller logs it: an operator's half-saved
 /// edit must not lock every agent out, and must not go unnoticed either.
 pub(crate) struct AgentTokens {
-    path: PathBuf,
+    path: Option<PathBuf>,
     client: Token,
     accepted: RwLock<Arc<Vec<Accepted>>>,
 }
@@ -40,16 +40,30 @@ impl AgentTokens {
     pub(crate) fn open(path: &Path, client: &Token) -> Result<Self, StartupError> {
         let accepted = read(path, client)?;
         Ok(Self {
-            path: path.to_path_buf(),
+            path: Some(path.to_path_buf()),
             client: client.clone(),
             accepted: RwLock::new(Arc::new(accepted)),
         })
     }
 
+    /// No shared join tokens: no host is admitted with a token every host of the pool
+    /// shares. A pool without a join token file admits only hosts that present a one-time
+    /// token or a host credential the server minted.
+    pub(crate) fn none(client: &Token) -> Self {
+        Self {
+            path: None,
+            client: client.clone(),
+            accepted: RwLock::new(Arc::new(Vec::new())),
+        }
+    }
+
     /// Reads the file again and, when it is valid, replaces the set. The file's text is
-    /// never in the error.
+    /// never in the error. Without a file there is nothing to read.
     pub(crate) fn reload(&self) -> Result<(), StartupError> {
-        let accepted = read(&self.path, &self.client)?;
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let accepted = read(path, &self.client)?;
         *self
             .accepted
             .write()

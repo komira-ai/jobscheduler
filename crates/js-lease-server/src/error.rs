@@ -4,20 +4,47 @@ use std::fmt;
 use std::io;
 use std::process::ExitCode;
 
-/// The server was refused permission to start: one flag is wrong, and the error names
-/// it. The process exits with status 2.
-#[derive(Debug, thiserror::Error)]
-#[error("{flag}: {reason}")]
+/// The server was refused permission to start: one flag is wrong, or one field of the
+/// configuration file, and the error names it. The process exits with status 2.
+///
+/// A flag reads as `--listen: reason`. A field of the configuration file reads as its
+/// place and the reason: `server.listen: reason`, or `pool "gpu": provider.api_key_file:
+/// reason` for a field of a pool. Neither holds a value from the file.
+#[derive(Debug)]
 pub struct StartupError {
     flag: &'static str,
+    place: Option<String>,
     reason: String,
 }
+
+impl fmt::Display for StartupError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let place = self.place.as_deref().unwrap_or(self.flag);
+        write!(out, "{place}: {}", self.reason)
+    }
+}
+
+impl std::error::Error for StartupError {}
 
 impl StartupError {
     /// A refusal naming `flag` (with its leading dashes) for `reason`.
     pub fn new(flag: &'static str, reason: impl fmt::Display) -> Self {
         Self {
             flag,
+            place: None,
+            reason: reason.to_string(),
+        }
+    }
+
+    /// A refusal of a field of the configuration file (`--config`): `place` is where it
+    /// is, such as `server.listen` or `pool "gpu": provider.api_key_file`. [`flag`]
+    /// answers `--config`.
+    ///
+    /// [`flag`]: StartupError::flag
+    pub fn at(place: impl fmt::Display, reason: impl fmt::Display) -> Self {
+        Self {
+            flag: "--config",
+            place: Some(place.to_string()),
             reason: reason.to_string(),
         }
     }
@@ -28,7 +55,7 @@ impl StartupError {
         move |err| Self::new(flag, err)
     }
 
-    /// The flag at fault, such as `--token-file`.
+    /// The flag at fault, such as `--token-file`; `--config` for a field of that file.
     pub fn flag(&self) -> &'static str {
         self.flag
     }
@@ -63,6 +90,15 @@ impl Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Asserts that a refusal of a field of the configuration file reads as its place and
+    /// the reason, and answers `--config` as its flag.
+    #[test]
+    fn a_field_refusal_reads_as_its_place() {
+        let refusal = StartupError::at("pool \"gpu\": max_instances", "required");
+        assert_eq!(refusal.to_string(), "pool \"gpu\": max_instances: required");
+        assert_eq!((refusal.flag(), refusal.reason()), ("--config", "required"));
+    }
 
     /// Asserts that a refusal exits 2 and any other failure 1, and that a refusal
     /// reads as its flag, a colon and the reason.
