@@ -16,6 +16,11 @@ pub const WALL_TIME_NOT_POSITIVE: &str = "wall-time-not-positive";
 pub const INVALID_JOB: &str = "invalid-job";
 /// A job whose image name is empty, too long or outside the image alphabet.
 pub const INVALID_IMAGE: &str = "invalid-image";
+/// A job whose image is not pinned by digest: it has no `@sha256:<64 lower case hex>`
+/// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's
+/// `field` is `image`. Agents run with the pull policy `missing`, so a tag could change
+/// under a fleet; a name with a tag as well as a digest is accepted.
+pub const IMAGE_DIGEST_REQUIRED: &str = "image-digest-required";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.
