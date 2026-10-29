@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
 use js_lease_server::{Cli, DropReason, KeySource, NodeRow, ProfileKey, RunMinute, UsageCounters};
 use js_types::LeaseId;
 use js_types::sched::WorkKey;
