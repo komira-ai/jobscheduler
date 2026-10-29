@@ -13,10 +13,9 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// narrowly. `job-creation` and `lsopen` are also in the floor: launchd refuses a job from
 /// a sandboxed process regardless, and Launch Services would start an application outside
 /// the sandbox.
-const HEAD: [&str; 6] = [
+const HEAD: [&str; 5] = [
     "(version 1)",
     "(allow default)",
-    "(deny file-write*)",
     "(deny job-creation)",
     "(deny lsopen)",
     "(deny user-preference-write)",
