@@ -7,7 +7,9 @@ use std::collections::BTreeMap;
 
 use common::*;
 use js_elastic::Offer;
-use js_scaler::{Cooldown, CooldownReason, Phase, Record, Records, StoredExec, StoredOffer};
+use js_scaler::{
+    Cooldown, CooldownReason, OLDEST, Phase, Record, Records, StoredExec, StoredOffer, VERSION,
+};
 use js_types::ExecMode;
 
 const GOLDEN: &str = include_str!("golden/records_v2.json");
@@ -33,6 +35,7 @@ fn sample() -> Records {
     orphan.last_clean = Some(at(3 * MINUTE));
     let mut records = Records {
         instances: vec![launching, orphan],
+        last_step: Some(at(40 * SECOND)),
         ..Records::default()
     };
     records.cooldowns.insert(
@@ -79,6 +82,7 @@ fn a_version_1_file_is_read_and_written_back_as_version_2() {
     let expected = Records {
         silent_since: BTreeMap::new(),
         missing_since: BTreeMap::new(),
+        last_step: None,
         ..sample()
     };
     assert_eq!(old, expected);
@@ -89,6 +93,56 @@ fn a_version_1_file_is_read_and_written_back_as_version_2() {
     let extra = GOLDEN_V1.replace("\"version\": 1,", "\"version\": 1, \"silent_since\": {},");
     let error = Records::decode(&extra).unwrap_err();
     assert!(error.to_string().contains("silent_since"), "{error}");
+}
+
+/// Asserts that a file of version 2 that names no time of its last write reads with none:
+/// the scaler then takes the whole span back to each saved time as downtime.
+#[test]
+fn a_version_2_file_without_the_time_of_its_last_write_reads_with_none() {
+    let old = GOLDEN.replace(",\n  \"last_step\": 1000000040000", "");
+    assert!(!old.contains("last_step"), "{old}");
+    let records = Records::decode(&old).unwrap();
+    assert_eq!(records.last_step, None);
+    assert_eq!(
+        records,
+        Records {
+            last_step: None,
+            ..sample()
+        }
+    );
+}
+
+/// Asserts that every version from `OLDEST` to `VERSION` reads, each from its own golden
+/// file, and is written back as `VERSION`; and that the versions on either side, and a
+/// number that only wraps into the range, are refused. Raising `OLDEST` or `VERSION` alone
+/// changes what this reads, so a golden is owed for each version in the range.
+#[test]
+fn every_version_in_the_supported_range_reads() {
+    for version in OLDEST..=VERSION {
+        let path = format!(
+            "{}/tests/golden/records_v{version}.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let records = Records::decode(&text).unwrap();
+        let again = records.encode().unwrap();
+        assert!(again.starts_with(&format!("{{\n  \"version\": {VERSION},")));
+        assert_eq!(Records::decode(&again).unwrap(), records);
+    }
+    for version in [
+        u64::from(OLDEST) - 1,
+        u64::from(VERSION) + 1,
+        u64::from(u32::MAX) + 2,
+    ] {
+        let text = GOLDEN.replace("\"version\": 2", &format!("\"version\": {version}"));
+        let error = Records::decode(&text).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with(&format!("records: version Some({version})")),
+            "{error}"
+        );
+    }
 }
 
 /// Asserts what is refused: text that is not JSON, a file of another version or of none,

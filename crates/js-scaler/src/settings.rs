@@ -134,6 +134,10 @@ pub enum Blocked {
     Deferred,
     /// The caller gave fewer random values than launches, or repeated one.
     Entropy,
+    /// An offer of the catalog would serve a waiting request but has no price, or a price
+    /// of zero, so it is never launched. The catalog needs fixing; nothing else will unblock
+    /// the request.
+    Unpriced,
     /// The pool holds `max_instances`.
     MaxInstances,
     /// One more machine would take the hourly spend over `max_spend_per_hour`.

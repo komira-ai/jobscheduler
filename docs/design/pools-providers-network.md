@@ -671,17 +671,19 @@ What the shell owes the host facts, because the step cannot tell otherwise:
   healthy machine and start the boot cooldown. A host with no shape covers no request.
 - `busy` for a host that is not `Live` is a booked lease, read from the lease table. It is
   not the runs the host last listed: the registry keeps that listing until it forgets the
-  host, so a host that went lost in the middle of a job would look busy for a day. The step
-  also ignores `busy` for a silent host once `lease_given_up` is true; a `Held` or
-  `Reserved` mark still keeps the host. For a `Live` host `busy` is leases, runs and streams.
+  host, so a host that went lost in the middle of a job would look busy for a day. So for a
+  silent host `busy` and `lease_given_up` never hold together: the first says a lease is
+  booked, the second says none is. A `Held` or `Reserved` mark still keeps the host. For a
+  `Live` host `busy` is leases, runs and streams.
 - `registry_complete` means settled, not only loaded. The registry keeps no idle or booting
   host in memory across a restart, so every one is absent until its agent says hello, which
   takes the agent's longest retry wait (two minutes) and longer when many agents share a
   hello limit. The step does not lean on the shell's settle alone (6.2, Booting to
   Releasing and Lost), but the shell should not report a view complete before the agents
   have had that wait.
-- A price of zero in the catalog is no price: the step never launches it, and the shell's
-  catalog check should report it as it reports a missing price.
+- A price of zero in the catalog is no price: the step never launches it. A request that
+  fits only an offer with no price, or a price of zero, shows the pool as `blocked: unpriced`
+  in the state, so the operator sees it before the shell's catalog check exists.
 - The records carry the first-seen times of silent and missing hosts (6.2, Lost), so the
   shell writes and reads them like the rest of the records file.
 
@@ -867,11 +869,20 @@ Rules, each tied to a requirement or to existing behaviour:
   runs and streams a silent host lists are stale (the job cannot report, and the registry
   keeps the listing until it forgets the host), so they do not keep it; a `Held` or `Reserved`
   mark still does. Release then waits for the registry to accept `release_host`, which is its
-  own check under its lock; that check must not count the stale listing of a silent host
-  with no lease, or the step asks again every tick and the host stays until the registry
-  forgets it. The time a host was first seen silent is kept in the records
-  (`silent_since`), so a scaler that restarts more often than `unknown_hold` still reaches
-  the hold; the time the scaler was down counts as silence. Hosts of a static pool are never released by the
+  own check under its lock. Today `js_registry`'s `quiet()` counts the stale listing of a
+  silent host with no lease, so the registry answers `Busy` to `Drain` and `ReleaseHost` and
+  the step asks again every tick, with no log line, until the registry forgets the host.
+  `quiet()` must stop counting a silent host's stale listing; once it does, that refusal is
+  gone and the hold (`unknown_hold` of silence, no booked lease, no `Held` or `Reserved`
+  mark) is the only guard against releasing a host that is alive. The time a host was first
+  seen silent is kept in the records (`silent_since`), with the time of the step that wrote
+  them (`last_step`). A scaler that restarts more often than `unknown_hold` still reaches
+  the hold, because the time it observed before and after adds up. The time it was down does
+  not count: no host could say hello meanwhile, so the first step after a restart moves
+  every saved silent and missing time forward by the span since `last_step`, and records
+  with no `last_step` begin the counts again at that step. `last_step` is written only with
+  the records, never alone, so it is a lower bound on the last step the old process ran,
+  and a restart errs toward counting less. Hosts of a static pool are never released by the
   scaler. Until then the machine counts toward the caps and the state shows the age of its
   silence.
 - A machine whose host the registry no longer shows (it ran `forget_lost`) is released the same

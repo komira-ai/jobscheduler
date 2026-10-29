@@ -22,7 +22,8 @@
 //!   an offer of another operating system or architecture.
 //! * Launch. Up to `max_step` launches per step, to the cheapest fitting offer that has a
 //!   price above zero (an offer with no price, or a price of zero, is never launched: zero
-//!   would pass both spend caps), when the pool is in `Live` mode, its checks pass, its list of machines was read, it is not
+//!   would pass both spend caps; a request that fits only such an offer shows
+//!   [`Blocked::Unpriced`]), when the pool is in `Live` mode, its checks pass, its list of machines was read, it is not
 //!   cooling off, no launch of it is waiting for the time its provider named, and the caps
 //!   hold: `max_instances`, `max_spend_per_hour` over the stored prices of the machines
 //!   held, and `max_spend_per_day` over what the machines cost in the last 24 hours (a
@@ -50,8 +51,9 @@
 //!   only, and only once its host has been missing on complete views for a third of
 //!   `boot_timeout`, so a restart does not release a machine whose agent is about to say
 //!   hello. The times a silent host was first seen silent and a machine was first seen
-//!   missing are in [`Records`], so a scaler restarted more often than `unknown_hold`
-//!   still reaches the hold. One the provider says it no longer has
+//!   missing are in [`Records`] with the time of the step that wrote them, so a scaler
+//!   restarted more often than `unknown_hold` still reaches the hold by the time it
+//!   observed; the time it was down is not counted. One the provider says it no longer has
 //!   ([`Input::not_found`]) is settled.
 //! * Scale down. A registered host quiet for `idle` is drained; a drained host that is
 //!   still quiet is marked for release; once the registry shows the mark the token is

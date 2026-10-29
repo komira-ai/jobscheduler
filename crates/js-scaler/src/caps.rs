@@ -44,10 +44,52 @@ pub(crate) fn nearest_miss<'a>(
     misses.and_then(|all| all.into_iter().max_by_key(|each| depth(*each)))
 }
 
+/// Whether `offer` could serve `demand` but for its price: available, fitting, and not
+/// refused this step.
+fn usable(
+    settings: &Settings,
+    offer: &Offer,
+    demand: &Demand,
+    refused: &[(String, String, Option<String>)],
+) -> bool {
+    let lately = refused.iter().any(|(pool, id, zone)| {
+        (pool.as_str(), id.as_str(), zone.as_deref())
+            == (
+                settings.pool.as_str(),
+                offer.id.as_str(),
+                offer.zone.as_deref(),
+            )
+    });
+    [offer.available, offer.fit(demand).is_ok(), !lately]
+        .into_iter()
+        .all(|ok| ok)
+}
+
+/// Whether `offer` has a price above zero. A price of zero is no price: it would pass both
+/// spend caps for any number of machines.
+fn priced(offer: &Offer) -> bool {
+    offer.price_cents_per_hour.is_some_and(|price| price > 0)
+}
+
+/// Whether some offer would serve `demand` but for having no price, or a price of zero.
+/// [`choose`] never takes one, so the pool launches nothing for the request, and the
+/// operator is told why.
+pub(crate) fn unpriced(
+    settings: &Settings,
+    offers: &[Offer],
+    demand: &Demand,
+    refused: &[(String, String, Option<String>)],
+) -> bool {
+    offers.iter().any(|offer| {
+        [usable(settings, offer, demand, refused), !priced(offer)]
+            .into_iter()
+            .all(|ok| ok)
+    })
+}
+
 /// The offer a launch for `demand` takes: available, priced above zero, fitting, and not
 /// refused this step; the cheapest, then the one with fewest gpus, then by id, then by
-/// zone. A price of zero is no price: it would pass both spend caps for any number of
-/// machines.
+/// zone.
 pub(crate) fn choose<'a>(
     settings: &Settings,
     offers: &'a [Offer],
@@ -57,22 +99,9 @@ pub(crate) fn choose<'a>(
     offers
         .iter()
         .filter(|offer| {
-            let lately = refused.iter().any(|(pool, id, zone)| {
-                (pool.as_str(), id.as_str(), zone.as_deref())
-                    == (
-                        settings.pool.as_str(),
-                        offer.id.as_str(),
-                        offer.zone.as_deref(),
-                    )
-            });
-            [
-                offer.available,
-                offer.price_cents_per_hour.is_some_and(|price| price > 0),
-                offer.fit(demand).is_ok(),
-                !lately,
-            ]
-            .into_iter()
-            .all(|ok| ok)
+            [usable(settings, offer, demand, refused), priced(offer)]
+                .into_iter()
+                .all(|ok| ok)
         })
         .min_by_key(|offer| {
             (

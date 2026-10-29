@@ -105,7 +105,8 @@ pub struct State {
     /// to say hello again) has been silent, as the scaler first saw it. A silent host is
     /// held and counted until it books nothing and has been silent for `unknown_hold`, so
     /// this is the age a status page shows. Kept in [`Records::silent_since`] too, so a
-    /// restart does not start it again; the downtime counts as silence.
+    /// restart does not start it again; the time the scaler was down does not count, see
+    /// [`Records::last_step`].
     pub silent: BTreeMap<String, Millis>,
     /// The machines released this step because their host was silent for `unknown_hold`
     /// and booked nothing (its leases given up, or marked releasing). The shell logs each:
@@ -119,6 +120,9 @@ pub struct State {
     /// machine is given up on only after a hold in this process, so a restart gives it the
     /// whole hold again, which is when its agent is about to say hello to the new registry.
     pub(crate) unheard: BTreeMap<String, Millis>,
+    /// Whether this state was read from records and has not yet taken a step: its first
+    /// step moves the silent and missing times past the time the scaler was down.
+    pub(crate) restored: bool,
 }
 
 impl State {
@@ -129,6 +133,7 @@ impl State {
             silent: records.silent_since.clone(),
             missing: records.missing_since.clone(),
             records,
+            restored: true,
             ..Self::default()
         }
     }

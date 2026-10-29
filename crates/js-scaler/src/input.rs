@@ -71,22 +71,23 @@ pub struct HostFacts {
     pub mark: Option<Mark>,
     /// Whether the host holds a lease, a run or a stream.
     ///
-    /// For a host that is not `Live` it means a booked lease: the shell sets it from the
-    /// lease table, not from the runs the host last listed. Those listings are stale once
-    /// the host stops talking and the registry keeps them until it forgets the host, so a
-    /// host that went lost in the middle of a job would otherwise look busy for a day. The
-    /// step also ignores `busy` for a silent host once [`lease_given_up`](Self::lease_given_up)
-    /// is `true`; a `Held` or `Reserved` mark still keeps it. For a `Live` host `busy` is
-    /// leases, runs and streams, as the registry's `releasing` reads them.
+    /// For a host that is not `Live` it means one thing: a lease booked on it in the lease
+    /// table. The shell never sets it from the runs the host last listed; those listings
+    /// are stale once the host stops talking and the registry keeps them until it forgets
+    /// the host, so a host that went lost in the middle of a job would otherwise look busy
+    /// for a day. So for a silent host `busy` and
+    /// [`lease_given_up`](Self::lease_given_up) are never both `true`: the first says a
+    /// lease is booked, the second says none is. A `Held` or `Reserved` mark keeps a silent
+    /// host as well. For a `Live` host `busy` is leases, runs and streams, as the
+    /// registry's `releasing` reads them.
     pub busy: bool,
     /// Whether the registry books nothing on the host: its lease grace gave up the leases
-    /// it held, or it held none. Once it is `true` for a silent host, the host is not
-    /// busy for the step whatever `busy` says (see [`busy`](Self::busy)). The shell sets it
-    /// for a silent host from the lease table,
+    /// it held, or it held none. The shell sets it for a silent host from the lease table,
     /// and it is `true` for a silent host that has no bookings at all (one that never held
     /// a lease included); it is `false` for a host that still holds a lease or whose
-    /// bookings the shell cannot read. A silent host marked `Releasing` needs no flag: the
-    /// registry booked nothing on it when it set the mark. The scaler also reads `busy` and
+    /// bookings the shell cannot read. It never holds together with
+    /// [`busy`](Self::busy) on a silent host. A silent host marked `Releasing` needs no
+    /// flag: the registry booked nothing on it when it set the mark. The scaler also reads
     /// `mark` and never releases a host that shows work, whatever this says.
     pub lease_given_up: bool,
 }

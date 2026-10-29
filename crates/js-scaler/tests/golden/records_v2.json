@@ -73,5 +73,6 @@
   },
   "missing_since": {
     "js-gone-away": 1000000120000
-  }
+  },
+  "last_step": 1000000040000
 }

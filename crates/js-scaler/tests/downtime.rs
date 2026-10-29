@@ -64,3 +64,35 @@ fn a_silent_host_is_not_drained_when_its_lease_is_given_up_after_a_long_downtime
     let actions = again.tick(at(back + 30 * MINUTE));
     assert_eq!(count(&actions, "Drain"), 1);
 }
+
+/// Asserts that records which name no last step, as an older file does, give no span to
+/// take away: the whole age of a silent host is taken as downtime, so its count begins at
+/// the first step and the hold runs from there, to the millisecond.
+#[test]
+fn records_without_a_last_step_begin_the_count_at_the_first_step() {
+    let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
+    rig.input.hosts[0].state = HostState::Lost;
+    rig.input.hosts[0].lease_given_up = true;
+    assert_eq!(kinds(&rig.tick(at(10 * SECOND))), ["Save"]);
+    rig.state.records.last_step = None;
+
+    let mut again = restart(&rig);
+    let back = 3 * HOUR;
+    assert_eq!(count(&again.tick(at(back)), "Drain"), 0);
+    assert_eq!(again.state.silent.values().copied().next(), Some(at(back)));
+    assert!(again.tick(at(back + 30 * MINUTE - 1)).is_empty());
+    let actions = again.tick(at(back + 30 * MINUTE));
+    assert_eq!(count(&actions, "Drain"), 1);
+}
+
+/// Asserts that a step which changes nothing does not write the time of the step: the file
+/// keeps the time of the last step that wrote it.
+#[test]
+fn a_step_that_changes_nothing_writes_nothing() {
+    let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
+    rig.input.hosts[0].state = HostState::Lost;
+    rig.input.hosts[0].lease_given_up = true;
+    assert_eq!(kinds(&rig.tick(at(10 * SECOND))), ["Save"]);
+    assert!(rig.tick(at(20 * SECOND)).is_empty());
+    assert_eq!(rig.state.records.last_step, Some(at(10 * SECOND)));
+}

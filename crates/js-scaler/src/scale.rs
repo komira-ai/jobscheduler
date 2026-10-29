@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{billed_until, check, choose, nearest_miss};
+use crate::caps::{billed_until, check, choose, nearest_miss, unpriced};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -443,6 +443,7 @@ impl Pass<'_> {
         let mut served: Vec<&Waiting> = Vec::new();
         let mut left = Vec::new();
         let mut stopped = None;
+        let mut no_price = false;
         for request in uncovered {
             let room = [
                 stopped.is_none(),
@@ -450,8 +451,14 @@ impl Pass<'_> {
             ]
             .into_iter()
             .all(|ok| ok);
-            let offer =
-                choose(settings, &pool.offers, &request.demand, &self.declined).filter(|_| room);
+            let chosen = choose(settings, &pool.offers, &request.demand, &self.declined);
+            no_price |= [
+                chosen.is_none(),
+                unpriced(settings, &pool.offers, &request.demand, &self.declined),
+            ]
+            .into_iter()
+            .all(|ok| ok);
+            let offer = chosen.filter(|_| room);
             match offer.map(|offer| self.stage(settings, offer, &staged)) {
                 Some(Ok(record)) => {
                     staged.push(record);
@@ -464,6 +471,7 @@ impl Pass<'_> {
                 None => left.push(request),
             }
         }
+        let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
         if live {
             if let Some(blocked) = stopped {
                 self.blocked.insert(settings.pool.clone(), blocked);
@@ -580,7 +588,13 @@ impl Pass<'_> {
         });
         self.records.silent_since = self.silent_now.clone();
         self.records.missing_since = self.missing_now.clone();
-        let save = (self.records != *before).then(|| Action::Save(Box::new(self.records.clone())));
+        // The time of the step is written with the records and never alone, so a restart
+        // reads a time that is no later than the last step the old process took.
+        let changed = self.records != *before;
+        if changed {
+            self.records.last_step = Some(now);
+        }
+        let save = changed.then(|| Action::Save(Box::new(self.records.clone())));
         let mut actions: Vec<Action> = save.into_iter().collect();
         actions.append(&mut self.actions);
         let no_offer = uncovered
@@ -605,6 +619,7 @@ impl Pass<'_> {
             silent_released: self.silent_released,
             missing: self.missing_now,
             unheard: self.unheard_now,
+            restored: false,
         };
         (state, actions)
     }

@@ -296,8 +296,12 @@ pub struct Cooldown {
 }
 
 /// The version of the records file this writer writes. Version 2 added the silent and
-/// missing times.
+/// missing times and the time of the last write.
 pub const VERSION: u32 = 2;
+
+/// The first version that has the silent and missing times and the time of the last write.
+/// A file of an older version is read with them empty.
+const TIMES_FROM: u32 = 2;
 
 /// The oldest version a reader still reads. A file of an older version is read as if it
 /// had been written by this one with the fields it lacks empty, and the next save writes
@@ -315,13 +319,21 @@ pub struct Records {
     pub cooldowns: BTreeMap<String, Cooldown>,
     /// Since when each registered machine whose host the registry shows but does not hear
     /// from has been silent, as the scaler first saw it. Written so that a scaler that
-    /// restarts more often than `unknown_hold` still reaches the hold: the time the
-    /// scaler was down counts as silence, since the host was not heard from then either.
+    /// restarts more often than `unknown_hold` still reaches the hold. The time the scaler
+    /// was down is not part of it: see [`Records::last_step`].
     pub silent_since: BTreeMap<String, Millis>,
     /// Since when each registered machine the registry does not show has been missing from
     /// complete views, unbroken, for the same reason. A restart of the scaler does not
     /// reset it, and nor does an incomplete view; a step that shows the host does.
     pub missing_since: BTreeMap<String, Millis>,
+    /// The time of the step that last wrote these records. A scaler that starts from them
+    /// was down from then until its first step, and the hosts could not say hello meanwhile,
+    /// so that span says nothing about them: the first step moves every silent and missing
+    /// time forward by it, and only time the scaler observed counts toward the holds. It is
+    /// written with every save and by no step on its own, so it is a lower bound on the
+    /// last step the old process ran, which errs toward counting less. `None` in a file
+    /// that has none: the whole span back to each time is taken as downtime.
+    pub last_step: Option<Millis>,
 }
 
 #[derive(Serialize)]
@@ -331,6 +343,7 @@ struct WireOut<'a> {
     cooldowns: &'a BTreeMap<String, Cooldown>,
     silent_since: &'a BTreeMap<String, Millis>,
     missing_since: &'a BTreeMap<String, Millis>,
+    last_step: Option<Millis>,
 }
 
 /// Version 2.
@@ -343,6 +356,8 @@ struct WireIn {
     cooldowns: BTreeMap<String, Cooldown>,
     silent_since: BTreeMap<String, Millis>,
     missing_since: BTreeMap<String, Millis>,
+    #[serde(default)]
+    last_step: Option<Millis>,
 }
 
 /// Version 1: the same without the two times.
@@ -387,6 +402,7 @@ impl Records {
             cooldowns: &self.cooldowns,
             silent_since: &self.silent_since,
             missing_since: &self.missing_since,
+            last_step: self.last_step,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -400,26 +416,27 @@ impl Records {
     pub fn decode(text: &str) -> Result<Self, RecordsError> {
         let value: serde_json::Value = serde_json::from_str(text)?;
         let found = value.get("version").and_then(serde_json::Value::as_u64);
-        // One arm for each version from `OLDEST` to `VERSION`.
-        match found {
-            Some(1) => {
-                let wire: WireV1 = serde_json::from_value(value)?;
-                Ok(Self {
-                    instances: wire.instances,
-                    cooldowns: wire.cooldowns,
-                    ..Self::default()
-                })
-            }
-            Some(2) => {
-                let wire: WireIn = serde_json::from_value(value)?;
-                Ok(Self {
-                    instances: wire.instances,
-                    cooldowns: wire.cooldowns,
-                    silent_since: wire.silent_since,
-                    missing_since: wire.missing_since,
-                })
-            }
-            _ => Err(RecordsError::Version { found }),
+        // The versions from `OLDEST` to `VERSION` are read; any other is refused.
+        let version = found
+            .and_then(|found| u32::try_from(found).ok())
+            .filter(|version| (OLDEST..=VERSION).contains(version))
+            .ok_or(RecordsError::Version { found })?;
+        if version < TIMES_FROM {
+            let wire: WireV1 = serde_json::from_value(value)?;
+            Ok(Self {
+                instances: wire.instances,
+                cooldowns: wire.cooldowns,
+                ..Self::default()
+            })
+        } else {
+            let wire: WireIn = serde_json::from_value(value)?;
+            Ok(Self {
+                instances: wire.instances,
+                cooldowns: wire.cooldowns,
+                silent_since: wire.silent_since,
+                missing_since: wire.missing_since,
+                last_step: wire.last_step,
+            })
         }
     }
 }

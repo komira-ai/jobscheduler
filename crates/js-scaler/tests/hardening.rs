@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use js_elastic::{Held, HostRef, HostStatus};
+use js_elastic::{Held, HostRef, HostStatus, Offer};
 use js_scaler::{
     Blocked, CooldownReason, HostFacts, HostState, Mark, Phase, Records, State, launchable,
 };
@@ -199,6 +199,7 @@ fn an_offer_priced_zero_is_not_launched() {
     only.input.waiting = vec![request("r1")];
     assert!(acquires(&only.tick(at(0))).is_empty());
     assert!(!launchable(&only.state, &only.input, at(0), &demand()));
+    assert_eq!(only.state.blocked["gpu"], Blocked::Unpriced);
 
     let mut beside = Rig::new(settings("gpu"));
     beside.pool().offers = vec![offer("free", 0), offer("a10", 60)];
@@ -207,6 +208,26 @@ fn an_offer_priced_zero_is_not_launched() {
     assert_eq!(plans.len(), 1);
     assert_eq!(plans[0].offer.id, "a10");
     assert_eq!(plans[0].offer.price_cents_per_hour, Some(60));
+    assert!(beside.state.blocked.is_empty());
+}
+
+/// Asserts that a request which fits only an offer with no price, or with a price of zero,
+/// shows the pool as blocked on it, and that a request nothing fits does not: that one is
+/// named in `no_offer` instead.
+#[test]
+fn a_request_that_fits_only_an_unpriced_offer_shows_the_pool_blocked() {
+    let mut rig = Rig::new(settings("gpu"));
+    rig.pool().offers = vec![Offer {
+        price_cents_per_hour: None,
+        ..offer("a10", 0)
+    }];
+    rig.input.waiting = vec![request("r1")];
+    assert!(acquires(&rig.tick(at(0))).is_empty());
+    assert_eq!(rig.state.blocked["gpu"], Blocked::Unpriced);
+
+    rig.pool().offers[0].available = false;
+    rig.tick(at(SECOND));
+    assert!(rig.state.blocked.is_empty());
 }
 
 /// Asserts that a machine found at the provider whose offer the catalog prices at zero is

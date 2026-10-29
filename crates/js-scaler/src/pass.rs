@@ -90,16 +90,35 @@ fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
 
 impl<'a> Pass<'a> {
     pub(crate) fn new(state: State, input: &'a Input, now: Millis) -> Self {
+        let last = state.records.last_step;
+        // The first step of a scaler read from records: it was down since the step that
+        // wrote them, and no host could say hello meanwhile, so each count moves forward
+        // by that span and holds only what the scaler observed. Records that name no such
+        // step give no span to take away, so the counts begin again now.
+        let after_downtime = |times: BTreeMap<String, Millis>| -> BTreeMap<String, Millis> {
+            if !state.restored {
+                return times;
+            }
+            times
+                .into_iter()
+                .map(|(name, since)| {
+                    let moved = last.map_or(now, |last| since.plus(now.since(last)).min(now));
+                    (name, moved)
+                })
+                .collect()
+        };
+        let silent = after_downtime(state.silent);
+        let missing = after_downtime(state.missing);
         Self {
             input,
             now,
             records: state.records,
             quiet: state.quiet,
             quiet_now: BTreeSet::new(),
-            silent: state.silent,
+            silent,
             silent_now: BTreeMap::new(),
             silent_released: Vec::new(),
-            missing: state.missing,
+            missing,
             missing_now: BTreeMap::new(),
             unheard: state.unheard,
             unheard_now: BTreeMap::new(),
