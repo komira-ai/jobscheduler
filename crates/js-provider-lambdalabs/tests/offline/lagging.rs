@@ -227,22 +227,178 @@ fn once_the_list_shows_the_instance_the_count_comes_from_the_list() {
     assert_eq!(api.fake.launched(), 2);
 }
 
+/// The hold of the rigs: the default `unknown_hold`.
+const HOLD: Duration = Duration::from_secs(600);
+
+fn refused_at(provider: &LambdaProvider, held: usize, max_machines: usize) {
+    let Acquired::Refused(refusal) = provider.acquire(&ask("b")) else {
+        panic!("launched past the cap");
+    };
+    assert_eq!(refusal.reason, Reason::AtMaxMachines { held, max_machines });
+}
+
 #[test]
-fn after_the_hold_an_instance_the_list_still_hides_is_no_longer_counted() {
+fn at_the_end_of_the_hold_a_found_instance_still_counts_and_the_cap_refuses() {
     let (api, clock, provider) = hidden_rig(1);
     assert!(matches!(
         provider.acquire(&ask("a")),
         Acquired::Accepted { .. }
     ));
-    // Just inside the hold: still counted.
-    clock.advance(Duration::from_secs(599));
-    assert!(matches!(provider.acquire(&ask("b")), Acquired::Refused(_)));
-    // The hold ends: the list is trusted again, as for an unknown launch. The retry of
-    // the same acquire launches, and so does the one for another id once it is due.
+    // Just inside the hold: counted, and nothing is read by id.
+    clock.advance(HOLD - Duration::from_secs(1));
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.count(Call::GetInstance), 0);
+    // The hold ends: the instance is read by id, found, and still counted.
     clock.advance(Duration::from_secs(1));
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.count(Call::GetInstance), 1);
+    assert_eq!(api.fake.launched(), 1);
+}
+
+#[test]
+fn a_probe_that_finds_the_instance_is_repeated_once_per_hold_not_per_tick() {
+    let (api, clock, provider) = hidden_rig(1);
     assert!(matches!(
         provider.acquire(&ask("a")),
         Acquired::Accepted { .. }
     ));
+    clock.advance(HOLD);
+    refused_at(&provider, 1, 1);
+    for _ in 0..5 {
+        clock.advance(INTERVAL);
+        refused_at(&provider, 1, 1);
+    }
+    assert_eq!(api.fake.count(Call::GetInstance), 1);
+    // A hold after the probe, the next one is made.
+    clock.advance(HOLD);
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.count(Call::GetInstance), 2);
+}
+
+#[test]
+fn a_probe_that_fails_keeps_the_instance_counted_and_is_retried_after_a_hold() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    api.fake
+        .fail_next(Call::GetInstance, ApiError::Transport("reset".to_owned()));
+    clock.advance(HOLD);
+    refused_at(&provider, 1, 1);
+    clock.advance(INTERVAL);
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.count(Call::GetInstance), 1);
+    // The next probe, a hold later, succeeds and finds it.
+    clock.advance(HOLD);
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.count(Call::GetInstance), 2);
+}
+
+#[test]
+fn a_404_while_the_list_cannot_be_read_is_not_trusted_and_the_instance_stays_counted() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    api.fake.remove_instance(&id("fake0001"));
+    clock.advance(HOLD);
+    // The launch's own list passes; the check that a list works fails.
+    api.fake.pass_next(Call::ListInstances);
+    api.fake
+        .fail_next(Call::ListInstances, ApiError::Transport("reset".to_owned()));
+    refused_at(&provider, 1, 1);
+    assert_eq!(api.fake.launched(), 1);
+}
+
+#[test]
+fn a_trusted_404_at_the_end_of_the_hold_drops_the_instance_and_frees_the_cap() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    api.fake.remove_instance(&id("fake0001"));
+    clock.advance(HOLD);
+    assert!(matches!(
+        provider.acquire(&ask("b")),
+        Acquired::Accepted { .. }
+    ));
     assert_eq!(api.fake.launched(), 2);
+}
+
+#[test]
+fn a_probe_that_finds_the_instance_terminated_drops_it() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    api.fake.set_status(&id("fake0001"), Status::Terminated);
+    clock.advance(HOLD);
+    assert!(matches!(
+        provider.acquire(&ask("b")),
+        Acquired::Accepted { .. }
+    ));
+}
+
+#[test]
+fn a_listed_row_without_our_marks_does_not_end_the_count() {
+    let (api, clock, provider) = hidden_rig(1);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    let original = api.fake.instances()[0].clone();
+    // The list shows the row, stripped of tags and name: foreign to the live set.
+    api.fake.update_instance(&id("fake0001"), &|row| {
+        row.tags.clear();
+        row.name = None;
+    });
+    api.hide.store(false, Ordering::SeqCst);
+    clock.advance(INTERVAL);
+    refused_at(&provider, 1, 1);
+    // The marks come back and the list shows the row as ours: the count comes from the
+    // list, and once the instance is removed the cap is free.
+    api.fake
+        .update_instance(&id("fake0001"), &|row| *row = original.clone());
+    clock.advance(INTERVAL);
+    refused_at(&provider, 1, 1);
+    api.fake.remove_instance(&id("fake0001"));
+    api.hide.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        provider.acquire(&ask("b")),
+        Acquired::Accepted { .. }
+    ));
+}
+
+#[test]
+fn every_id_a_multi_instance_launch_returns_counts_and_a_retry_gets_the_first() {
+    let (api, clock, provider) = hidden_rig(2);
+    // The launch asks for one instance; an answer with two is an anomaly the provider
+    // releases the extra of and counts both.
+    api.fake.launch_creates(2);
+    let Acquired::Accepted { held, extras } = provider.acquire(&ask("a")) else {
+        panic!("not accepted");
+    };
+    assert_eq!(held.id, id("fake0001"));
+    assert_eq!(extras.len(), 1);
+    assert_eq!(extras[0].id, id("fake0002"));
+    clock.advance(INTERVAL);
+    refused_at(&provider, 2, 2);
+    // The retry is answered with the first instance and no extras.
+    let Acquired::Accepted {
+        held: again,
+        extras,
+    } = provider.acquire(&ask("a"))
+    else {
+        panic!("not accepted");
+    };
+    assert_eq!(again.id, id("fake0001"));
+    assert!(extras.is_empty());
+    assert_eq!(api.fake.count(Call::Launch), 1);
+    // The extra is read by id with the first once the hold ends, and still counted.
+    clock.advance(HOLD);
+    refused_at(&provider, 2, 2);
 }
