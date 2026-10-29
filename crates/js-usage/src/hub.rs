@@ -57,7 +57,7 @@ use crate::{
 
 /// Heartbeats of a host after the one that carried a run's acknowledgement, at which the
 /// run is handed to the sink: the lease's last partial minute is sent on a later beat.
-pub const GRACE_BEATS: u8 = 2;
+pub const GRACE_BEATS: u8 = 1;
 
 /// How often, in wall minutes, the sink is flushed.
 pub const FLUSH_EVERY_MINUTES: u64 = 5;
