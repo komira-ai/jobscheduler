@@ -99,7 +99,7 @@ use std::time::Duration;
 use js_agent_wire::refusal;
 use js_agent_wire::{
     Heartbeat, HeartbeatReply, Hello, HostCredential, Phase, ProtocolRange, RefusalReason, Refused,
-    ValidationError, Welcome,
+    ValidationError, Welcome, limits,
 };
 use serde_json::Value;
 
@@ -629,7 +629,7 @@ impl<'a> Session<'a> {
             (Phase::Serving, Some(phase)) => phase,
             (phase, _) => phase,
         };
-        let beat = Heartbeat {
+        let mut beat = Heartbeat {
             host_id: self.hello.host_id.clone(),
             epoch: live.epoch,
             session: live.secret.0.clone(),
@@ -641,6 +641,7 @@ impl<'a> Session<'a> {
             exclusive_refused: lease.refused,
             load: None,
         };
+        shed_log_tails(&mut beat);
         beat.validate()
             .map(|()| serde_json::to_value(&beat).unwrap_or_default())
     }
@@ -841,5 +842,100 @@ impl<'a> Session<'a> {
             after: self.backoff.next(&mut *self.jitter, retry_after),
             note: Some(Note::Retrying { what, reason }),
         }
+    }
+}
+
+/// What a heartbeat may weigh once its log tails are counted: three quarters of the body
+/// the server reads, as the wire's own totals are held to.
+const BEAT_BUDGET: usize = limits::HEARTBEAT_BODY_BUDGET / 4 * 3;
+
+/// Drops the log tails of `beat`, the largest first, until the beat fits [`BEAT_BUDGET`].
+/// A result is resent until it is acknowledged, so a beat the server refuses as too large
+/// would stall every result in it for good; a result that loses its tail is still accepted
+/// and the run is still told. (The stored result keeps its tail: only the copy sent is cut.)
+fn shed_log_tails(beat: &mut Heartbeat) {
+    let size = |beat: &Heartbeat| serde_json::to_vec(beat).map_or(0, |bytes| bytes.len());
+    while size(beat) > BEAT_BUDGET {
+        let heaviest = beat
+            .results
+            .iter_mut()
+            .filter_map(|result| {
+                let weight = result
+                    .log_tail
+                    .as_ref()
+                    .map(|t| t.stdout.len() + t.stderr.len());
+                weight.map(|weight| (weight, result))
+            })
+            .max_by_key(|(weight, _)| *weight);
+        match heaviest {
+            Some((_, result)) => result.log_tail = None,
+            None => return,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use js_agent_wire::{LogTail, Outcome, RunResult};
+
+    use super::*;
+
+    fn result(run: &str, log: usize) -> RunResult {
+        RunResult {
+            run_id: run.to_owned(),
+            lease_id: "1-1".to_owned(),
+            outcome: Outcome::Failed,
+            exit_code: Some(1),
+            detail: None,
+            log_tail: Some(LogTail {
+                stdout: "o".repeat(log),
+                stderr: "e".repeat(log),
+                truncated: false,
+            }),
+        }
+    }
+
+    fn beat(results: Vec<RunResult>) -> Heartbeat {
+        Heartbeat {
+            host_id: "h".to_owned(),
+            epoch: 1,
+            session: "s".to_owned(),
+            phase: Phase::Serving,
+            held: Vec::new(),
+            results,
+            taint: None,
+            exclusive_ready: None,
+            exclusive_refused: None,
+            load: None,
+        }
+    }
+
+    /// Asserts that a beat of results whose tails fit the budget is sent whole, and that
+    /// one whose tails do not fit loses the largest tails first (the later of equals),
+    /// until it fits, while every
+    /// result stays. It catches a beat over the server's body limit (every result in it
+    /// would be refused for ever, and resent) and a result dropped to make room.
+    #[test]
+    fn a_beat_over_the_budget_sheds_the_largest_tails_first() {
+        let mut small = beat(vec![result("a", 100), result("b", 100)]);
+        shed_log_tails(&mut small);
+        assert!(small.results.iter().all(|r| r.log_tail.is_some()));
+
+        let each = limits::MAX_LOG_STREAM_LEN;
+        let mut big = beat(vec![
+            result("a", each),
+            result("b", each / 2),
+            result("c", each),
+            result("d", each),
+            result("e", each),
+        ]);
+        shed_log_tails(&mut big);
+        assert_eq!(big.results.len(), 5);
+        let size = serde_json::to_vec(&big).unwrap().len();
+        assert!(size <= BEAT_BUDGET, "{size}");
+        let kept: Vec<bool> = big.results.iter().map(|r| r.log_tail.is_some()).collect();
+        // 4 x 16 KiB + 8 KiB does not fit in 48 KiB: full-size tails go first (the last of
+        // equals first), and two of them are enough.
+        assert_eq!(kept, [true, true, true, false, false]);
     }
 }

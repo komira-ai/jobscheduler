@@ -361,6 +361,7 @@ fn a_load_at_every_cap_with_96_held_and_8_results_stays_under_the_budget() {
                 outcome: Outcome::TimedOut,
                 exit_code: None,
                 detail: None,
+                log_tail: None,
             })
             .collect(),
         taint: None,

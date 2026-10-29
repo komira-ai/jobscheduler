@@ -81,6 +81,33 @@ pub trait CommandRunner {
     /// Like [`CommandRunner::run`], but the program's environment is exactly `env`: the
     /// environment of the agent is not passed on.
     fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String>;
+
+    /// Like [`CommandRunner::run_in`], but both of the program's output streams are read,
+    /// each kept to its last `keep` bytes: a program that prints more is not an error, the
+    /// older bytes are dropped and [`Streams::dropped`] says so. The call fails when the
+    /// program has not exited within `limit`. A runner that cannot read the second stream
+    /// reports that and does not guess.
+    fn run_streams(
+        &self,
+        program: &str,
+        _args: &[&str],
+        _env: &[(&str, &str)],
+        _keep: usize,
+        _limit: Duration,
+    ) -> Result<Streams, String> {
+        Err(format!("{program}: this runner reads no standard error"))
+    }
+}
+
+/// The last bytes of the two output streams of a program that exited with status 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Streams {
+    /// The end of standard output.
+    pub stdout: Vec<u8>,
+    /// The end of standard error.
+    pub stderr: Vec<u8>,
+    /// Whether either stream printed more than was kept.
+    pub dropped: bool,
 }
 
 /// Reads a text file, and looks at the files around it.
@@ -256,6 +283,56 @@ pub enum Ran {
     Spawn(String),
 }
 
+impl SystemCommands {
+    /// Starts `program` and reads both its streams, each kept to its last `keep` bytes,
+    /// while it runs (neither stream can block it). The call fails when the program does
+    /// not exit with status 0, or does not finish within `limit` (it is
+    /// then killed and collected); a program that prints more than `keep` is not an error.
+    fn start_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        keep: usize,
+        limit: Duration,
+    ) -> Result<Streams, String> {
+        let failed = |err: io::Error| format!("{program}: {err}");
+        let (out_reader, out_writer) = io::pipe().map_err(failed)?;
+        let (err_reader, err_writer) = io::pipe().map_err(failed)?;
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(out_writer)
+            .stderr(err_writer)
+            .env_clear()
+            .envs(env.iter().copied());
+        if self.group {
+            command.process_group(0);
+        }
+        let spawned = command.spawn();
+        // The command (and with it the parent's copies of the write ends) is gone here, so
+        // the readers see the end of the output.
+        drop(command);
+        let child = spawned.map_err(failed)?;
+        let pid = child.id();
+        let (done, finished) = mpsc::channel();
+        // This thread owns the child from here on and always collects it.
+        thread::spawn(move || {
+            let _ = done.send(watch_streams(child, out_reader, err_reader, keep));
+        });
+        match finished.recv_timeout(limit) {
+            Ok((streams, status)) if status.code == Some(0) => Ok(streams),
+            Ok((_, status)) => Err(format!("{program}: {}", status.text)),
+            Err(_) => {
+                kill(pid, self.group);
+                let _ = finished.recv_timeout(COLLECT_WAIT);
+                Err(format!("{program}: timed out after {limit:?}"))
+            }
+        }
+    }
+}
+
 impl CommandRunner for SystemCommands {
     fn run(&self, program: &str, args: &[&str]) -> Result<String, String> {
         self.start(program, args, None)
@@ -264,6 +341,69 @@ impl CommandRunner for SystemCommands {
     fn run_in(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
         self.start(program, args, Some(env))
     }
+
+    fn run_streams(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        keep: usize,
+        limit: Duration,
+    ) -> Result<Streams, String> {
+        self.start_streams(program, args, env, keep, limit)
+    }
+}
+
+/// Reads both streams of `child` to their ends, then waits for it. The standard error is
+/// read on a thread of its own, so a program that fills one pipe while the other is read
+/// is not stalled.
+fn watch_streams(
+    mut child: Child,
+    out: PipeReader,
+    err: PipeReader,
+    keep: usize,
+) -> (Streams, Status) {
+    let err_reader = thread::spawn(move || read_tail(err, keep));
+    let (stdout, cut_out) = read_tail(out, keep);
+    let (stderr, cut_err) = err_reader.join().unwrap_or_default();
+    let lost = Status {
+        code: None,
+        text: "could not be collected".to_owned(),
+    };
+    let status = child.wait().map_or(lost, |status| Status {
+        code: status.code(),
+        text: status.to_string(),
+    });
+    let streams = Streams {
+        stdout,
+        stderr,
+        dropped: cut_out || cut_err,
+    };
+    (streams, status)
+}
+
+/// The last `keep` bytes `reader` yields, and whether it yielded more. The buffer is
+/// trimmed whenever it holds twice `keep`, so memory stays bounded however much is read.
+fn read_tail(mut reader: PipeReader, keep: usize) -> (Vec<u8>, bool) {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut dropped = false;
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        kept.extend_from_slice(&chunk[..n]);
+        if kept.len() >= keep.saturating_mul(2).max(chunk.len()) {
+            kept.drain(..kept.len() - keep);
+            dropped = true;
+        }
+    }
+    if kept.len() > keep {
+        kept.drain(..kept.len() - keep);
+        dropped = true;
+    }
+    (kept, dropped)
 }
 
 /// How a started program ended, as `watch` reports it.

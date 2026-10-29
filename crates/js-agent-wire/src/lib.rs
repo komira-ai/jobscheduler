@@ -110,8 +110,8 @@ pub use command::{Command, Isolation, JobSpec, Limits, Mount};
 pub use credential::HostCredential;
 pub use error::{Rule, ValidationError};
 pub use heartbeat::{
-    Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, Outcome, RefusalReason,
-    RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
+    Ack, ExclusiveRefusal, Heartbeat, HeartbeatReply, HeldRun, HeldState, LogTail, Outcome,
+    RefusalReason, RefusedCommand, ReplyCheck, ResultAck, RunResult, Taint,
 };
 pub use hello::{
     GpuDevice, Hello, HelloReply, InstanceIdentity, Phase, Refused, Welcome, WireShape,

@@ -211,6 +211,14 @@
 //! the agent does not accept `--container-bin` there: the post-job checks of
 //! [`integrity`](crate::integrity) read `/proc`, and a job must not run unchecked.
 //!
+//! # Logs
+//!
+//! `create` bounds the container's log on the host (see [`logs`]), and once a job has
+//! exited, before the container is removed, one `logs` call reads the last bytes of its
+//! standard output and standard error, apart, for the result ([`ContainerRuntime::log_tail`]).
+//! The call has the same limits as every other. The tail is returned verbatim to whoever
+//! can read the run: a job must not print secrets.
+//!
 //! # Not here
 //!
 //! Registry credentials (the agent holds none: an image is on the host, or pullable
@@ -218,6 +226,7 @@
 //! above).
 
 mod args;
+mod logs;
 mod seccomp;
 mod settings;
 
@@ -226,7 +235,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use js_agent_wire::Isolation;
+use js_agent_wire::{Isolation, LogTail};
 use serde_json::Value;
 
 pub use args::{
@@ -1099,5 +1108,9 @@ impl ContainerRuntime for CliRuntime {
 
     fn supports_gpus(&self) -> bool {
         self.gpus
+    }
+
+    fn log_tail(&mut self, id: &ContainerId) -> Result<Option<LogTail>, RuntimeError> {
+        self.read_logs(id).map_err(RuntimeError::from)
     }
 }

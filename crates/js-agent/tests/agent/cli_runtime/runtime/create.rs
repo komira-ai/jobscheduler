@@ -129,6 +129,12 @@ fn create_builds_the_documented_argv() {
         "core=0",
         "--ipc",
         "private",
+        "--log-driver",
+        "json-file",
+        "--log-opt",
+        "max-size=1048576",
+        "--log-opt",
+        "max-file=2",
         "--pull",
         "never",
         "--user",
@@ -173,6 +179,13 @@ fn podman_gets_cdi_devices_and_the_rest_alike() {
     assert!(args.contains(&"--read-only".to_owned()));
     let at = args.iter().position(|a| a == "--pid").unwrap();
     assert_eq!(args[at + 1], "private");
+    let at = args.iter().position(|a| a == "--log-driver").unwrap();
+    assert_eq!(args[at + 1], "k8s-file");
+    assert!(args.contains(&"max-size=1048576".to_owned()));
+    assert!(
+        !args.contains(&"max-file=2".to_owned()),
+        "Podman takes no max-file"
+    );
     assert!(
         args.contains(&"type=bind,src=/srv/in,dst=/mnt/data/in,readonly,nosuid,nodev".to_owned())
     );

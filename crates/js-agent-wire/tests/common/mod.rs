@@ -85,6 +85,7 @@ pub fn result() -> RunResult {
         outcome: Outcome::TimedOut,
         exit_code: Some(137),
         detail: Some("wall limit".into()),
+        log_tail: None,
     }
 }
 

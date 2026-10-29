@@ -185,6 +185,7 @@ impl Job {
             outcome,
             exit_code,
             detail: detail.map(str::to_owned),
+            log_tail: None,
         }
     }
 

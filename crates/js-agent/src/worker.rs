@@ -639,8 +639,9 @@ fn work(
             Order::Reply { reply, .. } => reply.commands.len(),
             _ => 0,
         });
-        // A run held may cost two calls (a stop, then an inspect or a remove).
-        let calls = life.held().len().saturating_mul(2).saturating_add(asked);
+        // A run held may cost three calls (a stop, then an inspect, the read of its log
+        // and a remove).
+        let calls = life.held().len().saturating_mul(3).saturating_add(asked);
         let bound = stall_bound(stop_grace, calls).as_millis();
         let bound = u64::try_from(bound).unwrap_or(u64::MAX);
         let due = clock.now_ms().saturating_add(bound).saturating_add(1);

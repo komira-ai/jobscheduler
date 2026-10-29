@@ -6,6 +6,7 @@
 
 mod args;
 mod lifecycle;
+mod logs;
 mod runtime;
 mod scripted;
 mod settings;

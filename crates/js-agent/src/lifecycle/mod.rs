@@ -187,6 +187,9 @@ pub mod detail {
 
 /// The codes of a [`Finding`].
 pub mod code {
+    /// The runtime could not read the log of a job that exited; its result goes without a
+    /// tail.
+    pub const LOGS_FAILED: &str = "logs-failed";
     /// The runtime could not tell whether a container has exited.
     pub const POLL_FAILED: &str = "poll-failed";
     /// The runtime could not stop a container.

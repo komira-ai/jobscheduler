@@ -66,6 +66,11 @@ pub const MAX_VERSION_LEN: usize = 64;
 pub const MAX_TAINT_TEXT_LEN: usize = 256;
 /// Longest result `detail` text, in bytes.
 pub const MAX_DETAIL_LEN: usize = 1024;
+/// Longest tail of one stream of a run's log in a result, in bytes. A result is resent in
+/// every heartbeat until acknowledged and the heartbeat body is held to
+/// [`HEARTBEAT_BODY_BUDGET`], so the tail is kept small: two streams at this size are a
+/// quarter of the budget, before JSON escaping.
+pub const MAX_LOG_STREAM_LEN: usize = 8 * 1024;
 /// Longest `detail` of an exclusive refusal, in bytes; the scheduler never parses it.
 pub const MAX_REFUSAL_DETAIL: usize = 256;
 /// Longest refusal code, in bytes.
