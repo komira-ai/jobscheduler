@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Request, Requeue,
-    Scheduler,
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, MemoryPercent, OpState, Request,
+    Requeue, Scheduler,
 };
 use js_store::Rows;
 use js_types::sched::{
@@ -126,13 +126,23 @@ pub(crate) struct Engine {
     pub(crate) size_keys: bool,
     /// Key floors the estimator lowered that the state store has not taken yet, at most one
     /// per size key ([`Engine::lower_key_floors`]).
-    pub(crate) unwritten_floors: Vec<KeyFloor>,
+    pub(crate) unwritten_floors: Vec<Lowering>,
+}
+
+/// A key floor the estimator lowered, for the state store to take.
+pub(crate) struct Lowering {
+    /// The floor as it stands in the scheduler now.
+    pub(crate) row: KeyFloor,
+    /// The ask the estimator lowered it from: the store's row is lowered only while it holds
+    /// no more than this ([`Rows::lower_key_floor`]).
+    pub(crate) before: u64,
 }
 
 impl Engine {
     /// An engine over a new scheduler, whose writer takes everything.
     pub(crate) fn new(config: &Config) -> Self {
-        let mut sched = Scheduler::new(config.term);
+        let mut sched = Scheduler::new(config.term)
+            .with_memory_percent(MemoryPercent::clamped(config.memory_schedulable_percent));
         if let Some(load) = config.load {
             sched = sched.with_load_config(load);
         }
@@ -391,9 +401,10 @@ impl Engine {
     /// queued operations it did not enqueue.
     fn runnable_elsewhere(&self, operation: OperationId) -> bool {
         self.sched.request(operation).is_some_and(|request| {
+            let percent = self.sched.memory_percent();
             self.remote
                 .iter()
-                .any(|(caps, capacity)| request.runnable_on(caps, capacity))
+                .any(|(caps, capacity)| percent.runnable_on(request, caps, capacity))
         })
     }
 
@@ -544,7 +555,16 @@ impl Engine {
     /// again at a later tick ([`Engine::write_key_floors`]); until then a restart books the
     /// higher floor. A floor the scheduler holds above what the estimator saw before the
     /// decay is left alone: a kill the estimator never saw raised it since.
-    pub(crate) fn lower_key_floors(&mut self, a: &dyn Adapter, lowered: Vec<Lowered>) {
+    pub(crate) fn lower_asked_key_floors(&mut self, a: &mut dyn Adapter) {
+        // A core with size keys off holds no key floors: the adapter is not asked.
+        if self.size_keys {
+            let lowered = a.lowered();
+            self.lower_key_floors(a, lowered);
+        }
+    }
+
+    /// [`Engine::lower_key_floors`] for the floors `lowered`, which the adapter named.
+    fn lower_key_floors(&mut self, a: &dyn Adapter, lowered: Vec<Lowered>) {
         for Lowered {
             size_key,
             before,
@@ -557,8 +577,15 @@ impl Engine {
             let Some(row) = self.sched.lower_key_floor(size_key, ask) else {
                 continue;
             };
-            self.unwritten_floors.retain(|f| f.key != size_key);
-            self.unwritten_floors.push(row);
+            // A row still waiting for the store replaces an older one of its key, and the
+            // store's row is still the one the older lowering saw: the larger `before` stands.
+            let waiting = self
+                .unwritten_floors
+                .iter()
+                .filter(|f| f.row.key == size_key);
+            let before = waiting.map(|f| f.before).fold(before, u64::max);
+            self.unwritten_floors.retain(|f| f.row.key != size_key);
+            self.unwritten_floors.push(Lowering { row, before });
         }
         self.write_key_floors(a);
     }
@@ -579,10 +606,12 @@ impl Engine {
         // to: a kill that raised it since has written the higher row (a restart loses what is
         // pending, and the higher row it leaves is the safe side).
         self.unwritten_floors
-            .retain(|row| sched.key_floor(row.key).unwrap_or(0) == row.ask);
-        self.unwritten_floors.retain(|row| {
-            let summary = a.summary_name(row.key);
-            let refused = rows.put_key_floor(row, summary.as_deref()).err();
+            .retain(|l| sched.key_floor(l.row.key).unwrap_or(0) == l.row.ask);
+        self.unwritten_floors.retain(|l| {
+            let summary = a.summary_name(l.row.key);
+            let refused = rows
+                .lower_key_floor(&l.row, l.before, summary.as_deref())
+                .err();
             if let Some(error) = &refused {
                 tracing::warn!(%error, "a lowered key floor was not written");
             }

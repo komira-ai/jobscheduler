@@ -175,6 +175,35 @@ fn stale_start_dropped_silently() {
     assert_eq!(names(&h.start(late)), ["started late"]);
 }
 
+/// Asserts that a native start, which this agent cannot run yet, creates nothing (no
+/// container, no scratch directory, no booking) and is answered with a held
+/// `failed_to_start` result carrying `native-unsupported`. It catches an agent that
+/// starts a native job as a container, or drops it without telling the server.
+#[test]
+fn native_job_is_refused_while_the_agent_has_no_native_runtime() {
+    let mut h = Harness::new("native-refused");
+    let mut spec = job("r1");
+    spec.image = String::new();
+    spec.args = Vec::new();
+    spec.native = Some(js_agent_wire::NativeSpec {
+        program: "/usr/bin/true".to_owned(),
+        args: Vec::new(),
+        env: Default::default(),
+        cwd: String::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        network: js_agent_wire::NetworkLevel::Off,
+    });
+    let events = h.start(spec);
+    assert_eq!(names(&events), ["refused r1 native-unsupported"]);
+    assert!(h.log.borrow().is_empty());
+    assert!(!h.scratch_of("r1").exists());
+    assert_eq!(h.life.free().cpu_millis, 4000);
+    let result = &h.life.results()[0];
+    assert_eq!(result.outcome, Outcome::FailedToStart);
+    assert_eq!(result.detail.as_deref(), Some("native-unsupported"));
+}
+
 /// Asserts that a start with `isolation = host` on an agent without `--allow-host-jobs`
 /// creates nothing (no container, no scratch directory, no booking) and is answered
 /// with a held `failed_to_start` result carrying `host-jobs-not-allowed`; and that with
