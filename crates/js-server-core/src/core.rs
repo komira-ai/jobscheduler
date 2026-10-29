@@ -89,9 +89,23 @@ pub struct Config {
     /// stuck work). The capacity the scheduler shows is the cut one. Cores, GPUs, VM
     /// slots and the lease cap are not cut, and neither is any figure an agent measures
     /// or a job's learned memory. Defaults to 100, which leaves admission unchanged.
-    /// [`Config::validate`] refuses 0 and anything above 100; a core built from a value
-    /// outside the range (it cannot fail) holds it to 1 to 100.
+    /// [`Config::validate`] refuses 0 and anything above 100, and [`Core::open`] calls it,
+    /// so a server refuses to start on such a value; only [`Core::new`], which cannot fail,
+    /// holds one to 1 to 100, as a last resort. A remote frontend's daemons are judged by
+    /// this core's percent, not their own frontend's, so a fleet whose frontends run
+    /// different percents applies the local one to every daemon it looks at.
     pub memory_schedulable_percent: u32,
+}
+
+/// Why [`Core::open`] did not start a core.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    /// The configuration is out of range.
+    #[error(transparent)]
+    Config(#[from] PercentError),
+    /// The state store cannot be read or written, or holds a row the scheduler did not write.
+    #[error(transparent)]
+    State(#[from] StateError),
 }
 
 impl Config {
@@ -115,8 +129,8 @@ impl Config {
     }
 
     /// Whether this configuration can build a core: `memory_schedulable_percent` must be
-    /// an integer from 1 to 100. The error names the field. A server calls this before
-    /// [`Core::new`], which cannot fail.
+    /// an integer from 1 to 100. The error names the field. [`Core::open`] calls this
+    /// first; [`Core::new`], which cannot fail, does not.
     ///
     /// # Errors
     ///
@@ -424,14 +438,16 @@ impl<A: Adapter> Core<A> {
     /// ([`Core::intake`]) requeues its lease. An operator's cordons are taken up too.
     ///
     /// # Errors
-    /// The store cannot be read or written, or holds a row that is not one the scheduler
-    /// wrote.
+    /// [`OpenError::Config`] when `config` fails [`Config::validate`]; [`OpenError::State`]
+    /// when the store cannot be read or written, or holds a row that is not one the
+    /// scheduler wrote.
     pub fn open(
         config: &Config,
         adapter: A,
         storage: Storage,
         now: FarmTime,
-    ) -> Result<Self, StateError> {
+    ) -> Result<Self, OpenError> {
+        config.validate()?;
         let mut core = Self::new(config, adapter);
         let Locked { engine, adapter } = core.state_mut();
         engine.keep_in(adapter, config.term, storage, now)?;

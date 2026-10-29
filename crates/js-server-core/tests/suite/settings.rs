@@ -6,13 +6,14 @@
 
 use js_caps::NodeCaps;
 use js_sched::MemoryLadder;
-use js_server_core::{Config, Core, PercentError, Report, Reported, WholeNodeConfig};
+use js_server_core::{Config, Core, OpenError, PercentError, Report, Reported, WholeNodeConfig};
 use js_types::sched::{Failure, LeaseId, LeaseKind, OperationId, Outcome, Resources, WorkKey};
 
 use crate::common::{
     Call, GIB, Rig, at, beat, block_on, calls, core_by, lease, reported, request, resend, submit,
     submit_request, up, up_after, worker,
 };
+use crate::stored::Setup;
 
 fn key(n: u64) -> WorkKey {
     WorkKey::new("main", format!("action-{n}"))
@@ -226,5 +227,33 @@ fn a_core_built_from_an_out_of_range_percent_holds_it_to_the_range() {
         up(&core, 0, "node-a", "d1");
         let shown = core.with(|view, _| view.sched().capacity(&worker("node-a")));
         assert_eq!(shown.map(|c| c.memory_bytes), Some(memory), "{bad}");
+    }
+}
+
+/// Catches: a server start that clamps an out-of-range percent instead of refusing it: 0
+/// would run at 1% and 500 at 100%, with nothing said. `Core::open` refuses the value, naming
+/// the field, and opens for each value in range.
+#[test]
+fn opening_a_core_refuses_a_percent_outside_the_range() {
+    for bad in [0, 101, 500] {
+        let setup = Setup::new();
+        let mut config = Config::new(1);
+        config.memory_schedulable_percent = bad;
+
+        let opened = Core::open(&config, Rig::default(), setup.storage(), at(0));
+
+        let error = opened.err().expect("refused");
+        assert!(
+            matches!(&error, OpenError::Config(PercentError(got)) if *got == bad),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("memory_schedulable_percent"));
+    }
+    for good in [1, 100] {
+        let setup = Setup::new();
+        let config = Config::new(1)
+            .with_memory_schedulable_percent(good)
+            .expect("in range");
+        assert!(Core::open(&config, Rig::default(), setup.storage(), at(0)).is_ok());
     }
 }
