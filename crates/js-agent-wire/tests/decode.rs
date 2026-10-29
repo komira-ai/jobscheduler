@@ -69,6 +69,7 @@ fn minimal_start_takes_defaults() {
     assert!(spec.labels.is_empty());
     assert_eq!((spec.heartbeat_seq, spec.valid_for_ms), (0, 0));
     assert_eq!(spec.limits.pids, None);
+    assert_eq!(spec.bundle, None);
     assert_eq!(spec.isolation, Isolation::Contained);
     assert_eq!(spec.validate(), Ok(()));
 }

@@ -139,17 +139,24 @@
 //! A session given a [`Quiesce`] ([`Session::with_quiesce`]) follows the `exclusive` lease a
 //! heartbeat reply names: `preparing`, then `exclusive_ready` once the host is quiet, or
 //! `exclusive_refused` (`host-unsafe` for a finding, `not-quiet` when a run is still held
-//! after `prepare_timeout`), then `restoring` when the reply stops naming the lease; see
-//! the `exclusive` module for the sequence and [`lifecycle::Lifecycle::prepare`] for what
-//! quiet means. The agent started by [`run_with`] gives the
-//! session no [`Quiesce`]: the job [`Worker`] does not implement it, so with `--container-bin`
-//! too the session does not follow an `exclusive` lease. Its heartbeats name no lease phase,
-//! `exclusive_ready` or `exclusive_refused`, and the worker's lifecycle refuses every start
-//! (`no-capacity`, reported as `failed_to_start`) while a reply names a lease, since nothing
-//! prepares the host for it; the runs it holds go on. A later change implements [`Quiesce`]
-//! on the worker. `prepare_timeout` is [`PREPARE_TIMEOUT`]
-//! until a flag sets it. The VM check of the design is a later change; the readiness hook
-//! (`--readiness-hook`, see `readiness`) wraps the host in [`Hooked`].
+//! after `prepare_timeout`, the hook's own code when the readiness hook refuses), then
+//! `restoring` when the reply stops naming the lease; see the `exclusive` module for the
+//! sequence and [`lifecycle::Lifecycle::prepare`] for what quiet means.
+//!
+//! The agent started by [`run_with`] with `--container-bin` gives its session a
+//! [`WorkerHost`], so it follows the lease. The checks and the hook block, so they run on
+//! the job [`Worker`]'s thread: each heartbeat that is waiting for the host sends the worker
+//! an order without waiting and reads the answer the worker last published for that lease
+//! (an answer about another lease is never taken for this one). While the host is not quiet
+//! the heartbeats say `preparing`; the starts of the lease run once the host is found quiet
+//! (and the hook, if any, agreed), and a start for any other lease is refused (`no-capacity`)
+//! from the reply that names the lease until the one that stops naming it. The readiness
+//! hook (`--readiness-hook`, see `readiness`) runs once for each lease, after the agent's
+//! own checks passed, and its verdict is kept for the lease. The deadline is
+//! [`PREPARE_TIMEOUT`] until a flag sets it, counted on the worker's clock. An agent without
+//! `--container-bin` runs no job and has no host to prepare, so it ignores `exclusive`. The
+//! VM check of the design is a later change. [`Hooked`] is the same hook rule as a wrapper
+//! around any [`Quiesce`], for a host driven in-thread.
 //!
 //! # Secrets
 //!
@@ -211,7 +218,7 @@ use jobs::Seams;
 use lifecycle::{Local, StateRoot};
 pub use readiness::{
     EXIT_NOISE_OVER_BOUND, EXIT_NOT_QUIET, EXIT_SETUP_FAILED, EXIT_UNSUPPORTED, HookRunner, Hooked,
-    ReadinessHook, Verdict, hook_runner,
+    ReadinessHook, Verdict, WorkerHook, hook_runner,
 };
 pub use run::{Exit, Sleeper, Wake, drive};
 pub use session::{
@@ -221,8 +228,9 @@ pub use signals::SystemSleeper;
 pub use system::{Machine, RuntimeBuild, SharedClock, System};
 pub use transport::{Answer, Connector, Dialer, REQUEST_LIMIT, Transport};
 pub use worker::{
-    Delivery, Handle, LINES_CAP, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue, STALL_CALLS_MAX,
-    STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, stall_bound,
+    Delivery, Handle, LINES_CAP, LeaseAnswers, Plan, QUEUE, RESCUE_BOUND, RESCUE_MAX, Rescue,
+    STALL_CALLS_MAX, STALL_MARGIN, STEP_EVERY, Snapshot, WIND_DOWN_MARGIN, Worker, WorkerHost,
+    stall_bound,
 };
 
 /// The exit statuses of `js-agent`.
@@ -379,9 +387,14 @@ fn execute(
     });
     let checked = offer.hello.validate();
     checked.map_err(|why| Failure::Usage(format!("the hello is not acceptable: {why}")))?;
-    // The hook is checked now for the same reason; the change that wires the lifecycle
-    // to the session wraps its host in `Hooked`.
-    ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
+    // The hook is checked now for the same reason; the job worker runs it, on its own
+    // thread, for a whole-node lease whose host it found quiet. `hook_runner` bounds one
+    // run to twice `prepare_timeout`, which the worker's watchdog is told of.
+    let hook = ReadinessHook::from_cli(&cli).map_err(Failure::Usage)?;
+    let readiness = hook.map(|hook| {
+        let runner = Box::new(hook_runner(PREPARE_TIMEOUT));
+        WorkerHook::new(hook, runner, PREPARE_TIMEOUT.saturating_mul(2))
+    });
     let toolkit = ToolkitHook::from_cli(&cli).map_err(Failure::Usage)?;
     // The post-job checks read /proc, which a Mac does not have: a container job there
     // would run unchecked, so none is accepted (see `integrity`). This comes before the
@@ -460,12 +473,22 @@ fn execute(
         machine: &services.machine,
         hook: services.worker_hook,
         rescue_bound: services.rescue_bound,
+        readiness,
     };
     let started = jobs::start(local, &offer.hello, platform, seams, err);
     let jobs = started.map_err(Failure::Usage)?;
+    // The session asks the worker about a whole-node lease; the worker answers on its own
+    // thread (see `WorkerHost`), so the heartbeat loop never waits for a check or the hook.
+    let mut host = jobs
+        .as_ref()
+        .map(|(worker, _)| WorkerHost::new(worker.handle()));
+    let clock = jobs.as_ref().map(|(worker, _)| worker.clock());
     let mut session = Session::new(offer.hello, &mut *transport, &mut *services.jitter);
     if let Some((worker, drain)) = &jobs {
         session = session.with_jobs(worker, *drain);
+    }
+    if let (Some(host), Some(clock)) = (host.as_mut(), clock.as_ref()) {
+        session = session.with_default_quiesce(host, clock);
     }
     if let Some(file) = &credentials {
         session = session.with_credential_store(file);

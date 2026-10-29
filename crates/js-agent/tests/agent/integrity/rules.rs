@@ -100,7 +100,13 @@ fn a_new_kernel_thread_is_not_a_daemonised_child() {
         after(&mut checks, "r1").is_ok(),
         "a thread of kthreadd is the kernel's"
     );
-    host.start_process(process(901, 1, 0, 5001, "0::/system.slice/x.service"));
+    host.start_process(process(
+        901,
+        1,
+        0,
+        5001,
+        "0::/machine.slice/libpod-9e1.scope",
+    ));
     let found = after(&mut checks, "r2").unwrap_err();
     assert_eq!(found.code(), code::DAEMONISED_CHILD);
     assert!(found.detail().contains("pid 901"), "{found:?}");

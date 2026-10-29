@@ -1,7 +1,7 @@
 //! The checks as the lifecycle runs them: the real [`Integrity`] over the in-memory host,
 //! after the container and scratch of each job are gone.
 
-use js_agent::integrity::{FakeHost, Integrity};
+use js_agent::integrity::{FakeHost, Integrity, input};
 
 use super::{JOB_UID, mount, process, started};
 use crate::lifecycle::{Harness, Options, cleanup, job, names};
@@ -137,4 +137,64 @@ fn a_neighbours_container_is_not_the_jobs_own() {
         "finding r2 process-as-job-user",
         "its process outlived its container: {events:?}"
     );
+}
+
+/// Asserts that a job that starts on an idle host is compared with the host as it was when
+/// it started: a module an operator loads between jobs is not the next job's. A baseline
+/// kept from the last check would call it `kernel-module-changed` and taint the host for
+/// something that happened while no job ran.
+#[test]
+fn a_job_on_an_idle_host_starts_from_the_host_as_it_is() {
+    let host = FakeHost::quiet();
+    let mut h = checked("idle", &host);
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    h.life.step();
+    host.load_module("zram");
+    h.start(job("r2"));
+    h.fake.exit("r2", 0);
+    let events = names(&h.life.step());
+    assert_eq!(events.last().unwrap(), "freed r2", "{events:?}");
+    assert!(!h.life.is_tainted());
+}
+
+/// Asserts that a job that starts beside another does not move the baseline: a module
+/// loaded while the first job runs is still found when it ends, though a second job started
+/// after it. It catches a baseline retaken at every start, which would let a running job's
+/// change pass.
+#[test]
+fn a_job_that_starts_beside_another_keeps_the_baseline() {
+    let host = FakeHost::quiet();
+    let mut h = checked("busy", &host);
+    h.start(job("r1"));
+    host.load_module("evil");
+    h.start(job("r2"));
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(
+        events.last().unwrap(),
+        "finding r1 kernel-module-changed",
+        "{events:?}"
+    );
+    assert!(h.life.is_tainted());
+}
+
+/// Asserts that a host that cannot be read when a job starts on it idle keeps the baseline
+/// it had, and that the check after the job finds it unreadable and taints the host. It
+/// catches a baseline replaced by an empty or partial reading, which would hide whatever
+/// the job then left.
+#[test]
+fn an_unreadable_host_at_an_idle_start_is_found_by_the_check() {
+    let host = FakeHost::quiet();
+    let mut h = checked("idle-unreadable", &host);
+    host.fail(input::MODULES);
+    h.start(job("r1"));
+    h.fake.exit("r1", 0);
+    let events = names(&h.life.step());
+    assert_eq!(
+        events.last().unwrap(),
+        "finding r1 modules-unreadable",
+        "{events:?}"
+    );
+    assert!(h.life.is_tainted());
 }
