@@ -75,6 +75,13 @@ pub struct Cli {
         requires = "agent_token_file"
     )]
     pub agent_hello_interval: Duration,
+    /// Refuses the first hello of a one-time join token that does not say the agent keeps
+    /// a host credential, so every launched host's token is dead after its first hello.
+    /// Turn it on once every agent is new: an agent that predates the host credential
+    /// cannot say so and is refused with `join-token-credential-required`. Off by default;
+    /// pool join tokens are not affected.
+    #[arg(long, requires = "agent_token_file")]
+    pub require_host_credential: bool,
     /// The ttl of a lease whose client names none, such as `600s`, `10m` or `1h`.
     #[arg(long, default_value = "600s", value_parser = parse_duration)]
     pub default_ttl: Duration,
@@ -281,6 +288,8 @@ pub(crate) struct AgentSetup {
     pub(crate) tokens: AgentTokens,
     pub(crate) pool: PoolConfig,
     pub(crate) hello_limit: HelloLimit,
+    /// `--require-host-credential`.
+    pub(crate) require_host_credential: bool,
 }
 
 impl Config {
@@ -380,6 +389,7 @@ fn hosts(cli: &Cli, client: &Token) -> Result<Hosts, StartupError> {
                     burst: cli.agent_hello_burst,
                     interval: cli.agent_hello_interval,
                 },
+                require_host_credential: cli.require_host_credential,
             }),
         }),
         (Some(_), None) => Err(StartupError::new(

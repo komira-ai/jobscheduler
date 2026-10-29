@@ -288,15 +288,39 @@ impl Agent {
         connector: impl Connector + Send + 'static,
         machine: Arc<FakeMachine>,
     ) -> Self {
+        Self::launch(url, Some(token), extra, host, connector, machine)
+    }
+
+    /// [`Agent::spawn`] with no `--token-file`: the agent finds its credential in the state
+    /// root `extra` names.
+    pub fn spawn_tokenless(
+        url: String,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+    ) -> Self {
+        let machine = Arc::new(FakeMachine::new());
+        Self::launch(url, None, extra, host, connector, machine)
+    }
+
+    fn launch(
+        url: String,
+        token: Option<PathBuf>,
+        extra: &[&str],
+        host: fn() -> Host,
+        connector: impl Connector + Send + 'static,
+        machine: Arc<FakeMachine>,
+    ) -> Self {
         let (tell, worker) = channel();
         let (slept, waits) = channel();
         let (go, gate) = channel();
-        let mut args: Vec<String> = vec![
-            "--server".into(),
-            url,
-            "--token-file".into(),
-            token.to_str().unwrap().to_owned(),
-        ];
+        let mut args: Vec<String> = vec!["--server".into(), url];
+        if let Some(token) = token {
+            args.extend([
+                "--token-file".to_owned(),
+                token.to_str().unwrap().to_owned(),
+            ]);
+        }
         if !extra.contains(&"--pool") {
             args.extend(["--pool".to_owned(), "macs".to_owned()]);
         }

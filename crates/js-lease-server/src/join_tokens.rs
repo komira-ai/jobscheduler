@@ -243,6 +243,10 @@ pub(crate) enum JoinRefusal {
     /// The hello asked for a credential and the operating system gave no random bytes for
     /// it; nothing was used, and the host may say hello again.
     Unavailable,
+    /// The server is set to require a host credential and the first hello of an unused
+    /// token did not ask for one. Nothing was used; the token stays good for a hello that
+    /// asks.
+    CredentialRequired,
 }
 
 impl JoinRefusal {
@@ -255,6 +259,7 @@ impl JoinRefusal {
             Self::NotAdmitted => "join-token-not-admitted",
             Self::Unsaved => "join-token-unsaved",
             Self::Unavailable => "join-token-unavailable",
+            Self::CredentialRequired => "join-token-credential-required",
         }
     }
 }
@@ -264,6 +269,8 @@ pub(crate) struct JoinTokens {
     path: PathBuf,
     clock: SharedClock,
     random: Box<dyn SessionSource>,
+    /// Refuse the first hello of an unused token that does not ask for a host credential.
+    require_credential: bool,
     entries: Mutex<Entries>,
 }
 
@@ -280,8 +287,18 @@ impl JoinTokens {
             path,
             clock,
             random,
+            require_credential: false,
             entries: Mutex::new(entries),
         })
+    }
+
+    /// These tokens with the first hello of an unused one required to ask for a host
+    /// credential: a hello that does not is refused ([`JoinRefusal::CredentialRequired`])
+    /// and leaves the token unused. A token that already registered its host is not
+    /// affected, and pool tokens are not join tokens.
+    pub(crate) fn requiring_credential(mut self, require: bool) -> Self {
+        self.require_credential = require;
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Entries> {
@@ -402,6 +419,9 @@ impl JoinTokens {
         }
         if instance != Some(&entry.instance) {
             return Err(JoinRefusal::WrongInstance);
+        }
+        if self.require_credential && !issue {
+            return Err(JoinRefusal::CredentialRequired);
         }
         let issued = self.credential_if(issue)?;
         let used = Entry {

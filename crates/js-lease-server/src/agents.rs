@@ -69,13 +69,15 @@ pub(crate) fn assemble(
                 tokens,
                 pool,
                 hello_limit,
+                require_host_credential,
             } = *agents;
             let path = state_path(state_file, ".agents");
             let joins = JoinTokens::open(
                 state_path(state_file, ".joins"),
                 clock.clone(),
                 Box::new(OsSessions),
-            )?;
+            )?
+            .requiring_credential(require_host_credential);
             let bindings = agent_state::load(&path)?;
             let registry = Registry::new(pool, clock.clone());
             for (host, binding) in &bindings {
