@@ -148,6 +148,15 @@ fn an_unusable_default_files_root_is_a_warning() {
         said.starts_with("run files unavailable: --run-files-root: "),
         "{said}"
     );
+    // A default that is the state root is never swept over it: run files go off, with a
+    // warning, and the agent still starts (a default must not break an unrelated setup).
+    let clash = Local::from_cli_with_default_files_root(&cli, &dir.path("state")).unwrap();
+    assert!(clash.files.is_none());
+    let said = clash.files_warning.unwrap();
+    assert!(
+        said.contains("is, holds or lies in the --state-root"),
+        "{said}"
+    );
     let good = Local::from_cli_with_default_files_root(&cli, &dir.path("default-files")).unwrap();
     assert!(good.files.is_some() && good.files_warning.is_none());
 }

@@ -605,13 +605,6 @@ impl Local {
                 );
             }
         }
-        if container.is_some() && scratch.is_none() {
-            return Err(
-                "--scratch-root: required with --container-bin: each run's private \
-                 directory is made there"
-                    .to_owned(),
-            );
-        }
         let (files, files_warning) = match (&cli.run_files_root, container.is_some()) {
             (_, false) => (None, None),
             (Some(path), true) => (Some(FilesRoot::open(path)?), None),
@@ -625,22 +618,30 @@ impl Local {
         // may not be, hold or lie in any other root of the agent: a sweep over the state
         // root would delete the taint marker and the host credential, and a mount root
         // that holds it would show every run's secrets to a job.
-        if let Some(root) = &files {
+        let overlap = files.as_ref().and_then(|root| {
             let others = mounts
                 .paths()
                 .map(|path| ("--mount-root", path))
                 .chain(scratch.iter().map(|r| ("--scratch-root", r.path())))
                 .chain(state.iter().map(|r| ("--state-root", r.path())));
-            for (flag, other) in others {
-                if root.path().starts_with(other) || other.starts_with(root.path()) {
-                    return Err(format!(
-                        "--run-files-root: is, holds or lies in the {flag} {}: the roots \
-                         must be separate directories",
-                        other.display()
-                    ));
-                }
-            }
-        }
+            let mut clash = others.filter(|(_, other)| {
+                root.path().starts_with(other) || other.starts_with(root.path())
+            });
+            clash.next().map(|(flag, other)| {
+                format!(
+                    "--run-files-root: is, holds or lies in the {flag} {}: the roots must be \
+                     separate directories",
+                    other.display()
+                )
+            })
+        });
+        // A root the operator named is an error; the default, which they did not name, only
+        // turns run files off, so it never changes which error an unrelated flag gets.
+        let (files, files_warning) = match (overlap, cli.run_files_root.is_some()) {
+            (None, _) => (files, files_warning),
+            (Some(why), true) => return Err(why),
+            (Some(why), false) => (None, Some(format!("run files unavailable: {why}"))),
+        };
         let busy: Vec<&Path> = mounts
             .paths()
             .chain(scratch.iter().map(ScratchRoot::path))
@@ -648,6 +649,13 @@ impl Local {
             .chain(files.iter().map(FilesRoot::path))
             .collect();
         let watch = watch_dirs(&cli.watch_dirs, &busy)?;
+        if container.is_some() && scratch.is_none() {
+            return Err(
+                "--scratch-root: required with --container-bin: each run's private \
+                 directory is made there"
+                    .to_owned(),
+            );
+        }
         Ok(Self {
             watch,
             mounts,
