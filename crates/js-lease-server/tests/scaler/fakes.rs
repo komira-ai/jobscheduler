@@ -3,6 +3,7 @@
 //! the way the real one's do. A test changes what the fake answers and reads its log.
 
 use std::collections::BTreeMap;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -43,6 +44,24 @@ pub struct World {
     pub save_ok: bool,
     pub mint_ok: bool,
     pub revoke_ok: bool,
+    /// When set, the provider's `list` says it has been called and then waits to be let go.
+    pub gate: Option<Arc<Gate>>,
+}
+
+/// A provider call held at a gate: the call tells `entered` it is there and waits (for at
+/// most 30 seconds, so a test that fails does not hang) until `release` is sent a value.
+pub struct Gate {
+    pub entered: Mutex<Sender<()>>,
+    pub release: Mutex<Receiver<()>>,
+}
+
+impl Gate {
+    fn pass(&self) {
+        let entered = self.entered.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = entered.send(());
+        let release = self.release.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = release.recv_timeout(Duration::from_secs(30));
+    }
 }
 
 /// The fake's effects, over a world the test also holds.
@@ -90,6 +109,10 @@ impl Effects for Handle {
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
+        let gate = self.world().gate.clone();
+        if let Some(gate) = gate {
+            gate.pass();
+        }
         let world = self.world();
         match world.list_fails {
             true => Err(ProviderError::new("the list failed")),
@@ -259,6 +282,7 @@ pub fn rig_with(records: Records, settings: Settings, entropy: Box<dyn SessionSo
         save_ok: true,
         mint_ok: true,
         revoke_ok: true,
+        gate: None,
     }));
     let clock = ManualClock::new(Timestamp::from_millis(START));
     let scaler = Scaler::new(

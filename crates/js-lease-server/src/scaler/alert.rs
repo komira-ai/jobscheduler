@@ -1,5 +1,6 @@
 //! What the shell tells an operator: the things the scaler counts and never releases on its
-//! own, and the one it released-or-should-have and did not.
+//! own, the one it released-or-should-have and did not, and a machine it cannot terminate
+//! because its token cannot be revoked.
 //!
 //! Each alert has a key that holds while the thing it names holds, so the shell says it
 //! once and says it again only if it clears and comes back.
@@ -18,11 +19,14 @@ use js_scaler::{Input, Mark, Millis, Phase, Record, State};
 /// - A silent host that books nothing and is still not marked releasing at twice `hold`
 ///   (the step drains and marks it at `hold`): something stops the release, and the
 ///   machine costs money.
+/// - A host in `unrevoked`: its join token could not be revoked, so its machine is not
+///   terminated (never while the token may work), and the revoke is tried again every
+///   tick. Until it goes through the machine runs and is paid for.
 pub(super) fn alerts(
-    state: &State,
-    input: &Input,
+    (state, input): (&State, &Input),
     now: Millis,
     hold: Duration,
+    unrevoked: &BTreeSet<String>,
 ) -> BTreeMap<String, String> {
     let known: BTreeSet<&str> = input
         .pools
@@ -57,7 +61,19 @@ pub(super) fn alerts(
                 ),
             )
         });
-    orphans.chain(strays).chain(stuck).collect()
+    let unrevoked = unrevoked.iter().map(|name| {
+        (
+            format!("revoke:{name}"),
+            format!(
+                "the join token of host {name} cannot be revoked, so its machine is not terminated and keeps running; the revoke is tried again every tick, so check the join token file"
+            ),
+        )
+    });
+    orphans
+        .chain(strays)
+        .chain(stuck)
+        .chain(unrevoked)
+        .collect()
 }
 
 /// Whether `input` shows the host `name` booking nothing and not marked releasing.

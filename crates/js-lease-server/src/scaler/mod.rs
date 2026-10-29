@@ -4,7 +4,9 @@
 //! runs the actions it returns in order. Everything it does to the world goes through
 //! [`Effects`], and every tick runs on the pool for blocking calls, because the calls block
 //! (a file sync, a provider's HTTP request). No lock of the registry or the lease table is
-//! held across any of them.
+//! held across any of them, and neither is the shell's own memory: a tick works on a copy
+//! of it and swaps the copy in when it is done, so the status page and the checks never
+//! wait for a provider's call.
 //!
 //! What the shell keeps between ticks, besides the step's [`State`] (whose records are the
 //! only part on disk):
@@ -90,6 +92,7 @@ struct Snapshot {
 }
 
 /// What the shell keeps between ticks.
+#[derive(Clone)]
 struct Memory {
     state: State,
     acquired: Vec<AcquireResult>,
@@ -114,6 +117,9 @@ struct Core {
     exec: ExecMode,
     settings: Settings,
     started: Millis,
+    /// Held for the whole of a tick, so that two ticks never work on the same copy.
+    one_tick: Mutex<()>,
+    /// Held only to copy [`Memory`] out and to swap it back in, never across a call.
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
 }
@@ -170,6 +176,7 @@ impl Scaler {
             exec,
             settings,
             started,
+            one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
         };
@@ -215,19 +222,24 @@ impl Core {
         self.memory.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// One tick, on a copy of the memory: the lock of the memory is taken to copy it and
+    /// to put the copy back, and not while a call is made.
     fn tick(&self) {
-        let mut memory = self.memory();
+        let _one = self.one_tick.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Millis::new(self.clock.now().millis());
-        self.retry_revokes(&mut memory);
-        let input = self.input(&memory, now);
-        let (next, actions) = step(memory.state.clone(), &input, now);
-        let Some(answers) = self.run(&mut memory, actions) else {
+        let mut work = self.memory().clone();
+        self.retry_revokes(&mut work);
+        let input = self.input(&work, now);
+        let (next, actions) = step(work.state.clone(), &input, now);
+        let Some(answers) = self.run(&mut work, actions) else {
+            *self.memory() = work;
             return;
         };
-        self.report(&mut memory, (&next, &input), now);
-        memory.state = next.clone();
-        memory.acquired = answers.acquired;
-        memory.released = answers.released;
+        self.report(&mut work, (&next, &input), now);
+        work.state = next.clone();
+        work.acquired = answers.acquired;
+        work.released = answers.released;
+        *self.memory() = work;
         let seen = Snapshot {
             state: next,
             input,
@@ -253,7 +265,7 @@ impl Core {
             warn!(host = %name, "released a machine whose host was silent and booked nothing");
         }
         let hold = self.settings.unknown_hold;
-        let found = alert::alerts(next, input, now, hold);
+        let found = alert::alerts((next, input), now, hold, &memory.unrevoked);
         memory.alerted.retain(|key| found.contains_key(key));
         for (key, message) in found {
             if memory.alerted.insert(key) {
