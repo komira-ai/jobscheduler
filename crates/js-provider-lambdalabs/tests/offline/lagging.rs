@@ -374,6 +374,26 @@ fn a_listed_row_without_our_marks_does_not_end_the_count() {
 }
 
 #[test]
+fn an_unlisted_answered_instance_and_a_listed_one_of_another_acquire_both_count() {
+    let (api, clock, provider) = hidden_rig(2);
+    assert!(matches!(
+        provider.acquire(&ask("a")),
+        Acquired::Accepted { .. }
+    ));
+    let mut other = api.fake.instances()[0].clone();
+    // The first row is shown stripped of its marks; a second row of ours is listed.
+    api.fake.update_instance(&id("fake0001"), &|row| {
+        row.tags.clear();
+        row.name = None;
+    });
+    other.id = id("fake0099");
+    api.fake.add_instance(other);
+    api.hide.store(false, Ordering::SeqCst);
+    clock.advance(INTERVAL);
+    refused_at(&provider, 2, 2);
+}
+
+#[test]
 fn every_id_a_multi_instance_launch_returns_counts_and_a_retry_gets_the_first() {
     let (api, clock, provider) = hidden_rig(2);
     // The launch asks for one instance; an answer with two is an anomaly the provider
