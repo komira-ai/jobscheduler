@@ -9,6 +9,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::digest::{DigestRef, DigestRefError};
 use crate::{Request, Resources};
 
 /// The capability key a request names its operating system by.
@@ -23,10 +24,6 @@ pub const DISK_GIB_KEY: &str = "disk-gib";
 pub const EXEC_KEY: &str = "exec";
 /// Bytes in a GiB.
 const GIB: u64 = 1 << 30;
-/// The only digest algorithm an image reference may name.
-const DIGEST_PREFIX: &str = "sha256:";
-/// Hex digits in a sha256 digest.
-const DIGEST_HEX_LEN: usize = 64;
 
 /// How a host runs a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -90,10 +87,7 @@ pub enum ImageRefError {
 /// the digest, so a value of it cannot name a tag that moves. The full grammar of the
 /// name (registry, path, tag) is checked where a run is started, not here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ImageDigestRef {
-    name: String,
-    digest: String,
-}
+pub struct ImageDigestRef(DigestRef);
 
 impl ImageDigestRef {
     /// The reference `text`.
@@ -102,33 +96,22 @@ impl ImageDigestRef {
     ///
     /// [`ImageRefError`] naming what is missing or malformed.
     pub fn parse(text: &str) -> Result<Self, ImageRefError> {
-        let (name, digest) = text.split_once('@').ok_or(ImageRefError::NoDigest)?;
-        let hex = digest.strip_prefix(DIGEST_PREFIX).unwrap_or_default();
-        let digest_ok = [
-            hex.len() == DIGEST_HEX_LEN,
-            hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
-        ];
-        if !digest_ok.into_iter().all(|ok| ok) {
-            return Err(ImageRefError::BadDigest);
+        match DigestRef::parse(text) {
+            Ok(core) => Ok(Self(core)),
+            Err(DigestRefError::NoDigest) => Err(ImageRefError::NoDigest),
+            Err(DigestRefError::BadDigest) => Err(ImageRefError::BadDigest),
+            Err(DigestRefError::BadName) => Err(ImageRefError::BadName),
         }
-        let name_ok = [!name.is_empty(), name.bytes().all(|b| b.is_ascii_graphic())];
-        if !name_ok.into_iter().all(|ok| ok) {
-            return Err(ImageRefError::BadName);
-        }
-        Ok(Self {
-            name: name.to_owned(),
-            digest: digest.to_owned(),
-        })
     }
 
     /// The name, with its tag if it has one.
     pub fn name(&self) -> &str {
-        &self.name
+        self.0.name()
     }
 
     /// The digest, as `sha256:<hex>`.
     pub fn digest(&self) -> &str {
-        &self.digest
+        self.0.digest()
     }
 }
 
