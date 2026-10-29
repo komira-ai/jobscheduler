@@ -437,11 +437,12 @@ impl Engine {
                 .as_ref()
                 .and_then(|u| u.floors.key_raised.as_ref());
             if let Some(raised) = raised {
-                self.unwritten_floors.retain(|f| f.key != raised.key);
+                self.unwritten_floors.retain(|f| f.row.key != raised.key);
             }
-            a.learned_requeue(&self.view(), requeue);
-            let lowered = a.lowered();
-            self.lower_key_floors(a, lowered);
+            if self.size_keys {
+                a.learned_requeue(&self.view(), requeue);
+            }
+            self.lower_asked_key_floors(a);
             self.unsettled.extend(unsettled);
         }
         let pending = std::mem::take(&mut self.unsettled);
