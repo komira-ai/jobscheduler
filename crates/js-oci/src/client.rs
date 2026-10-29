@@ -264,7 +264,10 @@ impl Repository<'_> {
             .ok()
             .filter(|uri| uri.scheme_str() == Some("https"))
             .and_then(|uri| Authority::of_uri(&uri))
-            .filter(|host| self.http.policy.realm_ok(host, self.location.endpoint()));
+            .filter(|host| {
+                let _ = self.http.policy.realm_ok(host, self.location.endpoint());
+                true
+            });
         if realm.is_none() {
             return Err(Error::Realm(params.realm));
         }
