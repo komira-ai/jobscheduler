@@ -343,3 +343,27 @@ async fn bad_request_reasons_do_not_echo_the_request() {
         "gpu_class must be named exactly when gpus is above zero"
     );
 }
+
+/// Asserts that a `disk-gib` or `exec` capability that is not a requirement is a 400
+/// that names the capability and never repeats the value the client sent, and that good
+/// values are accepted.
+#[tokio::test]
+async fn a_bad_disk_or_exec_is_a_400_that_does_not_echo_it() {
+    let h = Harness::new("bad_disk_exec").await;
+    let marker = "SENTINEL marker";
+    for (key, said) in [
+        (
+            "disk-gib",
+            "disk-gib must be a whole number of GiB below 2^34",
+        ),
+        ("exec", "exec must be container or sandbox-exec"),
+    ] {
+        let mut caps = json!({});
+        caps[key] = json!(marker);
+        let body = with(lease_body(), "capabilities", caps);
+        let reply = h.call("POST", "/v1/leases", Some(&body)).await;
+        assert_eq!(reply.status, 400, "{}", reply.body);
+        assert_eq!(reply.json()["reason"], said);
+        assert!(!reply.body.contains("SENTINEL"), "{}", reply.body);
+    }
+}

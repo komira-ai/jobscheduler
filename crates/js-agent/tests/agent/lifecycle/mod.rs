@@ -14,6 +14,7 @@ mod owed;
 mod reach;
 mod results;
 mod rules;
+mod scratch;
 mod taint;
 
 use std::collections::BTreeSet;
