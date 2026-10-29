@@ -309,3 +309,10 @@ pub fn records_path(scratch: &Scratch) -> std::path::PathBuf {
     name.push(".scaler");
     scratch.state().with_file_name(name)
 }
+
+/// The path of the hosts the registry refused to remove, beside the lease file of `scratch`.
+pub fn unremoved_path(scratch: &Scratch) -> std::path::PathBuf {
+    let mut name = records_path(scratch).into_os_string();
+    name.push(".unremoved");
+    std::path::PathBuf::from(name)
+}

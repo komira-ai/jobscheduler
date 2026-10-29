@@ -21,7 +21,10 @@
 //! - [`Scaler`]: the shell that runs [`js_scaler::step`] on the server's tick for an
 //!   elastic pool: it reads the registry and the provider, runs the step's actions in
 //!   order, and keeps the pool's records in `<state file>.scaler` ([`RecordsFile`]), owner
-//!   only and written whole before the call a record describes.
+//!   only and written whole before the call a record describes, and the hosts the registry
+//!   refused to remove in `<state file>.scaler.unremoved` ([`UnremovedFile`]), written the
+//!   same way and before the registry is asked to remove a host, so that a restart tries
+//!   them again.
 //! - [`start`] and [`Running`]: the server, with time and ticks injected ([`SharedClock`],
 //!   [`Ticker`]) so a test steps both.
 //!
@@ -490,7 +493,7 @@ pub use layered::LayeredProvider;
 pub use pool::LaunchInputs;
 pub use scaler::{
     Call, Effects, KEY_VALID_FOR, Launcher, REGISTRY_FLOOR, REGISTRY_QUIET, RETRY_AFTER,
-    RecordsFile, Scaler,
+    RecordsFile, Scaler, UnremovedFile,
 };
 pub use server::{Running, start, start_with_checks};
 pub use ticker::{ChannelTicker, IntervalTicker, Tick, TickHandle, Ticker, channel_ticker};

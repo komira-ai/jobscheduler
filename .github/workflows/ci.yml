@@ -260,6 +260,69 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
+  # The sandbox a job gets, proven by a job: js-agent's container create path against a
+  # real rootful Podman (the distro's, the version the hosts run), with the job's own
+  # view of its seccomp filter, capabilities, user namespace, network, root, /tmp and
+  # scratch mount read from inside the running container
+  # (crates/js-agent/tests/live_podman.rs, ignored in every other job). The host is
+  # prepared here and only read by the test: a subordinate id range for a user name that
+  # has no account, and the image, pulled by digest because the agent pulls nothing. The
+  # job stands alone, so a failure here blocks no other job.
+  live-podman:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      JS_LIVE_IMAGE: docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      JS_LIVE_SUBUID_USER: js-live-map
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Install Podman from the distribution
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman
+          podman --version
+      # One line per file, for a user name no account has: ids 300000 to 365535, above every
+      # id of the runner's passwd and group files and of its own ranges.
+      - name: Prepare the subordinate id range
+        run: |
+          echo "$JS_LIVE_SUBUID_USER:300000:65536" | sudo tee -a /etc/subuid
+          echo "$JS_LIVE_SUBUID_USER:300000:65536" | sudo tee -a /etc/subgid
+      - name: Pull the image by digest
+        run: sudo podman pull "$JS_LIVE_IMAGE"
+      - name: Build the test as the runner user
+        run: cargo test -p js-agent --test live_podman --locked --no-run
+      # Root runs the test (the agent refuses to map jobs otherwise), with the runner's
+      # toolchain and home.
+      - name: Run one job in Podman and assert its sandbox
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test -p js-agent --test live_podman --locked -- --ignored --nocapture
+      - name: Podman state after a failure
+        if: ${{ failure() }}
+        run: |
+          sudo podman ps -a
+          sudo podman logs --latest || true
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   # Licences, advisories, bans and sources, as deny.toml configures them. cargo-deny is
   # the release binary, checked against its SHA-256 before use.
   deny:
