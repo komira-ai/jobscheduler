@@ -430,3 +430,50 @@ async fn a_host_that_has_not_announced_itself_again_is_judged_by_its_stored_shap
     assert!(!state.records.instances[0].condemned);
     assert!(state.records.cooldowns.is_empty());
 }
+
+/// Asserts when the hosts the registry refused to remove are written: once, right after
+/// the refusal that adds a host (after the removal call, in the tick that made it) and not
+/// again while the set does not change; and, when the registry takes the host later and
+/// the disk is full, the failure is counted, the file keeps the old set, and the next tick
+/// writes the empty set without a new count. It catches a set written only at the end of a
+/// run, one written at every tick, and a failed write that is never tried again, which
+/// would leave a removed host to be retried after a restart or a refused host forgotten.
+#[tokio::test]
+async fn the_hosts_the_registry_refused_are_written_when_they_change_and_a_failure_is_retried() {
+    let rig = rig(
+        records(vec![registered("js-unremoved-file", "i-gone")]),
+        live(),
+    );
+    let mut lost = view("js-unremoved-file");
+    lost.state = HostState::Lost;
+    rig.world().hosts = vec![lost];
+    rig.world().gone = vec!["i-gone".to_owned()];
+    rig.world().remove_ok = false;
+    rig.scaler.tick().await;
+    let log = rig.log();
+    let at = |entry: &str| log.iter().position(|each| each == entry).unwrap();
+    assert!(
+        at("remove:js-unremoved-file") < at("save-unremoved"),
+        "{log:?}"
+    );
+    let host = BTreeSet::from(["js-unremoved-file".to_owned()]);
+    assert_eq!(rig.world().saved_unremoved, Some(host.clone()));
+
+    rig.scaler.tick().await;
+    let writes = |rig: &crate::fakes::Rig| {
+        let log = rig.log();
+        log.iter().filter(|each| *each == "save-unremoved").count()
+    };
+    assert_eq!(writes(&rig), 1, "{:?}", rig.log());
+
+    rig.world().remove_ok = true;
+    rig.world().save_unremoved_ok = false;
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, Some(host));
+    rig.world().save_unremoved_ok = true;
+    rig.scaler.tick().await;
+    assert_eq!(rig.scaler.save_errors(), 1);
+    assert_eq!(rig.world().saved_unremoved, Some(BTreeSet::new()));
+    assert!(rig.world().hosts.is_empty());
+}
