@@ -2,8 +2,7 @@
 
 use std::time::Instant;
 
-/// One minute in microseconds.
-pub const MINUTE_USEC: u64 = 60_000_000;
+pub use js_agent_usage::MINUTE_USEC;
 
 /// A source of monotonic time in microseconds.
 ///

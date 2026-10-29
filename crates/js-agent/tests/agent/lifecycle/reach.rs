@@ -36,7 +36,10 @@ fn private(dir: &Scratch, name: &str) -> PathBuf {
 /// The flags that enable containers, with the state root `state`.
 fn containers(dir: &Scratch, state: &std::path::Path) -> Vec<String> {
     let exec = dir.write("docker", "#!/bin/sh\n", 0o755);
+    let scratch = private(dir, "run-scratch");
     vec![
+        "--scratch-root".to_owned(),
+        scratch.display().to_string(),
         "--container-bin".to_owned(),
         exec.display().to_string(),
         "--container-user".to_owned(),

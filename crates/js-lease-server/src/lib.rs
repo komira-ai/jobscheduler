@@ -351,6 +351,8 @@ mod config;
 mod error;
 mod hosts;
 mod io_timeout;
+mod join_api;
+mod join_tokens;
 mod layered;
 mod listener;
 mod rate;

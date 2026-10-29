@@ -4,13 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::error::{ApiError, ErrorCode, cut, plain};
-use crate::model::{Architecture, Instance, InstanceId, InstanceTypeOffer, Region, Status, Tag};
+use crate::model::{
+    Architecture, Instance, InstanceId, InstanceTypeOffer, LaunchRequest, Region, Status, Tag,
+};
 
 /// The longest parser message quoted in an error.
 const QUOTED: usize = 160;
@@ -195,4 +197,90 @@ pub(crate) fn error_parts(body: &[u8]) -> (ErrorCode, Option<String>) {
         ),
         Err(_) => (ErrorCode::Unparsed, None),
     }
+}
+
+#[derive(Serialize)]
+struct WireTagOut<'a> {
+    key: &'a str,
+    value: &'a str,
+}
+
+#[derive(Serialize)]
+struct LaunchBody<'a> {
+    region_name: &'a str,
+    instance_type_name: &'a str,
+    ssh_key_names: [&'a str; 1],
+    name: &'a str,
+    tags: Vec<WireTagOut<'a>>,
+}
+
+#[derive(Serialize)]
+struct TerminateBody<'a> {
+    instance_ids: [&'a str; 1],
+}
+
+#[derive(Deserialize)]
+struct Launched {
+    instance_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct Terminated {
+    #[serde(default)]
+    terminated_instances: Vec<WireId>,
+}
+
+#[derive(Deserialize)]
+struct WireId {
+    id: String,
+}
+
+/// The body of a launch call.
+pub(crate) fn launch_body(request: &LaunchRequest) -> Vec<u8> {
+    let body = LaunchBody {
+        region_name: &request.region,
+        instance_type_name: &request.instance_type,
+        ssh_key_names: [&request.ssh_key],
+        name: &request.name,
+        tags: request
+            .tags
+            .iter()
+            .map(|tag| WireTagOut {
+                key: &tag.key,
+                value: &tag.value,
+            })
+            .collect(),
+    };
+    // A struct of strings always serializes.
+    serde_json::to_vec(&body).unwrap_or_default()
+}
+
+/// The body of a terminate call for one instance.
+pub(crate) fn terminate_body(id: &InstanceId) -> Vec<u8> {
+    let body = TerminateBody {
+        instance_ids: [id.as_str()],
+    };
+    serde_json::to_vec(&body).unwrap_or_default()
+}
+
+/// The ids of a launch answer.
+pub(crate) fn launched(body: &[u8]) -> Result<Vec<InstanceId>, ApiError> {
+    let found: Envelope<Launched> = decode(body)?;
+    ids(found.data.instance_ids)
+}
+
+/// The ids a terminate answer says were terminated.
+pub(crate) fn terminated(body: &[u8]) -> Result<Vec<InstanceId>, ApiError> {
+    let found: Envelope<Terminated> = decode(body)?;
+    ids(found.data.terminated_instances.into_iter().map(|w| w.id))
+}
+
+fn ids(found: impl IntoIterator<Item = String>) -> Result<Vec<InstanceId>, ApiError> {
+    found
+        .into_iter()
+        .map(|id| {
+            InstanceId::new(&id)
+                .map_err(|_| ApiError::Malformed("an instance id of an unexpected form".to_owned()))
+        })
+        .collect()
 }

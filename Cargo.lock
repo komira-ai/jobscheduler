@@ -933,6 +933,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
+ "js-agent-usage",
  "js-agent-wire",
  "js-client",
  "js-lease",
@@ -944,6 +945,10 @@ dependencies = [
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "js-agent-usage"
+version = "0.1.0"
 
 [[package]]
 name = "js-agent-wire"
@@ -991,6 +996,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1068,6 +1074,7 @@ dependencies = [
  "js-pool-static",
  "js-provider",
  "js-provider-fake",
+ "js-testkit",
  "js-types",
  "serde",
  "thiserror",
@@ -1169,6 +1176,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "time",
  "toml",
@@ -2704,6 +2712,7 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2845,6 +2854,15 @@ checksum = "88261b9deccee56594c11a3460c462c41f58d148598fe70ad77070126a68aba4"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

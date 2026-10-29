@@ -1,0 +1,8 @@
+{
+  "error": {
+    "code": "instance-operations/launch/insufficient-capacity",
+    "message": "Not enough capacity. CANARY-MESSAGE-TEXT",
+    "suggestion": "CANARY-SUGGESTION-TEXT",
+    "request_id": "req-capacity"
+  }
+}

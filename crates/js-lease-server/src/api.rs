@@ -22,6 +22,7 @@ use crate::agent_api;
 use crate::agents::Agents;
 use crate::config::Token;
 use crate::hosts::HostList;
+use crate::join_api;
 use crate::run_api;
 use crate::usage::ProfileCurves;
 use crate::usage_hub::{Usage, UsageCounters};
@@ -175,6 +176,7 @@ pub(crate) fn router(shared: Arc<Shared>) -> Router {
     match &shared.agents {
         Some(agents) => app
             .merge(agent_api::router(agents.clone()))
+            .merge(join_api::router(shared.clone(), agents.clone()))
             .merge(run_api::router(shared.clone(), agents.clone())),
         None => app,
     }
