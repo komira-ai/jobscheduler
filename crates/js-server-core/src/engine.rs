@@ -18,8 +18,8 @@ use std::time::Duration;
 
 use js_caps::NodeCaps;
 use js_sched::{
-    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Prediction, Request,
-    Requeue, Scheduler,
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, OpState, Request, Requeue,
+    Scheduler,
 };
 use js_store::Rows;
 use js_types::sched::{
@@ -28,7 +28,7 @@ use js_types::sched::{
 };
 
 use crate::adapter::{Adapter, Link, Lowered, Stage, View};
-use crate::core::{Admitted, Config, Held, NotQueued};
+use crate::core::{Admitted, Config, Held, NotQueued, SubmitOptions};
 use crate::intake::Intake;
 use crate::store::Unsettled;
 use crate::write::{Attempt, Batch, Settles, Writer};
@@ -490,18 +490,22 @@ impl Engine {
         a: &mut dyn Adapter,
         request: &Request,
         parcel: &[u8],
-        size_key: Option<u64>,
-        prediction: Option<Prediction>,
+        options: SubmitOptions,
         now: FarmTime,
     ) -> Result<Admitted, NotQueued> {
         if self.fenced {
             return Err(NotQueued::Fenced);
         }
+        let SubmitOptions {
+            size_key,
+            prediction,
+            max_wall,
+        } = options;
         // A core with size keys off ignores the key: nothing is written, nothing is booked.
         let size_key = size_key.filter(|_| self.size_keys);
         let waiter = WaiterId(self.next_waiter);
         self.next_waiter += 1;
-        let held = self.queue(a, request, parcel, size_key, now)?;
+        let held = self.queue(a, request, parcel, size_key, max_wall, now)?;
         let twin = match held {
             Held::Here => self.sched.twin(request),
             Held::Elsewhere(operation) => Some(operation),
@@ -517,6 +521,12 @@ impl Engine {
         // to it). A joined caller keeps the key of the operation it joined.
         if let Some(key) = size_key.filter(|_| !admitted.joined && held == Held::Here) {
             self.sched.set_size_key(admitted.operation, key);
+        }
+        // The longest run likewise, for the whole-node drain: a joined caller keeps the wall
+        // time of the operation it joined (taken from its row when the store's twin was taken
+        // in).
+        if let Some(wall) = max_wall.filter(|_| !admitted.joined && held == Held::Here) {
+            self.sched.set_max_wall(admitted.operation, wall);
         }
         // The cost likewise: a new operation is charged it from its first round. A twin keeps
         // its cost while it holds a lease; one that still waits takes the newer prediction.

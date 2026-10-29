@@ -20,7 +20,8 @@ tar -xzf /usr/local/lib/tailscale.tgz --strip-components=1 -C /usr/local/bin
 printf '%s' '***' > /etc/jobscheduler/ts-authkey
 chmod 0600 -- /etc/jobscheduler/ts-authkey
 systemd-run --unit=tailscaled /usr/local/bin/tailscaled --state=/var/lib/tailscale/tailscaled.state
-/usr/local/bin/tailscale up --auth-key=file:/etc/jobscheduler/ts-authkey --hostname=<HOST> --accept-dns=false
+sh -c 'i=0; until [ -S "$1" ]; do i=$((i+1)); if [ "$i" -gt 30 ]; then logger -t jobscheduler "tailscaled socket $1 not up after 30 s"; exit 1; fi; sleep 1; done' sh /var/run/tailscale/tailscaled.sock
+/usr/local/bin/tailscale up --auth-key=file:/etc/jobscheduler/ts-authkey --hostname=<HOST> --accept-dns=true
 rm -f -- /etc/jobscheduler/ts-authkey
 # agent
 install -d -m 0700 -- /var/lib/js-agent/state /var/lib/js-agent/scratch

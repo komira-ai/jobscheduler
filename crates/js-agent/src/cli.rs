@@ -36,8 +36,9 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub instance_file: Option<PathBuf>,
     /// A PEM file with the certificate to trust for `https://` (the server's, or the
-    /// authority that issued it). Required for `https://`; the platform's roots are not
-    /// read.
+    /// authority that issued it); only those certificates are trusted then. Optional:
+    /// without it an `https://` server is verified against the public roots bundled in the
+    /// agent (a Mozilla set), never the platform's store.
     #[arg(long, value_name = "PATH")]
     pub ca_cert: Option<PathBuf>,
     /// The pool this host asks to join.
