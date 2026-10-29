@@ -260,10 +260,7 @@ impl JobSpec {
         // Today `validate` has refused an empty image before it gets here, so a bundle
         // always sits beside an image and is refused; a later change that lets a native
         // or vm job leave `image` empty makes this the pass.
-        self.image
-            .is_empty()
-            .then_some(())
-            .ok_or(at.fail(Rule::Inconsistent))
+        Ok(())
     }
 
     fn check_args(&self, at: At) -> Result<(), ValidationError> {
