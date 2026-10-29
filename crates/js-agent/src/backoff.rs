@@ -3,8 +3,6 @@
 
 use std::time::Duration;
 
-use rustix::rand::{GetRandomFlags, getrandom};
-
 /// The ceiling of the first wait.
 pub const BASE: Duration = Duration::from_secs(1);
 
@@ -32,7 +30,7 @@ pub struct SystemJitter;
 impl Jitter for SystemJitter {
     fn up_to(&mut self, max: u64) -> u64 {
         let mut bytes = [0u8; 8];
-        let _ = getrandom(&mut bytes, GetRandomFlags::empty());
+        let _ = getrandom::getrandom(&mut bytes);
         u64::from_le_bytes(bytes) % max.saturating_add(1)
     }
 }

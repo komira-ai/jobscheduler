@@ -23,7 +23,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::adapt::SharedClock;
-use crate::checks::{State, Verdict};
+use crate::checks::{Checked, State, Verdict};
 use crate::hosts::MemoryView;
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 
@@ -60,6 +60,8 @@ struct PoolView {
     reasons: Vec<String>,
     credentials: Option<CheckView>,
     network_check: Option<CheckView>,
+    /// The provider's own checks of the last pass.
+    provider_checks: Vec<NamedCheckView>,
     instances: Instances,
     blocked: Option<&'static str>,
     no_offer: Option<NoOffer>,
@@ -75,6 +77,27 @@ struct CheckView {
     ok: bool,
     reason: Option<String>,
     checked_at_ms: u64,
+}
+
+/// One of the provider's own checks.
+#[derive(Debug, Serialize)]
+struct NamedCheckView {
+    name: &'static str,
+    ok: bool,
+    reason: Option<String>,
+    /// What a check that held said, such as what a launch will make.
+    note: Option<String>,
+    checked_at_ms: u64,
+}
+
+fn named_view(checked: Checked) -> NamedCheckView {
+    NamedCheckView {
+        name: checked.name,
+        ok: checked.verdict.reason.is_none(),
+        reason: checked.verdict.reason,
+        note: checked.note,
+        checked_at_ms: checked.verdict.at.millis(),
+    }
 }
 
 /// The machines the scheduler holds.
@@ -178,6 +201,7 @@ impl Status {
             reasons: health.reasons(),
             credentials: check_view(health.credentials),
             network_check: check_view(health.network),
+            provider_checks: health.provider.into_iter().map(named_view).collect(),
             instances: Instances {
                 n: 0,
                 max: pool.max_instances,
@@ -268,6 +292,14 @@ fn pool_section(out: &mut String, pool: &PoolView) {
     row(out, "memory booked", &booked);
     row(out, "credentials", &check_text(&pool.credentials));
     row(out, "network check", &check_text(&pool.network_check));
+    for check in &pool.provider_checks {
+        let text = match (&check.reason, &check.note) {
+            (Some(reason), _) => format!("failed at {} ms: {reason}", check.checked_at_ms),
+            (None, Some(note)) => format!("ok at {} ms: {note}", check.checked_at_ms),
+            (None, None) => format!("ok at {} ms", check.checked_at_ms),
+        };
+        row(out, &format!("check {}", check.name), &text);
+    }
     for reason in &pool.reasons {
         row(out, "reason", reason);
     }

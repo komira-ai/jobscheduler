@@ -2,6 +2,7 @@
 //! the small value types, and the provider over the fake account.
 
 mod acquire;
+mod checks;
 mod config;
 mod fake;
 mod host_prep;
