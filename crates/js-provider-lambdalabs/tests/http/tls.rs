@@ -57,3 +57,19 @@ fn an_https_client_does_not_fall_back_to_plain_http() {
     assert!(matches!(api.list_instances(), Err(ApiError::Transport(_))));
     assert!(server.seen().is_empty());
 }
+
+#[test]
+fn with_no_bundle_a_self_signed_server_is_refused_before_the_key_is_sent() {
+    // The bundled public roots do not hold a test certificate, so a client given no
+    // bundle refuses this server: the default is a root set, not "trust anything".
+    let server = Server::tls(&Cert::new());
+    server.on(
+        "GET /api/v1/instances",
+        Reply::json(200, &fixture("instances.json")),
+    );
+    let scratch = Scratch::new("tls-no-bundle");
+    let key = ApiKey::from_file(&scratch.key_file("tls-key")).unwrap();
+    let api = HttpApi::connect(&server.url("https"), &key, None, PATIENT).unwrap();
+    assert!(matches!(api.list_instances(), Err(ApiError::Transport(_))));
+    assert!(server.seen().is_empty());
+}

@@ -4,6 +4,20 @@
 
 use crate::ids::HostName;
 
+/// The container program the agent starts jobs with. The bootstrap names it in the agent's
+/// unit and checks it exists; a provider whose image keeps it elsewhere installs it here.
+pub const CONTAINER_BIN: &str = "/usr/bin/docker";
+
+/// The agent's state root, which the bootstrap creates (owner-only) and names in the
+/// agent's unit. It lies on the machine's root disk.
+pub const STATE_ROOT: &str = "/var/lib/js-agent/state";
+
+/// The agent's scratch root, named in the agent's unit. The agent refuses to start when
+/// it shares a device with [`STATE_ROOT`], so a provider whose machines have one disk
+/// mounts a file system of its own here in its `host_prep`, and the unit does not start
+/// without that mount.
+pub const SCRATCH_ROOT: &str = "/var/lib/js-agent/scratch";
+
 /// The name of a place in a plan where a secret goes. The plan holds the name, never
 /// the secret.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]

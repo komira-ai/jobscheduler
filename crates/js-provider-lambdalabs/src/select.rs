@@ -23,8 +23,13 @@ fn arch_name(architecture: &Architecture) -> String {
 /// One offer per (type, region with capacity now). A type is offered when it is a row of
 /// `table` with the GPU count the API gives for it (a row that disagrees with the API is
 /// a configuration error and is skipped); the row's class is the offer's GPU class. A
-/// type with no region that has capacity has no offer.
-pub(crate) fn offers(table: &OptionTable, types: &[InstanceTypeOffer]) -> Vec<Offer> {
+/// type with no region that has capacity has no offer. When `only` is set, only the
+/// regions it lists are offered.
+pub(crate) fn offers(
+    table: &OptionTable,
+    types: &[InstanceTypeOffer],
+    only: Option<&[String]>,
+) -> Vec<Offer> {
     types
         .iter()
         .filter_map(|kind| {
@@ -34,7 +39,12 @@ pub(crate) fn offers(table: &OptionTable, types: &[InstanceTypeOffer]) -> Vec<Of
                 .map(|row| (kind, row))
         })
         .flat_map(|(kind, row)| {
-            let mut regions: Vec<&str> = kind.regions.iter().map(|r| r.name.as_str()).collect();
+            let mut regions: Vec<&str> = kind
+                .regions
+                .iter()
+                .map(|r| r.name.as_str())
+                .filter(|name| only.is_none_or(|only| only.iter().any(|o| o == name)))
+                .collect();
             regions.sort_unstable();
             regions.dedup();
             regions.into_iter().map(|region| Offer {
@@ -131,7 +141,7 @@ mod tests {
             "[[option]]\ninstance_type = \"gpu_1x_a\"\ngpu_class = \"nvidia-a\"\ngpus = 1\n",
         )
         .unwrap();
-        let mut all = offers(&table, &[kind("gpu_1x_a", &["r1", "r2"])]);
+        let mut all = offers(&table, &[kind("gpu_1x_a", &["r1", "r2"])], None);
         assert_eq!(candidates(&all, &anything()).len(), 2);
         all[0].available = false;
         let chosen = candidates(&all, &anything());
@@ -151,6 +161,7 @@ mod tests {
         let mut all = offers(
             &table,
             &[kind("gpu_1x_a", &["r1"]), kind("gpu_1x_b", &["r1"])],
+            None,
         );
         all[0].price_cents_per_hour = None;
         let chosen = candidates(&all, &anything());

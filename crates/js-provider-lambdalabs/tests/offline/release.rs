@@ -482,14 +482,15 @@ fn a_catalog_that_cannot_be_read_is_an_error_and_not_an_empty_catalog() {
 }
 
 #[test]
-fn the_provider_needs_no_host_preparation_and_carries_no_payload_yet() {
+fn the_provider_prepares_the_host_and_names_its_payload_limit() {
     let rig = rig(live(5));
-    assert!(
-        rig.provider
-            .host_prep(&crate::rig::candidate("region-a"))
-            .is_empty()
+    let mut roomy = crate::rig::candidate("region-a");
+    roomy.disk_bytes = 512 << 30;
+    assert_eq!(rig.provider.host_prep(&roomy).len(), 8);
+    assert_eq!(
+        rig.provider.payload_limit(),
+        js_provider_lambdalabs::PAYLOAD_LIMIT
     );
-    assert_eq!(rig.provider.payload_limit(), 0);
 }
 
 #[test]

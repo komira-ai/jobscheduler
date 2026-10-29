@@ -266,10 +266,13 @@ fn a_key_file_others_can_read_is_refused_without_quoting_it() {
 #[test]
 fn a_client_that_cannot_be_built_is_reported_before_any_call() {
     let rig = Rig::new();
-    *rig.connect_error.borrow_mut() = Some(SetupError::CaBundleRequired);
+    *rig.connect_error.borrow_mut() = Some(SetupError::BaseUrl);
     let (status, out) = rig.exec(&rig.args(&[]));
     assert_eq!(status, 1);
-    assert!(out.contains("an https base URL needs a CA bundle"), "{out}");
+    assert!(
+        out.contains("the base URL must be scheme://host[:port]"),
+        "{out}"
+    );
     assert_eq!(rig.fake.calls(), Vec::new());
 }
 

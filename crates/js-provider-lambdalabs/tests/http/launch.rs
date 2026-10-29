@@ -24,6 +24,10 @@ const LAUNCH: &str = "POST /api/v1/instance-operations/launch";
 const TERMINATE: &str = "POST /api/v1/instance-operations/terminate";
 const LIST: &str = "GET /api/v1/instances";
 const ONE: &str = "GET /api/v1/instances/c0ffee00c0ffee00c0ffee00c0ffee01";
+const RULESETS: &str = "GET /api/v1/firewall-rulesets";
+const MAKE_RULESET: &str = "POST /api/v1/firewall-rulesets";
+const KEYS: &str = "GET /api/v1/ssh-keys";
+const MAKE_KEY: &str = "POST /api/v1/ssh-keys";
 
 fn request() -> LaunchRequest {
     LaunchRequest {
@@ -35,6 +39,8 @@ fn request() -> LaunchRequest {
             key: "jobscheduler:pool".to_owned(),
             value: "fixture".to_owned(),
         }],
+        user_data: None,
+        firewall_ruleset_ids: Vec::new(),
     }
 }
 
@@ -145,6 +151,23 @@ fn provider(
     max_machines: usize,
     limit: Duration,
 ) -> (LambdaProvider, Arc<ManualClock>) {
+    provider_with(server, limit, |scheduler| {
+        ElasticConfig::new(
+            scheduler,
+            "fixture-key",
+            std::num::NonZeroUsize::new(max_machines).unwrap(),
+        )
+        .unwrap()
+    })
+}
+
+/// A provider on the real client against `server` with the config `make` builds for the
+/// scheduler `sched-one`, enabled and live.
+fn provider_with(
+    server: &Server,
+    limit: Duration,
+    make: impl FnOnce(SchedulerId) -> ElasticConfig,
+) -> (LambdaProvider, Arc<ManualClock>) {
     let scratch = Scratch::new("launch");
     let key = ApiKey::from_file(&scratch.key_file("key-one")).unwrap();
     let api = HttpApi::connect(&server.url("http"), &key, None, limit).unwrap();
@@ -153,14 +176,7 @@ fn provider(
         "[[option]]\ninstance_type = \"gpu_1x_sample\"\ngpu_class = \"nvidia-sample\"\ngpus = 1\n",
     )
     .unwrap();
-    let config = ElasticConfig::new(
-        SchedulerId::new("sched-one").unwrap(),
-        "fixture-key",
-        std::num::NonZeroUsize::new(max_machines).unwrap(),
-    )
-    .unwrap()
-    .enable()
-    .live();
+    let config = make(SchedulerId::new("sched-one").unwrap()).enable().live();
     (
         LambdaProvider::new(Arc::new(api), clock.clone(), table, config),
         clock,
@@ -197,9 +213,18 @@ fn empty_list(server: &Server) {
     server.on(LIST, Reply::json(200, &fixture("instances_empty.json")));
 }
 
+/// The account already holds this scheduler's no-inbound ruleset in `region-a`.
+fn ruleset_ready(server: &Server) {
+    server.on(
+        RULESETS,
+        Reply::json(200, &fixture("firewall_rulesets.json")),
+    );
+}
+
 #[test]
 fn the_provider_lists_then_launches_with_the_ownership_tags_and_name() {
     let server = Server::plain();
+    ruleset_ready(&server);
     empty_list(&server);
     server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
     let (provider, _) = provider(&server, 2, PATIENT);
@@ -212,9 +237,16 @@ fn the_provider_lists_then_launches_with_the_ownership_tags_and_name() {
         .iter()
         .map(|s| format!("{} {}", s.method, s.target))
         .collect();
-    assert_eq!(methods, [LIST, LAUNCH].map(str::to_owned).to_vec());
-    let sent = body(&server, 1);
+    assert_eq!(
+        methods,
+        [RULESETS, LIST, LAUNCH].map(str::to_owned).to_vec()
+    );
+    let sent = body(&server, 2);
     assert_eq!(sent["instance_type_name"], "gpu_1x_sample");
+    // The ruleset found by its name is the one attached, and an empty payload sends no
+    // user data.
+    assert_eq!(sent["firewall_rulesets"], json!([{"id": "rs-noinbound-a"}]));
+    assert!(sent.get("user_data").is_none());
     assert!(sent["name"].as_str().unwrap().starts_with("js-"));
     let tags: Vec<(String, String)> = sent["tags"]
         .as_array()
@@ -280,6 +312,7 @@ fn statuses_and_codes_of_a_launch_become_the_provider_answers() {
     ];
     for (status, file, want) in cases {
         let server = Server::plain();
+        ruleset_ready(&server);
         empty_list(&server);
         server.on(LAUNCH, Reply::json(status, &fixture(file)));
         let (provider, _) = provider(&server, 2, PATIENT);
@@ -293,6 +326,7 @@ fn statuses_and_codes_of_a_launch_become_the_provider_answers() {
 #[test]
 fn a_launch_that_never_answers_is_unknown_at_the_limit() {
     let server = Server::plain();
+    ruleset_ready(&server);
     empty_list(&server);
     server.on(LAUNCH, Reply::Hang);
     let (provider, _) = provider(&server, 2, Duration::from_millis(300));
@@ -309,6 +343,7 @@ fn a_launch_that_never_answers_is_unknown_at_the_limit() {
 #[test]
 fn a_list_that_cannot_be_read_stops_the_launch() {
     let server = Server::plain();
+    ruleset_ready(&server);
     server.on(LIST, Reply::json(500, &fixture("error_internal.json")));
     server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
     let (provider, _) = provider(&server, 2, PATIENT);
@@ -319,6 +354,7 @@ fn a_list_that_cannot_be_read_stops_the_launch() {
 #[test]
 fn a_list_with_a_page_token_is_not_taken_for_everything() {
     let server = Server::plain();
+    ruleset_ready(&server);
     server.on(
         LIST,
         Reply::json(200, r#"{"data": [], "page_token": "more"}"#),
@@ -334,12 +370,13 @@ fn a_release_over_http_reads_terminates_one_id_and_reads_back() {
     let server = Server::plain();
     // An instance that is ours: the name and tags the provider would have given.
     let (provider, clock) = provider(&server, 2, PATIENT);
+    ruleset_ready(&server);
     empty_list(&server);
     server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
     let Acquired::Accepted { held, .. } = provider.acquire(&ask()) else {
         panic!("not accepted");
     };
-    let sent = body(&server, 1);
+    let sent = body(&server, 2);
     let instance = |status: &str| {
         let mut one: Value = serde_json::from_str(&fixture("instance.json")).unwrap();
         one["data"]["id"] = json!(held.id.as_str());
@@ -358,12 +395,12 @@ fn a_release_over_http_reads_terminates_one_id_and_reads_back() {
     let seen: Vec<String> = server
         .seen()
         .iter()
-        .skip(2)
+        .skip(3)
         .map(|s| format!("{} {}", s.method, s.target))
         .collect();
     assert_eq!(seen, [ONE, TERMINATE, ONE].map(str::to_owned));
     assert_eq!(
-        body(&server, 3),
+        body(&server, 4),
         json!({"instance_ids": ["c0ffee00c0ffee00c0ffee00c0ffee01"]})
     );
     // The documented 404 on the next read, after a list has worked, is gone.
@@ -373,4 +410,145 @@ fn a_release_over_http_reads_terminates_one_id_and_reads_back() {
     );
     clock.advance(Duration::from_secs(1));
     assert_eq!(provider.release(&held.id), Released::Gone);
+}
+
+#[test]
+fn a_launch_posts_the_user_data_and_the_ruleset_ids_it_was_given() {
+    let server = Server::plain();
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    let mut asked = request();
+    asked.user_data = Some(js_elastic::Secret::new(
+        "#!/bin/sh\necho booted\n".to_owned(),
+    ));
+    asked.firewall_ruleset_ids = vec!["rs-1".to_owned(), "rs-2".to_owned()];
+    client(&server, "key-one").launch(&asked).unwrap();
+    let sent = body(&server, 0);
+    assert_eq!(sent["user_data"], "#!/bin/sh\necho booted\n");
+    assert_eq!(
+        sent["firewall_rulesets"],
+        json!([{"id": "rs-1"}, {"id": "rs-2"}])
+    );
+    assert_eq!(sent["ssh_key_names"], json!(["fixture-key"]));
+}
+
+#[test]
+fn a_missing_ruleset_is_made_with_no_rules_in_the_region_and_attached_with_the_payload() {
+    let server = Server::plain();
+    server.on(RULESETS, Reply::json(200, r#"{"data": []}"#));
+    server.on(
+        MAKE_RULESET,
+        Reply::json(200, &fixture("firewall_ruleset.json")),
+    );
+    empty_list(&server);
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    let (provider, _) = provider(&server, 2, PATIENT);
+    let mut asked = ask();
+    asked.payload = BootPayload::new("#!/bin/sh\necho PAYLOAD-BODY\n".to_owned());
+    assert!(matches!(
+        provider.acquire(&asked),
+        Acquired::Accepted { .. }
+    ));
+    let methods: Vec<String> = server
+        .seen()
+        .iter()
+        .map(|s| format!("{} {}", s.method, s.target))
+        .collect();
+    assert_eq!(
+        methods,
+        [RULESETS, MAKE_RULESET, LIST, LAUNCH]
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(
+        body(&server, 1),
+        json!({"name": "js-sched-one-noinbound", "region": "region-a", "rules": []})
+    );
+    let sent = body(&server, 3);
+    assert_eq!(sent["firewall_rulesets"], json!([{"id": "rs-new"}]));
+    assert_eq!(sent["user_data"], "#!/bin/sh\necho PAYLOAD-BODY\n");
+}
+
+#[test]
+fn a_ruleset_of_our_name_in_another_region_does_not_count_and_one_with_rules_is_refused() {
+    // The account holds our name in region-b only: region-a gets its own.
+    let elsewhere = fixture("firewall_rulesets.json").replace("\"region-a\"", "\"region-b\"");
+    let server = Server::plain();
+    server.on(RULESETS, Reply::json(200, &elsewhere));
+    server.on(
+        MAKE_RULESET,
+        Reply::json(200, &fixture("firewall_ruleset.json")),
+    );
+    empty_list(&server);
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    let (first, _) = provider(&server, 2, PATIENT);
+    assert!(matches!(first.acquire(&ask()), Acquired::Accepted { .. }));
+    assert_eq!(server.seen()[1].method, "POST");
+
+    // A ruleset of our name that holds a rule is never used.
+    let with_rule = r#"{"data": [{"id": "rs-open", "name": "js-sched-one-noinbound",
+        "region": {"name": "region-a", "description": ""},
+        "rules": [{"protocol": "all", "source_network": "0.0.0.0/0", "description": ""}]}]}"#;
+    let server = Server::plain();
+    server.on(RULESETS, Reply::json(200, with_rule));
+    let (provider, _) = provider(&server, 2, PATIENT);
+    assert_eq!(
+        provider.acquire(&ask()),
+        Acquired::Refused(Refusal {
+            code: RefusalCode::Denied,
+            reason: Reason::Firewall(
+                "firewall: the ruleset js-sched-one-noinbound holds 1 rules; it must hold none"
+                    .to_owned()
+            ),
+        })
+    );
+    assert!(server.seen().iter().all(|s| s.method == "GET"));
+}
+
+#[test]
+fn an_account_with_no_key_gets_one_made_by_the_api_and_the_private_half_is_not_kept() {
+    let server = Server::plain();
+    ruleset_ready(&server);
+    server.on(KEYS, Reply::json(200, r#"{"data": []}"#));
+    server.on(
+        MAKE_KEY,
+        Reply::json(200, &fixture("ssh_key_generated.json")),
+    );
+    empty_list(&server);
+    server.on(LAUNCH, Reply::json(200, &fixture("launch.json")));
+    let (provider, _) = provider_with(&server, PATIENT, |scheduler| {
+        ElasticConfig::with_account_key(scheduler, std::num::NonZeroUsize::new(2).unwrap())
+    });
+    let answer = provider.acquire(&ask());
+    assert!(matches!(answer, Acquired::Accepted { .. }));
+    assert!(!format!("{answer:?}").contains("PRIVATE-CANARY"));
+    let methods: Vec<String> = server
+        .seen()
+        .iter()
+        .map(|s| format!("{} {}", s.method, s.target))
+        .collect();
+    assert_eq!(
+        methods,
+        [KEYS, MAKE_KEY, RULESETS, LIST, LAUNCH]
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(body(&server, 1), json!({"name": "js-sched-one"}));
+    assert_eq!(body(&server, 4)["ssh_key_names"], json!(["js-sched-one"]));
+}
+
+#[test]
+fn an_account_with_several_keys_and_none_named_is_refused_before_any_write() {
+    let server = Server::plain();
+    server.on(KEYS, Reply::json(200, &fixture("ssh_keys.json")));
+    let (provider, _) = provider_with(&server, PATIENT, |scheduler| {
+        ElasticConfig::with_account_key(scheduler, std::num::NonZeroUsize::new(2).unwrap())
+    });
+    assert_eq!(
+        provider.acquire(&ask()),
+        Acquired::Refused(Refusal {
+            code: RefusalCode::Denied,
+            reason: Reason::SshKey("provider.ssh_key: account has 2 keys; name one".to_owned()),
+        })
+    );
+    assert!(server.seen().iter().all(|s| s.method == "GET"));
 }

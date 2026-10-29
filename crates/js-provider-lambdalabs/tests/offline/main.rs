@@ -4,6 +4,8 @@
 mod acquire;
 mod config;
 mod fake;
+mod host_prep;
+mod inputs;
 mod key;
 mod lagging;
 mod model;

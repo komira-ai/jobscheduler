@@ -37,6 +37,8 @@ ureq.workspace = true
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+# The test that renders the script a Lambda machine runs, with the provider's own steps.
+js-provider-lambdalabs = { path = "../js-provider-lambdalabs" }
 js-testkit = { path = "../js-testkit" }
 # The test that keeps the secrets out of every log line reads the HTTP client's own
 # `log` output.

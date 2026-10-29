@@ -5,7 +5,7 @@ use std::time::Duration;
 use js_elastic::{
     Acquired, BootPayload, ElasticProvider, HostStatus, Reason, Refusal, RefusalCode, Released,
 };
-use js_provider_lambdalabs::{ApiError, Call, ErrorCode, SCHEDULER_TAG};
+use js_provider_lambdalabs::{ApiError, Call, ErrorCode, PAYLOAD_LIMIT, SCHEDULER_TAG};
 
 use crate::rig::{INTERVAL, SCHEDULER, ask, candidate, config, host, id, live, rig, row, tag};
 
@@ -106,24 +106,29 @@ fn an_offer_with_no_zone_is_refused_without_a_call() {
 }
 
 #[test]
-fn a_payload_is_refused_until_the_provider_can_deliver_one_and_nothing_is_launched() {
+fn a_payload_over_the_limit_is_refused_before_any_call_and_one_at_the_limit_is_launched() {
     let rig = rig(live(5));
-    assert_eq!(rig.provider.payload_limit(), 0);
+    let limit = rig.provider.payload_limit();
+    assert_eq!(limit, PAYLOAD_LIMIT);
     let mut request = ask("a");
-    request.payload = BootPayload::new("join-token-MARKER".to_owned());
+    request.payload = BootPayload::new("join-token-MARKER".repeat(limit / 17 + 1));
+    let len = request.payload.len();
+    assert!(len > limit);
     let answer = rig.provider.acquire(&request);
     assert_eq!(
         answer,
-        refused(
-            RefusalCode::Shape,
-            Reason::PayloadTooLarge { len: 17, limit: 0 }
-        )
+        refused(RefusalCode::Shape, Reason::PayloadTooLarge { len, limit })
     );
     // The refusal says how big the payload was and never what it held.
     assert!(!format!("{answer:?}").contains("MARKER"));
     assert!(rig.fake.calls().is_empty());
-    // With no payload the same request launches.
-    assert_eq!(held_id(&rig.provider.acquire(&ask("a"))), "fake0001");
+    // A payload of exactly the limit is launched.
+    request.payload = BootPayload::new("x".repeat(limit));
+    assert_eq!(held_id(&rig.provider.acquire(&request)), "fake0001");
+    assert_eq!(
+        rig.fake.launches()[0].user_data().map(str::len),
+        Some(limit)
+    );
 }
 
 #[test]

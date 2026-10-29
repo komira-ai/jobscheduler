@@ -19,6 +19,10 @@
 //! - A boot deadline, a wall-clock cap and a spend cap (the API's hourly price times the
 //!   time since the launch) each force teardown. Termination is tried a bounded number
 //!   of times and each try reads the instance back.
+//!
+//! The launch goes through [`LambdaProvider::acquire`], so the instance carries the
+//! no-inbound firewall ruleset that every launch carries: nothing can connect to it, and
+//! the optional ssh check cannot succeed against a launch made this way.
 
 mod args;
 mod state;
