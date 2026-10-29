@@ -678,7 +678,8 @@ fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
         stop_grace,
     };
     let (runtime, mut lines) = machine.runtime(&wanted)?;
-    let checks = Integrity::start(machine.view(), settings.uid(), watch)?;
+    let checks =
+        Integrity::start(machine.view(), settings.uid(), watch)?.with_slots(settings.slot_ids(0).0);
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));
