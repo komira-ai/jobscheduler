@@ -493,3 +493,40 @@ fn a_full_queue_makes_the_question_busy_without_waiting() {
     assert!(handle.settle());
     assert_eq!(host.prepare(LEASE), Quiet::Ready);
 }
+
+/// Asserts that questions never crowd replies out of the queue: with the worker inside a
+/// runtime call, twenty prepare questions and twenty restore questions leave exactly one of
+/// each in the queue, so `QUEUE - 2` replies are still taken and only the next is `Full`
+/// (a question per heartbeat would have filled the queue and dropped replies earlier). It
+/// catches a proxy that queues a question on every heartbeat while the worker is busy.
+#[test]
+fn questions_never_crowd_replies_out_of_the_queue() {
+    let dir = Scratch::new("jobs-quiesce-crowd");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    let mut host = WorkerHost::new(worker.handle());
+
+    machine.world.hold_creates();
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    machine.world.wait_entered(1);
+    for _ in 0..20 {
+        assert_eq!(host.prepare(LEASE), Quiet::Busy);
+        assert_eq!(host.restore(LEASE), Restored::Busy);
+    }
+    for n in 0..QUEUE - 2 {
+        assert_eq!(
+            worker.try_deliver(granting(LEASE, &[])),
+            Delivery::Delivered,
+            "reply {n} has room"
+        );
+    }
+    assert_eq!(worker.try_deliver(granting(LEASE, &[])), Delivery::Full);
+
+    machine.world.release();
+    assert!(worker.handle().settle());
+    assert_eq!(
+        host.restore(LEASE),
+        Restored::Busy,
+        "asked again once taken"
+    );
+}
