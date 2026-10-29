@@ -8,7 +8,8 @@ mod support;
 
 use js_agent_wire::{HeldRun, HeldState};
 use js_provider::{Provider, RefusalCode, StartAck};
-use js_registry::{Busy, HostMark, HostState, HostView};
+use js_registry::{Busy, HostMark, HostState, HostView, RunRefusal};
+use support::world::job;
 use support::*;
 
 fn held(run: &str) -> HeldRun {
@@ -341,4 +342,40 @@ fn a_mark_survives_a_new_hello() {
     fx.join("b", "t");
     assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
     assert_eq!(mark(&fx, "b"), Some(HostMark::Releasing));
+}
+
+/// Asserts the two guards that matter if a booking ever lands on a marked host. The only
+/// way to put one there is `seat`, the call that puts back a booking the server lost with
+/// its process (the marks are in memory, so a restart clears them and the real order is the
+/// other way round). With a booking seated on a draining host and on a releasing host, a run
+/// is queued on neither (`no-capacity`, the same refusal as a host out of the serving
+/// phase), and the same call is queued once the drain is undone; `remove` keeps the
+/// releasing host (`Busy::Lease`) until its lease is stopped. It catches a run start that
+/// reads the lease table and not the mark, and a remove that drops a booking with its host.
+#[test]
+fn a_booking_seated_on_a_marked_host_starts_no_run_and_blocks_remove() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.join("b", "t");
+    let (a, b) = (host("a"), host("b"));
+    fx.registry.drain(&a).unwrap();
+    fx.registry.drain(&b).unwrap();
+    fx.registry.release_host(&b).unwrap();
+    fx.provider.seat(&a, lease(1), None).unwrap();
+    fx.provider.seat(&b, lease(2), None).unwrap();
+    assert_eq!(fx.registry.host_of(&lease(2)), Some(b.clone()));
+
+    for (name, held) in [(&a, lease(1)), (&b, lease(2))] {
+        let refused = fx.registry.queue_run(name, &held, job("r1"));
+        assert_eq!(refused.unwrap_err(), RunRefusal::NoCapacity, "{name}");
+    }
+    fx.registry.undrain(&a).unwrap();
+    assert!(fx.registry.queue_run(&a, &lease(1), job("r1")).is_ok());
+
+    assert_eq!(fx.registry.remove(&b), Err(Busy::Lease));
+    assert_eq!(fx.registry.host_of(&lease(2)), Some(b.clone()));
+    let mut provider = fx.registry.provider();
+    provider.stop(&lease(2));
+    assert_eq!(fx.registry.remove(&b), Ok(()));
+    assert_eq!(fx.registry.hosts().len(), 1);
 }

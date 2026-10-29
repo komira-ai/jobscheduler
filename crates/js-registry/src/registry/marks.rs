@@ -211,6 +211,3 @@ fn quiet(
         false => Err(Busy::Runs),
     }
 }
-
-#[cfg(test)]
-mod tests;

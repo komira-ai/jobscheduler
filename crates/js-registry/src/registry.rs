@@ -810,16 +810,15 @@ impl Registry {
         if book.read(lease) != booked {
             return Err(RunRefusal::NotHeld);
         }
-        if record.leaving.is_some() {
-            return Err(RunRefusal::NoCapacity);
-        }
         if record.taint.is_some() {
             return Err(RunRefusal::HostTainted);
         }
         if record.exclusive.awaits_ready() {
             return Err(RunRefusal::NotReady);
         }
-        if record.phase != Phase::Serving {
+        // A host being scaled away takes no run, as one out of the serving phase takes none.
+        let takes_runs = (record.phase == Phase::Serving) & record.leaving.is_none();
+        if !takes_runs {
             return Err(RunRefusal::NoCapacity);
         }
         let seen = (record.beats, now.millis());
