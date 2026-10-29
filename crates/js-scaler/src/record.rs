@@ -244,6 +244,14 @@ pub struct Record {
     pub clean_lists: u8,
     /// For `Failed` and `Orphan`: when the last of them was taken.
     pub last_clean: Option<Millis>,
+    /// Whether the registry has ever shown its host live and heard from, on a step of the
+    /// scaler. It is set once and never cleared. A host that has been heard from has
+    /// booted, so the lost-Welcome rule (the host said hello and was never heard from; see
+    /// `Pass::on_silent`) never applies to it, even when a later restart of its agent
+    /// says hello again and the heartbeat count starts over. Files written before the
+    /// field existed read it as `false`.
+    #[serde(default)]
+    pub seen_live: bool,
 }
 
 impl Record {

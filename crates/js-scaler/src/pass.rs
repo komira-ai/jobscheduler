@@ -221,6 +221,7 @@ impl<'a> Pass<'a> {
                 condemned: false,
                 clean_lists: 0,
                 last_clean: None,
+                seen_live: false,
                 ..launch.clone()
             });
         }
@@ -411,6 +412,7 @@ impl<'a> Pass<'a> {
                 condemned: false,
                 clean_lists: 0,
                 last_clean: None,
+                seen_live: false,
             });
         }
     }
