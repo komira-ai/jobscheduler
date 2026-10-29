@@ -101,7 +101,7 @@ pub fn fit(ring: &Ring) -> Option<Fit> {
     }
     // Nothing earlier to hold: the start of the curve is the first clean value (0 only when no
     // emitted minute has one), not the default.
-    let first = raw.get(lead).map_or(0, |p| p.cores_milli);
+    let first = raw.last().map_or(0, |p| p.cores_milli);
     for p in &mut raw[..lead] {
         p.cores_milli = first;
     }
