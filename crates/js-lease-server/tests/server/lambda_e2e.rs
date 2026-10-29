@@ -100,11 +100,14 @@ async fn a_waiting_request_is_served_by_a_launched_host_that_is_released_when_id
     assert_eq!(rig.phase(), Phase::Registered);
     assert_eq!(rig.registry().hosts().len(), 1);
 
-    let ack = rig.present();
-    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
+    // The consumer's poll commits the lease on the host; it stays pending until the
+    // agent reports the host ready, and then the same poll is answered Started.
+    assert!(matches!(rig.present(), StartAck::Unknown));
     assert!(rig.registry().waiting().is_empty());
     let lease = LeaseId::new(1, 1);
     assert_eq!(rig.ready(&credential, &me).await, lease.to_string());
+    let ack = rig.present();
+    assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
     let host = HostId::new(&name).unwrap();
     assert_eq!(
         rig.registry().provider().observe(&lease),
@@ -256,9 +259,10 @@ async fn a_default_mode_pool_whose_host_says_hello_serves_a_request() {
     let (me, credential) = rig.join(&token, &name).await;
     rig.tick().await;
     assert_eq!(rig.phase(), Phase::Registered);
+    assert!(matches!(rig.present(), StartAck::Unknown));
+    rig.ready(&credential, &me).await;
     let ack = rig.present();
     assert!(matches!(&ack, StartAck::Started { host } if host.as_str() == name));
-    rig.ready(&credential, &me).await;
     let host = HostId::new(&name).unwrap();
     let observed = rig.registry().provider().observe(&LeaseId::new(1, 1));
     assert_eq!(observed, Observed::Present { host });
