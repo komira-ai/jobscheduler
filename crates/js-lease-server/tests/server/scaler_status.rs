@@ -118,6 +118,7 @@ async fn the_status_lists_the_machines_the_orphans_and_the_newest_launch_of_the_
             ),
         ],
         cooldowns: BTreeMap::new(),
+        ..Default::default()
     };
     RecordsFile::new(records_path(&scratch))
         .save(&records)
@@ -167,6 +168,7 @@ async fn the_alerts_are_on_the_status() {
     let records = Records {
         instances: vec![orphan],
         cooldowns: BTreeMap::new(),
+        ..Default::default()
     };
     RecordsFile::new(records_path(&scratch))
         .save(&records)

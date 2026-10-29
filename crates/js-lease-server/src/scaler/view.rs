@@ -3,7 +3,7 @@
 
 use js_elastic::{GpuClass, Offer, PriceUnit};
 use js_registry::{HostMark, HostState, HostView, Waiting as Request};
-use js_scaler::{HostFacts, HostState as Hearing, Mark, Records, Waiting};
+use js_scaler::{HostFacts, HostState as Hearing, Mark, Waiting};
 use js_types::{ExecMode, Shape};
 
 /// The shape of a host in the form of an offer, so that one rule judges a host and an
@@ -51,25 +51,16 @@ fn hearing(state: HostState) -> Hearing {
 }
 
 /// `host`, a host of the pool `pool` whose jobs run in `exec` mode, as the scaler reads it.
-/// What it holds is what it announced when it did, and what the pool books for it
-/// otherwise. It is busy when it holds a lease or still has runs to finish. It has given
+/// What it holds is what it announced, if it did. It is busy when it holds a lease or still has runs to finish. It has given
 /// up its leases when the registry does not hear from it and books no lease on it: a silent
 /// host that never held one included.
 ///
-/// A host that has announced nothing yet (one put back after a restart, not yet heard from)
-/// has the shape its record stored, when `known` has one: the pool's floor, which is below
-/// any offer, would otherwise condemn a healthy machine as short.
-pub(super) fn host_facts(
-    host: HostView,
-    pool: &str,
-    exec: ExecMode,
-    known: impl Fn(&str) -> Option<Offer>,
-) -> HostFacts {
-    let announced = host.claim.as_ref().map(|claim| offer_of(claim, exec));
-    let shape = match announced.or_else(|| known(host.id.as_str())) {
-        Some(shape) => shape,
-        None => offer_of(&host.shape, exec),
-    };
+/// `shape` is `Some` only when the host announced one (the registry's `claim`), and `None`
+/// for a host that has announced none since the registry was put back after a restart. The
+/// shell never stands in the pool's floor (`host.shape`) or a stored shape: the floor is
+/// below any offer and would read as a hello that falls short.
+pub(super) fn host_facts(host: HostView, pool: &str, exec: ExecMode) -> HostFacts {
+    let shape = host.claim.as_ref().map(|claim| offer_of(claim, exec));
     HostFacts {
         shape,
         pool: pool.to_owned(),
@@ -80,15 +71,6 @@ pub(super) fn host_facts(
         id: host.id,
         heard_since_hello: host.heard_since_hello,
     }
-}
-
-/// The offer the record named `name` stored, if there is one.
-pub(super) fn stored_shape(records: &Records, name: &str) -> Option<Offer> {
-    let record = records
-        .instances
-        .iter()
-        .find(|record| record.name == name)?;
-    Some(record.offer.to_offer(record.price_cents_per_hour))
 }
 
 /// `request`, a waiting request, as the scaler reads it.
