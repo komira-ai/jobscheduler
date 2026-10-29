@@ -268,7 +268,7 @@ fn write_at(rig: &mut Rig, n: u64, now: u64) {
         name: None,
         offer: "a10".to_owned(),
         zone: None,
-        status: HostStatus::Running,
+        status: HostStatus::Active,
     };
     rig.pool().held.as_mut().unwrap().push(held);
     assert_eq!(kinds(&rig.tick(at(now))), ["Save"]);
