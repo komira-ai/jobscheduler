@@ -178,7 +178,7 @@ mod tests {
         let trailing_newline = format!("t@sha256:{HEX}\n");
         let leading_space = format!("t@ sha256:{HEX}");
         let second_at = format!("t@x@sha256:{HEX}");
-        let table: Vec<(String, Verdict)> = vec![
+        let table: [(String, Verdict); 24] = [
             (format!("toolchain@sha256:{HEX}"), Verdict::Pinned),
             (format!("toolchain:1.2@sha256:{HEX}"), Verdict::Pinned),
             (

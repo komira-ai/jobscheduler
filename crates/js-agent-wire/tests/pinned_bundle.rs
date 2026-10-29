@@ -41,12 +41,12 @@ fn image_verdict(image: &str) -> Verdict {
 fn bundle_verdict(bundle: &str) -> Verdict {
     let mut spec = job();
     spec.bundle = Some(bundle.into());
-    if let Err(err) = spec.validate() {
-        if err.rule() != Rule::Inconsistent {
-            assert_eq!(err.code(), refusal::INVALID_BUNDLE, "{bundle}");
-            assert_eq!(err.field(), "bundle");
-            return Verdict::Malformed;
-        }
+    if let Err(err) = spec.validate()
+        && err.rule() != Rule::Inconsistent
+    {
+        assert_eq!(err.code(), refusal::INVALID_BUNDLE, "{bundle}");
+        assert_eq!(err.field(), "bundle");
+        return Verdict::Malformed;
     }
     match spec.require_pinned() {
         Ok(()) => Verdict::Accepted,
@@ -75,7 +75,7 @@ fn images_and_bundles_accept_and_refuse_the_same_pins() {
     let upper_name = format!("A@sha256:{HEX}");
     let transport = format!("oci:foo@sha256:{HEX}");
     let nul = format!("a\0b@sha256:{HEX}");
-    let table: Vec<(String, Verdict)> = vec![
+    let table: [(String, Verdict); 18] = [
         (format!("a@sha256:{HEX}"), Verdict::Accepted),
         (format!("ghcr.io/o/i:v1@sha256:{HEX}"), Verdict::Accepted),
         (
