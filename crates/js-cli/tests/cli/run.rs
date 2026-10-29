@@ -12,9 +12,11 @@ use js_cli::{ForwardedSignal, Services, Signaller, Waiter};
 use js_provider::Call;
 
 use crate::procs::{assert_reaped, fifo, path_str, secs};
+#[cfg(target_os = "linux")]
+use crate::support::TOKEN;
 use crate::support::{
-    EndsRun, FixedClock, Harness, Manual, Never, Outcome, Scratch, T0, TOKEN, acquire_words,
-    against, http, run_words, sequence, services,
+    EndsRun, FixedClock, Harness, Manual, Never, Outcome, Scratch, T0, acquire_words, against,
+    http, run_words, sequence, services,
 };
 
 /// Runs `lease run` with `extra` flags and `command`, with a waiter nobody steps.
