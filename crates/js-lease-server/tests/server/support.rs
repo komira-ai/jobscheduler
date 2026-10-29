@@ -12,7 +12,7 @@ use clap::Parser;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
-    channel_ticker, start_with_checks,
+    Ticker, channel_ticker, start_with_checks,
 };
 use js_pool_static::{EXAMPLE_CONFIG, StaticPool};
 use js_provider::Provider;
@@ -396,6 +396,18 @@ pub fn first_labels(reply: &Reply) -> BTreeMap<String, String> {
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
         .collect()
+}
+
+/// Starts a server on `config` with a ticker for its table and a ticker for pool checks
+/// that nothing steps. Every test starts its server through [`start_with_checks`], so that
+/// one copy of the generic start-up code runs all of what the tests start.
+pub async fn start<T: Ticker>(
+    config: Config,
+    clock: SharedClock,
+    ticker: T,
+) -> Result<Running, StartupError> {
+    let (_checks, check_ticker) = channel_ticker();
+    start_with_checks(config, clock, ticker, check_ticker).await
 }
 
 /// What the server logs on the calling thread, kept as text until the capture is

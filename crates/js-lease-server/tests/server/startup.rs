@@ -6,9 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
 use clap::Parser;
-use js_lease_server::{SharedClock, channel_ticker, parse_duration, run, start};
+use js_lease_server::{SharedClock, channel_ticker, parse_duration, run};
 
-use crate::support::{Harness, Scratch, TOKEN, args_with, base_args, config, replace, request};
+use crate::support::{
+    Harness, Scratch, TOKEN, args_with, base_args, config, replace, request, start,
+};
 
 /// The flag a refusal names, and that its reason is not empty.
 fn flag_of<T>(result: Result<T, js_lease_server::StartupError>) -> &'static str {
