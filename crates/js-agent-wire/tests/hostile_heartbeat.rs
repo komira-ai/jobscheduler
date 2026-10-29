@@ -362,7 +362,7 @@ fn refusal_and_hello_reply_are_checked() {
         assert_eq!(named(bad).validate().unwrap_err().code(), code);
     }
     expect(
-        named(&long(limits::MAX_CAPABILITY_KEY_LEN + 1))
+        named(&long(MAX_CAPABILITY_KEY_LEN + 1))
             .validate()
             .unwrap_err(),
         "field",
