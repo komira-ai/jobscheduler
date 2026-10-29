@@ -532,7 +532,7 @@ impl<'a> Pass<'a> {
         // is forgotten. Only the booked lease, or a mark, keeps the host.
         let working = [
             (host.busy, host.lease_given_up) == (true, false),
-            matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
+            matches!(host.mark, Some(Mark::Reserved)),
         ];
         let due = [ripe, !working.into_iter().any(|work| work)];
         let marked = host.mark == Some(Mark::Releasing);
