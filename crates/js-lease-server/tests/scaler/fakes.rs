@@ -453,7 +453,9 @@ pub fn record(name: &str, phase: Phase) -> Record {
         condemned: false,
         clean_lists: 0,
         last_clean: None,
-        seen_live: false,
+        // A machine the step has seen live already: a step that sees it live again has
+        // nothing new to write down.
+        seen_live: true,
     }
 }
 
