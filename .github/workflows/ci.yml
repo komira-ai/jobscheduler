@@ -139,6 +139,7 @@ jobs:
             crates/js-provider-fake/
             crates/js-provider-lambdalabs/
             crates/js-registry/
+            crates/js-scaler/
             crates/js-sched/
             crates/js-sim/
             crates/js-sizing/
