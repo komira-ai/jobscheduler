@@ -22,6 +22,7 @@ prefix FATE fate/
 prefix FLOOR floor/
 prefix KEY_FLOOR keyfloor/
 prefix OPKEY opkey/
+prefix OPWALL opwall/
 prefix INFLIGHT inflight/
 prefix EPOCH meta/epoch
 prefix ALIVE meta/alive
@@ -45,6 +46,7 @@ loss loss/0000000000000004
 fate fate/0000000000000004
 opkey opkey/0000000000000004
 opkey opkey/0000000000000008
+opwall opwall/0000000000000008
 floor floor/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1
 key_floor keyfloor/0000000000000007
 inflight inflight/6d61696e/0101010101010101010101010101010101010101010101010101010101010101/1

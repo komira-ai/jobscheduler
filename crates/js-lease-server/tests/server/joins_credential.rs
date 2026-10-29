@@ -5,7 +5,6 @@
 use std::fs;
 use std::time::Duration;
 
-use clap::Parser;
 use js_lease_server::Cli;
 use serde_json::{Value, json};
 
@@ -347,7 +346,10 @@ fn the_switch_needs_agent_registration() {
     let scratch = Scratch::new("cred_required_flag");
     let mut args = crate::support::base_args(&scratch);
     args.push("--require-host-credential".into());
-    assert!(Cli::try_parse_from(args).is_err());
+    assert_eq!(
+        crate::support::config(args).err().unwrap().to_string(),
+        "--require-host-credential: requires --agent-pool-config"
+    );
     let mut args = agent_args(&scratch, false);
     args.push("--require-host-credential".into());
     assert!(Cli::try_parse_from(args).is_ok());
