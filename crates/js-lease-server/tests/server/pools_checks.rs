@@ -308,3 +308,38 @@ fn the_grep_for_secrets_finds_a_planted_one() {
     assert_eq!(leaked(&planted).len(), 2);
     assert!(leaked("nothing here").is_empty());
 }
+
+/// Asserts the agent pins against the catalog. A pool that launches and has an agent
+/// pinned for x86_64 only is unavailable while the catalog holds an offer of aarch64, and
+/// says which offer, which architecture and which field; a pool in `plan` mode is not
+/// held to it, and a live pool whose offers are all pinned is available. It catches a pool
+/// that would launch a machine for which it has no agent, or fall back to another
+/// architecture's.
+#[tokio::test]
+async fn a_live_pool_is_unavailable_for_an_offer_of_an_architecture_it_has_no_agent_for() {
+    let mut arm = a10("gpu_1x_a10_arm", 1, 129);
+    arm.arch = "aarch64".to_owned();
+    let live = Options {
+        live: true,
+        exec: "container",
+        ..Options::default()
+    };
+    let rig = Rig::start("checks_pins_live", vec![arm.clone()], live).await;
+    rig.step().await;
+    let pool = rig.pool().await;
+    assert_eq!(pool["state"], "unavailable");
+    assert_eq!(
+        reasons(&pool),
+        [
+            "catalog: gpu_1x_a10_arm is for the architecture aarch64, which has no agent pin (agent.aarch64)"
+        ]
+    );
+
+    let rig = Rig::start("checks_pins_plan", vec![arm], Options::default()).await;
+    rig.step().await;
+    assert_eq!(rig.pool().await["state"], "available");
+
+    let pinned = Rig::start("checks_pins_ok", vec![a10("gpu_1x_a10", 1, 129)], live).await;
+    pinned.step().await;
+    assert_eq!(pinned.pool().await["state"], "available");
+}
