@@ -318,6 +318,12 @@ fn env_rules() {
         "LD_PRELOAD",
         "SANDBOX_X",
         "JS_AGENT_RUN",
+        "__XPC_DYLD_LIBRARY_PATH",
+        "MALLOC_CONF",
+        "MALLOCX",
+        "MallocStackLogging",
+        "MallocLogFile",
+        "OBJC_PRINT_IMAGES",
     ] {
         expect(one(key, "v"), field, Rule::Reserved, code);
     }
@@ -341,6 +347,9 @@ fn env_rules() {
     env.extend([
         ("_A9".to_owned(), "line one\nline two \u{202e}".to_owned()),
         ("LDX".to_owned(), String::new()),
+        ("__X".to_owned(), String::new()),
+        ("MALLO".to_owned(), String::new()),
+        ("OBJC".to_owned(), String::new()),
         ("dyld_lower".to_owned(), long(MAX_ENV_VALUE_LEN)),
     ]);
     assert_eq!(ok.validate(), Ok(()));
@@ -529,4 +538,131 @@ fn inputs_and_outputs_are_counted() {
     native.inputs = inputs(MAX_INPUTS);
     native.outputs = outputs(MAX_OUTPUTS);
     assert_eq!(ok.validate(), Ok(()));
+}
+
+/// Paths that APFS treats as one name are one name here: they differ by case, or by Unicode
+/// normalisation. Input dests and output paths take ASCII only, so a composed and a
+/// decomposed `\u{e9}` are refused outright, and the case fold of the rest is exact. It
+/// catches `A` and `a` passing as two inputs that clone over one another on a Mac.
+#[test]
+fn paths_that_collide_on_a_case_insensitive_volume_are_refused() {
+    let code = refusal::INVALID_JOB;
+    let stage = |dest: &str| InputRef::Stage {
+        stage_id: STAGE.into(),
+        dest: dest.into(),
+        placement: Placement::ReadOnly,
+    };
+    let inputs = |dests: &[&str]| {
+        let dests: Vec<InputRef> = dests.iter().map(|d| stage(d)).collect();
+        check(move |n| n.inputs = dests)
+    };
+    expect(inputs(&["A", "a"]), "native.inputs", Rule::Duplicate, code);
+    expect(
+        inputs(&["Src", "sRC/x"]),
+        "native.inputs",
+        Rule::Inconsistent,
+        code,
+    );
+    let outputs = |paths: &[&str]| {
+        let paths: Vec<OutputSpec> = paths
+            .iter()
+            .map(|p| OutputSpec {
+                path: (*p).into(),
+                kind: OutputKind::File,
+            })
+            .collect();
+        check(move |n| {
+            n.inputs.clear();
+            n.outputs = paths;
+        })
+    };
+    expect(
+        outputs(&["A", "a"]),
+        "native.outputs",
+        Rule::Duplicate,
+        code,
+    );
+    expect(
+        outputs(&["A", "a/b"]),
+        "native.outputs",
+        Rule::Inconsistent,
+        code,
+    );
+    let composed = "caf\u{e9}";
+    let decomposed = "cafe\u{301}";
+    for dest in [composed, decomposed] {
+        expect(inputs(&[dest]), "native.inputs", Rule::BadChars, code);
+        expect(outputs(&[dest]), "native.outputs", Rule::BadChars, code);
+        expect(
+            check(|n| n.cwd = dest.into()),
+            "native.cwd",
+            Rule::BadChars,
+            code,
+        );
+    }
+}
+
+/// An output may not nest in, contain or equal another output or an input `dest`. It
+/// catches `out` collected beside `out/a.o`, and a job writing into a read-only staged
+/// input.
+#[test]
+fn outputs_do_not_overlap_each_other_or_the_inputs() {
+    let code = refusal::INVALID_JOB;
+    let field = "native.outputs";
+    let output = |path: &str, kind| OutputSpec {
+        path: path.into(),
+        kind,
+    };
+    let with = |paths: Vec<OutputSpec>| check(move |n| n.outputs = paths);
+    let nested = with(vec![
+        output("out", OutputKind::Dir),
+        output("out/a.o", OutputKind::File),
+    ]);
+    expect(nested, field, Rule::Inconsistent, code);
+    let reversed = with(vec![
+        output("out/a.o", OutputKind::File),
+        output("out", OutputKind::Dir),
+    ]);
+    expect(reversed, field, Rule::Inconsistent, code);
+    let same_as_input = with(vec![output("src", OutputKind::Dir)]);
+    expect(same_as_input, field, Rule::Duplicate, code);
+    let inside_input = with(vec![output("src/gen.o", OutputKind::File)]);
+    expect(inside_input, field, Rule::Inconsistent, code);
+    let over_input = check(|n| {
+        n.inputs = vec![InputRef::Stage {
+            stage_id: STAGE.into(),
+            dest: "a/b".into(),
+            placement: Placement::ReadOnly,
+        }];
+        n.outputs = vec![output("a", OutputKind::Dir)];
+    });
+    expect(over_input, field, Rule::Inconsistent, code);
+    let mut siblings = spec();
+    siblings.native.as_mut().unwrap().outputs = vec![
+        output("out", OutputKind::Dir),
+        output("outer", OutputKind::File),
+        output("srcs", OutputKind::File),
+    ];
+    assert_eq!(siblings.validate(), Ok(()));
+}
+
+/// A start whose `image` key is missing decodes (the field defaults to empty) and is refused
+/// as `invalid-image` instead of reading as an unknown command. It catches a start that
+/// vanishes without a report.
+#[test]
+fn a_start_with_no_image_key_is_refused_not_skipped() {
+    let body = json!({
+        "type": "start", "run_id": "r", "lease_id": "1-1",
+        "limits": {"cpu_millis": 1, "memory_bytes": 1, "wall_ms": 1}
+    });
+    let reply: HeartbeatReply = serde_json::from_value(json!({"commands": [body]})).unwrap();
+    let [Command::Start(spec)] = reply.commands.as_slice() else {
+        panic!("not a start: {:?}", reply.commands);
+    };
+    expect(
+        spec.validate().unwrap_err(),
+        "image",
+        Rule::Empty,
+        refusal::INVALID_IMAGE,
+    );
 }

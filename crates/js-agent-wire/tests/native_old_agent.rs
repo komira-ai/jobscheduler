@@ -24,19 +24,48 @@ struct OldJobSpec {
     labels: BTreeMap<String, String>,
 }
 
-/// The old `validate` as far as the image: both ids are tokens, then the image is checked,
-/// and a start with an empty image is refused with `invalid-image` before anything runs.
-/// The old grammar for a non-empty image is not copied (every image in these tests is a
-/// well-formed one it accepted).
+/// The old `image::image`, body copied from `crates/js-agent-wire/src/image.rs` as of
+/// main before the `native` body existed (commit 51bd69748). Its return type and the
+/// `Rule` names are local stand-ins for the crate-private ones; the three checks and their
+/// order are the original. The reference grammar, `is_reference`, is not copied: every
+/// image in these tests is a well-formed one it accepted, so it is a stub that says yes.
+mod old_image {
+    pub const MAX_IMAGE_LEN: usize = js_agent_wire::limits::MAX_IMAGE_LEN;
+
+    #[derive(Debug, PartialEq)]
+    pub enum Rule {
+        Empty,
+        TooLong,
+        BadChars,
+    }
+
+    fn is_reference(_value: &str) -> bool {
+        true
+    }
+
+    pub fn image(value: &str) -> Result<(), Rule> {
+        if value.is_empty() {
+            return Err(Rule::Empty);
+        }
+        if value.len() > MAX_IMAGE_LEN {
+            return Err(Rule::TooLong);
+        }
+        if !is_reference(value) {
+            return Err(Rule::BadChars);
+        }
+        Ok(())
+    }
+}
+
+/// The old `Command::validate` for a start as far as the image: both ids are tokens, then
+/// the image is checked by the copy above, and a refusal there is `invalid-image` before
+/// anything runs.
 fn old_validate(spec: &OldJobSpec) -> Result<(), &'static str> {
     let token = |text: &str| !text.is_empty() && text.len() <= 128;
     if !token(&spec.run_id) || !token(&spec.lease_id) {
         return Err(refusal::INVALID_JOB);
     }
-    if spec.image.is_empty() {
-        return Err(refusal::INVALID_IMAGE);
-    }
-    Ok(())
+    old_image::image(&spec.image).map_err(|_| refusal::INVALID_IMAGE)
 }
 
 fn native() -> NativeSpec {
