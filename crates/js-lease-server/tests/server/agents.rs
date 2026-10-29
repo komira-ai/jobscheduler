@@ -10,7 +10,7 @@ use crate::agents_support::{
     JOIN, JOIN_B, Session, beat, entry, hello_body, hello_with, hosts, join, listed, post,
     post_raw, session, start_agents,
 };
-use crate::support::{Harness, LogCapture, TOKEN, guard, guard_tasks, ids, lease_body, request};
+use crate::support::{Harness, LogCapture, TOKEN, guard_tasks, ids, lease_body, request};
 
 fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
