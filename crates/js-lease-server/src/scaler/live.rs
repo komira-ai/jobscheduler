@@ -8,7 +8,7 @@ use js_elastic::{
     AcquireId, Acquired, ElasticProvider, Held, HostName, HostRef, Offer, ProviderError, Released,
     SchedulerId, Secret,
 };
-use js_registry::{HostView, Waiting};
+use js_registry::{Busy, HostView, Waiting};
 use js_scaler::{AcquirePlan, Health, Records};
 use js_types::{HostId, ProviderId};
 use tracing::warn;
@@ -149,13 +149,13 @@ impl Effects for Live {
         }
     }
 
-    fn remove(&self, host: &str) -> Result<(), String> {
+    fn remove(&self, host: &str) -> Result<(), Busy> {
         let Ok(id) = HostId::new(host) else {
             return Ok(());
         };
         let registry = &self.agents.registry;
         registry.mark_ending(&id);
-        registry.remove(&id).map_err(|busy| busy.to_string())
+        registry.remove(&id)
     }
 }
 
