@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use super::super::scripted::{DOCKER, Scripted};
 use super::super::{
     HOST, NAME_R1, created, docker, in_another_pid_namespace, made_at, mount, no_file, open,
-    open_at, open_with, platform, sees_the_engines_pid, settings, spec,
+    open_at, open_with, platform, profile_option, sees_the_engines_pid, settings, spec,
 };
 use super::cleanup::other_agent;
 use super::{start, strings, subs};
@@ -117,6 +117,8 @@ fn create_builds_the_documented_argv() {
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        &profile_option(),
         "--network",
         "none",
         "--read-only",
@@ -234,6 +236,7 @@ fn the_job_cannot_reach_the_runtimes_options() {
         rt.create_and_start(&job).unwrap();
         kinds.push((job.run_id.clone(), job.image.clone(), job.args.clone()));
     }
+    let profile = profile_option();
     for (run, image, job_args) in kinds {
         let args = created(&world, &run);
         let dashes = args.iter().position(|a| a == "--").unwrap();
@@ -257,6 +260,11 @@ fn the_job_cannot_reach_the_runtimes_options() {
             let at = before.iter().position(|a| a == flag).unwrap();
             assert_eq!(before[at + 1], value, "{run}: {flag}");
         }
+        assert_eq!(
+            security_options(before),
+            ["no-new-privileges", profile.as_str()],
+            "{run}"
+        );
         assert!(before.contains(&"--read-only".to_owned()), "{run}");
         assert!(before.contains(&"--pids-limit".to_owned()), "{run}");
     }
@@ -586,4 +594,16 @@ fn no_profile_no_container() {
         );
     }
     assert!(world.calls_of("create").is_empty());
+}
+
+/// Asserts that a directory whose name is not UTF-8 is refused before anything is
+/// written: the profile's path is an argv entry and must be text. It catches a path
+/// that is mangled lossily into one that names another file.
+#[test]
+fn a_profile_directory_that_is_not_text_is_refused() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::path::Path::new(OsStr::from_bytes(b"/work/\xff"));
+    let said = js_agent::cli_runtime::install_profile(dir).unwrap_err();
+    assert_eq!(said.kind(), std::io::ErrorKind::InvalidInput);
 }

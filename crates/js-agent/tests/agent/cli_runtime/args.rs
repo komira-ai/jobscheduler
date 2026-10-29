@@ -12,6 +12,9 @@ use js_agent::cli_runtime::{
 
 use super::{BIN, mount, settings, spec};
 
+/// The profile option's file in these tests.
+const PROFILE: &str = "/scratch-root/seccomp+pinned.json";
+
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
 }
@@ -124,12 +127,14 @@ fn a_limit_of_zero_is_refused() {
 /// itself before its result is read.
 #[test]
 fn hardening_flags_always_present() {
-    let docker = hardening_args(&settings(), Engine::Docker);
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
     let common = [
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        "seccomp=/scratch-root/seccomp+pinned.json",
         "--network",
         "none",
         "--read-only",
@@ -144,7 +149,7 @@ fn hardening_flags_always_present() {
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
-    let podman = hardening_args(&settings(), Engine::Podman);
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
     assert_eq!(
         podman,
         strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
@@ -160,7 +165,7 @@ fn hardening_flags_always_present() {
 #[test]
 fn hardening_pins_privileges_and_the_syscall_filter() {
     for engine in [Engine::Docker, Engine::Podman] {
-        let args = hardening_args(&settings(), engine);
+        let args = hardening_args(&settings(), engine, PROFILE);
         let values = |flag: &str| -> Vec<String> {
             args.windows(2)
                 .filter(|pair| pair[0] == flag)
@@ -178,8 +183,7 @@ fn hardening_pins_privileges_and_the_syscall_filter() {
             .filter(|option| option.starts_with("seccomp="))
             .collect();
         assert_eq!(profiles.len(), 1, "{engine:?}");
-        assert!(profiles[0].starts_with("seccomp=/"), "{engine:?}");
-        assert!(!profiles[0].contains("unconfined"), "{engine:?}");
+        assert_eq!(profiles[0], &format!("seccomp={PROFILE}"), "{engine:?}");
     }
 }
 
@@ -193,7 +197,7 @@ fn hardening_follows_the_settings() {
         .unwrap()
         .with_tmp_size(Some("2g"))
         .unwrap();
-    let args = hardening_args(&set, Engine::Docker);
+    let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
     assert_eq!(value("--user"), "5:6");
