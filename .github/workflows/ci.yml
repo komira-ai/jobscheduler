@@ -141,6 +141,7 @@ jobs:
             crates/js-registry/
             crates/js-sched/
             crates/js-sim/
+            crates/js-sizing/
             crates/js-testkit/
             crates/js-types/
             crates/js-whole/
