@@ -6,7 +6,7 @@ use std::time::Duration;
 use js_elastic::HostStatus;
 use js_provider_lambdalabs::{ApiError, Call, TerminateEffect};
 
-use crate::rig::{FIRST, Rig, TestRemote};
+use crate::rig::{FIRST, Rig};
 
 fn never_active(rig: &Rig, extra: &[&str]) -> (i32, String) {
     let args = rig.go_args(extra);
@@ -24,7 +24,7 @@ fn the_boot_deadline_forces_teardown() {
     );
     assert_eq!(rig.clock_secs(), 60);
     assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
-    assert!(out.contains("STOP: the run did not finish its check; the instance is terminated"));
+    assert!(out.contains("STOP: the run did not reach active; the instance is terminated"));
 }
 
 #[test]
@@ -72,42 +72,16 @@ fn the_spend_cap_is_named_when_both_caps_are_reached() {
 }
 
 #[test]
-fn a_cap_reached_by_the_time_the_instance_is_active_skips_the_ssh_check() {
+fn a_cap_reached_by_the_time_the_instance_is_active_still_forces_teardown() {
     let rig = Rig::new();
-    let args = rig.go_args(&[
-        "--ssh-key",
-        "/id",
-        "--ssh-user",
-        "u",
-        "--wall-cap-secs",
-        "5",
-    ]);
-    let remote = TestRemote::answering(Ok(String::new()));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
+    let args = rig.go_args(&["--wall-cap-secs", "5"]);
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 1, "{out}");
-    assert!(remote.asked.borrow().is_empty());
     assert!(
         out.contains("teardown forced: the wall-clock cap is reached"),
         "{out}"
     );
     assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
-}
-
-#[test]
-fn the_ssh_check_is_given_only_the_time_the_caps_leave() {
-    let rig = Rig::new();
-    let args = rig.go_args(&[
-        "--ssh-key",
-        "/id",
-        "--ssh-user",
-        "u",
-        "--wall-cap-secs",
-        "100",
-    ]);
-    let remote = TestRemote::answering(Ok(String::new()));
-    let (status, out) = rig.exec_active(&args, 1, &remote);
-    assert_eq!(status, 0, "{out}");
-    assert_eq!(remote.asked.borrow()[0].4, Duration::from_secs(90));
 }
 
 #[test]
@@ -139,11 +113,7 @@ fn a_termination_that_fails_twice_is_retried_and_confirmed_on_the_third_try() {
     let down = || ApiError::Transport("down".to_owned());
     rig.fake.fail_next(Call::Terminate, down());
     rig.fake.fail_next(Call::Terminate, down());
-    let (status, out) = rig.exec_active(
-        &rig.go_args(&[]),
-        1,
-        &TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_active(&rig.go_args(&[]), 1);
     assert_eq!(status, 0, "{out}");
     assert_eq!(rig.fake.count(Call::Terminate), 3);
     assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
@@ -153,11 +123,7 @@ fn a_termination_that_fails_twice_is_retried_and_confirmed_on_the_third_try() {
 fn an_instance_the_api_reads_as_gone_counts_as_terminated() {
     let rig = Rig::new();
     rig.fake.set_terminate_effect(TerminateEffect::Removed);
-    let (status, out) = rig.exec_active(
-        &rig.go_args(&[]),
-        1,
-        &TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_active(&rig.go_args(&[]), 1);
     assert_eq!(status, 0, "{out}");
     assert_eq!(rig.fake.count(Call::Terminate), 1);
     assert!(out.contains("Gone"), "{out}");

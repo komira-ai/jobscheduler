@@ -126,11 +126,7 @@ fn a_foreign_instance_does_not_refuse() {
         vec![tag("team", "x")],
         HostStatus::Active,
     ));
-    let (status, out) = rig.exec_active(
-        &args,
-        1,
-        &crate::rig::TestRemote::answering(Ok(String::new())),
-    );
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     assert!(!out.contains("already exist"), "{out}");
     assert_eq!(rig.fake.count(Call::Launch), 1);

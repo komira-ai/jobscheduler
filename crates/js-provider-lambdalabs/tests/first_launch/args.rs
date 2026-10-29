@@ -19,7 +19,6 @@ fn a_dry_run_launches_nothing_and_prints_the_plan_with_its_hash() {
         "boot deadline: 900 s",
         "wall-clock cap: 1800 s",
         "spend cap: 100 cents, reached 4800 s after the launch at this price",
-        "ssh check: none",
         "choice: the cheapest x86_64 GPU type with capacity",
         "ssh key name on the account: my-key",
         "dry run: nothing was launched.",
@@ -62,15 +61,9 @@ fn flags_name_the_type_and_the_region_and_appear_in_the_plan_and_its_hash() {
 }
 
 #[test]
-fn the_ssh_check_and_every_limit_are_in_the_plan() {
+fn every_limit_is_in_the_plan() {
     let rig = Rig::new();
     let (_, out) = rig.exec(&rig.args(&[
-        "--ssh-key",
-        "/id",
-        "--ssh-user",
-        "ubuntu",
-        "--ssh-command",
-        "uptime",
         "--boot-deadline-secs",
         "60",
         "--wall-cap-secs",
@@ -79,15 +72,13 @@ fn the_ssh_check_and_every_limit_are_in_the_plan() {
         "3",
     ]));
     for needle in [
-        "ssh check: ubuntu@instance: uptime",
         "boot deadline: 60 s",
         "wall-clock cap: 120 s",
         "spend cap: 3 cents, reached 144 s after the launch",
     ] {
         assert!(out.contains(needle), "{needle:?} missing:\n{out}");
     }
-    let (_, out) = rig.exec(&rig.args(&["--ssh-key", "/id", "--ssh-user", "ubuntu"]));
-    assert!(out.contains("ubuntu@instance: nvidia-smi"), "{out}");
+    assert!(!out.contains("ssh check"), "{out}");
 }
 
 #[test]
@@ -206,18 +197,6 @@ fn every_malformed_command_line_is_refused_with_status_2() {
             "--boot-deadline-secs must be",
         ),
         (&["--spend-cap-cents", "-1"], "--spend-cap-cents must be"),
-        (
-            &["--ssh-key", "/id"],
-            "--ssh-key and --ssh-user are given together",
-        ),
-        (
-            &["--ssh-user", "u"],
-            "--ssh-key and --ssh-user are given together",
-        ),
-        (
-            &["--ssh-command", "ls"],
-            "--ssh-key and --ssh-user are given together",
-        ),
         (&["--plan-hash", "abc"], "--plan-hash goes with --go"),
         (
             &["--teardown-only", "f", "--go"],
@@ -287,4 +266,31 @@ fn a_ca_bundle_flag_reaches_the_client_and_is_absent_otherwise() {
         rig.bundles.borrow().as_slice(),
         [Some(std::path::PathBuf::from("/roots.pem")), None]
     );
+}
+
+#[test]
+fn the_ssh_flags_are_refused_because_the_launch_has_no_inbound_access() {
+    let rig = Rig::new();
+    let cases: &[&[&str]] = &[
+        &["--ssh-key", "/id"],
+        &["--ssh-user", "ubuntu"],
+        &["--ssh-command", "uptime"],
+        &["--ssh-key", "/id", "--ssh-user", "ubuntu"],
+        // With no value the flag is refused for what it is, not for the missing value.
+        &["--ssh-key"],
+    ];
+    for extra in cases {
+        for go in [false, true] {
+            let mut flags = extra.to_vec();
+            flags.extend(go.then_some("--go"));
+            let (status, out) = rig.exec(&rig.args(&flags));
+            assert_eq!(status, 2, "{flags:?}: {out}");
+            assert!(
+                out.contains("has no effect and is refused: the launch has no inbound access, so nothing can connect over ssh"),
+                "{flags:?}: {out}"
+            );
+            assert!(!out.contains("ubuntu") && !out.contains("/id"), "{out}");
+            assert_eq!(rig.fake.count(Call::Launch), 0);
+        }
+    }
 }
