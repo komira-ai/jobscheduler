@@ -10,7 +10,10 @@ use js_agent::cli_runtime::{
     limits_to_args,
 };
 
-use super::{BIN, mount, settings, spec};
+use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
+
+/// The profile option's file in these tests.
+const PROFILE: &str = "/scratch-root/seccomp+pinned.json";
 
 fn strings(args: &[&str]) -> Vec<String> {
     args.iter().map(|arg| (*arg).to_owned()).collect()
@@ -28,7 +31,7 @@ fn base(cpus: &str, memory: &str, pids: &str) -> Vec<String> {
         "--pids-limit",
         pids,
         "--mount",
-        "type=bind,src=/work/scratch/r1,dst=/scratch",
+        DOCKER_SCRATCH,
     ])
 }
 
@@ -78,13 +81,19 @@ fn limits_to_args_table() {
         ),
     ];
     for (name, job, expected) in rows {
-        for engine in [Engine::Docker, Engine::Podman] {
-            assert_eq!(
-                limits_to_args(engine, &job, true).unwrap(),
-                expected,
-                "{name}"
-            );
-        }
+        assert_eq!(
+            limits_to_args(Engine::Docker, &job, true).unwrap(),
+            expected,
+            "{name}"
+        );
+        let mut podman = expected.clone();
+        *podman.last_mut().unwrap() =
+            "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev".to_owned();
+        assert_eq!(
+            limits_to_args(Engine::Podman, &job, true).unwrap(),
+            podman,
+            "{name}"
+        );
     }
 }
 
@@ -124,12 +133,14 @@ fn a_limit_of_zero_is_refused() {
 /// itself before its result is read.
 #[test]
 fn hardening_flags_always_present() {
-    let docker = hardening_args(&settings(), Engine::Docker);
+    let docker = hardening_args(&settings(), Engine::Docker, PROFILE);
     let common = [
         "--cap-drop",
         "ALL",
         "--security-opt",
         "no-new-privileges",
+        "--security-opt",
+        "seccomp=/scratch-root/seccomp+pinned.json",
         "--network",
         "none",
         "--read-only",
@@ -144,11 +155,42 @@ fn hardening_flags_always_present() {
     assert_eq!(docker, strings(&[&common[..], &tail[..]].concat()));
     assert!(!docker.iter().any(|arg| arg == "--rm" || arg == "--pid"));
 
-    let podman = hardening_args(&settings(), Engine::Podman);
+    let podman = hardening_args(&settings(), Engine::Podman, PROFILE);
     assert_eq!(
         podman,
         strings(&[&common[..], &["--pid", "private"][..], &tail[..]].concat())
     );
+}
+
+/// Asserts, for both engines, the properties of the hardening list that keep a job
+/// from gaining privilege: every capability dropped, `no-new-privileges`, and exactly one
+/// seccomp profile that names a file (never `unconfined`, never the engine's built-in
+/// default, which changes with the engine's version). It catches a job that runs with the
+/// engine's own syscall filter, and a list that loses either of the older flags when the
+/// profile is added.
+#[test]
+fn hardening_pins_privileges_and_the_syscall_filter() {
+    for engine in [Engine::Docker, Engine::Podman] {
+        let args = hardening_args(&settings(), engine, PROFILE);
+        let values = |flag: &str| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == flag)
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+        assert_eq!(values("--cap-drop"), ["ALL"], "{engine:?}");
+        let options = values("--security-opt");
+        assert!(
+            options.contains(&"no-new-privileges".to_owned()),
+            "{engine:?}"
+        );
+        let profiles: Vec<&String> = options
+            .iter()
+            .filter(|option| option.starts_with("seccomp="))
+            .collect();
+        assert_eq!(profiles.len(), 1, "{engine:?}");
+        assert_eq!(profiles[0], &format!("seccomp={PROFILE}"), "{engine:?}");
+    }
 }
 
 /// Asserts that the settings reach the hardening list: the network, the user, the pull
@@ -161,7 +203,7 @@ fn hardening_follows_the_settings() {
         .unwrap()
         .with_tmp_size(Some("2g"))
         .unwrap();
-    let args = hardening_args(&set, Engine::Docker);
+    let args = hardening_args(&set, Engine::Docker, PROFILE);
     let value = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(value("--network"), "jobs");
     assert_eq!(value("--user"), "5:6");
@@ -188,14 +230,14 @@ fn the_actions_cgroup_becomes_the_cgroup_parent() {
     ];
     for (dir, parent) in rows {
         for engine in [Engine::Docker, Engine::Podman] {
-            let args = hardening_args(&with(dir), engine);
+            let args = hardening_args(&with(dir), engine, PROFILE);
             assert_eq!(
                 args[args.len() - 2..],
                 strings(&["--cgroup-parent", parent])
             );
         }
     }
-    let plain = hardening_args(&settings(), Engine::Docker);
+    let plain = hardening_args(&settings(), Engine::Docker, PROFILE);
     assert!(!plain.iter().any(|arg| arg == "--cgroup-parent"));
 }
 
@@ -253,7 +295,12 @@ fn docker_gets_the_gpu_indices_as_one_quoted_argument() {
         let pairs: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ["--gpus".to_owned(), value.to_owned()]);
-        assert_eq!(args.iter().filter(|a| a.contains("device=")).count(), 1);
+        // The quoted GPU value appears once; the scratch volume's `volume-opt=device=` is
+        // another option and is not counted.
+        assert_eq!(
+            args.iter().filter(|a| a.starts_with("\"device=")).count(),
+            1
+        );
     }
 }
 
@@ -282,7 +329,7 @@ fn mount_ro_honoured() {
     assert_eq!(
         mounts_of(&args),
         [
-            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            DOCKER_SCRATCH,
             "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
         ]
@@ -294,11 +341,41 @@ fn mount_ro_honoured() {
     assert_eq!(
         mounts_of(&old),
         [
-            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            DOCKER_SCRATCH,
             "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly",
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
         ]
     );
+}
+
+/// Asserts that on Podman every mount, the scratch directory first, is `nosuid,nodev`
+/// (after `readonly` where it is read-only), so a set-uid file or a device node a job
+/// leaves there has no effect; and that on Docker, whose `--mount type=bind` takes no such
+/// option, the scratch directory is a volume of the local driver that binds the directory
+/// `nosuid,nodev` (the option list in one quoted CSV field, no copy of the image's
+/// `/scratch` into it) while the other mounts stay plain binds. It catches a scratch
+/// directory that can hold a working set-uid binary or device node, and the option sent
+/// to a bind mount that rejects it.
+#[test]
+fn podman_mounts_are_nosuid_nodev() {
+    let mut job = spec("r1");
+    job.mounts = vec![
+        mount("/srv/data/in", "/mnt/data/in", true),
+        mount("/srv/data/out", "/mnt/data/out", false),
+    ];
+    let args = limits_to_args(Engine::Podman, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&args),
+        [
+            "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev",
+            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,nosuid,nodev",
+            "type=bind,src=/srv/data/out,dst=/mnt/data/out,nosuid,nodev",
+        ]
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    let docker = mounts_of(&docker);
+    assert_eq!(docker[0], DOCKER_SCRATCH);
+    assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
 }
 
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`

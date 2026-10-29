@@ -40,6 +40,7 @@ fn the_system_usage_clock_shares_the_jobs_zero() {
 
 /// Asserts that the system's view of the host is this machine's `/proc`: the process table
 /// holds this very process. It catches a view over the wrong files.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_system_view_reads_this_machines_processes() {
     let processes = System::new().view().processes().expect("/proc is readable");

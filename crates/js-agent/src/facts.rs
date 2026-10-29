@@ -70,6 +70,7 @@ const NVIDIA_SMI: &str = "/usr/bin/nvidia-smi";
 const SYSCTL: &str = "/usr/sbin/sysctl";
 const SYSTEM_PROFILER: &str = "/usr/sbin/system_profiler";
 const IOREG: &str = "/usr/sbin/ioreg";
+const DF: &str = "/bin/df";
 
 /// Runs a program and returns what it printed.
 pub trait CommandRunner {
@@ -508,6 +509,26 @@ fn meminfo_total(text: &str) -> Result<u64, String> {
         .ok_or_else(|| "/proc/meminfo has no MemTotal".to_owned())
         .and_then(|rest| number(rest.trim().trim_end_matches("kB"), "MemTotal"))
         .map(|kibibytes| kibibytes.saturating_mul(1024))
+}
+
+/// The free space, in whole GiB rounded down, of the volume that holds `path`, as POSIX
+/// `df -P -k` prints it (the same on Linux and macOS): the `Available` column of the one
+/// row. The row is read from the `Capacity` column (`NN%`) back, so a file system or mount
+/// point name with spaces does not shift it.
+///
+/// # Errors
+///
+/// `df` cannot be run, or printed no row of numbers followed by a capacity.
+pub fn free_gib(runner: &dyn CommandRunner, path: &Path) -> Result<u64, String> {
+    let shown = path.to_string_lossy();
+    let text = runner.run(DF, &["-P", "-k", &shown])?;
+    let row = text.lines().nth(1).unwrap_or_default();
+    let words: Vec<&str> = row.split_whitespace().collect();
+    let kib = (3..words.len())
+        .find(|at| words[*at].ends_with('%'))
+        .and_then(|at| words[at - 1].parse::<u64>().ok());
+    kib.map(|kib| kib / (1024 * 1024))
+        .ok_or_else(|| "df printed no free space for the volume".to_owned())
 }
 
 /// The GPUs of the host: Apple's through `system_profiler` on a Mac, NVIDIA's through

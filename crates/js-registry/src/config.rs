@@ -44,6 +44,7 @@ pub struct PoolConfig {
     name: ProviderId,
     class: ResourceClass,
     shape: Shape,
+    booked: Shape,
     max_machines: usize,
     heartbeat_interval_ms: u64,
     grace_ms: u64,
@@ -65,6 +66,7 @@ impl PoolConfig {
         Self {
             name,
             class,
+            booked: shape.clone(),
             shape,
             max_machines,
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
@@ -124,9 +126,22 @@ impl PoolConfig {
     ///
     /// A pool made without this setting requires nothing of the kind, so hosts that
     /// predate the capabilities keep joining it.
+    ///
+    /// Admission makes the reported mode the pool's mode, so the pool's hosts are booked
+    /// with `exec` among their capabilities (unless the shape names one): a request that
+    /// requires `exec=sandbox-exec` is placed on a host that reported a `sandbox-exec`
+    /// runtime, never on a container host, whatever the pool or its cloud is called. A pool
+    /// without this setting books its shape as given, and a request that requires `exec`
+    /// finds no host there unless the shape's capabilities name it (then admission holds
+    /// each host to the value it reports).
     #[must_use]
     pub fn with_exec(mut self, exec: ExecMode) -> Self {
         self.exec = Some(exec);
+        let mut capabilities = self.shape.capabilities().clone();
+        capabilities
+            .entry(js_types::EXEC_KEY.to_owned())
+            .or_insert_with(|| exec.name().to_owned());
+        self.booked = Shape::new(self.shape.resources().clone(), capabilities);
         self
     }
 
@@ -185,6 +200,12 @@ impl PoolConfig {
 
     pub(crate) fn shape(&self) -> &Shape {
         &self.shape
+    }
+
+    /// The shape every host of the pool is booked as: [`Self::shape`], with the pool's
+    /// execution mode when it declares one.
+    pub(crate) fn booked(&self) -> &Shape {
+        &self.booked
     }
 
     pub(crate) fn max_machines(&self) -> usize {

@@ -20,6 +20,25 @@ fn arch_name(architecture: &Architecture) -> String {
     }
 }
 
+/// What is wrong with the rows of `table` against the catalog `types`, one line per row: a
+/// row that names no type of the catalog (a typo) or disagrees with it on the GPU count.
+pub(crate) fn row_faults(table: &OptionTable, types: &[InstanceTypeOffer]) -> Vec<String> {
+    table
+        .rows()
+        .iter()
+        .filter_map(
+            |row| match types.iter().find(|kind| kind.name == row.instance_type) {
+                None => Some(format!("{} is not offered", row.instance_type)),
+                Some(kind) if kind.gpus != row.gpus => Some(format!(
+                    "{} has {} gpus in the catalog, not {}",
+                    row.instance_type, kind.gpus, row.gpus
+                )),
+                Some(_) => None,
+            },
+        )
+        .collect()
+}
+
 /// One offer per (type, region with capacity now). A type is offered when it is a row of
 /// `table` with the GPU count the API gives for it (a row that disagrees with the API is
 /// a configuration error and is skipped); the row's class is the offer's GPU class. A
@@ -30,6 +49,9 @@ pub(crate) fn offers(
     types: &[InstanceTypeOffer],
     only: Option<&[String]>,
 ) -> Vec<Offer> {
+    for fault in row_faults(table, types) {
+        tracing::warn!(%fault, "a types row is skipped");
+    }
     types
         .iter()
         .filter_map(|kind| {
