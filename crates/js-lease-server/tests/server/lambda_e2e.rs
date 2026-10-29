@@ -219,6 +219,7 @@ async fn the_binding_refuses_another_instance_and_the_token_dies_at_the_first_he
 #[tokio::test]
 async fn a_default_mode_pool_whose_host_has_no_route_is_released_at_boot_timeout() {
     let rig = Rig::start_default("e2e_default_silent").await;
+    rig.complete_view(&[]).await;
     let (name, token) = rig.launch().await;
     let script = rig.script(0);
     assert!(!script.to_lowercase().contains("tailscale"), "{script}");

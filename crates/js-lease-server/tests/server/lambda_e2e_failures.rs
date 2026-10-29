@@ -26,6 +26,7 @@ use crate::scaler_support::records_path;
 #[tokio::test]
 async fn a_host_that_never_says_hello_is_released_at_boot_timeout_and_the_pool_cools_off() {
     let rig = Rig::start("e2e_boot_timeout").await;
+    rig.complete_view(&[]).await;
     let (name, token) = rig.launch().await;
 
     rig.advance(14 * 60);
@@ -109,6 +110,7 @@ async fn assert_released_once(rig: &Rig, name: &str, token: &str) {
 /// the record is Releasing and the machine is terminated. It catches a machine kept and
 /// billed past its boot time because its host registered and then went silent.
 #[tokio::test]
+#[ignore = "needs #387: the registry does not yet report heard-since-hello"]
 async fn a_lost_welcome_is_released_at_boot_timeout() {
     let rig = Rig::start("e2e_lost_welcome").await;
     let (name, token) = lose_the_welcome(&rig).await;

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use js_lease_server::RecordsFile;
+use js_lease_server::{REGISTRY_FLOOR, REGISTRY_QUIET, RecordsFile};
 use js_provider::{Provider, StartAck};
 use js_provider_lambdalabs::{FakeLambda, TerminateEffect};
 use js_scaler::{Phase, State};
@@ -27,6 +27,9 @@ pub const KEYS: &str = "POST /api/v2/tailnet/-/keys";
 pub const DEVICES: &str = "GET /api/v2/tailnet/-/devices";
 /// The route the device of the launched host is deleted at.
 pub const DELETE_DEVICE: &str = "DELETE /api/v2/device/d1";
+
+/// How far the clock moves between two ticks of [`Rig::complete_view`], in seconds.
+const STEP: u64 = 10;
 
 /// The request id of the one request the consumer in these tests makes.
 const REQUEST: &str = "r1";
@@ -179,6 +182,30 @@ impl Rig {
         self.h
             .clock
             .advance(std::time::Duration::from_secs(seconds));
+    }
+
+    /// Ticks, `STEP` of the test's clock apart and every host of `heard` beating before each
+    /// tick, until the scaler vouches for the registry's view. The view is complete only
+    /// after [`REGISTRY_FLOOR`] of uptime (the server counts at most twice its tick interval
+    /// per tick) with every host of the roster heard, or after [`REGISTRY_QUIET`]; the bound
+    /// below is a multiple of the latter, so a view that never completes fails the test.
+    pub async fn complete_view(&self, heard: &[(&str, &Session)]) {
+        let scaler = self.h.running.scaler().unwrap();
+        let bound = 2 * REGISTRY_QUIET.as_secs() / STEP;
+        let mut ticks = 0;
+        while !scaler.registry_complete() {
+            assert!(ticks < bound, "the registry view never completed");
+            self.advance(STEP);
+            for (bearer, me) in heard {
+                assert_eq!(self.beat(bearer, me).await.status, 200);
+            }
+            self.tick().await;
+            ticks += 1;
+        }
+        assert!(
+            ticks * STEP >= REGISTRY_FLOOR.as_secs() / 2,
+            "completed after {ticks} ticks"
+        );
     }
 
     /// The consumer presents its request: the answer the registry gives it.
