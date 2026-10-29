@@ -126,3 +126,28 @@ fn the_fake_answers_what_the_client_does_for_the_same_data() {
         assert_eq!(fake.get_instance(&instance.id).unwrap(), *instance);
     }
 }
+
+#[test]
+fn ruleset_and_key_fixtures_carry_the_documented_fields() {
+    for row in json("firewall_rulesets.json")["data"].as_array().unwrap() {
+        require(
+            row,
+            &["id", "name", "region", "rules", "created", "instance_ids"],
+            "ruleset",
+        );
+    }
+    let made = json("firewall_ruleset.json");
+    require(
+        &made["data"],
+        &["id", "name", "region", "rules", "created", "instance_ids"],
+        "ruleset",
+    );
+    for row in json("ssh_keys.json")["data"].as_array().unwrap() {
+        require(row, &["id", "name", "public_key"], "ssh key");
+    }
+    require(
+        &json("ssh_key_generated.json")["data"],
+        &["id", "name", "public_key", "private_key"],
+        "generated ssh key",
+    );
+}

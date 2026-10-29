@@ -133,6 +133,7 @@ pub fn hello(host: &str) -> Hello {
         labels: map(&[("rack", "r1")]),
         phase: Phase::Serving,
         held: Vec::new(),
+        accepts_host_credential: false,
     }
 }
 

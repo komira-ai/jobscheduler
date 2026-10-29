@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use js_elastic::Demand;
 use js_lease::Timestamp;
 use js_pool_static::HostBook;
 use js_provider::{Observed, RefusalCode, StartAck, StartSpec};
@@ -25,10 +26,12 @@ impl Registry {
         let grace_ms = self.grace_ms();
         let facts = state.records.iter().map(|(id, record)| {
             let live = record.state(now, grace_ms) == HostState::Live;
-            let capability = match (record.taint.is_some(), live) {
-                (true, _) => Capability::Tainted,
-                (false, true) => Capability::Capable,
-                (false, false) => Capability::Lost,
+            // A host being scaled away is leaving the pool: no reservation drains it.
+            let capability = match (record.taint.is_some(), record.leaving.is_some(), live) {
+                (true, _, _) => Capability::Tainted,
+                (false, true, _) => Capability::Releasing,
+                (false, false, true) => Capability::Capable,
+                (false, false, false) => Capability::Lost,
             };
             let quiet = record.quiet(&state.runs, id);
             let lease = booked.get(id);
@@ -137,7 +140,12 @@ impl Registry {
             hosts: &listed,
             tainted: &tainted,
         };
-        let capable = placement::capable(&asking, &state.requests);
+        // A host that could be launched counts as one that could ever serve the request.
+        let launch = state
+            .launchable
+            .as_ref()
+            .is_some_and(|launchable| launchable.allows(&Demand::from_request(wanted)));
+        let capable = placement::capable(&asking, &state.requests) | launch;
         let queueing = [whole, fresh, fits_pool, gate.is_none()];
         let regain = Rules::of(&self.shared.config).regain_grace_ms;
         let place = spec

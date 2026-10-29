@@ -40,6 +40,16 @@ pub trait Transport {
     /// Sends `body` to `path` and returns the answer, whatever its status. The error is a
     /// short reason the server could not be reached; it never holds the token.
     fn post(&mut self, path: &str, body: &Value) -> Result<Answer, String>;
+
+    /// Makes `secret` the bearer of every later post, in place of the token the transport
+    /// was connected with. The agent calls it with the host credential a welcome carried
+    /// (once it is on disk) and with the one it finds in its state root at start.
+    ///
+    /// # Errors
+    ///
+    /// A short reason the secret cannot be used as a bearer; it never holds the secret.
+    /// The transport then keeps what it had.
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String>;
 }
 
 /// Makes the [`Transport`] the flags name.
@@ -73,7 +83,8 @@ impl Connector for Dialer {
     }
 }
 
-/// A connected client. It holds the token and has no `Debug`.
+/// A connected client. It holds the token, or the credential that replaced it, and has no
+/// `Debug`.
 struct HttpTransport(Client);
 
 impl Transport for HttpTransport {
@@ -86,5 +97,9 @@ impl Transport for HttpTransport {
                 retry_after: reply.retry_after,
             })
             .map_err(|err| err.to_string())
+    }
+
+    fn adopt_credential(&mut self, secret: &str) -> Result<(), String> {
+        self.0.set_bearer(secret).map_err(|err| err.to_string())
     }
 }

@@ -635,3 +635,111 @@ fn lease_clocks_are_bounded() {
     assert_eq!(r.elapsed_minute(&h, &lease(2, 0)), 0);
     assert_eq!(r.elapsed_minute(&h, &lease(2, count - 1)), 10);
 }
+
+/// The readings both recorders in the leases-only tests are fed: a baseline, then
+/// accepted readings in successive wall minutes, each carrying a lease minute and clock.
+fn feed(r: &mut Recorder, beats: u64) -> Vec<(Observed, Vec<MinuteIn>)> {
+    let h = host("h");
+    let mut out = vec![r.observe(&h, 7, &load(1, 100 * SEC, 0, 0), BIG, 500)];
+    for n in 0..beats {
+        let mut l = load(n + 2, (110 + 10 * n) * SEC, (5 + 5 * n) * SEC, n + 1);
+        l.minutes = vec![minute_in(n, 1, 2, 3, 4)];
+        l.clocks = vec![ClockIn {
+            lease: lease(1, n),
+            started_mono_usec: 100 * SEC,
+        }];
+        out.push(r.observe(&h, 7, &l, BIG, 500 + n));
+    }
+    out
+}
+
+/// Readings that pass through every way a reading is refused, an epoch change, and
+/// accepted readings between them, each carrying a lease minute and clock.
+fn feed_refusals(r: &mut Recorder) -> Vec<(Observed, Vec<MinuteIn>)> {
+    let h = host("h");
+    let over_cpu = 6 * SEC + 10 * SEC * 8 * IMPLAUSIBLE_FACTOR + 1;
+    let over_ws = (64u64 << 30) * IMPLAUSIBLE_FACTOR + 1;
+    // (epoch, seq, mono s, cpu usec, working set)
+    let steps = [
+        (7, 1, 100, 0, 0),
+        (7, 2, 110, 5 * SEC, 1),
+        (7, 2, 115, 5 * SEC, 1),
+        (7, 3, 110, 5 * SEC, 1),
+        (7, 4, 120, 10 * SEC, 2),
+        (7, 5, 130, SEC, 3),
+        (7, 6, 140, 6 * SEC, 4),
+        (7, 7, 150, over_cpu, 5),
+        (7, 8, 150, 7 * SEC, over_ws),
+        (7, 9, 160, 8 * SEC, 6),
+        (8, 1, 5, 0, 0),
+        (8, 2, 15, 3 * SEC, 7),
+    ];
+    let mut out = Vec::new();
+    for (n, (epoch, seq, mono, cpu, ws)) in (0u64..).zip(steps) {
+        let mut l = load(seq, mono * SEC, cpu, ws);
+        l.minutes = vec![minute_in(n, 1, 2, 3, 4)];
+        l.clocks = vec![ClockIn {
+            lease: lease(1, n),
+            started_mono_usec: 2 * SEC,
+        }];
+        out.push(r.observe(&h, epoch, &l, BIG, 500 + n));
+    }
+    out
+}
+
+// Asserts a leases-only recorder answers every reading as a normal one does, the
+// observed verdict, the lease minutes, the lease clocks and the counters alike, over
+// accepted readings, each refusal and an epoch change; catches a leases-only mode that
+// changes a drop path, a counter or the lease side.
+#[test]
+fn leases_only_gives_the_same_lease_output() {
+    let mut normal = Recorder::new();
+    let mut lean = Recorder::leases_only();
+    let seen = feed_refusals(&mut normal);
+    assert_eq!(seen, feed_refusals(&mut lean));
+    for reason in [
+        DropReason::NoBaseline,
+        DropReason::EpochChanged,
+        DropReason::SeqNotAbove,
+        DropReason::ClockBack,
+        DropReason::CounterBack,
+        DropReason::ImpliedCoresOverFourXThreads,
+        DropReason::MemoryOverFourXCapacity,
+    ] {
+        assert!(
+            seen.iter().any(|(o, _)| *o == Observed::Dropped(reason)),
+            "{reason:?} not reached"
+        );
+    }
+    assert!(seen.iter().any(|(o, _)| *o == Observed::Accepted));
+    for n in 0..12 {
+        assert_eq!(
+            normal.elapsed_minute(&host("h"), &lease(1, n)),
+            lean.elapsed_minute(&host("h"), &lease(1, n)),
+        );
+    }
+    assert_eq!(normal.counters(), lean.counters());
+}
+
+// Asserts a leases-only recorder never hands out a node minute, however many readings it
+// took and however late it is asked; catches node minutes still being booked.
+#[test]
+fn leases_only_gives_no_node_minutes() {
+    let mut r = Recorder::leases_only();
+    feed(&mut r, 200);
+    assert!(r.node_minutes_due(500).is_empty());
+    assert!(r.node_minutes_due(701).is_empty());
+    assert!(r.node_minutes_due(u64::MAX).is_empty());
+}
+
+// Asserts a leases-only recorder holds no node-minute state after many readings while a
+// normal one holds one per wall minute; catches state that grows with the readings.
+#[test]
+fn leases_only_holds_no_node_minute_state() {
+    let mut normal = Recorder::new();
+    let mut lean = Recorder::leases_only();
+    feed(&mut normal, 200);
+    feed(&mut lean, 200);
+    assert_eq!(normal.held_node_minutes(), 200);
+    assert_eq!(lean.held_node_minutes(), 0);
+}

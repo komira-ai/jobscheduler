@@ -1,14 +1,16 @@
 //! The core: one lock around the scheduler's driver and the server's own state.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
-    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Request,
-    UNSERVABLE_WAIT,
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
+    Request, UNSERVABLE_WAIT,
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
+use js_types::sched::usage::CurveSource;
 use js_types::sched::{FarmTime, LeaseId, OperationId, WaiterId, WorkerId};
 use js_whole::WholeNodeConfig;
 
@@ -20,6 +22,25 @@ use crate::observer::Observer;
 use crate::report::{Report, Standing, Taken, log_refusal};
 use crate::store::Storage;
 use crate::write::Writer;
+
+/// The curve source a [`Config`] hands the scheduler. Clones share the source; two are equal
+/// when they are the same source.
+#[derive(Clone)]
+pub(crate) struct Curves(pub(crate) Arc<dyn CurveSource + Send + Sync>);
+
+impl fmt::Debug for Curves {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Curves")
+    }
+}
+
+impl PartialEq for Curves {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Curves {}
 
 /// How a core is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +77,9 @@ pub struct Config {
     /// and their summary names a start takes up. Off, a key is ignored and the rows of an
     /// earlier run are neither read nor allowed to fail a start.
     pub size_keys: bool,
+    /// Where the scheduler finds the learned curves of action keys
+    /// ([`Config::with_curves`]); `None` is the scheduler's default, no curves.
+    pub(crate) curves: Option<Curves>,
 }
 
 impl Config {
@@ -73,6 +97,7 @@ impl Config {
             loss_requeues: LOSS_REQUEUES,
             whole_node: None,
             size_keys: false,
+            curves: None,
         }
     }
 
@@ -112,6 +137,15 @@ impl Config {
     #[must_use]
     pub fn with_whole_node(mut self, whole: WholeNodeConfig) -> Self {
         self.whole_node = Some(whole);
+        self
+    }
+
+    /// This configuration, giving the scheduler `curves` to read
+    /// ([`Scheduler::with_curves`](js_sched::Scheduler::with_curves)). Every core built from
+    /// this configuration, a restart's included, holds this same source.
+    #[must_use]
+    pub fn with_curves(mut self, curves: Arc<dyn CurveSource + Send + Sync>) -> Self {
+        self.curves = Some(Curves(curves));
         self
     }
 
@@ -381,11 +415,42 @@ impl<A: Adapter> Core<A> {
         size_key: Option<u64>,
         enrol: impl FnOnce(&mut A, &Admitted),
     ) -> Result<Admitted, NotQueued> {
+        self.submit_with(now, request, parcel, size_key, None, enrol)
+    }
+
+    /// [`Core::submit_keyed`] for a request with a cost `prediction` the caller computed
+    /// outside the lock (predicting reads the server's own store rows): what the scheduler
+    /// charges the lease the operation gets. `None` is the booked cost: the request's cores,
+    /// no memory, not cold.
+    ///
+    /// The scheduler is given the cost after the operation is numbered and before its
+    /// `Submit` is fed, so the operation's first placement round is charged it. Nothing is
+    /// read or written for it: the prediction is not in the operation's stored rows.
+    ///
+    /// A request that joins an operation the scheduler holds keeps that operation's cost,
+    /// unless the operation still waits for a lease: then `prediction`, if there is one,
+    /// replaces the held cost, as the newer estimate. Once the operation holds a lease the
+    /// prediction is ignored: the lease was charged when it was granted, and an operation
+    /// requeued after a lost lease is placed at the cost it was last given. A request for an
+    /// operation another frontend holds ([`Held::Elsewhere`]) sets nothing: this scheduler
+    /// never places it.
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_with(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        prediction: Option<Prediction>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(adapter, &request, parcel, size_key, now)?;
+        let admitted = engine.admit(adapter, &request, parcel, size_key, prediction, now)?;
         enrol(adapter, &admitted);
         match admitted.held {
             Held::Here => {

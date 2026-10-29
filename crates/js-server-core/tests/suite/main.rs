@@ -8,6 +8,7 @@
 mod admission;
 mod cell;
 mod common;
+mod curves;
 mod feed;
 mod frontends;
 mod handover;
@@ -17,6 +18,7 @@ mod learned;
 mod outage;
 mod owners;
 mod placement;
+mod predicted;
 mod recover;
 mod report;
 mod session;

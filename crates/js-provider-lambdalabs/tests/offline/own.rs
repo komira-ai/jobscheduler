@@ -1,14 +1,14 @@
 //! Ownership marks, tags made from labels, and the ids.
 
-use js_provider_lambdalabs::{
-    ACQUIRE_TAG, AcquireId, Claim, Elastic, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG,
-    SchedulerId, Status,
+use js_elastic::{
+    Acquired, Claim, ElasticProvider, HostStatus, Reason, RefusalCode, Released, SchedulerId,
 };
+use js_provider_lambdalabs::{ACQUIRE_TAG, LabelError, MAX_TAGS, POOL_TAG, SCHEDULER_TAG};
 
-use crate::rig::{SCHEDULER, ask, live, rig, tag};
+use crate::rig::{SCHEDULER, ask, ask_as, host, live, rig, tag};
 
 /// What the fake holds after one live launch with `labels`.
-fn launched_with(labels: &[(&str, &str)], pool: &str) -> Result<Vec<(String, String)>, LabelError> {
+fn launched_with(labels: &[(&str, &str)], pool: &str) -> Result<Vec<(String, String)>, String> {
     let rig = rig(live(3));
     let mut request = ask("acq-1");
     request.pool = pool.to_owned();
@@ -17,13 +17,13 @@ fn launched_with(labels: &[(&str, &str)], pool: &str) -> Result<Vec<(String, Str
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
     match rig.provider.acquire(&request) {
-        js_provider_lambdalabs::Acquired::Accepted { .. } => Ok(rig.fake.instances()[0]
+        Acquired::Accepted { .. } => Ok(rig.fake.instances()[0]
             .tags
             .iter()
             .map(|t| (t.key.clone(), t.value.clone()))
             .collect()),
-        js_provider_lambdalabs::Acquired::Refused(refusal) => match refusal.reason {
-            js_provider_lambdalabs::Reason::Label(why) => {
+        Acquired::Refused(refusal) => match refusal.reason {
+            Reason::Label(why) => {
                 assert_eq!(rig.fake.launched(), 0, "a refused label launched something");
                 Err(why)
             }
@@ -31,28 +31,6 @@ fn launched_with(labels: &[(&str, &str)], pool: &str) -> Result<Vec<(String, Str
         },
         other => panic!("{other:?}"),
     }
-}
-
-#[test]
-fn ids_are_short_plain_text() {
-    assert!(SchedulerId::new("a.b_c-9").is_ok());
-    assert!(SchedulerId::new(&"s".repeat(64)).is_ok());
-    for bad in ["", "a b", "a/b", "a:b", "é"] {
-        assert!(SchedulerId::new(bad).is_err(), "{bad:?}");
-        assert!(AcquireId::new(bad).is_err(), "{bad:?}");
-    }
-    assert!(SchedulerId::new(&"s".repeat(65)).is_err());
-    assert!(AcquireId::new(&"a".repeat(128)).is_ok());
-    assert!(AcquireId::new(&"a".repeat(129)).is_err());
-    let id = AcquireId::new("acq-1").unwrap();
-    assert_eq!((id.as_str(), id.to_string().as_str()), ("acq-1", "acq-1"));
-    assert_eq!(SchedulerId::new("s1").unwrap().as_str(), "s1");
-    assert!(
-        SchedulerId::new("")
-            .unwrap_err()
-            .to_string()
-            .contains("1 to 64")
-    );
 }
 
 #[test]
@@ -82,10 +60,10 @@ fn the_name_is_a_prefix_per_scheduler_and_a_hash_per_acquire() {
     .enable()
     .live()
     .launch_interval(crate::rig::INTERVAL));
-    for r in [&one, &two] {
-        r.provider.acquire(&ask("acq-1"));
+    for (r, scheduler) in [(&one, SCHEDULER), (&two, "sched-two")] {
+        r.provider.acquire(&ask_as(scheduler, "acq-1"));
         r.clock.advance(crate::rig::INTERVAL);
-        r.provider.acquire(&ask("acq-2"));
+        r.provider.acquire(&ask_as(scheduler, "acq-2"));
     }
     let name = |r: &crate::rig::Rig, n: usize| r.fake.instances()[n].name.clone().unwrap();
     let (a1, a2, b1) = (name(&one, 0), name(&one, 1), name(&two, 0));
@@ -94,11 +72,27 @@ fn the_name_is_a_prefix_per_scheduler_and_a_hash_per_acquire() {
     assert_ne!(a1[16..], a2[16..], "two acquires, two names");
     assert_ne!(a1[..16], b1[..16], "two schedulers, two prefixes");
     assert_eq!(a1[16..], b1[16..], "the suffix depends on the acquire only");
+    // The instance carries the name the request gave it.
+    assert_eq!(a1, ask("acq-1").name.as_str());
+}
+
+#[test]
+fn a_host_name_without_this_schedulers_prefix_is_refused_and_nothing_is_launched() {
+    let rig = rig(live(3));
+    // Named by another scheduler: an instance launched under it would not be recognised
+    // as ours afterwards, and the cost guard would not count it.
+    let request = ask_as("sched-two", "acq-1");
+    let Acquired::Refused(refusal) = rig.provider.acquire(&request) else {
+        panic!("a foreign name was launched");
+    };
+    assert_eq!(refusal.code, RefusalCode::Shape);
+    assert_eq!(refusal.reason, Reason::Name);
+    assert_eq!(rig.fake.launched(), 0);
 }
 
 #[test]
 fn labels_that_could_collide_or_overflow_are_refused_not_rewritten() {
-    let key = |k: &str| LabelError::Key(k.to_owned());
+    let key = |k: &str| LabelError::Key(k.to_owned()).to_string();
     // a.b and a-b must not both become jobscheduler:a-b.
     assert_eq!(launched_with(&[("a.b", "x")], "p"), Err(key("a.b")));
     assert_eq!(launched_with(&[("A", "x")], "p"), Err(key("A")));
@@ -112,29 +106,29 @@ fn labels_that_could_collide_or_overflow_are_refused_not_rewritten() {
     for reserved in ["scheduler", "acquire", "pool"] {
         assert_eq!(
             launched_with(&[(reserved, "x")], "p"),
-            Err(LabelError::Reserved(reserved.to_owned()))
+            Err(LabelError::Reserved(reserved.to_owned()).to_string())
         );
     }
     assert_eq!(
         launched_with(&[("a", "x"), ("a", "y")], "p"),
-        Err(LabelError::Twice("a".to_owned()))
+        Err(LabelError::Twice("a".to_owned()).to_string())
     );
     assert_eq!(
         launched_with(&[("a", "")], "p"),
-        Err(LabelError::Value("a".to_owned()))
+        Err(LabelError::Value("a".to_owned()).to_string())
     );
     assert_eq!(
         launched_with(&[("a", "has space")], "p"),
-        Err(LabelError::Value("a".to_owned()))
+        Err(LabelError::Value("a".to_owned()).to_string())
     );
     assert_eq!(
         launched_with(&[("a", &"v".repeat(129))], "p"),
-        Err(LabelError::Value("a".to_owned()))
+        Err(LabelError::Value("a".to_owned()).to_string())
     );
     assert!(launched_with(&[("a", &"v".repeat(128))], "p").is_ok());
     assert_eq!(
         launched_with(&[], ""),
-        Err(LabelError::Value("pool".to_owned()))
+        Err(LabelError::Value("pool".to_owned()).to_string())
     );
 }
 
@@ -152,7 +146,7 @@ fn the_number_of_tags_is_capped() {
     assert!(launched_with(&pairs(MAX_TAGS - 3), "p").is_ok());
     assert_eq!(
         launched_with(&pairs(MAX_TAGS - 2), "p"),
-        Err(LabelError::TooMany(MAX_TAGS + 1))
+        Err(LabelError::TooMany(MAX_TAGS + 1).to_string())
     );
     assert!(LabelError::TooMany(17).to_string().contains("17"));
 }
@@ -169,9 +163,9 @@ fn claim_of(name: Option<&str>, tags: Vec<js_provider_lambdalabs::Tag>) -> Claim
         i.name = name.clone();
         i.tags = tags.clone();
     });
-    match rig.provider.release(&crate::rig::id("fake0001")) {
-        js_provider_lambdalabs::Released::Refused(claim) => claim,
-        js_provider_lambdalabs::Released::Terminating(Status::Terminating) => Claim::Ours,
+    match rig.provider.release(&host("fake0001")) {
+        Released::Refused(claim) => claim,
+        Released::Terminating(HostStatus::Terminating) => Claim::Ours,
         other => panic!("{other:?}"),
     }
 }
