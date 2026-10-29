@@ -19,6 +19,7 @@ mod config_pool_refusals;
 mod config_refusals;
 mod config_serve;
 mod config_support;
+mod config_usage;
 mod gpu_path_pin;
 mod joins;
 mod joins_credential;
