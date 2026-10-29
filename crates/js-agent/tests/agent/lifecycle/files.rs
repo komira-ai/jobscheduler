@@ -31,8 +31,12 @@ fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o7777
 }
 
+fn files_root(h: &Harness) -> &js_agent::lifecycle::FilesRoot {
+    h.config.files.as_ref().unwrap()
+}
+
 fn files_dir(h: &Harness, run_id: &str) -> std::path::PathBuf {
-    h.config.scratch.files_of(run_id)
+    files_root(h).of(run_id)
 }
 
 /// The runtime is handed the files directory (not the scratch directory, which the job
@@ -156,10 +160,8 @@ fn restart_sweeps_orphan_files_and_keeps_the_adopted_runs() {
     assert_eq!(fs::read_dir(&kept).unwrap().count(), 2);
 }
 
-/// A files directory left by an earlier agent for the same run id is removed before the
-/// run's new one is written, and a write that fails (here a name the directory already
-/// holds cannot happen, so a bad name stands in) leaves a start that fails as
-/// `scratch-failed` and cleans up. Catches `O_EXCL` tripping over a stale directory.
+/// A files directory left by an earlier process for the same run id is replaced by the
+/// run's new one. Catches `O_EXCL` tripping over a stale directory.
 #[test]
 fn a_stale_files_directory_is_replaced() {
     let mut h = Harness::new("files-stale");
@@ -173,14 +175,115 @@ fn a_stale_files_directory_is_replaced() {
     );
 }
 
-/// The scratch root refuses to write a name that is not one path component, even though
-/// the wire already refuses it. Catches an agent that trusts the wire check alone with a
-/// path.
+/// The files root refuses to write a name that is not one path component, even though the
+/// wire already refuses it, and leaves nothing behind. Catches an agent that trusts the
+/// wire check alone with a path.
 #[test]
-fn write_files_refuses_a_name_with_a_slash() {
+fn write_refuses_a_name_with_a_slash_and_leaves_nothing() {
     let h = Harness::new("files-name");
-    let bad = [file("../x", "x")];
-    let why = h.config.scratch.write_files("r9", &bad).unwrap_err();
+    let root = files_root(&h);
+    let bad = [file("ok", "x"), file("../x", "x")];
+    let why = root.write("r9", &bad).unwrap_err();
     assert_eq!(why.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(!h.config.scratch.path().join("x").exists());
+    assert!(!root.of("r9").exists(), "the partial directory is removed");
+    assert!(!root.path().join("x").exists());
+}
+
+/// A write that fails half way (the second file of the same name cannot be created
+/// `O_EXCL`) removes the directory it made, so the first file's secret is not left on the
+/// file system, and the error holds neither a name nor any contents. Catches a failed
+/// start that leaves a readable `0444` secret behind.
+#[test]
+fn a_failed_write_removes_its_partial_directory() {
+    let h = Harness::new("files-partial");
+    let root = files_root(&h);
+    let twice = [file("tok", "SECRET-PLANTED-7f3a"), file("tok", "other")];
+    let why = root.write("r9", &twice).unwrap_err();
+    assert_eq!(why.kind(), std::io::ErrorKind::AlreadyExists);
+    let shown = format!("{why} {why:?}");
+    assert!(
+        !shown.contains("SECRET") && !shown.contains("tok"),
+        "{shown}"
+    );
+    assert!(!root.of("r9").exists());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+/// A start whose files cannot be written (the files root is replaced by a file after the
+/// agent started, so the directory cannot be made whoever runs the test) is a
+/// `failed_to_start` with the `scratch-failed` detail and a finding, creates no
+/// container, reports and logs nothing of the file's name or contents, and is cleaned up
+/// once the root is back. Catches a start that goes on without its files, a failure that
+/// is not reported, and an error text that carries a secret.
+#[test]
+fn files_that_cannot_be_written_fail_the_start_without_leaking() {
+    let mut h = Harness::new("files-fail");
+    let root = files_root(&h).path().to_owned();
+    fs::remove_dir(&root).unwrap();
+    fs::write(&root, "in the way").unwrap();
+    let mut spec = with_files("r1");
+    spec.files = vec![file("secret-name", "SECRET-PLANTED-7f3a")];
+    let events = h.start(spec);
+    assert_eq!(names(&events), ["finding r1 scratch-failed", "result r1"]);
+    assert_eq!(
+        h.life.results()[0].detail.as_deref(),
+        Some("scratch-failed")
+    );
+    assert!(h.fake.created().is_empty(), "no container was created");
+    let shown = format!("{events:?} {:?} {:?}", h.life.results(), h.life.held());
+    assert!(
+        !shown.contains("SECRET") && !shown.contains("secret-name"),
+        "{shown}"
+    );
+    fs::remove_file(&root).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(names(&h.life.step()).last().unwrap(), "freed r1");
+}
+
+/// A planted secret reaches nothing the agent can print: not the `ContainerSpec` the
+/// runtime is handed (the debug form), not any event, result or held run (the forms the
+/// worker logs), and not the debug form of the start. Catches a derived Debug or a log
+/// line that would put a presigned URL in a journal.
+#[test]
+fn a_planted_secret_is_printed_nowhere() {
+    let mut h = Harness::new("files-planted");
+    let mut spec = job("r1");
+    spec.files = vec![file("tok", "SECRET-PLANTED-7f3a")];
+    let events = h.start(spec.clone());
+    h.fake.exit("r1", 0);
+    let more = h.life.step();
+    let shown = [
+        format!("{spec:?}"),
+        format!("{:?}", h.fake.created()),
+        format!("{events:?}"),
+        format!("{more:?}"),
+        format!("{:?}", h.life.results()),
+        format!("{:?}", h.life.held()),
+        format!("{:?}", h.log.borrow()),
+    ];
+    for text in shown {
+        assert!(!text.contains("SECRET-PLANTED"), "{text}");
+    }
+}
+
+/// An agent with no files root refuses a start that carries files, with
+/// `files-unsupported`, and creates nothing. Catches an agent that runs the task without
+/// the files it was sent.
+#[test]
+fn an_agent_without_a_files_root_refuses_files() {
+    let mut h = Harness::new("files-none");
+    let mut config = h.config.clone();
+    config.files = None;
+    let (life, _) = js_agent::lifecycle::Lifecycle::adopt(
+        config,
+        Box::new(h.fake.clone()),
+        Box::new(js_agent::lifecycle::NoChecks),
+        Box::new(h.clock.clone()),
+    )
+    .unwrap();
+    h.life = life;
+    let events = names(&h.start(with_files("r1")));
+    assert_eq!(events, ["refused r1 files-unsupported"]);
+    assert!(h.fake.created().is_empty());
 }

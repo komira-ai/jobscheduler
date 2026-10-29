@@ -50,6 +50,10 @@ async fn files_reach_the_start_and_are_not_echoed() {
         !format!("{listing:?}").contains("SECRET-VALUE"),
         "{listing:?}"
     );
+    let path = format!("/v1/leases/{lease}/runs/run-1-1");
+    let one = h.call("GET", &path, None).await;
+    assert_eq!(one.status, 200, "{}", one.body);
+    assert!(!one.body.contains("SECRET-VALUE"), "{}", one.body);
 }
 
 /// Asserts that a run without files sends no `files` key, so the start is the bytes an

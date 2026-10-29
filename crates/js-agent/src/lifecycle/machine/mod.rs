@@ -240,6 +240,12 @@ impl Lifecycle {
                 "run files are delivered to contained jobs only",
             ));
         }
+        if !spec.files.is_empty() && self.config.files.is_none() {
+            return Err(no(
+                detail::FILES_UNSUPPORTED,
+                "this agent has no run files directory",
+            ));
+        }
         if !spec.gpu_indices.is_empty() && !self.runtime.supports_gpus() {
             return Err(no(
                 detail::GPU_UNSUPPORTED,
@@ -338,33 +344,24 @@ impl Lifecycle {
                 return;
             }
         };
-        let started = self.config.scratch.create(run_id).map_err(|why| {
+        let failed = |why: std::io::Error| {
             (
                 detail::SCRATCH_FAILED,
                 code::SCRATCH_FAILED,
                 why.to_string(),
                 false,
             )
-        });
+        };
+        let started = self.config.scratch.create(run_id).map_err(failed);
         // The files are written before the container exists, and only here: a start that
-        // is sent again finds its job above and never reaches this point.
+        // is sent again finds its job above and never reaches this point. `admit` has
+        // seen to it that a start with files has a files root.
         let started = started.and_then(|scratch| {
-            let files = match spec.files.is_empty() {
-                true => Ok(None),
-                false => self
-                    .config
-                    .scratch
-                    .write_files(run_id, &spec.files)
-                    .map(Some),
+            let written = match (&self.config.files, spec.files.is_empty()) {
+                (Some(root), false) => root.write(run_id, &spec.files).map(Some),
+                _ => Ok(None),
             };
-            files.map(|files| (scratch, files)).map_err(|why| {
-                (
-                    detail::SCRATCH_FAILED,
-                    code::SCRATCH_FAILED,
-                    why.to_string(),
-                    false,
-                )
-            })
+            written.map(|files| (scratch, files)).map_err(failed)
         });
         let started = started.and_then(|(scratch, files)| {
             let container = container_spec(spec, mounts, scratch, files);

@@ -440,6 +440,12 @@ impl Runs {
             let state = listed.get(run.spec.run_id.as_str()).copied();
             let abandoned = [gap, run.stop == Stop::Sent].into_iter().any(|set| set);
             run.life = next_life(run.life, state, abandoned);
+            // Once the host lists the run (or the run is given up) no start will be
+            // sent again, so the secret files are not kept: they are held only until
+            // the agent has taken the start.
+            if run.life != Life::Queued {
+                run.spec.files = Vec::new();
+            }
         }
     }
 
@@ -642,5 +648,49 @@ mod tests {
         assert!(reply.commands.is_empty());
         let reply = runs.answer(&host, &beat(), held(false), (&book, 0));
         assert!(matches!(reply.commands[..], [Command::Start(_)]));
+    }
+
+    /// Asserts that a run's files are kept while its start can still be resent and dropped
+    /// from the stored run once the host lists it: every beat before the listing carries
+    /// the start with the files, the beat that lists it does not resend them, and the
+    /// stored run holds none afterwards. It catches secrets kept in the registry's memory
+    /// for the whole life of the run.
+    #[test]
+    fn files_are_dropped_once_the_host_lists_the_run() {
+        use js_agent_wire::{HeldRun, HeldState, RunFile};
+        let host = HostId::new("a").unwrap();
+        let (book, shape) = (
+            HostBook::new(),
+            Resources::new(4000, 8 << 30, 0, None).unwrap(),
+        );
+        let mut spec = job();
+        spec.files = vec![RunFile {
+            name: "tok".into(),
+            contents: "x".into(),
+        }];
+        let mut runs = Runs::default();
+        runs.admit(&host, &LeaseId::new(1, 1), spec.clone(), &shape, (0, 0))
+            .unwrap();
+        let open = Standing {
+            gap: false,
+            tainted: false,
+            unready: false,
+        };
+        for _ in 0..2 {
+            let reply = runs.answer(&host, &beat(), open, (&book, 0));
+            let [Command::Start(sent)] = &reply.commands[..] else {
+                panic!("{:?}", reply.commands);
+            };
+            assert_eq!(sent.files, spec.files);
+        }
+        assert_eq!(runs.map["r1"].spec.files, spec.files);
+        let mut listed = beat();
+        listed.held = vec![HeldRun {
+            run_id: "r1".into(),
+            state: HeldState::Starting,
+        }];
+        let reply = runs.answer(&host, &listed, open, (&book, 0));
+        assert!(reply.commands.is_empty());
+        assert!(runs.map["r1"].spec.files.is_empty());
     }
 }

@@ -2,7 +2,7 @@
 //! of the in-memory fake: the same jobs, the same results, the same order of cleanup.
 
 use js_agent::lifecycle::{Config, Event, Lifecycle, NoChecks, label};
-use js_agent_wire::{Command, Outcome};
+use js_agent_wire::{Command, Outcome, RunFile};
 
 use super::scripted::Scripted;
 use super::{HOST, docker, made_at, open_at, thirty_seconds_on};
@@ -344,4 +344,45 @@ fn an_agent_that_does_not_see_the_containers_process_taints_the_host() {
     assert!(life.is_tainted());
     assert_eq!(start(&mut life, "r2"), ["refused r2 host-tainted"]);
     assert_eq!(docker.calls_of("create").len(), 1);
+}
+
+/// A planted secret in a run file reaches no argument of any call the command line runtime
+/// makes (create, start, inspect, rm), and no event, result or held run the lifecycle
+/// reports, on the path that starts and on the path whose files cannot be written. The
+/// create argument holds the files directory's path and nothing of its contents. Catches a
+/// secret passed on a command line (readable by every user through `ps`) or logged.
+#[test]
+fn a_planted_secret_is_on_no_command_line_and_in_no_report() {
+    const SECRET: &str = "SECRET-PLANTED-7f3a";
+    let mut w = World::new("secret", "linux");
+    let with_secret = |run: &str| {
+        let mut spec = job(run);
+        spec.files = vec![RunFile {
+            name: "tok".to_owned(),
+            contents: SECRET.to_owned(),
+        }];
+        reply(vec![Command::Start(Box::new(spec))])
+    };
+    let mut shown = vec![format!("{:?}", w.life.apply(&with_secret("r1")))];
+    let create = super::created(&w.docker, "r1");
+    assert!(
+        create
+            .iter()
+            .any(|arg| arg.contains(",dst=/run/js-files,readonly")),
+        "{create:?}"
+    );
+    // The files root becomes a file, so the second start cannot write its files.
+    let root = w._dir.path("files");
+    std::fs::remove_dir_all(&root).unwrap();
+    std::fs::write(&root, "in the way").unwrap();
+    shown.push(format!("{:?}", w.life.apply(&with_secret("r2"))));
+    w.docker.exit("r1", 0);
+    shown.push(format!("{:?}", w.life.step()));
+    shown.push(format!("{:?} {:?}", w.life.results(), w.life.held()));
+    for call in ["create", "start", "inspect", "stop", "rm", "ps"] {
+        shown.push(format!("{:?}", w.docker.calls_of(call)));
+    }
+    for text in shown {
+        assert!(!text.contains("SECRET-PLANTED"), "{text}");
+    }
 }

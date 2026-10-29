@@ -75,6 +75,19 @@ fn a_name_is_unique() {
     expect(err, "files", Rule::Duplicate, refusal::INVALID_FILE);
 }
 
+/// Names that differ only in case are duplicates (`Token` and `token`). Catches two files
+/// that are one on a case-folding file system, where the second would overwrite or fail
+/// the first.
+#[test]
+fn names_differing_only_in_case_are_duplicates() {
+    let err = check(|j| j.files = vec![file("Token", "1"), file("token", "2")]);
+    expect(err, "files", Rule::Duplicate, refusal::INVALID_FILE);
+    assert_eq!(
+        with(vec![file("token", "1"), file("token2", "2")]).validate(),
+        Ok(())
+    );
+}
+
 /// One file's contents: the cap passes, one over is refused, and a NUL is refused at any
 /// position. Catches an unbounded file and a NUL that would truncate the contents where a
 /// C reader stops.

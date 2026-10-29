@@ -48,6 +48,7 @@ pub fn start(
     let Local {
         mounts,
         scratch,
+        files,
         container,
         state,
         watch,
@@ -62,6 +63,7 @@ pub fn start(
         allow_host_jobs: false,
         mounts,
         scratch,
+        files,
         state,
         stop_grace,
     };

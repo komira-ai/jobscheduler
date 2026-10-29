@@ -203,6 +203,7 @@ impl Agent {
             allow_host_jobs: false,
             mounts: MountRoots::new(&[]).unwrap(),
             scratch: ScratchRoot::open(dir.path()).unwrap(),
+            files: None,
             state: StateRoot::open(state.path()).unwrap(),
             stop_grace: Duration::from_secs(1),
         };

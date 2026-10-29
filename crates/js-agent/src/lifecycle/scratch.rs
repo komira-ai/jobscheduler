@@ -2,22 +2,15 @@
 
 use std::ffi::{CStr, CString};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
     AtFlags, CWD, Dev, Dir, FileType, Mode, OFlags, chmodat, fstat, openat, statat, unlinkat,
 };
 use rustix::io::Errno;
-
-use js_agent_wire::RunFile;
-
-/// Appended to a run id to name the directory of the run's files beside its scratch
-/// directory. `@` is outside the alphabet of a run id, so no run id can be mistaken for
-/// the files of another.
-const FILES_SUFFIX: &str = "@files";
 
 /// The canonical path of `path`, which must be a directory (not a link to one) that the
 /// user running the agent owns, with no permission for group or others. `flag` names the
@@ -75,52 +68,6 @@ impl ScratchRoot {
         self.path.join(run_id)
     }
 
-    /// The directory of the run's files, which need not exist: beside the run's scratch
-    /// directory and never inside it, because the job holds the scratch directory
-    /// read-write and must not be able to touch the files.
-    pub fn files_of(&self, run_id: &str) -> PathBuf {
-        self.path.join(format!("{run_id}{FILES_SUFFIX}"))
-    }
-
-    /// Writes the run's files into a new directory ([`ScratchRoot::files_of`]) and returns
-    /// it. Each file is created `0444` and must not exist (`O_EXCL`), then the directory
-    /// is made `0555`: any user in the container can read the files and nobody, the
-    /// agent's user included, can add, change or unlink one without first changing the
-    /// directory's mode. The directory is `0700` while it is filled.
-    ///
-    /// A directory left by an earlier agent for this run id is not touched here:
-    /// [`ScratchRoot::create`] removes it first. Nothing is written for a start without
-    /// files (use [`ScratchRoot::files_of`] only when there are some).
-    ///
-    /// # Errors
-    ///
-    /// A name that is not one ordinary path component, a file or the directory that
-    /// already exists, or a write that fails. What was written stays until
-    /// [`ScratchRoot::remove`], which the failed start's cleanup runs.
-    pub fn write_files(&self, run_id: &str, files: &[RunFile]) -> io::Result<PathBuf> {
-        let dir = self.files_of(run_id);
-        fs::DirBuilder::new().mode(0o700).create(&dir)?;
-        for file in files {
-            let plain =
-                !matches!(file.name.as_str(), "" | "." | "..") && !file.name.contains(['/', '\0']);
-            if !plain {
-                return Err(io::ErrorKind::InvalidInput.into());
-            }
-            let mut out = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o444)
-                .open(dir.join(&file.name))?;
-            out.write_all(file.contents.as_bytes())?;
-            // The umask can only take bits away, but a restrictive one would take read
-            // from the container's user.
-            out.set_permissions(fs::Permissions::from_mode(0o444))?;
-            out.sync_all()?;
-        }
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555))?;
-        Ok(dir)
-    }
-
     /// Makes the run's directory, mode `0700` whatever the umask. A directory left by an
     /// earlier agent for this run id is removed first: the run is new, so it is garbage.
     ///
@@ -135,8 +82,7 @@ impl ScratchRoot {
         Ok(dir)
     }
 
-    /// Removes the run's directory and everything in it, and the directory of its files
-    /// ([`ScratchRoot::write_files`]), whatever the job left: a
+    /// Removes the run's directory and everything in it, whatever the job left: a
     /// directory it closed (mode 0, or without write permission) is opened up first by
     /// restoring the owner's permission, and the tree is walked without recursion, so its
     /// depth is not bounded by the stack or by the length of a path. One that is not there
@@ -153,23 +99,7 @@ impl ScratchRoot {
     /// The run id is not one ordinary path component, the run's path is not a directory,
     /// or something in it cannot be removed.
     pub fn remove(&self, run_id: &str) -> io::Result<()> {
-        let normal = !matches!(run_id, "" | "." | "..") && !run_id.contains('/');
-        let name = CString::new(run_id)
-            .ok()
-            .filter(|_| normal)
-            .ok_or(io::ErrorKind::InvalidInput)?;
-        let files = CString::new(format!("{run_id}{FILES_SUFFIX}"))
-            .map_err(|_| io::ErrorKind::InvalidInput)?;
-        let root = self.open_root()?;
-        // Both are tried; the first failure is the one reported. A closed `0555` files
-        // directory is opened up by the walk like any other (see `open_dir`).
-        let gone = |removed: rustix::io::Result<()>| match removed {
-            Err(Errno::NOENT) | Ok(()) => Ok(()),
-            Err(why) => Err(io::Error::from(why)),
-        };
-        let scratch = gone(remove_tree(&root, &name));
-        let files = gone(remove_tree(&root, &files));
-        scratch.and(files)
+        remove_entry(&self.path, run_id)
     }
 
     /// Removes every entry of the root that is not the directory of a run in `kept`, and
@@ -184,38 +114,56 @@ impl ScratchRoot {
 
     /// [`ScratchRoot::sweep`], or the error that the root could not be listed.
     fn sweep_except(&self, kept: &[&str]) -> io::Result<usize> {
-        let (root, entries) = self.open_root().and_then(|root| {
-            Dir::read_from(&root)
-                .map(|entries| (root, entries))
-                .map_err(io::Error::from)
-        })?;
-        let orphans: Vec<CString> = entries
-            .flatten()
-            .map(|entry| entry.file_name().to_owned())
-            .filter(|name| {
-                let bytes = name.to_bytes();
-                // A kept run keeps its files directory too.
-                let owned = |run: &&str| {
-                    let run = run.as_bytes();
-                    run == bytes || bytes.strip_suffix(FILES_SUFFIX.as_bytes()) == Some(run)
-                };
-                bytes != b"." && bytes != b".." && !kept.iter().any(owned)
-            })
-            .collect();
-        // An entry that cannot be examined is unlinked like a file: if it vanished, the
-        // unlink fails and it is not counted.
-        Ok(orphans
-            .iter()
-            .filter(|name| match is_dir(&root, name) {
-                Ok(true) => remove_tree(&root, name).is_ok(),
-                _ => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
-            })
-            .count())
+        sweep_entries(&self.path, &|name| {
+            kept.iter().any(|run| run.as_bytes() == name)
+        })
     }
+}
 
-    fn open_root(&self) -> io::Result<OwnedFd> {
-        Ok(openat(CWD, &self.path, DIR_FLAGS, Mode::empty())?)
+fn open_root(path: &Path) -> io::Result<OwnedFd> {
+    Ok(openat(CWD, path, DIR_FLAGS, Mode::empty())?)
+}
+
+/// Removes the entry `run_id` of the directory `root` with everything under it (see
+/// [`ScratchRoot::remove`]); one that is not there is not an error.
+pub(super) fn remove_entry(root: &Path, run_id: &str) -> io::Result<()> {
+    let normal = !matches!(run_id, "" | "." | "..") && !run_id.contains('/');
+    let name = CString::new(run_id)
+        .ok()
+        .filter(|_| normal)
+        .ok_or(io::ErrorKind::InvalidInput)?;
+    let root = open_root(root)?;
+    match remove_tree(&root, &name) {
+        Err(Errno::NOENT) | Ok(()) => Ok(()),
+        Err(why) => Err(why.into()),
     }
+}
+
+/// Removes every entry of the directory `path` that `keep` does not name, and returns how
+/// many it removed (see [`ScratchRoot::sweep`]).
+pub(super) fn sweep_entries(path: &Path, keep: &dyn Fn(&[u8]) -> bool) -> io::Result<usize> {
+    let (root, entries) = open_root(path).and_then(|root| {
+        Dir::read_from(&root)
+            .map(|entries| (root, entries))
+            .map_err(io::Error::from)
+    })?;
+    let orphans: Vec<CString> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_owned())
+        .filter(|name| {
+            let bytes = name.to_bytes();
+            bytes != b"." && bytes != b".." && !keep(bytes)
+        })
+        .collect();
+    // An entry that cannot be examined is unlinked like a file: if it vanished, the
+    // unlink fails and it is not counted.
+    Ok(orphans
+        .iter()
+        .filter(|name| match is_dir(&root, name) {
+            Ok(true) => remove_tree(&root, name).is_ok(),
+            _ => unlinkat(&root, name.as_c_str(), AtFlags::empty()).is_ok(),
+        })
+        .count())
 }
 
 const DIR_FLAGS: OFlags = OFlags::RDONLY

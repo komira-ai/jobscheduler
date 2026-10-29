@@ -274,3 +274,38 @@ fn an_unreadable_volume_is_a_warning_and_no_disk() {
         assert!(ran.err.contains(&said), "{}", ran.err);
     }
 }
+
+/// Asserts that an agent whose run files root is on a disk, not on a tmpfs, ends with
+/// status 2 naming `--run-files-root` before it sends anything, and that the same agent
+/// with the root on a tmpfs says hello with `run-files`. It catches secrets (URLs, tokens)
+/// that would be written to a disk, and a check that cannot fail.
+#[test]
+fn a_run_files_root_must_be_on_a_tmpfs() {
+    let dir = Scratch::new("contract-files-disk");
+    let owned = container_flags(&dir);
+    let all: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let root = std::fs::canonicalize(dir.path("run-files")).unwrap();
+    let mut host = linux_host();
+    host.files = host.files.clone().disk_under(&root);
+    let (script, sent) = Script::new(vec![no_runtime()]);
+    let connector = ScriptConnector::of(script);
+    let mut sleeper = CountingSleeper::stopping_at(1);
+    let jobs: Jobs<'_> = (Arc::new(FakeMachine::new()), None);
+    let ran = run_on(
+        &flags(&all),
+        &host,
+        &connector,
+        &mut sleeper,
+        &mut Lowest,
+        jobs,
+    );
+    assert_eq!(ran.status(), code(2), "{}", ran.err);
+    assert!(
+        ran.err.contains("--run-files-root:") && ran.err.contains("is not on a tmpfs"),
+        "{}",
+        ran.err
+    );
+    assert!(sent.borrow().is_empty());
+    let (_, hello) = container_hello("contract-files-tmpfs", &[], &linux_host());
+    assert_eq!(hello["capabilities"]["run-files"], "true");
+}

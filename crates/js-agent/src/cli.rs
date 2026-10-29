@@ -87,6 +87,15 @@ pub struct Cli {
     /// others.
     #[arg(long, value_name = "PATH")]
     pub scratch_root: Option<PathBuf>,
+    /// The directory under which each run's files (`files` of a start: URLs and tokens) are
+    /// written, `0555` with `0444` files, and mounted read-only at `/run/js-files`. Made
+    /// `0700` when missing. It must be on a `tmpfs` so the secrets never reach a disk; the
+    /// agent refuses to start when it is not. A reboot clears it, which is fine: a run does
+    /// not survive a reboot. Without the flag `/run/js-agent/files` is used when it can be
+    /// made; when it cannot, the agent runs without run files and does not report the
+    /// `run-files` capability.
+    #[arg(long, value_name = "PATH")]
+    pub run_files_root: Option<PathBuf>,
     /// The directory the agent keeps its taint marker and its host credential in: it must be
     /// owned by the user running the agent, with no permission for group or others.
     /// Required with `--container-bin`. Giving it also lets a server issue the host a

@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_agent::cli_runtime::Settings;
-use js_agent::lifecycle::{Capacity, Config, MountRoots, ScratchRoot, StateRoot};
+use js_agent::lifecycle::{Capacity, Config, FilesRoot, MountRoots, ScratchRoot, StateRoot};
 use js_agent::{Plan, Platform, Rescue, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
@@ -71,6 +71,7 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         allow_host_jobs: false,
         mounts: MountRoots::new(&[]).unwrap(),
         scratch: ScratchRoot::open(&private(dir, "scratch")).unwrap(),
+        files: Some(FilesRoot::open(&private(dir, "files")).unwrap()),
         state: StateRoot::open(&private(dir, "state")).unwrap(),
         stop_grace: Duration::from_secs(1),
     };

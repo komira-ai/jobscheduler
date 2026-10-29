@@ -10,8 +10,8 @@
 //!   ran it (`--version`) and found Docker or Podman; an engine that does not run ends the
 //!   agent first, so no hello names a runtime that was not found. An agent that runs no
 //!   jobs (no `--container-bin`) reports neither.
-//! - `run-files` is `true` for the same agent: it writes a start's `files` and mounts them
-//!   at `/run/js-files`. The server sends a start with files to a host that reports it only.
+//! - `run-files` is `true` for an agent with a run files root (`--run-files-root`, on a
+//!   tmpfs): it writes a start's `files` and mounts them at `/run/js-files`. The server sends a start with files to a host that reports it only.
 //! - `gpu-toolkit` is `true` when the host offers GPUs and `--gpu-toolkit-hook` ran and
 //!   exited 0. The hook is the operator's check that a container can use a GPU (for
 //!   example, a container that runs `nvidia-smi`); the agent knows only its exit status.
@@ -64,14 +64,18 @@ pub(crate) fn report(
     hello: &mut Hello,
     hook: Option<&ToolkitHook>,
     commands: &dyn CommandRunner,
+    run_files: bool,
 ) -> Vec<String> {
     let mode = ExecMode::Container.name().to_owned();
     hello.capabilities.insert(RUNTIME.to_owned(), mode.clone());
     hello.capabilities.insert(EXEC.to_owned(), mode);
-    // This agent writes a start's run files; an older one would ignore them.
-    hello
-        .capabilities
-        .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    // This agent writes a start's run files (when it has a files root); an older one
+    // would ignore them.
+    if run_files {
+        hello
+            .capabilities
+            .insert(RUN_FILES.to_owned(), FLAG_SET.to_owned());
+    }
     let Some(hook) = hook.filter(|_| hello.shape.gpus > 0) else {
         return Vec::new();
     };

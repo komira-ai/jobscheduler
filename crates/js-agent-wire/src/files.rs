@@ -65,5 +65,7 @@ pub fn validate_files(files: &[RunFile]) -> Result<(), ValidationError> {
     if total > limits::MAX_RUN_FILES_TOTAL_BYTES {
         return Err(at.fail(Rule::TooLong));
     }
-    check::distinct(at, files.iter().map(|file| file.name.as_str()))
+    // Compared in lower case: two names that differ only in case are one file on a file
+    // system that folds case (a Mac volume), and a reader should not have to tell them apart.
+    check::distinct(at, files.iter().map(|file| file.name.to_ascii_lowercase()))
 }

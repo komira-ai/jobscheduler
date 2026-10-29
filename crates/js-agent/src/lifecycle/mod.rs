@@ -147,6 +147,7 @@
 
 mod machine;
 mod mounts;
+mod run_files;
 mod runtime;
 mod scratch;
 pub mod taint;
@@ -164,6 +165,7 @@ use crate::cli_runtime::{Flags, Settings};
 
 pub use machine::{Lifecycle, Quiet, RETIRED_CAP, Restored};
 pub use mounts::{MountError, MountRoots};
+pub use run_files::{DEFAULT_ROOT as DEFAULT_RUN_FILES_ROOT, FilesRoot};
 pub use runtime::{
     ContainerId, ContainerRuntime, ContainerSpec, Exit, Found, ResolvedMount, RuntimeError, Status,
     label,
@@ -180,6 +182,10 @@ pub mod detail {
     /// The job names a GPU and the runtime's containers cannot use one (a container on a
     /// Mac cannot reach the Apple GPU). Nothing is created.
     pub const GPU_UNSUPPORTED: &str = "gpu-unsupported";
+    /// The job carries run files and this agent has no files root. A server sends files
+    /// only to an agent that reported the `run-files` capability, so this is a fault of the
+    /// sender.
+    pub const FILES_UNSUPPORTED: &str = "files-unsupported";
     /// The job is a host job and carries run files, which only a container can be given
     /// (they are mounted read-only at `/run/js-files`). Nothing is created.
     pub const FILES_NEED_CONTAINER: &str = "files-need-container";
@@ -458,6 +464,9 @@ pub struct Config {
     pub mounts: MountRoots,
     /// Where the runs' scratch directories go.
     pub scratch: ScratchRoot,
+    /// Where the runs' files go (on a tmpfs); none when the agent was started without a
+    /// usable `--run-files-root`, and then a start with files is refused.
+    pub files: Option<FilesRoot>,
     /// Where the taint marker is kept.
     pub state: StateRoot,
     /// How long a container gets to stop on its own before it is killed.
@@ -471,6 +480,9 @@ pub struct Local {
     pub mounts: MountRoots,
     /// `--scratch-root`, when given.
     pub scratch: Option<ScratchRoot>,
+    /// `--run-files-root`, or the default under `/run` when that can be made; always none
+    /// without `--container-bin`.
+    pub files: Option<FilesRoot>,
     /// `--container-bin`, `--container-network` and `--container-user`, when containers
     /// are enabled by `--container-bin`.
     pub container: Option<Settings>,
@@ -580,10 +592,17 @@ impl Local {
                     .to_owned(),
             );
         }
+        // The files root is the last check, so no other flag's error depends on it.
+        let files = match (&cli.run_files_root, container.is_some()) {
+            (_, false) => None,
+            (Some(path), true) => Some(FilesRoot::open(path)?),
+            (None, true) => FilesRoot::open(Path::new(DEFAULT_RUN_FILES_ROOT)).ok(),
+        };
         Ok(Self {
             watch,
             mounts,
             scratch,
+            files,
             container,
             state,
             stop_grace,
@@ -600,10 +619,25 @@ impl Local {
     /// not prove (subvolumes sharing free space have distinct device numbers), and the
     /// engine's data root and container layers are not compared.
     ///
+    /// The run files root (`--run-files-root`, or the default under `/run`) must be on a
+    /// `tmpfs`; one that is not, or cannot be looked at, stops the agent.
+    ///
     /// # Errors
     ///
     /// The text names the flags at fault; a path that cannot be looked at is an error too.
     pub fn check_filesystems(&self, files: &dyn FileReader) -> Result<(), String> {
+        if let Some(root) = &self.files {
+            let on_tmpfs = files.is_tmpfs(root.path()).map_err(|why| {
+                format!("--run-files-root: cannot tell what file system it is on: {why}")
+            })?;
+            if !on_tmpfs {
+                return Err(format!(
+                    "--run-files-root: {} is not on a tmpfs: a run's files hold secrets that \
+                     must not reach a disk",
+                    root.path().display()
+                ));
+            }
+        }
         let Some(state) = &self.state else {
             return Ok(());
         };
