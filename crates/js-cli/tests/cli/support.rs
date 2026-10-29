@@ -470,10 +470,19 @@ impl Harness {
         Driven::new(move || tick_on(&handle, &ticks))
     }
 
-    /// Stops the server; later requests find nothing listening.
+    /// Stops the server; later requests fail to talk to it. Its port stays owned for the
+    /// rest of the process by a listener that drops every connection at once, so no other
+    /// test's server can take the port and answer in its place.
     pub fn stop(&mut self) {
         let running = self.running.take().unwrap();
+        let addr = running.addr();
         self.rt.block_on(running.shutdown()).unwrap();
+        let listener = TcpListener::bind(addr).unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
     }
 
     /// The ids of the leases the server lists, read by the CLI.
