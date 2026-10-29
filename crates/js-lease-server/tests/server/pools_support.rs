@@ -231,11 +231,6 @@ impl FakeNet {
         *self.check.lock().unwrap() = Err(error);
     }
 
-    /// Makes the check pass.
-    pub fn pass(&self) {
-        *self.check.lock().unwrap() = Ok(());
-    }
-
     /// Makes the check panic, or not.
     pub fn panic(&self, panics: bool) {
         self.panics.store(panics, Ordering::SeqCst);
@@ -335,7 +330,7 @@ pub struct Rig {
     pub clock: ManualClock,
     pub ticks: TickHandle,
     pub checks: TickHandle,
-    pub scratch: Scratch,
+    _scratch: Scratch,
     pub cloud: Arc<FakeCloud>,
     pub net: Arc<FakeNet>,
     pub logs: LogCapture,
@@ -408,7 +403,7 @@ impl Rig {
             clock: manual,
             ticks,
             checks,
-            scratch,
+            _scratch: scratch,
             cloud,
             net,
             logs,
