@@ -29,6 +29,12 @@ pub enum ArgsError {
         "a mount path must be absolute UTF-8 without a comma, a colon, a quote or a control character"
     )]
     MountPath,
+    /// A read-only mount that holds another mount point, on an engine without recursive
+    /// read-only: the mount below it would stay writable.
+    #[error(
+        "a read-only mount holds another mount, which this engine would leave writable: use Docker 25 or later, or mount a directory without mount points"
+    )]
+    NestedMount,
     /// A label whose key is empty or holds `=`.
     #[error("a label key must not be empty or hold '='")]
     LabelKey,
@@ -54,7 +60,7 @@ pub type Bind = (String, String, bool);
 /// because `-v` splits on `:`. With `recursive_ro` a read-only bind also gets
 /// `bind-recursive=readonly,bind-propagation=rprivate`, so a mount below it is read-only
 /// too (Docker 25 and later; the engine refuses the container on a kernel before 5.12
-/// rather than leave the submount writable).
+/// rather than leave the submount writable). Podman gets `nosuid,nodev` on every mount.
 ///
 /// # Errors
 ///
@@ -87,7 +93,7 @@ pub fn limits_to_args(
         .iter()
         .map(|mount| (mount.host.as_path(), mount.target.as_str(), mount.ro));
     for (host, target, ro) in std::iter::once(scratch).chain(jobs) {
-        let value = mount_value(host, target, ro, recursive_ro)?;
+        let value = mount_value(engine, host, target, ro, recursive_ro)?;
         args.extend(["--mount".to_owned(), value]);
     }
     Ok(args)
@@ -123,8 +129,45 @@ fn gpu_args(engine: Engine, indices: &[u32]) -> Vec<String> {
     }
 }
 
-/// A bind mount, as the value of `--mount`.
-fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<String, ArgsError> {
+/// Whether a mount point other than `host` itself is below it, in the text of a
+/// `/proc/self/mountinfo` (the mount point is the fifth field, a space written `\040` and
+/// a backslash `\134`).
+pub fn has_submount(mountinfo: &str, host: &Path) -> bool {
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .map(|point| point.replace("\\040", " ").replace("\\134", "\\"))
+        .any(|point| Path::new(&point) != host && Path::new(&point).starts_with(host))
+}
+
+/// Refuses a read-only mount of `spec` that holds a mount point (per `mountinfo`), for an
+/// engine that cannot make the mounts below it read-only too.
+///
+/// # Errors
+///
+/// [`ArgsError::NestedMount`].
+pub fn check_submounts(spec: &ContainerSpec, mountinfo: &str) -> Result<(), ArgsError> {
+    let nested = spec
+        .mounts
+        .iter()
+        .filter(|mount| mount.ro)
+        .any(|mount| has_submount(mountinfo, &mount.host));
+    match nested {
+        true => Err(ArgsError::NestedMount),
+        false => Ok(()),
+    }
+}
+
+/// A bind mount, as the value of `--mount`. Podman's `--mount` takes `nosuid,nodev` for a
+/// bind, so there a set-uid file or a device node on the mount has no effect; Docker's
+/// takes neither.
+fn mount_value(
+    engine: Engine,
+    host: &Path,
+    target: &str,
+    ro: bool,
+    recursive: bool,
+) -> Result<String, ArgsError> {
     let plain = |text: &str| text.starts_with('/') && !text.contains([',', '"', ':']);
     let clean = |text: &str| plain(text) && !text.chars().any(char::is_control);
     let host = host.to_str().filter(|text| clean(text));
@@ -134,8 +177,12 @@ fn mount_value(host: &Path, target: &str, ro: bool, recursive: bool) -> Result<S
         (true, false) => ",readonly",
         (true, true) => ",readonly,bind-recursive=readonly,bind-propagation=rprivate",
     };
+    let unprivileged = match engine {
+        Engine::Podman => ",nosuid,nodev",
+        Engine::Docker => "",
+    };
     host.zip(target)
-        .map(|(host, target)| format!("type=bind,src={host},dst={target}{access}"))
+        .map(|(host, target)| format!("type=bind,src={host},dst={target}{access}{unprivileged}"))
         .ok_or(ArgsError::MountPath)
 }
 

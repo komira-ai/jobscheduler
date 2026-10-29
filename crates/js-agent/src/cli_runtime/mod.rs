@@ -221,8 +221,8 @@ use js_agent_wire::Isolation;
 use serde_json::Value;
 
 pub use args::{
-    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, hardening_args, label_args,
-    limits_to_args,
+    ArgsError, Bind, DEFAULT_PIDS, SCRATCH_TARGET, binds_of, check_submounts, hardening_args,
+    label_args, limits_to_args,
 };
 pub use settings::{
     DEFAULT_NETWORK, DEFAULT_TMP_SIZE, DEFAULT_USER, Flags, Pull, Settings, SettingsError,
@@ -543,6 +543,11 @@ impl CliRuntime {
         labels.insert(label::CREATED_MS.to_owned(), created_ms.to_string());
         let mut args = vec!["create".to_owned(), "--name".to_owned(), name.to_owned()];
         args.extend(label_args(&labels)?);
+        if !self.recursive_ro
+            && let Some(mountinfo) = (self.proc_read)("/proc/self/mountinfo")
+        {
+            check_submounts(spec, &mountinfo)?;
+        }
         args.extend(limits_to_args(self.engine, spec, self.recursive_ro)?);
         args.extend(hardening_args(&self.settings, self.engine));
         args.extend(["--".to_owned(), spec.image.clone()]);
