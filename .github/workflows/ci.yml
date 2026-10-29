@@ -13,8 +13,10 @@ on:
 
 permissions: {}
 
+# One run per workflow and pull request: a new push to a PR cancels that PR's queued or
+# running run (macOS runners are scarce), while pushes to main are never cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

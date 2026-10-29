@@ -33,6 +33,9 @@ pub enum Rule {
     /// An image reference is not pinned by a `sha256:` digest of 64 lower case hex digits.
     #[error("must be pinned by a sha256 digest")]
     NotPinned,
+    /// The field is only meaningful in a native job, and this job has no native body.
+    #[error("needs a native job")]
+    NeedsNative,
     /// The peer speaks no protocol version this side speaks.
     #[error("names no protocol version this side speaks")]
     UnsupportedProtocol,

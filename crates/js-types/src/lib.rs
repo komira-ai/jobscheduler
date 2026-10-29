@@ -16,6 +16,7 @@
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod class;
+mod digest;
 pub mod env;
 mod ids;
 mod job;
@@ -26,6 +27,7 @@ pub mod sched;
 mod shape;
 
 pub use class::{Admission, ClassError, ResourceClass};
+pub use digest::{BundleRef, BundleRefError, DigestRef, DigestRefError};
 pub use ids::{ClassId, HostId, IdError, LeaseId, ProviderId, RequestId, RequestIdError};
 pub use job::{
     ContainerSpec, DISK_GIB_KEY, EXEC_KEY, ExecMode, ImageDigestRef, ImageRefError, Requirements,
