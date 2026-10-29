@@ -28,6 +28,7 @@ case "$1" in
 --version) echo "Docker version 27.3.1, build ce12230" ;;
 create|ps) echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef ;;
 info) echo true ;;
+volume) echo '{"device":"/work/scratch/r1","o":"bind,nosuid,nodev","type":"none"}' ;;
 inspect)
   case "$*" in
   *Config.Labels*) echo 'running {"jobscheduler.dev/run-id":"r1","jobscheduler.dev/created-ms":"1000000"}' ;;
