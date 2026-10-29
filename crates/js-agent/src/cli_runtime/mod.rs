@@ -971,14 +971,20 @@ fn parse_pid(text: &str) -> Option<(u32, bool)> {
     pid.parse().ok().map(|pid| (pid, ended))
 }
 
+/// The entries of the JSON `.Mounts` of an `inspect` (`null` is none). `None` when the
+/// text is not a list or `null`.
+fn mount_entries(text: &str) -> Option<Vec<Value>> {
+    match serde_json::from_str(text.trim()).ok()? {
+        Value::Null => Some(Vec::new()),
+        Value::Array(entries) => Some(entries),
+        _ => None,
+    }
+}
+
 /// The bind mounts in the JSON `.Mounts` of an `inspect`; other kinds are left out. `None`
 /// when the text is not that.
 fn binds_read(text: &str) -> Option<Vec<Bind>> {
-    let entries = match serde_json::from_str(text.trim()).ok()? {
-        Value::Null => Vec::new(),
-        Value::Array(entries) => entries,
-        _ => return None,
-    };
+    let entries = mount_entries(text)?;
     let each = entries.iter().map(bind_of);
     each.collect::<Option<Vec<_>>>()
         .map(|binds| binds.into_iter().flatten().collect())
@@ -1007,11 +1013,7 @@ struct VolumeMount {
 /// The volumes in the JSON `.Mounts` of an `inspect`; other kinds are left out. `None`
 /// when the text is not that, or a volume lacks the fields of one.
 fn volumes_read(text: &str) -> Option<Vec<VolumeMount>> {
-    let entries = match serde_json::from_str(text.trim()).ok()? {
-        Value::Null => Vec::new(),
-        Value::Array(entries) => entries,
-        _ => return None,
-    };
+    let entries = mount_entries(text)?;
     let each = entries.iter().map(volume_of);
     each.collect::<Option<Vec<_>>>()
         .map(|volumes| volumes.into_iter().flatten().collect())
