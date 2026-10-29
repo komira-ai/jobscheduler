@@ -168,16 +168,8 @@ impl Engine {
         if taken == Taken::Held {
             self.owed.insert(lease, worker.clone());
         }
-        let (operation, node) = (name, worker);
-        match outcome {
-            Outcome::Completed { .. } => {
-                tracing::info!(%operation, %lease, %node, accepted, "lease finished ok");
-            }
-            Outcome::Failed(failure) => {
-                tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
-            }
-        }
         a.after_report(&self.view(), now, worker, &report, &answers, taken);
+        a.log_finished(&name, worker, &report, taken);
         // What the estimator learned from the report may lower a key floor.
         let lowered = a.lowered();
         self.lower_key_floors(a, lowered);

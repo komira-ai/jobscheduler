@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use js_sched::{
-    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Request,
-    UNSERVABLE_WAIT,
+    DaemonInstance, Event, FINISHED_RETENTION, LOSS_REQUEUES, LoadConfig, MemoryLadder, Prediction,
+    Request, UNSERVABLE_WAIT,
 };
 use js_store::ORPHAN_WAIT;
 use js_store::{EpochBump, Progress, StateError};
@@ -236,6 +236,28 @@ pub struct UnknownNode(pub String);
 #[error("the state store could not be read for node {0}, which another frontend holds")]
 pub struct NodeUnread(pub String);
 
+/// Which frontend of the state store holds a node, as one frontend can tell
+/// ([`Core::node_held`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeHeld {
+    /// This frontend owns the node, or the node has a link here (it registered with this
+    /// core) and the store has never had an owner for it, as when its first claim was
+    /// refused; a core with no state store holds every node linked to it. A link here
+    /// whose claim was refused while the store names another owner reads `Elsewhere`: the
+    /// store's answer decides.
+    Here,
+    /// The store knows the node and this frontend does not own it.
+    Elsewhere {
+        /// The leases the store holds on the node, in lease order (none if it holds no
+        /// unfinished work); the leases of other nodes are not listed.
+        leases: Vec<LeaseId>,
+    },
+    /// No frontend has held the node and it is not connected here.
+    Unknown,
+    /// The store could not say who holds the node.
+    Unread,
+}
+
 /// An operator action on a node that was not applied.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PlaceError {
@@ -415,11 +437,42 @@ impl<A: Adapter> Core<A> {
         size_key: Option<u64>,
         enrol: impl FnOnce(&mut A, &Admitted),
     ) -> Result<Admitted, NotQueued> {
+        self.submit_with(now, request, parcel, size_key, None, enrol)
+    }
+
+    /// [`Core::submit_keyed`] for a request with a cost `prediction` the caller computed
+    /// outside the lock (predicting reads the server's own store rows): what the scheduler
+    /// charges the lease the operation gets. `None` is the booked cost: the request's cores,
+    /// no memory, not cold.
+    ///
+    /// The scheduler is given the cost after the operation is numbered and before its
+    /// `Submit` is fed, so the operation's first placement round is charged it. Nothing is
+    /// read or written for it: the prediction is not in the operation's stored rows.
+    ///
+    /// A request that joins an operation the scheduler holds keeps that operation's cost,
+    /// unless the operation still waits for a lease: then `prediction`, if there is one,
+    /// replaces the held cost, as the newer estimate. Once the operation holds a lease the
+    /// prediction is ignored: the lease was charged when it was granted, and an operation
+    /// requeued after a lost lease is placed at the cost it was last given. A request for an
+    /// operation another frontend holds ([`Held::Elsewhere`]) sets nothing: this scheduler
+    /// never places it.
+    ///
+    /// # Errors
+    /// As [`Core::submit`].
+    pub fn submit_with(
+        &self,
+        now: FarmTime,
+        request: Request,
+        parcel: &[u8],
+        size_key: Option<u64>,
+        prediction: Option<Prediction>,
+        enrol: impl FnOnce(&mut A, &Admitted),
+    ) -> Result<Admitted, NotQueued> {
         let waiting = Instant::now();
         let mut locked = self.lock();
         self.observer.lock_waited(waiting.elapsed());
         let Locked { engine, adapter } = &mut *locked;
-        let admitted = engine.admit(adapter, &request, parcel, size_key, now)?;
+        let admitted = engine.admit(adapter, &request, parcel, size_key, prediction, now)?;
         enrol(adapter, &admitted);
         match admitted.held {
             Held::Here => {
@@ -618,6 +671,18 @@ impl<A: Adapter> Core<A> {
         let mut locked = self.lock();
         let Locked { engine, adapter } = &mut *locked;
         engine.place(adapter, now, worker, action)
+    }
+
+    /// Which frontend holds `worker` at `now`, for a view of a node that may be connected
+    /// to another frontend of the state store. Writes nothing. It reads, in order: whether
+    /// this core owns the node (the node's `owner/` row, when the core's last look is old);
+    /// whether the store has an `owner/` row for the node at all (the only look
+    /// [`Core::place`] makes); and, for a node the core does not own, the stored lease rows
+    /// that name the node. "Connected here" means the core holds a link for the node, not
+    /// that its stream is open, so a link with no owner row reads `Here`.
+    #[must_use]
+    pub fn node_held(&self, now: FarmTime, worker: &WorkerId) -> NodeHeld {
+        self.lock().engine.node_held(now, worker)
     }
 
     /// Takes this core out of service for good, for a successor to take over: from now on

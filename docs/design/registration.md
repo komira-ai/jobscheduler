@@ -28,7 +28,10 @@ hello in message metadata, never in a log line.
 - *One-time join token (an elastic kind with no signed identity).* A provider that cannot sign an instance identity (a GPU cloud that
   gives the instance nothing signed) proves it another way: the operator's tooling mints a token for the instance it launched
   (`POST /v1/agent/join-tokens`, behind the client token, with the provider and instance id and a short lifetime, 30 minutes unless asked,
-  at most a day) and delivers it to that instance after boot, never in user data, an argument or a commit. The server keeps only its digest, in
+  at most a day) and delivers it to that instance, never in an argument or a commit. A kind that has no channel to a new instance other
+  than its launch (Lambda) delivers it in the launch payload (user data), as pools-providers-network.md (7.2) designs it: the service mints
+  it just before the launch with a lifetime of the pool's `boot_timeout` plus a margin, it crosses TLS to the provider and is never logged, and the host credential below retires it
+  at the host's first hello (pools-providers-network.md, 7.2; K6 of design.md). The server keeps only its digest, in
   `<state file>.joins`, so a restart keeps an unused token valid and a used one used. The first hello that presents the token, names that
   instance in `instance`, and arrives before the expiry registers the host and consumes the token: it is then tied to that host id. It
   carries that host's later hellos and heartbeats and nothing else; a hello for another host id is refused `join-token-used`, an unused token
@@ -54,10 +57,34 @@ hello in message metadata, never in a log line.
   machine, a host id reused by another instance), not against the holder of a token, who can name the instance too; and the client token can
   mint a token for any instance id. One server owns the state file at a time (the lock beside the lease file refuses a second one), and
   the file of tokens is written whole through a new temporary file, so a file a crash left under that name never decides its mode.
+- *Host credential (replaces a one-time token at the first hello).* A hello says `accepts_host_credential: true` when the agent has a
+  state root (`--state-root`) to keep one in. The first hello of a host that registers with an unused one-time token and says so is
+  answered with a `Welcome` that carries `host_credential`, 256 random bits as 64 hex digits, and in the same write the token is
+  retired: its row is replaced by a row for the credential, bound to the same instance and host, with the same 24 hour silence bound
+  renewed by the same hellos and heartbeats, so the token's copy in a launch request's user data authenticates nothing from then on (its
+  hello and heartbeat get the 401 of an unknown token). Only digests are kept, in the same owner-only whole-file state as the tokens
+  (`<state file>.joins`), a row naming the digest of the token it replaced (`replaces`), which is what the registry still knows the host
+  by. `DELETE /v1/agent/join-tokens` revokes the credential with the rest of the instance's rows. The agent writes the credential to
+  `host-credential` in its state root (mode 0600, through a temporary file, synced and renamed) before it uses it, sends it as the
+  bearer of every later call, and reads the file again at start. A hello that does not say it keeps a credential (an older agent, or one
+  with no state root) is answered as before and its token stays good, and so does a host that joins with the pool's shared token. A
+  server from before the field sends none, and the agent then goes on with its token. Of two first hellos for one token one is admitted
+  and gets the credential; the other finds the token gone. If the registry refuses the hello that issued the credential the credential
+  goes back and the token is unused again. If the welcome is lost on the wire after the token was retired, the host holds nothing that
+  authenticates: its next hello is refused (401), the agent ends, and the host stays until whoever launched it releases it when its boot
+  time is up; it does not register a second time. If the agent cannot write the file it uses the credential for that process and logs
+  that a restart cannot register the host again.
 - *Lifecycle.* A host that stops heartbeating is Unknown, its leases stay and the agent self-fences. Past the grace its self-fence
   leases are given up, since the agent has fenced itself (5.4); a run-on lease is given up only when the host is proven stopped
   (operator removal or a provider Absent), and stays booked with an alert until then. The host stays listed as lost for a retention
   window. A restarted agent registers again with the same id and re-announces its leases; the announcement is reconciled against the
   table, and a lease id not committed to this host id is answered `Cancel` and never adopted.
+- *Configuration.* With `--config` the registration settings are keys of the file and no flag may be given beside it. The rate limit on
+  hellos is `server.agent_hello_burst` (60) and `server.agent_hello_interval` (`1s`): one join credential may say a burst of hellos and then
+  one more per interval, counted per credential, refusals included. `server.require_host_credential` (false) refuses the first hello of a
+  one-time token that does not say the agent keeps a host credential. The pool that registers hosts is a `[[pool]]` table, its shared
+  tokens the pool's `join_token_file`, and the three server keys are refused when no pool registers agents. They have the flags'
+  names and defaults (`--agent-hello-burst`, `--agent-hello-interval`, `--require-host-credential`), and the flags work as before when
+  `--config` is absent.
 - *Source.* The `DefaultProvider` (providers.md) is served by a `RegisteredAgentSource` of `CapacitySource` (5.9), which answers from admitted agents and ignores the bookings it is given: the lease
   file records leases and agents re-announce them.

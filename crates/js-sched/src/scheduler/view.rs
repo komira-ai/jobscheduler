@@ -195,6 +195,13 @@ impl Scheduler {
         self.admission.set_prediction(operation, prediction);
     }
 
+    /// Whether a prediction set with [`Scheduler::set_cost`] is held for `operation`: it is
+    /// dropped when the operation is forgotten as queued or retired.
+    #[must_use]
+    pub fn has_cost(&self, operation: OperationId) -> bool {
+        self.admission.hinted(operation)
+    }
+
     /// What admission charged `lease`, which a worker holds: the cost in its grant record.
     #[must_use]
     pub fn lease_cost(&self, lease: LeaseId) -> Option<LeaseCost> {

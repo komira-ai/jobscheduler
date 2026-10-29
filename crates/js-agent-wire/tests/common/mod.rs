@@ -41,6 +41,7 @@ pub fn hello() -> Hello {
             model: "A100".into(),
             memory_bytes: 1 << 36,
         }],
+        accepts_host_credential: false,
         labels: map(&[("rack", "r1")]),
         phase: Phase::Serving,
         held: vec![HeldRun {
@@ -54,7 +55,9 @@ pub fn job() -> JobSpec {
     JobSpec {
         run_id: "run-1".into(),
         lease_id: "1-1".into(),
-        image: "ubuntu:24.04".into(),
+        image:
+            "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
         args: vec!["make".into(), "all".into()],
         limits: Limits {
             cpu_millis: 2000,
@@ -149,6 +152,7 @@ pub fn welcome() -> Welcome {
         grace_ms: 15_000,
         pool: "builders".into(),
         session: "s3cret-0".into(),
+        host_credential: None,
     }
 }
 

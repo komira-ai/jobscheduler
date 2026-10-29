@@ -18,11 +18,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use js_sched::{DaemonInstance, NodePhase, Request, Requeue, Scheduler};
+use js_sched::{DaemonInstance, NodePhase, Prediction, Request, Requeue, Scheduler};
 use js_store::Ending;
 use js_types::sched::{
-    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Refusal, StartLease, WaiterId,
-    WorkerId,
+    Answer, Effect, FarmTime, LeaseGrant, LeaseId, OperationId, Outcome, Refusal, StartLease,
+    WaiterId, WorkerId,
 };
 
 use crate::host::Stream;
@@ -126,6 +126,20 @@ impl Lowered {
     }
 }
 
+/// The `lease finished` line with the fields the core knows: `operation`, `lease`, `node`,
+/// whether the scheduler took the report (`accepted`), and for a failure its kind.
+pub fn log_finished_line(operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+    let (lease, node, accepted) = (report.lease, worker, taken == Taken::Accepted);
+    match report.outcome {
+        Outcome::Completed { .. } => {
+            tracing::info!(%operation, %lease, %node, accepted, "lease finished ok");
+        }
+        Outcome::Failed(failure) => {
+            tracing::warn!(%operation, %lease, %node, ?failure, accepted, "lease finished failed");
+        }
+    }
+}
+
 /// Everything the core asks of the server around it. See the module documentation.
 pub trait Adapter: Send {
     /// The farm time of the feed about to start, called at the top of every feed that is
@@ -173,6 +187,18 @@ pub trait Adapter: Send {
         _answers: &[Answer],
         _taken: Taken,
     ) {
+    }
+
+    /// Writes the one log line for a report that was fed: `lease finished ok` (INFO) or
+    /// `lease finished failed` (WARN), naming the operation, lease and node, and whether the
+    /// scheduler took the report (`accepted`). Called once for each
+    /// [`Core::report`](crate::Core::report), right after the matching
+    /// [`Adapter::after_report`], so the line follows whatever that hook logged. `operation`
+    /// is the name [`Adapter::name`] gave before the feed. An adapter that has more to say
+    /// on the line (the exit code of the run, say) overrides this and writes the line itself,
+    /// with the same words; the default is [`log_finished_line`], the fields the core knows.
+    fn log_finished(&mut self, operation: &str, worker: &WorkerId, report: &Report, taken: Taken) {
+        log_finished_line(operation, worker, report, taken);
     }
 
     /// Whether the connection of `worker`'s stream `stream` is still open. Asked when the
@@ -278,6 +304,31 @@ pub trait Adapter: Send {
         lease: Option<&LeaseGrant>,
         size_key: Option<u64>,
     );
+
+    /// The cost prediction for the queued `operation`, which the core takes up from the state
+    /// store: at the start, from another frontend's queue at an intake poll, or when a
+    /// request joins it. The scheduler charges it the prediction at its next placement round.
+    /// `None` is the booked cost: the request's cores, no memory. `request` and `size_key`
+    /// are as for [`Adapter::adopted`].
+    ///
+    /// Runs under the core lock, after `adopted`: every other submit, report and tick waits
+    /// for it. It must not read the store, do I/O, block, or take any other lock: the server
+    /// predicts outside the lock (as for [`Core::submit_with`](crate::Core::submit_with))
+    /// and answers here from what it has kept. The type does not enforce this: the adapter
+    /// is a trait, free to hold a store handle or a mutex, and one that does stalls the
+    /// whole core.
+    ///
+    /// The prediction is not stored with the operation: the stored row is the same with or
+    /// without one. An operation that holds a lease keeps the cost it was charged, and is
+    /// not asked about.
+    fn predicted(
+        &mut self,
+        _operation: OperationId,
+        _request: &Request,
+        _size_key: Option<u64>,
+    ) -> Option<Prediction> {
+        None
+    }
 
     /// The callers among `callers` still waiting: not answered, and still listening (a caller
     /// that gave up is not).

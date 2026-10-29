@@ -16,6 +16,11 @@ pub const WALL_TIME_NOT_POSITIVE: &str = "wall-time-not-positive";
 pub const INVALID_JOB: &str = "invalid-job";
 /// A job whose image name is empty, too long or outside the image alphabet.
 pub const INVALID_IMAGE: &str = "invalid-image";
+/// A job whose image is not pinned by digest: it has no `@sha256:<64 lower case hex>`
+/// part (a tag alone, another algorithm, a digest of the wrong length). The refusal's
+/// `field` is `image`. Agents run with the pull policy `missing`, so a tag could change
+/// under a fleet; a name with a tag as well as a digest is accepted.
+pub const IMAGE_DIGEST_REQUIRED: &str = "image-digest-required";
 /// A job with a mount that is absolute, climbs with `..`, is empty or names no root.
 pub const INVALID_MOUNT: &str = "invalid-mount";
 /// A hello for a host id that is already live.
@@ -67,6 +72,14 @@ pub const HOST_BOUND: &str = "host-bound";
 /// A heartbeat that does not carry the session secret issued at the host's last hello:
 /// absent, or not the one issued. Nothing about the host changes.
 pub const SESSION_MISMATCH: &str = "session-mismatch";
+/// A hello from a host that lacks what the pool requires of every host: no `runtime`
+/// capability, or no `gpu-toolkit` in a pool with GPUs. The refusal's `field` names the
+/// capability. Only the operator can change it, so the agent does not ask again.
+pub const HOST_CONTRACT: &str = "host-contract";
+/// A hello from a host that reports another execution mode than the pool's `exec`: its
+/// `exec` or its `runtime` names a different mode. The refusal's `field` names the
+/// capability. Only the operator can change it, so the agent does not ask again.
+pub const EXECUTION_MISMATCH: &str = "execution-mismatch";
 /// A hello the server cannot answer because it could not make a session secret.
 pub const SESSION_UNAVAILABLE: &str = "session-unavailable";
 /// A hello for a host id the operator lists in a static pool: an id belongs to one

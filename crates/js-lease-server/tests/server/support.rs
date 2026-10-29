@@ -8,7 +8,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use clap::Parser;
 use js_lease::{Booking, ManualClock, Timestamp};
 use js_lease_server::{
     CapacitySource, Cli, Config, Limits, Running, Seated, SharedClock, StartupError, TickHandle,
@@ -320,6 +319,8 @@ impl Provider for SharedProvider {
 #[derive(Debug)]
 pub struct Reply {
     pub status: u16,
+    /// The status line and headers, in lower case.
+    pub head: String,
     pub body: String,
 }
 
@@ -389,6 +390,7 @@ pub fn parse_reply(raw: &[u8]) -> Reply {
         .map_or(0, |code| code.parse().unwrap());
     Reply {
         status,
+        head: head.to_ascii_lowercase(),
         body: body.to_string(),
     }
 }

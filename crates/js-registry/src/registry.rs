@@ -3,11 +3,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
+use js_caps::HostContract;
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
-use js_types::sched::WorkKey;
 use js_types::{HostId, LeaseId, ProviderId, RequestId, Shape};
+use js_usage::ProfileKey;
 
 use crate::config::PoolConfig;
 use crate::credential::{Binding, Credential};
@@ -23,8 +24,13 @@ use crate::whole::requests::{
 };
 use crate::whole::reserve::{Marks, Reservation};
 
+mod demand;
+mod marks;
 mod provider_side;
 mod start;
+
+pub use demand::{Launchable, Waiting};
+pub use marks::Busy;
 
 /// Where a host's session stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +72,8 @@ pub struct HostView {
     /// is sent no start and takes no new run. It is kept across a restart and is not
     /// cleared by anything in this crate.
     pub taint: Option<Taint>,
-    /// How the host is set aside for a whole-node request, if it is.
+    /// How the host is set aside, if it is: for a whole-node request, or to be scaled away
+    /// ([`HostMark::Draining`], [`HostMark::Releasing`], which win over the others).
     pub mark: Option<HostMark>,
     /// The request a reserved host is set aside for; `None` unless `mark` is
     /// [`HostMark::Reserved`].
@@ -76,13 +83,19 @@ pub struct HostView {
     pub drain_deadline: Option<Timestamp>,
 }
 
-/// How a host is set aside for whole-node use.
+/// How a host is set aside: for whole-node use, or to be scaled away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostMark {
     /// Set aside for a waiting request: it takes no start but that request's.
     Reserved,
     /// A whole-node lease is committed on it.
     Held,
+    /// Marked by [`Registry::drain`]: it holds no lease and no run, and takes no start of
+    /// any kind. Only [`Registry::undrain`] or [`Registry::release_host`] ends the mark.
+    Draining,
+    /// Marked by [`Registry::release_host`]: the host is being given back and takes no
+    /// start. Nothing clears the mark; [`Registry::remove`] drops the host.
+    Releasing,
 }
 
 /// How many hosts are reserved, how many are held whole, and how many requests wait
@@ -123,6 +136,9 @@ struct Record {
     /// The last lease started on the host and the latest it can end: its start plus its
     /// max wall time. A lease put back after a restart has none, and counts as ending now.
     bound: Option<(LeaseId, Timestamp)>,
+    /// Whether the host is being scaled away (see [`Registry::drain`]). It outlives a
+    /// session and is held in memory only.
+    leaving: Option<marks::Leaving>,
 }
 
 impl Record {
@@ -144,6 +160,7 @@ impl Record {
             beats: 0,
             exclusive: Exclusive::Free,
             bound: None,
+            leaving: None,
         }
     }
 
@@ -166,15 +183,16 @@ impl Record {
     }
 
     /// Whether a new lease may be placed here: heard from within the grace period,
-    /// serving, `quiet` (no run left over from the last lease), not tainted and clear of
-    /// a whole-node lease (not held, not restoring). Every other phase takes no new
-    /// lease. A lease already on a tainted host is untouched.
+    /// serving, `quiet` (no run left over from the last lease), not tainted, clear of
+    /// a whole-node lease (not held, not restoring) and not being scaled away. Every
+    /// other phase takes no new lease. A lease already on a tainted host is untouched.
     fn bookable(&self, now: Timestamp, grace_ms: u64, quiet: bool) -> bool {
         let live = self.state(now, grace_ms) == HostState::Live;
         let serving = self.phase == Phase::Serving;
         let clean = self.taint.is_none();
         let clear = self.exclusive.is_free();
-        [live, serving, quiet, clean, clear]
+        let staying = self.leaving.is_none();
+        [live, serving, quiet, clean, clear, staying]
             .into_iter()
             .all(|ok| ok)
     }
@@ -206,6 +224,8 @@ struct State {
     waiting: WaitList,
     /// The hosts set aside for waiting requests.
     marks: Marks,
+    /// Whether a request that finds no host could be served by a launch.
+    launchable: Option<Launchable>,
 }
 
 impl State {
@@ -286,6 +306,7 @@ impl Registry {
             requests: Requests::default(),
             waiting: WaitList::default(),
             marks: Marks::default(),
+            launchable: None,
         };
         Self {
             shared: Arc::new(Shared {
@@ -465,8 +486,10 @@ impl Registry {
     /// [`Hello::validate`], which include the reserved label prefix), then in this
     /// order: the pool is this one; the host id is not reserved to another source
     /// ([`Registry::reserve`]); the host id is not bound to another credential, nor
-    /// to another instance when its binding names one; the host id is not live; the
-    /// shape claimed offers at least the pool's shape; the pool has room for a host it
+    /// to another instance when its binding names one; the host id is not live; when
+    /// the pool declares an execution mode ([`PoolConfig::with_exec`]), the host meets its
+    /// contract ([`Refusal::HostContract`] and [`Refusal::ExecutionMismatch`] name the
+    /// capability at fault); the shape claimed offers at least the pool's shape; the pool has room for a host it
     /// does not know (hosts forgotten after the lost-host retention do not count); a
     /// session secret can be made. A
     /// refused hello creates and changes nothing. An admitted one starts a new session:
@@ -517,6 +540,7 @@ impl Registry {
         let kept_exclusive =
             known.map_or(Exclusive::Free, |record| record.exclusive.after_hello(now));
         let kept_bound = known.and_then(|record| record.bound);
+        let kept_leaving = known.and_then(|record| record.leaving);
         let instance = hello.instance.as_ref();
         let bound_elsewhere = kept_binding
             .as_ref()
@@ -531,6 +555,10 @@ impl Registry {
         }
         let prior_epoch = known.map(|record| record.epoch);
         let floor = config.shape();
+        if let Some(exec) = config.exec() {
+            let contract = HostContract::new(exec, floor.resources().gpus() > 0);
+            contract.check(&hello.capabilities)?;
+        }
         let offers_floor = hello
             .to_shape()
             .ok()
@@ -570,6 +598,7 @@ impl Registry {
                 taint: kept_taint,
                 exclusive: kept_exclusive,
                 bound: kept_bound,
+                leaving: kept_leaving,
             },
         );
         state.runs.sync(&host, &hello.held, true);
@@ -580,6 +609,7 @@ impl Registry {
             grace_ms: config.grace_ms(),
             pool: config.name().to_string(),
             session: secret,
+            host_credential: None,
         })
     }
 
@@ -747,11 +777,11 @@ impl Registry {
     /// booked shape alone ([`RunRefusal::LimitsExceedShape`]); [`RunRefusal::HostLost`]
     /// for a host not heard within the grace period; [`RunRefusal::NotHeld`] when the
     /// registry's booking of `host` is not `lease`; [`RunRefusal::HostTainted`] for a
-    /// host that reported a taint; [`RunRefusal::NoCapacity`] when the
-    /// host is out of the serving phase or the run does not fit what is left of the
-    /// booked shape (the limits of the host's live runs, the GPU indices they hold, and
-    /// [`crate::MAX_LIVE_RUNS`]); [`RunRefusal::RunExists`] for an id in use. A refusal
-    /// changes nothing.
+    /// host that reported a taint; [`RunRefusal::NoCapacity`] when the host is marked
+    /// draining or releasing ([`Registry::drain`]), is out of the serving phase or the
+    /// run does not fit what is left of the booked shape (the limits of the host's live
+    /// runs, the GPU indices they hold, and [`crate::MAX_LIVE_RUNS`]);
+    /// [`RunRefusal::RunExists`] for an id in use. A refusal changes nothing.
     ///
     /// A run's limits count against the budget until it leaves the host's held list, and
     /// not before: the host drops a run from that list only after its container and
@@ -765,15 +795,15 @@ impl Registry {
         self.queue_keyed_run(host, lease, spec, None)
     }
 
-    /// [`Registry::queue_run`] for a run whose work the lease holder named: `work_key` is
-    /// kept beside the run (in memory, like the run) and is what [`Registry::work_key_of`]
-    /// answers. It is not part of the job, so the host never receives it.
+    /// [`Registry::queue_run`] for a run whose work the lease holder named: `profile`, the
+    /// name the holder supplied, is kept beside the run (in memory, like the run) and is what
+    /// [`Registry::profile_of`] answers. It is not part of the job, so the host never receives it.
     pub fn queue_keyed_run(
         &self,
         host: &HostId,
         lease: &LeaseId,
         mut spec: JobSpec,
-        work_key: Option<WorkKey>,
+        profile: Option<ProfileKey>,
     ) -> Result<RunView, RunRefusal> {
         spec.lease_id = lease.to_string();
         let now = self.shared.clock.now();
@@ -800,17 +830,19 @@ impl Registry {
         if record.exclusive.awaits_ready() {
             return Err(RunRefusal::NotReady);
         }
-        if record.phase != Phase::Serving {
+        // A host being scaled away takes no run, as one out of the serving phase takes none.
+        let takes_runs = (record.phase == Phase::Serving) & record.leaving.is_none();
+        if !takes_runs {
             return Err(RunRefusal::NoCapacity);
         }
         let seen = (record.beats, now.millis());
-        runs.admit(host, lease, (spec, work_key), shape.resources(), seen)
+        runs.admit(host, lease, (spec, profile), shape.resources(), seen)
     }
 
-    /// The work key the run `run_id` was queued with, or `None` when it was queued without
-    /// one or the registry does not know the run (a restart forgets every run).
-    pub fn work_key_of(&self, run_id: &str) -> Option<WorkKey> {
-        self.lock().runs.work_key_of(run_id)
+    /// The profile name the run `run_id` was queued with, or `None` when it was queued
+    /// without one or the registry does not know the run (a restart forgets every run).
+    pub fn profile_of(&self, run_id: &str) -> Option<ProfileKey> {
+        self.lock().runs.profile_of(run_id)
     }
 
     /// Asks for the run `run_id` of `lease` to stop: a retained intent, carried as a stop
@@ -892,10 +924,11 @@ impl Registry {
             releasing: !booked.contains_key(id)
                 & !(record.quiet(&state.runs, id) & record.exclusive.is_free()),
             taint: record.taint.clone(),
-            mark: match (set_aside(id), record.exclusive.held_since()) {
-                (Some(_), _) => Some(HostMark::Reserved),
-                (None, Some(_)) => Some(HostMark::Held),
-                (None, None) => None,
+            mark: match (record.leaving, set_aside(id), record.exclusive.held_since()) {
+                (Some(leaving), _, _) => Some(leaving.mark()),
+                (None, Some(_), _) => Some(HostMark::Reserved),
+                (None, None, Some(_)) => Some(HostMark::Held),
+                (None, None, None) => None,
             },
             reserved_for: set_aside(id).map(|mark| mark.request.clone()),
             drain_deadline: set_aside(id)

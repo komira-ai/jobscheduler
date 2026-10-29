@@ -52,8 +52,9 @@ struct HostEntry {
     /// is sent no start and takes no new run.
     #[serde(skip_serializing_if = "Option::is_none")]
     taint: Option<Taint>,
-    /// Set for a registered host set aside for whole-node use: `reserved` for a waiting
-    /// request, `held` while a whole-node lease is committed on it.
+    /// Set for a registered host that is set aside: `reserved` for a waiting whole-node
+    /// request, `held` while a whole-node lease is committed on it, `draining` and
+    /// `releasing` while it is being scaled away.
     #[serde(skip_serializing_if = "Option::is_none")]
     mark: Option<&'static str>,
     /// The request a reserved host is set aside for.
@@ -121,6 +122,8 @@ impl HostEntry {
             mark: host.mark.map(|mark| match mark {
                 HostMark::Reserved => "reserved",
                 HostMark::Held => "held",
+                HostMark::Draining => "draining",
+                HostMark::Releasing => "releasing",
             }),
             reserved_for: host.reserved_for.map(|id| id.to_string()),
             drain_deadline_ms: host.drain_deadline.map(|at| at.millis()),
@@ -150,5 +153,55 @@ impl HostList {
             .collect();
         hosts.sort_by(|a, b| a.id.cmp(&b.id));
         Self { hosts }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use js_agent_wire::Phase;
+    use js_types::Resources;
+
+    fn view(mark: Option<HostMark>) -> HostView {
+        let resources = Resources::new(1000, 1 << 20, 0, None).unwrap();
+        HostView {
+            id: HostId::new("a").unwrap(),
+            state: HostState::Live,
+            phase: Phase::Serving,
+            lease: None,
+            shape: Shape::new(resources, BTreeMap::new()),
+            labels: BTreeMap::new(),
+            agent_version: None,
+            epoch: 1,
+            releasing: false,
+            taint: None,
+            mark,
+            reserved_for: None,
+            drain_deadline: None,
+        }
+    }
+
+    /// Each mark a registered host can carry is listed under its own name, and a host with
+    /// none has no `mark` field at all. It catches a mark added to the registry that the
+    /// listing maps to another name, and a field that appears as `null` for a plain host,
+    /// which would change the body existing clients read.
+    #[test]
+    fn each_mark_is_listed_by_its_name() {
+        let cases = [
+            (None, None),
+            (Some(HostMark::Reserved), Some("reserved")),
+            (Some(HostMark::Held), Some("held")),
+            (Some(HostMark::Draining), Some("draining")),
+            (Some(HostMark::Releasing), Some("releasing")),
+        ];
+        for (mark, listed) in cases {
+            let list = HostList::of(Vec::new(), vec![view(mark)], None);
+            let body = serde_json::to_value(&list).unwrap();
+            let host = &body["hosts"][0];
+            assert_eq!(host["id"], "a");
+            assert_eq!(host["source"], "registered");
+            assert_eq!(host.get("mark").and_then(|m| m.as_str()), listed);
+            assert_eq!(host.get("mark").is_none(), listed.is_none());
+        }
     }
 }

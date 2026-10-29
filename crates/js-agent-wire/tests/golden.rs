@@ -4,6 +4,7 @@
 mod common;
 
 use common::{heartbeat, hello, job, welcome};
+use js_agent_wire::refusal;
 use js_agent_wire::{
     Ack, Command, ExclusiveRefusal, Heartbeat, HeartbeatReply, HelloReply, Isolation, Outcome,
     ProtocolRange, RefusalReason, Refused, ResultAck, Taint,
@@ -81,6 +82,7 @@ fn welcome_and_hello_reply_wire_forms() {
     let refused = HelloReply::Refused(Refused {
         code: "unsupported-protocol".into(),
         supported: Some(ProtocolRange { min: 2, max: 3 }),
+        field: None,
     });
     assert_eq!(
         serde_json::to_value(&refused).unwrap(),
@@ -93,11 +95,24 @@ fn welcome_and_hello_reply_wire_forms() {
     let bare = HelloReply::Refused(Refused {
         code: "host-live".into(),
         supported: None,
+        field: None,
     });
     assert_eq!(
         serde_json::to_value(&bare).unwrap(),
         json!({"type": "refused", "code": "host-live"})
     );
+    let named = HelloReply::Refused(Refused {
+        code: refusal::HOST_CONTRACT.into(),
+        supported: None,
+        field: Some("runtime".into()),
+    });
+    assert_eq!(
+        serde_json::to_value(&named).unwrap(),
+        json!({"type": "refused", "code": "host-contract", "field": "runtime"})
+    );
+    // A refusal an older server sent has no `field`; it reads as none.
+    let old: Refused = serde_json::from_value(json!({"code": "host-live"})).unwrap();
+    assert_eq!(old.field, None);
 }
 
 /// Asserts the exact JSON of a start command, tag included. It catches a changed
@@ -108,7 +123,7 @@ fn start_command_wire_form() {
         "type": "start",
         "run_id": "run-1",
         "lease_id": "1-1",
-        "image": "ubuntu:24.04",
+        "image": "ubuntu:24.04@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "args": ["make", "all"],
         "limits": {
             "cpu_millis": 2000,

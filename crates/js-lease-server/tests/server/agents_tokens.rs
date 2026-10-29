@@ -6,7 +6,6 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::ExitCode;
 
-use clap::Parser;
 use js_lease_server::{Cli, run};
 use serde_json::json;
 
@@ -48,7 +47,7 @@ fn neither_source_configured_refused() {
     let scratch = Scratch::new("agents_neither");
     let (flag, reason) = flag_of(without_pool_config(&scratch));
     assert_eq!(flag, "--pool-config");
-    assert!(reason.contains("--agent-token-file"), "{reason}");
+    assert!(reason.contains("--agent-pool-config"), "{reason}");
 
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let code = run(without_pool_config(&scratch), &mut out, &mut err);
@@ -61,10 +60,11 @@ fn neither_source_configured_refused() {
     assert!(config(agent_args(&scratch, true)).is_ok());
 }
 
-/// Asserts that the two agent flags come together, each refusal naming the one that is
-/// missing, and that the hello limit flags are accepted only beside the token file and
-/// only above zero. It catches registration half turned on: tokens with no pool to join,
-/// or a pool nobody can reach.
+/// Asserts that the token file needs the pool file (the refusal names the pool flag), that
+/// the pool file alone is a valid start (a pool with no shared token), and that the hello
+/// limit flags are accepted only beside the pool file and only above zero. It catches
+/// tokens with no pool to join, a pool file that is still refused for lacking a token
+/// file, and a hello limit that is accepted with registration off.
 #[test]
 fn agent_flags_come_together() {
     let scratch = Scratch::new("agents_together");
@@ -84,12 +84,18 @@ fn agent_flags_come_together() {
         "--agent-pool-config",
         value_of("--agent-pool-config"),
     );
-    assert_eq!(flag_of(only_pool).0, "--agent-token-file");
+    assert!(config(only_pool).is_ok());
 
     let burst = with_flag(base_args(&scratch), "--agent-hello-burst", "5");
-    assert!(Cli::try_parse_from(burst).is_err());
+    assert_eq!(
+        config(burst).err().unwrap().to_string(),
+        "--agent-hello-burst: requires --agent-pool-config"
+    );
     let interval = with_flag(base_args(&scratch), "--agent-hello-interval", "5s");
-    assert!(Cli::try_parse_from(interval).is_err());
+    assert_eq!(
+        config(interval).err().unwrap().to_string(),
+        "--agent-hello-interval: requires --agent-pool-config"
+    );
     let zero = with_flag(full.clone(), "--agent-hello-burst", "0");
     assert!(Cli::try_parse_from(zero).is_err());
     let limited = with_flag(full, "--agent-hello-burst", "5");

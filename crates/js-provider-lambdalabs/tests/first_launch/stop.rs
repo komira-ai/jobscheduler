@@ -1,19 +1,16 @@
 //! A stop request (in the example, SIGINT, SIGTERM or SIGHUP) before the launch, during
-//! the boot wait and during the ssh step, and the teardown command printed up front. No
+//! the boot wait and just after the instance is active, and the teardown command printed up front. No
 //! signal is sent: the rig's stop flag stands in for the handler's, and its read counter
 //! places a request between two reads the runner makes.
 //!
 //! The reads of a run that launches, in order: 1 before the launch, then per wait
 //! iteration one at the top and one before the pause; after the instance is active, one
-//! before the ssh step and one after it.
+//! more.
 
-use js_provider_lambdalabs::{Call, Status, TerminateEffect};
+use js_elastic::HostStatus;
+use js_provider_lambdalabs::{Call, TerminateEffect};
 
-use crate::rig::{FIRST, Rig, TestRemote, activate};
-
-fn ssh_flags() -> [&'static str; 4] {
-    ["--ssh-key", "/keys/id", "--ssh-user", "ubuntu"]
-}
+use crate::rig::{FIRST, Rig, activate};
 
 /// The flags of the teardown command the run printed.
 fn printed_flags(out: &str) -> &str {
@@ -28,28 +25,24 @@ fn assert_interrupted_and_terminated(rig: &Rig, status: i32, out: &str) {
     assert_eq!(status, 1, "{out}");
     assert!(out.contains("teardown forced: interrupted"), "{out}");
     assert!(
-        out.contains("STOP: the run did not finish its check; the instance is terminated"),
+        out.contains("STOP: the run did not reach active; the instance is terminated"),
         "{out}"
     );
     assert!(out.contains("result: terminated"), "{out}");
     assert_eq!(rig.fake.count(Call::Launch), 1);
     assert_eq!(rig.fake.count(Call::Terminate), 1);
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }
 
 #[test]
 fn a_stop_during_the_boot_wait_terminates_the_instance_and_says_interrupted() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
-    let (status, out) = rig.exec_with(
-        &args,
-        &|n| {
-            if n == 2 {
-                rig.stop.set(true);
-            }
-        },
-        &TestRemote::answering(Err("not asked".to_owned())),
-    );
+    let (status, out) = rig.exec_with(&args, &|n| {
+        if n == 2 {
+            rig.stop.set(true);
+        }
+    });
     assert_interrupted_and_terminated(&rig, status, &out);
     // The request came during the second pause; the next look at it is the next
     // iteration's first, so there is no third pause.
@@ -86,46 +79,18 @@ fn a_stop_is_honoured_within_one_poll_step() {
 }
 
 #[test]
-fn a_stop_during_the_ssh_step_terminates_the_instance_and_says_interrupted() {
-    for answer in [Ok("fine".to_owned()), Err("killed".to_owned())] {
-        let rig = Rig::new();
-        let args = rig.go_args(&ssh_flags());
-        let remote = TestRemote::answering(answer);
-        let (status, out) = rig.exec_with(
-            &args,
-            &|n| {
-                if n == 1 {
-                    activate(&rig.fake);
-                    // Reads 1 to 3 are the launch and the first iteration, 4 the top of
-                    // the second, 5 the one before the ssh step, 6 the one after it: a
-                    // request that came while ssh ran.
-                    rig.stop_from_read.set(6);
-                }
-            },
-            &remote,
-        );
-        assert_interrupted_and_terminated(&rig, status, &out);
-        assert_eq!(remote.asked.borrow().len(), 1, "{out}");
-    }
-}
-
-#[test]
-fn a_stop_after_active_and_before_ssh_does_not_start_the_ssh_step() {
+fn a_stop_just_after_active_terminates_the_instance_and_says_interrupted() {
     let rig = Rig::new();
-    let args = rig.go_args(&ssh_flags());
-    let remote = TestRemote::answering(Ok("fine".to_owned()));
-    let (status, out) = rig.exec_with(
-        &args,
-        &|n| {
-            if n == 1 {
-                activate(&rig.fake);
-                rig.stop_from_read.set(5);
-            }
-        },
-        &remote,
-    );
+    let args = rig.go_args(&[]);
+    let (status, out) = rig.exec_with(&args, &|n| {
+        if n == 1 {
+            activate(&rig.fake);
+            // Reads 1 to 3 are the launch and the first iteration, 4 the top of the
+            // second, 5 the one after the instance showed active.
+            rig.stop_from_read.set(5);
+        }
+    });
     assert_interrupted_and_terminated(&rig, status, &out);
-    assert!(remote.asked.borrow().is_empty(), "{out}");
 }
 
 #[test]
@@ -163,7 +128,7 @@ fn a_dry_run_ignores_a_stop_request() {
 fn the_teardown_command_is_printed_right_after_the_state_file_is_written() {
     let rig = Rig::new();
     let args = rig.go_args(&[]);
-    let (status, out) = rig.exec_active(&args, 1, &TestRemote::answering(Ok(String::new())));
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     let line = format!(
         "teardown command (run it if this process dies): first_launch --base-url {} --key-file {} --teardown-only {}",
@@ -189,7 +154,7 @@ fn the_teardown_command_is_printed_right_after_the_state_file_is_written() {
 fn the_printed_teardown_command_works_and_carries_a_ca_bundle() {
     let rig = Rig::new();
     let args = rig.go_args(&["--ca-bundle", "/roots.pem"]);
-    let (status, out) = rig.exec_active(&args, 1, &TestRemote::answering(Ok(String::new())));
+    let (status, out) = rig.exec_active(&args, 1);
     assert_eq!(status, 0, "{out}");
     let printed = printed_flags(&out);
     assert!(printed.contains(" --ca-bundle /roots.pem "), "{printed}");
@@ -206,5 +171,5 @@ fn the_printed_teardown_command_works_and_carries_a_ca_bundle() {
     let (status, out) = rig.exec(&words);
     assert_eq!(status, 0, "{out}");
     assert!(out.contains("tearing down: fake0001"), "{out}");
-    assert_eq!(rig.status_of(FIRST), Status::Terminating);
+    assert_eq!(rig.status_of(FIRST), HostStatus::Terminating);
 }

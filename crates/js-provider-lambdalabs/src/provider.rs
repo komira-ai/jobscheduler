@@ -1,22 +1,34 @@
-//! The provider: [`Elastic`] over [`LambdaApi`], with the cost guard.
+//! The provider: [`ElasticProvider`] over [`LambdaApi`], with the cost guard.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use js_elastic::{
+    AcquireId, AcquireRequest, Acquired, BootStep, Claim, Demand, ElasticProvider, Extra, Held,
+    HostRef, HostStatus, Offer, ProviderError, Reason, Refusal, RefusalCode, Released, Secret,
+};
+
 use crate::api::LambdaApi;
 use crate::clock::Clock;
 use crate::config::{ElasticConfig, Mode};
-use crate::elastic::{
-    AcquireRequest, Acquired, Candidate, Elastic, Extra, GpuRequest, Held, Reason, Refusal,
-    RefusalCode, Released,
-};
 use crate::error::{ApiError, ErrorCode};
-use crate::model::{Instance, InstanceId, LaunchRequest, Status};
+use crate::host;
+use crate::model::{Instance, InstanceId, LaunchRequest};
 use crate::options::OptionTable;
-use crate::own::{AcquireId, Claim, LabelError, Owner};
+use crate::own::{LabelError, Owner};
 use crate::select;
+
+/// The most bytes of boot payload this provider carries: the user data of a launch.
+///
+/// UNVERIFIED. Lambda's published API description says the user data "cannot exceed 1MB in
+/// size", and does not say whether that is 10^6 or 2^20 bytes, whether it counts the text
+/// as sent (JSON escapes included) or what the check does at the edge. This is the smaller
+/// reading, 10^6 bytes of the payload itself. No call has been made to see where the API
+/// refuses; the first live launch is the check, and a payload the API refuses after this
+/// accepts it comes back as a refusal, not a launch.
+pub const PAYLOAD_LIMIT: usize = 1_000_000;
 
 /// What the launch lock protects: the guard's memory. Holding the lock across the list
 /// and the launch is what lets one launch run at a time.
@@ -43,12 +55,65 @@ struct Launching {
 struct Answered {
     /// What the answer named.
     held: Held,
+    /// The same instance's id, in the form the API takes.
+    id: InstanceId,
     /// Whether this is the instance the launch is answered with on a retry. A launch
     /// asks for one instance; any other id it returns is an extra, counted all the same.
     primary: bool,
     /// When the instance is read by id next: the launch time plus the hold, then
     /// the time of each probe plus the hold.
     due: Duration,
+}
+
+/// Why the firewall or the ssh key of a launch could not be settled. Nothing was launched.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PrepareError {
+    /// A call to the API failed.
+    #[error("{0}")]
+    Api(#[from] ApiError),
+    /// The scheduler id is too long for the ruleset's name (64 characters at most).
+    #[error("firewall: the scheduler id is too long for a ruleset name of 64 characters")]
+    FirewallName,
+    /// The ruleset of our name holds rules, so it is not the one that lets nothing in.
+    #[error("firewall: the ruleset {name} holds {rules} rules; it must hold none")]
+    FirewallRules {
+        /// The ruleset's name.
+        name: String,
+        /// How many rules it holds.
+        rules: usize,
+    },
+    /// The scheduler id is too long for the name of a key to make (64 characters at most).
+    #[error("provider.ssh_key: the scheduler id is too long to name a key; name one")]
+    KeyName,
+    /// The account has several keys and none is named.
+    #[error("provider.ssh_key: account has {count} keys; name one")]
+    SshKeys {
+        /// How many keys the account has.
+        count: usize,
+    },
+}
+
+impl PrepareError {
+    /// The answer to an acquire that stopped here. A failed call that may or may not have
+    /// reached the API is [`Acquired::Deferred`] by `retry`, not [`Acquired::Unknown`]:
+    /// no launch was sent.
+    fn answer(&self, retry: Duration) -> Acquired {
+        match self {
+            Self::Api(error) => match LambdaProvider::failed(error) {
+                Acquired::Unknown => Acquired::Deferred { wait: retry },
+                definite => definite,
+            },
+            Self::FirewallName => {
+                LambdaProvider::refuse(RefusalCode::Shape, Reason::Firewall(self.to_string()))
+            }
+            Self::FirewallRules { .. } => {
+                LambdaProvider::refuse(RefusalCode::Denied, Reason::Firewall(self.to_string()))
+            }
+            Self::KeyName | Self::SshKeys { .. } => {
+                LambdaProvider::refuse(RefusalCode::Denied, Reason::SshKey(self.to_string()))
+            }
+        }
+    }
 }
 
 /// What a sweep found. Nothing is terminated by it.
@@ -73,6 +138,8 @@ pub struct LambdaProvider {
     /// Whether a list has succeeded: a 404 on a read by id is trusted only after one.
     probed: AtomicBool,
     dry_run_logged: AtomicBool,
+    /// The name of the ssh key every launch holds, once settled.
+    key: Mutex<Option<String>>,
 }
 
 impl LambdaProvider {
@@ -94,6 +161,7 @@ impl LambdaProvider {
             launching: Mutex::new(Launching::default()),
             probed: AtomicBool::new(false),
             dry_run_logged: AtomicBool::new(false),
+            key: Mutex::new(None),
         }
     }
 
@@ -103,15 +171,88 @@ impl LambdaProvider {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Where `request` can launch, best first (see the module docs of the choice): empty
-    /// when no type fits or none has capacity, which is a capacity refusal.
+    /// Where `demand` can launch, best first (see the module docs of the choice): empty
+    /// when no offer fits or none has capacity, which is a capacity refusal.
     ///
     /// # Errors
     ///
     /// [`ApiError`] when the instance types cannot be had.
-    pub fn launch_options(&self, request: &GpuRequest) -> Result<Vec<Candidate>, ApiError> {
-        let offers = self.api.instance_types()?;
-        Ok(select::candidates(&self.options, &offers, request))
+    pub fn launch_options(&self, demand: &Demand) -> Result<Vec<Offer>, ApiError> {
+        let types = self.api.instance_types()?;
+        Ok(select::candidates(
+            &select::offers(&self.options, &types, self.config.regions.as_deref()),
+            demand,
+        ))
+    }
+
+    /// The id of this scheduler's ruleset that lets nothing in, in `region`: found by the
+    /// name `js-<scheduler>-noinbound`, or created with no rules when the region has none.
+    /// Read again before every launch, never remembered: a rule added since the last
+    /// launch must not ride along on the next one, and one list call is cheap next to a
+    /// launch. Every launch attaches it, because a ruleset can only be attached at launch.
+    /// A ruleset of that name that holds rules is refused, never used.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError`] when the scheduler id is too long for the name, a call fails, or
+    /// the ruleset holds rules.
+    pub fn ensure_firewall(&self, region: &str) -> Result<String, PrepareError> {
+        let name = format!("js-{}-noinbound", self.config.scheduler.as_str());
+        if name.len() > 64 {
+            return Err(PrepareError::FirewallName);
+        }
+        let found = self
+            .api
+            .list_firewall_rulesets()?
+            .into_iter()
+            .find(|ruleset| ruleset.name == name && ruleset.region == region);
+        let ruleset = match found {
+            Some(ruleset) => ruleset,
+            None => self.api.create_firewall_ruleset(region, &name)?,
+        };
+        if ruleset.rules > 0 {
+            return Err(PrepareError::FirewallRules {
+                name,
+                rules: ruleset.rules,
+            });
+        }
+        Ok(ruleset.id)
+    }
+
+    /// The name of the one ssh key every launch holds. Lambda takes exactly one name and
+    /// the key is never used to log in, because the ruleset lets nothing in. The key is,
+    /// in this order: the one named in the configuration (not looked up: a name the account
+    /// does not hold is refused by the API at launch); the account's key named
+    /// `js-<scheduler>`; the account's only key; or, on an account with no key, a key made
+    /// under the name `js-<scheduler>` by the API, of which neither half is kept. An
+    /// account with several keys and none of that name is an error that asks for a name.
+    /// Settled once and kept.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError`] when a call fails, the account has several keys and none to pick,
+    /// or the key to make cannot be named.
+    pub fn ssh_key(&self) -> Result<String, PrepareError> {
+        if let Some(name) = &self.config.ssh_key {
+            return Ok(name.clone());
+        }
+        let mut chosen = self.key.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(name) = chosen.as_ref() {
+            return Ok(name.clone());
+        }
+        let ours =
+            Some(format!("js-{}", self.config.scheduler.as_str())).filter(|name| name.len() <= 64);
+        let keys = self.api.list_ssh_keys()?;
+        let named = keys.iter().find(|key| Some(&key.name) == ours.as_ref());
+        let name = match (named, keys.as_slice(), ours) {
+            (Some(key), _, _) => key.name.clone(),
+            (None, [only], _) => only.name.clone(),
+            (None, [], Some(ours)) => self.api.create_ssh_key(&ours)?.name,
+            (None, [], None) => return Err(PrepareError::KeyName),
+            (None, many, _) => return Err(PrepareError::SshKeys { count: many.len() }),
+        };
+        *chosen = Some(name.clone());
+        Ok(name)
     }
 
     /// Lists what this scheduler has launched or half-launched and reports it. Report
@@ -123,10 +264,10 @@ impl LambdaProvider {
     pub fn sweep(&self, booked: &[AcquireId]) -> Result<Sweep, ApiError> {
         let mut sweep = Sweep::default();
         for instance in self.api.list_instances()? {
-            if instance.status == Status::Terminated {
+            if instance.status == HostStatus::Terminated {
                 continue;
             }
-            let held = Held::of(&instance);
+            let held = held_of(&instance);
             match self.owner.claim(&instance) {
                 Claim::Foreign => {}
                 Claim::Suspect => {
@@ -134,7 +275,7 @@ impl LambdaProvider {
                     sweep.suspects.push(held);
                 }
                 Claim::Ours => match instance.status {
-                    Status::Terminating | Status::Preempted => sweep.ending.push(held),
+                    HostStatus::Terminating | HostStatus::Preempted => sweep.ending.push(held),
                     _ if booked.iter().any(|b| b.as_str() == held.acquire) => {}
                     _ => sweep.orphans.push(held),
                 },
@@ -147,17 +288,57 @@ impl LambdaProvider {
         Acquired::Refused(Refusal { code, reason })
     }
 
-    /// The launch for `request`, tagged and named.
-    fn launch_request(&self, request: &AcquireRequest) -> Result<LaunchRequest, LabelError> {
+    /// The launch for `request` in `zone`, tagged and named.
+    fn launch_request(
+        &self,
+        request: &AcquireRequest,
+        zone: &str,
+    ) -> Result<LaunchRequest, LabelError> {
         let tags = self
             .owner
             .tags(&request.acquire, &request.pool, &request.labels)?;
+        // The key, the ruleset and the user data are put in when the launch is to be sent
+        // (`prepare`): a dry run builds this much and calls nothing.
         Ok(LaunchRequest {
-            region: request.candidate.region.clone(),
-            instance_type: request.candidate.instance_type.clone(),
-            ssh_key: self.config.ssh_key.clone(),
-            name: self.owner.name(&request.acquire),
+            region: zone.to_owned(),
+            instance_type: request.offer.id.clone(),
+            ssh_key: String::new(),
+            name: request.name.to_string(),
             tags,
+            user_data: None,
+            firewall_ruleset_ids: Vec::new(),
+        })
+    }
+
+    /// Completes `launch` for sending: the ssh key, the no-inbound ruleset of its region
+    /// and the payload as user data (none when the payload is empty). Makes the account's
+    /// ruleset or key when it has none, so it is not called in a dry run. The answer that
+    /// stops the launch, if something does.
+    fn prepare(&self, launch: &mut LaunchRequest, request: &AcquireRequest) -> Option<Acquired> {
+        let retry = self.config.launch_interval;
+        match self.ssh_key() {
+            Ok(name) => launch.ssh_key = name,
+            Err(why) => return Some(why.answer(retry)),
+        }
+        match self.ensure_firewall(&launch.region) {
+            Ok(id) => launch.firewall_ruleset_ids.push(id),
+            Err(why) => return Some(why.answer(retry)),
+        }
+        launch.user_data = match request.payload.is_empty() {
+            true => None,
+            false => Some(Secret::new(request.payload.expose().to_owned())),
+        };
+        Self::unprotected(launch)
+    }
+
+    /// The refusal of a launch that carries no firewall ruleset: it would have the
+    /// account's default rules, and a ruleset can only be attached at launch. Never sent.
+    fn unprotected(launch: &LaunchRequest) -> Option<Acquired> {
+        launch.firewall_ruleset_ids.is_empty().then(|| {
+            Self::refuse(
+                RefusalCode::Shape,
+                Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
+            )
         })
     }
 
@@ -184,16 +365,16 @@ impl LambdaProvider {
     fn still_held(&self, launched: &mut Answered, rows: &[Instance], now: Duration) -> bool {
         let listed_ours = rows
             .iter()
-            .any(|row| row.id == launched.held.id && self.owner.claim(row) == Claim::Ours);
+            .any(|row| row.id == launched.id && self.owner.claim(row) == Claim::Ours);
         if listed_ours {
             return false;
         }
         if now < launched.due {
             return true;
         }
-        let id = &launched.held.id;
+        let id = &launched.id;
         let keep = match self.api.get_instance(id) {
-            Ok(found) => found.status != Status::Terminated,
+            Ok(found) => found.status != HostStatus::Terminated,
             Err(error) if self.trust_absent(&error) => false,
             Err(error) => {
                 tracing::warn!(%error, %id, "the probe of an unlisted instance failed; still counting it");
@@ -233,7 +414,7 @@ impl LambdaProvider {
             ) => RefusalCode::Denied,
             (true, _) => return Acquired::Unknown,
         };
-        Self::refuse(refusal, Reason::Api(code.clone()))
+        Self::refuse(refusal, Reason::Api(code.to_string()))
     }
 
     /// Trusts a 404 on a read by id only after a list has worked: a key that cannot see
@@ -268,17 +449,17 @@ impl LambdaProvider {
         let live: Vec<(&Instance, Claim)> = rows
             .iter()
             .map(|row| (row, self.owner.claim(row)))
-            .filter(|(row, claim)| *claim != Claim::Foreign && row.status != Status::Terminated)
+            .filter(|(row, claim)| *claim != Claim::Foreign && row.status != HostStatus::Terminated)
             .collect();
         let wanted = request.acquire.as_str();
         let earlier = live.iter().find(|(row, claim)| {
             *claim == Claim::Ours
                 && Owner::acquire_of(row) == Some(wanted)
-                && !matches!(row.status, Status::Terminating)
+                && !matches!(row.status, HostStatus::Terminating)
         });
         if let Some((row, _)) = earlier {
             return Acquired::Accepted {
-                held: Held::of(row),
+                held: held_of(row),
                 extras: Vec::new(),
             };
         }
@@ -322,7 +503,7 @@ impl LambdaProvider {
         let unlisted = gate
             .answered
             .iter()
-            .filter(|a| !live.iter().any(|(row, _)| row.id == a.held.id))
+            .filter(|a| !live.iter().any(|(row, _)| row.id == a.id))
             .count();
         let held = live.len() + gate.unknown.len() + unlisted;
         let max_machines = self.config.max_machines.get();
@@ -346,7 +527,7 @@ impl LambdaProvider {
             instance_type = %launch.instance_type,
             region = %launch.region,
             name = %launch.name,
-            price_cents_per_hour = request.candidate.price_cents_per_hour,
+            price_cents_per_hour = ?request.offer.price_cents_per_hour,
             "launching one instance"
         );
         let ids = match self.api.launch(launch) {
@@ -366,16 +547,17 @@ impl LambdaProvider {
         };
         gate.unknown.remove(wanted);
         let held = Held {
-            id: first.clone(),
+            id: first.host_ref(),
             acquire: wanted.to_owned(),
             name: Some(launch.name.clone()),
-            instance_type: launch.instance_type.clone(),
-            region: launch.region.clone(),
-            status: Status::Booting,
+            offer: launch.instance_type.clone(),
+            zone: Some(launch.region.clone()),
+            status: HostStatus::Booting,
         };
         let due = now + self.config.unknown_hold;
         gate.answered.push(Answered {
             held: held.clone(),
+            id: first.clone(),
             primary: true,
             due,
         });
@@ -383,9 +565,10 @@ impl LambdaProvider {
         for id in rest {
             gate.answered.push(Answered {
                 held: Held {
-                    id: id.clone(),
+                    id: id.host_ref(),
                     ..held.clone()
                 },
+                id: id.clone(),
                 primary: false,
                 due,
             });
@@ -396,12 +579,12 @@ impl LambdaProvider {
                 tracing::error!(%id, "a launch started more than one instance; releasing the extra");
                 // A 404 right after a launch may be a read that lags the write, so for
                 // an extra it is not evidence of "gone".
-                let released = match self.release(id) {
+                let released = match self.release_instance(id) {
                     Released::Gone => Released::Unknown,
                     other => other,
                 };
                 Extra {
-                    id: id.clone(),
+                    id: id.host_ref(),
                     released,
                 }
             })
@@ -410,17 +593,52 @@ impl LambdaProvider {
     }
 }
 
-impl Elastic for LambdaProvider {
+impl ElasticProvider for LambdaProvider {
+    fn catalog(&self) -> Result<Vec<Offer>, ProviderError> {
+        let types = self.api.instance_types().map_err(provider_error)?;
+        Ok(select::offers(
+            &self.options,
+            &types,
+            self.config.regions.as_deref(),
+        ))
+    }
+
+    fn host_prep(&self, offer: &Offer) -> Vec<BootStep> {
+        host::steps(self.config.scratch_gib, offer.disk_bytes)
+    }
+
+    fn payload_limit(&self) -> usize {
+        PAYLOAD_LIMIT
+    }
+
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);
         }
-        if self.options.get(&request.candidate.instance_type).is_none() {
+        let (Some(zone), Some(_)) = (
+            request.offer.zone.as_deref(),
+            self.options.get(&request.offer.id),
+        ) else {
+            return Self::refuse(RefusalCode::Shape, Reason::NotAllowed);
+        };
+        if !self.owner.owns_name(&request.name) {
+            return Self::refuse(RefusalCode::Shape, Reason::Name);
+        }
+        let (len, limit) = (request.payload.len(), self.payload_limit());
+        if len > limit {
+            return Self::refuse(RefusalCode::Shape, Reason::PayloadTooLarge { len, limit });
+        }
+        let in_regions = self
+            .config
+            .regions
+            .as_ref()
+            .is_none_or(|only| only.iter().any(|region| region == zone));
+        if !in_regions {
             return Self::refuse(RefusalCode::Shape, Reason::NotAllowed);
         }
-        let launch = match self.launch_request(request) {
+        let mut launch = match self.launch_request(request, zone) {
             Ok(launch) => launch,
-            Err(why) => return Self::refuse(RefusalCode::Shape, Reason::Label(why)),
+            Err(why) => return Self::refuse(RefusalCode::Shape, Reason::Label(why.to_string())),
         };
         if self.config.mode == Mode::DryRun {
             // Once at info level, then quietly: a pool asks again every tick.
@@ -436,21 +654,37 @@ impl Elastic for LambdaProvider {
             }
             return Self::refuse(RefusalCode::Denied, Reason::DryRun);
         }
+        if let Some(answer) = self.prepare(&mut launch, request) {
+            return answer;
+        }
         let mut gate = self.launching();
         self.launch_locked(&mut gate, request, &launch)
     }
 
-    fn list(&self) -> Result<Vec<Held>, ApiError> {
+    fn list(&self) -> Result<Vec<Held>, ProviderError> {
         Ok(self
             .api
-            .list_instances()?
+            .list_instances()
+            .map_err(provider_error)?
             .iter()
             .filter(|row| self.owner.claim(row) == Claim::Ours)
-            .map(Held::of)
+            .map(held_of)
             .collect())
     }
 
-    fn release(&self, id: &InstanceId) -> Released {
+    fn release(&self, id: &HostRef) -> Released {
+        match InstanceId::new(id.as_str()) {
+            Ok(id) => self.release_instance(&id),
+            // Not an id of this API, so not an instance of it and not ours: a definite
+            // answer, never "gone" and never one to retry. Nothing is asked of the API.
+            Err(_) => Released::Refused(Claim::Foreign),
+        }
+    }
+}
+
+impl LambdaProvider {
+    /// Terminates one instance, if it is ours, and reads it back.
+    fn release_instance(&self, id: &InstanceId) -> Released {
         let first = match self.api.get_instance(id) {
             Ok(found) => found,
             Err(error) if self.trust_absent(&error) => return Released::Gone,
@@ -473,11 +707,57 @@ impl Elastic for LambdaProvider {
             Err(error) if self.trust_absent(&error) => Released::Gone,
             Err(_) => Released::Unknown,
             Ok(after) => match (&after.status, confirmed) {
-                (Status::Terminating | Status::Terminated, _) | (_, true) => {
+                (HostStatus::Terminating | HostStatus::Terminated, _) | (_, true) => {
                     Released::Terminating(after.status)
                 }
                 _ => Released::Unknown,
             },
         }
+    }
+}
+
+fn provider_error(error: ApiError) -> ProviderError {
+    ProviderError::new(error.to_string())
+}
+
+/// The scheduler's view of an instance.
+fn held_of(instance: &Instance) -> Held {
+    Held {
+        id: instance.id.host_ref(),
+        acquire: Owner::acquire_of(instance).unwrap_or_default().to_owned(),
+        name: instance.name.clone(),
+        offer: instance.instance_type.clone(),
+        zone: Some(instance.region.clone()),
+        status: instance.status.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a launch with no firewall ruleset is refused as a shape error and
+    /// that one with a ruleset passes: the guard that keeps a launch from going out under
+    /// the account's default rules.
+    #[test]
+    fn a_launch_without_a_ruleset_is_refused_as_shape() {
+        let mut launch = LaunchRequest {
+            region: "r".to_owned(),
+            instance_type: "t".to_owned(),
+            ssh_key: "k".to_owned(),
+            name: "n".to_owned(),
+            tags: Vec::new(),
+            user_data: None,
+            firewall_ruleset_ids: Vec::new(),
+        };
+        assert_eq!(
+            LambdaProvider::unprotected(&launch),
+            Some(Acquired::Refused(Refusal {
+                code: RefusalCode::Shape,
+                reason: Reason::Firewall("a launch needs a firewall ruleset".to_owned()),
+            }))
+        );
+        launch.firewall_ruleset_ids.push("rs".to_owned());
+        assert_eq!(LambdaProvider::unprotected(&launch), None);
     }
 }

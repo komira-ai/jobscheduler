@@ -10,8 +10,8 @@ use js_agent_wire::{
 };
 use js_provider::{Provider, RefusalCode, StartAck};
 use js_registry::{MAX_FINISHED_RUNS, MAX_LIVE_RUNS, PoolConfig, RunRefusal, RunState, RunView};
-use js_types::sched::WorkKey;
 use js_types::{Admission, ClassId, ProviderId, ResourceClass, Resources, Shape};
+use js_usage::ProfileKey;
 use support::*;
 
 /// A job of `cpu` thousandths of a core and 1 MiB, no GPU.
@@ -19,7 +19,8 @@ fn job(run: &str, cpu: u64) -> JobSpec {
     JobSpec {
         run_id: run.into(),
         lease_id: String::new(),
-        image: "busybox:1".into(),
+        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
         args: Vec::new(),
         limits: Limits {
             cpu_millis: cpu,
@@ -252,6 +253,35 @@ fn a_listed_run_survives_the_loss_of_its_host() {
     fx.hello(&hello("a"), &cred("t")).unwrap();
     assert_eq!(state_of(&fx, "r1"), RunState::Ended);
     assert_eq!(welcome.epoch, 2);
+}
+
+/// Asserts that a job whose image is not pinned by a sha256 digest is refused before any
+/// state is read, with `image-digest-required`, and queues nothing; a digest alone and a
+/// tag with a digest are queued. It catches a start reaching a host that pulls what it
+/// lacks with a tag that can move.
+#[test]
+fn an_unpinned_image_is_refused_and_a_pinned_one_queued() {
+    let (fx, _epoch) = leased();
+    let ask = |spec: JobSpec| fx.registry.queue_run(&host("a"), &lease(1), spec);
+    let hex = "0123456789abcdef".repeat(4);
+    for image in [
+        "busybox:1".to_string(),
+        "busybox".to_string(),
+        format!("busybox@sha256:{}", &hex[..40]),
+        format!("busybox@sha512:{hex}{hex}"),
+    ] {
+        let mut bad = job("r1", 1);
+        bad.image = image.clone();
+        let err = ask(bad).unwrap_err();
+        assert_eq!(err.code(), refusal::IMAGE_DIGEST_REQUIRED, "{image}");
+    }
+    assert!(fx.registry.runs_of(&lease(1)).is_empty());
+    let mut digest = job("r1", 1);
+    digest.image = format!("busybox@sha256:{hex}");
+    ask(digest).unwrap();
+    let mut both = job("r2", 1);
+    both.image = format!("busybox:1@sha256:{hex}");
+    ask(both).unwrap();
 }
 
 /// Asserts every refusal of the admission and its code, in the order the registry checks
@@ -704,36 +734,36 @@ fn states_have_stable_names() {
     }
 }
 
-/// Asserts that a run queued with a work key answers it, by id and in its view, and that a
-/// run queued without one, and a run the registry does not know, answer none; and that the
-/// start the host is sent is, whole, the start of the same run queued without a key. It
-/// catches a key lost between the queue and the result, a key given to the wrong run, and
-/// a key that reaches the agent by any route (a label, an argument, the environment, the
+/// Asserts that a run queued with a profile name answers it, by id and in its view, and that
+/// a run queued without one, and a run the registry does not know, answer none; and that the
+/// start the host is sent is, whole, the start of the same run queued without a name. It
+/// catches a name lost between the queue and the result, a name given to the wrong run, and
+/// a name that reaches the agent by any route (a label, an argument, the environment, the
 /// image or a field of its own).
 #[test]
-fn a_work_key_stays_with_its_run_and_never_reaches_the_host() {
+fn a_profile_name_stays_with_its_run_and_never_reaches_the_host() {
     let (fx, epoch) = leased();
-    let key = WorkKey::new("builds", "ab12/34");
-    let keyed = fx
+    let key = ProfileKey::parse("est.row-1").unwrap();
+    let named = fx
         .registry
         .queue_keyed_run(&host("a"), &lease(1), job("r1", 500), Some(key.clone()))
         .unwrap();
-    assert_eq!(keyed.work_key, Some(key.clone()));
+    assert_eq!(named.profile, Some(key.clone()));
     let plain = queue(&fx, "r2", 500).unwrap();
-    assert_eq!(plain.work_key, None);
-    assert_eq!(fx.registry.work_key_of("r1"), Some(key.clone()));
-    assert_eq!(fx.registry.work_key_of("r2"), None);
-    assert_eq!(fx.registry.work_key_of("r3"), None);
+    assert_eq!(plain.profile, None);
+    assert_eq!(fx.registry.profile_of("r1"), Some(key.clone()));
+    assert_eq!(fx.registry.profile_of("r2"), None);
+    assert_eq!(fx.registry.profile_of("r3"), None);
     let listed = fx.registry.runs_of(&lease(1));
-    assert_eq!(listed[0].work_key, Some(key));
-    assert_eq!(listed[1].work_key, None);
+    assert_eq!(listed[0].profile, Some(key));
+    assert_eq!(listed[1].profile, None);
     let reply = beat(&fx, "a", epoch, &[]);
     assert_eq!(words(&reply), ["start r1", "start r2"]);
-    // The same run id submitted without a key, on a registry of its own: what the host
-    // receives for it must be equal to the start of the keyed run, whole.
+    // The same run id submitted without a name, on a registry of its own: what the host
+    // receives for it must be equal to the start of the named run, whole.
     let (other, other_epoch) = leased();
     queue(&other, "r1", 500).unwrap();
-    let unkeyed = beat(&other, "a", other_epoch, &[]);
-    assert_eq!(words(&unkeyed), ["start r1"]);
-    assert_eq!(reply.commands[0], unkeyed.commands[0]);
+    let unnamed = beat(&other, "a", other_epoch, &[]);
+    assert_eq!(words(&unnamed), ["start r1"]);
+    assert_eq!(reply.commands[0], unnamed.commands[0]);
 }

@@ -5,12 +5,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use js_elastic::{Acquired, ElasticProvider, HostStatus, Reason, Released};
 use js_provider_lambdalabs::{
-    Acquired, ApiError, Call, Elastic, FakeLambda, Instance, InstanceId, InstanceTypeOffer,
-    LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, Reason, Released, Status,
+    ApiError, Call, FakeLambda, FirewallRuleset, Instance, InstanceId, InstanceTypeOffer,
+    LambdaApi, LambdaProvider, LaunchRequest, ManualClock, OptionTable, SshKey,
 };
 
-use crate::rig::{INTERVAL, TABLE, ask, id, live, offer};
+use crate::rig::{INTERVAL, TABLE, ask, host, id, live, offer};
 
 /// The fake account behind a list that can hide every row, and a terminate that can name
 /// another id and do nothing.
@@ -42,6 +43,22 @@ impl LambdaApi for Lagging {
             Some(other) => Ok(vec![other]),
             None => self.fake.terminate(id),
         }
+    }
+    fn list_firewall_rulesets(&self) -> Result<Vec<FirewallRuleset>, ApiError> {
+        self.fake.list_firewall_rulesets()
+    }
+    fn create_firewall_ruleset(
+        &self,
+        region: &str,
+        name: &str,
+    ) -> Result<FirewallRuleset, ApiError> {
+        self.fake.create_firewall_ruleset(region, name)
+    }
+    fn list_ssh_keys(&self) -> Result<Vec<SshKey>, ApiError> {
+        self.fake.list_ssh_keys()
+    }
+    fn create_ssh_key(&self, name: &str) -> Result<SshKey, ApiError> {
+        self.fake.create_ssh_key(name)
     }
 }
 
@@ -91,7 +108,7 @@ fn a_retry_after_a_lost_launch_answer_does_not_launch_again_while_the_list_lags(
     // The list catches up: the retry finds the instance.
     api.hide.store(false, Ordering::SeqCst);
     match provider.acquire(&ask("a")) {
-        Acquired::Accepted { held, .. } => assert_eq!(held.id, id("fake0001")),
+        Acquired::Accepted { held, .. } => assert_eq!(held.id, host("fake0001")),
         other => panic!("not accepted: {other:?}"),
     }
     assert_eq!(api.fake.launched(), 1);
@@ -118,8 +135,8 @@ fn a_terminate_answer_naming_another_id_is_not_a_confirmation() {
     ));
     *api.terminate_names.lock().unwrap() = Some(id("other0001"));
     // The answer lists a different id and the read-back still shows the instance active.
-    assert_eq!(provider.release(&id("fake0001")), Released::Unknown);
-    assert_eq!(api.fake.instances()[0].status, Status::Booting);
+    assert_eq!(provider.release(&host("fake0001")), Released::Unknown);
+    assert_eq!(api.fake.instances()[0].status, HostStatus::Booting);
 }
 
 #[test]
@@ -190,7 +207,7 @@ fn a_retry_of_an_answered_acquire_gets_the_first_instance_and_launches_nothing()
         panic!("not accepted");
     };
     assert_eq!(again, first);
-    assert_eq!(again.id, id("fake0001"));
+    assert_eq!(again.id, host("fake0001"));
     assert!(extras.is_empty());
     assert_eq!(api.fake.launched(), 1);
     assert_eq!(api.fake.count(Call::Launch), 1);
@@ -335,7 +352,7 @@ fn a_probe_that_finds_the_instance_terminated_drops_it() {
         provider.acquire(&ask("a")),
         Acquired::Accepted { .. }
     ));
-    api.fake.set_status(&id("fake0001"), Status::Terminated);
+    api.fake.set_status(&id("fake0001"), HostStatus::Terminated);
     clock.advance(HOLD);
     assert!(matches!(
         provider.acquire(&ask("b")),
@@ -402,9 +419,9 @@ fn every_id_a_multi_instance_launch_returns_counts_and_a_retry_gets_the_first() 
     let Acquired::Accepted { held, extras } = provider.acquire(&ask("a")) else {
         panic!("not accepted");
     };
-    assert_eq!(held.id, id("fake0001"));
+    assert_eq!(held.id, host("fake0001"));
     assert_eq!(extras.len(), 1);
-    assert_eq!(extras[0].id, id("fake0002"));
+    assert_eq!(extras[0].id, host("fake0002"));
     clock.advance(INTERVAL);
     refused_at(&provider, 2, 2);
     // The retry is answered with the first instance and no extras.
@@ -415,7 +432,7 @@ fn every_id_a_multi_instance_launch_returns_counts_and_a_retry_gets_the_first() 
     else {
         panic!("not accepted");
     };
-    assert_eq!(again.id, id("fake0001"));
+    assert_eq!(again.id, host("fake0001"));
     assert!(extras.is_empty());
     assert_eq!(api.fake.count(Call::Launch), 1);
     // The extra is read by id with the first once the hold ends, and still counted.
