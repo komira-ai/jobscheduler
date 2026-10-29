@@ -34,6 +34,23 @@ const LITERALS: [&str; 6] = [
     "/dev/urandom",
     "/dev/tty",
 ];
+/// Processes whose denials belong to the toolchain steps (the rest of the log is the machine).
+const OURS: [&str; 14] = [
+    "clang",
+    "xcrun",
+    "xcode-select",
+    "codesign",
+    "swift",
+    "ld",
+    "cc",
+    "as",
+    "ar",
+    "js-mac-probe",
+    "true",
+    "sandbox-exec",
+    "xcodebuild",
+    "libtool",
+];
 const DATA: &str = "/System/Volumes/Data";
 const SECRET: &[u8] = b"secret\n";
 
@@ -281,7 +298,9 @@ fn denials() -> Probe {
         let Some((_, what)) = tail.split_once(") ") else {
             continue;
         };
-        seen.insert(format!("{process} {what}"));
+        if OURS.iter().any(|name| process.starts_with(name)) {
+            seen.insert(format!("{process} {what}"));
+        }
     }
     let listed: Vec<String> = seen.iter().take(200).cloned().collect();
     describe(
