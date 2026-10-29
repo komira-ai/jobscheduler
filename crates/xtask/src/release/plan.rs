@@ -1,23 +1,18 @@
-//! `release plan --head <sha> --tip <sha>`: whether the commit `--head`, which passed `ci`
-//! on main, is released, and as which version. The checkout in `--repo-dir` must be at
+//! `release plan --head <sha>`: whether the commit `--head`, which passed `ci` on main and is
+//! the commit the workflow run is at, is released, and as which version. The checkout in `--repo-dir` must be at
 //! `--head` and hold every tag (`fetch-depth: 0`).
 //!
 //! In order, the first rule that applies decides:
 //!
-//! 1. `--tip` (main's tip, read from the GitHub API by the workflow when the job runs) is
-//!    not `--head`: not released. The attestation of a build records the commit the
-//!    workflow run is at, which for a run started by another workflow is the tip of main,
-//!    not the commit that passed, and a re-run of an old run keeps its old `--head`. A
-//!    build of an older commit would be attested as another one, or published as the
-//!    newest version, so the newer push releases (its change is measured from the latest
-//!    tag, so nothing is lost).
-//! 2. A `v*` tag is at a commit that has `--head` as an ancestor, not at `--head` itself:
-//!    a later release exists, so this commit is not released.
-//! 3. No `v*` tag is merged into `--head`: released, as the workspace version. A tag on
+//! 1. A `v*` tag is at a commit that has `--head` as an ancestor, not at `--head` itself:
+//!    a later release exists, so this commit is not released. That keeps the version
+//!    monotonic and puts no tag on a commit older than the latest tag, whatever order
+//!    the runs of several pushes finish in; the newer release covers this change.
+//! 2. No `v*` tag is merged into `--head`: released, as the workspace version. A tag on
 //!    another branch is not a release of this history and is ignored.
-//! 4. The latest merged tag names `--head`: a re-run of a release that was started.
+//! 3. The latest merged tag names `--head`: a re-run of a release that was started.
 //!    Released, as that tag's version; the tag is kept as it is.
-//! 5. Some path changed between the latest merged tag and `--head` ships
+//! 4. Some path changed between the latest merged tag and `--head` ships
 //!    ([`super::is_shipped`], or a file a shipped source includes, [`super::include`]):
 //!    released, as [`super::next`]. Otherwise not released.
 //!
@@ -41,13 +36,10 @@ use super::{
 /// The arguments of `release plan`.
 #[derive(clap::Args)]
 pub struct PlanArgs {
-    /// The commit that passed `ci`, a full SHA (on Actions, the workflow run's `head_sha`).
+    /// The commit that passed `ci`, a full SHA (on Actions, `GITHUB_SHA`, the commit the
+    /// run is at and the one an attestation records).
     #[arg(long)]
     pub head: String,
-    /// The commit main is at now, as the GitHub API says when the job runs (not
-    /// `GITHUB_SHA`, which a re-run keeps).
-    #[arg(long)]
-    pub tip: String,
     /// A checkout at `--head` holding the whole history and every tag.
     #[arg(long, default_value = ".")]
     pub repo_dir: PathBuf,
@@ -127,12 +119,6 @@ fn capture(program: &Path, dir: &Path, args: &[&str]) -> Result<String, Error> {
 /// `tagged` is the latest release tag merged into `--head`; `later` the latest one at a
 /// commit that has `--head` as a proper ancestor.
 fn decide(a: &PlanArgs, tagged: Option<Version>, later: Option<Version>) -> Result<Verdict, Error> {
-    if a.tip != a.head {
-        return Ok(Verdict::skip(format!(
-            "main is at {} now, past {}: the push that moved it releases this change",
-            a.tip, a.head
-        )));
-    }
     if let Some(later) = later {
         return Ok(Verdict::skip(format!(
             "{} is a release past {}: a newer release exists",
