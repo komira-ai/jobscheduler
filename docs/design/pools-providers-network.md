@@ -1098,12 +1098,30 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    5); until that run exists the design does not claim removal. After the Welcome credential
    (7.2) a surviving token copy is useless, so cleanup is defence in depth, not the guard.
 8. Block metadata for jobs. A process that reaches the provider's metadata address can read the
-   user data again, and the host runs untrusted GPU jobs in containers. The template drops traffic
-   from the container networks (and the job user) to the metadata address before the agent starts,
-   and the agent runs containers on a bridge, never the host network. The address and the way to
-   drop it on the stock image are not verified (Open questions 5); the live checklist (13.4) tests
-   that a container cannot read user data. No job runs before the first hello, and the token is
-   retired at it, so the window between boot and first hello holds no job.
+   user data again, and the host runs untrusted GPU jobs in containers. The renderer (one for
+   every provider, `crates/js-lease-server/src/bootstrap/metadata.rs`) writes, after the provider's
+   `host_prep` and before the token, the network steps and the agent's unit, an `nftables`
+   rules file (`/etc/jobscheduler/metadata-block.nft`) and `js-metadata-block.service`, a
+   oneshot that loads it and is enabled for boot. `nft` is part of the Ubuntu 24.04 server
+   image; the script checks the program with `test -x` and stops if it is missing, so the
+   agent never starts without the block. The table `inet js_metadata` has two chains at
+   priority -10 (ahead of the container engine's own rules; both accept by default):
+   `forward` drops traffic to `169.254.169.254`, which covers a container on any network the
+   engine makes, and `output` drops the same for every uid but 0. Root keeps the address: the
+   agent and the bootstrap run as root, and no step after boot needs it, so a blanket drop
+   would also work; the rule exempts root so that a later step that does need it fails
+   in one place, not everywhere. The unit
+   is ordered `Before=network-pre.target js-agent.service`, the file is reloaded at every
+   boot (the table is deleted and made again, so a second load changes nothing), and the
+   agent's unit has `Requires=` and `After=` on it. The script reads the loaded table back
+   before it goes on. The agent is started without `--container-network`, so containers get
+   the agent's default, no network at all; a pool that later gives jobs egress names a
+   bridge there, and the rule covers it with no change. `host` is refused by the agent. The
+   address is not verified for Lambda (Open questions 5) and is one named constant; the
+   IPv6 address of the service is not blocked, because this design does not name one. The
+   live checklist (13.4) tests that a container cannot read user data. No job runs before
+   the first hello, and the token is retired at it, so the window between boot and first
+   hello holds no job.
 
 Hardening of the template, each a golden test of the rendered text with every secret
 masked: `write_files` mode 0600 for every secret; no `set -x` and no `echo` of a secret;

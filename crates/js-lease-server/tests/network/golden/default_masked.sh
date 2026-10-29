@@ -8,6 +8,43 @@ set -eu
 umask 077
 # image preparation
 apt-get install -y curl
+# metadata block
+test -x /usr/sbin/nft
+mkdir -p /etc/jobscheduler
+cat > /etc/jobscheduler/metadata-block.nft <<'RULES'
+table inet js_metadata
+delete table inet js_metadata
+table inet js_metadata {
+  chain forward {
+    type filter hook forward priority -10; policy accept;
+    ip daddr 169.254.169.254 drop
+  }
+  chain output {
+    type filter hook output priority -10; policy accept;
+    meta skuid != 0 ip daddr 169.254.169.254 drop
+  }
+}
+RULES
+chmod 0644 /etc/jobscheduler/metadata-block.nft
+cat > /etc/systemd/system/js-metadata-block.service <<'BLOCK'
+[Unit]
+Description=jobscheduler metadata address block
+DefaultDependencies=no
+Before=network-pre.target js-agent.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft --file /etc/jobscheduler/metadata-block.nft
+
+[Install]
+WantedBy=multi-user.target
+BLOCK
+chmod 0644 /etc/systemd/system/js-metadata-block.service
+systemctl daemon-reload
+systemctl enable --now js-metadata-block.service
+/usr/sbin/nft list table inet js_metadata > /dev/null
 # identity
 mkdir -p /etc/jobscheduler
 printf '%s' '***' > /etc/jobscheduler/token
@@ -30,6 +67,8 @@ cat > /etc/systemd/system/js-agent.service <<'UNIT'
 [Unit]
 Description=jobscheduler agent
 After=network-online.target
+Requires=js-metadata-block.service
+After=js-metadata-block.service
 Wants=network-online.target
 RequiresMountsFor=/var/lib/js-agent/scratch
 

@@ -12,8 +12,9 @@
 //! nothing else: it never sees a plan, a slot or a network mode.
 //!
 //! What the script does, in order: prepares the image (the provider's `host_prep`),
-//! writes the join token and the instance line, runs the network mode's steps, fetches
-//! the agent and checks its SHA-256 before it can start, and installs and starts the
+//! blocks the metadata address (`metadata`: no container and no user but root reaches
+//! it, and the agent's unit requires the block), writes the join token and the instance
+//! line, runs the network mode's steps, fetches the agent and checks its SHA-256 before it can start, and installs and starts the
 //! agent's unit. The first command is a `trap` on `EXIT` that removes the secret files
 //! the steps wrote and the traces cloud-init leaves of the script.
 //!
@@ -37,6 +38,7 @@
 //! Not rendered here: the host contract check of what the agent finds, which the agent's
 //! own report makes at admission.
 
+mod metadata;
 mod shell;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +47,7 @@ use std::fmt::Write;
 use js_elastic::{
     BootPayload, BootPlan, BootStep, CONTAINER_BIN, SCRATCH_ROOT, STATE_ROOT, Secret, SlotName,
 };
+pub use metadata::{METADATA_ADDRESS, METADATA_RULES_PATH, METADATA_TABLE, METADATA_UNIT, NFT_BIN};
 use shell::{hex, single_quoted, unit_quoted, word};
 
 /// What a secret prints as in a masked render.
@@ -277,6 +280,7 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     for step in &plan.host_prep {
         w.step(step)?;
     }
+    metadata::write(&mut w);
     w.line("# identity");
     w.line("mkdir -p /etc/jobscheduler");
     w.secret_file(TOKEN_PATH, &join_slot)?;
@@ -305,6 +309,8 @@ pub fn render(plan: &BootPlan, fill: Fill<'_>) -> Result<String, RenderError> {
     w.line("[Unit]");
     w.line("Description=jobscheduler agent");
     w.line("After=network-online.target");
+    w.line(&format!("Requires={METADATA_UNIT}"));
+    w.line(&format!("After={METADATA_UNIT}"));
     w.line("Wants=network-online.target");
     w.line(&format!("RequiresMountsFor={SCRATCH_ROOT}"));
     w.line("");
