@@ -933,6 +933,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hex",
+ "js-agent-usage",
  "js-agent-wire",
  "js-client",
  "js-lease",
@@ -944,6 +945,10 @@ dependencies = [
  "thiserror",
  "tokio",
 ]
+
+[[package]]
+name = "js-agent-usage"
+version = "0.1.0"
 
 [[package]]
 name = "js-agent-wire"
