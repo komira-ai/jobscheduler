@@ -229,7 +229,9 @@ fn docker_gets_the_gpu_indices_as_one_quoted_argument() {
         let pairs: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ["--gpus".to_owned(), value.to_owned()]);
-        assert_eq!(args.iter().filter(|a| a.contains("device=")).count(), 1);
+        // The quoted GPU value appears once; the scratch volume's `volume-opt=device=` is
+        // another option and is not counted.
+        assert_eq!(args.iter().filter(|a| a.starts_with("\"device=")).count(), 1);
     }
 }
 
