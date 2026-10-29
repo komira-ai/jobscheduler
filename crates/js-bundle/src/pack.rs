@@ -236,7 +236,28 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Resul
 /// The directory cannot be read, holds something a layer does not (see the module
 /// documentation), or breaks a rule of the tree.
 pub fn pack_tar(root: &Path) -> Result<PackedTar, PackError> {
-    todo!("{root:?}")
+    let mut items = BTreeMap::new();
+    collect(root, "", &mut items)?;
+    let mut tree = Tree::default();
+    for (path, item) in &items {
+        let node = match item {
+            Item::Dir => Node::Dir,
+            Item::File { .. } => Node::File,
+            Item::Link(target) => Node::Link(target.clone()),
+        };
+        tree.add(path, node)?;
+    }
+    tree.check_links()?;
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, item) in &items {
+        append(&mut builder, path, item)?;
+    }
+    let bytes = builder.into_inner()?;
+    Ok(PackedTar {
+        diff_id: DiffId::from_sha256(Sha256::digest(&bytes)),
+        entries: items.len() as u64,
+        bytes,
+    })
 }
 
 /// Packs the directory `root` into a compressed layer.

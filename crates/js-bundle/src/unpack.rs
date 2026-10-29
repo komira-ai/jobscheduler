@@ -595,8 +595,15 @@ fn unpack_dyn(
     root: BorrowedFd<'_>,
     limits: &Limits,
 ) -> Result<Unpacked, UnpackError> {
-    let _ = (reader, root, limits);
-    todo!()
+    let mut meter = Meter::new(reader, limits.bytes.saturating_add(END_BLOCKS));
+    let walked = walk(&mut meter, root, limits);
+    let progress = walked.map_err(|failure| failure.explain(&meter))?;
+    Ok(Unpacked {
+        entries: progress.entries,
+        file_bytes: progress.file_bytes,
+        stream_bytes: meter.total,
+        diff_id: DiffId::from_sha256(meter.hasher.finalize()),
+    })
 }
 
 /// Extracts the tar stream `tar` into the directory `root`, which must be empty.

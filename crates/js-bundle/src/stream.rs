@@ -73,7 +73,7 @@ pub enum StreamError {
 /// bytes.
 #[must_use]
 pub fn compress(tar: &[u8]) -> Vec<u8> {
-    todo!("{}", tar.len())
+    compress_to_vec(tar, CompressionLevel::Fastest)
 }
 
 /// Reads `buf.len()` bytes, or says why not.
@@ -166,8 +166,15 @@ impl<'a> Decoder<'a> {
     /// # Errors
     /// The header is missing, malformed or over a limit.
     pub fn new(source: &'a mut dyn Read) -> Result<Decoder<'a>, StreamError> {
-        let _ = source;
-        todo!()
+        let head = read_head(source)?;
+        let source = Source {
+            head: Cursor::new(head),
+            rest: source,
+            ended: false,
+        };
+        let frame = StreamingDecoder::new_with_max_window_size(source, MAX_WINDOW_BYTES)
+            .map_err(corrupt)?;
+        Ok(Decoder { frame })
     }
 }
 

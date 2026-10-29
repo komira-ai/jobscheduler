@@ -164,7 +164,41 @@ fn printable(text: &str) -> bool {
 /// # Errors
 /// The first rule the path breaks.
 pub fn check_path(path: &[u8]) -> Result<&str, NameDefect> {
-    todo!("{path:?}")
+    let text = std::str::from_utf8(path).map_err(|_| NameDefect::ForbiddenByte)?;
+    if text.is_empty() {
+        return Err(NameDefect::Empty);
+    }
+    if text.starts_with('/') {
+        return Err(NameDefect::Absolute);
+    }
+    if text.len() > MAX_PATH_BYTES {
+        return Err(NameDefect::TooLong);
+    }
+    if !printable(text) {
+        return Err(NameDefect::ForbiddenByte);
+    }
+    if text.split('/').count() > MAX_DEPTH {
+        return Err(NameDefect::TooDeep);
+    }
+    for part in text.split('/') {
+        if part.is_empty() {
+            return Err(NameDefect::EmptyComponent);
+        }
+        if matches!(part, "." | "..") {
+            return Err(NameDefect::DotComponent);
+        }
+        if part.len() > MAX_COMPONENT_BYTES {
+            return Err(NameDefect::ComponentTooLong);
+        }
+        if part.starts_with("._") {
+            return Err(NameDefect::AppleDouble);
+        }
+    }
+    let first = text.split('/').next().unwrap_or_default();
+    if ROOT_RESERVED.contains(&first) {
+        return Err(NameDefect::RootReserved);
+    }
+    Ok(text)
 }
 
 /// Checks the target of a symlink and returns it as text.
@@ -176,7 +210,28 @@ pub fn check_path(path: &[u8]) -> Result<&str, NameDefect> {
 /// # Errors
 /// The first rule the target breaks.
 pub fn check_target(target: &[u8]) -> Result<&str, NameDefect> {
-    todo!("{target:?}")
+    let text = std::str::from_utf8(target).map_err(|_| NameDefect::ForbiddenByte)?;
+    if text.is_empty() {
+        return Err(NameDefect::Empty);
+    }
+    if text.len() > MAX_TARGET_BYTES {
+        return Err(NameDefect::TooLong);
+    }
+    if text.starts_with('/') {
+        return Err(NameDefect::Absolute);
+    }
+    if !printable(text) {
+        return Err(NameDefect::ForbiddenByte);
+    }
+    for part in text.split('/') {
+        if part.is_empty() {
+            return Err(NameDefect::EmptyComponent);
+        }
+        if part.len() > MAX_COMPONENT_BYTES {
+            return Err(NameDefect::ComponentTooLong);
+        }
+    }
+    Ok(text)
 }
 
 /// What an entry is.

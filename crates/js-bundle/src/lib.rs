@@ -29,8 +29,6 @@
 //! (`std::fs` to read a tree, `openat` and friends to write one), which the layer allows.
 
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
-// Stubs of the layer codec: the tests land first, red.
-#![allow(dead_code, unused)]
 
 mod config;
 mod env;
