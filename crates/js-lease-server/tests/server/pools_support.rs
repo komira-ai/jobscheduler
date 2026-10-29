@@ -126,8 +126,9 @@ impl FakeCloud {
         self.catalogs.load(Ordering::SeqCst)
     }
 
-    /// How many calls other than the catalog and the host preparation (acquire, list,
-    /// release) were made: a pool in `plan` makes none.
+    /// How many calls other than the catalog, the host preparation and the list (acquire,
+    /// release) were made: a pool in `plan` makes none. A list reads and changes nothing,
+    /// and the scaler reads it to show what a plan pool would launch.
     pub fn others(&self) -> usize {
         self.others.load(Ordering::SeqCst)
     }
@@ -159,7 +160,6 @@ impl ElasticProvider for Handle {
     }
 
     fn list(&self) -> Result<Vec<Held>, ProviderError> {
-        self.0.others.fetch_add(1, Ordering::SeqCst);
         Ok(Vec::new())
     }
 
@@ -167,6 +167,15 @@ impl ElasticProvider for Handle {
         self.0.others.fetch_add(1, Ordering::SeqCst);
         Released::Unknown
     }
+}
+
+/// The pin of the agent a `live` pool needs: an `https` address and a hash.
+fn agent_pin() -> String {
+    format!(
+        "{{ url = {}, sha256 = {} }}",
+        quote("https://js.example:7301/agent"),
+        quote(&"ab".repeat(32))
+    )
 }
 
 thread_local! {
@@ -369,7 +378,9 @@ impl Rig {
             .set("provider", &provider)
             .set("join_token_file", &quoted(&joins));
         let pool = match options.live {
-            true => pool.set("launch", &quote("live")),
+            true => pool
+                .set("launch", &quote("live"))
+                .set("agent", &agent_pin()),
             false => pool,
         };
         let pool = match options.net {

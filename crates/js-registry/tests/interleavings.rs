@@ -97,7 +97,7 @@ fn play(seed: u64, tally: &mut Tally) {
                 }
             }
             Op::StartRun => {
-                let Some(held) = booked.clone() else { continue };
+                let Some(held) = booked else { continue };
                 match fx.registry.queue_run(&a, &held, job(&format!("r{step}"))) {
                     Ok(_) => {
                         assert!(!marked(&before), "{tag}: started a run on a marked host");
