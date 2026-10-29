@@ -2,7 +2,7 @@
 
 mod support;
 
-use js_agent_wire::{Isolation, JobSpec, Limits, refusal};
+use js_agent_wire::{JobSpec, refusal};
 use js_provider::{Provider, RefusalCode, StartAck, StartSpec};
 use js_registry::{PoolConfig, Refusal, RunRefusal, WholeNodeConfig};
 use js_types::{ExecMode, MemoryPercent, ProviderId, Request, RequestId, ResourceClass, Resources};
@@ -32,26 +32,9 @@ fn asking(sequence: u64, memory_bytes: u64) -> StartSpec {
 }
 
 fn job(memory_bytes: u64) -> JobSpec {
-    JobSpec {
-        run_id: "r1".into(),
-        lease_id: String::new(),
-        image: "busybox:1@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            .into(),
-        args: Vec::new(),
-        limits: Limits {
-            cpu_millis: 1000,
-            memory_bytes,
-            pids: None,
-            wall_ms: 60_000,
-        },
-        gpu_indices: Vec::new(),
-        mounts: Vec::new(),
-        isolation: Isolation::Contained,
-        labels: Default::default(),
-        heartbeat_seq: 0,
-        valid_for_ms: 0,
-        native: None,
-    }
+    let mut spec = support::world::job("r1");
+    spec.limits.memory_bytes = memory_bytes;
+    spec
 }
 
 /// Asserts that at 90 a pool of 8 GiB hosts books floor(8 GiB x 90 / 100) bytes: a lease
