@@ -42,7 +42,7 @@ impl Shape {
                 DISK_GIB_KEY => have
                     .and_then(|have| have.parse::<u64>().ok())
                     .zip(value.parse::<u64>().ok())
-                    .is_some_and(|(have, want)| want <= have),
+                    .is_some_and(|(have, want)| want == have),
                 _ => have == Some(value),
             }
         });
