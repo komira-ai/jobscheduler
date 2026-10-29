@@ -10,7 +10,7 @@ use js_agent::cli_runtime::{
     limits_to_args,
 };
 
-use super::{BIN, mount, settings, spec};
+use super::{BIN, DOCKER_SCRATCH, mount, settings, spec};
 
 /// The profile option's file in these tests.
 const PROFILE: &str = "/scratch-root/seccomp+pinned.json";
@@ -31,7 +31,7 @@ fn base(cpus: &str, memory: &str, pids: &str) -> Vec<String> {
         "--pids-limit",
         pids,
         "--mount",
-        "type=bind,src=/work/scratch/r1,dst=/scratch",
+        DOCKER_SCRATCH,
     ])
 }
 
@@ -81,13 +81,19 @@ fn limits_to_args_table() {
         ),
     ];
     for (name, job, expected) in rows {
-        for engine in [Engine::Docker, Engine::Podman] {
-            assert_eq!(
-                limits_to_args(engine, &job, true).unwrap(),
-                expected,
-                "{name}"
-            );
-        }
+        assert_eq!(
+            limits_to_args(Engine::Docker, &job, true).unwrap(),
+            expected,
+            "{name}"
+        );
+        let mut podman = expected.clone();
+        *podman.last_mut().unwrap() =
+            "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev".to_owned();
+        assert_eq!(
+            limits_to_args(Engine::Podman, &job, true).unwrap(),
+            podman,
+            "{name}"
+        );
     }
 }
 
@@ -259,7 +265,12 @@ fn docker_gets_the_gpu_indices_as_one_quoted_argument() {
         let pairs: Vec<&[String]> = args.windows(2).filter(|p| p[0] == "--gpus").collect();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ["--gpus".to_owned(), value.to_owned()]);
-        assert_eq!(args.iter().filter(|a| a.contains("device=")).count(), 1);
+        // The quoted GPU value appears once; the scratch volume's `volume-opt=device=` is
+        // another option and is not counted.
+        assert_eq!(
+            args.iter().filter(|a| a.starts_with("\"device=")).count(),
+            1
+        );
     }
 }
 
@@ -288,7 +299,7 @@ fn mount_ro_honoured() {
     assert_eq!(
         mounts_of(&args),
         [
-            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            DOCKER_SCRATCH,
             "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,bind-recursive=readonly,bind-propagation=rprivate",
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
         ]
@@ -300,11 +311,41 @@ fn mount_ro_honoured() {
     assert_eq!(
         mounts_of(&old),
         [
-            "type=bind,src=/work/scratch/r1,dst=/scratch",
+            DOCKER_SCRATCH,
             "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly",
             "type=bind,src=/srv/data/out,dst=/mnt/data/out",
         ]
     );
+}
+
+/// Asserts that on Podman every mount, the scratch directory first, is `nosuid,nodev`
+/// (after `readonly` where it is read-only), so a set-uid file or a device node a job
+/// leaves there has no effect; and that on Docker, whose `--mount type=bind` takes no such
+/// option, the scratch directory is a volume of the local driver that binds the directory
+/// `nosuid,nodev` (the option list in one quoted CSV field, no copy of the image's
+/// `/scratch` into it) while the other mounts stay plain binds. It catches a scratch
+/// directory that can hold a working set-uid binary or device node, and the option sent
+/// to a bind mount that rejects it.
+#[test]
+fn podman_mounts_are_nosuid_nodev() {
+    let mut job = spec("r1");
+    job.mounts = vec![
+        mount("/srv/data/in", "/mnt/data/in", true),
+        mount("/srv/data/out", "/mnt/data/out", false),
+    ];
+    let args = limits_to_args(Engine::Podman, &job, false).unwrap();
+    assert_eq!(
+        mounts_of(&args),
+        [
+            "type=bind,src=/work/scratch/r1,dst=/scratch,nosuid,nodev",
+            "type=bind,src=/srv/data/in,dst=/mnt/data/in,readonly,nosuid,nodev",
+            "type=bind,src=/srv/data/out,dst=/mnt/data/out,nosuid,nodev",
+        ]
+    );
+    let docker = limits_to_args(Engine::Docker, &job, false).unwrap();
+    let docker = mounts_of(&docker);
+    assert_eq!(docker[0], DOCKER_SCRATCH);
+    assert!(!docker[1..].iter().any(|m| m.contains("nosuid")));
 }
 
 /// Asserts that a mount path that could add an option to the comma-separated `--mount`

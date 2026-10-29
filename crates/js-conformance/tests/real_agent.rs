@@ -84,6 +84,7 @@ fn job(run: &str) -> JobSpec {
         labels: BTreeMap::new(),
         heartbeat_seq: 0,
         valid_for_ms: 0,
+        native: None,
     }
 }
 
