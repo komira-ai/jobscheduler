@@ -1,0 +1,13 @@
+//! Behaviour that needs no server: the key file, the option table, the in-memory fake,
+//! the small value types, and the provider over the fake account.
+
+mod acquire;
+mod config;
+mod fake;
+mod key;
+mod lagging;
+mod model;
+mod options;
+mod own;
+mod release;
+mod rig;

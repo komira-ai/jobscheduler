@@ -120,6 +120,37 @@ fn gpu_class_names_offered_gpus_only() {
     );
 }
 
+/// Asserts that `--instance-file` puts the instance the file names into the hello (a line
+/// `PROVIDER:INSTANCE_ID`, surrounding white space dropped), that a hello without the flag
+/// names none, and that a file that is missing or is not that form, or names what the
+/// wire refuses, ends the program before it says hello and names the flag. It catches an
+/// agent that cannot present the instance a one-time token is bound to, and one that
+/// sends a made-up instance.
+#[test]
+fn the_instance_file_names_the_instance_in_the_hello() {
+    let path = "/etc/js-agent/instance";
+    let host = |text: &str| {
+        let mut host = linux_host();
+        host.files = host.files.with(path, text);
+        host
+    };
+    let plain = hello_of(&["--host-id", "gpu-1"], &linux_host());
+    assert!(plain.get("instance").is_none(), "{plain}");
+    let flags = ["--host-id", "gpu-1", "--instance-file", path];
+    let hello = hello_of(&flags, &host("lambdalabs:0920582c\n"));
+    assert_eq!(
+        hello["instance"],
+        json!({ "provider": "lambdalabs", "instance_id": "0920582c" })
+    );
+    let said = refused(&flags, &linux_host());
+    assert!(said.contains("--instance-file: "), "{said}");
+    assert!(said.contains("No such file"), "{said}");
+    let said = refused(&flags, &host("no-colon-here\n"));
+    assert!(said.contains("must hold PROVIDER:INSTANCE_ID"), "{said}");
+    let said = refused(&flags, &host("Not A Provider:i-1\n"));
+    assert!(said.contains("instance.provider"), "{said}");
+}
+
 /// Asserts that `os` and `arch` cannot be set as capabilities, that an operator
 /// capability of another name is passed on, and that a label the wire refuses (the
 /// reserved prefix) ends the program before it says hello.
@@ -193,8 +224,9 @@ fn usage_errors_and_help() {
 }
 
 /// Asserts that plain http to a host off the loopback is refused naming `--server`, and
-/// https without `--ca-cert` naming `--ca-cert`, before any fact is probed or anything is
-/// sent. It catches a token that would cross a network in clear.
+/// an https `--ca-cert` file that is missing naming `--ca-cert`, before any fact is probed
+/// or anything is sent. (https without `--ca-cert` is no longer refused: it trusts the
+/// bundled public roots.) It catches a token that would cross a network in clear.
 #[test]
 fn plain_http_off_loopback_refused() {
     let dir = Scratch::new("flags_http");
@@ -220,12 +252,28 @@ fn plain_http_off_loopback_refused() {
         plain.err
     );
     assert!(plain.err.contains("plain http"), "{}", plain.err);
-    let no_ca = go("https://leases.example.com:7300");
-    assert_eq!(no_ca.status(), code(2));
+    let missing = dir.path("absent.pem");
+    let no_file = run(
+        &[
+            "--server",
+            "https://leases.example.com:7300",
+            "--token-file",
+            token.to_str().unwrap(),
+            "--pool",
+            "macs",
+            "--ca-cert",
+            missing.to_str().unwrap(),
+        ],
+        &host,
+        &Dialer,
+        &mut CountingSleeper::stopping_at(1),
+        &mut Highest,
+    );
+    assert_eq!(no_file.status(), code(2));
     assert!(
-        no_ca.err.starts_with("js-agent: --ca-cert: "),
+        no_file.err.starts_with("js-agent: --ca-cert: "),
         "{}",
-        no_ca.err
+        no_file.err
     );
     assert!(
         host.commands.ran.borrow().is_empty(),

@@ -36,6 +36,8 @@ hyper-util = { version = "0.1.21", default-features = false }
 # Calls rustix has no portable form of (js-testkit: mkfifo, and a
 # signal to ignore one).
 libc = "0.2.190"
+# Dev-dependency of js-provider-lambdalabs: a sink for the HTTP client's own log lines.
+log = "0.4.34"
 # macOS only (js-vmm, js-mac-session): the Objective-C runtime and the Foundation binding.
 objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
@@ -77,7 +79,8 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std"] }
-ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
+webpki-roots = { version = "1.0.11", default-features = false }
 
 # Every public item carries a doc comment; the lint job runs clippy with `-D warnings`,
 # so a missing one fails the build.

@@ -490,6 +490,22 @@ impl<'a> Session<'a> {
         self.jobs.iter().for_each(|jobs| jobs.worker.stop_all());
     }
 
+    /// The end after a refusal for good: stops the runs through the worker, and what it
+    /// cannot stop without it, bounded (see [`Worker::wind_down`]). The lines say what
+    /// could not be stopped; none for a session with no worker.
+    pub fn wind_down_jobs(&self) -> Vec<String> {
+        let down = self.jobs.iter().flat_map(|jobs| jobs.worker.wind_down());
+        down.collect()
+    }
+
+    /// The end after the worker's own end: stops the containers without the worker,
+    /// bounded (see [`Worker::rescue`]). The lines say what could not be stopped; none for a
+    /// session with no worker.
+    pub fn rescue_jobs(&self) -> Vec<String> {
+        let rescued = self.jobs.iter().flat_map(|jobs| jobs.worker.rescue());
+        rescued.collect()
+    }
+
     /// The lines the worker wants printed since the last call.
     pub fn job_lines(&self) -> Vec<String> {
         let lines = self.jobs.iter().map(|jobs| jobs.worker.take_lines());

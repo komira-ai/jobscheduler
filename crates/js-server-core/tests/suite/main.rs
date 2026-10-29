@@ -8,11 +8,13 @@
 mod admission;
 mod cell;
 mod common;
+mod curves;
 mod feed;
 mod frontends;
 mod handover;
 mod hooks;
 mod intake;
+mod learned;
 mod outage;
 mod owners;
 mod placement;

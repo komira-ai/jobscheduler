@@ -193,3 +193,28 @@ fn list_failures_are_errors_and_a_vanished_container_is_skipped() {
     world.vanish("r2");
     assert_eq!(rt.list_labelled().unwrap(), []);
 }
+
+/// Asserts that the ids-only listing asks `ps` with the same two label filters, reads no
+/// container (so a container whose inspect output is unreadable is still listed), and
+/// fails when `ps` fails. It catches a rescue listing that depends on every inspect.
+#[test]
+fn list_ids_reads_nothing_and_fails_with_ps() {
+    let world = docker();
+    let mut rt = open(&world);
+    let one = start(&mut rt, &world, "r1");
+    let two = start(&mut rt, &world, "r2");
+    world.leak(&[(label::RUN, "theirs"), (label::AGENT, "h-other")]);
+    let reads = world.calls_of("inspect").len();
+    world.say("inspect", "garbage");
+    assert!(rt.list_labelled().is_err());
+    let mut ids = rt.list_ids().unwrap();
+    ids.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut want = vec![one, two];
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(ids, want);
+    let after = world.calls_of("inspect").len();
+    assert_eq!(after, reads + 1, "only the failing list_labelled read");
+    world.fail("ps", 1);
+    let said = rt.list_ids().unwrap_err();
+    assert_eq!(said.0, "ps: /bin/sh: exit status: 1");
+}

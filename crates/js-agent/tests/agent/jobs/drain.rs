@@ -12,7 +12,7 @@ use js_agent_wire::{HeldRun, HeldState};
 use serde_json::{Value, json};
 
 use super::fake::{Build, FakeMachine};
-use super::{private, start, start_answer, starts, user};
+use super::{private, rescue, start, start_answer, starts, user};
 use crate::bounds::{Capped, WakeBudget};
 use crate::support::{
     CountingSleeper, Jobs, Lowest, Reply, Scratch, Script, ScriptConnector, beat_ok, code, flags,
@@ -303,7 +303,9 @@ fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
         held: vec![running],
         ..Snapshot::default()
     };
-    let worker = Worker::orphaned(machine.clock.clone(), held);
+    let dir = Scratch::new("jobs-drain-orphan");
+    let rescue = rescue(&dir, &machine);
+    let worker = Worker::orphaned(machine.clock.clone(), held, rescue);
     let replies = vec![
         welcome(1),
         reply(200, start_answer(&["r2"])),
@@ -317,6 +319,35 @@ fn a_reply_that_finds_the_queue_gone_during_the_drain_ends_it_as_failed() {
     assert!(matches!(exit, Exit::Failed(_)), "{exit:?}");
     assert!(!worker.ended(), "the end mark was never set");
     assert_eq!(phases(&sent), ["serving", "draining"]);
+}
+
+/// Asserts that a server that refuses the host for good while it drains ends the drain
+/// with the refusal and has the running job stopped before the agent leaves: the stop
+/// request comes with a job running, the first drain heartbeat is refused, and the job is
+/// stopped through the worker. It catches a drain that leaves a container running when the
+/// token is revoked during it.
+#[test]
+fn a_refusal_during_the_drain_stops_the_runs_and_keeps_its_status() {
+    let dir = Scratch::new("jobs-drain-fatal");
+    let machine = FakeMachine::new();
+    let worker = start(&dir, &machine);
+    assert_eq!(worker.try_deliver(starts(&["r1"])), Delivery::Delivered);
+    assert!(worker.handle().settle());
+    let replies = vec![welcome(1), beat_ok(), refused(401, "unauthorised")];
+    let (exit, _, sent) = drained(&worker, LONG, replies, |n| match n {
+        0 => Wake::Stop,
+        _ => Wake::Elapsed,
+    });
+    assert!(matches!(exit, Exit::Fatal(_)), "{exit:?}");
+    assert!(
+        phases(&sent).contains(&"draining".to_owned()),
+        "refused while draining"
+    );
+    assert!(
+        machine.world.log().contains(&"stop r1".to_owned()),
+        "{:?}",
+        machine.world.log()
+    );
 }
 
 /// The flags that start an agent with containers over `dir`.

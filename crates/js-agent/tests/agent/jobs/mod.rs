@@ -6,6 +6,7 @@
 
 mod drain;
 mod e2e;
+mod ends;
 mod exclusive;
 pub mod fake;
 mod session;
@@ -19,7 +20,7 @@ use std::time::Duration;
 
 use js_agent::cli_runtime::Settings;
 use js_agent::lifecycle::{Capacity, Config, MountRoots, ScratchRoot, StateRoot};
-use js_agent::{Plan, Platform, Worker};
+use js_agent::{Plan, Platform, Rescue, Worker};
 use js_agent_wire::{Command, HeartbeatReply};
 use serde_json::{Value, json};
 
@@ -82,7 +83,19 @@ pub fn plan(dir: &Scratch, machine: &FakeMachine, step_every: Duration) -> Plan 
         watch: Vec::new(),
         machine: Arc::new(machine.clone()),
         step_every,
+        rescue_bound: Some(crate::support::RESCUE_TEST_BOUND),
     }
+}
+
+/// How the agent stops its containers without a worker, over `machine`.
+pub fn rescue(dir: &Scratch, machine: &FakeMachine) -> Rescue {
+    let platform = Platform {
+        os: "linux".to_owned(),
+        arch: "x86_64".to_owned(),
+    };
+    let machine = Arc::new(machine.clone());
+    let grace = Duration::from_secs(1);
+    Rescue::new(machine, settings(dir), "h1".to_owned(), platform, grace)
 }
 
 /// A worker over `machine` that steps only when asked.

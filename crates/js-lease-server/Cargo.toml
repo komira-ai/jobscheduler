@@ -34,6 +34,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 js-provider-fake = { path = "../js-provider-fake" }
+js-testkit = { path = "../js-testkit" }
 rcgen.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }
 

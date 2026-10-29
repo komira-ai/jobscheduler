@@ -209,6 +209,19 @@ pub trait ContainerRuntime {
     /// The runtime cannot list.
     fn list_labelled(&mut self) -> Result<Vec<Found>, RuntimeError>;
 
+    /// The ids of the containers [`ContainerRuntime::list_labelled`] would list, without
+    /// reading each one. The rescue at the agent's end uses it: it needs only the ids, and
+    /// a container that cannot be read must still be stopped. A backend that can list
+    /// without reading overrides it; the default lists in full.
+    ///
+    /// # Errors
+    ///
+    /// The runtime cannot list.
+    fn list_ids(&mut self) -> Result<Vec<ContainerId>, RuntimeError> {
+        let found = self.list_labelled()?;
+        Ok(found.into_iter().map(|one| one.id).collect())
+    }
+
     /// Whether a container made here can use a GPU. A start that names a GPU where this
     /// is false is refused (`gpu-unsupported`) and creates nothing.
     fn supports_gpus(&self) -> bool {

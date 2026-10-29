@@ -628,3 +628,20 @@ fn the_container_is_created_with_the_jobs_limits_and_the_agents_labels() {
     assert_eq!(labels[label::GPUS], "1,0");
     assert_eq!(labels[label::WALL_MS], "60000");
 }
+
+/// Asserts that two harnesses built under one name are two worlds: the second one's
+/// set-up does not remove the first one's scratch root, and a start on the first one
+/// still makes its scratch directory. It catches a test harness whose directory is
+/// named by the test alone, so that two tests of one name (or one test run twice at once)
+/// delete each other's roots under a running agent.
+#[test]
+fn harnesses_of_one_name_do_not_share_a_scratch_root() {
+    let mut first = Harness::new("same-name");
+    let mut second = Harness::new("same-name");
+    assert_ne!(first.dir.path("scratch"), second.dir.path("scratch"));
+    assert_eq!(names(&first.start(job("r1"))), ["started r1"]);
+    assert!(first.scratch_of("r1").is_dir());
+    assert_eq!(names(&second.start(job("r1"))), ["started r1"]);
+    assert!(second.scratch_of("r1").is_dir());
+    assert_ne!(first.scratch_of("r1"), second.scratch_of("r1"));
+}

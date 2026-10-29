@@ -262,6 +262,9 @@ fn usage_sources_use_no_wall_clock() {
         include_str!("../../../src/usage/clock.rs"),
         include_str!("../../../src/usage/mod.rs"),
         include_str!("../../../src/usage/sampler.rs"),
+        include_str!("../../../../js-agent-usage/src/binner.rs"),
+        include_str!("../../../../js-agent-usage/src/lib.rs"),
+        include_str!("../../../../js-agent-usage/src/sample.rs"),
     ];
     let banned = [["System", "Time"].concat(), ["UNIX", "_EPOCH"].concat()];
     for source in sources {

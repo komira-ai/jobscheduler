@@ -17,11 +17,21 @@ use crate::worker::{Handle, Plan, STEP_EVERY, Worker};
 /// grace, so their results reach the server and are acknowledged.
 pub const DRAIN_SETTLE: Duration = Duration::from_secs(30);
 
+/// What the worker is made over, besides the flags.
+pub struct Seams<'a> {
+    /// The clock, the runtime and the host view.
+    pub machine: &'a Arc<dyn Machine>,
+    /// Handed a [`Handle`] to the worker once it has started.
+    pub hook: Option<&'a dyn Fn(Handle)>,
+    /// The bound of the rescue in place of [`crate::RESCUE_BOUND`]; `None` outside a test.
+    pub rescue_bound: Option<Duration>,
+}
+
 /// Starts the worker when `--container-bin` is given, and `None` when it is not: an agent
 /// without it registers and heartbeats and runs no job. The worker has built the
 /// lifecycle and adopted the containers an earlier process left when this returns, and
 /// the lines it has to say (the engine's warnings, what it adopted) are written to `err`.
-/// `hook` is handed a [`Handle`] to the worker.
+/// The hook of `seams` is handed a [`Handle`] to the worker.
 ///
 /// # Errors
 ///
@@ -32,8 +42,7 @@ pub fn start(
     local: Local,
     hello: &Hello,
     platform: &Platform,
-    machine: &Arc<dyn Machine>,
-    hook: Option<&dyn Fn(Handle)>,
+    seams: Seams<'_>,
     err: &mut dyn Write,
 ) -> Result<Option<(Worker, Drain)>, String> {
     let Local {
@@ -62,14 +71,15 @@ pub fn start(
         host_id: hello.host_id.clone(),
         platform: platform.clone(),
         watch,
-        machine: machine.clone(),
+        machine: seams.machine.clone(),
         step_every: STEP_EVERY,
+        rescue_bound: seams.rescue_bound,
     })
     .map_err(|why| format!("--container-bin: {why}"))?;
     worker.take_lines().iter().for_each(|line| {
         let _ = writeln!(err, "js-agent: {line}");
     });
-    hook.iter().for_each(|hook| hook(worker.handle()));
+    seams.hook.iter().for_each(|hook| hook(worker.handle()));
     let settle = stop_grace.saturating_add(DRAIN_SETTLE);
     let drain = Drain {
         wait: drain_wait,

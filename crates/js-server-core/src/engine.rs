@@ -17,14 +17,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use js_caps::NodeCaps;
-use js_sched::{Cordon, DaemonInstance, Event, FARM_RERUNS, Input, Request, Requeue, Scheduler};
+use js_sched::{
+    Cordon, DaemonInstance, Event, FARM_RERUNS, Input, KeyFloor, Request, Requeue, Scheduler,
+};
 use js_store::Rows;
 use js_types::sched::{
     Answer, ControlRecord, Effect, FarmTime, LeaseId, OperationId, Outcome, Refusal, Resources,
     StartLease, StateMachine, WaiterId, Waiting, WorkerId,
 };
 
-use crate::adapter::{Adapter, Link, Stage, View};
+use crate::adapter::{Adapter, Link, Lowered, Stage, View};
 use crate::core::{Admitted, Config, Held, NotQueued};
 use crate::intake::Intake;
 use crate::store::Unsettled;
@@ -119,6 +121,11 @@ pub(crate) struct Engine {
     /// What the intake poll keeps between two looks at the state store
     /// ([`Core::intake`](crate::Core::intake)).
     pub(crate) intake: Intake,
+    /// Size keys are on ([`Config::size_keys`]).
+    pub(crate) size_keys: bool,
+    /// Key floors the estimator lowered that the state store has not taken yet, at most one
+    /// per size key ([`Engine::lower_key_floors`]).
+    pub(crate) unwritten_floors: Vec<KeyFloor>,
 }
 
 impl Engine {
@@ -130,6 +137,9 @@ impl Engine {
         }
         if let Some(whole) = &config.whole_node {
             sched = sched.with_whole_node(whole.clone());
+        }
+        if let Some(curves) = &config.curves {
+            sched = sched.with_curves(Arc::clone(&curves.0));
         }
         if let Some(bound) = config.memory_floors {
             sched = sched.with_memory_floors(bound);
@@ -173,6 +183,8 @@ impl Engine {
             superseded: false,
             untraced_kept: BTreeMap::new(),
             intake: Intake::new(config.orphan_wait),
+            size_keys: config.size_keys,
+            unwritten_floors: Vec::new(),
         }
     }
 
@@ -291,7 +303,7 @@ impl Engine {
     /// written: it would put the lease back, held by no one.
     pub(crate) fn log_requeues(&mut self, a: &mut dyn Adapter) {
         let given_up = self.sched.take_requeues();
-        self.settle_requeues(&given_up);
+        self.settle_requeues(a, &given_up);
         // The queue row a give-up writes is this core's own: the intake poll finds the
         // operation queued as it left it, not queued again by another frontend.
         for requeue in &given_up {
@@ -477,24 +489,85 @@ impl Engine {
         a: &mut dyn Adapter,
         request: &Request,
         parcel: &[u8],
+        size_key: Option<u64>,
         now: FarmTime,
     ) -> Result<Admitted, NotQueued> {
         if self.fenced {
             return Err(NotQueued::Fenced);
         }
+        // A core with size keys off ignores the key: nothing is written, nothing is booked.
+        let size_key = size_key.filter(|_| self.size_keys);
         let waiter = WaiterId(self.next_waiter);
         self.next_waiter += 1;
-        let held = self.queue(a, request, parcel, now)?;
+        let held = self.queue(a, request, parcel, size_key, now)?;
         let twin = match held {
             Held::Here => self.sched.twin(request),
             Held::Elsewhere(operation) => Some(operation),
         };
-        Ok(Admitted {
+        let admitted = Admitted {
             waiter,
             operation: twin.unwrap_or_else(|| self.sched.next_operation()),
             joined: twin.is_some(),
             held,
-        })
+        };
+        // Before the `Submit` is fed, so the first placement round books the key's floor.
+        // The id is the one the `opkey/` row was written under (`queue` moved the scheduler
+        // to it). A joined caller keeps the key of the operation it joined.
+        if let Some(key) = size_key.filter(|_| !admitted.joined && held == Held::Here) {
+            self.sched.set_size_key(admitted.operation, key);
+        }
+        Ok(admitted)
+    }
+
+    /// Takes the key floors the adapter's estimator wants lowered to the scheduler, and
+    /// writes them down on a best-effort basis: a row the store refuses is kept and written
+    /// again at a later tick ([`Engine::write_key_floors`]); until then a restart books the
+    /// higher floor. A floor the scheduler holds above what the estimator saw before the
+    /// decay is left alone: a kill the estimator never saw raised it since.
+    pub(crate) fn lower_key_floors(&mut self, a: &dyn Adapter, lowered: Vec<Lowered>) {
+        for Lowered {
+            size_key,
+            before,
+            ask,
+        } in lowered
+        {
+            if self.sched.key_floor(size_key).is_some_and(|f| f > before) {
+                continue;
+            }
+            let Some(row) = self.sched.lower_key_floor(size_key, ask) else {
+                continue;
+            };
+            self.unwritten_floors.retain(|f| f.key != size_key);
+            self.unwritten_floors.push(row);
+        }
+        self.write_key_floors(a);
+    }
+
+    /// Writes the lowered key floors waiting for the store; those it refuses stay.
+    pub(crate) fn write_key_floors(&mut self, a: &dyn Adapter) {
+        let rows = self
+            .rows
+            .clone()
+            .filter(|_| !self.fenced && !self.superseded);
+        let Some(rows) = rows else {
+            // No store to write to, or a newer writer holds it: nothing is kept.
+            self.unwritten_floors.clear();
+            return;
+        };
+        let sched = &self.sched;
+        // A pending row is written only while the scheduler still holds the floor it lowered
+        // to: a kill that raised it since has written the higher row (a restart loses what is
+        // pending, and the higher row it leaves is the safe side).
+        self.unwritten_floors
+            .retain(|row| sched.key_floor(row.key).unwrap_or(0) == row.ask);
+        self.unwritten_floors.retain(|row| {
+            let summary = a.summary_name(row.key);
+            let refused = rows.put_key_floor(row, summary.as_deref()).err();
+            if let Some(error) = &refused {
+                tracing::warn!(%error, "a lowered key floor was not written");
+            }
+            refused.is_some()
+        });
     }
 
     /// Expires leases of silent workers and places queued work. A silent lease lost past
@@ -502,6 +575,10 @@ impl Engine {
     /// heartbeat's do. Logs each drain that has paused at its deadline, once.
     pub(crate) fn tick(&mut self, a: &mut dyn Adapter, now: FarmTime) -> Vec<Answer> {
         let answers = self.feed(a, now, Event::Tick);
+        // The lowered rows the store refused are written again; a fenced core drops them.
+        if !self.unwritten_floors.is_empty() {
+            self.write_key_floors(a);
+        }
         let paused: BTreeSet<WorkerId> = self
             .links
             .keys()
