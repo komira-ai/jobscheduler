@@ -168,13 +168,18 @@ fn the_binary_refuses_container_jobs_off_linux() {
         path
     };
     let (state, scratch) = (private("state"), private("scratch"));
+    let user = format!(
+        "{}:{}",
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw()
+    );
     let docker = dir.write("docker", "#!/bin/sh\n", 0o755);
     let output = Command::new(env!("CARGO_BIN_EXE_js-agent"))
         .args(["--server", &server.url(), "--pool", "macs"])
         .args(["--token-file", server.join_file().to_str().unwrap()])
         .args(["--host-id", "refused-1"])
         .args(["--container-bin", docker.to_str().unwrap()])
-        .args(["--container-user", "1:1"])
+        .args(["--container-user", &user])
         .args(["--state-root", state.to_str().unwrap()])
         .args(["--scratch-root", scratch.to_str().unwrap()])
         .stdin(Stdio::null())

@@ -231,6 +231,7 @@ fn a_process_in_proc_must_be_the_containers() {
 /// Asserts the files the runtime reads by default: the agent's own control group is text,
 /// its pid namespace link is `pid:[..]`, and a path that does not exist reads as nothing.
 /// It catches a default that reads nothing, or the wrong thing.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_default_files_are_the_agents_own_proc() {
     assert!(read_proc("/proc/self/cgroup").is_some());
@@ -242,6 +243,7 @@ fn the_default_files_are_the_agents_own_proc() {
 /// Asserts that the agent's own `/proc` is what the runtime looks in by default: the
 /// agent's own process is there, and a pid beyond every pid a host gives is not. It catches
 /// a default that answers yes or no whatever the pid.
+#[cfg(target_os = "linux")]
 #[test]
 fn the_default_looks_in_the_agents_own_proc() {
     assert!(pid_in_proc(std::process::id()));
