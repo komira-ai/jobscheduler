@@ -150,7 +150,7 @@ fn a_late_acceptance_of_a_failed_acquire_is_released() {
     rig.tick(at(30 * MINUTE));
     rig.input.acquired = vec![accepted(&plan, "i-late")];
     let actions = rig.tick(at(31 * MINUTE));
-    assert_eq!(kinds(&actions), ["Save", "Release"]);
+    assert_eq!(kinds(&actions), ["Save", "Revoke", "Release"]);
     assert_eq!(rig.phase(0), Phase::Releasing);
     assert_eq!(rig.record(0).cloud_id.as_deref(), Some("i-late"));
 }
