@@ -22,6 +22,11 @@ pub(crate) struct Pass<'a> {
     /// Since when each silent host was silent at the last step, and at this one.
     silent: BTreeMap<String, Millis>,
     pub(crate) silent_now: BTreeMap<String, Millis>,
+    /// The machines released this step on their host's silence.
+    pub(crate) silent_released: Vec<String>,
+    /// Since when each machine was missing from a complete view, at the last step and now.
+    missing: BTreeMap<String, Millis>,
+    pub(crate) missing_now: BTreeMap<String, Millis>,
     /// Records for the machines an acquire answer named besides the one wanted, added when
     /// the lists have been read.
     extras: Vec<Record>,
@@ -87,6 +92,9 @@ impl<'a> Pass<'a> {
             quiet_now: BTreeSet::new(),
             silent: state.silent,
             silent_now: BTreeMap::new(),
+            silent_released: Vec::new(),
+            missing: state.missing,
+            missing_now: BTreeMap::new(),
             extras: Vec::new(),
             drawn: 0,
             blocked: BTreeMap::new(),
@@ -120,7 +128,7 @@ impl<'a> Pass<'a> {
     }
 
     /// Revokes the token and forgets the network key of a machine that never was.
-    fn clean_up(&mut self, i: usize) {
+    pub(crate) fn clean_up(&mut self, i: usize) {
         let name = self.records.instances[i].name.clone();
         self.actions.push(Action::Revoke(name.clone()));
         self.actions.push(Action::ForgetNetwork(name));
@@ -411,7 +419,7 @@ impl<'a> Pass<'a> {
             match (record.phase, host) {
                 (Phase::Booting, Some(host)) => self.on_hello(pool, i, host),
                 (Phase::Booting, None) => self.on_boot_wait(pool, i),
-                (Phase::Registered | Phase::Draining, host) => self.on_held(i, host),
+                (Phase::Registered | Phase::Draining, host) => self.on_held(pool, i, host),
                 _ => {}
             }
         }
@@ -432,10 +440,16 @@ impl<'a> Pass<'a> {
     }
 
     /// A machine that has not said hello is given up on `boot_timeout` after its launch,
-    /// the instant its join token was minted from.
+    /// the instant its join token was minted from, and only on a complete registry view: on
+    /// an incomplete one its host may have said hello and be holding work, so the machine is
+    /// held and counted until a complete view still shows no hello.
     fn on_boot_wait(&mut self, pool: &PoolInput, i: usize) {
         let waited = self.now.since(self.records.instances[i].launched_at);
-        if waited >= pool.settings.boot_timeout {
+        let due = [
+            waited >= pool.settings.boot_timeout,
+            self.input.registry_complete,
+        ];
+        if due.into_iter().all(|ok| ok) {
             self.start_release(i);
             self.cool(&pool.settings, CooldownReason::BootFailed);
         }
@@ -448,19 +462,77 @@ impl<'a> Pass<'a> {
     ///   hear from: revoked, forgotten and removed, and gone.
     /// * A host the registry no longer shows: it forgot it (`forget_lost`), so it holds no
     ///   lease, and the machine is still billed and still counted; it is released.
-    /// * A host the registry shows but does not hear from: held and counted, never released
-    ///   on silence, until the provider says it is terminated or not found.
-    fn on_held(&mut self, i: usize, host: Option<&HostFacts>) {
+    /// * A host the registry shows but does not hear from: held and counted while the
+    ///   registry still holds its leases ([`Pass::on_silent`]).
+    fn on_held(&mut self, pool: &PoolInput, i: usize, host: Option<&HostFacts>) {
         let name = self.records.instances[i].name.clone();
         let not_found = self.input.not_found.contains(&name);
-        match (host.map(|host| (host.state, host.mark)), not_found) {
-            (Some((HostState::Live, mark)), _) => self.on_mark(i, mark),
+        match (host, not_found) {
+            (Some(host), _) if host.state == HostState::Live => self.on_mark(i, host.mark),
             (_, true) => {
                 self.start_release(i);
                 self.confirm_gone(i);
             }
-            (None, false) => self.start_release(i),
-            (Some(_), false) => {}
+            (None, false) => self.on_forgotten(pool, i, name),
+            (Some(host), false) => self.on_silent(pool, i, host),
+        }
+    }
+
+    /// A registered or draining machine whose host the registry shows but does not hear
+    /// from. It is held and counted, and `silent` says since when, until the host books
+    /// nothing and has been silent for `unknown_hold`; only then does the machine cost
+    /// money for nothing. A host that holds a lease, a run or a stream, or is set aside
+    /// for work (`Held`, `Reserved`), is never released, whatever else the snapshot says.
+    /// Otherwise:
+    ///
+    /// * the registry marks the host `Releasing` (it booked nothing when it did): the
+    ///   machine is released and named in `silent_released` for the shell to log;
+    /// * the registry's lease grace has given up the leases
+    ///   ([`HostFacts::lease_given_up`]): the host is drained and marked for release, as
+    ///   an idle one is, and the registry checks it is quiet when it runs those actions.
+    ///   Its mark is read back on a later step (`Releasing` above, or `Draining` again if
+    ///   the registry found it busy, when both are asked once more).
+    fn on_silent(&mut self, pool: &PoolInput, i: usize, host: &HostFacts) {
+        let name = self.records.instances[i].name.clone();
+        let hold = pool.settings.unknown_hold;
+        let ripe = self
+            .silent
+            .get(&name)
+            .is_some_and(|since| self.now.since(*since) >= hold);
+        let working = [
+            host.busy,
+            matches!(host.mark, Some(Mark::Held | Mark::Reserved)),
+        ];
+        let due = [ripe, !working.into_iter().any(|work| work)];
+        let marked = host.mark == Some(Mark::Releasing);
+        match (due.into_iter().all(|ok| ok), marked, host.lease_given_up) {
+            (false, _, _) | (true, false, false) => {}
+            (true, true, _) => {
+                self.start_release(i);
+                self.silent_released.push(name);
+            }
+            (true, false, true) => {
+                if self.records.instances[i].phase == Phase::Registered {
+                    self.go(i, Phase::Draining);
+                }
+                self.actions.push(Action::Drain(name.clone()));
+                self.actions.push(Action::ReleaseHost(name));
+            }
+        }
+    }
+
+    /// A machine the registry does not show. It is released only when the view is complete
+    /// and the machine has been missing from every step since one at least `unknown_hold`
+    /// ago: the registry may have restarted or been read in part, and releasing on that
+    /// would cut work. Any step on which the host is shown, or the view is incomplete,
+    /// starts the count over. Until then the machine is held and counted.
+    fn on_forgotten(&mut self, pool: &PoolInput, i: usize, name: String) {
+        if self.input.registry_complete {
+            let since = self.missing.get(&name).copied().unwrap_or(self.now);
+            self.missing_now.insert(name, since);
+            if self.now.since(since) >= pool.settings.unknown_hold {
+                self.start_release(i);
+            }
         }
     }
 
@@ -480,8 +552,8 @@ impl<'a> Pass<'a> {
         }
     }
 
-    /// Notes since when each registered or draining machine whose host the registry shows
-    /// but does not hear from has been silent.
+    /// Notes since when each registered or draining machine whose host the registry does
+    /// not hear from, or does not show, has been silent.
     pub(crate) fn track_silent(&mut self, pool: &PoolInput) {
         let input = self.input;
         for i in self.indices(&pool.settings.pool) {

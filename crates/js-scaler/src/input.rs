@@ -67,6 +67,14 @@ pub struct HostFacts {
     pub mark: Option<Mark>,
     /// Whether the host holds a lease, a run or a stream.
     pub busy: bool,
+    /// Whether the registry books nothing on the host: its lease grace gave up the leases
+    /// it held, or it held none. The shell sets it for a silent host from the lease table,
+    /// and it is `true` for a silent host that has no bookings at all (one that never held
+    /// a lease included); it is `false` for a host that still holds a lease or whose
+    /// bookings the shell cannot read. A silent host marked `Releasing` needs no flag: the
+    /// registry booked nothing on it when it set the mark. The scaler also reads `busy` and
+    /// `mark` and never releases a host that shows work, whatever this says.
+    pub lease_given_up: bool,
 }
 
 /// One pool: its settings, the state of its checks, its offers and what its provider
@@ -82,6 +90,12 @@ pub struct PoolInput {
     /// The machines the provider lists. `None` when the list failed: that is never read as
     /// an empty list.
     pub held: Option<Vec<Held>>,
+    /// The acquire ids the provider holds an unresolved call for: an earlier call of the
+    /// acquire got no answer and may have landed (a provider that answers `Deferred` for
+    /// such an acquire does so with this set). The shell fills it from the provider; a
+    /// `Planned` record with one of these ids is kept when no request waits for it, so its
+    /// retry settles the call instead of leaving a machine nobody counts.
+    pub unresolved: Vec<AcquireId>,
 }
 
 /// The provider's answer to an acquire the caller ran for an earlier step.
@@ -117,6 +131,14 @@ pub struct Input {
     pub waiting: Vec<Waiting>,
     /// The hosts the registry knows.
     pub hosts: Vec<HostFacts>,
+    /// Whether `hosts` is the registry's whole, settled view: every host it holds, read
+    /// after it finished loading its state. The shell sets it `false` for a view it cannot
+    /// vouch for (the registry has just started, a read failed or was partial). A machine
+    /// missing from `hosts` is released only on a complete view, seen missing twice at
+    /// least `unknown_hold` apart, and a booting machine is given up on at `boot_timeout`
+    /// only on a complete view (its host may have said hello and be missing from a partial
+    /// one); on an incomplete one everything is held and counted.
+    pub registry_complete: bool,
     /// Answers to acquires.
     pub acquired: Vec<AcquireResult>,
     /// Answers to releases.

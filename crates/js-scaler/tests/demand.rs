@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use common::*;
 use js_elastic::Offer;
 use js_scaler::{
-    Action, Blocked, HostFacts, HostState, LaunchMode, Mark, Phase, Settings, State, step,
+    Action, Blocked, HostFacts, HostState, LaunchMode, Mark, Phase, Settings, State, StoredOffer,
+    step,
 };
 use js_types::{ExecMode, RequestId};
 
@@ -154,17 +155,19 @@ fn a_free_host_covers_one_request() {
     assert!(acquires(&rig.tick(at(10 * SECOND))).is_empty());
 }
 
-/// Asserts that a host that is busy, marked for another purpose, silent, in another pool
-/// or too small does not cover a request. It catches a free host being counted that
-/// cannot serve the request.
+/// Asserts that a host that is busy, marked for another purpose, silent, in another pool,
+/// too small, or of another operating system or architecture does not cover a request. It
+/// catches a free host being counted that cannot serve the request.
 #[test]
 fn a_host_that_cannot_serve_does_not_cover() {
-    let breakers: [fn(&mut HostFacts); 5] = [
+    let breakers: [fn(&mut HostFacts); 7] = [
         |h| h.busy = true,
         |h| h.mark = Some(Mark::Held),
         |h| h.state = HostState::Lost,
         |h| h.pool = "other".to_owned(),
         |h| h.shape.cpu_millis = 1000,
+        |h| h.shape.os = "macos".to_owned(),
+        |h| h.shape.arch = "aarch64".to_owned(),
     ];
     for break_it in breakers {
         let mut rig = Rig::new(settings("gpu"));
@@ -196,6 +199,24 @@ fn a_machine_on_its_way_covers_one_request_that_fits() {
     rig.input.waiting = vec![big];
     assert!(acquires(&rig.tick(at(10 * SECOND))).is_empty());
     assert_eq!(rig.state.no_offer[&id("r3")], js_elastic::Dimension::Gpus);
+}
+
+/// Asserts that a machine on its way whose offer is of another operating system or
+/// architecture does not cover a request: it catches a machine credited to a request it
+/// cannot serve, which would then wait for a host that never fits.
+#[test]
+fn a_machine_on_its_way_of_another_platform_does_not_cover() {
+    let breakers: [fn(&mut StoredOffer); 2] = [
+        |offer| offer.os = "macos".to_owned(),
+        |offer| offer.arch = "aarch64".to_owned(),
+    ];
+    for break_it in breakers {
+        let mut rig = Rig::new(settings("gpu"));
+        rig.input.waiting = vec![request("r1")];
+        assert_eq!(acquires(&rig.tick(at(0))).len(), 1);
+        break_it(&mut rig.state.records.instances[0].offer);
+        assert_eq!(acquires(&rig.tick(at(5 * SECOND))).len(), 1);
+    }
 }
 
 /// Asserts the choice among offers that fit: the cheaper first; at one price, fewer

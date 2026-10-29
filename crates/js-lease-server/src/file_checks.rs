@@ -50,8 +50,13 @@ pub(crate) fn check_listeners(server: &Server, elastic: bool) -> Result<Vec<Stri
             ));
         }
         if addr.ip().is_unspecified() {
+            // The status pages are on `server.listen` alone.
+            let pages = match key == "server.listen" {
+                true => "; /v1/pools and /status are served only to private peers",
+                false => "",
+            };
             warnings.push(format!(
-                "server: warning: binds all interfaces ({key} {addr})"
+                "server: warning: binds all interfaces ({key} {addr}){pages}"
             ));
         }
     }

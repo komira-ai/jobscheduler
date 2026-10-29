@@ -116,6 +116,50 @@ impl Pass<'_> {
         uncovered
     }
 
+    /// Forgets the launches the provider told to wait that no request waits for any more:
+    /// no waiting request was matched to them. Nothing was sent for one, so its token is
+    /// revoked and its network key forgotten and the record simply goes; kept, it would be
+    /// retried at its time and launch a machine for nobody, or, in a pool that does not
+    /// launch, stay counted for good.
+    ///
+    /// A record whose acquire id the provider holds an unresolved call for
+    /// ([`PoolInput::unresolved`]) is kept even when nobody waits for it: an earlier call
+    /// of the same acquire may have landed, so a machine may exist, and the retry at the
+    /// record's time (the same acquire id, which the provider answers for what it
+    /// launched) is what settles it. Dropped, the machine would show up later as an orphan.
+    ///
+    /// Runs once every request has been matched, before any record is added or removed, so
+    /// the positions in `claims` still hold.
+    pub(crate) fn drop_unwanted(&mut self, claims: &Claims) {
+        let unwanted: Vec<usize> = (0..self.records.instances.len())
+            .filter(|i| {
+                let record = &self.records.instances[*i];
+                let unresolved = self.input.pools.iter().any(|pool| {
+                    [
+                        pool.settings.pool == record.pool,
+                        record
+                            .acquire
+                            .iter()
+                            .any(|acquire| pool.unresolved.contains(acquire)),
+                    ]
+                    .into_iter()
+                    .all(|ok| ok)
+                });
+                [
+                    record.phase == Phase::Planned,
+                    !claims.records.contains(i),
+                    !unresolved,
+                ]
+                .into_iter()
+                .all(|ok| ok)
+            })
+            .collect();
+        for i in unwanted.into_iter().rev() {
+            self.clean_up(i);
+            self.records.instances.remove(i);
+        }
+    }
+
     /// Takes back a draining host that an uncovered request fits: reuse beats a launch. A
     /// registered host the registry still shows draining (an earlier undrain was lost) is
     /// taken back the same way, with no change to its record.
@@ -501,8 +545,9 @@ impl Pass<'_> {
     }
 
     /// Ends the step: forgets the records that no longer count and whose billed time has
-    /// left the day window, writes the records first among the actions if the step changed
-    /// them, and names the requests no offer fits, among those nothing covered.
+    /// left the day window, and the refused ones; writes the records first among the
+    /// actions if the step changed them; and names the requests no offer fits, among those
+    /// nothing covered.
     pub(crate) fn finish(
         mut self,
         before: &Records,
@@ -516,12 +561,18 @@ impl Pass<'_> {
                 .iter()
                 .find(|pool| pool.settings.pool == record.pool)
                 .map_or(Duration::ZERO, |pool| pool.settings.boot_timeout);
-            [
+            // A refused acquire never was a machine and costs nothing: it goes at once, so
+            // a pool that is refused over and over does not grow its records.
+            let costs = [
                 record.counts(),
                 billed_until(record, boot_timeout, now) > now.back(crate::caps::DAY),
+            ];
+            [
+                record.phase != Phase::Refused,
+                costs.into_iter().any(|keep| keep),
             ]
             .into_iter()
-            .any(|keep| keep)
+            .all(|keep| keep)
         });
         let save = (self.records != *before).then(|| Action::Save(Box::new(self.records.clone())));
         let mut actions: Vec<Action> = save.into_iter().collect();
@@ -545,6 +596,8 @@ impl Pass<'_> {
             refused: self.refused,
             quiet,
             silent: self.silent_now,
+            silent_released: self.silent_released,
+            missing: self.missing_now,
         };
         (state, actions)
     }

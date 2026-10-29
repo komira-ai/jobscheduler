@@ -157,7 +157,8 @@ fn an_orphan_of_an_unknown_offer_blocks_launches() {
 
 /// Asserts what does not count: a refused acquire, a machine confirmed gone and a failed
 /// acquire that two clean lists settled leave room in a cap of one machine; a failed
-/// acquire one clean list short, and a launch the provider told to wait, hold it.
+/// acquire one clean list short, and a launch the provider told to wait that a waiting request
+/// is matched to, hold it.
 #[test]
 fn only_machines_that_exist_or_may_exist_count() {
     let mut settled = record(Phase::Failed, 60, 0);
@@ -165,15 +166,11 @@ fn only_machines_that_exist_or_may_exist_count() {
     let mut unsettled = record(Phase::Failed, 60, 0);
     unsettled.clean_lists = 1;
     unsettled.last_clean = Some(at(0));
-    let mut small = record(Phase::Planned, 60, 0);
-    small.offer.cpu_millis = 1000;
-    small.retry_at = Some(at(DAY));
     let cases = [
         (record(Phase::Refused, 60, 0), 1),
         (record(Phase::Gone, 60, 0), 1),
         (settled, 1),
         (unsettled, 0),
-        (small, 0),
     ];
     for (held, expected) in cases {
         let mut limits = settings("gpu");
@@ -181,4 +178,14 @@ fn only_machines_that_exist_or_may_exist_count() {
         let mut rig = rig_with(limits, vec![held]);
         assert_eq!(launches(&mut rig, 5 * SECOND), expected);
     }
+
+    let mut waiting = record(Phase::Planned, 60, 0);
+    waiting.retry_at = Some(at(DAY));
+    let mut limits = settings("gpu");
+    limits.max_instances = 1;
+    let mut rig = rig_with(limits, Vec::new());
+    rig.state.records.instances = vec![waiting];
+    rig.input.waiting = vec![request("r1"), request("r2")];
+    assert_eq!(launches(&mut rig, 5 * SECOND), 0);
+    assert_eq!(rig.phase(0), Phase::Planned);
 }

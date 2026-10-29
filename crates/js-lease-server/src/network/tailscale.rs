@@ -5,7 +5,11 @@ use std::time::Duration;
 
 use js_elastic::{Artifact, BootStep, HostName, SlotName};
 
-use super::{Contribution, FORGET_ATTEMPTS, LaunchCtx, NetworkError, NetworkMode, TailscaleApi};
+use super::{
+    API_BASE, API_TIMEOUT, Contribution, FORGET_ATTEMPTS, LaunchCtx, NetworkError, NetworkMode,
+    OAuthClient, TailscaleApi,
+};
+use crate::adapt::SharedClock;
 
 /// The slot the auth key fills.
 pub const AUTH_KEY_SLOT: &str = "network.tailscale.authkey";
@@ -75,6 +79,22 @@ impl TailscaleMode {
                 settings.tag
             ))),
         }
+    }
+
+    /// The mode for a pool's `network` table: Tailscale's own API at [`API_BASE`], the
+    /// credential's own tailnet, every call bounded by [`API_TIMEOUT`]. Makes no request.
+    ///
+    /// # Errors
+    ///
+    /// [`NetworkError::Misconfigured`] when the tag is not `tag:` and a name.
+    pub fn for_client(
+        client: OAuthClient,
+        tag: String,
+        binary: Artifact,
+        clock: SharedClock,
+    ) -> Result<Self, NetworkError> {
+        let api = TailscaleApi::new(API_BASE, "-", client, clock, API_TIMEOUT)?;
+        Self::new(api, TailscaleSettings { tag, binary })
     }
 
     /// The mode over `api` for a `settings` whose tag is known to pass [`valid_tag`], as

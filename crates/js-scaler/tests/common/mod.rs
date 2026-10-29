@@ -93,6 +93,7 @@ pub fn pool(settings: Settings) -> PoolInput {
         health: Health::Available,
         offers: vec![offer("a10", 60)],
         held: Some(Vec::new()),
+        unresolved: Vec::new(),
     }
 }
 
@@ -108,6 +109,7 @@ pub fn host(name: &str, pool: &str) -> HostFacts {
         },
         mark: None,
         busy: false,
+        lease_given_up: false,
     }
 }
 
@@ -118,6 +120,7 @@ pub fn input(pool: PoolInput) -> Input {
         pools: vec![pool],
         waiting: Vec::new(),
         hosts: Vec::new(),
+        registry_complete: true,
         acquired: Vec::new(),
         released: Vec::new(),
         not_found: Vec::new(),

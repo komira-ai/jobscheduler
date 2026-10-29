@@ -153,6 +153,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sync_wrapper",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1130,6 +1131,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "ureq",
@@ -2638,6 +2640,7 @@ dependencies = [
  "futures-util",
  "pin-project-lite",
  "sync_wrapper",
+ "tokio",
  "tower-layer",
  "tower-service",
 ]
