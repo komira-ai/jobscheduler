@@ -1130,10 +1130,9 @@ What is specific to the stock Lambda image is data the Lambda crate returns from
    that later gives jobs egress names a bridge there, and the rule covers it with no change.
    The rule does not cover every network an engine can make: a rootful `slirp4netns` or
    `pasta` network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
-   or `ipvlan` network never passes the host's forward hook. The agent refuses `host`,
-   `slirp4netns`, `pasta`, `macvlan` and `ipvlan` as `--container-network` names, but it
-   cannot know the driver behind a differently named network, so a pool that names one
-   must be a bridge network. The
+   or `ipvlan` network never passes the host's forward hook. The agent refuses only `host`
+   by name and cannot know the driver behind a network, so a pool that names one must name a
+   bridge network. The
    address is not verified for Lambda (Open questions 5) and is one named constant; the
    IPv6 address of the service is not blocked, because this design does not name one. The
    live checklist (13.4) tests that a container cannot read user data. No job runs before

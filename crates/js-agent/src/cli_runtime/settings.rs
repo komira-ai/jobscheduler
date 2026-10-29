@@ -39,8 +39,7 @@ pub enum SettingsError {
     #[error("--container-bin: not an executable file")]
     BinMissing,
     /// `--container-network` names no network the agent will use: `host` (it would put
-    /// the job on the machine's own network), a mode whose traffic the host's forward
-    /// chain never sees (`slirp4netns`, `pasta`, `macvlan`, `ipvlan`), or text that is not a network name (which
+    /// the job on the machine's own network), or text that is not a network name (which
     /// would let `container:<id>` or an option pass as one).
     #[error("--container-network: not a network name the agent will use")]
     Network,
@@ -381,23 +380,14 @@ impl Settings {
     }
 }
 
-/// Network names the agent refuses besides `host`: a rootful `slirp4netns` or `pasta`
-/// egresses as host uid 0, and `macvlan` and `ipvlan` networks bypass the host's forward
-/// hook, so a firewall rule on the forward chain (the metadata block) would not cover them.
-const UNFILTERED_NETWORKS: [&str; 4] = ["slirp4netns", "pasta", "macvlan", "ipvlan"];
-
-/// `name` when it is a plain network name other than `host` and the names of
-/// [`UNFILTERED_NETWORKS`].
+/// `name` when it is a plain network name other than `host`.
 fn network_name(name: &str) -> Result<&str, SettingsError> {
     let word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     let shaped = (1..=NETWORK_NAME_MAX).contains(&name.len())
         && name.starts_with(|c: char| c.is_ascii_alphanumeric())
         && name.chars().all(word);
     Some(name)
-        .filter(|name| {
-            let refused = |bad: &&str| name.eq_ignore_ascii_case(bad);
-            shaped && !name.eq_ignore_ascii_case("host") && !UNFILTERED_NETWORKS.iter().any(refused)
-        })
+        .filter(|name| shaped && !name.eq_ignore_ascii_case("host"))
         .ok_or(SettingsError::Network)
 }
 

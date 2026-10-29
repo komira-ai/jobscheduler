@@ -15,8 +15,9 @@
 //!   engine made, so one rule on the destination covers every bridge network. It does
 //!   not cover every network an engine can make: a rootful `slirp4netns` or `pasta`
 //!   network egresses as host uid 0, which the `output` chain exempts, and a `macvlan`
-//!   or `ipvlan` network never passes the host's forward hook. The agent refuses those
-//!   four as `--container-network` names, and the agent's unit passes no network at all.
+//!   or `ipvlan` network never passes the host's forward hook. The agent does not refuse
+//!   them by name; the agent's unit passes no network at all, and a pool that names a
+//!   network must name a bridge.
 //! - `output`: packets of a process on the host, dropped for every uid but 0. The agent
 //!   runs as root and the bootstrap's own steps run as root; once the script is done
 //!   neither needs the address, so it is not opened to them by name.
