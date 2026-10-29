@@ -110,9 +110,10 @@ fn restarts_every_ten_minutes_still_reach_the_hold() {
 fn nothing_pending_writes_nothing() {
     let (mut rig, _) = registered(settings("gpu"), "i-1", 2 * SECOND);
     rig.input.hosts[0].busy = true;
+    let written = rig.state.records.last_step;
     for minute in 1..=60 {
         let actions = rig.tick(at(2 * SECOND + minute * MINUTE));
         assert!(actions.is_empty(), "minute {minute}: {:?}", kinds(&actions));
     }
-    assert_eq!(rig.state.records.last_step, None);
+    assert_eq!(rig.state.records.last_step, written);
 }
