@@ -362,10 +362,8 @@ impl Core {
     /// leaves the host in the file; a failed write does not stop the removal.
     fn remove(&self, memory: &mut Memory, host: String) {
         let added = memory.unremoved.insert(host.clone());
-        if added {
-            memory.unremoved_dirty = true;
-            self.flush_unremoved(memory);
-        }
+        memory.unremoved_dirty |= added;
+        self.flush_unremoved(memory);
         self.ask_removal(memory, &host, added);
         self.flush_unremoved(memory);
     }
