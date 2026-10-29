@@ -35,6 +35,7 @@ impl Scheduler {
         self.size_keys.remove(&operation);
         self.max_walls.remove(&operation);
         self.drain.forget(operation);
+        self.admission.forget(operation);
         Some(op.waiters)
     }
 }
