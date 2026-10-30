@@ -99,11 +99,7 @@ fn controls_run_unsandboxed_and_the_rest_under_the_allow_profile() {
         match step.role() {
             Role::Control => {
                 let programs = ["/bin/cat", "/bin/ls", "/usr/bin/stat", "/usr/bin/xattr"];
-                assert!(
-                    programs.iter().any(|p| argv[0] == OsString::from(p)),
-                    "{}",
-                    step.class()
-                );
+                assert!(programs.iter().any(|p| argv[0] == *p), "{}", step.class());
             }
             Role::Denied | Role::Allowed => {
                 assert_eq!(argv[0], OsString::from(SANDBOX_EXEC), "{}", step.class());

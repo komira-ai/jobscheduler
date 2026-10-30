@@ -14,7 +14,7 @@
 (allow file-read* (subpath (param "XCODE_APP")) (literal "/Library/Preferences/com.apple.dt.Xcode.plist"))
 (allow file-read* (subpath "/private/etc/ssl") (subpath "/System/Library/Security"))
 (allow file-read* (literal "/private/etc/localtime") (subpath "/usr/share/zoneinfo"))
-(deny file-read* (literal "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent") (literal "/bin/ps") (literal "/sbin/ping") (literal "/usr/bin/at") (literal "/usr/bin/atq") (literal "/usr/bin/atrm") (literal "/usr/bin/batch") (literal "/usr/bin/crontab") (literal "/usr/bin/login") (literal "/usr/bin/newgrp") (literal "/usr/bin/quota") (literal "/usr/bin/su") (literal "/usr/bin/sudo") (literal "/usr/bin/top") (literal "/usr/libexec/authopen") (literal "/usr/libexec/security_authtrampoline") (literal "/usr/sbin/traceroute") (literal "/usr/sbin/traceroute6"))
+(deny file-read* (literal "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent") (literal "/bin/ps") (literal "/sbin/ping") (literal "/usr/bin/at") (literal "/usr/bin/atq") (literal "/usr/bin/atrm") (literal "/usr/bin/batch") (literal "/usr/bin/crontab") (literal "/usr/bin/login") (literal "/usr/bin/newgrp") (literal "/usr/bin/quota") (literal "/usr/bin/su") (literal "/usr/bin/sudo") (literal "/usr/bin/top") (literal "/usr/bin/write") (literal "/usr/libexec/authopen") (literal "/usr/libexec/security_authtrampoline") (literal "/usr/sbin/postdrop") (literal "/usr/sbin/postqueue") (literal "/usr/sbin/traceroute") (literal "/usr/sbin/traceroute6"))
 (deny file-read* (subpath (param "RD_0")))
 (deny file-write* (subpath (param "RD_0")))
 (deny file-read* (subpath (param "RD_1")))
