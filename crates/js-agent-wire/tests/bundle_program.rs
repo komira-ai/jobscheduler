@@ -5,7 +5,9 @@ mod common;
 
 use common::{expect, job};
 use js_agent_wire::refusal::{self, RefusalClass, bundle_class};
-use js_agent_wire::{BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, JobSpec, NativeSpec, Rule};
+use js_agent_wire::{
+    BUNDLE_ENTRYPOINT_MAX, BUNDLE_PROGRAM_PREFIX, Isolation, JobSpec, NativeSpec, Rule,
+};
 use serde_json::json;
 
 const HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -17,6 +19,7 @@ fn spec(program: &str, bundled: bool) -> JobSpec {
     spec.args = Vec::new();
     spec.gpu_indices = Vec::new();
     spec.mounts = Vec::new();
+    spec.isolation = Isolation::Contained;
     spec.native =
         Some(serde_json::from_value::<NativeSpec>(json!({ "program": program })).unwrap());
     spec.bundle = bundled.then(|| format!("toolchain@sha256:{HEX}"));
