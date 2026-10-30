@@ -785,8 +785,10 @@ impl Local {
 
 /// The `--image-allow` entries, each checked.
 fn image_allow(entries: &[String]) -> Result<Vec<Allow>, String> {
-    let _ = entries;
-    Ok(Vec::<Allow>::new())
+    entries
+        .iter()
+        .map(|entry| Allow::parse(entry).map_err(|why| format!("--image-allow: {why}")))
+        .collect()
 }
 
 impl Local {
