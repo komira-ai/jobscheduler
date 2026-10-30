@@ -1,8 +1,10 @@
 //! A `crun run` the driver started: [`Running`].
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::oci::RunEnd;
+use crate::oci::logs::Capture;
+use crate::oci::{LogTail, RunEnd};
 
 /// A `crun run` driven by the `runc` crate's async client in a thread of its own, on a
 /// one-thread runtime that thread owns. It ends when the container does, and kills
@@ -21,6 +23,8 @@ pub struct Running {
     /// panics.
     ended: tokio::sync::watch::Receiver<Option<RunEnd>>,
     abort: Option<tokio::sync::oneshot::Sender<()>>,
+    /// What the container wrote, for a run that has its output drained.
+    capture: Option<Arc<Capture>>,
 }
 
 impl Running {
@@ -63,7 +67,22 @@ impl Running {
             thread,
             ended,
             abort: Some(abort_tx),
+            capture: None,
         })
+    }
+
+    /// This run, with the output `capture` reads from the container's pipes.
+    pub(crate) fn with_capture(mut self, capture: Arc<Capture>) -> Self {
+        self.capture = Some(capture);
+        self
+    }
+
+    /// What the container has written so far, the last bytes of each stream apart (copied
+    /// out; see [`crate::oci::LogLimits`] for the bounds). Complete once [`Running::wait`]
+    /// returned, up to the output of a process the job left behind. Empty for a run that
+    /// has no output drained.
+    pub fn tail(&self) -> LogTail {
+        self.capture.as_ref().map(|c| c.tail()).unwrap_or_default()
     }
 
     /// Waits until the run has ended. Cancel-safe; may be called again.
@@ -136,6 +155,20 @@ mod tests {
 
     const SOON: Duration = Duration::from_secs(5);
     const PAUSE: Duration = Duration::from_millis(1);
+
+    /// Catches a run without drained output reporting one, and a capture not handed
+    /// through: no output is an empty tail, a capture's bytes are the run's tail.
+    #[tokio::test]
+    async fn a_run_reports_the_tail_of_its_capture_if_it_has_one() {
+        let dir = crate::unit_dir("running-tail");
+        let mut run = Running::spawn("tail".to_owned(), async { RunEnd::Exited(0) }).expect("run");
+        run.wait().await;
+        assert_eq!(run.tail(), LogTail::default());
+        let capture =
+            Arc::new(Capture::create(&dir, crate::oci::LogLimits::default()).expect("files"));
+        let run = run.with_capture(capture);
+        assert_eq!(run.tail(), LogTail::default());
+    }
 
     /// Catches a run whose answer is lost or wrong: the thread's own failures (no
     /// runtime, no thread), a panic in the work (no answer), an abort (twice is the same
