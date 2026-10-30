@@ -137,6 +137,7 @@ fn hello() -> Hello {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             gpus: 1,
+            disk_bytes: 0,
             gpu_class: Some("nvidia-a10".to_owned()),
             max_leases: None,
         },

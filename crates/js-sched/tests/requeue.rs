@@ -27,6 +27,7 @@ fn request() -> Request {
         resources: Resources::new(1_000, GIB),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::default(),
     }
 }

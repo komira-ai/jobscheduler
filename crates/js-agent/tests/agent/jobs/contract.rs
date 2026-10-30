@@ -172,6 +172,26 @@ fn the_contract_capabilities_cannot_be_set_by_flag() {
     }
 }
 
+/// Asserts that an operator cannot give the two disk-quota capabilities with
+/// `--capability` either: the agent ends with status 2 naming the key, and sends nothing.
+/// It catches a pool that names `scratch-quota` admitting a host that merely says so.
+#[test]
+fn flag_cannot_claim_scratch_quota() {
+    for key in ["scratch-quota", "scratch-default-gib"] {
+        let flag = format!("{key}=project");
+        let (ran, sent, _) = run_scripted(
+            &["--capability", flag.as_str()],
+            &linux_host(),
+            vec![welcome(1)],
+            1,
+        );
+        assert_eq!(ran.status(), code(2), "{key}: {}", ran.err);
+        let said = format!("--capability: {key} is detected and cannot be set");
+        assert!(ran.err.contains(&said), "{}", ran.err);
+        assert!(sent.borrow().is_empty(), "{key}");
+    }
+}
+
 /// Asserts that an operator who gave as many capabilities as the wire allows, with
 /// `os` and `arch` among them, gets an agent that ends with status 2 saying the hello is
 /// not acceptable (the contract capabilities no longer fit), before the job half starts

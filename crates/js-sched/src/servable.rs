@@ -114,7 +114,14 @@ pub(crate) struct Servable {
 /// function behind `Scheduler::charge_at` and the figures the score reads, so the two
 /// cannot differ. `cost` is the lease's cost before the clamp to the worker; `profile` is
 /// how it is charged over time, which an action that would own the worker whole is not
-/// (it is charged flat).
+/// (it is charged flat). An action that owns its worker ([`Request::owns_worker`]) is
+/// charged here, as the predicate counts it, at its predicted cost clamped to the worker;
+/// once placed, the ledger holds the worker's whole capacity for it
+/// ([`Worker::charged_whole`]), which [`Scheduler::load_at`] shows. The predicate is not
+/// given the capacity: a worker's own processes make it measured-busy, and the predicate
+/// would refuse every worker.
+///
+/// [`Scheduler::load_at`]: crate::Scheduler::load_at
 pub(crate) fn charge_on(
     worker: &Worker,
     request: &Request,
@@ -193,7 +200,8 @@ impl Servable {
     /// ([`Admission`]) and the ranking is by what the worker is charged
     /// ([`Worker::load_charged`]); under `Off` (the rollback switch) the booked rule and the
     /// booked ranking decide ([`Worker::has_room`], [`Worker::load`]). A whole-machine
-    /// lease, and an action at the whole host's memory, go only to a worker with no lease,
+    /// lease, an action that owns its worker and an action at the whole host's memory go only
+    /// to a worker with no lease,
     /// so every candidate has nothing booked and the first by name is taken. Such an
     /// action waits until some worker's free memory meets its request; nothing reserves a
     /// worker for it.
@@ -265,16 +273,11 @@ impl Servable {
                 worker.load_state.note_cold(now, &adm.cfg);
             }
         }
-        let booked = match request.kind {
-            LeaseKind::WholeMachine => {
-                worker.whole = true;
-                worker.capacity
-            }
-            LeaseKind::Action | LeaseKind::Vm => {
-                worker.whole = worker.exclusive(request);
-                request.resources
-            }
-        };
+        let booked = worker.booking(request);
+        match request.kind {
+            LeaseKind::WholeMachine => worker.whole = true,
+            LeaseKind::Action | LeaseKind::Vm => worker.whole = worker.exclusive(request),
+        }
         worker.booked = worker.booked.saturating_add(booked);
         worker.leases += 1;
         match request.kind {
@@ -466,7 +469,9 @@ impl Servable {
         now: FarmTime,
     ) -> (LeaseCost, Left) {
         let cost = match attempt.request.kind {
-            LeaseKind::Action => clamped(attempt.cost, &worker.capacity),
+            LeaseKind::Action => {
+                worker.charged_whole(attempt.request, clamped(attempt.cost, &worker.capacity))
+            }
             // A VM is charged what it books; a whole-machine lease is not on the ledger.
             LeaseKind::Vm | LeaseKind::WholeMachine => attempt.cost,
         };
@@ -546,7 +551,7 @@ impl Servable {
         let at = self.matching(workers, request);
         self.memo[at].1.iter().any(|&i| {
             let w = &workers[&self.live[i]];
-            w.capacity.fits(&request.resources)
+            w.capacity.fits(&request.demand())
                 && w.capacity.memory_bytes > request.resources.memory_bytes
         })
     }
@@ -555,9 +560,10 @@ impl Servable {
     /// if it still could run it, else the one that could which holds the fewest leases,
     /// then has the least booked, then comes first by name; with `drain` (the workers by
     /// drain cost, cheapest first), the first of those that could. Never one in `reserved`,
-    /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease
-    /// holds a worker (the caller asks only for one); an action at a worker's whole
-    /// memory waits until some worker has no lease, and nothing reserves one for it.
+    /// nor one in `avoid` while [`Servable::fit`] skips it. Only a whole-machine lease or an
+    /// action that owns its worker ([`Request::owns_worker`]) holds a worker (the caller
+    /// asks only for one); an action at a worker's whole memory waits until some worker
+    /// has no lease, and nothing reserves one for it.
     pub(crate) fn reserve(
         &mut self,
         workers: &BTreeMap<WorkerId, Worker>,
@@ -576,7 +582,7 @@ impl Servable {
             .filter(|name| {
                 !reserved.contains(*name)
                     && !skip.contains(*name)
-                    && workers[*name].capacity.fits(&request.resources)
+                    && workers[*name].capacity.fits(&request.demand())
             })
             .collect();
         if let Some(kept) = kept.filter(|kept| candidates.contains(kept)) {
@@ -611,7 +617,7 @@ impl Servable {
             .iter()
             .map(|&i| &self.live[i])
             .filter(|name| {
-                !reserved.contains(*name) && workers[*name].capacity.fits(&request.resources)
+                !reserved.contains(*name) && workers[*name].capacity.fits(&request.demand())
             })
             .collect()
     }
@@ -629,7 +635,7 @@ impl Servable {
         static NONE: BTreeSet<WorkerId> = BTreeSet::new();
         let elsewhere =
             self.memo[at].1.iter().map(|&i| &self.live[i]).any(|name| {
-                !avoid.contains(name) && workers[name].capacity.fits(&request.resources)
+                !avoid.contains(name) && workers[name].capacity.fits(&request.demand())
             });
         if elsewhere { avoid } else { &NONE }
     }
@@ -654,7 +660,7 @@ impl Servable {
                 let w = &workers[*name];
                 serves(&w.caps, request.kind)
                     && request.needs.matches(&w.caps)
-                    && w.capacity.fits(&request.resources)
+                    && w.capacity.fits(&request.demand())
             })
             .collect();
         if could.is_empty() {
@@ -683,7 +689,7 @@ impl Servable {
                 let w = &workers[name];
                 serves(&w.caps, request.kind)
                     && request.needs.matches(&w.caps)
-                    && w.capacity.fits(&request.resources)
+                    && w.capacity.fits(&request.demand())
             })
             .collect()
     }
@@ -741,7 +747,7 @@ impl Servable {
         }
         let large_enough = matching
             .iter()
-            .any(|&i| workers[&self.live[i]].capacity.fits(&request.resources));
+            .any(|&i| workers[&self.live[i]].capacity.fits(&request.demand()));
         if large_enough {
             return Verdict::Servable;
         }

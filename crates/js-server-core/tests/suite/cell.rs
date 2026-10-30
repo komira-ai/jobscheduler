@@ -224,6 +224,7 @@ fn work(n: u64) -> Request {
         // Every fourth action is networked, so it self-fences.
         hermetic: !n.is_multiple_of(4),
         do_not_cache: false,
+        whole_worker: false,
     }
 }
 

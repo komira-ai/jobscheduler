@@ -129,6 +129,24 @@ pub trait FileReader {
     fn is_tmpfs(&self, path: &Path) -> Result<bool, String>;
 }
 
+impl FileReader for Box<dyn FileReader> {
+    fn read(&self, path: &str) -> Result<String, String> {
+        (**self).read(path)
+    }
+
+    fn link(&self, path: &str) -> Result<String, String> {
+        (**self).link(path)
+    }
+
+    fn device(&self, path: &Path) -> Result<u64, String> {
+        (**self).device(path)
+    }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        (**self).is_tmpfs(path)
+    }
+}
+
 /// How long a helper may take to print its output, and again to exit once it has.
 pub const PROBE_LIMIT: Duration = Duration::from_secs(10);
 
@@ -718,6 +736,7 @@ fn accepted(gpus: Gpus) -> Result<Gpus, String> {
             cpu_millis: 0,
             memory_bytes: 0,
             gpus: gpus.count,
+            disk_bytes: 0,
             gpu_class: gpus.class.clone(),
             max_leases: None,
         },

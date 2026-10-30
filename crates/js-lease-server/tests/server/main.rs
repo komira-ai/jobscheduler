@@ -6,6 +6,7 @@
 
 mod agents;
 mod agents_contract;
+mod agents_load;
 mod agents_no_shared_token;
 mod agents_restart;
 mod agents_support;
@@ -21,13 +22,16 @@ mod config_pool_refusals;
 mod config_refusals;
 mod config_serve;
 mod config_support;
+mod config_usage;
 mod gpu_path_pin;
+mod guard_names;
 mod joins;
 mod joins_credential;
 mod joins_revoke;
 mod lambda_e2e;
 mod lambda_e2e_failures;
 mod lambda_e2e_support;
+mod layering;
 mod limits;
 mod memory_percent;
 mod pools_checks;
@@ -54,4 +58,8 @@ mod support;
 #[path = "../network/fake.rs"]
 mod tailnet;
 mod ticks;
+mod timings;
 mod tls;
+mod usage;
+mod usage_keys;
+mod usage_support;

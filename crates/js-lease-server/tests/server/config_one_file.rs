@@ -200,7 +200,13 @@ fn beside() -> Vec<(Vec<&'static str>, String)> {
         key("--write-timeout", "6s"),
         key("--max-requests", "9"),
         key("--drain-timeout", "7s"),
+        key("--usage-db", "/usage.db"),
+        key("--profile-store-bytes", "5"),
     ];
+    rows.push((
+        vec!["--usage-off"],
+        "--usage-off: not allowed with --config; set server.usage_off".to_owned(),
+    ));
     rows.push((
         vec!["--require-host-credential"],
         "--require-host-credential: not allowed with --config; set server.require_host_credential"

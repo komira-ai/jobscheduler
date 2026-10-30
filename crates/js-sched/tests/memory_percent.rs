@@ -16,6 +16,7 @@ fn node() -> Resources {
         leases: Some(64),
         gpus: 2,
         vms: 3,
+        disk_bytes: 40 * GIB,
         ..Resources::new(96_000, 251 * GIB)
     }
 }
@@ -106,8 +107,8 @@ fn requests_above_the_effective_capacity_are_placed_nowhere_else() {
 }
 
 /// Catches: the status showing the reported capacity, the cut applied twice (a second
-/// report cut again, or a report cut from the cut one), and cores, GPUs, VM slots or the
-/// lease cap changed.
+/// report cut again, or a report cut from the cut one), and cores, GPUs, disk, VM slots or
+/// the lease cap changed.
 #[test]
 fn the_capacity_shown_is_the_cut_one_applied_once_and_only_to_memory() {
     let mut r = rig(90);

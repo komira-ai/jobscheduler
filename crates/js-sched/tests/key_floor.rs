@@ -46,6 +46,7 @@ fn request(n: u8, memory: u64) -> Request {
         resources: Resources::new(1_000, memory),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::from_platform([("OSFamily", "linux")]).unwrap(),
     }
 }
@@ -98,6 +99,19 @@ impl Farm {
             instance: DaemonInstance::new(name),
             predecessor_stopped: false,
             capacity: Resources::new(cpus * 1_000, memory_gib * GIB),
+            caps: linux(),
+        };
+        assert!(self.feed(event).is_empty());
+    }
+
+    /// [`Farm::node`] with `disk_gib` GiB of scratch disk.
+    fn node_disk(&mut self, name: &str, cpus: u64, memory_gib: u64, disk_gib: u64) {
+        let event = Event::WorkerUp {
+            worker: w(name),
+            instance: DaemonInstance::new(name),
+            predecessor_stopped: false,
+            capacity: Resources::new(cpus * 1_000, memory_gib * GIB)
+                .with_disk_bytes(disk_gib * GIB),
             caps: linux(),
         };
         assert!(self.feed(event).is_empty());
@@ -183,6 +197,23 @@ fn farm_with_floor_16() -> Farm {
     assert!(f.end(&second, ok()).is_empty());
     assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
     f
+}
+
+both_rules! {
+/// Catches: a key floor applied to an action that owns its worker. With a floor on its
+/// size key it is placed at once on an idle worker, books the whole worker, and leaves
+/// the floor as it was.
+fn a_whole_worker_request_takes_no_key_floor() {
+    let mut f = farm_with_floor_16();
+    let request = Request {
+        whole_worker: true,
+        ..request(2, 4 * GIB)
+    };
+    f.submit_keyed(2, request, KEY);
+    let start = only(f.tick());
+    assert_eq!(start.resources, Resources::new(8_000, 64 * GIB));
+    assert_eq!(f.s.key_floor(KEY), Some(16 * GIB));
+}
 }
 
 both_rules! {
@@ -415,6 +446,15 @@ fn the_bound_is_the_largest_live_node_that_could_run_it() {
     wants.resources = wants.resources.with_gpus(1);
     assert_eq!(f.s.key_floor_bound(&wants), 0);
     wants.resources = Resources::new(1_000, 4 * GIB);
+    // A request for disk counts only the nodes that hold it: none yet, then the one with
+    // 10 GiB, and none again for more than that.
+    wants.resources = wants.resources.with_disk_bytes(5 * GIB);
+    assert_eq!(f.s.key_floor_bound(&wants), 0, "no node has the disk");
+    f.node_disk("disky", 8, 24, 10);
+    assert_eq!(f.s.key_floor_bound(&wants), 24 * GIB);
+    wants.resources = wants.resources.with_disk_bytes(11 * GIB);
+    assert_eq!(f.s.key_floor_bound(&wants), 0, "more than any node holds");
+    wants.resources = Resources::new(1_000, 4 * GIB);
     // A silent node is not live.
     f.advance(LEASE_GRACE + Duration::from_secs(1));
     f.heartbeat("small", &[]);
@@ -429,6 +469,24 @@ fn the_bound_is_the_largest_live_node_that_could_run_it() {
     assert_eq!(empty.s.key_floor_bound(&wants), 0);
     empty.submit_keyed(1, request(1, 4 * GIB), KEY);
     assert!(empty.tick().is_empty());
+}
+}
+
+both_rules! {
+/// Catches the digest's cap taken from nodes that cannot hold its disk: a 64 GiB node
+/// with no disk must not lift the cap of an action that asks for disk, so the kill at
+/// 4 GiB retries at the 8 GiB of the only node that could run it, not at 16.
+fn the_cap_counts_only_nodes_with_the_disk() {
+    let mut f = Farm::new();
+    f.node_disk("a", 8, 8, 10);
+    f.node_disk("b", 8, 64, 0);
+    let mut asks = request(1, 4 * GIB);
+    asks.resources = asks.resources.with_disk_bytes(5 * GIB);
+    f.submit_keyed(1, asks, KEY);
+    let first = only(f.tick());
+    assert_eq!(first.worker, w("a"));
+    let rerun = f.killed(&first);
+    assert_eq!(rerun.resources.memory_bytes, 8 * GIB, "the cap of node a");
 }
 }
 

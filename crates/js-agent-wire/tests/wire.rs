@@ -186,6 +186,7 @@ fn round_trip_of_every_message() {
         cpu_millis: 1,
         memory_bytes: 1,
         gpus: 0,
+        disk_bytes: 0,
         gpu_class: None,
         max_leases: None,
     };

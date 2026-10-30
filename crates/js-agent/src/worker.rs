@@ -23,6 +23,11 @@
 //!   needs no `Send` bound. The lifecycle is built (and the containers the previous
 //!   process left are adopted) before [`Worker::start`] returns, so the first hello can
 //!   list them.
+//! - **The worker samples the usage** of the leases that run, once per heartbeat interval,
+//!   when `--actions-cgroup` is given: after a step it asks its [`Collector`] whether a
+//!   window has passed and, if so, reads the cgroup files on its own thread and publishes
+//!   the reading in the [`Outbox`] the session takes it from. The session never reads a
+//!   cgroup file.
 //! - **A whole-node lease is prepared on the worker's thread.** The post-job checks and the
 //!   readiness hook block, so the session asks through [`WorkerHost`]: it sends a prepare or
 //!   restore order without waiting and reads the last answer the worker published, which
@@ -97,6 +102,7 @@ use crate::readiness::{HookWindow, WorkerHook};
 mod quiesce;
 
 use crate::system::{Machine, RuntimeBuild, SharedClock};
+use crate::usage::{Collector, Outbox};
 use quiesce::take_asked;
 pub use quiesce::{LeaseAnswers, WorkerHost};
 
@@ -147,6 +153,9 @@ pub struct Plan {
     pub machine: Arc<dyn Machine>,
     /// How long the worker waits for an order before it steps by itself.
     pub step_every: Duration,
+    /// Where the usage of the leases is published for the session to take. Without it, or
+    /// without `--actions-cgroup` in the settings, nothing is sampled.
+    pub usage: Option<Arc<Outbox>>,
     /// The bound of the [`Rescue`] in place of [`RESCUE_BOUND`]: for a test.
     pub rescue_bound: Option<Duration>,
     /// The readiness hook the worker runs for a whole-node lease whose host it found quiet;
@@ -502,11 +511,11 @@ impl Worker {
                 Err(why) => {
                     let _ = ready.send(Err(why));
                 }
-                Ok((life, lines)) => {
+                Ok((life, usage, lines)) => {
                     own.publish(Snapshot::of(&life), &LeaseAnswers::default(), lines);
                     let _ = ready.send(Ok(()));
                     let seams = (step_every, stop_grace);
-                    work(life, hook, (&inbox, &own, &thread_clock), seams);
+                    work(life, usage, hook, (&inbox, &own, &thread_clock), seams);
                 }
             }
         });
@@ -653,9 +662,13 @@ impl Worker {
     }
 }
 
-/// The lifecycle, built and with the previous process's containers adopted, and the lines
-/// to print about it.
-fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), String> {
+/// What `build` makes: the lifecycle, the usage collector when there is one, and the lines
+/// to print.
+type Built = (Lifecycle, Option<Collector>, Vec<String>);
+
+/// The lifecycle, built and with the previous process's containers adopted, the collector of
+/// the usage, and the lines to print about them.
+fn build(plan: Plan, clock: SharedClock) -> Result<Built, String> {
     let Plan {
         config,
         settings,
@@ -663,6 +676,7 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
         platform,
         watch,
         machine,
+        usage,
         ..
     } = plan;
     let stop_grace = config.stop_grace;
@@ -681,12 +695,29 @@ fn build(plan: Plan, clock: SharedClock) -> Result<(Lifecycle, Vec<String>), Str
     let (life, events) = Lifecycle::adopt(config, runtime, Box::new(checks), Box::new(clock))
         .map_err(|why| format!("cannot list the containers of an earlier run: {why}"))?;
     lines.extend(describe(&events));
-    Ok((life, lines))
+    let collector = usage.and_then(|outbox| match settings.actions_cgroup() {
+        Some(dir) => Some(Collector::new(
+            machine.cgroup_files(),
+            dir,
+            machine.usage_clock(),
+            outbox,
+        )),
+        None => {
+            lines.push(NO_ACTIONS_CGROUP.to_owned());
+            None
+        }
+    });
+    Ok((life, collector, lines))
 }
+
+/// Why the heartbeat carries no load.
+const NO_ACTIONS_CGROUP: &str =
+    "usage: --actions-cgroup is not given: the heartbeat carries no load";
 
 /// The worker's loop: an order or a step interval, then a step, then a publication.
 fn work(
     mut life: Lifecycle,
+    mut usage: Option<Collector>,
     hook: Option<WorkerHook>,
     (inbox, shared, clock): (&Receiver<Order>, &Shared, &SharedClock),
     (step_every, stop_grace): (Duration, Duration),
@@ -759,6 +790,15 @@ fn work(
         }
         lines.extend(describe(&life.step()));
         answers.follow(life.exclusive());
+        let sampled = usage
+            .as_mut()
+            .filter(|collector| collector.due())
+            .map(|collector| {
+                let mut said = life.find_cgroups();
+                said.extend(collector.run(&life.running()));
+                said
+            });
+        lines.extend(sampled.into_iter().flatten());
         shared.publish(Snapshot::of(&life), &answers, lines);
         shared.busy_until.store(0, Ordering::SeqCst);
         settle.iter().for_each(|done| {

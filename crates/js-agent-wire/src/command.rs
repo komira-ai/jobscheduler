@@ -35,6 +35,12 @@ pub struct Limits {
     pub cpu_millis: u64,
     /// Bytes of memory; above zero.
     pub memory_bytes: u64,
+    /// The most bytes of scratch disk the job may use, when bounded; above zero and at
+    /// most [`limits::MAX_DISK_BYTES`] when present. An agent from before the field
+    /// ignores it and runs the job unbounded, so a server places a job that sets it only
+    /// on a host that reports the `scratch-quota` capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_bytes: Option<u64>,
     /// The most processes the job may hold, when bounded; above zero when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pids: Option<u64>,
@@ -57,6 +63,14 @@ impl Limits {
             1,
             limits::MAX_MEMORY_BYTES,
         )?;
+        if let Some(disk) = self.disk_bytes {
+            check::range(
+                at.field("limits.disk_bytes"),
+                disk,
+                1,
+                limits::MAX_DISK_BYTES,
+            )?;
+        }
         if let Some(pids) = self.pids {
             check::range(at.field("limits.pids"), pids, 1, limits::MAX_PIDS)?;
         }
@@ -313,6 +327,9 @@ impl JobSpec {
             self.limits.cpu_millis > shape.cpu_millis,
             self.limits.memory_bytes > shape.memory_bytes,
             gpus > shape.gpus,
+            self.limits
+                .disk_bytes
+                .is_some_and(|disk| disk > shape.disk_bytes),
         ];
         if over.into_iter().any(|bad| bad) {
             return Err(at.fail(Rule::Inconsistent));

@@ -61,11 +61,18 @@
 //!
 //! The client decodes nothing: layer bytes go to the caller as they were stored.
 //!
+//! Where the bytes come from is a [`BundleSource`]: a [`Repository`] of a registry, or a
+//! [`Layout`], an OCI image-layout directory on disk (a release asset unpacked for a host
+//! with no registry, or a test). Both run the same checks (the manifest's digest, kind,
+//! limits and index refusal, and each blob's length and digest), so what one accepts the
+//! other accepts, and the bytes are the same. A layout is read without following a
+//! symlink below its root and refuses a version it does not know.
+//!
 //! ```ignore
 //! let client = Client::new(Policy::new(vec![Allow::parse("ghcr.io/komira-ai/")?]));
 //! let repo = client.repository(Location::parse("ghcr.io/komira-ai/bundle")?)?;
 //! let kind = Kind::bundle();
-//! let manifest = repo.fetch_manifest(&pin, &kind).await?;
+//! let manifest = repo.fetch_manifest(&pin, &kind).await?; // with `BundleSource` in scope
 //! let config = repo.fetch_config(&manifest, &kind).await?;
 //! for layer in manifest.layers() {
 //!     repo.fetch_blob(layer, &mut sink).await?;
@@ -76,15 +83,20 @@ mod client;
 mod digest;
 mod error;
 mod http;
+mod layout;
 mod location;
 mod manifest;
 mod policy;
+mod source;
 mod text;
+mod verify;
 
 pub use client::{BlobSink, Client, Repository};
 pub use digest::Digest;
 pub use error::Error;
 pub use http::{RootSummary, Timeouts};
+pub use layout::{Layout, LayoutFault};
 pub use location::{Authority, Location};
 pub use manifest::{Descriptor, Kind, Limits, Manifest, Platform, media};
 pub use policy::{AddressClass, Allow, Policy, classify};
+pub use source::BundleSource;
