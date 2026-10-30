@@ -144,6 +144,15 @@
 //! step that sees a pool in plan ends its go), after which it can be taken out. `GET
 //! /v1/pools` shows `launch` as the mode the pool is in now (`plan` once `live_until` has
 //! passed) and `live_until_ms`.
+//!
+//! Rolling back to a server older than the totals: it reads the records file, but its next
+//! save drops `go` and `pool_kinds` and it forgets records after 24 hours. After rolling forward
+//! again the budget since the go starts afresh at the pool's next launch (the old go and what
+//! was settled into it are forgotten), and the month window holds only the days since the
+//! rollback, for up to 30 days. For that period tighten the totals, or hold the pools in
+//! `plan`. A retry of a launch the provider told to wait (a `Planned` record), made when the
+//! pool has no go, begins none: that launch is outside any go, and is bounded by the day and
+//! month totals only.
 //! `launch` is `plan` unless the file says `live`: a pool in `plan` launches nothing, and
 //! one that is `live` launches machines for requests that wait, within `max_instances`,
 //! `max_spend_per_hour` and `max_spend_per_day`, and releases them when they have been

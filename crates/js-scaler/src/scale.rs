@@ -425,6 +425,10 @@ impl Pass<'_> {
     /// a launch: it is checked against every cap again, with the machines of the pool other
     /// than itself, and one that does not fit stays planned and shows the cap. Returns how
     /// many were sent.
+    ///
+    /// A retry begins no go: it stages nothing, and the go is begun by the launch step. A pool
+    /// that returns to live holding a `Planned` record retries it before the launch step, so
+    /// that launch is outside any go and is bounded by the day and month totals only.
     fn retry_planned(&mut self, settings: &Settings) -> usize {
         let due: Vec<usize> = self
             .indices(&settings.pool)

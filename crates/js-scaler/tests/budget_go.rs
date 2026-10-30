@@ -186,3 +186,20 @@ fn only_the_caps_have_a_name_on_the_status() {
         assert_eq!(other.cap_name(), None);
     }
 }
+
+/// Asserts the case the comment of `retry_planned` names: a live pool with no go that holds a
+/// `Planned` record whose time has come retries it, and the retry begins no go (the launch
+/// step does, and it stages nothing here because the record covers the waiting request). So
+/// that launch is outside any go. It catches a retry that begins a go on its own, which the
+/// design does not intend, or one that is not sent.
+#[test]
+fn a_retry_of_a_planned_launch_begins_no_go() {
+    let mut rig = Rig::new(settings("gpu"));
+    let mut waiting = record(js_scaler::Phase::Planned, 60, 0);
+    waiting.retry_at = Some(at(SECOND));
+    rig.state.records.instances = vec![waiting];
+    rig.input.waiting = vec![request("r1")];
+    let actions = rig.tick(at(2 * SECOND));
+    assert_eq!(acquires(&actions).len(), 1);
+    assert!(rig.state.records.go.is_empty());
+}
