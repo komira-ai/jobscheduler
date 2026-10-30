@@ -48,6 +48,7 @@ fn request(cpu_millis: u64) -> Request {
         needs: js_caps::Request::parse([("arch", "arm64")]).expect("a valid request"),
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
     }
 }
 

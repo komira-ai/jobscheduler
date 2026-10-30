@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{billed_until, check, choose, nearest_miss, unpriced};
+use crate::budget;
+use crate::caps::{check, choose, nearest_miss, unpriced};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -31,7 +32,11 @@ pub(crate) struct Claims {
 
 /// The actions that start a launch: the join token, valid for `valid_for`, then the
 /// acquire.
-fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = Action> {
+fn launch_actions(
+    record: &Record,
+    valid_for: Duration,
+    lifetime: Option<Duration>,
+) -> impl Iterator<Item = Action> {
     let mint = Action::Mint {
         host: record.name.clone(),
         valid_for,
@@ -43,6 +48,7 @@ fn launch_actions(record: &Record, valid_for: Duration) -> impl Iterator<Item = 
             pool: record.pool.clone(),
             name: record.name.clone(),
             offer: record.offer.to_offer(record.price_cents_per_hour),
+            lifetime,
         }))
     });
     [Some(mint), acquire].into_iter().flatten()
@@ -76,8 +82,9 @@ impl Pass<'_> {
     }
 
     /// Matches requests greedily, in queue order, to a free host that fits and is not set
-    /// aside, then to a machine on its way whose offer fits. A request left over is
-    /// uncovered.
+    /// aside, then to a machine on its way whose offer fits, or to a restored machine
+    /// still awaited (its host has not said hello since the restart, `boot_timeout` not yet
+    /// run from it) whose offer fits. A request left over is uncovered.
     pub(crate) fn cover<'w>(
         &self,
         pool: &PoolInput,
@@ -89,7 +96,10 @@ impl Pass<'_> {
         for request in waiting {
             let host = self.input.hosts.iter().find(|host| {
                 let condemned = self.records.instances.iter().any(|record| {
-                    (record.condemned, record.name.as_str()) == (true, host.id.as_str())
+                    let ending = [record.condemned, self.aged(record, &pool.settings)]
+                        .into_iter()
+                        .any(|ending| ending);
+                    (ending, record.name.as_str()) == (true, host.id.as_str())
                 });
                 [
                     host.pool == name,
@@ -117,7 +127,8 @@ impl Pass<'_> {
                 .position(|(i, record)| {
                     [
                         record.pool == name,
-                        COMING.contains(&record.phase),
+                        COMING.contains(&record.phase)
+                            || self.awaited(record, pool.settings.boot_timeout),
                         !claims.records.contains(&i),
                         record.offer.to_offer(0).fit(&request.demand).is_ok(),
                     ]
@@ -206,6 +217,7 @@ impl Pass<'_> {
                     record.pool == name,
                     [Phase::Draining, Phase::Registered].contains(&record.phase),
                     !record.condemned,
+                    !self.aged(record, &pool.settings),
                     !claims.hosts.contains(&record.name),
                     serves,
                 ]
@@ -244,6 +256,7 @@ impl Pass<'_> {
                     record.phase == Phase::Registered,
                     marked,
                     !claims.hosts.contains(&record.name),
+                    !self.aged(record, &pool.settings),
                 ]
                 .into_iter()
                 .all(|ok| ok)
@@ -267,18 +280,31 @@ impl Pass<'_> {
             let marked = host_named(input, &name)
                 .filter(|host| (host.state, host.mark) == (HostState::Live, Some(Mark::Draining)));
             if let Some(host) = marked {
-                if host.busy {
-                    self.go(i, Phase::Registered);
-                    self.actions.push(Action::Undrain(name));
-                } else {
-                    self.actions.push(Action::ReleaseHost(name));
+                // A busy host that reached `max_age` stays draining: the mark cuts no work,
+                // and taking it back would let it live on.
+                let retiring = self.aged(&self.records.instances[i], &pool.settings);
+                match (host.busy, retiring) {
+                    (false, _) => self.actions.push(Action::ReleaseHost(name)),
+                    (true, true) => {}
+                    (true, false) => {
+                        self.go(i, Phase::Registered);
+                        self.actions.push(Action::Undrain(name));
+                    }
                 }
             }
         }
     }
 
-    /// Drains a registered host that has been quiet for `idle` and that no request is
-    /// matched to. A condemned host is drained as soon as it is quiet.
+    /// Whether `record`'s machine has reached the pool's `max_age`, counted from its launch.
+    /// The launch time is in the records, so a restart does not start it again, and the
+    /// time the scaler was down counts: the cloud bills through it.
+    pub(crate) fn aged(&self, record: &Record, settings: &Settings) -> bool {
+        settings.aged(record.launched_at, self.now)
+    }
+
+    /// Drains a registered host that has been quiet for `idle` (and has lived
+    /// `min_host_lifetime`) and that no request is matched to. A condemned host is drained
+    /// as soon as it is quiet. A host that reached `max_age` is retired, busy or not.
     fn drain_idle(&mut self, pool: &PoolInput, claims: &Claims) {
         let input = self.input;
         let registered: Vec<usize> = self
@@ -290,6 +316,18 @@ impl Pass<'_> {
             let record = &self.records.instances[i];
             let name = record.name.clone();
             let condemned = record.condemned;
+            let launched = record.launched_at;
+            if self.aged(record, &pool.settings) {
+                // Retired whether or not it is busy. A host the registry does not hear from
+                // is left to the silence rules, and the cloud's lifetime.
+                let live =
+                    host_named(input, &name).is_some_and(|host| host.state == HostState::Live);
+                if live {
+                    self.go(i, Phase::Draining);
+                    self.actions.push(Action::Retire(name));
+                }
+                continue;
+            }
             let quiet = host_named(input, &name).is_some_and(|host| {
                 [
                     host.state == HostState::Live,
@@ -304,7 +342,10 @@ impl Pass<'_> {
                 .all(|ok| ok)
             {
                 let since = *self.quiet.entry(name.clone()).or_insert(self.now);
-                let ripe = self.now.since(since) >= pool.settings.idle;
+                let grown = self.now.since(launched) >= pool.settings.min_host_lifetime;
+                let ripe = [self.now.since(since) >= pool.settings.idle, grown]
+                    .into_iter()
+                    .all(|ok| ok);
                 if [condemned, ripe].into_iter().any(|ok| ok) {
                     self.go(i, Phase::Draining);
                     // A condemned host is also marked for release at once: each call is
@@ -384,6 +425,10 @@ impl Pass<'_> {
     /// a launch: it is checked against every cap again, with the machines of the pool other
     /// than itself, and one that does not fit stays planned and shows the cap. Returns how
     /// many were sent.
+    ///
+    /// A retry begins no go: it stages nothing, and the go is begun by the launch step. A pool
+    /// that returns to live holding a `Planned` record retries it before the launch step, so
+    /// that launch is outside any go and is bounded by the day and month totals only.
     fn retry_planned(&mut self, settings: &Settings) -> usize {
         let due: Vec<usize> = self
             .indices(&settings.pool)
@@ -410,7 +455,18 @@ impl Pass<'_> {
                 .map(|(_, record)| record.clone())
                 .collect();
             let price = self.records.instances[i].price_cents_per_hour;
-            match check(settings, self.now, &others, &[], &BTreeSet::new(), price) {
+            let within =
+                check(settings, self.now, &others, &[], &BTreeSet::new(), price).and_then(|()| {
+                    budget::check(
+                        self.input,
+                        &self.records,
+                        settings,
+                        self.now,
+                        (&others, &[]),
+                        price,
+                    )
+                });
+            match within {
                 Ok(()) => {
                     self.go(i, Phase::Launching);
                     let now = self.now;
@@ -419,8 +475,11 @@ impl Pass<'_> {
                     record.retry_at = None;
                     record.attempt += 1;
                     record.token_expires = Some(now.plus(settings.token_life()));
-                    self.actions
-                        .extend(launch_actions(record, settings.token_life()));
+                    self.actions.extend(launch_actions(
+                        record,
+                        settings.token_life(),
+                        settings.lifetime(),
+                    ));
                     sent += 1;
                 }
                 Err(blocked) => {
@@ -439,7 +498,7 @@ impl Pass<'_> {
         uncovered: Vec<&'w Waiting>,
     ) -> Vec<&'w Waiting> {
         let settings = &pool.settings;
-        let live = settings.launch == LaunchMode::Live;
+        let live = settings.mode(self.now) == LaunchMode::Live;
         if let Some(blocked) = self.gate(pool) {
             self.blocked.insert(settings.pool.clone(), blocked);
             return uncovered;
@@ -459,6 +518,13 @@ impl Pass<'_> {
         let mut left = Vec::new();
         let mut stopped = None;
         let mut no_price = false;
+        // The go begins before anything is staged, so that the budget since the go counts the
+        // launches staged in this step (with `max_step` above one, the second is checked
+        // against the first); it is taken back if nothing is staged.
+        let fresh = live && !self.records.go.contains_key(&settings.pool);
+        if fresh {
+            self.begin_go(&settings.pool);
+        }
         for request in uncovered {
             let room = [
                 stopped.is_none(),
@@ -487,14 +553,23 @@ impl Pass<'_> {
             }
         }
         let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
+        if fresh && staged.is_empty() {
+            self.records.go.remove(&settings.pool);
+        }
         if live {
             if let Some(blocked) = stopped {
                 self.blocked.insert(settings.pool.clone(), blocked);
             }
             self.drawn += staged.len();
+            if !staged.is_empty() {
+                self.note_kind(settings);
+            }
             for record in staged {
-                self.actions
-                    .extend(launch_actions(&record, settings.token_life()));
+                self.actions.extend(launch_actions(
+                    &record,
+                    settings.token_life(),
+                    settings.lifetime(),
+                ));
                 self.records.instances.push(record);
             }
         } else {
@@ -529,6 +604,15 @@ impl Pass<'_> {
             &self.records.instances,
             staged,
             &BTreeSet::new(),
+            price,
+        )?;
+        let records = (self.records.instances.as_slice(), staged);
+        budget::check(
+            self.input,
+            &self.records,
+            settings,
+            self.now,
+            records,
             price,
         )?;
         let bits = self
@@ -583,25 +667,7 @@ impl Pass<'_> {
     ) -> (State, Vec<Action>) {
         let now = self.now;
         let input: &Input = self.input;
-        self.records.instances.retain(|record| {
-            let boot_timeout = input
-                .pools
-                .iter()
-                .find(|pool| pool.settings.pool == record.pool)
-                .map_or(Duration::ZERO, |pool| pool.settings.boot_timeout);
-            // A refused acquire never was a machine and costs nothing: it goes at once, so
-            // a pool that is refused over and over does not grow its records.
-            let costs = [
-                record.counts(),
-                billed_until(record, boot_timeout, now) > now.back(crate::caps::DAY),
-            ];
-            [
-                record.phase != Phase::Refused,
-                costs.into_iter().any(|keep| keep),
-            ]
-            .into_iter()
-            .all(|keep| keep)
-        });
+        self.forget();
         self.records.silent_since = self.silent_now.clone();
         self.records.missing_since = self.missing_now.clone();
         // The time of the step is written with the records and never alone, so a restart
@@ -634,7 +700,38 @@ impl Pass<'_> {
             .into_iter()
             .filter(|(name, _)| self.quiet_now.contains(name))
             .collect();
+        // The window closes for a machine whose host is live, whose record has left the
+        // registered phase, or whose `boot_timeout` has run from the restart. A pool absent
+        // from this step's input does not close it: the absence may be a moment's (a pool
+        // list that failed to load), so the window is taken as not yet run out. `cover` asks
+        // the pool for its `boot_timeout`, so nothing is covered for a pool while it is
+        // absent either.
+        let awaiting = std::mem::take(&mut self.awaiting)
+            .into_iter()
+            .filter(|(name, restart)| {
+                let record = self
+                    .records
+                    .instances
+                    .iter()
+                    .find(|record| record.name == *name);
+                let window = record.and_then(|record| {
+                    input
+                        .pools
+                        .iter()
+                        .find(|pool| pool.settings.pool == record.pool)
+                        .map(|pool| pool.settings.boot_timeout)
+                });
+                [
+                    record.is_some_and(|record| record.phase == Phase::Registered),
+                    window.is_none_or(|window| now.since(*restart) < window),
+                    host_named(input, name).is_none_or(|host| host.state != HostState::Live),
+                ]
+                .into_iter()
+                .all(|ok| ok)
+            })
+            .collect();
         let state = State {
+            awaiting,
             records: self.records,
             blocked: self.blocked,
             plan: self.plan,

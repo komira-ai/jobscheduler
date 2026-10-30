@@ -163,6 +163,7 @@ pub fn ask_as(scheduler: &str, acquire: &str) -> AcquireRequest {
         name: HostName::derive(&SchedulerId::new(scheduler).unwrap(), &acquire),
         acquire,
         pool: "pool-a".to_owned(),
+        lifetime: None,
         offer: candidate("region-a"),
         labels: Vec::new(),
         payload: BootPayload::new(String::new()),

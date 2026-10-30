@@ -28,6 +28,7 @@ fn request(kind: LeaseKind, platform: &[(&str, &str)], resources: Resources) -> 
         resources,
         hermetic: true,
         do_not_cache: false,
+        whole_worker: false,
         needs: js_caps::Request::from_platform(platform.iter().copied()).unwrap(),
     }
 }
@@ -306,6 +307,15 @@ fn display_of_each_variant_is_pinned() {
             },
             "the 1 live worker(s) that satisfy the action's platform are all smaller than \
              its request (500 millicores, 7 bytes of memory, 2 GPU(s), 3 VM slot(s))",
+        ),
+        (
+            Unservable::TooLarge {
+                matching: 2,
+                asked: Resources::new(500, 7).with_disk_bytes(4096),
+            },
+            "the 2 live worker(s) that satisfy the action's platform are all smaller than \
+             its request (500 millicores, 7 bytes of memory, 0 GPU(s), 0 VM slot(s), \
+             4096 bytes of disk)",
         ),
     ];
     for (cause, text) in cases {

@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::cli_runtime::{CliRuntime, Settings, system_runner, unix_ms};
-use crate::facts::Platform;
+use crate::facts::{FileReader, Platform, SystemFiles};
 use crate::integrity::{HostView, ProcHost};
 use crate::lifecycle::{Clock, Runtime};
+use crate::usage::UsageClock;
 
 /// A monotonic clock both threads of the agent may read.
 pub type SharedClock = Arc<dyn Clock + Send + Sync>;
@@ -53,6 +54,28 @@ pub trait Machine: Send + Sync {
 
     /// The host the post-job checks read. Called on the worker thread.
     fn view(&self) -> Box<dyn HostView>;
+
+    /// The clock the usage is timed by, microseconds on the same monotonic clock as
+    /// [`Machine::clock`] (the same zero), which a lease's start is stamped on. Called once,
+    /// on the worker thread. By default the clock of the jobs in whole milliseconds.
+    fn usage_clock(&self) -> Box<dyn UsageClock> {
+        Box::new(Milliseconds(self.clock()))
+    }
+
+    /// The files the cgroup tree is read from. Called once, on the worker thread. By
+    /// default the machine's own.
+    fn cgroup_files(&self) -> Box<dyn FileReader> {
+        Box::new(SystemFiles)
+    }
+}
+
+/// The clock of the jobs read as microseconds, a millisecond at a time.
+struct Milliseconds(SharedClock);
+
+impl UsageClock for Milliseconds {
+    fn now_usec(&self) -> u64 {
+        self.0.now_ms().saturating_mul(1000)
+    }
 }
 
 /// The machine the agent runs on.
@@ -76,12 +99,18 @@ impl Default for System {
     }
 }
 
-/// Milliseconds since an instant, on the monotonic clock.
+/// Time since an instant, on the monotonic clock.
 struct Monotonic(Instant);
 
 impl Clock for Monotonic {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+impl UsageClock for Monotonic {
+    fn now_usec(&self) -> u64 {
+        u64::try_from(self.0.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 }
 
@@ -101,5 +130,9 @@ impl Machine for System {
 
     fn view(&self) -> Box<dyn HostView> {
         Box::new(ProcHost::system())
+    }
+
+    fn usage_clock(&self) -> Box<dyn UsageClock> {
+        Box::new(Monotonic(self.origin))
     }
 }

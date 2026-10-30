@@ -1,9 +1,12 @@
 //! What one step reads: demand, pools and their offers, hosts, and the answers the
 //! caller got from the provider since the last step.
 
+use std::time::Duration;
+
 use js_elastic::{AcquireId, Acquired, Demand, Held, Offer, Released, SchedulerId};
 use js_types::{HostId, RequestId};
 
+use crate::budget::Budgets;
 use crate::settings::{Health, Settings};
 
 /// One whole-node request on the registry's wait list (`js_registry::Waiting`), in queue
@@ -37,7 +40,12 @@ pub enum Mark {
 ///
 /// Only `Live` is acted on: a host in either other state covers no request, is never
 /// drained and is never released on its silence. The registry keeps the host's booking in
-/// both, and so does the scaler.
+/// both, and so does the scaler. The host covers nothing, but the machine it stands for does
+/// while the scaler is new and the host has not said hello since the restart: until then,
+/// for `boot_timeout` from the restart, the machine's stored offer covers a request it
+/// fits, so the request is not given a second machine. Only a machine in the registered
+/// phase is awaited, not a draining one: a draining machine takes no new lease, so it could
+/// not serve the request it would hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostState {
     /// Said hello or heartbeat within grace.
@@ -182,4 +190,25 @@ pub struct Input {
     /// randomness of its own; the caller draws these from a source of entropy and never
     /// repeats one.
     pub entropy: Vec<[u8; 16]>,
+    /// The server-wide totals ([`Budgets`]); none by default.
+    pub budgets: Budgets,
+}
+
+impl Input {
+    /// The `boot_timeout` of the pool named `pool`, or zero for a pool this input does not
+    /// have (its records are billed the minimum).
+    pub(crate) fn boot_timeout(&self, pool: &str) -> Duration {
+        self.pools
+            .iter()
+            .find(|each| each.settings.pool == pool)
+            .map_or(Duration::ZERO, |each| each.settings.boot_timeout)
+    }
+
+    /// The provider kind of the pool named `pool`, if this input has the pool.
+    pub(crate) fn kind_of(&self, pool: &str) -> Option<&String> {
+        self.pools
+            .iter()
+            .find(|each| each.settings.pool == pool)
+            .map(|each| &each.settings.kind)
+    }
 }

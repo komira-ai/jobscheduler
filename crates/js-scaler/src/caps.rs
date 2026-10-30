@@ -14,6 +14,12 @@ const MINUTE: Duration = Duration::from_secs(60);
 /// The window of the day cap.
 pub(crate) const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The window of the monthly totals: 30 days, rolling. A calendar month would let a total
+/// be spent twice in a few days across the turn of the month, and would make the figure
+/// depend on a calendar and a time zone the scaler does not have; a rolling window holds
+/// at every instant.
+pub(crate) const MONTH: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// The order in which [`Offer::fit`] checks, which is how near a miss is.
 const DIMENSIONS: [Dimension; 8] = [
     Dimension::Os,
@@ -147,15 +153,26 @@ pub(crate) fn billed_until(record: &Record, boot_timeout: Duration, now: Millis)
     end.max(record.launched_at.plus(least))
 }
 
-/// What a record has cost inside the last 24 hours: its stored price over the part of its
-/// billed time (see [`billed_until`]) that lies after `now` minus a day, rounded up to
-/// whole minutes and then a whole cent. A machine that still runs keeps accruing, so a
-/// long-lived or stuck one goes on eating the day cap, and one that ended more than a day
-/// ago costs nothing.
-fn spent(record: &Record, settings: &Settings, now: Millis) -> u64 {
-    let until = billed_until(record, settings.boot_timeout, now);
-    let from = record.launched_at.max(now.back(DAY));
+/// What a record has cost from `from` on: its stored price over the part of its billed time
+/// (see [`billed_until`]) that lies after `from` and after its launch, rounded up to whole
+/// minutes and then a whole cent. A machine that still runs keeps accruing, and one that
+/// ended before `from` costs nothing.
+pub(crate) fn spent_since(
+    record: &Record,
+    boot_timeout: Duration,
+    now: Millis,
+    from: Millis,
+) -> u64 {
+    let until = billed_until(record, boot_timeout, now);
+    let from = record.launched_at.max(from);
     cents(record.price_cents_per_hour, until.since(from))
+}
+
+/// What a record has cost inside the last 24 hours. A machine that still runs keeps
+/// accruing, so a long-lived or stuck one goes on eating the day cap, and one that ended
+/// more than a day ago costs nothing.
+fn spent(record: &Record, settings: &Settings, now: Millis) -> u64 {
+    spent_since(record, settings.boot_timeout, now, now.back(DAY))
 }
 
 /// Whether one more machine of `price` may be launched into the pool.

@@ -104,6 +104,9 @@ impl Effects for Wired {
             Call::Drain => {
                 let _ = self.registry.drain(&id);
             }
+            Call::Retire => {
+                let _ = self.registry.retire(&id);
+            }
             Call::Undrain => {
                 let _ = self.registry.undrain(&id);
             }
@@ -137,6 +140,7 @@ fn hello() -> Hello {
             cpu_millis: 8000,
             memory_bytes: 64 << 30,
             gpus: 1,
+            disk_bytes: 0,
             gpu_class: Some("nvidia-a10".to_owned()),
             max_leases: None,
         },

@@ -20,7 +20,7 @@ pub struct Request {
     /// serving the kind. An `action` books `resources`; a `whole_machine` lease waits
     /// for an empty worker at least `resources` large and books all of it.
     pub kind: LeaseKind,
-    /// The CPU, memory and GPUs to book for it (for a `whole_machine` lease, the least
+    /// The CPU, memory, GPUs and scratch disk to book for it (for a `whole_machine` lease, the least
     /// worker it may run on).
     pub resources: Resources,
     /// What a worker must offer to run it, from the action's platform properties. The
@@ -31,6 +31,13 @@ pub struct Request {
     pub hermetic: bool,
     /// The client asked for the result not to be cached.
     pub do_not_cache: bool,
+    /// An `action` asks for a whole worker, whichever worker it lands on: it runs alone on
+    /// a worker that holds no other lease, books all of that worker's CPUs, memory, GPUs
+    /// and VM slots, and nothing else is placed beside it. `resources` then names only
+    /// what the worker must offer beyond its CPUs and memory (GPUs, VM slots); its CPU
+    /// and memory are not compared with the worker's, so the request fits workers of any
+    /// size. Ignored for the other lease kinds. False places a request as before.
+    pub whole_worker: bool,
 }
 
 impl Request {
@@ -41,6 +48,28 @@ impl Request {
             FencePolicy::RunOn
         } else {
             FencePolicy::SelfFence
+        }
+    }
+
+    /// Whether this request owns the worker it lands on: an action with `whole_worker`.
+    #[must_use]
+    pub fn owns_worker(&self) -> bool {
+        self.whole_worker && self.kind == LeaseKind::Action
+    }
+
+    /// What a worker's whole capacity must hold for the request to run on it once its
+    /// bookings end: `resources`, except that a request that owns its worker leaves
+    /// out CPUs and memory (it books whatever the worker has).
+    #[must_use]
+    pub fn demand(&self) -> Resources {
+        if self.owns_worker() {
+            Resources {
+                cpu_millis: 0,
+                memory_bytes: 0,
+                ..self.resources
+            }
+        } else {
+            self.resources
         }
     }
 
@@ -59,7 +88,7 @@ impl Request {
     /// other schedulers asks it of those.
     #[must_use]
     pub fn runnable_on(&self, caps: &NodeCaps, capacity: &Resources) -> bool {
-        serves(caps, self.kind) && self.needs.matches(caps) && capacity.fits(&self.resources)
+        serves(caps, self.kind) && self.needs.matches(caps) && capacity.fits(&self.demand())
     }
 }
 

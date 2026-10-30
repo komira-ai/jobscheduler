@@ -34,6 +34,9 @@ pub enum SettingsError {
     /// The prepare timeout was zero.
     #[error("the prepare timeout must be positive")]
     PrepareNotPositive,
+    /// The ceiling on the maximum wall time was zero.
+    #[error("the ceiling on the maximum wall time must be positive")]
+    MaxWallNotPositive,
 }
 
 /// The table could not be opened over its file.
@@ -91,6 +94,14 @@ pub enum AcquireError {
     /// The ttl was zero.
     #[error("the ttl must be positive")]
     TtlNotPositive,
+    /// The request's maximum wall time is above the ceiling the table was set with
+    /// ([`crate::Settings::with_max_wall`]). Nothing was recorded, no lease id was used and
+    /// the provider was not called.
+    #[error("the maximum wall time is above the ceiling of {} s", .ceiling.as_secs())]
+    WallAboveCeiling {
+        /// The ceiling.
+        ceiling: std::time::Duration,
+    },
     /// The sequence has reached the largest value the file can hold, so no further id
     /// can be issued. Nothing was recorded and the provider was not called.
     #[error("lease ids are used up: the next sequence cannot be stored")]

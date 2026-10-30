@@ -33,6 +33,10 @@ pub enum SampleError {
     /// The actions cgroup's `memory.stat` is unreadable or lacks a file cache key.
     #[error("the node memory.stat cannot be read")]
     NodeMemoryStat,
+    /// The actions cgroup's `cpu.max` is unreadable or neither `max` nor a number. Whether
+    /// the cgroup is limited is not guessed.
+    #[error("the node cpu.max cannot be read")]
+    NodeCpuMax,
 }
 
 /// Reads the cgroup tree under the actions directory through a [`FileReader`].
@@ -78,7 +82,7 @@ impl<F: FileReader> Sampler<F> {
             .read(&format!("{dir}/cpu.max"))
             .ok()
             .and_then(|text| cpu_limited(&text))
-            .unwrap_or(true);
+            .ok_or(SampleError::NodeCpuMax)?;
         let read: Vec<Option<LeaseSample>> = leases.iter().map(|l| self.lease(l)).collect();
         let unreadable = read.iter().filter(|lease| lease.is_none()).count();
         Ok(Sample {

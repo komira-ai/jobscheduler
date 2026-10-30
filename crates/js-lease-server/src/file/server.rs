@@ -11,6 +11,7 @@ use super::{Load, Section};
 use crate::config::{BootMode, Limits, TlsFiles, Token, parse_token};
 use crate::error::StartupError;
 use crate::rate::HelloLimit;
+use crate::usage_setup::DEFAULT_PROFILE_STORE_BYTES;
 
 const SERVER_KEYS: &[&str] = &[
     "listen",
@@ -25,6 +26,7 @@ const SERVER_KEYS: &[&str] = &[
     "tick",
     "default_ttl",
     "max_ttl",
+    "max_lease_wall",
     "max_connections",
     "handshake_timeout",
     "header_timeout",
@@ -35,6 +37,15 @@ const SERVER_KEYS: &[&str] = &[
     "agent_hello_burst",
     "agent_hello_interval",
     "require_host_credential",
+    "usage_db",
+    "usage_off",
+    "profile_store_bytes",
+    "alert_webhook_url",
+    "alert_webhook_token_file",
+    "alert_repeat_after",
+    "max_spend_per_day_total",
+    "max_spend_per_month_total",
+    "max_spend_since_go_total",
 ];
 
 /// What the `[server]` table says.
@@ -49,8 +60,31 @@ pub(crate) struct Server {
     pub(crate) tls: Option<TlsFiles>,
     pub(crate) tick: Duration,
     pub(crate) settings: Settings,
+    /// `max_lease_wall`: the ceiling on a lease's `max_wall`, when the file sets one.
+    pub(crate) max_lease_wall: Option<Duration>,
     pub(crate) limits: Limits,
     pub(crate) agents: AgentKeys,
+    pub(crate) usage: UsageKeys,
+    /// The totals over every pool of the server.
+    pub(crate) totals: js_scaler::Totals,
+    pub(crate) alerts: Option<AlertKeys>,
+}
+
+/// The alert keys of `[server]`: where each alert the scaler raises is POSTed, and the file
+/// that holds the bearer token the receiver wants, when it wants one.
+pub(crate) struct AlertKeys {
+    pub(crate) webhook_url: String,
+    pub(crate) token_file: Option<PathBuf>,
+    /// How often an alert that keeps holding is sent again.
+    pub(crate) repeat_after: Duration,
+}
+
+/// The usage keys of `[server]`, as the file gave them: the flags `--usage-db`,
+/// `--usage-off` and `--profile-store-bytes`, with their defaults.
+pub(crate) struct UsageKeys {
+    pub(crate) db: Option<PathBuf>,
+    pub(crate) off: bool,
+    pub(crate) profile_store_bytes: u64,
 }
 
 /// The keys of `[server]` that belong to agent registration, as the file gave them. They
@@ -139,10 +173,18 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         interval: s.duration("agent_hello_interval")?,
         require_host_credential: s.boolean("require_host_credential")?,
     };
+    let usage = read_usage(&mut s)?;
+    let totals = super::budget::read_totals(&mut s)?;
+    let alerts = read_alerts(&mut s)?;
     // The same check as `--default-ttl` and `--max-ttl`.
     let settings = match Settings::new(default_ttl, max_ttl) {
         Ok(settings) => settings,
         Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
+    };
+    let max_lease_wall = s.duration("max_lease_wall")?;
+    let settings = match max_lease_wall {
+        Some(wall) => with_ceiling(&s, settings, wall)?,
+        None => settings,
     };
     Ok(Server {
         listen,
@@ -155,8 +197,67 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         tls,
         tick,
         settings,
+        max_lease_wall,
         limits,
         agents,
+        usage,
+        totals,
+        alerts,
+    })
+}
+
+/// The alert keys. The token file and the repeat period mean something only with the URL.
+fn read_alerts(s: &mut Section) -> Result<Option<AlertKeys>, StartupError> {
+    let url = s.string("alert_webhook_url")?;
+    let token_file = s.path("alert_webhook_token_file")?;
+    let repeat_after = s.duration("alert_repeat_after")?;
+    let Some(webhook_url) = url else {
+        let given = [
+            ("alert_webhook_token_file", token_file.is_some()),
+            ("alert_repeat_after", repeat_after.is_some()),
+        ];
+        return match given.into_iter().find(|(_, set)| *set) {
+            Some((key, _)) => Err(s.fail(key, "needs server.alert_webhook_url")),
+            None => Ok(None),
+        };
+    };
+    Ok(Some(AlertKeys {
+        webhook_url,
+        token_file,
+        repeat_after: repeat_after.unwrap_or(Duration::from_secs(3600)),
+    }))
+}
+
+/// `settings` with `wall` as the ceiling on a lease's wall time: at most 30 days, and
+/// positive (the settings refuse a zero, which `duration` has already refused, and the
+/// refusal is passed on if that ever changes).
+fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Settings, StartupError> {
+    if wall > super::lifetime::LONGEST {
+        return Err(s.fail("max_lease_wall", "must not be longer than 30 days"));
+    }
+    settings
+        .with_max_wall(wall)
+        .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
+}
+
+/// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
+/// beside `usage_off = true`.
+fn read_usage(s: &mut Section) -> Result<UsageKeys, StartupError> {
+    let db = s.path("usage_db")?;
+    let off = s.boolean("usage_off")?.unwrap_or(false);
+    let bytes = s.bounded(
+        "profile_store_bytes",
+        1,
+        u64::MAX,
+        DEFAULT_PROFILE_STORE_BYTES,
+    )?;
+    if db.is_some() & off {
+        return Err(s.fail("usage_db", "not allowed with server.usage_off"));
+    }
+    Ok(UsageKeys {
+        db,
+        off,
+        profile_store_bytes: bytes,
     })
 }
 
@@ -173,5 +274,30 @@ pub(super) fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token,
             let reason = format!("{} {reason}", path.display());
             Err(StartupError::at(place, reason))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a ceiling the settings refuse (a zero) is an error naming the key and
+    /// not a ceiling silently dropped, and that 30 days is the longest accepted. A zero
+    /// cannot come from the file, whose durations are positive, so this is the only way to
+    /// reach the refusal.
+    #[test]
+    fn a_ceiling_is_never_dropped_silently() {
+        let s = Section::open(toml::Table::new(), "server.".to_owned());
+        let base = Settings::new(Duration::from_secs(60), Duration::from_secs(120)).unwrap();
+        let said = with_ceiling(&s, base, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            said,
+            "server.max_lease_wall: the ceiling on the maximum wall time must be positive"
+        );
+        let longest = super::super::lifetime::LONGEST;
+        assert!(with_ceiling(&s, base, longest).is_ok());
+        assert!(with_ceiling(&s, base, longest + Duration::from_secs(1)).is_err());
     }
 }

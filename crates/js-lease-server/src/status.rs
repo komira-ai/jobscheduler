@@ -21,12 +21,13 @@ use std::sync::PoisonError;
 use js_elastic::Demand;
 use js_lease::{Clock, Timestamp};
 use js_registry::Registry;
-use js_scaler::{Phase, Record, Records};
+use js_scaler::{LaunchMode, Millis, Phase, Record, Records};
 use js_types::ExecMode;
 use serde::Serialize;
 
 use crate::adapt::SharedClock;
 use crate::checks::{Checked, State, Verdict};
+use crate::hosts::MemoryView;
 use crate::pool::{Next, NextLaunch, NoOffer, Pool, Wanted};
 use crate::scaler::Scaler;
 
@@ -55,7 +56,14 @@ struct PoolView {
     network: &'static str,
     /// The execution mode the hosts must report, or `none` for a pool that asked for none.
     exec: String,
+    /// The mode the pool is in now: `plan` once its `live_until` has passed, whatever the
+    /// file says.
     launch: &'static str,
+    /// When the pool's go ends, in milliseconds since the epoch, if the file sets one.
+    live_until_ms: Option<u64>,
+    /// The memory of the pool's floor, the percent of it the pool books and what that
+    /// comes to.
+    memory: MemoryView,
     state: State,
     /// Why the pool is unavailable, one line for each check that failed.
     reasons: Vec<String>,
@@ -73,6 +81,12 @@ struct PoolView {
     /// removal, a release the provider does not confirm, an orphan, a silent host that
     /// nothing releases.
     alerts: Vec<String>,
+    /// The server's time at the end of the scaler's last finished tick, in milliseconds;
+    /// null before the first. A watcher outside the server reads it as the heartbeat.
+    last_tick_ms: Option<u64>,
+    /// Whether the pool has a scaler: it ticks, so `last_tick_ms` is a heartbeat that must
+    /// move. A pool without one (a plan-only or static pool) has no heartbeat.
+    scaler: bool,
     next_launch: Option<NextLaunch>,
 }
 
@@ -101,6 +115,9 @@ struct MachineView {
     offer: String,
     zone: Option<String>,
     price_cents_per_hour: u64,
+    /// The provider's id for the machine, once the provider has given one: what a watcher
+    /// outside the server matches the provider's list against.
+    provider_id: Option<String>,
 }
 
 /// A machine of the scheduler's that no record knew: counted, never released by the
@@ -202,6 +219,7 @@ fn held(records: &Records, pool: &str) -> (Vec<MachineView>, Vec<OrphanView>, Op
             offer: record.offer.id.clone(),
             zone: record.offer.zone.clone(),
             price_cents_per_hour: record.price_cents_per_hour,
+            provider_id: record.cloud_id.clone(),
         })
         .collect();
     let orphans = ours
@@ -268,11 +286,25 @@ impl Status {
                 Next::NoOffer(none) => (None, Some(none)),
             },
         };
+        let now = Millis::new(self.clock.now().millis());
+        let settings = self.scaler.as_ref().map(Scaler::settings);
+        let launch = settings.map_or(pool.launch, |set| match set.mode(now) {
+            LaunchMode::Live => "live",
+            LaunchMode::Plan => "plan",
+        });
+        let live_until_ms = settings
+            .and_then(|set| set.live_until)
+            .map(Millis::as_millis);
+        let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
+        // The checks first; once they pass, the cap that keeps the scaler from launching.
+        let capped = scaled
+            .as_ref()
+            .and_then(|seen| seen.blocked.get(&pool.name));
         let blocked = match state {
-            State::Available => None,
+            State::Available => capped.and_then(|why| why.cap_name()),
             _ => Some("unavailable"),
         };
-        let records = self.scaler.as_ref().map(|scaler| scaler.state().records);
+        let records = scaled.map(|seen| seen.records);
         let (machines, orphans, last_launch) = held(&records.unwrap_or_default(), &pool.name);
         let spend = machines
             .iter()
@@ -283,7 +315,9 @@ impl Status {
             kind: pool.kind.clone(),
             network: pool.network_kind,
             exec: exec_name(pool.exec),
-            launch: pool.launch,
+            launch,
+            live_until_ms,
+            memory: MemoryView::of(pool.memory),
             state,
             reasons: health.reasons(),
             credentials: check_view(health.credentials),
@@ -301,6 +335,12 @@ impl Status {
             machines,
             orphans,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
+            scaler: self.scaler.is_some(),
+            last_tick_ms: self
+                .scaler
+                .as_ref()
+                .and_then(Scaler::last_tick)
+                .map(Millis::as_millis),
             next_launch,
         }
     }
@@ -372,6 +412,12 @@ fn pool_section(out: &mut String, pool: &PoolView) {
     row(out, "network", pool.network);
     row(out, "exec", &pool.exec);
     row(out, "launch", pool.launch);
+    let memory = &pool.memory;
+    let booked = format!(
+        "{} of {} bytes ({}%)",
+        memory.bookable_bytes, memory.configured_bytes, memory.schedulable_percent
+    );
+    row(out, "memory booked", &booked);
     row(out, "credentials", &check_text(&pool.credentials));
     row(out, "network check", &check_text(&pool.network_check));
     for check in &pool.provider_checks {

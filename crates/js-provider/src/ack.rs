@@ -1,4 +1,4 @@
-use js_types::{HostId, LeaseId, Shape};
+use js_types::{HostId, LeaseId, MemoryHeadroom, Shape};
 
 use crate::RefusalCode;
 
@@ -67,8 +67,12 @@ pub enum StopAck {
 pub struct HostCapacity {
     /// The host.
     pub host: HostId,
-    /// What the host offers.
+    /// What the host offers to be booked: its memory is already cut to the pool's
+    /// `memory_schedulable_percent`.
     pub shape: Shape,
+    /// The memory the operator configured for the host, the percent of it that is booked
+    /// and what that comes to (the memory of `shape`).
+    pub memory: MemoryHeadroom,
     /// The lease holding the whole host, or `None` when it is free.
     pub leased_to: Option<LeaseId>,
 }

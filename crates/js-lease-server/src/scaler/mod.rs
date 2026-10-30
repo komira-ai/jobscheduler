@@ -74,21 +74,25 @@ mod unremoved;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
+use js_alert::{AlertSink, Notifier};
 use js_elastic::{Acquired, HostRef, Released, SchedulerId, Secret};
 use js_lease::{Booking, Clock};
 use js_registry::{HostState, HostView, Launchable, SessionSource};
 use js_scaler::{
-    AcquireResult, Action, Input, Millis, Phase, PoolInput, Records, ReleaseResult, Settings,
-    State, launchable, step,
+    AcquireResult, Action, Budgets, Input, Millis, Phase, PoolInput, Records, ReleaseResult,
+    Settings, State, launchable, step,
 };
 use js_types::ExecMode;
 use tracing::{debug, warn};
 
 use crate::adapt::SharedClock;
 use crate::util::blocking;
+
+/// The most alerts waiting for the sink; beyond it the oldest is dropped and counted.
+const ALERT_QUEUE: usize = 64;
 
 pub(crate) use build::{Parts, build};
 pub use complete::{REGISTRY_FLOOR, REGISTRY_QUIET};
@@ -140,6 +144,8 @@ struct Core {
     scheduler: SchedulerId,
     exec: ExecMode,
     settings: Settings,
+    /// The server-wide totals every step is given.
+    budgets: Budgets,
     /// What decides whether the registry's view is complete (the `complete` module).
     gate: Mutex<complete::Gate>,
     /// Held for the whole of a tick, so that two ticks never work on the same copy.
@@ -147,6 +153,9 @@ struct Core {
     /// Held only to copy [`Memory`] out and to swap it back in, never across a call.
     memory: Mutex<Memory>,
     last: Arc<Mutex<Option<Snapshot>>>,
+    /// Where each alert is sent besides the log; set once, at start. Its delivery runs on a
+    /// thread of its own, so a slow or refusing receiver never holds up a tick.
+    sink: OnceLock<Mutex<Notifier>>,
 }
 
 /// The scaler of one elastic pool. A handle: clones share one scaler.
@@ -175,8 +184,22 @@ impl Scaler {
         effects: Box<dyn Effects>,
         clock: SharedClock,
         entropy: Box<dyn SessionSource>,
-        (scheduler, exec): (SchedulerId, ExecMode),
+        wiring: (SchedulerId, ExecMode),
         settings: Settings,
+        records: Records,
+    ) -> Self {
+        let budgets = (settings, Budgets::default());
+        Self::budgeted(effects, clock, entropy, wiring, budgets, records)
+    }
+
+    /// A scaler as [`Scaler::new`] makes one, whose steps also hold the server-wide
+    /// `budgets` ([`Budgets`]).
+    pub fn budgeted(
+        effects: Box<dyn Effects>,
+        clock: SharedClock,
+        entropy: Box<dyn SessionSource>,
+        (scheduler, exec): (SchedulerId, ExecMode),
+        (settings, budgets): (Settings, Budgets),
         records: Records,
     ) -> Self {
         let mut unrevoked = BTreeSet::new();
@@ -203,10 +226,12 @@ impl Scaler {
             scheduler,
             exec,
             settings,
+            budgets,
             gate: Mutex::new(gate),
             one_tick: Mutex::new(()),
             memory: Mutex::new(memory),
             last: Arc::new(Mutex::new(None)),
+            sink: OnceLock::new(),
         };
         Self {
             core: Arc::new(core),
@@ -233,6 +258,44 @@ impl Scaler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         gate.bound((now, cap), leased.iter().map(|b| b.host.to_string()));
+    }
+
+    /// Sends every alert the scaler raises to `sink` as well as the log: once when it
+    /// begins to hold, again every `repeat_after` while it holds, and again if it clears and
+    /// returns. Delivery is on a thread of its own with a bounded queue, so a sink that
+    /// refuses or hangs never delays a tick; a refused alert is sent again after a wait
+    /// that doubles up to a cap, and stays pending until delivered once. Set once, before
+    /// the first tick; a second call changes nothing.
+    pub fn set_sink(&self, sink: Arc<dyn AlertSink>, repeat_after: Duration) {
+        let _ = self
+            .core
+            .sink
+            .set(Mutex::new(Notifier::new(sink, repeat_after, ALERT_QUEUE)));
+    }
+
+    /// Waits until every alert handed to the sink has been answered. For tests and for a
+    /// program about to exit; a tick never calls it.
+    pub fn flush_alerts(&self) {
+        if let Some(notifier) = self.core.sink.get() {
+            notifier
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .flush();
+        }
+    }
+
+    /// The server's time at the end of the last tick that finished, in milliseconds; `None`
+    /// before the first. The status page shows it, and a watcher outside the server reads
+    /// it as the server's heartbeat. A tick that cannot write the scaler's records does
+    /// nothing else and does not finish (the disk is full or gone), so the heartbeat stops
+    /// then and the watcher's alarm is right to say so.
+    pub fn last_tick(&self) -> Option<Millis> {
+        let seen = self
+            .core
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        seen.as_ref().map(|seen| seen.now)
     }
 
     /// Whether the last tick vouched for the registry's view; false before the first.
@@ -264,6 +327,11 @@ impl Scaler {
     pub async fn tick(&self) {
         let core = Arc::clone(&self.core);
         blocking(move || core.tick()).await;
+    }
+
+    /// The settings the scaler was built with.
+    pub fn settings(&self) -> &Settings {
+        &self.core.settings
     }
 
     /// What the last tick left: the records, why each pool launches nothing, what a plan
@@ -397,6 +465,11 @@ impl Core {
                 warn!("{message}");
             }
         }
+        if let Some(notifier) = self.sink.get() {
+            let at = Duration::from_millis(now.as_millis());
+            let mut notifier = notifier.lock().unwrap_or_else(PoisonError::into_inner);
+            notifier.pass(at, &found);
+        }
         memory.alerts = found;
     }
 
@@ -456,6 +529,7 @@ impl Core {
             released: memory.released.clone(),
             not_found,
             entropy: draws.map(|bytes| tail(&bytes)).collect(),
+            budgets: self.budgets.clone(),
         }
     }
 
@@ -492,6 +566,7 @@ impl Core {
                     });
                 }
                 Action::Drain(host) => self.effects.call(Call::Drain, &host),
+                Action::Retire(host) => self.effects.call(Call::Retire, &host),
                 Action::Undrain(host) => self.effects.call(Call::Undrain, &host),
                 Action::ReleaseHost(host) => self.effects.call(Call::ReleaseHost, &host),
                 Action::Revoke(host) => self.revoke(memory, host),

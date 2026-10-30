@@ -10,7 +10,7 @@ use js_provider::Provider;
 use js_scaler::{Millis, Phase, Record, Records, StoredOffer};
 use serde_json::{Value, json};
 
-use crate::scaler_support::{account, records_path, spec, start, text, token_in};
+use crate::scaler_support::{account, records_path, spec, start, text, text_with, token_in};
 use crate::support::{Harness, Scratch, T0};
 
 /// The one pool of `GET /v1/pools`.
@@ -60,6 +60,9 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     h.ticks.step().await;
     let (before, _) = pool(&h).await;
     assert_eq!(before["machines"], json!([]));
+    // The heartbeat a watcher outside the server reads: the time of the tick that ran.
+    assert_eq!(before["last_tick_ms"], T0);
+    assert_eq!(before["scaler"], true);
     assert_eq!(before["last_launch"], Value::Null);
     assert_eq!(before["instances"]["n"], 0);
 
@@ -74,7 +77,8 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     let (after, body) = pool(&h).await;
     let machine = json!({
         "host": held.name, "state": "booting", "offer": "gpu_1x_a100",
-        "zone": "us-west-1", "price_cents_per_hour": 129
+        "zone": "us-west-1", "price_cents_per_hour": 129,
+        "provider_id": held.cloud_id
     });
     assert_eq!(after["machines"], json!([machine]));
     assert_eq!(after["orphans"], json!([]));
@@ -127,13 +131,16 @@ async fn the_status_lists_the_machines_the_orphans_and_the_newest_launch_of_the_
     let again = text(&scratch, "live", "resume");
     let h = start(scratch, &again).await;
     let (view, _) = pool(&h).await;
-    let one = |host: &str, state: &str| {
+    let one = |host: &str, state: &str, id: Option<&str>| {
         json!({
             "host": host, "state": state, "offer": "gpu_1x_a100",
-            "zone": "us-west-1", "price_cents_per_hour": 129
+            "zone": "us-west-1", "price_cents_per_hour": 129, "provider_id": id
         })
     };
-    let machines = json!([one("js-a", "registered"), one("js-new", "planned")]);
+    let machines = json!([
+        one("js-a", "registered", Some("i-1")),
+        one("js-new", "planned", None)
+    ]);
     assert_eq!(view["machines"], machines);
     assert_eq!(
         view["orphans"],
@@ -194,4 +201,101 @@ async fn the_alerts_are_on_the_status() {
         page.body
     );
     assert!(page.body.contains("i-stray-alert"), "{}", page.body);
+}
+
+/// Asserts that a launch a server-wide total refuses is shown, for each of the three totals:
+/// two requests wait, the first launches within a total of 50 cents (a launch is billed at
+/// least `boot_timeout`, 33 cents of an offer at 129 cents an hour), and the second would
+/// take it to 66, so the pool shows `max_spend_total` as what blocks it and has launched one
+/// machine, not two. It catches a total that is read and not enforced, and a cap the status
+/// does not show.
+#[tokio::test]
+async fn a_launch_the_server_total_refuses_shows_max_spend_total() {
+    for key in [
+        "max_spend_per_day_total",
+        "max_spend_per_month_total",
+        "max_spend_since_go_total",
+    ] {
+        let scratch = Scratch::new(&format!("scaler_status_{key}"));
+        account(&scratch);
+        let source = text(&scratch, "live", "initialise").replacen(
+            "[server]\n",
+            &format!("[server]\n{key} = \"0.50\"\n"),
+            1,
+        );
+        let h = start(scratch, &source).await;
+        h.ticks.step().await;
+        for (lease, id) in [(1, "r1"), (2, "r2")] {
+            h.running
+                .registry()
+                .unwrap()
+                .provider()
+                .start(spec(lease, id));
+        }
+        for _ in 0..3 {
+            h.ticks.step().await;
+        }
+        let (view, body) = pool(&h).await;
+        assert_eq!(view["blocked"], "max_spend_total", "{key}: {body}");
+        assert_eq!(view["instances"]["n"], 1, "{key}: {body}");
+        assert_eq!(
+            view["machines"].as_array().unwrap().len(),
+            1,
+            "{key}: {body}"
+        );
+    }
+}
+
+/// Asserts, at run time and not only at load, that the status shows the mode the pool is in
+/// and when its go ends: a live pool with a `live_until` an hour ahead shows `live` and the
+/// instant; once the clock passes it, the same pool shows `plan` (the file still says live),
+/// and no machine is launched for a request that waits. It catches a status that keeps
+/// showing the file's mode after the go has ended.
+#[tokio::test]
+async fn the_status_shows_a_go_that_has_ended() {
+    let scratch = Scratch::new("scaler_status_expired");
+    account(&scratch);
+    let until = T0 + 3_600_000;
+    let wall = iso(until);
+    let source = text_with(&scratch, "live", "initialise", &[("live_until", &wall)]);
+    let h = start(scratch, &source).await;
+    h.ticks.step().await;
+    let (before, _) = pool(&h).await;
+    assert_eq!(before["launch"], "live");
+    assert_eq!(before["live_until_ms"], until);
+
+    h.clock.advance(std::time::Duration::from_secs(3601));
+    h.running
+        .registry()
+        .unwrap()
+        .provider()
+        .start(spec(1, "r1"));
+    h.ticks.step().await;
+    h.ticks.step().await;
+    let (after, body) = pool(&h).await;
+    assert_eq!(after["launch"], "plan", "{body}");
+    assert_eq!(after["live_until_ms"], until);
+    assert_eq!(after["instances"]["n"], 0, "{body}");
+}
+
+/// The instant `ms` milliseconds after the epoch as a UTC date-time, for a file.
+fn iso(ms: u64) -> String {
+    let secs = ms / 1000;
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Civil date from days since the epoch (the inverse of the file reader's conversion).
+    let z = i64::try_from(days).unwrap() + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }

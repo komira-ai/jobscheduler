@@ -271,6 +271,7 @@ pub fn request(n: u64) -> Request {
         needs: js_caps::Request::default(),
         hermetic: !n.is_multiple_of(3),
         do_not_cache: false,
+        whole_worker: false,
     }
 }
 
