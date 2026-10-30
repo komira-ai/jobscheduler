@@ -92,7 +92,9 @@ fn network(text: &str) -> Result<NetworkLevel, String> {
 /// the `--tree` flags is the order of the layers.
 #[derive(Debug, Args)]
 pub struct PackArgs {
-    /// The layout directory to make. It must not exist; its parent must.
+    /// The layout directory to make. It must not exist; its parent must. It is built in
+    /// `.NAME.partial` beside it and renamed in; a run that is killed can leave both, and
+    /// both are then removed by hand.
     #[arg(long)]
     pub out: PathBuf,
     /// The bundle's name: lowercase letters, digits, `.`, `_` and `-`.

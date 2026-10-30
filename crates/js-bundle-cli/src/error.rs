@@ -50,7 +50,7 @@ pub enum Error {
     Oci(#[from] js_oci::Error),
     /// An annotation whose key is not a reverse-domain key or whose value is empty.
     #[error(
-        "annotation {key:?} needs a reverse-domain key (dot-separated labels of lowercase letters, digits, '-' and '_') and a non-empty value"
+        "annotation {key:?} needs a reverse-domain key of at most 256 bytes (dot-separated labels of lowercase letters, digits, '-' and '_') and a non-empty value of at most 4096 bytes, without control or bidirectional characters"
     )]
     Annotation {
         /// The key.

@@ -300,7 +300,15 @@ fn append(builder: &mut tar::Builder<Vec<u8>>, path: &str, item: &Item) -> Resul
 /// The directory cannot be read, holds something a layer does not (see the module
 /// documentation), or breaks a rule of the tree.
 pub fn pack_tar(root: &Path) -> Result<PackedTar, PackError> {
-    if at(root, std::fs::symlink_metadata(root))?.is_symlink() {
+    // A trailing slash makes the system resolve a link, so the check looks at the name
+    // without trailing slashes.
+    let text = root.as_os_str().as_bytes();
+    let end = text
+        .iter()
+        .rposition(|b| *b != b'/')
+        .map_or(text.len(), |i| i + 1);
+    let bare = Path::new(std::ffi::OsStr::from_bytes(&text[..end]));
+    if at(bare, std::fs::symlink_metadata(bare))?.is_symlink() {
         return Err(PackError::RootSymlink {
             path: show(root.as_os_str().as_bytes()),
         });

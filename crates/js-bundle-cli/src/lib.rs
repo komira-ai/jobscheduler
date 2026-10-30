@@ -20,6 +20,7 @@ mod error;
 mod inspect;
 mod layout;
 mod pack;
+mod text;
 mod verify;
 
 use std::io::Write;

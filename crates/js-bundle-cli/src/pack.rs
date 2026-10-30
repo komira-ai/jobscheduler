@@ -16,6 +16,12 @@ use js_oci::Digest;
 use crate::cli::{PackArgs, Pair};
 use crate::error::Error;
 use crate::layout::{self, Blob};
+use crate::text::forbidden;
+
+/// The most bytes of an annotation key and of a value: the manifest stays far below the
+/// reader's limit.
+const MAX_KEY_BYTES: usize = 256;
+const MAX_VALUE_BYTES: usize = 4096;
 
 /// `pairs` as a map; a name given twice is refused.
 fn unique(flag: &'static str, pairs: &[Pair]) -> Result<BTreeMap<String, String>, Error> {
@@ -40,7 +46,8 @@ fn none_left(flag: &'static str, left: BTreeMap<String, String>) -> Result<(), E
 }
 
 /// The manifest annotations the `--annotation` flags give, sorted by key. A key is two or
-/// more dot-separated labels of lowercase letters, digits, `-` and `_`; a value is not empty.
+/// more dot-separated labels of lowercase letters, digits, `-` and `_`; a value is not empty,
+/// holds no control or bidirectional character, and both stay within their caps.
 fn annotations(args: &PackArgs) -> Result<BTreeMap<String, String>, Error> {
     let map = unique("--annotation", &args.annotations)?;
     for (key, value) in &map {
@@ -51,7 +58,14 @@ fn annotations(args: &PackArgs) -> Result<BTreeMap<String, String>, Error> {
             [!label.is_empty(), plain].into_iter().all(|ok| ok)
         };
         let key_ok = [key.contains('.'), key.split('.').all(label)];
-        let ok = [key_ok[0], key_ok[1], !value.is_empty()];
+        let ok = [
+            key_ok[0],
+            key_ok[1],
+            key.len() <= MAX_KEY_BYTES,
+            !value.is_empty(),
+            value.len() <= MAX_VALUE_BYTES,
+            !value.chars().any(forbidden),
+        ];
         if !ok.into_iter().all(|ok| ok) {
             return Err(Error::Annotation { key: key.clone() });
         }

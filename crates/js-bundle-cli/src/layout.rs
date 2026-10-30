@@ -121,12 +121,17 @@ pub(crate) fn write(
     std::fs::create_dir(dir).map_err(at(dir))?;
     let name = dir.file_name().unwrap_or_default().to_string_lossy();
     let staged = dir.with_file_name(format!(".{name}.partial"));
+    if let Err(error) = std::fs::create_dir(&staged).map_err(at(&staged)) {
+        // The staging name was taken or cannot be made: nothing of it is ours to remove.
+        let _ = std::fs::remove_dir(dir);
+        return Err(error);
+    }
     let built = fill(&staged, config, layers, &manifest, &index)
         .and_then(|()| std::fs::rename(&staged, dir).map_err(at(dir)));
     match built {
         Ok(()) => Ok(manifest.digest),
         Err(error) => {
-            // Best effort: both are ours, made above.
+            // Best effort: both were made by this run, above.
             let _ = std::fs::remove_dir_all(&staged);
             let _ = std::fs::remove_dir(dir);
             Err(error)
@@ -134,7 +139,7 @@ pub(crate) fn write(
     }
 }
 
-/// Makes `staged` and writes the layout into it.
+/// Writes the layout into the directory `staged`.
 fn fill(
     staged: &Path,
     config: &Blob,
@@ -142,7 +147,6 @@ fn fill(
     manifest: &Blob,
     index: &[u8],
 ) -> Result<(), Error> {
-    std::fs::create_dir(staged).map_err(at(staged))?;
     let blobs = staged.join("blobs").join("sha256");
     std::fs::create_dir_all(&blobs).map_err(at(&blobs))?;
     for blob in layers.iter().chain([config, manifest]) {
