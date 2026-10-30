@@ -26,22 +26,25 @@ use super::scan::{PrivilegedScan, scan_privileged};
 pub enum MacosMajor {
     /// macOS 14 (Sonoma).
     Macos14,
+    /// macOS 15 (Sequoia).
+    Macos15,
 }
 
 impl MacosMajor {
     /// Every version that has a base set.
-    pub const ALL: [Self; 1] = [Self::Macos14];
+    pub const ALL: [Self; 2] = [Self::Macos14, Self::Macos15];
 
     /// The version with major number `major`, if it has a base set.
     #[must_use]
     pub fn from_major(major: u32) -> Option<Self> {
         match major {
             14 => Some(Self::Macos14),
+            15 => Some(Self::Macos15),
             _ => None,
         }
     }
 
-    /// The version of a `sw_vers -productVersion` text (`14.5`, `14.5.1`), if it has a
+    /// The version of a `sw_vers -productVersion` text (`14.5`, `15.8.2`), if it has a
     /// base set.
     #[must_use]
     pub fn from_product_version(text: &str) -> Option<Self> {
@@ -56,6 +59,7 @@ impl MacosMajor {
     pub fn major(self) -> u32 {
         match self {
             Self::Macos14 => 14,
+            Self::Macos15 => 15,
         }
     }
 
@@ -80,6 +84,7 @@ impl MacosMajor {
     pub fn base(self) -> &'static BaseSet {
         match self {
             Self::Macos14 => &MACOS_14,
+            Self::Macos15 => &MACOS_15,
         }
     }
 }
@@ -250,3 +255,64 @@ pub(super) fn reads(
         .collect();
     lines.push(format!("(deny file-read* {})", setuid.join(" ")));
 }
+
+/// The macOS 15 set, from a trace on the hosted macOS 15.8.2 image (build 24H232). The
+/// reference workloads (`true`, a read of a granted tree, a bundle entrypoint, a
+/// compile and an ad-hoc `codesign` with the selected Xcode, a read through the time
+/// zone link) ran under the macOS 14 set with each line removed in turn, and `fs_usage`
+/// listed the paths they touch. A line is here only when a workload touched it or
+/// failed without it; the lines of the macOS 14 set that neither happened to are not
+/// carried over, so this set reads nothing the macOS 14 set does not. Run alone, the
+/// macOS 14 set passed every workload and every denied read on this image, and the
+/// image's setuid files under the 14 roots are the same twenty.
+///
+/// - names: `/var` is needed (the compile and the time zone read fail without it);
+///   `/etc` and `/usr` are looked at by `codesign`.
+/// - `/` is a data read, as in macOS 14: every workload fails without it.
+/// - `/System/Library`, `/usr/lib`, `/usr/bin`, `/usr/share`, `/bin`: touched by every
+///   dynamically linked workload and by the compile (frameworks, `dyld`, the tools, the
+///   ICU data).
+/// - `/System/Volumes/Preboot/Cryptexes`: the system frameworks are opened through the
+///   `OS` cryptex. `/System/Cryptexes` was not touched and is not carried over.
+/// - `/private/var/db/timezone`: needed (the read through `/private/etc/localtime`
+///   fails without it).
+/// - the five device files: each is opened by a workload.
+/// - not carried over, because nothing touched them and no workload failed without them:
+///   `/System/Cryptexes`, `/usr/sbin`, `/usr/libexec`, `/sbin`, `/private/var/db/dyld`,
+///   `/private/var/select/sh` and the names `/System` and `/tmp`.
+/// - setuid: the files of the 20 found under the macOS 14 roots that lie under a
+///   directory this set grants; the others are not readable by default.
+static MACOS_15: BaseSet = BaseSet {
+    names: &["/etc", "/usr", "/var"],
+    reads: &[
+        (Match::Literal, "/"),
+        (Match::Subpath, "/System/Library"),
+        (Match::Subpath, "/System/Volumes/Preboot/Cryptexes"),
+        (Match::Subpath, "/usr/lib"),
+        (Match::Subpath, "/usr/bin"),
+        (Match::Subpath, "/usr/share"),
+        (Match::Subpath, "/bin"),
+        (Match::Subpath, "/private/var/db/timezone"),
+        (Match::Literal, "/dev/null"),
+        (Match::Literal, "/dev/zero"),
+        (Match::Literal, "/dev/random"),
+        (Match::Literal, "/dev/urandom"),
+        (Match::Literal, "/dev/tty"),
+    ],
+    setuid: &[
+        "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent",
+        "/bin/ps",
+        "/usr/bin/at",
+        "/usr/bin/atq",
+        "/usr/bin/atrm",
+        "/usr/bin/batch",
+        "/usr/bin/crontab",
+        "/usr/bin/login",
+        "/usr/bin/newgrp",
+        "/usr/bin/quota",
+        "/usr/bin/su",
+        "/usr/bin/sudo",
+        "/usr/bin/top",
+        "/usr/bin/write",
+    ],
+};

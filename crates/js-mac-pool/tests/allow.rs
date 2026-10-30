@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Scratch, assurance, layout, path, tree, xcode_host};
+use common::{Scratch, assurance, assurance_for, layout, path, tree, xcode_host};
 use js_bundle::ReadGrantKind;
 use js_mac_pool::seatbelt::{
     AbsPath, BuildError, Caps, MAX_LISTED, MacosMajor, Match, Narrowing, Net, PathError,
@@ -99,6 +99,104 @@ fn a_profile_without_grants_the_user_folder_or_lists_matches_its_golden() {
         text_of(&policy),
         include_str!("goldens/allow_macos14_bare.sb")
     );
+}
+
+#[test]
+fn a_macos_15_profile_without_grants_matches_its_golden() {
+    let bare = SlotLayout {
+        inputs: vec![],
+        read_denies: vec![],
+        ..layout()
+    };
+    let policy = Policy::base(bare, allow_caps(Net::Loopback))
+        .unwrap()
+        .narrowed(Narrowing {
+            drop_uid_entry: true,
+            ..Narrowing::default()
+        })
+        .unwrap()
+        .allowing(&assurance_for(MacosMajor::Macos15), vec![])
+        .unwrap();
+    assert_eq!(
+        text_of(&policy),
+        include_str!("goldens/allow_macos15_bare.sb")
+    );
+}
+
+/// The macOS 15 base set is what the trace on the hosted macOS 15.8.2 image (build
+/// 24H232) produced, written out here line by line: a line enters `MACOS_15` only
+/// together with its row here, and the reviewer reads this table against the trace.
+#[test]
+fn the_macos_15_base_set_is_what_the_trace_produced() {
+    let base = MacosMajor::Macos15.base();
+    assert_eq!(base.names(), ["/etc", "/usr", "/var"]);
+    assert_eq!(
+        base.reads(),
+        [
+            (Match::Literal, "/"),
+            (Match::Subpath, "/System/Library"),
+            (Match::Subpath, "/System/Volumes/Preboot/Cryptexes"),
+            (Match::Subpath, "/usr/lib"),
+            (Match::Subpath, "/usr/bin"),
+            (Match::Subpath, "/usr/share"),
+            (Match::Subpath, "/bin"),
+            (Match::Subpath, "/private/var/db/timezone"),
+            (Match::Literal, "/dev/null"),
+            (Match::Literal, "/dev/zero"),
+            (Match::Literal, "/dev/random"),
+            (Match::Literal, "/dev/urandom"),
+            (Match::Literal, "/dev/tty"),
+        ]
+    );
+    assert_eq!(
+        base.setuid(),
+        [
+            "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent",
+            "/bin/ps",
+            "/usr/bin/at",
+            "/usr/bin/atq",
+            "/usr/bin/atrm",
+            "/usr/bin/batch",
+            "/usr/bin/crontab",
+            "/usr/bin/login",
+            "/usr/bin/newgrp",
+            "/usr/bin/quota",
+            "/usr/bin/su",
+            "/usr/bin/sudo",
+            "/usr/bin/top",
+            "/usr/bin/write",
+        ]
+    );
+}
+
+/// A newer major version is reviewed against the older one: it never reads a place the
+/// reviewed macOS 14 set does not, and denies at least the setuid files it grants a
+/// directory of.
+#[test]
+fn the_macos_15_base_set_reads_nothing_the_macos_14_set_does_not() {
+    let old = MacosMajor::Macos14.base();
+    let new = MacosMajor::Macos15.base();
+    for read in new.reads() {
+        assert!(old.reads().contains(read), "{read:?}");
+    }
+    for name in new.names() {
+        assert!(old.names().contains(name), "{name}");
+    }
+    for file in new.setuid() {
+        assert!(old.setuid().contains(file), "{file}");
+    }
+    let granted: Vec<&str> = new
+        .reads()
+        .iter()
+        .filter(|(how, _)| *how == Match::Subpath)
+        .map(|(_, path)| *path)
+        .collect();
+    for file in old.setuid() {
+        let under = granted
+            .iter()
+            .any(|dir| file.starts_with(&format!("{dir}/")));
+        assert_eq!(new.setuid().contains(file), under, "{file}");
+    }
 }
 
 #[test]
@@ -381,7 +479,9 @@ fn macos_versions_are_read_from_a_product_version() {
         ("14.5", Some(MacosMajor::Macos14)),
         ("14", Some(MacosMajor::Macos14)),
         (" 14.5.1\n", Some(MacosMajor::Macos14)),
-        ("15.0", None),
+        ("15.0", Some(MacosMajor::Macos15)),
+        ("15.8.2", Some(MacosMajor::Macos15)),
+        ("16.0", None),
         ("13.6", None),
         ("fourteen", None),
         ("", None),
@@ -390,8 +490,26 @@ fn macos_versions_are_read_from_a_product_version() {
         assert_eq!(MacosMajor::from_product_version(text), expected, "{text:?}");
     }
     assert_eq!(MacosMajor::from_major(14), Some(MacosMajor::Macos14));
-    assert_eq!(MacosMajor::from_major(26), None);
+    assert_eq!(MacosMajor::from_major(15), Some(MacosMajor::Macos15));
     assert_eq!(MacosMajor::Macos14.major(), 14);
+    assert_eq!(MacosMajor::Macos15.major(), 15);
+}
+
+/// A major version without a reviewed base set has no value, so no allow profile of it
+/// can be built: the next major (16), the one after the hosted runner's (26) and the
+/// older ones fail closed.
+#[test]
+fn a_major_version_without_a_base_set_fails_closed() {
+    for major in [0, 1, 10, 11, 12, 13, 16, 17, 25, 26, 27, u32::MAX] {
+        assert_eq!(MacosMajor::from_major(major), None, "{major}");
+        assert_eq!(
+            MacosMajor::from_product_version(&format!("{major}.0.1")),
+            None,
+            "{major}"
+        );
+    }
+    let known: Vec<u32> = MacosMajor::ALL.iter().map(|m| m.major()).collect();
+    assert_eq!(known, [14, 15]);
 }
 
 #[test]
