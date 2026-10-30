@@ -13,6 +13,9 @@ use crate::facts::{CommandRunner, free_bytes};
 /// `sw_vers`, by its absolute path like every helper the agent runs.
 const SW_VERS: &str = "/usr/bin/sw_vers";
 
+/// The most bytes a list file or a manifest may have: far above a list of 100,000 digests.
+pub const MAX_LIST_BYTES: u64 = 8 << 20;
+
 /// What a bundle needs of the host, read from its config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Needs {
@@ -74,6 +77,11 @@ pub trait BundleHost: Send + Sync {
     /// The free bytes of the volume `path` is on.
     fn free_bytes(&self, path: &Path) -> Result<u64, String>;
 
+    /// Whether this agent can run a bundle it holds. The hello and the `Caps` frame
+    /// advertise bundles only when it can: a server that placed work by `bundle` on a host
+    /// that cannot run one would see every start end in a refusal.
+    fn can_run(&self) -> bool;
+
     /// Begins to fetch the bundle `name` (a pin's name, with its tag if it has one) with
     /// manifest digest `digest` into the store.
     fn fetch(&self, store: &Path, name: &str, digest: &str) -> Fetch;
@@ -83,12 +91,21 @@ pub trait BundleHost: Send + Sync {
 #[derive(Debug, Clone, Copy)]
 pub struct SystemHost<R> {
     runner: R,
+    /// The user that must own a list file and the directory it is in: root.
+    owner: u32,
 }
 
 impl<R: CommandRunner + Send + Sync> SystemHost<R> {
     /// A host that runs its helpers (`sw_vers`, `df`) with `runner`.
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self { runner, owner: 0 }
+    }
+
+    /// The same host, with list files owned by `owner` instead of root (for a test that
+    /// cannot be root).
+    #[must_use]
+    pub fn with_owner(self, owner: u32) -> Self {
+        Self { owner, ..self }
     }
 }
 
@@ -206,6 +223,11 @@ impl<R: CommandRunner + Send + Sync> BundleHost for SystemHost<R> {
 
     fn free_bytes(&self, path: &Path) -> Result<u64, String> {
         free_bytes(&self.runner, path)
+    }
+
+    fn can_run(&self) -> bool {
+        // There is no bundle runtime yet.
+        false
     }
 
     fn fetch(&self, _store: &Path, _name: &str, _digest: &str) -> Fetch {

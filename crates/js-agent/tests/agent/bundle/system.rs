@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use js_agent::CommandRunner;
-use js_agent::bundle::{BundleHost, Fetch, Needs, SystemHost};
+use js_agent::bundle::{BundleHost, Fetch, MAX_LIST_BYTES, Needs, SystemHost};
 use js_bundle::BundleConfig;
 
 use super::fake::digest;
@@ -43,8 +43,13 @@ impl CommandRunner for Runner {
     }
 }
 
+/// The user running the tests: list files are written by it, so it stands for root.
+fn me() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 fn host() -> SystemHost<Runner> {
-    SystemHost::new(Runner(BTreeMap::new()))
+    SystemHost::new(Runner(BTreeMap::new())).with_owner(me())
 }
 
 fn hex(c: char) -> String {
@@ -249,4 +254,89 @@ fn on_a_mac_the_start_checks_read_the_real_volume() {
     fs::create_dir(&here).unwrap();
     assert_eq!(host().check_start(&here, &here), Ok(()));
     assert!(host().check_start(&dir.path("missing"), &here).is_err());
+}
+
+fn mode(path: &Path, bits: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
+}
+
+/// A list file is the trust root of a host, so it is read only when it is what the updater
+/// writes: a regular file, reached without a link, owned by the expected user, writable by
+/// nobody else, in a directory that is likewise, and of a sane size. Each condition is
+/// refused with the path in the reason. It catches an allow list a pool user could change, a
+/// link to a file that does not stop, and a named pipe that would block the agent for good.
+#[test]
+fn a_list_file_is_read_only_when_it_is_trusted() {
+    let dir = Scratch::new("sys-trust");
+    let good = dir.path("allow");
+    put(&good, "ok\n");
+    mode(&good, 0o644);
+    assert_eq!(host().read_file(&good), Ok("ok\n".to_owned()));
+    mode(&good, 0o600);
+    assert_eq!(host().read_file(&good), Ok("ok\n".to_owned()));
+
+    let link = dir.path("link");
+    std::os::unix::fs::symlink(&good, &link).unwrap();
+    assert!(host().read_file(&link).unwrap_err().contains("link"));
+
+    let fifo = dir.path("fifo");
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    for odd in [fifo, dir.path("")] {
+        let why = host().read_file(&odd).unwrap_err();
+        assert!(why.contains("not a regular file"), "{why}");
+    }
+
+    let why = host().with_owner(me() + 1).read_file(&good).unwrap_err();
+    assert!(why.contains("not owned by the expected user"), "{why}");
+
+    for bits in [0o664, 0o646] {
+        mode(&good, bits);
+        let why = host().read_file(&good).unwrap_err();
+        assert!(
+            why.contains("writable by group or others"),
+            "{bits:o}: {why}"
+        );
+    }
+    mode(&good, 0o644);
+
+    let loose = dir.path("loose");
+    fs::create_dir(&loose).unwrap();
+    put(&loose.join("allow"), "x\n");
+    mode(&loose, 0o777);
+    let why = host().read_file(&loose.join("allow")).unwrap_err();
+    assert!(why.contains("directory"), "{why}");
+    assert!(why.contains("writable by group or others"), "{why}");
+    mode(&loose, 0o755);
+    assert_eq!(host().read_file(&loose.join("allow")), Ok("x\n".to_owned()));
+}
+
+/// A list file over the size cap is refused, and one that is not UTF-8 is an error. It
+/// catches a root process that reads without bound.
+#[test]
+fn a_list_file_over_the_cap_or_not_text_is_refused() {
+    let dir = Scratch::new("sys-cap");
+    let big = dir.path("big");
+    let at_cap = vec![b'#'; usize::try_from(MAX_LIST_BYTES).unwrap()];
+    fs::write(&big, &at_cap).unwrap();
+    assert_eq!(
+        host().read_file(&big).map(|text| text.len()),
+        Ok(at_cap.len())
+    );
+    fs::write(&big, vec![b'#'; at_cap.len() + 1]).unwrap();
+    assert!(host().read_file(&big).unwrap_err().contains("larger than"));
+    let binary = dir.path("binary");
+    fs::write(&binary, [0xff, 0xfe]).unwrap();
+    assert!(host().read_file(&binary).is_err());
+}
+
+/// This build has no bundle runtime, so the machine's host says it cannot run a bundle. It
+/// catches a build that advertises a toolchain it cannot start.
+#[test]
+fn the_machines_host_cannot_run_a_bundle_yet() {
+    assert!(!host().can_run());
 }

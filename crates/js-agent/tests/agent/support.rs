@@ -670,6 +670,7 @@ pub fn run_with_store(
         jitter,
         sleeper,
         machine: jobs.0,
+        long_bundle_values: store.get(|s| s.long_values),
         bundle: store,
         worker_hook: jobs.1,
         rescue_bound: Some(RESCUE_TEST_BOUND),

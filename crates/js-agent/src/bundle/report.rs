@@ -19,7 +19,8 @@ pub struct Reported {
 /// The facts a host with `settings` reports: the manifest digests the store holds, its root,
 /// the read model and the Xcode builds the host found. A store that cannot be listed
 /// reports no bundle and warns, so a job is never placed on a guess.
-pub fn report(settings: &Settings, host: &dyn BundleHost) -> Reported {
+pub fn report(settings: &Settings, host: &dyn BundleHost, long_values: bool) -> Reported {
+    let _ = long_values;
     let mut warnings = Vec::new();
     let bundles = host.held(&settings.store).unwrap_or_else(|why| {
         warnings.push(format!(
@@ -49,7 +50,8 @@ pub fn report(settings: &Settings, host: &dyn BundleHost) -> Reported {
 /// The capabilities of the hello for `caps`: `bundle-root` always, and `bundle` (the
 /// digests, comma-separated; the first of them when there are more than the wire takes)
 /// when the store holds any.
-pub fn hello_capabilities(caps: &Caps) -> Vec<(String, String)> {
+pub fn hello_capabilities(caps: &Caps, long_values: bool) -> Vec<(String, String)> {
+    let _ = long_values;
     let held = (!caps.bundles.is_empty()).then(|| {
         (
             BUNDLE_CAPABILITY.to_owned(),

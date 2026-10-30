@@ -30,6 +30,10 @@ pub struct State {
     /// The volume of a path: the first prefix that matches.
     pub volumes: Vec<(PathBuf, VolumeFacts)>,
     pub securelevel: i64,
+    /// Whether the agent can run a bundle.
+    pub can_run: bool,
+    /// Whether the server takes a long `bundle` capability value.
+    pub long_values: bool,
     pub fetches: Vec<(String, String)>,
     pub started: Vec<(PathBuf, PathBuf)>,
 }
@@ -47,6 +51,8 @@ impl Default for State {
             fetch: Fetch::Started,
             volumes: vec![(PathBuf::from("/"), apfs(1))],
             securelevel: -1,
+            can_run: true,
+            long_values: true,
             fetches: Vec::new(),
             started: Vec::new(),
         }
@@ -129,6 +135,10 @@ impl BundleHost for FakeHost {
 
     fn free_bytes(&self, _path: &Path) -> Result<u64, String> {
         self.get(|s| s.free.clone())
+    }
+
+    fn can_run(&self) -> bool {
+        self.get(|s| s.can_run)
     }
 
     fn fetch(&self, _store: &Path, name: &str, digest: &str) -> Fetch {

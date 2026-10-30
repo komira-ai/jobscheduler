@@ -302,6 +302,9 @@ pub struct Services<'a> {
     pub machine: Arc<dyn Machine>,
     /// What the bundle store reads from the machine; used only with `--bundle-store`.
     pub bundle: Arc<dyn BundleHost>,
+    /// The server takes a `bundle` capability value longer than the common 128 bytes. The
+    /// machine's own is false: a server cannot say so yet.
+    pub long_bundle_values: bool,
     /// Told of the job worker once it has started (a test's way to wait for it).
     pub worker_hook: Option<&'a dyn Fn(Handle)>,
     /// The bound of the rescue of the jobs in place of [`RESCUE_BOUND`]: for a test.
@@ -351,6 +354,7 @@ pub fn main_with(
                 sleeper: &mut sleeper,
                 machine: Arc::new(System::new()),
                 bundle: Arc::new(SystemHost::new(SystemCommands::default())),
+                long_bundle_values: false,
                 worker_hook: None,
                 rescue_bound: None,
             };
@@ -418,6 +422,7 @@ fn execute(
     let store = bundle.as_ref().map(|settings| StoreView {
         settings,
         host: &**host,
+        long_values: services.long_bundle_values,
     });
     let mut offer =
         offer(&cli, platform, commands, files, version, store).map_err(Failure::Usage)?;

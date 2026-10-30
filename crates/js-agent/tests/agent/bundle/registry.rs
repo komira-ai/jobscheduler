@@ -89,6 +89,16 @@ fn a_bare_host_and_malformed_entries_are_refused() {
         ("ghcr.io:80a/x", "has a host that is not a registry host"),
         ("bad_host/x", "has a host that is not a registry host"),
         ("a..b/x", "has a host that is not a registry host"),
+        ("ghcr.io:65536/x", "has a host that is not a registry host"),
+        ("ghcr.io:0/x", "has a host that is not a registry host"),
+        (
+            "ghcr.io/./x",
+            "has a namespace that is empty or not lower case",
+        ),
+        (
+            "ghcr.io/x/..",
+            "has a namespace that is empty or not lower case",
+        ),
         ("/x", "has a host that is not a registry host"),
     ];
     for (text, said) in cases {

@@ -153,6 +153,9 @@ pub struct StoreView<'a> {
     pub settings: &'a Settings,
     /// The machine, as the store sees it.
     pub host: &'a dyn BundleHost,
+    /// The server takes a `bundle` capability value longer than 128 bytes (more than one
+    /// digest). No server says so yet, so the agent sends one digest at most.
+    pub long_values: bool,
 }
 
 /// Detects the host and applies the flags. A host that has a bundle store (`store`) also
@@ -189,11 +192,12 @@ pub fn offer(
         .unzip();
     let (disk_bytes, advisory, disk_warning) = disk(cli, runner, kept_back.unwrap_or_default());
     capabilities.extend(advisory);
-    let reported = store.map(|view| report(view.settings, view.host));
+    let long_values = store.is_some_and(|view| view.long_values);
+    let reported = store.map(|view| report(view.settings, view.host, view.long_values));
     capabilities.extend(
         reported
             .iter()
-            .flat_map(|found| hello_capabilities(&found.caps)),
+            .flat_map(|found| hello_capabilities(&found.caps, long_values)),
     );
     let host_id = id(cli, platform, runner, files)?;
     let instance = instance(cli, files)?;

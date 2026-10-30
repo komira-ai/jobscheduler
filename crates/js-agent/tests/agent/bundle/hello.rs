@@ -272,7 +272,7 @@ fn the_caps_frame_carries_the_facts_of_the_hello() {
         s.held = Ok(vec![digest('a'), digest('b')]);
         s.xcodes = vec![xcode("16C5032a"), xcode("15F31d"), xcode("16C5032a")];
     });
-    let reported = report(&settings(&host), &*host);
+    let reported = report(&settings(&host), &*host, true);
     assert!(reported.warnings.is_empty());
     let caps = reported.caps;
     assert_eq!(caps.validate(), Ok(()));
@@ -280,7 +280,7 @@ fn the_caps_frame_carries_the_facts_of_the_hello() {
     assert_eq!(caps.bundle_root, STORE);
     assert_eq!(caps.read_model, ReadModel::Open);
     assert_eq!(caps.xcode, ["15F31d", "16C5032a"]);
-    let hello = hello_capabilities(&caps);
+    let hello = hello_capabilities(&caps, true);
     assert_eq!(
         hello,
         [
@@ -291,6 +291,9 @@ fn the_caps_frame_carries_the_facts_of_the_hello() {
             ("bundle-root".to_owned(), STORE.to_owned()),
         ]
     );
+    let common = hello_capabilities(&caps, false);
+    assert_eq!(common[0], ("bundle".to_owned(), digest('a')));
+    assert_eq!(common[1].0, "bundle-root");
 }
 
 /// The reserve is the budget less what the store uses, never below zero, and the whole budget
@@ -312,4 +315,106 @@ fn the_reserve_never_goes_below_zero() {
     let (reserve, warning) = reserve_bytes(&settings, &*host);
     assert_eq!(reserve, 10 * GIB);
     assert!(warning.unwrap().contains("(io)"));
+}
+
+/// A server that has not said it takes a long `bundle` value gets one digest, which fits the
+/// common 128-byte cap; two digests are 143 bytes, which an older server refuses as an
+/// invalid hello and the agent would then stop. The agent warns that it reports only the
+/// first. It catches a rollout where upgrading an agent first takes it off an old server.
+#[test]
+fn a_server_without_long_values_gets_one_digest() {
+    let two = format!("{},{}", digest('a'), digest('b'));
+    assert_eq!(two.len(), 143);
+    let store = FakeHost::new();
+    store.set(|s| {
+        s.held = Ok(vec![digest('a'), digest('b')]);
+        s.long_values = false;
+    });
+    let (ran, hello) = run_hello("hello-common", &store_flags("40"), store, 100);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    let shown = hello["capabilities"]["bundle"].as_str().unwrap();
+    assert_eq!(shown, digest('a'));
+    assert!(shown.len() <= limits::MAX_CAPABILITY_VALUE_LEN);
+    assert!(
+        ran.err
+            .contains("only the first 1 are reported in the hello"),
+        "{}",
+        ran.err
+    );
+}
+
+/// An agent that cannot run a bundle advertises neither `bundle` nor `bundle-root`, and says
+/// why. It catches a placement on a host whose every start would end in a refusal.
+#[test]
+fn a_host_that_cannot_run_a_bundle_advertises_nothing() {
+    let store = FakeHost::new();
+    store.set(|s| {
+        s.held = Ok(vec![digest('a')]);
+        s.can_run = false;
+    });
+    let (ran, hello) = run_hello("hello-cannot-run", &store_flags("40"), store.clone(), 100);
+    assert_eq!(ran.status(), code(0), "{}", ran.err);
+    assert!(hello["capabilities"].get("bundle").is_none());
+    assert!(hello["capabilities"].get("bundle-root").is_none());
+    assert!(ran.err.contains("cannot run a bundle yet"), "{}", ran.err);
+    let reported = report(&settings(&store), &*store, true);
+    assert_eq!(reported.caps, js_agent_wire::Caps::default());
+}
+
+/// Only held digests that the deny list and the allow list let through are advertised: a
+/// denied digest and an unlisted one are left out, and when a list cannot be read nothing is
+/// advertised and the agent warns. It catches a placement that is sent again and again to a
+/// host that refuses the digest.
+#[test]
+fn only_permitted_digests_are_advertised() {
+    let host = FakeHost::new();
+    host.file(
+        "/etc/js/allow",
+        &format!("{}\n{}\n", digest('a'), digest('b')),
+    );
+    host.file("/etc/js/deny", &format!("{}\n", digest('b')));
+    host.set(|s| s.held = Ok(vec![digest('a'), digest('b'), digest('c')]));
+    let args = [
+        "js-agent",
+        "--server",
+        "http://127.0.0.1:1",
+        "--pool",
+        "macs",
+        "--scratch-root",
+        "/Volumes/work/scratch",
+        "--bundle-store",
+        STORE,
+        "--bundle-budget-gib",
+        "10",
+        "--bundle-allow-file",
+        "/etc/js/allow",
+        "--bundle-deny-file",
+        "/etc/js/deny",
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    let settings = Settings::from_cli(&cli, &mac(), &*host).unwrap().unwrap();
+    let reported = report(&settings, &*host, true);
+    assert_eq!(reported.caps.bundles, [digest('a')]);
+    assert!(reported.warnings.is_empty());
+    host.set(|s| {
+        s.files.remove(std::path::Path::new("/etc/js/allow"));
+    });
+    let reported = report(&settings, &*host, true);
+    assert!(reported.caps.bundles.is_empty());
+    assert!(
+        reported.warnings[0].contains("allow list cannot be read"),
+        "{:?}",
+        reported.warnings
+    );
+    host.file("/etc/js/allow", &format!("{}\n", digest('a')));
+    host.set(|s| {
+        s.files.remove(std::path::Path::new("/etc/js/deny"));
+    });
+    let reported = report(&settings, &*host, true);
+    assert!(reported.caps.bundles.is_empty());
+    assert!(
+        reported.warnings[0].contains("deny list cannot be read"),
+        "{:?}",
+        reported.warnings
+    );
 }
