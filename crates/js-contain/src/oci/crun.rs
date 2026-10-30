@@ -74,7 +74,6 @@ impl JobDrop {
     /// (the order in which each call is still allowed), all three real, effective and saved.
     fn apply(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt as _;
-        let (uid, gid) = (self.uid, self.gid);
         command
             .env_clear()
             .env("PATH", &self.path)
@@ -83,8 +82,16 @@ impl JobDrop {
         // SAFETY: `drop_ids` makes three system calls and nothing else (no allocation, no
         // lock) in the forked child before it execs.
         unsafe {
-            command.pre_exec(move || drop_ids(uid, gid, clear_groups));
+            command.pre_exec(self.in_child());
         }
+    }
+}
+
+impl JobDrop {
+    /// The function run in the forked child before the exec.
+    fn in_child(&self) -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
+        let (uid, gid) = (self.uid, self.gid);
+        move || drop_ids(uid, gid, clear_groups)
     }
 }
 
@@ -656,8 +663,7 @@ mod tests {
         // The real `setgroups`, and the closure given to the child, as an ordinary user.
         assert_eq!(clear_groups().is_ok(), root);
         let job = JobDrop::new(Some((uid, gid)), None, 0).expect("root daemon");
-        let closure = move || drop_ids(job.uid, job.gid, clear_groups);
-        assert_eq!(closure().is_ok(), root);
+        assert_eq!(job.in_child()().is_ok(), root);
     }
 
     /// Catches a failed `crun delete` taken for a success while the container's state is
