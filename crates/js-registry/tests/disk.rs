@@ -4,7 +4,7 @@
 
 mod support;
 
-use js_agent_wire::{Hello, Isolation, JobSpec, Limits};
+use js_agent_wire::{HeldRun, HeldState, Hello, Isolation, JobSpec, Limits, Outcome, RunResult};
 use js_caps::{SCRATCH_DEFAULT_GIB, SCRATCH_QUOTA, SCRATCH_QUOTA_PROJECT};
 use js_provider::Provider;
 use js_registry::{PoolConfig, Refusal, RunRefusal};
@@ -229,4 +229,120 @@ fn checked_refuses_a_quota_pool_without_disk() {
     assert_eq!(pool(0, false).checked(), Ok(pool(0, false)));
     assert_eq!(pool(GIB, true).checked(), Ok(pool(GIB, true)));
     assert_eq!(pool(GIB, false).checked(), Ok(pool(GIB, false)));
+}
+
+/// Asserts that a quota pool refuses, at hello, a host whose default cannot be booked:
+/// the default larger than the pool's disk (26 GiB in a 25 GiB pool, and 2^33 GiB, which
+/// `checked_mul` still counts), no default, zero, not a number, too large to count, or a
+/// quota that is not `project`; all `shape-not-accepted`. A default equal to the pool's
+/// disk joins. It catches a host that joins and then fails every run without disk
+/// `no-capacity` forever, and a pool that books zero for runs without disk.
+#[test]
+fn a_quota_pool_refuses_a_host_without_a_default_that_fits() {
+    let join = |quota: Option<&str>, default: Option<&str>| {
+        let fx = fixture_of(pool(25 * GIB, true));
+        fx.hello(&host_hello(25 * GIB, quota, default, &[]), &cred("t"))
+    };
+    let huge = u64::MAX.to_string();
+    let refused = [
+        (Some("project"), Some("26")),
+        (Some("project"), Some("8589934592")),
+        (Some("project"), Some(huge.as_str())),
+        (Some("project"), Some("0")),
+        (Some("project"), Some("ten")),
+        (Some("project"), None),
+        (Some("yes"), Some("10")),
+        (None, Some("10")),
+        (None, None),
+    ];
+    for (quota, default) in refused {
+        let joined = join(quota, default);
+        assert_eq!(
+            joined.map(|_| ()),
+            Err(Refusal::ShapeNotAccepted),
+            "{quota:?} {default:?}"
+        );
+    }
+    assert!(join(Some("project"), Some("25")).is_ok());
+    assert!(join(Some("project"), Some("1")).is_ok());
+}
+
+fn listed(runs: &[&str]) -> Vec<HeldRun> {
+    let run = |id: &&str| HeldRun {
+        run_id: (*id).into(),
+        state: HeldState::Running,
+    };
+    runs.iter().map(run).collect()
+}
+
+fn beat(fx: &Fixture, epoch: u64, held: &[&str], done: &[&str]) {
+    let mut message = fx.heartbeat("a", epoch);
+    message.held = listed(held);
+    message.results = done
+        .iter()
+        .map(|id| RunResult {
+            run_id: (*id).into(),
+            lease_id: lease(1).to_string(),
+            outcome: Outcome::Succeeded,
+            exit_code: Some(0),
+            detail: None,
+            log_tail: None,
+        })
+        .collect();
+    fx.registry.heartbeat(&message, &cred("t")).unwrap();
+}
+
+/// Asserts that a run that ends gives its booked disk back, whichever way it ends: a
+/// 20 GiB run of a 25 GiB pool leaves only 5 GiB, a second 10 GiB run is refused
+/// `no-capacity`, and after the first finishes (its result sent and no longer listed),
+/// is cancelled before the host listed it, or is lost with its host, the second is
+/// queued. Meanwhile a run still listed keeps holding. It catches a sum over every run
+/// the registry remembers instead of the live ones.
+#[test]
+fn an_ended_run_frees_its_disk() {
+    let ends: [(&str, fn(&Fixture, u64)); 3] = [
+        ("finished", |fx, epoch| {
+            beat(fx, epoch, &["r1"], &[]);
+            beat(fx, epoch, &[], &["r1"]);
+        }),
+        ("cancelled", |fx, epoch| {
+            fx.registry.stop_run(&lease(1), "r1").unwrap();
+            beat(fx, epoch, &[], &[]);
+        }),
+        ("lost", |fx, epoch| {
+            fx.pass_grace();
+            beat(fx, epoch, &[], &[]);
+        }),
+    ];
+    for (how, end) in ends {
+        let hello = host_hello(25 * GIB, Some("project"), Some("10"), &[]);
+        let fx = fixture_of(pool(25 * GIB, true));
+        let epoch = fx.hello(&hello, &cred("t")).unwrap().epoch;
+        assert!(started_on(&fx.provider.clone().start(spec(1))).is_some());
+        assert_eq!(queue(&fx, "r1", Some(20 * GIB)), Ok(()), "{how}");
+        assert_eq!(
+            queue(&fx, "r2", Some(10 * GIB)),
+            Err(RunRefusal::NoCapacity)
+        );
+        end(&fx, epoch);
+        assert_eq!(queue(&fx, "r2", Some(10 * GIB)), Ok(()), "{how}");
+        assert_eq!(
+            queue(&fx, "r3", Some(16 * GIB)),
+            Err(RunRefusal::NoCapacity)
+        );
+    }
+}
+
+/// Asserts that a run the host still lists keeps its disk: after a heartbeat that lists
+/// the 20 GiB run, a 10 GiB run is still refused. It catches a release on listing.
+#[test]
+fn a_listed_run_keeps_its_disk() {
+    let hello = host_hello(25 * GIB, Some("project"), Some("10"), &[]);
+    let fx = leased(pool(25 * GIB, true), &hello);
+    assert_eq!(queue(&fx, "r1", Some(20 * GIB)), Ok(()));
+    beat(&fx, 1, &["r1"], &[]);
+    assert_eq!(
+        queue(&fx, "r2", Some(10 * GIB)),
+        Err(RunRefusal::NoCapacity)
+    );
 }

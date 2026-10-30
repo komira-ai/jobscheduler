@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use js_agent_wire::refusal as refusal_code;
 use js_agent_wire::{Heartbeat, HeartbeatReply, Hello, JobSpec, Outcome, Phase, Taint, Welcome};
-use js_caps::{FLAG_SET, HostContract, RUN_FILES};
+use js_caps::{FLAG_SET, HostContract, RUN_FILES, SCRATCH_QUOTA};
 use js_lease::{Clock, Timestamp};
 use js_pool_static::HostBook;
 use js_provider::Observed;
@@ -549,6 +549,9 @@ impl Registry {
     /// pool-full. The transport must rate-limit hellos per credential, and per-host
     /// credentials (design D18) close it; there is no per-credential cap here.
     ///
+    /// A pool that names `scratch-quota` also refuses (`shape-not-accepted`) a host whose
+    /// quota default does not count (see `quota_default`) or is more than the pool's disk.
+    ///
     /// The runs a hello lists as held are never adopted. A run the registry holds a live
     /// record of stays as it is, now listed by the host; every other listed run is
     /// answered with a cancel in the host's next heartbeat reply (a welcome carries no
@@ -604,6 +607,15 @@ impl Registry {
         if !offers_floor {
             return Err(Refusal::ShapeNotAccepted);
         }
+        // A pool that names `scratch-quota` books a default for every run without disk, so
+        // a host must report one that counts and fits the pool's disk: otherwise its runs
+        // without disk would book nothing, or never fit.
+        let quota_pool = floor.capabilities().contains_key(SCRATCH_QUOTA);
+        let default = quota_default(&hello.capabilities);
+        let fits = default.is_some_and(|bytes| bytes <= floor.resources().disk_bytes());
+        if [quota_pool, !fits].into_iter().all(|ok| ok) {
+            return Err(Refusal::ShapeNotAccepted);
+        }
         let room = state.records.len() < config.max_machines();
         if ![prior_epoch.is_some(), room].into_iter().any(|ok| ok) {
             return Err(Refusal::PoolFull);
@@ -632,7 +644,7 @@ impl Registry {
                 agent_version: Some(hello.agent_version.clone()),
                 labels: hello.labels.clone(),
                 files: hello.capabilities.get(RUN_FILES).map(String::as_str) == Some(FLAG_SET),
-                quota_default: quota_default(&hello.capabilities),
+                quota_default: default,
                 held,
                 beats: 0,
                 taint: kept_taint,

@@ -176,7 +176,7 @@ impl RunRefusal {
 /// The quota in bytes a host enforces on a run that sets no `disk_bytes`: its
 /// `scratch-default-gib` whole GiB, when it reports `scratch-quota` as `project`. `None`
 /// when it does not, or when the default is absent, not a whole number, zero, or too
-/// large to count in bytes: a host that says it bounds disk and not by how much is
+/// large to count in bytes (above the wire's `MAX_DISK_BYTES`): a host that says it bounds disk and not by how much is
 /// treated as one that does not, so the server never books a guess.
 pub(crate) fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u64> {
     let quota = capabilities
@@ -186,7 +186,8 @@ pub(crate) fn quota_default(capabilities: &BTreeMap<String, String>) -> Option<u
         .get(SCRATCH_DEFAULT_GIB)
         .and_then(|value| value.parse::<u64>().ok());
     let bytes = gib.and_then(|gib| gib.checked_mul(1 << 30));
-    bytes.filter(|bytes| [quota, *bytes > 0].into_iter().all(|ok| ok))
+    let counts = |bytes: &u64| (1..=limits::MAX_DISK_BYTES).contains(bytes);
+    bytes.filter(|bytes| [quota, counts(bytes)].into_iter().all(|ok| ok))
 }
 
 /// Checks a job against the wire rules and the shape a lease books, before any state is
@@ -647,6 +648,26 @@ impl Runs {
 mod tests {
     use super::*;
     use js_agent_wire::{Limits, Phase};
+
+    /// Asserts the bytes of a default: the largest whole-GiB default within the wire's
+    /// `MAX_DISK_BYTES` counts and the next GiB does not, and the quota capability is
+    /// needed. It catches a default accepted above the wire maximum, which a sum over
+    /// 2^18 runs could overflow.
+    #[test]
+    fn the_default_is_bounded_by_the_wire_maximum() {
+        let caps = |quota: &str, gib: &str| {
+            BTreeMap::from([
+                (SCRATCH_QUOTA.to_owned(), quota.to_owned()),
+                (SCRATCH_DEFAULT_GIB.to_owned(), gib.to_owned()),
+            ])
+        };
+        let top = limits::MAX_DISK_BYTES >> 30;
+        assert_eq!(top, 65_535);
+        assert_eq!(quota_default(&caps("project", "65535")), Some(top << 30));
+        assert_eq!(quota_default(&caps("project", "65536")), None);
+        assert_eq!(quota_default(&caps("project", "1")), Some(1 << 30));
+        assert_eq!(quota_default(&caps("no", "1")), None);
+    }
 
     fn job() -> JobSpec {
         JobSpec {
