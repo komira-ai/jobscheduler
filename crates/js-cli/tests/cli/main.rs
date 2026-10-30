@@ -9,7 +9,6 @@ mod binary;
 mod failures;
 mod flags;
 mod lost_reply;
-mod native;
 mod ops;
 mod procs;
 mod release;
