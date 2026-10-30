@@ -132,10 +132,17 @@ pub(super) trait Sys: Send + Sync {
     fn block_rdev(&self, path: &Path) -> io::Result<Option<u64>>;
     /// `qs_flags` of `Q_XGETQSTAT` for the file system on `device`.
     fn quota_flags(&self, device: &Path) -> io::Result<u16>;
-    /// `FS_IOC_FSGETXATTR` of the directory.
-    fn get_attr(&self, dir: &Path) -> io::Result<Fsx>;
-    /// `FS_IOC_FSSETXATTR` of the directory.
-    fn set_attr(&self, dir: &Path, attr: Fsx) -> io::Result<()>;
+    /// Opens the directory `path` for the calls below: `O_DIRECTORY | O_NOFOLLOW |
+    /// O_CLOEXEC`, so a link in the last component is refused and not followed. A caller
+    /// opens a run's directory once and does everything to that descriptor, so the checks
+    /// and the changes cannot land on different directories.
+    fn open_dir(&self, path: &Path) -> io::Result<File>;
+    /// Whether the open directory holds no entry.
+    fn is_empty(&self, dir: &File) -> io::Result<bool>;
+    /// `FS_IOC_FSGETXATTR` of the open directory.
+    fn get_attr(&self, dir: &File) -> io::Result<Fsx>;
+    /// `FS_IOC_FSSETXATTR` of the open directory.
+    fn set_attr(&self, dir: &File, attr: Fsx) -> io::Result<()>;
     /// `Q_XGETQUOTA` for a project.
     fn get_quota(&self, device: &Path, project: u32) -> io::Result<Dq>;
     /// `Q_XSETQLIM`: the hard limits of a project, in blocks of 512 and inodes; 0 is none.
@@ -220,10 +227,21 @@ impl Sys for Kernel {
         .map(flags_of)
     }
 
-    fn get_attr(&self, dir: &Path) -> io::Result<Fsx> {
-        let dir = open_dir(dir)?;
+    fn open_dir(&self, path: &Path) -> io::Result<File> {
+        open_dir(path)
+    }
+
+    fn is_empty(&self, dir: &File) -> io::Result<bool> {
+        // The descriptor's own listing, through its `/proc` link: the path is not looked up
+        // again, the link resolves to the directory the descriptor holds. An entry that
+        // cannot be read still is an entry, so it counts as not empty.
+        let entries = fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))?;
+        Ok(entries.take(1).count() == 0)
+    }
+
+    fn get_attr(&self, dir: &File) -> io::Result<Fsx> {
         syscall(Fsx::default(), |attr| {
-            // FFI-BOUNDARY: the descriptor `dir` is owned here and open for the call; `attr`
+            // FFI-BOUNDARY: the descriptor `dir` is borrowed and open for the call; `attr`
             // is a live exclusive borrow of a `#[repr(C)]` struct with the layout of
             // `struct fsxattr` (28 bytes), which the kernel fills. It keeps neither.
             unsafe {
@@ -236,8 +254,7 @@ impl Sys for Kernel {
         })
     }
 
-    fn set_attr(&self, dir: &Path, attr: Fsx) -> io::Result<()> {
-        let dir = open_dir(dir)?;
+    fn set_attr(&self, dir: &File, attr: Fsx) -> io::Result<()> {
         let mut attr = attr;
         // FFI-BOUNDARY: as `get_attr`, but the kernel only reads `attr`.
         check(unsafe {
@@ -393,24 +410,41 @@ mod tests {
         assert!(Kernel.set_limits(nul, 5, 1, 1).is_err());
     }
 
-    /// A directory that is not there cannot be opened for the project calls. For one that
-    /// is, the kernel answers whatever its file system does (an ordinary one has no project
-    /// quota, a tmpfs may not know the call): the test makes the calls and takes the answer
-    /// as it comes, because the real effect is tested on an XFS host.
+    /// A directory that is not there cannot be opened. A link to a directory is refused and
+    /// not followed (`O_NOFOLLOW`: without it the open would succeed and the project id
+    /// would land on whatever the link points at), and so is a plain file. For a directory
+    /// that is there, the listing says whether it is empty, and a descriptor that is no
+    /// directory cannot be listed. The attribute calls on an open directory get whatever
+    /// its file system answers (an ordinary one has no project quota, a tmpfs may not know
+    /// the call): the test makes them and takes the answer as it comes, because the real
+    /// effect is tested on an XFS host.
     #[test]
-    fn the_project_calls_open_the_directory() {
+    fn the_project_calls_work_on_one_open_directory() {
         let gone = Path::new("/nonexistent-js-quota-dir");
         assert_eq!(
-            Kernel.get_attr(gone).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
-        assert_eq!(
-            Kernel.set_attr(gone, Fsx::default()).unwrap_err().kind(),
+            Kernel.open_dir(gone).unwrap_err().kind(),
             io::ErrorKind::NotFound
         );
         let dir = temp("attr");
-        let _ = Kernel.get_attr(&dir);
-        let _ = Kernel.set_attr(&dir, Fsx::default());
+        let link = dir.with_extension("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let refused = Kernel.open_dir(&link).unwrap_err();
+        assert!(
+            matches!(refused.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)),
+            "{refused:?}"
+        );
+        let file = dir.join("plain");
+        fs::write(&file, "x").unwrap();
+        assert!(Kernel.open_dir(&file).is_err());
+        let open = Kernel.open_dir(&dir).unwrap();
+        assert!(!Kernel.is_empty(&open).unwrap());
+        fs::remove_file(&file).unwrap();
+        assert!(Kernel.is_empty(&open).unwrap());
+        assert!(Kernel.is_empty(&File::open("/dev/null").unwrap()).is_err());
+        let _ = Kernel.get_attr(&open);
+        let _ = Kernel.set_attr(&open, Fsx::default());
+        drop(open);
+        fs::remove_file(&link).unwrap();
         fs::remove_dir(&dir).unwrap();
     }
 }

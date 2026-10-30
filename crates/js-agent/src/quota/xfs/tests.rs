@@ -2,14 +2,16 @@
 //! probe asks, the order of the calls of `apply` and `clear`, and every failure of each.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::quota::mountinfo::makedev;
 use crate::quota::sys::{Dq, Fsx};
-use crate::quota::{Mode, ProjectIds};
+use crate::quota::{MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT, Mode, ProjectIds};
 
 #[derive(Default)]
 struct St {
@@ -17,6 +19,8 @@ struct St {
     rdev: Option<u64>,
     flags: u16,
     attrs: BTreeMap<PathBuf, Fsx>,
+    /// The path each open descriptor was opened from (the script has no real project ids).
+    paths: BTreeMap<i32, PathBuf>,
     dq: BTreeMap<u32, Dq>,
     /// Operations that fail: `get_attr` fails every call, `get_attr#2` only the second.
     fail: BTreeSet<String>,
@@ -72,19 +76,40 @@ impl Sys for Arc<Script> {
         Ok(self.st().flags)
     }
 
-    fn get_attr(&self, dir: &Path) -> io::Result<Fsx> {
-        self.enter("get_attr")?;
-        match dir.exists() {
-            true => Ok(self.st().attrs.get(dir).copied().unwrap_or_default()),
-            false => Err(io::ErrorKind::NotFound.into()),
+    /// Like `O_DIRECTORY | O_NOFOLLOW`: a link is refused, not followed (the path is looked
+    /// at without following it, unlike `exists`).
+    fn open_dir(&self, path: &Path) -> io::Result<File> {
+        self.enter("open_dir")?;
+        if !std::fs::symlink_metadata(path)?.is_dir() {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
+        let file = File::open(path)?;
+        self.st().paths.insert(file.as_raw_fd(), path.to_owned());
+        Ok(file)
     }
 
-    fn set_attr(&self, dir: &Path, attr: Fsx) -> io::Result<()> {
+    fn is_empty(&self, dir: &File) -> io::Result<bool> {
+        self.enter("is_empty")?;
+        let path = self.st().paths[&dir.as_raw_fd()].clone();
+        Ok(std::fs::read_dir(path)?.next().is_none())
+    }
+
+    fn get_attr(&self, dir: &File) -> io::Result<Fsx> {
+        self.enter("get_attr")?;
+        let st = self.st();
+        Ok(st
+            .attrs
+            .get(&st.paths[&dir.as_raw_fd()])
+            .copied()
+            .unwrap_or_default())
+    }
+
+    fn set_attr(&self, dir: &File, attr: Fsx) -> io::Result<()> {
         self.enter("set_attr")?;
         let mut st = self.st();
+        let path = st.paths[&dir.as_raw_fd()].clone();
         if !st.forget_attrs {
-            st.attrs.insert(dir.to_owned(), attr);
+            st.attrs.insert(path, attr);
         }
         Ok(())
     }
@@ -177,6 +202,7 @@ fn probe_finds_project_quota() {
             "mountinfo",
             "rdev",
             "flags",
+            "open_dir",
             "get_attr",
             "set_attr",
             "get_attr"
@@ -186,6 +212,35 @@ fn probe_finds_project_quota() {
     let set = rig.script.st().attrs.values().next().copied().unwrap();
     assert_eq!(set.projid, ProjectIds::default().probe_id().get());
     assert_ne!(set.xflags & XFLAG_PROJINHERIT, 0);
+}
+
+/// Every probe makes a directory of a name of its own: two probes of one process set
+/// their project id on two different paths. It catches a name made of the process id
+/// alone, which a leftover of an earlier process with the same id would block.
+#[test]
+fn probe_directories_have_random_names() {
+    let rig = Rig::new("probe-names");
+    assert_eq!(rig.quota.probe().mode, Mode::Project);
+    assert_eq!(rig.quota.probe().mode, Mode::Project);
+    let paths: Vec<_> = rig.script.st().attrs.keys().cloned().collect();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert_ne!(paths[0], paths[1]);
+}
+
+/// A probe directory left by a crashed process of the same process id does not make the
+/// probe say none, and the probe does not touch it. It catches a probe that fails on
+/// `AlreadyExists`, which would turn a crash into a host with no quota until the
+/// leftover is removed by hand.
+#[test]
+fn a_leftover_probe_directory_does_not_block_the_probe() {
+    let rig = Rig::new("probe-stale");
+    let stale = rig
+        .root
+        .join(format!(".js-quota-probe-{}", std::process::id()));
+    std::fs::create_dir(&stale).unwrap();
+    let probe = rig.quota.probe();
+    assert_eq!(probe.mode, Mode::Project, "{probe}");
+    assert!(stale.is_dir());
 }
 
 /// Probes a rig set up by `setup` and expects none with `want` in the reason.
@@ -249,12 +304,14 @@ fn probe_says_why_not() {
         "without prjquota",
     );
     expect_none(
-        "stale-probe-dir",
-        |r| {
-            let name = format!(".js-quota-probe-{}", std::process::id());
-            std::fs::create_dir(r.root.join(name)).unwrap();
-        },
+        "root-gone",
+        |r| std::fs::remove_dir(&r.root).unwrap(),
         "cannot make a probe directory",
+    );
+    expect_none(
+        "open-fails",
+        |r| r.script.fail("open_dir"),
+        "project ids cannot be set",
     );
     expect_none(
         "get-fails",
@@ -279,9 +336,10 @@ fn probe_says_why_not() {
 }
 
 /// `apply` sets the project id and the inherit flag on the empty directory first, then the
-/// limits, in blocks of 512 rounded up. It catches limits set in bytes, and a directory
-/// bound after the quota (a window in which the project is limited and the directory is
-/// not counted is harmless, but the project must be set before the call returns).
+/// limits, in blocks of 512 rounded up, and does the emptiness check and the three
+/// attribute calls on the one descriptor it opened (`open_dir` is in the log once). It
+/// catches limits set in bytes, a project id set after the limits, and a path that is
+/// opened again between the check and the change.
 #[test]
 fn apply_sets_the_project_then_the_limits() {
     let rig = Rig::new("apply-ok");
@@ -293,6 +351,8 @@ fn apply_sets_the_project_then_the_limits() {
         [
             "mountinfo",
             "rdev",
+            "open_dir",
+            "is_empty",
             "get_attr",
             "set_attr",
             "get_attr",
@@ -307,8 +367,9 @@ fn apply_sets_the_project_then_the_limits() {
 }
 
 /// `apply` refuses what would leave a run unbounded or uncounted, before it touches
-/// anything: a limit of 0 (no limit for the kernel), a directory outside the root, one
-/// that holds a file (it would escape the count), and a root that has no quota.
+/// anything: a limit of 0 (no limit for the kernel) or above the bounds, a directory that
+/// is not a direct child of the root, one that holds a file (it would escape the count),
+/// and a root that has no quota.
 #[test]
 fn apply_refuses_what_cannot_be_enforced() {
     let rig = Rig::new("apply-refuse");
@@ -317,8 +378,18 @@ fn apply_refuses_what_cannot_be_enforced() {
     let zero = |bytes, inodes| rig.quota.apply(&dir, project, bytes, inodes).unwrap_err();
     assert!(matches!(zero(0, 5), QuotaError::BadLimit(_)));
     assert!(matches!(zero(5, 0), QuotaError::BadLimit(_)));
-    let outside = rig.quota.apply(Path::new("/elsewhere/r1"), project, 5, 5);
-    assert!(matches!(outside, Err(QuotaError::Outside(_))));
+    let too_big = |bytes, inodes| rig.quota.apply(&dir, project, bytes, inodes).unwrap_err();
+    assert!(matches!(
+        too_big(MAX_BLOCK_LIMIT_BYTES + 1, 5),
+        QuotaError::BadLimit(_)
+    ));
+    assert!(matches!(too_big(u64::MAX, 5), QuotaError::BadLimit(_)));
+    assert!(matches!(
+        too_big(5, MAX_INODE_LIMIT + 1),
+        QuotaError::BadLimit(_)
+    ));
+    assert!(matches!(too_big(5, u64::MAX), QuotaError::BadLimit(_)));
+    assert!(rig.script.log().is_empty());
     std::fs::write(dir.join("early"), "x").unwrap();
     let full = rig.quota.apply(&dir, project, 5, 5);
     assert!(matches!(full, Err(QuotaError::NotEmpty(_))), "{full:?}");
@@ -349,12 +420,93 @@ fn apply_refuses_what_cannot_be_enforced() {
     ));
 }
 
+/// The largest limits are taken, and the block limit does not overflow on the way to the
+/// kernel's unit: 2^46 - 1 bytes are 2^37 blocks of 512.
+#[test]
+fn apply_takes_the_largest_limits() {
+    let rig = Rig::new("apply-max");
+    let dir = rig.run_dir("r1");
+    let project = rig.project(1);
+    rig.quota
+        .apply(&dir, project, MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT)
+        .unwrap();
+    assert_eq!(rig.script.st().dq[&project.get()].blocks_limit, 1 << 37);
+    assert_eq!(
+        rig.quota.limits(project).unwrap(),
+        (1 << 46, MAX_INODE_LIMIT)
+    );
+}
+
+/// A directory the root does not directly hold is `Outside`, for `apply` and for `clear`,
+/// and nothing reaches the kernel: a path that goes up with `..` and starts with the root
+/// by components, the root itself, `root/..`, a sibling of the root whose name begins like
+/// it, a deeper path, and a relative path. It catches a prefix test on the path, which
+/// passes the first four.
+#[test]
+fn apply_and_clear_refuse_a_directory_that_is_not_a_child_of_the_root() {
+    let rig = Rig::new("outside");
+    let project = rig.project(1);
+    let name = rig.root.file_name().unwrap().to_owned();
+    let mut sibling = name.clone();
+    sibling.push("-x");
+    let outside = [
+        rig.root.join("../etc/x"),
+        rig.root.join(".."),
+        rig.root.clone(),
+        rig.root.with_file_name(sibling).join("r1"),
+        rig.root.join("a/r1"),
+        PathBuf::from("r1"),
+        rig.root.parent().unwrap().join("..").join(&name).join("r1"),
+    ];
+    for dir in outside {
+        let applied = rig.quota.apply(&dir, project, 5, 5);
+        assert!(
+            matches!(applied, Err(QuotaError::Outside(_))),
+            "{dir:?}: {applied:?}"
+        );
+        let cleared = rig.quota.clear(&dir, project);
+        assert!(
+            matches!(cleared, Err(QuotaError::Outside(_))),
+            "{dir:?}: {cleared:?}"
+        );
+    }
+    assert!(rig.script.log().is_empty());
+    let message = rig.quota.clear(&rig.root, project).unwrap_err().to_string();
+    assert!(message.contains("directly below"), "{message}");
+}
+
+/// A link to a directory is not followed: `apply` and `clear` on a link below the root fail
+/// at the open, and the directory it points at gets no project id. It catches an open that
+/// follows links (in the real kernel the flag is `O_NOFOLLOW`; `sys` tests that on the real
+/// open, and this one that the logic stops at its failure).
+#[test]
+fn a_link_to_a_directory_is_refused() {
+    let rig = Rig::new("link");
+    let target = rig.run_dir("target");
+    let link = rig.root.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let project = rig.project(1);
+    let applied = rig.quota.apply(&link, project, 5, 5);
+    assert!(matches!(applied, Err(QuotaError::Io { .. })), "{applied:?}");
+    let cleared = rig.quota.clear(&link, project);
+    assert!(matches!(cleared, Err(QuotaError::Io { .. })), "{cleared:?}");
+    assert!(!rig.script.log().contains(&"set_attr"));
+    assert!(rig.script.st().attrs.is_empty());
+}
+
 /// Every system call of `apply` that fails is an error naming what failed, and an id the
 /// file system does not keep is `Lost`. It catches a failure that is swallowed and a run
 /// that would start unbounded.
 #[test]
 fn apply_reports_each_failed_call() {
-    for op in ["get_attr#1", "set_attr", "get_attr#2", "set_limits"] {
+    for op in [
+        "open_dir",
+        "is_empty",
+        "get_attr#1",
+        "set_attr",
+        "get_attr#2",
+        "set_limits",
+    ] {
         let rig = Rig::new(&format!("apply-{op}"));
         let dir = rig.run_dir("r1");
         rig.script.fail(op);
@@ -416,7 +568,14 @@ fn clear_removes_the_limits_then_the_project() {
     rig.quota.clear(&dir, project).unwrap();
     assert_eq!(
         rig.script.log(),
-        ["mountinfo", "rdev", "set_limits", "get_attr", "set_attr"]
+        [
+            "mountinfo",
+            "rdev",
+            "set_limits",
+            "open_dir",
+            "get_attr",
+            "set_attr"
+        ]
     );
     let attr = rig.script.st().attrs[&dir];
     assert_eq!((attr.projid, attr.xflags & XFLAG_PROJINHERIT), (0, 0));
@@ -439,13 +598,14 @@ fn clear_after_the_tree_is_removed() {
     rig.quota.clear(&rig.root.join("gone"), project).unwrap();
     assert_eq!(rig.quota.limits(project).unwrap(), (0, 0));
     assert!(!rig.script.log().contains(&"set_attr"));
+    assert!(!rig.script.log().contains(&"get_attr"));
 }
 
 /// A `clear` that fails at any call is an error, so the caller keeps the slot; and a retry
 /// after the failure succeeds. It catches a clear that reports success after a failed step.
 #[test]
 fn clear_reports_each_failed_call() {
-    for op in ["set_limits", "get_attr", "set_attr"] {
+    for op in ["set_limits", "open_dir", "get_attr", "set_attr"] {
         let rig = Rig::new(&format!("clear-{op}"));
         let dir = rig.run_dir("r1");
         let project = rig.project(2);

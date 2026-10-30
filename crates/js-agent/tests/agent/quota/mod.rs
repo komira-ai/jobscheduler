@@ -11,8 +11,8 @@ use std::io;
 use std::path::Path;
 
 use js_agent::quota::{
-    Call, FakeQuota, MAX_SLOTS, Mode, Probe, ProjectId, ProjectIds, QuotaError, ScratchQuota,
-    Usage, probe,
+    Call, FakeQuota, MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT, MAX_SLOTS, Mode, Probe, ProjectId,
+    ProjectIds, QuotaError, ScratchQuota, Usage, probe,
 };
 
 use crate::support::Scratch;
@@ -27,13 +27,13 @@ fn run_dir(scratch: &Scratch, name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A run's use of the quota in order: claim the id, apply to the empty directory, run,
+/// A run's use of the quota in order, against the [`FakeQuota`]: claim the id, apply to the empty directory, run,
 /// remove the tree, clear. The calls reach the quota in that order with the arguments the
 /// caller gave, and the limits are there from the apply until the clear. It catches an
 /// `apply` that is not made before the directory is written, and a `clear` that leaves the
 /// limits.
 #[test]
-fn apply_then_clear_in_order() {
+fn fake_quota_apply_then_clear_in_order() {
     let scratch = Scratch::new("quota-order");
     let dir = run_dir(&scratch, "r1");
     let quota = FakeQuota::new();
@@ -60,9 +60,9 @@ fn apply_then_clear_in_order() {
 }
 
 /// A directory with something in it is refused (a file made before the project id is set
-/// is not counted), and so is a limit of 0 (no limit for the kernel). Nothing is bound.
+/// is not counted), and so is a limit of 0 (no limit for the kernel) or above the bounds. Nothing is bound.
 #[test]
-fn apply_refuses_a_full_directory_and_a_zero_limit() {
+fn apply_refuses_a_full_directory_a_zero_limit_and_a_limit_too_big() {
     let scratch = Scratch::new("quota-refuse");
     let dir = run_dir(&scratch, "r1");
     let quota = FakeQuota::new();
@@ -75,6 +75,28 @@ fn apply_refuses_a_full_directory_and_a_zero_limit() {
         quota.apply(&dir, project, 10, 0),
         Err(QuotaError::BadLimit(_))
     ));
+    // A limit above the bound could wrap to 0 on the way to the kernel: refused, and the
+    // largest accepted is taken.
+    for (bytes, inodes) in [
+        (MAX_BLOCK_LIMIT_BYTES + 1, 10),
+        (u64::MAX, 10),
+        (10, MAX_INODE_LIMIT + 1),
+        (10, u64::MAX),
+    ] {
+        assert!(matches!(
+            quota.apply(&dir, project, bytes, inodes),
+            Err(QuotaError::BadLimit(_))
+        ));
+    }
+    assert_eq!(quota.limits_of(project), None);
+    quota
+        .apply(&dir, project, MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT)
+        .unwrap();
+    assert_eq!(
+        quota.limits_of(project),
+        Some((MAX_BLOCK_LIMIT_BYTES, MAX_INODE_LIMIT))
+    );
+    quota.clear(&dir, project).unwrap();
     fs::write(dir.join("early"), "x").unwrap();
     assert!(matches!(
         quota.apply(&dir, project, 10, 10),

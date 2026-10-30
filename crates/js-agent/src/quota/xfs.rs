@@ -12,14 +12,14 @@
 //! source that is renamed (a container's `/dev`) or is not a device (a bind mount of a
 //! file, an anonymous device) is refused instead of aimed at some other file system.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
 use super::mountinfo;
 use super::sys::{Kernel, PROJECT_ACCT_AND_ENFD, Sys, XFLAG_PROJINHERIT};
 use super::{
     Probe, ProjectId, ProjectIds, QuotaError, ScratchQuota, Usage, check_limits, io_err,
-    require_empty,
+    is_child_of,
 };
 
 /// Project quota on the XFS file system that holds one scratch root.
@@ -83,6 +83,14 @@ impl XfsQuota {
         }
     }
 
+    /// Refuses a directory that is not a direct child of the root, by its components.
+    fn require_child(&self, run_dir: &Path) -> Result<(), QuotaError> {
+        match is_child_of(&self.root, run_dir) {
+            true => Ok(()),
+            false => Err(QuotaError::Outside(run_dir.to_owned())),
+        }
+    }
+
     fn device(&self) -> Result<PathBuf, QuotaError> {
         self.find_device().map_err(QuotaError::Unsupported)
     }
@@ -96,8 +104,9 @@ impl XfsQuota {
         }
     }
 
-    /// Sets the project id and the inherit flag on `dir`, and reads them back.
-    fn assign(&self, dir: &Path, project: ProjectId) -> Result<(), QuotaError> {
+    /// Sets the project id and the inherit flag on the open directory `dir`, and reads them
+    /// back from the same descriptor.
+    fn assign(&self, dir: &File, project: ProjectId) -> Result<(), QuotaError> {
         let mut attr = io_err(
             self.sys.get_attr(dir),
             "read the project id of the directory",
@@ -127,17 +136,31 @@ impl XfsQuota {
                 device.display()
             ));
         }
-        let dir = self
-            .root
-            .join(format!(".js-quota-probe-{}", std::process::id()));
+        let dir = self.root.join(probe_name());
         fs::create_dir(&dir)
             .map_err(|why| format!("cannot make a probe directory in the scratch root: {why}"))?;
-        let set = self.assign(&dir, self.ids.probe_id());
-        // A directory left behind (the remove failed) is swept at the next start.
+        let set = io_err(self.sys.open_dir(&dir), "open the probe directory")
+            .and_then(|fd| self.assign(&fd, self.ids.probe_id()));
+        // A directory left behind (the remove failed, or the process died) stays: its name
+        // is not used again.
         let _ = fs::remove_dir(&dir);
         set.map(|()| device)
             .map_err(|why| format!("project ids cannot be set: {why}"))
     }
+}
+
+/// The name of a probe directory: the process id and 64 random bits, so a directory that an
+/// earlier process with the same id left behind (a crash; in containers the id is often the
+/// same) is not the one this probe makes. Were the system's randomness unreadable the bits
+/// are 0, and a leftover of that name makes the probe say none, which is safe.
+fn probe_name() -> String {
+    let mut bits = [0_u8; 8];
+    let _ = getrandom::getrandom(&mut bits);
+    format!(
+        ".js-quota-probe-{}-{:016x}",
+        std::process::id(),
+        u64::from_le_bytes(bits)
+    )
 }
 
 impl ScratchQuota for XfsQuota {
@@ -156,12 +179,18 @@ impl ScratchQuota for XfsQuota {
         inode_limit: u64,
     ) -> Result<(), QuotaError> {
         let blocks = check_limits(block_limit_bytes, inode_limit)?;
-        if !run_dir.starts_with(&self.root) {
-            return Err(QuotaError::Outside(run_dir.to_owned()));
-        }
+        self.require_child(run_dir)?;
         let device = self.device()?;
-        require_empty(run_dir)?;
-        self.assign(run_dir, project)?;
+        // One descriptor for everything: what is checked empty is what gets the project id.
+        let dir = io_err(
+            self.sys.open_dir(run_dir),
+            "open the run's scratch directory",
+        )?;
+        let empty = io_err(self.sys.is_empty(&dir), "list the run's scratch directory")?;
+        if !empty {
+            return Err(QuotaError::NotEmpty(run_dir.to_owned()));
+        }
+        self.assign(&dir, project)?;
         io_err(
             self.sys
                 .set_limits(&device, project.get(), blocks, inode_limit),
@@ -179,24 +208,31 @@ impl ScratchQuota for XfsQuota {
     }
 
     fn clear(&self, run_dir: &Path, project: ProjectId) -> Result<(), QuotaError> {
+        self.require_child(run_dir)?;
         let device = self.device()?;
+        // The limits go to 0 (none) with `Q_XSETQLIM`, not `Q_XQUOTARM`: that command frees
+        // the quota files of the whole file system, every run's project, and only works
+        // with quota accounting off. The project's record stays, with no limit and the
+        // usage it still has, which is what `usage` reads before the id is reused.
         io_err(
             self.sys.set_limits(&device, project.get(), 0, 0),
             "remove the limits of the project",
         )?;
-        match self.sys.get_attr(run_dir) {
+        let dir = match self.sys.open_dir(run_dir) {
             // The directory is gone, and the project id with it.
-            Err(why) if why.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            other => {
-                let mut attr = io_err(other, "read the project id of the directory")?;
-                attr.projid = 0;
-                attr.xflags &= !XFLAG_PROJINHERIT;
-                io_err(
-                    self.sys.set_attr(run_dir, attr),
-                    "remove the project id from the directory",
-                )
-            }
-        }
+            Err(why) if why.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            other => io_err(other, "open the run's scratch directory")?,
+        };
+        let mut attr = io_err(
+            self.sys.get_attr(&dir),
+            "read the project id of the directory",
+        )?;
+        attr.projid = 0;
+        attr.xflags &= !XFLAG_PROJINHERIT;
+        io_err(
+            self.sys.set_attr(&dir, attr),
+            "remove the project id from the directory",
+        )
     }
 }
 

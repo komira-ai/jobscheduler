@@ -129,8 +129,8 @@ pub enum QuotaError {
     /// The directory already holds something: its contents would not be counted.
     #[error("{} is not empty: files made before the project id is set escape the quota", .0.display())]
     NotEmpty(PathBuf),
-    /// The directory is not below the scratch root the quota was made for.
-    #[error("{} is not below the scratch root", .0.display())]
+    /// The directory is not a direct child of the scratch root the quota was made for.
+    #[error("{} is not a directory directly below the scratch root", .0.display())]
     Outside(PathBuf),
     /// The project still has usage from an earlier run: its id is not reused yet.
     #[error("project {project} still holds {} bytes in {} inodes", .usage.bytes, .usage.inodes)]
@@ -167,15 +167,40 @@ pub(crate) fn io_err<T>(result: io::Result<T>, what: &'static str) -> Result<T, 
     result.map_err(|source| QuotaError::Io { what, source })
 }
 
+/// The largest block limit an `apply` takes, in bytes: the bound of a job's disk limit on
+/// the wire ([`js_agent_wire::limits::MAX_DISK_BYTES`], 2^46 - 1). Blocks of 512 bytes
+/// then come to at most 2^37, and the kernel's shift back up to bytes cannot wrap to 0,
+/// which would mean no limit.
+pub const MAX_BLOCK_LIMIT_BYTES: u64 = js_agent_wire::limits::MAX_DISK_BYTES;
+
+/// The largest inode limit an `apply` takes: what a 32-bit inode count holds, far above
+/// what one run's scratch makes.
+pub const MAX_INODE_LIMIT: u64 = u32::MAX as u64;
+
 /// Checks the limits of an `apply` and returns the block limit in 512-byte blocks, the unit
 /// of the kernel interface (a size is rounded up). A limit of 0 is refused: for the kernel it
-/// means no limit at all.
+/// means no limit at all. So is one above [`MAX_BLOCK_LIMIT_BYTES`] or [`MAX_INODE_LIMIT`].
 pub(crate) fn check_limits(block_limit_bytes: u64, inode_limit: u64) -> Result<u64, QuotaError> {
     match (block_limit_bytes, inode_limit) {
         (0, _) => Err(QuotaError::BadLimit("a block limit of 0 means no limit")),
         (_, 0) => Err(QuotaError::BadLimit("an inode limit of 0 means no limit")),
+        (bytes, _) if bytes > MAX_BLOCK_LIMIT_BYTES => {
+            Err(QuotaError::BadLimit("a block limit above 2^46 - 1 bytes"))
+        }
+        (_, inodes) if inodes > MAX_INODE_LIMIT => {
+            Err(QuotaError::BadLimit("an inode limit above 2^32 - 1"))
+        }
         (bytes, _) => Ok(bytes.div_ceil(512)),
     }
+}
+
+/// Whether `run_dir` is a directory directly below `root`: its parent is the root itself
+/// and its last component is a name. The test is on the components, with no look at the
+/// file system: a path that goes up (`root/../x`, `root/..`) or is the root itself is not a
+/// child, and a deeper path is not a run's directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn is_child_of(root: &Path, run_dir: &Path) -> bool {
+    run_dir.parent() == Some(root) && run_dir.file_name().is_some()
 }
 
 /// Refuses a directory that holds anything (see [`QuotaError::NotEmpty`]).
@@ -192,7 +217,7 @@ pub trait ScratchQuota: Send + Sync {
     /// Whether this quota can work on the scratch root it was made for, and why.
     fn probe(&self) -> Probe;
 
-    /// Bounds the **empty** directory `run_dir` (below the scratch root) as project
+    /// Bounds the **empty** directory `run_dir` (a direct child of the scratch root) as project
     /// `project`: everything made below it is counted against the project and meets
     /// `EDQUOT` at `block_limit_bytes` of space or `inode_limit` inodes. Call it before the
     /// directory is chowned or written to. A failed call may leave the project id on the
@@ -200,7 +225,7 @@ pub trait ScratchQuota: Send + Sync {
     ///
     /// # Errors
     ///
-    /// A limit of 0, a directory that is not empty or is not below the scratch root, a
+    /// A limit of 0, a directory that is not empty or is not a direct child of the scratch root, a
     /// root that cannot carry a quota, or a failed system call.
     fn apply(
         &self,
@@ -225,7 +250,8 @@ pub trait ScratchQuota: Send + Sync {
     ///
     /// # Errors
     ///
-    /// The root cannot carry a quota, or a system call failed.
+    /// `run_dir` is not a direct child of the scratch root, the root cannot carry a quota,
+    /// or a system call failed.
     fn clear(&self, run_dir: &Path, project: ProjectId) -> Result<(), QuotaError>;
 }
 
