@@ -8,10 +8,12 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use js_agent::image::pull::{Host, run};
-use js_contain::oci::OciConfig;
+use js_agent::image::RegistryImages;
+use js_agent::image::pull::{Host, ID_TOOLS, oci_config, run};
 use js_contain::oci::image::published_root;
+use js_contain::oci::{Oci, OciConfig};
 use js_oci::{Allow, Client, Digest};
 use js_testkit::dir::TestDir;
 use js_testkit::oci_registry::{Artifact, Fixture, REGISTRY};
@@ -83,6 +85,19 @@ fn standins(dir: &Path, config: &mut OciConfig) {
 /// entry of the allow-list reaches it as a private registry on loopback, as the fixture's
 /// own client does) and the stand-ins of `cell`.
 fn pull_with(fx: &Fixture, cell: &Cell, euid: u32, crun: &str, args: &[&str]) -> Ran {
+    pull_hooked(fx, cell, euid, crun, args, &|_| {})
+}
+
+/// [`pull_with`], with `hook` run on the configuration after the stand-ins are set and
+/// before the backend starts: the moment between the verb's lock and its pull.
+fn pull_hooked(
+    fx: &Fixture,
+    cell: &Cell,
+    euid: u32,
+    crun: &str,
+    args: &[&str],
+    hook: &dyn Fn(&mut OciConfig),
+) -> Ran {
     let client = |allow: Vec<Allow>| -> Client {
         fx.client_with(
             allow
@@ -93,6 +108,7 @@ fn pull_with(fx: &Fixture, cell: &Cell, euid: u32, crun: &str, args: &[&str]) ->
     };
     let configure = |config: &mut OciConfig| {
         standins(cell.files.path(), config);
+        hook(config);
     };
     let host = Host {
         euid,
@@ -149,15 +165,19 @@ fn reference(fx: &Fixture, artifact: &Artifact) -> String {
     format!("{}/team/app@{}", fx.at(REGISTRY), artifact.digest)
 }
 
+/// The names in `dir`, which must exist: a listing that cannot be made fails the test, so
+/// that an assertion of "nothing left" cannot pass on a directory it never read.
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
         })
-        .unwrap_or_default();
+        .collect();
     names.sort();
     names
 }
@@ -566,4 +586,106 @@ fn the_agents_entry_point_refuses_a_registry_outside_the_allow_list() {
         "{err}"
     );
     assert_eq!(names(cell.scratch()), Vec::<String>::new());
+}
+
+/// A pull that finds the image published once it holds the lock (another pull of the same
+/// image finished while this one was setting up) says `already-published`, not `pulled`,
+/// and asks the registry for nothing. Catches a pull that checks the store only before it
+/// takes the lock and so reports work it did not do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_whose_image_appears_while_it_waits_for_the_lock_reports_already_published() {
+    let fx = Fixture::start().await;
+    let artifact = image();
+    fx.publish(&artifact);
+    let cell = Cell::new("pull-recheck");
+    let root = published_root(cell.scratch(), artifact.digest.as_str());
+    let flags = flags(&fx, cell.scratch(), &reference(&fx, &artifact));
+    let args: Vec<&str> = flags.iter().map(String::as_str).collect();
+    let other_pull_finishes = |_: &mut OciConfig| {
+        assert!(!root.exists(), "published before the other pull finished");
+        std::fs::create_dir_all(&root).expect("published by the other pull");
+    };
+    let ran = pull_hooked(&fx, &cell, 0, "/usr/bin/true", &args, &other_pull_finishes);
+    assert_eq!(ran.status, exit_status(0), "{}", ran.stderr);
+    assert_eq!(
+        ran.stdout,
+        format!(
+            "image-pull: status=already-published digest={} root={}\n",
+            artifact.digest,
+            root.display()
+        )
+    );
+    assert_eq!(
+        fx.requests(),
+        Vec::<String>::new(),
+        "the registry was asked"
+    );
+}
+
+/// A pull on a scratch root an agent's backend holds is a usage error (status 2) naming the
+/// lock file, and has fetched and published nothing; it goes through once the backend is
+/// gone. Catches a pull that runs beside a live agent (its start would sweep what the
+/// agent's unpack is making), and one that reports the refusal as a failed pull.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pull_beside_a_live_agent_on_the_same_root_is_refused() {
+    let fx = Fixture::start().await;
+    let artifact = image();
+    fx.publish(&artifact);
+    let cell = Cell::new("pull-agent");
+    let mut config = OciConfig::default();
+    standins(cell.files.path(), &mut config);
+    config.runtime = "/usr/bin/true".into();
+    let source =
+        RegistryImages::new(fx.client_with(vec![]), std::env::consts::ARCH).expect("source");
+    let agent = Oci::new(&config, Arc::new(source), cell.scratch(), "/js-image-pull")
+        .expect("the agent's backend starts");
+
+    let ran = run_flags(&fx, &cell, &reference(&fx, &artifact));
+    assert_eq!(ran.status, exit_status(2), "{}", ran.stderr);
+    assert!(ran.stderr.contains(".js-oci.lock"), "{}", ran.stderr);
+    assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+    assert_eq!(
+        fx.requests(),
+        Vec::<String>::new(),
+        "the registry was asked"
+    );
+    assert!(
+        !published_root(cell.scratch(), artifact.digest.as_str()).exists(),
+        "published"
+    );
+
+    drop(agent);
+    let ran = run_flags(&fx, &cell, &reference(&fx, &artifact));
+    assert_eq!(ran.status, exit_status(0), "{}", ran.stderr);
+}
+
+/// The lock the agent's scratch sweep keeps is the one the backend takes (the agent crate
+/// names it without js-contain, which Mac builds lack). Catches the two spellings drifting
+/// apart, which would let the sweep unlink a held lock.
+#[test]
+fn the_sweeps_lock_name_is_the_backends() {
+    assert_eq!(
+        js_agent::lifecycle::ScratchRoot::LOCK_FILE,
+        js_contain::oci::lock::LOCK_FILE
+    );
+}
+
+/// The verb runs the runtime's helpers with `newuidmap` and `newgidmap` from `/usr/bin`,
+/// never from its own `PATH` (it is root: a `PATH` entry others can write is a root
+/// shell), whatever the environment says, and as the job user with the runtime asked for.
+/// Catches the default configuration's `PATH` lookup reaching a root verb.
+#[test]
+fn the_verb_looks_for_the_id_tools_in_usr_bin_and_not_on_the_path() {
+    let config = oci_config((1000, 1001), None);
+    assert_eq!(
+        config.id_tool_path,
+        Some(OsString::from("/usr/bin")),
+        "the tools are looked for on the system's path only"
+    );
+    assert_eq!(ID_TOOLS, "/usr/bin");
+    assert_eq!(config.job_user, Some((1000, 1001)));
+    assert_eq!(config.runtime, std::path::PathBuf::from("/usr/bin/crun"));
+    let own = oci_config((1000, 1001), Some("/opt/crun".into()));
+    assert_eq!(own.runtime, std::path::PathBuf::from("/opt/crun"));
+    assert_eq!(own.id_tool_path, config.id_tool_path);
 }

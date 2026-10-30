@@ -98,6 +98,19 @@ impl Cell {
     }
 }
 
+impl Drop for Cell {
+    /// Takes this process out of the leaf and removes the cgroup. Nothing here fails: a
+    /// test that is already unwinding must not panic again, and a cgroup a failed helper
+    /// left stays until the machine restarts.
+    fn drop(&mut self) {
+        let pid = std::process::id().to_string();
+        let _ = fs::write("/sys/fs/cgroup/cgroup.procs", pid);
+        let dir = PathBuf::from(format!("/sys/fs/cgroup{}", self.cgroup));
+        let _ = fs::remove_dir(dir.join("supervisor"));
+        let _ = fs::remove_dir(&dir);
+    }
+}
+
 /// A tar of `entries`, owned by root of the image: a directory when the data is `None`.
 fn tar_of(entries: &[(&str, Option<&[u8]>)]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
@@ -195,15 +208,19 @@ fn pull(fx: &Fixture, cell: &Cell, artifact: &Artifact) -> Ran {
     }
 }
 
+/// The names in `dir`, which must exist: a listing that cannot be made fails the test, so
+/// that an assertion of "nothing left" cannot pass on a directory it never read.
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
         })
-        .unwrap_or_default();
+        .collect();
     names.sort();
     names
 }

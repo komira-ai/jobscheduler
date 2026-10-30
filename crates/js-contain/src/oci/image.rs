@@ -13,12 +13,17 @@
 //!
 //! The first use of an image pays for the fetch and the unpack, on the lease's prepare
 //! step or, for the images the daemon is given up front, at start; a second use
-//! (and a second daemon on the same data directory) finds the directory and fetches
-//! nothing.
+//! (and a daemon started later on the same data directory, once the first is gone) finds
+//! the directory and fetches nothing. Two daemons do not run on one directory together
+//! ([`super::lock`]).
 //!
 //! The unpack runs in a user namespace with the daemon user unmapped, the stage directory
 //! the only writable path and the downloaded blobs read-only, so a hostile tar can write
 //! nothing the daemon user owns.
+//!
+//! The rename publishes the image, so the unpacked tree is flushed to disk (`syncfs`)
+//! before it and the images directory (`fsync`) after it: a power loss leaves a published
+//! image whole, or none.
 //!
 //! Single flight per digest: concurrent first uses of one image wait on one fetch and
 //! unpack; a use cancelled midway leaves another to retry (a stage directory with a
@@ -185,8 +190,13 @@ impl Images {
         // The stage was open to the container's root; the image directory is not.
         let closed = std::fs::Permissions::from_mode(0o755);
         at(&stage, tokio::fs::set_permissions(&stage, closed).await).map_err(failed)?;
+        // The rename is what says the image is complete, so everything it makes visible is
+        // on disk first: after a power loss a published directory is whole or absent.
+        at(&stage, blocking(&stage, flush_fs).await).map_err(failed)?;
         let finished = self.dir.join(&hex);
-        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)
+        at(&finished, tokio::fs::rename(&stage, &finished).await).map_err(failed)?;
+        // And the name itself, so that "pulled" is not said of one a crash can take back.
+        at(&self.dir, blocking(&self.dir, flush_dir).await).map_err(failed)
     }
 
     /// Downloads the image's layers into `blobs` (a directory the container's ids can
@@ -258,6 +268,26 @@ impl Images {
             ))
         }
     }
+}
+
+/// Writes everything on the file system `path` is on to disk (`syncfs`): the files and
+/// directories of an unpack, made by ids this process does not own, in one call.
+pub(crate) fn flush_fs(path: &Path) -> std::io::Result<()> {
+    Ok(rustix::fs::syncfs(std::fs::File::open(path)?)?)
+}
+
+/// Writes the entries of the directory `path` to disk (`fsync` of the directory).
+pub(crate) fn flush_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+/// Runs `work` on `path` on a thread that may block.
+async fn blocking(path: &Path, work: fn(&Path) -> std::io::Result<()>) -> std::io::Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || work(&path))
+        .await
+        .map_err(std::io::Error::from)
+        .and_then(|done| done)
 }
 
 /// A step of the fetch or the unpack that failed, as the check of an image reports it.

@@ -21,13 +21,19 @@
 //! ```
 //!
 //! An image that is already published is not fetched again, and the registry is not asked.
-//! Exit status 0 is a pulled or published image, 2 a usage error (nothing was made or
-//! asked), 1 a failure of the pull itself (nothing is published; the stage and the
+//! Exit status 0 is a pulled or published image, 2 a usage error (nothing was fetched or
+//! published), 1 a failure of the pull itself (nothing is published; the stage and the
 //! downloaded layers are removed).
 //!
-//! Two pulls into one scratch root do not run together (a lock file in the root), and a
-//! pull must not run beside an agent that uses the same root: starting the backend sweeps
-//! the stages an earlier run left behind, which would include this one's.
+//! Two pulls into one scratch root do not run together (a lock file in the root, exit 1 for
+//! the second), and a pull does not run beside an agent that uses the same root: starting
+//! the backend sweeps the stages an earlier run left behind, which would include this
+//! one's, so the backend holds the scratch lock of js-contain ([`js_contain::oci::lock`])
+//! for as long as it lives, and a pull that finds it held is a usage error (exit 2) that
+//! has fetched nothing.
+//!
+//! The verb runs the runtime's helpers with the system's `newuidmap` and `newgidmap`
+//! (`/usr/bin`), never with whatever its `PATH` names: it is root.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -38,7 +44,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use js_contain::oci::image::{PinnedImage, published_root};
-use js_contain::oci::{Oci, OciConfig};
+use js_contain::oci::{Oci, OciConfig, OciError};
 use js_oci::{Allow, Client, Location, Policy};
 
 use super::RegistryImages;
@@ -50,6 +56,23 @@ pub const VERB: &str = "image-pull";
 
 /// The lock file in the scratch root.
 const LOCK: &str = ".js-image-pull.lock";
+
+/// The directory `newuidmap` and `newgidmap` are run from: where the `uidmap` package puts
+/// them. A root verb does not look them up on its `PATH`.
+pub const ID_TOOLS: &str = "/usr/bin";
+
+/// The configuration of the runtime for a pull as the job user `user`, with the runtime
+/// `crun` (the system's by default).
+#[must_use]
+pub fn oci_config(user: (u32, u32), crun: Option<PathBuf>) -> OciConfig {
+    let mut config = OciConfig {
+        job_user: Some(user),
+        id_tool_path: Some(OsString::from(ID_TOOLS)),
+        ..OciConfig::default()
+    };
+    config.runtime = crun.unwrap_or(config.runtime);
+    config
+}
 
 /// What the verb takes from the machine it runs on.
 pub struct Host<'a> {
@@ -192,17 +215,22 @@ fn pull(args: &[OsString], host: &Host<'_>) -> Result<String, Failure> {
     }
 
     let _lock = lock(root.path())?;
-    let mut config = OciConfig {
-        job_user: Some(user),
-        ..OciConfig::default()
-    };
-    config.runtime = args.crun_bin.unwrap_or(config.runtime);
+    let mut config = oci_config(user, args.crun_bin);
     host.configure
         .iter()
         .for_each(|configure| configure(&mut config));
     let source = RegistryImages::new(client, std::env::consts::ARCH).map_err(failed)?;
-    let oci =
-        Oci::new(&config, Arc::new(source), root.path(), &args.cgroup_parent).map_err(failed)?;
+    let oci = Oci::new(&config, Arc::new(source), root.path(), &args.cgroup_parent).map_err(
+        |e| match e {
+            // A live agent (or a pull that does not take the pull lock) owns the root.
+            OciError::Locked { .. } => Failure::Usage(e.to_string()),
+            other => failed(other),
+        },
+    )?;
+    // Another pull of this image may have finished while this one set up.
+    if published.is_dir() {
+        return Ok(done("already-published"));
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

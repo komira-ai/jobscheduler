@@ -910,3 +910,75 @@ fn the_seccomp_profile_resolved_for_a_job_allows_the_calls_of_a_network_client()
         assert!(allowed.contains(call), "{call} is not allowed: {allowed:?}");
     }
 }
+
+/// Catches two backends on one scratch directory (the later one's start sweeps the stage
+/// of the earlier one's unpack), a refusal that has swept first, a lock that outlives its
+/// backend, and a lock file that cannot be opened being skipped. The refusal names the lock
+/// file; the stage of the live backend is still there; once it is dropped the directory
+/// can be started again.
+#[test]
+fn a_scratch_directory_is_used_by_one_backend_at_a_time() {
+    let dir = scratch("one-backend");
+    let scratch = dir.join("scratch");
+    let first = start(&config(&dir, true), &scratch).expect("starts");
+    let stage = scratch.join("oci-images/.stage-aa-1-0");
+    std::fs::create_dir_all(&stage).expect("stage");
+    let refused = start(&config(&dir, true), &scratch).expect_err("locked");
+    let OciError::Locked { path, .. } = &refused else {
+        panic!("not the lock: {refused}");
+    };
+    assert_eq!(path, &scratch.join(lock::LOCK_FILE));
+    assert!(refused.to_string().contains(".js-oci.lock"), "{refused}");
+    assert!(stage.is_dir(), "the live backend's stage was swept");
+    drop(first);
+    assert_eq!(started(&config(&dir, true), &scratch), "started");
+
+    // A directory where the lock file should be: not skipped, and not a lock refusal.
+    let blocked = dir.join("blocked");
+    std::fs::create_dir_all(blocked.join(lock::LOCK_FILE)).expect("directory");
+    let said = started(&config(&dir, true), &blocked);
+    assert!(said.contains(lock::LOCK_FILE), "{said}");
+    assert!(said.contains("Is a directory"), "{said}");
+}
+
+/// Catches an unpacked image that is only in the page cache when it is published (a power
+/// loss would leave a published directory without its data) by pinning what the flush
+/// steps do: each succeeds on a directory and reports a path that is gone, so a flush that
+/// swallows its error shows. A flush that is skipped altogether, and the order (flush,
+/// rename, flush) of `Images::acquire`, cannot be seen from a running process: a power
+/// loss is not a test.
+#[test]
+fn the_flush_steps_of_a_publish_succeed_on_a_directory_and_fail_on_a_missing_one() {
+    let dir = scratch("flush");
+    image::flush_fs(&dir).expect("syncfs");
+    image::flush_dir(&dir).expect("fsync");
+    let gone = dir.join("gone");
+    assert_eq!(
+        image::flush_fs(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        image::flush_dir(&gone).expect_err("missing").kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+/// Catches the ownership change that follows a link (a job user's link in place of the
+/// work directory would give root's target away) and one that is lost: a directory is
+/// changed by its descriptor (to its own ids here, which any user may do), a link to it is
+/// refused, and so is a path that is not there.
+#[test]
+fn a_work_directory_is_given_by_descriptor_and_never_through_a_link() {
+    let dir = scratch("chown-dir");
+    let real = dir.join("real");
+    std::fs::create_dir(&real).expect("dir");
+    let (uid, gid) = (
+        rustix::process::getuid().as_raw(),
+        rustix::process::getgid().as_raw(),
+    );
+    chown_dir(&real, uid, gid).expect("own directory");
+    let link = dir.join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("link");
+    assert!(chown_dir(&link, uid, gid).is_err(), "followed a link");
+    assert!(chown_dir(&dir.join("absent"), uid, gid).is_err());
+}
