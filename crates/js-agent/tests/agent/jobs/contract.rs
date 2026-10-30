@@ -225,9 +225,15 @@ fn host_with_disk(dir: &Scratch, answer: Result<&str, &str>) -> Host {
 /// Runs the whole agent over containers on a host whose `df` answers `answer`; returns
 /// what it printed and the hello it sent.
 fn disk_hello(name: &str, answer: Result<&str, &str>) -> (Ran, Value) {
+    disk_hello_with(name, answer, &[])
+}
+
+/// [`disk_hello`] with `extra` flags beside the container ones.
+fn disk_hello_with(name: &str, answer: Result<&str, &str>, extra: &[&str]) -> (Ran, Value) {
     let dir = Scratch::new(name);
     let host = host_with_disk(&dir, answer);
-    let owned = container_flags(&dir);
+    let mut owned = container_flags(&dir);
+    owned.extend(extra.iter().map(|flag| (*flag).to_owned()));
     let all: Vec<&str> = owned.iter().map(String::as_str).collect();
     let (script, sent) = Script::new(vec![no_runtime()]);
     let connector = ScriptConnector::of(script);
@@ -271,6 +277,49 @@ fn the_free_disk_of_the_work_volume_is_reported_in_whole_gib() {
         assert_eq!(hello["capabilities"]["disk-gib"], gib, "{row}");
         assert_eq!(hello["capabilities"]["runtime"], "container");
     }
+}
+
+/// Asserts the offered-disk arithmetic: without `--scratch-low-water-gib` the shape offers
+/// the volume's free bytes exactly (not rounded to a GiB) and `disk-gib` says them in whole
+/// GiB; with it the shape offers free minus the mark and `disk-gib` says that; a mark equal
+/// to free, and one far above it, offer 0 without underflow. It catches a disk offered
+/// without the low-water mark, a mark taken in the wrong unit, a wrapped subtraction, and
+/// an advisory number that differs from the booked one.
+#[test]
+fn offered_disk_is_free_space_minus_the_low_water_mark_and_never_below_zero() {
+    let row = |kib: u64| format!("{DF_HEAD}/dev/sda1 99999999 100 {kib} 11% /\n");
+    // (free KiB, extra flags, offered bytes, disk-gib)
+    let gib = |n: u64| n << 30;
+    let cases: [(u64, &[&str], u64, &str); 6] = [
+        (10 << 20, &[], gib(10), "10"),
+        (1_048_575, &[], 1_048_575 * 1024, "0"),
+        (10 << 20, &["--scratch-low-water-gib", "3"], gib(7), "7"),
+        (10 << 20, &["--scratch-low-water-gib", "10"], 0, "0"),
+        (10 << 20, &["--scratch-low-water-gib", "11"], 0, "0"),
+        (
+            10 << 20,
+            &["--scratch-low-water-gib", "18446744073709551615"],
+            0,
+            "0",
+        ),
+    ];
+    for (n, (kib, extra, bytes, advisory)) in cases.into_iter().enumerate() {
+        let (_, hello) = disk_hello_with(&format!("disk-offer-{n}"), Ok(&row(kib)), extra);
+        assert_eq!(hello["shape"]["disk_bytes"], bytes, "{extra:?}");
+        assert_eq!(hello["capabilities"]["disk-gib"], advisory, "{extra:?}");
+    }
+}
+
+/// Asserts that a volume too big for the wire is offered at the wire's maximum, and that an
+/// unreadable volume offers 0 bytes. It catches a hello the server refuses as invalid and a
+/// disk offered on a guess.
+#[test]
+fn offered_disk_is_capped_at_the_wire_maximum_and_zero_when_unreadable() {
+    let huge = format!("{DF_HEAD}/dev/sda1 1 1 {} 11% /\n", u64::MAX / 2048);
+    let (_, hello) = disk_hello_with("disk-offer-huge", Ok(&huge), &[]);
+    assert_eq!(hello["shape"]["disk_bytes"], (1u64 << 46) - 1);
+    let (_, hello) = disk_hello_with("disk-offer-unreadable", Err("df: not found"), &[]);
+    assert_eq!(hello["shape"]["disk_bytes"], 0);
 }
 
 /// Asserts that a volume `df` cannot report (the program fails, prints nothing, prints no

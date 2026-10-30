@@ -6,6 +6,7 @@
 
 mod adopt;
 mod cleanup;
+mod disk;
 mod exclusive;
 pub mod fake;
 mod files;
@@ -177,6 +178,7 @@ pub fn config_in(dir: &Scratch, allow_host_jobs: bool) -> Config {
         capacity: Capacity {
             cpu_millis: 4000,
             memory_bytes: 8 << 30,
+            disk_bytes: 10 << 30,
             gpus: BTreeSet::from([0, 1]),
         },
         allow_host_jobs,

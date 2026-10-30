@@ -403,3 +403,15 @@ fn the_readiness_hook_flags_are_checked_when_the_agent_starts() {
         assert!(err.contains(said), "{extra:?}: {err}");
     }
 }
+
+/// Asserts that `--scratch-low-water-gib` without `--scratch-root` is refused before
+/// anything is sent and names the flag, since there is no volume to take the mark from.
+/// It catches a mark that is silently ignored.
+#[test]
+fn a_low_water_mark_without_a_scratch_root_is_refused() {
+    let said = refused(&["--scratch-low-water-gib", "1"], &linux_host());
+    assert!(
+        said.contains("--scratch-low-water-gib: needs --scratch-root"),
+        "{said}"
+    );
+}

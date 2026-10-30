@@ -657,6 +657,7 @@ fn container(run_id: &str, isolation: Option<&str>) -> Vec<(&'static str, String
         ("jobscheduler.dev/lease-id", "lease-old".to_owned()),
         ("jobscheduler.dev/cpu-millis", "1000".to_owned()),
         ("jobscheduler.dev/memory-bytes", "1073741824".to_owned()),
+        ("jobscheduler.dev/disk-bytes", "0".to_owned()),
         ("jobscheduler.dev/gpus", String::new()),
         ("jobscheduler.dev/wall-ms", "60000".to_owned()),
     ];

@@ -82,6 +82,24 @@ pub struct Cli {
     /// directory; it is canonicalised when the agent starts. No root, no mount.
     #[arg(long = "mount-root", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots: Vec<(String, PathBuf)>,
+    /// A directory jobs may mount from read-only, as `name=path`; like `--mount-root`, and
+    /// it shares its namespace of names, except that a start with a read-write mount from
+    /// it is refused. Unlike `--mount-root`, it may be on the scratch root's file system
+    /// when `--scratch-quota` is given. May be given more than once.
+    #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
+    pub mount_roots_ro: Vec<(String, PathBuf)>,
+    /// The scratch root's file system is to bound each run's disk with a quota. Today the
+    /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
+    /// system as the scratch root (a read-write mount there would be an unbounded path to
+    /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
+    /// advertises nothing.
+    #[arg(long)]
+    pub scratch_quota: bool,
+    /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
+    /// disk it offers is the free space of that volume when the agent starts minus this
+    /// (0 when this is more). Needs `--scratch-root`. Without it, the free space is offered.
+    #[arg(long, value_name = "GIB")]
+    pub scratch_low_water_gib: Option<u64>,
     /// The directory under which every run gets a private scratch directory (`0700`). It
     /// must be owned by the user running the agent, with no permission for group or
     /// others.

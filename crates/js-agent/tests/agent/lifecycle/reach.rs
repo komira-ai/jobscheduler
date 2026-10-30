@@ -287,3 +287,118 @@ fn an_agent_that_watches_no_directory_says_so() {
     assert_eq!(status, code(0), "{err}");
     assert!(!err.contains("--watch-dir given"), "no containers: {err}");
 }
+
+/// Asserts the mount-root rule of `--scratch-quota`, on a machine whose mount roots and
+/// scratch root share a file system. Without the flag the agent starts. With it, a
+/// `--mount-root` on the scratch root's file system ends the agent with status 2 before
+/// anything is sent, naming `--mount-root` and `--scratch-quota`, and one on another file
+/// system starts it; a root that cannot be looked at ends it too (the check fails closed).
+/// It catches a read-write mount that reaches the disk the quota is to bound without being
+/// counted, and a rule that applies when the flag is absent.
+#[test]
+fn mount_root_on_scratch_device_refused_only_with_quota() {
+    let dir = Scratch::new("reach-quota-mount");
+    let (scratch, data, other) = (
+        private(&dir, "scratch"),
+        private(&dir, "data"),
+        private(&dir, "other"),
+    );
+    let scratch_s = scratch.display().to_string();
+    let (mount, elsewhere) = (
+        format!("data={}", data.display()),
+        format!("other={}", other.display()),
+    );
+    let whole = fs::canonicalize(dir.path("")).unwrap();
+    let mut same = linux_host();
+    same.files = same.files.with_device_under(&whole, 7);
+    let mut apart = linux_host();
+    apart.files = apart
+        .files
+        .with_device_under(&fs::canonicalize(&scratch).unwrap(), 7)
+        .with_device_under(&fs::canonicalize(&other).unwrap(), 8);
+
+    let plain = ["--mount-root", &mount, "--scratch-root", &scratch_s];
+    let (status, err, _) = start_on(&same, &plain);
+    assert_eq!(
+        status,
+        code(0),
+        "no --scratch-quota: nothing is compared: {err}"
+    );
+
+    let quota = [
+        "--mount-root",
+        &mount,
+        "--scratch-root",
+        &scratch_s,
+        "--scratch-quota",
+    ];
+    let (status, err, sent) = start_on(&same, &quota);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--mount-root:") && err.contains("--scratch-quota"),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+
+    let off = [
+        "--mount-root",
+        &elsewhere,
+        "--scratch-root",
+        &scratch_s,
+        "--scratch-quota",
+    ];
+    let (status, err, _) = start_on(&apart, &off);
+    assert_eq!(status, code(0), "a root on another file system: {err}");
+
+    let mut blind = linux_host();
+    blind.files = blind
+        .files
+        .unlooked_under(&fs::canonicalize(&data).unwrap());
+    let (status, err, sent) = start_on(&blind, &quota);
+    assert_eq!(status, code(2), "{err}");
+    assert!(err.contains("Permission denied"), "{err}");
+    assert_eq!(sent, 0);
+}
+
+/// Asserts that a `--mount-root-ro` on the scratch root's file system starts the agent
+/// with `--scratch-quota` (a mount from it is read-only, so it cannot fill the disk), that
+/// a `--mount-root` beside it on that file system is still refused, and that a name given
+/// to both flags is refused as given twice. It catches a read-only root that is refused for
+/// its device, a read-write root that slips through next to it, and two roots of one name.
+#[test]
+fn mount_root_ro_on_scratch_device_allowed() {
+    let dir = Scratch::new("reach-quota-mount-ro");
+    let (scratch, data, extra) = (
+        private(&dir, "scratch"),
+        private(&dir, "data"),
+        private(&dir, "extra"),
+    );
+    let scratch_s = scratch.display().to_string();
+    let (ro, rw, again) = (
+        format!("data={}", data.display()),
+        format!("extra={}", extra.display()),
+        format!("data={}", extra.display()),
+    );
+    let whole = fs::canonicalize(dir.path("")).unwrap();
+    let mut same = linux_host();
+    same.files = same.files.with_device_under(&whole, 7);
+    let base = ["--scratch-root", &scratch_s, "--scratch-quota"];
+
+    let only_ro = [&base[..], &["--mount-root-ro", &ro]].concat();
+    let (status, err, _) = start_on(&same, &only_ro);
+    assert_eq!(status, code(0), "{err}");
+
+    let both = [&base[..], &["--mount-root-ro", &ro, "--mount-root", &rw]].concat();
+    let (status, err, sent) = start_on(&same, &both);
+    assert_eq!(status, code(2), "{err}");
+    assert!(
+        err.contains("--mount-root:") && err.contains(&extra.display().to_string()),
+        "{err}"
+    );
+    assert_eq!(sent, 0);
+
+    let twice = [&base[..], &["--mount-root-ro", &ro, "--mount-root", &again]].concat();
+    let (status, err, _) = start_on(&same, &twice);
+    assert_eq!(status, code(2), "{err}");
+    assert!(err.contains("given twice"), "{err}");
+}
