@@ -13,7 +13,12 @@ use std::process::{Command, Stdio};
 /// to read, and some programs refuse to start without a readable one.
 pub fn user_command(program: &str, args: &[&Path], uid: u32, gid: u32) -> Command {
     let mut command = Command::new(program);
-    command.args(args).uid(uid).gid(gid).stdin(Stdio::null());
+    command
+        .args(args)
+        .uid(uid)
+        .gid(gid)
+        .current_dir("/")
+        .stdin(Stdio::null());
     command
 }
 
