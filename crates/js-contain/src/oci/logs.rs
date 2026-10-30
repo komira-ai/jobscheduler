@@ -305,7 +305,7 @@ pub(crate) type Launch =
 /// Runs `launch` with new pipes, drains them into `capture` meanwhile, and once it has
 /// returned waits for the drain as long as the capture's limits say.
 pub(crate) async fn supervise(capture: Arc<Capture>, launch: Launch) -> RunEnd {
-    supervise_with(pipe::pipe, capture, launch, timer()).await
+    supervise_with(pipe::pipe, capture, launch, timer()).await.0
 }
 
 /// The two pipes of a run: the write ends, blocking, for the child, and the readers.
@@ -324,10 +324,21 @@ fn open_pipes(make: Pipe) -> std::io::Result<Pipes> {
 
 /// [`supervise`] with `make` making the pipes (the one place the pipes can fail, a test's
 /// to cause) and `grace` making the end of the wait for the drain (a test's to fire).
-async fn supervise_with(make: Pipe, capture: Arc<Capture>, launch: Launch, grace: Grace) -> RunEnd {
+/// Also says whether both pipes closed (`false`: the grace ended the wait).
+async fn supervise_with(
+    make: Pipe,
+    capture: Arc<Capture>,
+    launch: Launch,
+    grace: Grace,
+) -> (RunEnd, bool) {
     let (out, out_rx, err, err_rx) = match open_pipes(make) {
         Ok(pipes) => pipes,
-        Err(e) => return RunEnd::Failed(format!("the pipes of the output: {e}")),
+        Err(e) => {
+            return (
+                RunEnd::Failed(format!("the pipes of the output: {e}")),
+                true,
+            );
+        }
     };
     let drain = Drain {
         out: tokio::spawn(pump(out_rx, capture.out.clone())),
@@ -335,10 +346,11 @@ async fn supervise_with(make: Pipe, capture: Arc<Capture>, launch: Launch, grace
     };
     // `launch` owns the write ends; they are closed when it returns.
     let end = launch(out, err).await;
-    if !drain.finish(grace(capture.drain_grace)).await {
+    let drained = drain.finish(grace(capture.drain_grace)).await;
+    if !drained {
         tracing::warn!("a process of the job holds its output open after the container ended");
     }
-    end
+    (end, drained)
 }
 
 #[cfg(test)]

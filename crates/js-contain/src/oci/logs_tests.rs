@@ -47,12 +47,13 @@ async fn read_until(sink: &Sink, bytes: u64) {
 
 /// The launch of `sh -c script` with the pipes as its output; its status is how the run
 /// ended.
-fn sh(script: &'static str) -> Launch {
+fn sh(script: &str) -> Launch {
+    let script = script.to_owned();
     Box::new(move |stdout, stderr| {
         Box::pin(async move {
             let mut child = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(script)
+                .arg(&script)
                 .stdin(Stdio::null())
                 .stdout(Stdio::from(stdout))
                 .stderr(Stdio::from(stderr))
@@ -65,9 +66,11 @@ fn sh(script: &'static str) -> Launch {
 }
 
 /// Runs `script` with output kept as `limits` say in `dir`.
-async fn run(dir: &Path, limits: LogLimits, script: &'static str) -> (RunEnd, LogTail) {
+async fn run(dir: &Path, limits: LogLimits, script: &str) -> (RunEnd, LogTail) {
     let capture = Arc::new(Capture::create(dir, limits).expect("files"));
-    let end = supervise_with(pipe::pipe, capture.clone(), sh(script), never()).await;
+    let end = supervise_with(pipe::pipe, capture.clone(), sh(script), never())
+        .await
+        .0;
     (end, capture.tail())
 }
 
@@ -150,27 +153,49 @@ async fn the_streams_are_kept_apart_and_an_unterminated_last_line_is_kept() {
 }
 
 /// Catches a run that waits for the end of a pipe a process of the job holds, and one that
-/// ends the grace without keeping what was read: `sh` leaves a background `sleep` that
-/// inherited both pipes and exits. The grace is fired once `before` has been read; the run
-/// then ends with the shell's status and the tail is what was read. A run that ignored the
-/// grace would hang here (until the background `sleep` ends or the CI job's limit).
+/// ends the grace without keeping what was read. `sh` leaves a background `read` that
+/// inherited both pipes and blocks on a fifo the test holds open and never writes: it ends
+/// only when the test drops its end, after the run. The grace is fired once `before` has
+/// been read; the run must then end with the shell's status, report that the drain did not
+/// close, and keep "before\n". A `finish` that ignored the grace would hang here (until
+/// the CI job's `timeout-minutes`), since nothing ends the straggler.
 #[tokio::test]
 async fn the_drain_ends_when_a_process_left_behind_holds_the_pipe() {
     let dir = dir("grandchild");
+    let fifo = dir.join("hold");
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &fifo,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RWXU,
+        0,
+    )
+    .expect("fifo");
+    // Read-write open of a fifo does not block; this end is never written.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&fifo)
+        .expect("hold");
     let capture = Arc::new(Capture::create(&dir, limits(1024, 1024)).expect("files"));
     let (fire, trigger) = tokio::sync::oneshot::channel::<()>();
     let supervised = supervise_with(
         pipe::pipe,
         capture.clone(),
-        sh("sleep 20 & echo before; exit 3"),
+        sh(&format!(
+            "read x < '{}' & echo before; exit 3",
+            fifo.display()
+        )),
         over_when(trigger),
     );
-    let (end, ()) = tokio::join!(supervised, async {
+    let ((end, drained), ()) = tokio::join!(supervised, async {
         read_until(&capture.out, 7).await;
         fire.send(()).expect("the run still waits");
     });
     assert_eq!(end, RunEnd::Exited(3));
+    assert!(!drained, "the grace ended the wait");
     assert_eq!(capture.tail().stdout.bytes, b"before\n");
+    drop(held);
 }
 
 /// Catches `finish` reporting a drain that did not close as closed (and the reverse), a
@@ -196,8 +221,12 @@ async fn a_drain_says_whether_both_pipes_closed() {
     assert!(!drain.finish(Box::pin(std::future::ready(()))).await);
     assert_eq!(capture.tail().stdout.bytes, b"tail");
     // The reader's end is closed once the abort has run; until then a write succeeds.
-    while !matches!(held.try_write(b"x"), Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
-        tokio::task::yield_now().await;
+    loop {
+        held.writable().await.expect("writable");
+        match held.try_write(b"x") {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => break,
+            _ => tokio::task::yield_now().await,
+        }
     }
     drop(held);
     let (none, rx) = pipe::pipe().expect("pipe");
@@ -261,7 +290,9 @@ async fn pipes_that_cannot_be_made_fail_the_run_before_it_starts() {
     }
     let dir = dir("nopipe");
     let capture = Arc::new(Capture::create(&dir, limits(1, 1)).expect("files"));
-    let end = supervise_with(no_pipe, capture, sh("exit 0"), never()).await;
+    let end = supervise_with(no_pipe, capture, sh("exit 0"), never())
+        .await
+        .0;
     assert_eq!(
         end,
         RunEnd::Failed("the pipes of the output: no pipes".to_owned())
