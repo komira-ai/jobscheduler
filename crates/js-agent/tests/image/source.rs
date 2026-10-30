@@ -333,7 +333,7 @@ async fn a_pin_that_cannot_be_pulled_is_a_failed_fetch_with_the_reason() {
         (
             "bad repository",
             PinnedImage {
-                reference: format!("norepository@{}", good.digest),
+                reference: format!("{}/Team/App@{}", fx.at(REGISTRY), good.digest),
                 ..good.clone()
             },
             "is not a well formed registry reference",
