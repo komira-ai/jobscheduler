@@ -11,8 +11,10 @@
 //! name one platform's image manifest: js-oci refuses an image index.
 //!
 //! `--allow-host HOST` also accepts HOST as a token endpoint (the registry's own host
-//! always is). A redirect target needs no entry: js-oci follows redirects to https
-//! hosts on port 443 whose addresses are public. Exit status 1 and the js-oci error on
+//! always is). It is not a gate on blob hosts: a redirect target needs no entry, js-oci
+//! follows redirects to https hosts on port 443 whose addresses are public. The probe
+//! reports neither the token realm nor the redirect host (js-oci exposes neither); a
+//! run that succeeds is the evidence that both were accepted. Exit status 1 and the js-oci error on
 //! stderr when anything fails. The steps are in `live_pull/probe.rs`.
 
 #[path = "live_pull/probe.rs"]

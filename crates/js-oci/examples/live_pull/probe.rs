@@ -74,7 +74,7 @@ pub async fn probe(
     let started = Instant::now();
     let manifest = repo.fetch_manifest(pin, kind).await?;
     lines.push(format!(
-        "manifest digest={} bytes={} layers={} verified=yes token=anonymous-ok ms={}",
+        "manifest digest={} bytes={} layers={} verified=yes ms={}",
         manifest.digest(),
         manifest.bytes().len(),
         manifest.layers().len(),

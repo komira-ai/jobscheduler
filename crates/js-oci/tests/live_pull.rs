@@ -66,10 +66,11 @@ async fn the_probe_reports_a_token_a_redirect_and_verified_digests() {
         "target registry={REGISTRY}:{port} repository={REPO} auth=anonymous"
     )));
     assert!(lines[1].starts_with(&format!(
-        "manifest digest={} bytes={} layers=2 verified=yes token=anonymous-ok",
+        "manifest digest={} bytes={} layers=2 verified=yes ms=",
         artifact.digest,
         artifact.manifest.len()
     )));
+    assert!(!lines[1].contains("token="), "{}", lines[1]);
     assert!(lines[2].starts_with(&format!(
         "config digest={} bytes={} verified=yes",
         Digest::of(CONFIG.as_bytes()),
@@ -151,6 +152,58 @@ async fn a_missing_manifest_and_an_oversize_layer_fail_with_their_reason() {
     assert_eq!(
         err.to_string(),
         "the smallest layer is 10 bytes, over --max-layer-bytes 5"
+    );
+    let layer = Digest::of(b"tiny layer");
+    assert!(
+        fx.requests().iter().all(|r| !r.contains(layer.as_str())),
+        "{:?}",
+        fx.requests()
+    );
+}
+
+/// Proves a location the policy does not admit is refused as `NotAllowed` before any
+/// request is made.
+#[tokio::test]
+async fn a_location_outside_the_policy_is_refused_before_any_request() {
+    let artifact = image();
+    let fx = serving(&artifact).await;
+    let client = fx.client_with(vec![entry(&fx, REGISTRY, "team")]);
+    let err = probe(
+        &client,
+        fx.location("elsewhere/bundle"),
+        &artifact.digest,
+        &kind(),
+        1 << 20,
+    )
+    .await
+    .expect_err("not allowed");
+    assert!(
+        matches!(&err, ProbeError::Pull(Error::NotAllowed { .. })),
+        "{err}"
+    );
+    assert!(fx.requests().is_empty(), "{:?}", fx.requests());
+}
+
+/// Proves a manifest whose config blob the registry does not hold fails the probe with
+/// the registry's status, before any layer is requested.
+#[tokio::test]
+async fn an_unpublished_config_blob_fails_the_probe() {
+    let artifact = image();
+    let fx = Fixture::start().await;
+    fx.publish_manifest_as(&artifact.digest, &artifact.manifest);
+    let client = fx.client_with(vec![entry(&fx, REGISTRY, "team")]);
+    let err = probe(
+        &client,
+        fx.location(REPO),
+        &artifact.digest,
+        &kind(),
+        1 << 20,
+    )
+    .await
+    .expect_err("config missing");
+    assert!(
+        matches!(&err, ProbeError::Pull(Error::Status { status: 404, .. })),
+        "{err}"
     );
     let layer = Digest::of(b"tiny layer");
     assert!(
