@@ -33,6 +33,8 @@ pub(crate) struct Agents {
     pub(crate) tokens: AgentTokens,
     /// The one-time tokens minted for launched instances.
     pub(crate) joins: JoinTokens,
+    /// The one provider the mint route accepts, or `None` for any.
+    pub(crate) mint_provider: Option<String>,
     pub(crate) limiter: HelloLimiter,
     /// The server's clock, which bounds a run by the time its lease has left.
     pub(crate) clock: SharedClock,
@@ -77,6 +79,7 @@ pub(crate) fn assemble(
             let AgentSetup {
                 tokens,
                 pool,
+                mint_provider,
                 hello_limit,
                 require_host_credential,
             } = *agents;
@@ -100,6 +103,7 @@ pub(crate) fn assemble(
                 registry,
                 tokens,
                 joins,
+                mint_provider,
                 limiter: HelloLimiter::new(hello_limit, clock.clone()),
                 clock: clock.clone(),
                 runs_minted: AtomicU64::new(0),
@@ -138,6 +142,7 @@ impl Agents {
             registry,
             tokens: AgentTokens::open(&tokens, &client).unwrap(),
             joins,
+            mint_provider: None,
             limiter: HelloLimiter::new(limit, clock.clone()),
             clock: clock.clone(),
             runs_minted: AtomicU64::new(0),

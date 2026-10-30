@@ -113,6 +113,9 @@ struct RunEntry {
     exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// The labels the client sent when it queued the run; left out when there are none.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    labels: std::collections::BTreeMap<String, String>,
     /// The end of the job's output; only the entry of one run carries it, the list leaves
     /// it out to stay small.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,6 +147,7 @@ impl From<RunView> for RunEntry {
             outcome: result.as_ref().map(|result| result.outcome),
             exit_code: result.as_ref().and_then(|result| result.exit_code),
             detail: result.and_then(|result| result.detail),
+            labels: run.labels,
         }
     }
 }

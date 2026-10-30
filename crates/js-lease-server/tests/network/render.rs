@@ -181,7 +181,7 @@ fn the_script_is_hardened() {
     let agent_check = lines.iter().position(|l| l.contains("chmod 0755")).unwrap();
     let start = lines
         .iter()
-        .position(|l| l.starts_with("systemctl enable"))
+        .position(|l| l.starts_with("systemctl enable --now js-agent"))
         .unwrap();
     assert!(
         agent_check < start,
