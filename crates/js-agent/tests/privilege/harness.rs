@@ -292,7 +292,8 @@ pub fn run_as(uid: u32, caps: &[u32], probe: &str, env: &[(&str, &Path)]) -> Rep
     );
     let values: BTreeMap<String, String> = text
         .lines()
-        .filter_map(|line| line.strip_prefix("PROBE "))
+        // The first line follows libtest's `test harness::child ... `.
+        .filter_map(|line| line.find("PROBE ").map(|at| &line[at + "PROBE ".len()..]))
         .filter_map(|rest| rest.split_once('='))
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
