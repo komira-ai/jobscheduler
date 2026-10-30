@@ -171,7 +171,12 @@ fn sealing_normalises_modes_and_gives_the_tree_to_the_owner() {
 
 #[test]
 fn the_root_owner_is_root_and_wheel() {
-    assert_eq!(format!("{:?}", Owner::root()), "Owner { uid: 0, gid: 0 }");
+    assert_eq!(Owner::root().ids(), (0, 0));
+    let me = (
+        rustix::process::geteuid().as_raw(),
+        rustix::process::getegid().as_raw(),
+    );
+    assert_eq!(Owner::caller().ids(), me);
 }
 
 #[test]
@@ -309,6 +314,17 @@ fn unsealing_a_tree_that_is_not_there_is_accepted() {
     rig.sealer
         .unseal_for_delete(&rig.dir.path().join("nowhere"))
         .unwrap();
+}
+
+#[test]
+fn unsealing_a_path_that_runs_through_a_file_is_an_error() {
+    let rig = Rig::new();
+    let root = rig.tree();
+    let error = rig
+        .sealer
+        .unseal_for_delete(&root.join("a.txt/inside"))
+        .unwrap_err();
+    assert!(error.0.contains("inside"), "{error}");
 }
 
 #[test]

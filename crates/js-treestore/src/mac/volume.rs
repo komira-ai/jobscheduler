@@ -3,6 +3,12 @@
 use std::io;
 use std::path::Path;
 
+/// `MNT_NOEXEC`: no program on the volume can run.
+const MNT_NOEXEC: u32 = 0x4;
+/// `MNT_IGNORE_OWNERSHIP`: the volume takes no notice of file owners, so root-owned sealing
+/// and the separation of users mean nothing on it.
+const MNT_IGNORE_OWNERSHIP: u32 = 0x0020_0000;
+
 /// What `statfs` says about a volume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeFacts {
@@ -60,6 +66,30 @@ pub fn check_volumes(
     scratch: &Path,
     read: impl Fn(&Path) -> io::Result<VolumeFacts>,
 ) -> Result<(), VolumeError> {
-    let _ = (store, scratch, read);
+    let on_store = facts(store, "store", &read)?;
+    if on_store.fs_type != "apfs" {
+        return Err(VolumeError::NotApfs {
+            what: "store",
+            fs_type: on_store.fs_type,
+        });
+    }
+    if on_store.flags & MNT_IGNORE_OWNERSHIP != 0 {
+        return Err(VolumeError::IgnoresOwnership { what: "store" });
+    }
+    if on_store.flags & MNT_NOEXEC != 0 {
+        return Err(VolumeError::NoExec { what: "store" });
+    }
+    let on_scratch = facts(scratch, "scratch", &read)?;
+    if on_scratch.fsid != on_store.fsid {
+        return Err(VolumeError::DifferentVolumes);
+    }
     Ok(())
+}
+
+fn facts(
+    path: &Path,
+    what: &'static str,
+    read: &impl Fn(&Path) -> io::Result<VolumeFacts>,
+) -> Result<VolumeFacts, VolumeError> {
+    read(path).map_err(|source| VolumeError::Read { what, source })
 }

@@ -18,6 +18,9 @@ pub enum SecurelevelError {
 /// # Errors
 /// The level is above 0 or `read` failed.
 pub fn check_securelevel(read: impl FnOnce() -> io::Result<i64>) -> Result<(), SecurelevelError> {
-    let _ = read;
+    let level = read().map_err(SecurelevelError::Read)?;
+    if level > 0 {
+        return Err(SecurelevelError::TooHigh(level));
+    }
     Ok(())
 }
