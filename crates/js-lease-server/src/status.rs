@@ -277,16 +277,14 @@ impl Status {
             },
         };
         let now = Millis::new(self.clock.now().millis());
-        let (launch, live_until_ms) = match self.scaler.as_ref().map(Scaler::settings) {
-            Some(set) => {
-                let mode = match set.mode(now) {
-                    LaunchMode::Live => "live",
-                    LaunchMode::Plan => "plan",
-                };
-                (mode, set.live_until.map(Millis::as_millis))
-            }
-            None => (pool.launch, None),
-        };
+        let settings = self.scaler.as_ref().map(Scaler::settings);
+        let launch = settings.map_or(pool.launch, |set| match set.mode(now) {
+            LaunchMode::Live => "live",
+            LaunchMode::Plan => "plan",
+        });
+        let live_until_ms = settings
+            .and_then(|set| set.live_until)
+            .map(Millis::as_millis);
         let scaled = self.scaler.as_ref().map(|scaler| scaler.state());
         // The checks first; once they pass, the cap that keeps the scaler from launching.
         let capped = scaled
