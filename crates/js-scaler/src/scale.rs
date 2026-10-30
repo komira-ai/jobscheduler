@@ -637,7 +637,11 @@ impl Pass<'_> {
             .filter(|(name, _)| self.quiet_now.contains(name))
             .collect();
         // The window closes for a machine whose host is live, whose record has left the
-        // registered phases, or whose `boot_timeout` has run from the restart.
+        // registered phase, or whose `boot_timeout` has run from the restart. A pool absent
+        // from this step's input does not close it: the absence may be a moment's (a pool
+        // list that failed to load), so the window is taken as not yet run out. `cover` asks
+        // the pool for its `boot_timeout`, so nothing is covered for a pool while it is
+        // absent either.
         let awaiting = std::mem::take(&mut self.awaiting)
             .into_iter()
             .filter(|(name, restart)| {
@@ -654,8 +658,8 @@ impl Pass<'_> {
                         .map(|pool| pool.settings.boot_timeout)
                 });
                 [
-                    record.is_some_and(|record| crate::pass::HELD.contains(&record.phase)),
-                    window.is_some_and(|window| now.since(*restart) < window),
+                    record.is_some_and(|record| record.phase == Phase::Registered),
+                    window.is_none_or(|window| now.since(*restart) < window),
                     host_named(input, name).is_none_or(|host| host.state != HostState::Live),
                 ]
                 .into_iter()

@@ -47,10 +47,6 @@ pub(crate) struct Pass<'a> {
     pub(crate) declined: Vec<(String, String, Option<String>)>,
 }
 
-/// The phases of a machine that is up and registered, whose host may not have said hello to
-/// this process yet.
-pub(crate) const HELD: [Phase; 2] = [Phase::Registered, Phase::Draining];
-
 /// The host named `name`, if the registry knows it.
 pub(crate) fn host_named<'a>(input: &'a Input, name: &str) -> Option<&'a HostFacts> {
     input.hosts.iter().find(|host| host.id.as_str() == name)
@@ -96,10 +92,19 @@ fn below(offer: &StoredOffer, host: Option<&js_elastic::Offer>) -> bool {
 }
 
 impl<'a> Pass<'a> {
-    /// Whether `record` is a restored machine whose host has not yet said hello to this
-    /// process and whose window, `boot_timeout` from the restart, is still open: it covers a
-    /// request its offer fits. The window is open for `boot_timeout` less a millisecond
-    /// after the restart and closed from `boot_timeout` on.
+    /// Whether `record` is a restored registered machine whose host has not yet said hello
+    /// to this process and whose window, `boot_timeout` from the restart, is still open: it
+    /// covers a request its offer fits. The window is open for `boot_timeout` less a
+    /// millisecond after the restart and closed from `boot_timeout` on.
+    ///
+    /// "The restart" is the first step the process takes. A machine that is draining is
+    /// never awaited: the registry places no new lease on it (which is why `cover` asks a
+    /// host to be live), so a request it covered would wait the whole window and be
+    /// launched for anyway. The trade-off: a restored machine that is dead holds a request
+    /// its offer fits for up to `boot_timeout` before the request gets a machine. A server
+    /// that crashes again inside `boot_timeout` starts the window afresh at each restart
+    /// (it is not written to disk), so it can hold a launch for as long as it keeps
+    /// crashing; that is bounded per restart and accepted.
     pub(crate) fn awaited(&self, record: &Record, boot_timeout: std::time::Duration) -> bool {
         let open = self
             .awaiting
@@ -110,7 +115,7 @@ impl<'a> Pass<'a> {
         [
             open,
             silent,
-            HELD.contains(&record.phase),
+            record.phase == Phase::Registered,
             !record.condemned,
         ]
         .into_iter()
@@ -136,14 +141,16 @@ impl<'a> Pass<'a> {
                 .collect()
         };
         // A scaler read from records starts the window of every machine it holds as
-        // registered or draining at this step: those are the machines whose agents have
-        // not yet said hello to the registry of this process.
+        // registered at this step: those are the machines whose agents have not yet said
+        // hello to the registry of this process. A draining machine is left out: the step
+        // had already decided to take it out, the registry places no new lease on it, and
+        // so it could never serve the request it would be awaited for.
         let awaiting = if state.restored {
             state
                 .records
                 .instances
                 .iter()
-                .filter(|record| HELD.contains(&record.phase))
+                .filter(|record| record.phase == Phase::Registered)
                 .map(|record| (record.name.clone(), now))
                 .collect()
         } else {

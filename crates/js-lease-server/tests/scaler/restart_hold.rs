@@ -126,3 +126,31 @@ async fn without_restored_records_a_waiting_request_is_launched_for() {
     assert!(launched(&rig), "{:?}", rig.log());
     assert_eq!(rig.scaler.state().records.instances.len(), 1);
 }
+
+/// Asserts that a restored machine that is draining holds nothing: the step had decided to
+/// take it out and the registry places no new lease on it, so a machine is launched for the
+/// request on the first tick instead of after `boot_timeout`. It catches a hold that awaits
+/// draining machines.
+#[tokio::test]
+async fn a_restored_draining_machine_does_not_hold_the_launch() {
+    let rig = rig(
+        records(vec![record("js-restored", Phase::Draining)]),
+        live(),
+    );
+    rig.world().waiting = vec![request("r1")];
+    rig.scaler.tick().await;
+    assert!(launched(&rig), "{:?}", rig.log());
+}
+
+/// Asserts that a restored machine whose offer fits only part of the request (enough cpu,
+/// too little memory) holds nothing: a machine is launched on the first tick. It catches a
+/// hold that looks at one dimension of the offer.
+#[tokio::test]
+async fn a_restored_machine_that_fits_part_of_a_request_does_not_hold_the_launch() {
+    let mut machine = record("js-restored", Phase::Registered);
+    machine.offer.memory_bytes = 1 << 29;
+    let rig = rig(records(vec![machine]), live());
+    rig.world().waiting = vec![request("r1")];
+    rig.scaler.tick().await;
+    assert!(launched(&rig), "{:?}", rig.log());
+}

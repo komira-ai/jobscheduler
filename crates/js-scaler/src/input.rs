@@ -40,7 +40,9 @@ pub enum Mark {
 /// both, and so does the scaler. The host covers nothing, but the machine it stands for does
 /// while the scaler is new and the host has not said hello since the restart: until then,
 /// for `boot_timeout` from the restart, the machine's stored offer covers a request it
-/// fits, so the request is not given a second machine.
+/// fits, so the request is not given a second machine. Only a machine in the registered
+/// phase is awaited, not a draining one: a draining machine takes no new lease, so it could
+/// not serve the request it would hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostState {
     /// Said hello or heartbeat within grace.

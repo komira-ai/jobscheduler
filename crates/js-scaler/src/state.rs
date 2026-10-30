@@ -123,13 +123,22 @@ pub struct State {
     /// Whether this state was read from records and has not yet taken a step: its first
     /// step moves the silent and missing times past the time the scaler was down.
     pub(crate) restored: bool,
-    /// The restored machines (registered or draining) the registry has not yet heard from
-    /// since this process started, each with the instant of the first step, which is the
+    /// The restored registered machines the registry has not yet heard from since this
+    /// process started, each with the instant of the first step, which is the
     /// restart. Until its host says hello, up to `boot_timeout` from that instant, such a
     /// machine covers a request its stored offer fits, so a request it would serve does not
     /// make a second machine (see `Pass::cover`). Not written to disk, on purpose: a restart
     /// gives every machine the whole window again, which is when its agent is about to say
     /// hello to the new registry.
+    ///
+    /// "Restart" is the first step after the process starts; each restart re-stamps every
+    /// window, so a server that keeps crashing within `boot_timeout` can hold a launch for
+    /// as long as it keeps crashing, which is bounded per restart and accepted. A restored
+    /// machine that is dead holds a request its offer fits for up to `boot_timeout`: a
+    /// stated trade-off for not launching twice for a machine that is only slow to say
+    /// hello. A draining machine is not awaited: the step had already decided to take it
+    /// out, and the registry places no new lease on it, so it would hold a request for the
+    /// whole window to no purpose (the request launches anyway at its end).
     pub(crate) awaiting: BTreeMap<String, Millis>,
 }
 
