@@ -36,10 +36,15 @@
 //! is offered. [`GcReport`] says how many bytes went and how many stay.
 
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
 
-use super::Oci;
-use super::image::{ImageCheckError, Images};
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode};
+
+use super::image::{ImageCheckError, Images, ROOTFS};
+use super::{JobError, Oci};
+use crate::walk::{DIRECTORY, Identity, back_to_parent, identity};
 
 /// What one collection did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -76,38 +81,244 @@ impl std::fmt::Display for GcReport {
     }
 }
 
-/// A stub: nothing is marked yet.
+/// An `ensure` of a digest in progress: the digest is not collected while this lives.
 #[derive(Debug)]
-#[allow(dead_code)]
-pub(crate) struct InUse;
+pub(crate) struct InUse<'a> {
+    images: &'a Images,
+    hex: String,
+}
 
-#[allow(dead_code)]
+impl Drop for InUse<'_> {
+    fn drop(&mut self) {
+        let mut book = self.images.book();
+        let left = book.using.get_mut(&self.hex).map(|n| {
+            *n = n.saturating_sub(1);
+            *n
+        });
+        if left == Some(0) {
+            book.using.remove(&self.hex);
+        }
+    }
+}
+
 impl Images {
-    /// A stub.
-    pub(crate) fn begin_use(&self, _hex: &str) -> Result<InUse, ImageCheckError> {
-        Ok(InUse)
+    /// Marks `hex` in use until the result is dropped.
+    ///
+    /// # Errors
+    /// The digest is being removed by a collection: the caller asks again.
+    pub(crate) fn begin_use(&self, hex: &str) -> Result<InUse<'_>, ImageCheckError> {
+        let mut book = self.book();
+        if book.removing.contains(hex) {
+            return Err(ImageCheckError::Failed(format!(
+                "image sha256:{hex} is being removed from the store; ask again"
+            )));
+        }
+        *book.using.entry(hex.to_owned()).or_default() += 1;
+        Ok(InUse {
+            images: self,
+            hex: hex.to_owned(),
+        })
     }
 
-    /// A stub: removes nothing.
+    /// Takes the digest `hex` for removal unless it is in use.
+    fn claim(&self, hex: &str) -> bool {
+        let mut book = self.book();
+        if book.using.contains_key(hex) {
+            return false;
+        }
+        book.removing.insert(hex.to_owned())
+    }
+
+    /// Ends the removal of `hex`; a removed digest forgets its single flight.
+    fn release(&self, hex: &str, removed: bool) {
+        let mut book = self.book();
+        book.removing.remove(hex);
+        if removed {
+            book.flights.remove(hex);
+        }
+    }
+
+    /// Removes every complete or partial digest directory not in `keep` (hex digests) and
+    /// not in use, with `remove` (which gets the path and must not follow symlinks), and
+    /// a digest directory that is not complete (no `rootfs`) whether or not it is named:
+    /// an unpack renames a finished stage onto the digest, which cannot land on a leftover.
+    ///
+    /// # Errors
+    /// The store directory cannot be read; a digest that cannot be removed is in the
+    /// report instead.
     pub(crate) fn collect(
         &self,
-        _keep: &HashSet<String>,
-        _remove: &mut dyn FnMut(&Path) -> Result<(), String>,
+        keep: &HashSet<String>,
+        remove: &mut dyn FnMut(&Path) -> Result<(), String>,
     ) -> Result<GcReport, String> {
-        Ok(GcReport::default())
+        let entries = match std::fs::read_dir(self.dir()) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(GcReport::default()),
+            Err(e) => {
+                return Err(format!(
+                    "reading the image store {}: {e}",
+                    self.dir().display()
+                ));
+            }
+        };
+        let mut hexes: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|name| is_digest_name(name))
+            .collect();
+        hexes.sort();
+        let mut report = GcReport::default();
+        for hex in hexes {
+            let path = self.dir().join(&hex);
+            let bytes = tree_bytes(&path).unwrap_or(0);
+            if (keep.contains(&hex) && is_complete(&path)) || !self.claim(&hex) {
+                report.kept += 1;
+                report.kept_bytes += bytes;
+                continue;
+            }
+            let result = remove(&path);
+            self.release(&hex, result.is_ok());
+            match result {
+                Ok(()) => {
+                    report.removed.push(format!("sha256:{hex}"));
+                    report.removed_bytes += bytes;
+                }
+                Err(why) => {
+                    report.failed.push(format!("sha256:{hex}: {why}"));
+                    report.kept_bytes += bytes;
+                }
+            }
+        }
+        Ok(report)
     }
 }
 
 impl Oci {
-    /// A stub: removes nothing.
+    /// Removes the image digests the store holds that nothing names: not one of
+    /// `configured` (the digests the executor is set up with) and not one of `leased`
+    /// (the digest of every live lease). Digests are `sha256:<hex>` or the hex alone;
+    /// anything else in a slice names nothing. Call it at start, before the disk
+    /// offered is read; a lease running without its digest in `leased` loses its image.
+    ///
+    /// A digest being fetched or unpacked is kept; the second call after a collection
+    /// removes nothing.
     ///
     /// # Errors
-    /// Never yet.
+    /// The store directory cannot be read. A digest that could not be removed is in
+    /// [`GcReport::failed`] and stays.
     pub fn collect_images(
         &self,
-        _configured: &[String],
-        _leased: &[String],
+        configured: &[String],
+        leased: &[String],
     ) -> Result<GcReport, String> {
-        Ok(GcReport::default())
+        let keep: HashSet<String> = configured
+            .iter()
+            .chain(leased)
+            .map(|d| d.strip_prefix("sha256:").unwrap_or(d).to_owned())
+            .collect();
+        let report = self
+            .images
+            .collect(&keep, &mut |path| self.remove_entry(path))?;
+        tracing::info!("{report}");
+        Ok(report)
     }
+
+    /// Removes one digest directory, or unlinks a digest name that is not a directory.
+    fn remove_entry(&self, path: &Path) -> Result<(), String> {
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.to_string()),
+        };
+        if !meta.is_dir() {
+            return std::fs::remove_file(path).map_err(|e| e.to_string());
+        }
+        match crate::remove::remove_tree(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // The files are the container's ids': a helper container removes them.
+            Err(_) => self
+                .remove_dir_blocking(path)
+                .map_err(|e: JobError| e.to_string()),
+        }
+    }
+}
+
+/// Whether `name` is the name of a digest directory: 64 lowercase hex digits.
+fn is_digest_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether `dir` is a directory (not a link) with a `rootfs` directory (not a link) in it.
+fn is_complete(dir: &Path) -> bool {
+    let is_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    is_dir(dir) && is_dir(&dir.join(ROOTFS))
+}
+
+/// A directory being measured.
+struct Frame {
+    id: Identity,
+    subdirectories: Vec<OsString>,
+}
+
+/// The disk `dir` and everything below it holds, in 512-byte blocks, without recursion
+/// and without following a symlink (the walk of [`crate::remove`], reading only). A
+/// subdirectory the daemon user may not open counts for its own entry only.
+fn tree_bytes(dir: &Path) -> std::io::Result<u64> {
+    let mut here = rustix::fs::openat(CWD, dir, DIRECTORY, Mode::empty())?;
+    let mut total = blocks(&rustix::fs::fstat(&here)?);
+    let mut stack = vec![Frame {
+        id: identity(&here)?,
+        subdirectories: measure_entries(&here, &mut total)?,
+    }];
+    while let Some(mut top) = stack.pop() {
+        if let Some(name) = top.subdirectories.pop() {
+            if let Ok(child) = rustix::fs::openat(&here, name.as_os_str(), DIRECTORY, Mode::empty())
+            {
+                let frame = Frame {
+                    id: identity(&child)?,
+                    subdirectories: measure_entries(&child, &mut total).unwrap_or_default(),
+                };
+                stack.extend([top, frame]);
+                here = child;
+            } else {
+                stack.push(top);
+            }
+            continue;
+        }
+        if let Some(parent) = stack.last() {
+            here = back_to_parent(&here, parent.id)?;
+        }
+    }
+    Ok(total)
+}
+
+/// Adds the size of every entry of `dir` to `total` and returns the names of the
+/// subdirectories.
+fn measure_entries(dir: &rustix::fd::OwnedFd, total: &mut u64) -> std::io::Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let name = entry?.file_name().to_bytes().to_vec();
+        if name != b"." && name != b".." {
+            names.push(OsString::from_vec(name));
+        }
+    }
+    let mut subdirectories = Vec::new();
+    for name in names {
+        let Ok(stat) = rustix::fs::statat(dir, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW) else {
+            continue;
+        };
+        *total += blocks(&stat);
+        if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+            subdirectories.push(name);
+        }
+    }
+    Ok(subdirectories)
+}
+
+/// The disk a file holds: its 512-byte blocks.
+fn blocks(stat: &rustix::fs::Stat) -> u64 {
+    u64::try_from(stat.st_blocks)
+        .unwrap_or(0)
+        .saturating_mul(512)
 }

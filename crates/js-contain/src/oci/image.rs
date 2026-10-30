@@ -25,7 +25,7 @@
 //! different random name each time; the leftovers are removed by the sweep at the next
 //! start).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -93,7 +93,16 @@ pub const STAGE_PREFIX: &str = ".stage-";
 #[derive(Debug)]
 pub(crate) struct Images {
     dir: PathBuf,
-    flights: Mutex<HashMap<String, Arc<OnceCell<()>>>>,
+    book: Mutex<Book>,
+}
+
+/// What the store knows of digests in motion: the single flights, the `ensure`s under
+/// way and the digests a collection is removing (`gc`).
+#[derive(Debug, Default)]
+pub(super) struct Book {
+    pub(super) flights: HashMap<String, Arc<OnceCell<()>>>,
+    pub(super) using: HashMap<String, usize>,
+    pub(super) removing: HashSet<String>,
 }
 
 /// The hex of an image's `sha256:<hex>` digest, the name of its directory.
@@ -109,8 +118,18 @@ impl Images {
     pub(crate) fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            flights: Mutex::new(HashMap::new()),
+            book: Mutex::new(Book::default()),
         }
+    }
+
+    /// The directory of the store.
+    pub(super) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The book, whatever a panicking holder left.
+    pub(super) fn book(&self) -> std::sync::MutexGuard<'_, Book> {
+        self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The root filesystem of the image whose digest is `digest` (`sha256:<hex>`).
@@ -136,13 +155,12 @@ impl Images {
         oci: &Oci,
         image: &PinnedImage,
     ) -> Result<(), ImageCheckError> {
+        // Held to the end: a collection leaves a digest with an `ensure` under way alone.
+        let _in_use = self.begin_use(&hex_of(image))?;
         if self.has(image) {
             return Ok(());
         }
-        let flight = {
-            let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
-            Arc::clone(flights.entry(hex_of(image)).or_default())
-        };
+        let flight = Arc::clone(self.book().flights.entry(hex_of(image)).or_default());
         flight.get_or_try_init(|| self.acquire(oci, image)).await?;
         Ok(())
     }

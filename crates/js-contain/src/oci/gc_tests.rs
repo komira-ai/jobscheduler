@@ -327,7 +327,6 @@ async fn what_a_crash_left_is_removed_and_the_image_can_unpack_again() {
     let fx = fixture("gc-crash");
     let stage = format!(".stage-{}-77-0", hexn('a'));
     std::fs::create_dir_all(fx.images.join(&stage)).expect("stage");
-    std::fs::write(fx.images.join(&stage).join("half"), b"x").expect("half");
     std::fs::create_dir_all(fx.images.join(format!("{stage}-blobs"))).expect("blobs");
     std::fs::create_dir_all(fx.images.join(hexn('a'))).expect("partial digest");
     std::fs::write(fx.images.join(hexn('a')).join("partial"), b"x").expect("partial");
