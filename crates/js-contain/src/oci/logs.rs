@@ -43,7 +43,10 @@
 //!
 //! **The files** are made new (an existing file, or a symbolic link in its place, is an
 //! error naming the path), mode 0600: only the agent's user reads them. A lease directory
-//! is used for one container, so nothing is truncated.
+//! is used for one container, so nothing is truncated. A second `start` on the same lease
+//! directory therefore fails with "exists" (`init::create_report`, which truncates, would
+//! not): a retry must use a new lease directory. A `start` that fails after the files were
+//! made (the thread could not be spawned) does not remove them.
 //!
 //! The container's standard input is not touched: it stays the init's report file.
 

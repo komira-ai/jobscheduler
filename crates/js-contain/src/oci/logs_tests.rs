@@ -259,11 +259,13 @@ async fn the_agent_holds_no_write_end_after_the_run() {
     assert_eq!(tail.stderr.bytes, b"err\n");
 }
 
-/// Catches an abort that waits for the drain or loses what was read: a run that has
-/// written and then hangs is dropped; the tail is what was written, and the readers end
-/// with the pipes although the grace is an hour.
+/// Catches bytes read before a run is dropped (an abort) being lost: a run that has
+/// written and then hangs is dropped, and the tail is what it wrote. This does not pin the
+/// teardown (dropping a future cannot wait, and the readers here outlive it because the
+/// test's runtime stays alive); that, the thread's runtime dropping with its tasks on an
+/// abort, is `Running`'s and is covered by the reading of its code only.
 #[tokio::test]
-async fn an_aborted_run_leaves_the_partial_tail_and_does_not_wait() {
+async fn an_aborted_run_keeps_what_was_read() {
     use std::io::Write as _;
     let dir = dir("abort");
     let hour = LogLimits {
