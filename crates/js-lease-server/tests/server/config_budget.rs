@@ -223,6 +223,12 @@ fn an_empty_kind_table_and_a_kind_month_below_the_server_day_are_refused() {
         "budget.lambdalabs.max_spend_per_month_total: must not be below server.max_spend_per_day_total"
     );
     assert!(load(&scratch, &with_budget(&text, &format!("{kind}\"10.00\""))).is_ok());
+    // The rule needs both figures: a kind with no month total, or a server with no day total,
+    // has nothing to compare.
+    let day_only = "max_spend_per_day_total = \"1.00\"";
+    assert!(load(&scratch, &with_budget(&text, day_only)).is_ok());
+    let month_only = with_budget(&plain, &format!("{kind}\"5.00\""));
+    assert!(load(&scratch, &month_only).is_ok());
 }
 
 /// Asserts the warnings about a go, each once and each only for its case: `live_until` on a
