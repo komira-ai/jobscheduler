@@ -34,7 +34,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 # `fs`: the layer files of the image source (src/image).
-tokio = { workspace = true, features = ["fs", "rt", "signal"] }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "signal", "sync"] }
 
 # The crun image source and the image config (src/image) are Linux code: js-contain drives
 # `crun` and is not built for the macOS target.
