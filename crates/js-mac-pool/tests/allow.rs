@@ -223,6 +223,10 @@ fn denies_come_after_every_grant_and_the_floor_is_last() {
         .rposition(|line| line.starts_with("(allow file-read*"))
         .expect("grants");
     assert!(at("(deny file-read*)") < at("(allow file-read-metadata"));
+    assert!(
+        at("(allow file-read-metadata (literal \"/System\")")
+            < at("(allow file-read* (literal \"/\")")
+    );
     assert!(at("(allow file-read-metadata") < at("(allow file-read* (literal \"/\")"));
     assert!(last_grant < at("(deny file-read* (literal"));
     assert!(at("(deny file-read* (literal") < at("(param \"RD_0\")"));
@@ -342,6 +346,7 @@ fn every_path_constant_is_plain_absolute_text() {
     for major in MacosMajor::ALL {
         let base = major.base();
         all.extend(base.reads().iter().map(|(_, text)| *text));
+        all.extend(base.names());
         all.extend(base.setuid());
         assert!(
             base.setuid()

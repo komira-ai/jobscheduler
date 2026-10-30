@@ -7,6 +7,7 @@
 (allow file-write* (subpath (param "RUN")) (subpath (param "UENTRY")) (literal "/dev/null") (subpath "/dev/fd"))
 (deny file-read*)
 (allow file-read-metadata (path-ancestors (param "RUN")) (path-ancestors (param "UENTRY")) (path-ancestors (param "TREE_0")) (path-ancestors (param "TREE_1")) (path-ancestors (param "XCODE_APP")))
+(allow file-read-metadata (literal "/System") (literal "/etc") (literal "/tmp") (literal "/usr") (literal "/var"))
 (allow file-read* (literal "/") (subpath "/System/Library") (subpath "/System/Cryptexes") (subpath "/System/Volumes/Preboot/Cryptexes") (subpath "/usr/lib") (subpath "/usr/bin") (subpath "/usr/sbin") (subpath "/usr/libexec") (subpath "/usr/share") (subpath "/bin") (subpath "/sbin") (subpath "/private/var/db/dyld") (subpath "/private/var/db/timezone") (literal "/private/var/select/sh") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/random") (literal "/dev/urandom") (literal "/dev/tty"))
 (allow file-read* (subpath (param "RUN")) (subpath (param "UENTRY")))
 (allow file-read* (subpath (param "TREE_0")) (subpath (param "TREE_1")))

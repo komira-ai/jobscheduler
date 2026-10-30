@@ -65,11 +65,21 @@ impl MacosMajor {
 /// What every run of the allow-list model may read, and the setuid files it may not.
 #[derive(Debug, PartialEq, Eq)]
 pub struct BaseSet {
+    names: &'static [&'static str],
     reads: &'static [(Match, &'static str)],
     setuid: &'static [&'static str],
 }
 
 impl BaseSet {
+    /// The names (file metadata only, not content) of the links at the root and the
+    /// directories above the base set: a path spelled through `/var` or `/etc` is
+    /// resolved by looking at the link, and a tool that is refused that gets `EPERM`
+    /// for a file it may write.
+    #[must_use]
+    pub fn names(&self) -> &'static [&'static str] {
+        self.names
+    }
+
     /// The reads: the system directories a process needs to start and link, and the
     /// few device files.
     #[must_use]
@@ -86,6 +96,7 @@ impl BaseSet {
 }
 
 static MACOS_14: BaseSet = BaseSet {
+    names: &["/System", "/etc", "/tmp", "/usr", "/var"],
     reads: &[
         (Match::Literal, "/"),
         (Match::Subpath, "/System/Library"),
@@ -179,6 +190,12 @@ pub(super) fn reads(
         "(allow file-read-metadata {})",
         ancestors.join(" ")
     ));
+    let names: Vec<String> = base
+        .names()
+        .iter()
+        .map(|path| filter((Match::Literal, *path)))
+        .collect();
+    lines.push(format!("(allow file-read-metadata {})", names.join(" ")));
     lines.push(format!("(allow file-read* {})", filters(base.reads())));
     lines.push(format!("(allow file-read* {})", own.join(" ")));
     if !trees.is_empty() {

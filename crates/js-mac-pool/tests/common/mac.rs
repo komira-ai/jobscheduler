@@ -203,8 +203,16 @@ pub fn sandbox_log() -> String {
                     .filter(|line| !line.contains("dtracehelper"))
                     .filter(|line| tools.iter().any(|tool| line.contains(tool)))
                     .collect();
-                let tail = lines.len().saturating_sub(120);
-                return format!("sandbox log:\n{}\n", lines[tail..].join("\n"));
+                // The compiler's own lines first: the rest is the Xcode tools' fallbacks.
+                let (own, rest): (Vec<&str>, Vec<&str>) = lines
+                    .into_iter()
+                    .partition(|line| line.contains(" cc(") || line.contains(" xcrun("));
+                let shown: Vec<&str> = own
+                    .into_iter()
+                    .chain(rest.into_iter().rev())
+                    .take(100)
+                    .collect();
+                return format!("sandbox log:\n{}\n", shown.join("\n"));
             }
         }
     }
