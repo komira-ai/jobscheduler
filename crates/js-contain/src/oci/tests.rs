@@ -885,6 +885,12 @@ async fn a_removed_image_is_fetched_again_and_a_present_one_is_not() {
     oci.check_pinned(&image).await.expect("not again");
     assert_eq!(fetched(), 1);
     assert!(oci.image_dir(&image).is_dir());
+    // A removal that fails says so and keeps the image.
+    let store = dir.join("s/oci-images");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).expect("mode");
+    assert!(oci.remove_image(&image).await.is_err());
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    assert!(oci.image_dir(&image).is_dir());
     oci.remove_image(&image).await.expect("removed");
     assert!(!oci.image_dir(&image).exists());
     oci.remove_image(&image).await.expect("already gone");
