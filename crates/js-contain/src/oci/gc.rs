@@ -87,7 +87,6 @@ impl std::fmt::Display for GcReport {
 }
 
 /// An `ensure` of a digest in progress: the digest is not collected while this lives.
-#[derive(Debug)]
 pub(crate) struct InUse<'a> {
     images: &'a Images,
     hex: String,
