@@ -957,6 +957,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "thiserror",
  "tokio",
 ]
@@ -992,8 +993,8 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "js-types",
- "ruzstd",
  "rustix",
+ "ruzstd",
  "serde",
  "serde_json",
  "sha2 0.11.1",
@@ -1083,7 +1084,9 @@ name = "js-contain"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "hex",
+ "js-oci",
  "js-types",
  "libc",
  "oci-spec",
@@ -1091,6 +1094,7 @@ dependencies = [
  "rustix",
  "serde_json",
  "sha2 0.11.1",
+ "tar",
  "thiserror",
  "tokio",
  "tracing",
@@ -3235,6 +3239,7 @@ dependencies = [
  "js-client",
  "js-elastic",
  "rcgen",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",

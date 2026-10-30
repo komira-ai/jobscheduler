@@ -31,11 +31,13 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# `fs`: the layer files of the image source (src/image).
-tokio = { workspace = true, features = ["fs", "rt", "signal"] }
+# `fs`: the layer files of the image source (src/image). `rt-multi-thread`: the runtime the
+# image pulls run on (src/lifecycle/prefetch.rs).
+tokio = { workspace = true, features = ["fs", "rt", "rt-multi-thread", "signal"] }
 
-# The crun image source and the image config (src/image) are Linux code: js-contain drives
-# `crun` and is not built for the macOS target.
+# The crun image source and the image config (src/image), and the helper modes this binary
+# answers when a helper container runs it (`main`), are Linux code: js-contain drives `crun`
+# and is not built for the macOS target.
 [target.'cfg(target_os = "linux")'.dependencies]
 js-contain = { path = "../js-contain" }
 
@@ -48,6 +50,7 @@ js-registry = { path = "../js-registry" }
 js-testkit = { path = "../js-testkit", features = ["oci-registry"] }
 clap.workspace = true
 rustix = { workspace = true, features = ["process"] }
+tar.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]

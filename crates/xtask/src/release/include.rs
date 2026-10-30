@@ -8,16 +8,46 @@
 //! An include is read as `name!(` and a plain string literal, with the path relative to
 //! the source file. Anything else after the parenthesis (`concat!`, `env!`, a raw string,
 //! an escape) cannot be resolved here and is an error, not a guess. The one exception is
-//! `concat!(env!("OUT_DIR"), ...)`, a file the build script writes: it is not in the
-//! repository, and the build script is shipped with its crate.
+//! `concat!(env!("OUT_DIR"), "<string literal>")` exactly, a file the build script writes: it
+//! is not in the repository, and the build script (`build.rs`) and its inputs ship with
+//! the crate.
 
 use super::Error;
 
 /// The macros that compile a file in.
 const MACROS: [&str; 3] = ["include_str!", "include_bytes!", "include!"];
 
-/// How an include of a build script's output starts.
-const OUT_DIR_PREFIX: &str = "concat!(env!(\"OUT_DIR\"),";
+/// Whether `args` (what follows the `(` of an include) is exactly
+/// `concat!(env!("OUT_DIR"), "<literal>")` and then the closing parenthesis: a file the
+/// build script writes. The literal has no backslash and no `..`, so it stays inside
+/// `OUT_DIR`. Anything else (another variable, an identifier or a second argument after
+/// the comma, a bare `env!("OUT_DIR")`, a plain `concat!`) is not one.
+fn is_out_dir_file(args: &str) -> bool {
+    let Some(rest) = args.trim_start().strip_prefix("concat!") else {
+        return false;
+    };
+    let rest = rest
+        .trim_start()
+        .strip_prefix('(')
+        .and_then(|r| r.trim_start().strip_prefix("env!"))
+        .and_then(|r| r.trim_start().strip_prefix('('))
+        .and_then(|r| r.trim_start().strip_prefix("\"OUT_DIR\""))
+        .and_then(|r| r.trim_start().strip_prefix(')'))
+        .and_then(|r| r.trim_start().strip_prefix(','))
+        .and_then(|r| r.trim_start().strip_prefix('"'))
+        .and_then(|r| r.split_once('"'));
+    let Some((literal, after)) = rest else {
+        return false;
+    };
+    if literal.contains('\\') || literal.contains("..") {
+        return false;
+    }
+    // The call ends here: `concat!` closes, then the include does.
+    after
+        .trim_start()
+        .strip_prefix(')')
+        .is_some_and(|r| r.trim_start().starts_with(')'))
+}
 
 /// The files the source `text` of `file` includes, as paths relative to the repository
 /// root (`file` is one too).
@@ -32,7 +62,7 @@ pub fn targets(file: &str, text: &str) -> Result<Vec<String>, Error> {
             };
             // A file the build script writes into `OUT_DIR` is not in the repository: the
             // script that writes it is a shipped file already.
-            if args.trim_start().starts_with(OUT_DIR_PREFIX) {
+            if is_out_dir_file(args) {
                 continue;
             }
             let path = args

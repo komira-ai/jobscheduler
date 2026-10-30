@@ -272,13 +272,21 @@ fn includes_are_read_as_paths_from_the_source() {
         ]
     );
     assert_eq!(include::targets("a.rs", "fn main() {}"), Ok(vec![]));
-    // A build script's output is not a repository file and is skipped, not an error.
+    // Exactly `concat!(env!("OUT_DIR"), "<literal>")` is a build script's output, not a
+    // repository file: skipped, with a literal include next to it still read.
     assert_eq!(
         include::targets(
             "a.rs",
             "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/x\")); include_str!(\"y\");"
         ),
         Ok(vec!["y".to_owned()])
+    );
+    assert_eq!(
+        include::targets(
+            "a.rs",
+            "include_str!(\n  concat!( env!( \"OUT_DIR\" ) , \"/x\" )\n);"
+        ),
+        Ok(vec![])
     );
     // Not a string literal, a raw string and an escape cannot be resolved.
     for (bad, line) in [
@@ -287,6 +295,24 @@ fn includes_are_read_as_paths_from_the_source() {
         ("include!(\"a\\\\b\");", 1),
         ("include_str!(", 1),
         ("include_str!(\"unterminated", 1),
+        // Every other non-literal include stays an error.
+        ("include_bytes!(concat!(env!(\"HOME\"), \"/x\"));", 1),
+        ("include_bytes!(concat!(\"a\", \"b\"));", 1),
+        ("include_bytes!(env!(\"OUT_DIR\"));", 1),
+        ("include_bytes!($path);", 1),
+        ("include_bytes!(concat!(env!(\"OUT_DIR\"), some_ident));", 1),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/../src/x.rs\"));",
+            1,
+        ),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/a\\\\b\"));",
+            1,
+        ),
+        (
+            "include_bytes!(concat!(env!(\"OUT_DIR\"), \"/a\", \"/b\"));",
+            1,
+        ),
     ] {
         assert_eq!(
             include::targets("a.rs", bad),
@@ -580,4 +606,28 @@ fn an_io_error_names_the_file() {
         write(&missing.join("x"), ""),
         Err(Error::Io { .. })
     ));
+}
+
+/// Pins the crates `release plan` treats as shipped binaries by default: the lease server,
+/// `js`, the agent, `js-bundle` and the two Mac host tools. A binary the release workflow
+/// builds but this list omits would never trigger a release when only it changes.
+#[test]
+fn the_default_ship_roots_are_the_released_binaries_crates() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        plan: plan::PlanArgs,
+    }
+    let cli = <Cli as clap::Parser>::try_parse_from(["xtask", "--head", "abc"]).expect("parses");
+    assert_eq!(
+        cli.plan.ship,
+        [
+            "js-lease-server",
+            "js-cli",
+            "js-agent",
+            "js-bundle-cli",
+            "js-mac-session",
+            "js-mac-provision"
+        ]
+    );
 }
