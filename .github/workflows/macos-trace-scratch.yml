@@ -1,0 +1,32 @@
+# Scratch (not for merge): collects the evidence a macOS read base set is derived from.
+name: macos-trace-scratch
+
+on:
+  push:
+    branches:
+      - scratch/macos15-trace
+
+permissions: {}
+
+jobs:
+  trace:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [macos-14, macos-15]
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Trace
+        run: python3 .github/scratch/macos-trace.py "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: trace-${{ matrix.image }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: ignore
