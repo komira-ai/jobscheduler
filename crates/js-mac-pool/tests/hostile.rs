@@ -193,8 +193,8 @@ struct Bundle {
     entrypoints: BTreeMap<String, PathBuf>,
 }
 
-fn bundle() -> Bundle {
-    let scratch = Scratch::new("tool");
+fn bundle(tag: &str) -> Bundle {
+    let scratch = Scratch::new(tag);
     let store = scratch.abs("store");
     let pinned = PinnedTree::new(&store, &common::diff_id('a')).expect("pinned");
     let other = PinnedTree::new(&store, &common::diff_id('b')).expect("other");
@@ -227,7 +227,7 @@ fn bundle() -> Bundle {
 
 #[test]
 fn a_program_is_an_entrypoint_that_is_a_regular_file_of_a_pinned_tree() {
-    let b = bundle();
+    let b = bundle("tool-good");
     let tool = ToolPath::from_entrypoint("@bundle/tool", &b.entrypoints, &b.pinned).expect("tool");
     assert_eq!(
         tool.path().as_str(),
@@ -238,7 +238,7 @@ fn a_program_is_an_entrypoint_that_is_a_regular_file_of_a_pinned_tree() {
 
 #[test]
 fn programs_that_are_not_pinned_regular_entrypoints_are_refused() {
-    let b = bundle();
+    let b = bundle("tool-refused");
     let other = b.entrypoints["other"].to_str().unwrap().to_owned();
     let table: [(&str, ToolError); 12] = [
         ("tool", ToolError::NotBundleRef("tool".to_owned())),
@@ -277,7 +277,7 @@ fn programs_that_are_not_pinned_regular_entrypoints_are_refused() {
 
 #[test]
 fn with_no_tree_pinned_no_entrypoint_is_a_program() {
-    let b = bundle();
+    let b = bundle("tool-none");
     let none: [PinnedTree; 0] = [];
     assert!(matches!(
         ToolPath::from_entrypoint("@bundle/tool", &b.entrypoints, &none),
