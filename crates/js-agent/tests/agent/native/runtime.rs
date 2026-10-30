@@ -303,16 +303,14 @@ fn a_user_the_helper_refuses_to_make_is_removed_again() {
         ]
     );
 
+    rig.fake.refuse("kill-uid", "stuck");
     rig.fake.refuse("user-delete", "busy");
     let spec = rig.spec("r2", native("/bin/true", &[]));
     let error = rig.rt.create_and_start(&spec).unwrap_err();
     assert!(error.0.contains("range full"), "{}", error.0);
-    assert!(
-        error.0.contains("user-delete"),
-        "the failed removal is told: {}",
-        error.0
-    );
-    assert!(error.0.contains("busy"), "{}", error.0);
+    for told in ["kill-uid: ", "stuck", "user-delete: ", "busy"] {
+        assert!(error.0.contains(told), "{told}: {}", error.0);
+    }
 
     let mut rig = Rig::new("used");
     rig.fake.refuse(

@@ -203,13 +203,40 @@ impl NativeRuntime {
         })
     }
 
-    /// Ends the user of `lease` after a start that failed, so none is left behind. A
-    /// failure to do so is not reported: the start's own error is the one the operator
-    /// needs, and the helper's boot reset ends what is left.
-    fn discard(&self, lease: &str) {
-        let _ = self.helper.kill_uid(lease);
-        let _ = self.helper.user_delete(lease);
+    /// Ends the user of `lease` after a start that failed, so none is left behind, and says
+    /// what could not be done: the start's own error is the first thing the operator needs,
+    /// but a user that is left is a uid held in the helper's range.
+    fn discard(&self, lease: &str) -> Vec<String> {
+        let killed = self
+            .helper
+            .kill_uid(lease)
+            .err()
+            .map(|why| format!("kill-uid: {why}"));
+        let deleted = self
+            .helper
+            .user_delete(lease)
+            .err()
+            .map(|why| format!("user-delete: {why}"));
+        killed.into_iter().chain(deleted).collect()
     }
+}
+
+/// `error`, and what could not be undone after it.
+fn with_problems(error: RuntimeError, problems: &[String]) -> RuntimeError {
+    match problems.is_empty() {
+        true => error,
+        false => RuntimeError::new(format!(
+            "{}; and the lease user could not be removed ({}): the helper's next boot reset ends it",
+            error.0,
+            problems.join("; ")
+        )),
+    }
+}
+
+/// Whether the helper refused `user-create` because the lease was used before: that lease
+/// is not ours to remove.
+fn used_before(why: &ClientError) -> bool {
+    matches!(why, ClientError::Refused(reason) if reason.contains("was used before"))
 }
 
 impl Runtime for NativeRuntime {
@@ -220,18 +247,24 @@ impl Runtime for NativeRuntime {
         let id = LeaseId::new(self.term, self.next);
         self.next += 1;
         let lease = Dotted(id).to_string();
-        let uid = self
-            .helper
-            .user_create(&lease, None)
-            .map_err(|why| fail(&"user-create", &why))?;
+        // The helper records the lease, and the uid it holds, before it makes the home and
+        // the account, so a refusal may leave a live lease: it is removed again.
+        let uid = match self.helper.user_create(&lease, None) {
+            Ok(uid) => uid,
+            Err(why) if used_before(&why) => return Err(fail(&"user-create", &why)),
+            Err(why) => {
+                let problems = self.discard(&lease);
+                return Err(with_problems(fail(&"user-create", &why), &problems));
+            }
+        };
         match self.launch(spec, native, (id, &lease, uid)) {
             Ok(run) => {
                 self.runs.insert(lease.clone(), run);
                 Ok(RunHandle(lease))
             }
             Err(why) => {
-                self.discard(&lease);
-                Err(why)
+                let problems = self.discard(&lease);
+                Err(with_problems(why, &problems))
             }
         }
     }
