@@ -41,6 +41,7 @@ fn spec() -> ContainerSpec {
         argv: strings(&["placeholder"]),
         limits: ContainerLimits::DEFAULT,
         shared: Vec::new(),
+        mounts: Vec::new(),
     }
 }
 
