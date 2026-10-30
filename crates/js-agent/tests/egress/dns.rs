@@ -2,7 +2,7 @@
 
 use js_agent::egress::Egress;
 
-use crate::sys::{Far, Holder, Server, allow_list, far, packets, serial, udp};
+use crate::sys::{Far, Holder, Reach, Server, allow_list, far, packets, serial, tcp, udp};
 
 /// Asserts that a wired namespace can ask the configured resolver and no other: a datagram
 /// to port 53 of the configured address is answered (the rule for it counted), one to another
@@ -46,6 +46,17 @@ fn only_the_configured_resolver_is_reachable() {
         packets("default-reject") > refused,
         "its own rule refused it"
     );
+    // TCP port 53 too.
+    let configured_tcp = Server::tcp(&far_host.ns, far::DNS);
+    let other_tcp = Server::tcp(&far_host.ns, far::DNS_OTHER);
+    assert!(
+        tcp(&holder.ns, far::DNS).connected(),
+        "TCP to the configured resolver"
+    );
+    assert!(packets("dns-tcp-0") >= 1);
+    assert!(matches!(tcp(&holder.ns, far::DNS_OTHER), Reach::Failed(_)));
+    assert_eq!(other_tcp.accepted(), 0);
+    assert_eq!(configured_tcp.accepted(), 1);
     drop(attachment);
 
     let none = Egress::start(allow_list(&["192.0.2.10:9300"], &[])).expect("restart");
@@ -57,5 +68,7 @@ fn only_the_configured_resolver_is_reachable() {
         "a resolver answered with none configured"
     );
     assert_eq!(configured.accepted(), 1);
+    assert!(matches!(tcp(&holder.ns, far::DNS), Reach::Failed(_)));
+    assert_eq!(configured_tcp.accepted(), 1);
     drop(attachment);
 }

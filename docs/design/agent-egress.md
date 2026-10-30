@@ -28,16 +28,16 @@ outside, while the container's init holds the job:
    `--wait-route <secs>` and does not start the job until `/proc/net/route` has a default route.
 2. The agent asks `Oci::container_pid` for the init's host pid and calls `Egress::attach`
    (`crates/js-agent/src/egress/host.rs`): it takes a /30 of the pool, makes the veth pair, turns
-   IPv6 off on the host end and reverse-path filtering on, addresses it, registers the interface in
-   the firewall's set, moves the job end into the namespace held open through
-   `/proc/<pid>/ns/net` (its identity is read before and after, and the host's own namespace is
-   refused), then enters that namespace with `nsenter` and, in one `ip -batch`, raises `lo`, gives
+   IPv6 off on the host end, addresses it, registers the interface in the firewall's set, opens
+   `/proc/<pid>/ns/net` once and keeps the descriptor (the host's own namespace is refused by
+   comparing device and inode), moves the job end into it and enters it, both by
+   `/proc/<agent pid>/fd/<n>`, never by the container's pid again. It enters it with `nsenter` and, in one `ip -batch`, raises `lo`, gives
    `eth0` no IPv6 link-local address, addresses and raises it, and adds the default route last.
 3. When the run ends the agent calls `release`: the set member and the host end go; the
    namespace is the kernel's to free with the container's last process.
 
 The privileged part is `egress::host` in the agent process: root, in the host's initial
-network namespace, running only the `ip` and `nft` programs the operator configured. It is never
+network namespace, running only the `ip`, `nft` and `nsenter` programs the operator configured. It is never
 in the container and never the job user. The rules live in that namespace, which the job cannot
 reach: its own namespace holds one interface and no firewall. Because the job's first instruction
 runs after the last wiring step (the init gate), no packet of the job leaves an unwired or
@@ -52,11 +52,13 @@ with the capabilities it already holds.
 ### The firewall
 
 Two tables, loaded in one `nft -f` transaction that first removes any earlier copy
-(`egress/ruleset.rs`). `inet js_egress` has a `forward` chain (priority -10, ahead of the
+(`egress/ruleset.rs`). `inet js_crun_egress` has a `forward` chain (priority -10, ahead of the
 distribution's rules) that accepts replies to a job, refuses new traffic to a job, drops all IPv6
-from a job, refuses `169.254.0.0/16`, accepts the configured resolvers (port 53, UDP and TCP) and
+from a job, refuses a source address that does not route back through the interface it came
+in on (`fib saddr . iif oif missing`: a job sends from its own address and no other), refuses
+`169.254.0.0/16`, accepts the configured resolvers (port 53, UDP and TCP) and
 endpoints (TCP) for an interface in the set `jobifs`, and refuses everything else from `jsv*`;
-its `input` chain refuses everything a job sends to the host itself. `ip js_egress_nat`
+its `input` chain refuses everything a job sends to the host itself. `ip js_crun_egress_nat`
 masquerades the pool toward anything outside it. Every rule counts and has a comment, so the
 tests can read that a refusal was the rule's doing. `Egress::check` (called before every create)
 reads both tables back and compares them, rule for rule, with what start loaded (counters,
@@ -65,10 +67,14 @@ handles and the set's members are not compared), and checks that IPv4 forwarding
 ## Configuration
 
 One mode, flags only: `--egress none` (the default) or `allow-list` with `--egress-allow`,
-`--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none sets nothing up: the
-container's namespace has loopback only. Agent start removes every `jsv*` and `jsp*` interface and
-both tables a previous process left (the keeper kills the containers with the agent), loads the
-firewall and switches IPv4 forwarding on.
+`--egress-dns`, `--egress-pool`, `--egress-ip`, `--egress-nft`, `--egress-nsenter`. Mode none does nothing: it runs
+no program and writes no file; the container's namespace has loopback only. An allow-list start
+removes the interfaces named `jsv<digits>` and `jsp<digits>` (exactly) and both tables a previous
+process left (the keeper kills the containers with the agent), loads the firewall and switches
+IPv4 forwarding on. That switch is host-wide and is never switched back: other users of the host
+may rely on it by then, and the agent cannot know. The tables are named `js_crun_egress` and
+`js_crun_egress_nat`, apart from the Podman path's `js_egress`, which stays as it was. The kernel's
+own reverse-path filter is not relied on; the firewall's `spoof` rule is, because it counts.
 
 DNS: a configured allow-list names its resolvers; the backend writes a `resolv.conf` with those and
 no other (`OciConfig::resolv_conf`), and the firewall accepts port 53 to those addresses only.

@@ -136,7 +136,7 @@ fn the_far_host_answers_only_through_the_masquerade() {
     let holder = Holder::new();
     let attachment = egress.attach("masq", holder.pid()).expect("attach");
 
-    nft(&["flush", "chain", "ip", "js_egress_nat", "postrouting"]);
+    nft(&["flush", "chain", "ip", "js_crun_egress_nat", "postrouting"]);
     let without = tcp(&holder.ns, far::ALLOWED);
     assert!(matches!(without, Reach::Failed(_)), "{without:?}");
     assert_eq!(
@@ -149,7 +149,7 @@ fn the_far_host_answers_only_through_the_masquerade() {
         "add",
         "rule",
         "ip",
-        "js_egress_nat",
+        "js_crun_egress_nat",
         "postrouting",
         "ip",
         "saddr",

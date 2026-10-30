@@ -14,20 +14,22 @@
 //! For a run whose container's first process is `pid` ([`Egress::attach`]):
 //!
 //! 1. take a /30 of the pool, and the names `jsvN` (host end) and `jspN` (job end);
-//! 2. read the identity of `/proc/<pid>/ns/net` and refuse the host's own;
-//! 3. in the initial namespace: make the veth pair, turn IPv6 off on the host end and
-//!    reverse-path filtering on, address the host end and set it up;
+//! 2. open `/proc/<pid>/ns/net` once, keep the descriptor, and refuse the host's own
+//!    namespace (compared by device and inode); the descriptor pins that namespace, so both
+//!    later steps name it as `/proc/<agent pid>/fd/<n>`, never by the container's pid again;
+//! 3. in the initial namespace: make the veth pair, turn IPv6 off on the host end, address the
+//!    host end and set it up;
 //! 4. add `jsvN` to the firewall's set of wired interfaces;
-//! 5. read the identity again (the namespace must be the same one), and move the job end
-//!    into the namespace, named `eth0`;
+//! 5. move the job end into the namespace, named `eth0`;
 //! 6. enter that namespace with `nsenter` and, in one `ip -batch`: raise `lo`, give `eth0` no
 //!    IPv6 link-local address, address and raise it, and add the default route last.
 //!
 //! Releasing a run removes the set member and the host end (which takes the job end with
 //! it); the container's namespace is the kernel's to free when its last process ends, so
-//! nothing of it outlives the run. A restart of the agent starts by removing every `jsv*`
-//! and `jsp*` interface and the two tables, because the keeper kills the containers with
-//! the agent: nothing a previous process wired is in use.
+//! nothing of it outlives the run. An allow-list start begins by removing every interface
+//! named `jsv<digits>` or `jsp<digits>` (exactly; no other name) and the two tables, because
+//! the keeper kills the containers with the agent: nothing a previous process wired is in
+//! use. Mode none runs no program and touches nothing.
 //!
 //! Everything the agent does to the machine goes through [`Sys`], so the unit tests script
 //! the whole sequence, including a failure at each step, and the tests that need the real
@@ -35,6 +37,7 @@
 
 use std::collections::BTreeSet;
 use std::io::Write as _;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -91,9 +94,22 @@ pub(crate) trait Sys: std::fmt::Debug + Send + Sync {
     fn write(&self, path: &str, text: &str) -> std::io::Result<()>;
     /// Reads the file `path`.
     fn read(&self, path: &str) -> std::io::Result<String>;
-    /// The device and inode of what `path` names, followed: for `/proc/<pid>/ns/net` the
-    /// identity of that network namespace.
+    /// The device and inode of what `path` names, followed: for `/proc/self/ns/net` the
+    /// identity of the agent's own network namespace.
     fn identity(&self, path: &str) -> std::io::Result<(u64, u64)>;
+    /// Opens the network namespace of process `pid` and keeps it open as long as the
+    /// result lives.
+    fn open_netns(&self, pid: u32) -> std::io::Result<Netns>;
+}
+
+/// An open network namespace: its identity, and a path any process of the host can open to
+/// get the same namespace (as long as this is alive).
+#[derive(Debug)]
+pub(crate) struct Netns {
+    pub(crate) identity: (u64, u64),
+    pub(crate) path: String,
+    /// The descriptor that pins it.
+    pub(crate) _held: Option<std::fs::File>,
 }
 
 /// The machine itself.
@@ -121,6 +137,16 @@ impl Sys for System {
     fn identity(&self, path: &str) -> std::io::Result<(u64, u64)> {
         let meta = std::fs::metadata(path)?;
         Ok((meta.dev(), meta.ino()))
+    }
+
+    fn open_netns(&self, pid: u32) -> std::io::Result<Netns> {
+        let file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+        let meta = file.metadata()?;
+        Ok(Netns {
+            identity: (meta.dev(), meta.ino()),
+            path: format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd()),
+            _held: Some(file),
+        })
     }
 }
 
@@ -201,9 +227,11 @@ fn sysctl(sys: &dyn Sys, path: &str, value: &str) -> Result<(), EgressError> {
 }
 
 impl Egress {
-    /// Starts the host side for `config`: removes what an earlier agent left (every `jsv*`
-    /// and `jsp*` interface, both tables), and in allow-list mode switches IPv4 forwarding
-    /// on and loads the firewall.
+    /// Starts the host side for `config`. Mode none runs nothing. An allow-list removes what
+    /// an earlier agent left (the interfaces `jsv<digits>` and `jsp<digits>`, both tables),
+    /// switches IPv4 forwarding on (a host-wide switch, which stays on when the agent ends:
+    /// other users of the host may rely on it, and the agent cannot know) and loads the
+    /// firewall.
     ///
     /// # Errors
     ///
@@ -213,9 +241,9 @@ impl Egress {
     }
 
     fn start_on(config: Config, sys: Arc<dyn Sys>) -> Result<Self, EgressError> {
-        sweep(&*sys, &config)?;
         let mut baseline = None;
         if config.mode() == Mode::AllowList {
+            sweep(&*sys, &config)?;
             sysctl(&*sys, "net/ipv4/ip_forward", "1\n")?;
             call(
                 &*sys,
@@ -379,17 +407,15 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
     let (ip, nft) = (config.ip(), config.nft());
     let container = |why: String| EgressError::Container { pid, why };
 
-    // The namespace is identified before anything is made, and again before the job end is
-    // moved into it, so what is wired is the namespace seen now and not whatever a reused
-    // pid names later.
-    let path = format!("/proc/{pid}/ns/net");
-    let theirs = sys
-        .identity(&path)
-        .map_err(|why| container(format!("{path}: {why}")))?;
+    // The namespace is opened once and held: what is wired is the namespace seen now and
+    // not whatever a reused pid names later.
+    let netns = sys
+        .open_netns(pid)
+        .map_err(|why| container(format!("/proc/{pid}/ns/net: {why}")))?;
     let own = sys
         .identity("/proc/self/ns/net")
         .map_err(|why| command("reading the agent's own network namespace", why))?;
-    if own == theirs {
+    if own == netns.identity {
         return Err(container(
             "it shares the host's network namespace".to_owned(),
         ));
@@ -402,7 +428,6 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
         &["link", "add", &host, "type", "veth", "peer", "name", &peer],
     )?;
     sysctl(sys, &format!("net/ipv6/conf/{host}/disable_ipv6"), "1")?;
-    sysctl(sys, &format!("net/ipv4/conf/{host}/rp_filter"), "1")?;
     step(
         "addressing the host end",
         ip,
@@ -422,12 +447,6 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
         ],
     )?;
 
-    let again = sys
-        .identity(&path)
-        .map_err(|why| container(format!("{path}: {why}")))?;
-    if again != theirs {
-        return Err(container("its network namespace changed".to_owned()));
-    }
     step(
         "moving the job end into the container",
         ip,
@@ -436,7 +455,7 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
             "set",
             &peer,
             "netns",
-            &pid.to_string(),
+            &netns.path,
             "name",
             INSIDE_NAME,
         ],
@@ -452,7 +471,7 @@ fn wire(sys: &dyn Sys, config: &Config, index: u32, pid: u32) -> Result<(), Egre
         sys,
         "configuring the job end",
         config.nsenter(),
-        &[&format!("--net={path}"), "--", ip, "-batch", "-"],
+        &[&format!("--net={}", netns.path), "--", ip, "-batch", "-"],
         Some(&batch),
     )
     .map(drop)
@@ -476,7 +495,13 @@ fn listing(sys: &dyn Sys, config: &Config) -> Result<Value, EgressError> {
     Ok(Value::Array(tables))
 }
 
-/// Removes every interface an earlier agent made and both tables.
+/// Whether `name` is `prefix` and then digits, nothing else (`jsv12`, not `jsvx` or `jspare0`).
+fn numbered(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix)
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Removes every interface an earlier allow-list made and both tables.
 fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
     let text = call(
         sys,
@@ -490,7 +515,7 @@ fn sweep(sys: &dyn Sys, config: &Config) -> Result<(), EgressError> {
     let leftovers = links
         .iter()
         .filter_map(|link| link.get("ifname").and_then(Value::as_str))
-        .filter(|name| name.starts_with(IF_PREFIX) || name.starts_with(PEER_PREFIX));
+        .filter(|name| numbered(name, IF_PREFIX) || numbered(name, PEER_PREFIX));
     for name in leftovers {
         // Deleting one end of a pair deletes the other, which may be later in the list.
         let deleted = call(

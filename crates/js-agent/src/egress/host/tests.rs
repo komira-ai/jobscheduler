@@ -11,12 +11,13 @@ use crate::egress::Flags;
 
 const PID: u32 = 77;
 const NET: &str = "/proc/77/ns/net";
+const NETFD: &str = "/proc/1/fd/5";
 const OWN: &str = "/proc/self/ns/net";
 const FORWARD: &str = "/proc/sys/net/ipv4/ip_forward";
 
-const INET: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"inet","name":"js_egress","handle":1}},{"set":{"name":"jobifs","type":"ifname","handle":2}},{"rule":{"chain":"forward","handle":3,"comment":"reply","expr":[{"counter":{"packets":0,"bytes":0}},{"accept":null}]}}]}"#;
-const INET_CHANGED: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"inet","name":"js_egress","handle":1}},{"set":{"name":"jobifs","type":"ifname","handle":2}},{"rule":{"chain":"forward","handle":3,"comment":"reply","expr":[{"counter":{"packets":0,"bytes":0}},{"drop":null}]}}]}"#;
-const NAT: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"ip","name":"js_egress_nat","handle":1}}]}"#;
+const INET: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"inet","name":"js_crun_egress","handle":1}},{"set":{"name":"jobifs","type":"ifname","handle":2}},{"rule":{"chain":"forward","handle":3,"comment":"reply","expr":[{"counter":{"packets":0,"bytes":0}},{"accept":null}]}}]}"#;
+const INET_CHANGED: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"inet","name":"js_crun_egress","handle":1}},{"set":{"name":"jobifs","type":"ifname","handle":2}},{"rule":{"chain":"forward","handle":3,"comment":"reply","expr":[{"counter":{"packets":0,"bytes":0}},{"drop":null}]}}]}"#;
+const NAT: &str = r#"{"nftables":[{"metainfo":{"version":"1.0.9"}},{"table":{"family":"ip","name":"js_crun_egress_nat","handle":1}}]}"#;
 
 /// Stand-ins for the three programs: executable files in a directory of their own.
 fn programs() -> &'static PathBuf {
@@ -63,9 +64,8 @@ fn allow_list() -> Config {
     config_with("allow-list", None)
 }
 
-/// What a path's identity reads as, one entry per read (`None` is an unreadable one); the
-/// last repeats.
-type Seen = Vec<Option<(u64, u64)>>;
+/// What a path's identity reads as, one entry per read ; the last repeats.
+type Seen = Vec<(u64, u64)>;
 
 /// What the scripted machine keeps.
 #[derive(Debug, Default)]
@@ -97,8 +97,8 @@ impl Fake {
         fake.state()
             .files
             .insert(FORWARD.to_owned(), "1\n".to_owned());
-        fake.identity(OWN, vec![Some((1, 1))]);
-        fake.identity(NET, vec![Some((1, 2))]);
+        fake.identity(OWN, vec![(1, 1)]);
+        fake.identity(NET, vec![(1, 2)]);
         fake
     }
 
@@ -182,6 +182,15 @@ impl Sys for Fake {
             .ok_or_else(|| std::io::Error::from(ErrorKind::NotFound))
     }
 
+    fn open_netns(&self, pid: u32) -> std::io::Result<Netns> {
+        let identity = Sys::identity(self, &format!("/proc/{pid}/ns/net"))?;
+        Ok(Netns {
+            identity,
+            path: NETFD.to_owned(),
+            _held: None,
+        })
+    }
+
     fn identity(&self, path: &str) -> std::io::Result<(u64, u64)> {
         let mut state = self.state();
         let (seen, cursor) = state
@@ -190,7 +199,7 @@ impl Sys for Fake {
             .ok_or_else(|| std::io::Error::from(ErrorKind::NotFound))?;
         let at = (*cursor).min(seen.len() - 1);
         *cursor += 1;
-        seen[at].ok_or_else(|| std::io::Error::from(ErrorKind::PermissionDenied))
+        Ok(seen[at])
     }
 }
 
@@ -204,55 +213,63 @@ fn attach_calls() -> Vec<String> {
     vec![
         "ip link add jsv0 type veth peer name jsp0".to_owned(),
         "write /proc/sys/net/ipv6/conf/jsv0/disable_ipv6 1".to_owned(),
-        "write /proc/sys/net/ipv4/conf/jsv0/rp_filter 1".to_owned(),
         "ip addr add 198.18.0.1/30 dev jsv0".to_owned(),
         "ip link set jsv0 up".to_owned(),
-        "nft add element inet js_egress jobifs { \"jsv0\" }".to_owned(),
-        format!("ip link set jsp0 netns {PID} name eth0"),
-        format!("nsenter --net={NET} -- {ip} -batch - << link set lo up"),
+        "nft add element inet js_crun_egress jobifs { \"jsv0\" }".to_owned(),
+        format!("ip link set jsp0 netns {NETFD} name eth0"),
+        format!("nsenter --net={NETFD} -- {ip} -batch - << link set lo up"),
     ]
 }
 
 fn release_calls(n: u32) -> Vec<String> {
     vec![
-        format!("nft delete element inet js_egress jobifs {{ \"jsv{n}\" }}"),
+        format!("nft delete element inet js_crun_egress jobifs {{ \"jsv{n}\" }}"),
         format!("ip link del jsv{n}"),
     ]
 }
 
-/// Catches mode none doing anything but clearing the host of what an earlier agent left:
-/// the leftover veth ends (a name that is already gone with its pair is not an error, a
-/// foreign interface and an entry with no name are left alone), both tables removed in one
-/// transaction, no forwarding switch, no firewall; the check passes, an attach is nothing
-/// and its drop makes no call.
+/// Catches mode none doing anything at all: it runs no program, reads and writes no file,
+/// needs none of the three programs, passes the check, and an attach is nothing whose drop
+/// makes no call.
 #[test]
-fn mode_none_only_sweeps_what_an_earlier_agent_left() {
+fn mode_none_does_nothing() {
+    let fake = Fake::new();
+    let egress = started(&fake, config_with("none", None));
+    assert_eq!(fake.log(), Vec::<String>::new());
+    assert_eq!(egress.config().mode(), Mode::None);
+    egress.check().expect("mode none has nothing to check");
+    let attachment = egress.attach("run", PID).expect("nothing to wire");
+    assert_eq!(attachment.interface(), None);
+    drop(attachment);
+    assert_eq!(fake.calls(), 0, "no call for a mode that wires nothing");
+}
+
+/// Catches a sweep that removes what is not the agent's or leaves what is: of the
+/// interfaces, `jsv0` and `jsp3` (a name that is already gone with its pair is not an
+/// error) are deleted, and `jspare0`, `jsvx`, `jsv`, `eth0`, `lo` and an entry with no name
+/// are not; both tables go in one transaction.
+#[test]
+fn the_sweep_removes_exactly_the_agents_numbered_interfaces() {
     let fake = Fake::new();
     fake.answer(
         "link show",
-        Ok(r#"[{"ifname":"lo"},{"ifname":"jsv0"},{"ifname":"jsp3"},{"mtu":1500},{"ifname":"eth0"}]"#
+        Ok(r#"[{"ifname":"lo"},{"ifname":"jsv0"},{"ifname":"jspare0"},{"ifname":"jsvx"},{"ifname":"jsv"},{"ifname":"jsp3"},{"mtu":1500},{"ifname":"eth0"}]"#
             .to_owned()),
     );
     fake.answer(
         "link del jsp3",
         Err("Cannot find device \"jsp3\"".to_owned()),
     );
-    let egress = started(&fake, config_with("none", None));
+    let _egress = started(&fake, allow_list());
     assert_eq!(
-        fake.log(),
+        fake.log()[..4],
         [
             "ip -j link show",
             "ip link del jsv0",
             "ip link del jsp3",
-            "nft -f - << add table inet js_egress",
+            "nft -f - << add table inet js_crun_egress",
         ]
     );
-    assert_eq!(egress.config().mode(), Mode::None);
-    egress.check().expect("mode none has nothing to check");
-    let attachment = egress.attach("run", PID).expect("nothing to wire");
-    assert_eq!(attachment.interface(), None);
-    drop(attachment);
-    assert_eq!(fake.log().len(), 4, "no call for a mode that wires nothing");
 }
 
 /// Catches an allow-list that starts without the firewall: after the sweep it switches IPv4
@@ -266,11 +283,11 @@ fn an_allow_list_loads_the_firewall_and_reads_it_back() {
         fake.log(),
         [
             "ip -j link show",
-            "nft -f - << add table inet js_egress",
+            "nft -f - << add table inet js_crun_egress",
             "write /proc/sys/net/ipv4/ip_forward 1",
-            "nft -f - << add table inet js_egress",
-            "nft -j list table inet js_egress",
-            "nft -j list table ip js_egress_nat",
+            "nft -f - << add table inet js_crun_egress",
+            "nft -j list table inet js_crun_egress",
+            "nft -j list table ip js_crun_egress_nat",
         ]
     );
     let loaded = fake.state().stdins[2].clone();
@@ -393,7 +410,7 @@ fn a_failure_at_every_step_of_the_wiring_is_undone() {
         let _attachment = egress.attach("count", PID).expect("attach");
         fake.calls() - before
     };
-    assert_eq!(calls, 8);
+    assert_eq!(calls, 7);
     for n in 0..calls {
         let fake = Fake::new();
         let egress = started(&fake, allow_list());
@@ -413,10 +430,8 @@ fn a_failure_at_every_step_of_the_wiring_is_undone() {
 }
 
 /// Catches the wiring of a namespace it must not touch: a container that is gone, one in the
-/// host's own namespace, an agent that cannot read its own namespace, a namespace that is
-/// another one by the time the job end is moved, and one that cannot be read the second
-/// time. The first two leave no call behind, the last two undo what was made, and none holds
-/// a block.
+/// host's own namespace, an agent that cannot read its own namespace, and none holds a
+/// block.
 #[test]
 fn a_namespace_that_is_not_the_containers_is_refused() {
     let fake = Fake::new();
@@ -430,7 +445,7 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
         "{error}"
     );
 
-    fake.identity(NET, vec![Some((1, 1))]);
+    fake.identity(NET, vec![(1, 1)]);
     let error = egress.attach("host", PID).expect_err("the host's own");
     assert!(
         error
@@ -445,7 +460,7 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
         "a pair was made for the host's own namespace"
     );
 
-    fake.identity(NET, vec![Some((1, 2))]);
+    fake.identity(NET, vec![(1, 2)]);
     fake.state().identities.remove(OWN);
     let error = egress
         .attach("blind", PID)
@@ -456,23 +471,9 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
             .contains("reading the agent's own network namespace"),
         "{error}"
     );
-    fake.identity(OWN, vec![Some((1, 1))]);
+    fake.identity(OWN, vec![(1, 1)]);
 
-    let logged = fake.log().len();
-    fake.identity(NET, vec![Some((1, 2)), Some((1, 3))]);
-    let error = egress.attach("swapped", PID).expect_err("changed");
-    assert!(
-        error.to_string().contains("its network namespace changed"),
-        "{error}"
-    );
-    assert!(fake.log()[logged..].ends_with(&release_calls(0)));
-
-    fake.identity(NET, vec![Some((1, 2)), None]);
-    let error = egress
-        .attach("vanished", PID)
-        .expect_err("unreadable the second time");
-    assert!(matches!(error, EgressError::Container { .. }), "{error}");
-    fake.identity(NET, vec![Some((1, 2))]);
+    fake.identity(NET, vec![(1, 2)]);
     let attachment = egress
         .attach("fine", PID)
         .expect("no block was held by the failures");
@@ -480,23 +481,27 @@ fn a_namespace_that_is_not_the_containers_is_refused() {
 }
 
 /// Catches IPv6 switches that are errors on a host that has none: a missing IPv6 switch is
-/// fine (IPv6 is off), but the same error for the IPv4 switch, and any other error for the
-/// IPv6 one, are not.
+/// fine (IPv6 is off), but the same error for the IPv4 forwarding switch, and any other error
+/// for the IPv6 one, are not.
 #[test]
 fn a_missing_ipv6_switch_is_tolerated_and_nothing_else_is() {
     let ipv6 = "/proc/sys/net/ipv6/conf/jsv0/disable_ipv6";
-    let rp = "/proc/sys/net/ipv4/conf/jsv0/rp_filter";
-    for (path, kind, works) in [
-        (ipv6, ErrorKind::NotFound, true),
-        (rp, ErrorKind::NotFound, false),
-        (ipv6, ErrorKind::PermissionDenied, false),
+    for (kind, works) in [
+        (ErrorKind::NotFound, true),
+        (ErrorKind::PermissionDenied, false),
     ] {
         let fake = Fake::new();
         let egress = started(&fake, allow_list());
-        fake.state().write_errors.insert(path.to_owned(), kind);
+        fake.state().write_errors.insert(ipv6.to_owned(), kind);
         let result = egress.attach("run", PID);
-        assert_eq!(result.is_ok(), works, "{path} {kind:?}: {result:?}");
+        assert_eq!(result.is_ok(), works, "{kind:?}: {result:?}");
     }
+    let fake = Fake::new();
+    fake.state()
+        .write_errors
+        .insert(FORWARD.to_owned(), ErrorKind::NotFound);
+    let error = Egress::start_on(allow_list(), fake.clone()).expect_err("no forwarding switch");
+    assert!(error.to_string().contains("ip_forward"), "{error}");
 }
 
 /// Catches a release that fails for what is not a failure, or hides one that is: a set
@@ -621,6 +626,13 @@ fn the_real_machine_runs_programs_and_reads_files() {
     let one = system.identity(OWN).expect("identity");
     assert_eq!(system.identity(OWN).expect("identity"), one);
     assert!(system.identity("/no/such/file").is_err());
+    let own_pid = system
+        .open_netns(std::process::id())
+        .expect("own namespace");
+    assert_eq!(own_pid.identity, one);
+    assert!(own_pid.path.starts_with("/proc/"));
+    assert_eq!(system.identity(&own_pid.path).expect("by path"), one);
+    assert!(system.open_netns(u32::MAX).is_err());
 
     let echo = ["/bin/echo".to_owned()];
     let allow = ["192.0.2.10:9300".to_owned()];

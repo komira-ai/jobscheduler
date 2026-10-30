@@ -394,6 +394,7 @@ mod tests {
     }
 
     /// Flags for an allow-list with the two programs the test host has.
+    #[cfg(target_os = "linux")]
     fn allow_list<'a>(allow: &'a [String], dns: &'a [String]) -> Flags<'a> {
         Flags {
             mode: Some("allow-list"),

@@ -90,12 +90,21 @@ fn a_restart_removes_what_a_crash_left() {
     ip(&[
         "link", "add", "jsv7", "type", "veth", "peer", "name", "jsp7",
     ]);
+    // Names that only look like the agent's are not its.
+    ip(&[
+        "link", "add", "jspare0", "type", "veth", "peer", "name", "jspare1",
+    ]);
     assert_eq!(links("jsv"), ["jsv0", "jsv7"]);
-    assert_eq!(links("jsp"), ["jsp7"]);
+    assert_eq!(links("jsp"), ["jsp7", "jspare0", "jspare1"]);
 
     let new = Egress::start(config()).expect("a restart");
     assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
-    assert!(links("jsp").is_empty(), "{:?}", links("jsp"));
+    assert_eq!(
+        links("jsp"),
+        ["jspare0", "jspare1"],
+        "only the numbered ones went"
+    );
+    ip(&["link", "del", "jspare0"]);
     assert!(wired().is_empty(), "{:?}", wired());
     assert!(std::path::Path::new(&format!("/proc/{}", holder.pid())).exists());
     let attachment = new.attach("again", holder.pid()).expect("wired again");

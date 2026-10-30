@@ -4,15 +4,17 @@
 //! Two tables, both the agent's alone, both loaded in one `nft -f` transaction that first
 //! removes any earlier copy:
 //!
-//! - `inet js_egress`: the `forward` chain (a filter hook at priority -10, ahead of the
+//! - `inet js_crun_egress`: the `forward` chain (a filter hook at priority -10, ahead of the
 //!   distribution's own forward rules at 0) holds, in order, the acceptance of replies to a
 //!   job, the refusal of new traffic to a job, the drop of everything IPv6 from a job, the
-//!   refusal of `169.254.0.0/16`, one acceptance per resolver (UDP and TCP, port 53) and per
+//!   refusal of a source address that does not route back through the interface it came in
+//!   on (`fib saddr . iif oif missing`: a job's own address and nothing else), the refusal of
+//!   `169.254.0.0/16`, one acceptance per resolver (UDP and TCP, port 53) and per
 //!   endpoint (a new TCP connection) for an interface in the set `jobifs`, and the refusal
 //!   of everything else from an interface named `jsv*`. The `input` chain refuses every
 //!   packet a job sends to the host itself. Every rule counts and carries a comment, so a
 //!   refusal can be told to be the rule's doing.
-//! - `ip js_egress_nat`: the masquerade of the pool's addresses toward anything outside
+//! - `ip js_crun_egress_nat`: the masquerade of the pool's addresses toward anything outside
 //!   the pool, so that an endpoint on another host answers to the host and not to an
 //!   address only the host knows.
 //!
@@ -30,10 +32,10 @@ use serde_json::Value;
 use super::config::Config;
 
 /// The table of the filter rules.
-pub const TABLE: &str = "js_egress";
+pub const TABLE: &str = "js_crun_egress";
 
 /// The table of the masquerade rule.
-pub const NAT_TABLE: &str = "js_egress_nat";
+pub const NAT_TABLE: &str = "js_crun_egress_nat";
 
 /// The set of the wired interfaces.
 pub const IFACE_SET: &str = "jobifs";
@@ -64,6 +66,7 @@ pub fn render(config: &Config) -> String {
          \t\toifname \"{IF_PREFIX}*\" ct state established,related counter accept comment \"reply\"\n\
          \t\toifname \"{IF_PREFIX}*\" counter drop comment \"inbound\"\n\
          \t\tiifname \"{IF_PREFIX}*\" meta nfproto ipv6 counter drop comment \"ipv6\"\n\
+         \t\tiifname \"{IF_PREFIX}*\" meta nfproto ipv4 fib saddr . iif oif missing counter drop comment \"spoof\"\n\
          \t\tiifname \"{IF_PREFIX}*\" ip daddr 169.254.0.0/16 counter reject with icmp type admin-prohibited comment \"metadata\"\n"
     );
     for (n, server) in config.dns().iter().enumerate() {
@@ -150,8 +153,10 @@ fn strip(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use crate::egress::Flags;
 
+    #[cfg(target_os = "linux")]
     fn config() -> Config {
         let allow = [
             "192.0.2.10:9300".to_owned(),
@@ -175,16 +180,18 @@ mod tests {
     /// allowance, the default refusal last), one allowance for each endpoint and resolver
     /// and nothing for a name the configuration did not give, the input refusal, the
     /// masquerade of the pool, and the replacement of an earlier copy.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_ruleset_holds_each_rule_in_its_place() {
         let text = render(&config());
         let at = |needle: &str| text.find(needle).expect(needle);
-        assert!(at("delete table inet js_egress") < at("table inet js_egress {"));
-        assert!(at("delete table ip js_egress_nat") < at("table ip js_egress_nat {"));
+        assert!(at("delete table inet js_crun_egress") < at("table inet js_crun_egress {"));
+        assert!(at("delete table ip js_crun_egress_nat") < at("table ip js_crun_egress_nat {"));
         let order = [
             "comment \"reply\"",
             "comment \"inbound\"",
             "comment \"ipv6\"",
+            "comment \"spoof\"",
             "comment \"metadata\"",
             "comment \"dns-udp-0\"",
             "comment \"dns-tcp-0\"",
@@ -221,7 +228,7 @@ mod tests {
         let listing = |packets: u64, handle: u64, member: &str, port: u64| {
             serde_json::json!({"nftables": [
                 {"metainfo": {"version": "1.0.9"}},
-                {"table": {"family": "inet", "name": "js_egress", "handle": handle}},
+                {"table": {"family": "inet", "name": "js_crun_egress", "handle": handle}},
                 {"set": {"name": "jobifs", "type": "ifname", "elem": [member], "handle": 2}},
                 {"rule": {"chain": "forward", "handle": handle + 1, "expr": [
                     {"match": {"op": "==", "left": {"meta": {"key": "l4proto"}}, "right": "tcp"}},

@@ -422,20 +422,22 @@ impl Drop for Holder {
     }
 }
 
-/// The JSON of `nft -j list table inet js_egress`.
+/// The JSON of `nft -j list table inet js_crun_egress`.
 fn table() -> Value {
-    serde_json::from_str(&nft(&["-j", "list", "table", "inet", "js_egress"])).expect("nft json")
+    serde_json::from_str(&nft(&["-j", "list", "table", "inet", "js_crun_egress"]))
+        .expect("nft json")
 }
 
-/// The packets that the rule commented `comment` of the table `js_egress` has counted.
+/// The packets that the rule commented `comment` of the table `js_crun_egress` has counted.
 pub fn packets(comment: &str) -> u64 {
     counted(&table(), comment)
 }
 
 /// The packets of the masquerade rule.
 pub fn masquerade_packets() -> u64 {
-    let json: Value = serde_json::from_str(&nft(&["-j", "list", "table", "ip", "js_egress_nat"]))
-        .expect("nft json");
+    let json: Value =
+        serde_json::from_str(&nft(&["-j", "list", "table", "ip", "js_crun_egress_nat"]))
+            .expect("nft json");
     counted(&json, "masquerade")
 }
 
@@ -451,12 +453,42 @@ fn counted(listing: &Value, comment: &str) -> u64 {
         .unwrap_or_else(|| panic!("no counted rule {comment:?}"))
 }
 
+/// Deletes the rule commented `comment` from the forward chain.
+pub fn delete_rule(comment: &str) {
+    let listing: Value = serde_json::from_str(&nft(&[
+        "-j",
+        "list",
+        "chain",
+        "inet",
+        "js_crun_egress",
+        "forward",
+    ]))
+    .expect("nft json");
+    let handle = listing["nftables"]
+        .as_array()
+        .expect("nftables")
+        .iter()
+        .filter_map(|item| item.get("rule"))
+        .find(|rule| rule["comment"] == comment)
+        .map(|rule| rule["handle"].as_u64().expect("a handle"))
+        .expect("the rule is there");
+    nft(&[
+        "delete",
+        "rule",
+        "inet",
+        "js_crun_egress",
+        "forward",
+        "handle",
+        &handle.to_string(),
+    ]);
+}
+
 /// The members of the set of wired interfaces, sorted; empty when the set (or the table)
 /// does not exist.
 pub fn wired() -> Vec<String> {
     let output = run(
         &tool("nft"),
-        &["-j", "list", "set", "inet", "js_egress", "jobifs"],
+        &["-j", "list", "set", "inet", "js_crun_egress", "jobifs"],
     );
     if !output.status.success() {
         return Vec::new();

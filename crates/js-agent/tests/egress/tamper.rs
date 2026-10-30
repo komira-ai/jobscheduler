@@ -85,10 +85,10 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
         let (listing, listed) = capable(&nft_bin, &["list", "ruleset"]);
         assert!(listing, "{listed}");
         assert!(
-            !listed.contains("js_egress"),
+            !listed.contains("js_crun_egress"),
             "the rules are in the job's namespace: {listed}"
         );
-        let (deleted, said) = capable(&nft_bin, &["delete", "table", "inet", "js_egress"]);
+        let (deleted, said) = capable(&nft_bin, &["delete", "table", "inet", "js_crun_egress"]);
         assert!(
             !deleted,
             "there is no table of the host's in the job's namespace: {said}"
@@ -125,8 +125,11 @@ fn a_job_cannot_alter_the_rules_even_with_every_capability_of_its_own_namespace(
             ][..],
             &["neigh", "flush", "all", "dev", "eth0"][..],
         ] {
-            let (_, said) = capable(&ip, args);
-            println!("ip {args:?}: {said}");
+            let (done, said) = capable(&ip, args);
+            assert!(
+                done,
+                "the job could not readdress itself with ip {args:?}: {said}"
+            );
         }
         let (_, said) = capable(&busybox, &["nc", "-w", "4", "192.0.2.10", "9300"]);
         assert!(
@@ -170,7 +173,7 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
         "add",
         "rule",
         "inet",
-        "js_egress",
+        "js_crun_egress",
         "forward",
         "counter",
         "accept",
@@ -180,7 +183,7 @@ fn the_rules_are_what_refuse_the_other_host_and_a_change_to_them_is_seen() {
         Err(EgressError::Rules),
         "a rule added to the table"
     );
-    nft(&["flush", "chain", "inet", "js_egress", "forward"]);
+    nft(&["flush", "chain", "inet", "js_crun_egress", "forward"]);
     assert_eq!(egress.check(), Err(EgressError::Rules), "a chain emptied");
     let reached = tcp(&holder.ns, far::OTHER_HOST);
     assert!(reached.connected(), "{reached:?}");

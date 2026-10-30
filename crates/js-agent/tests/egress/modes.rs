@@ -69,7 +69,7 @@ fn the_default_mode_gives_a_job_loopback_only_and_no_route() {
     );
     assert!(links("jsv").is_empty(), "{:?}", links("jsv"));
     assert!(
-        !table_loaded("inet", "js_egress"),
+        !table_loaded("inet", "js_crun_egress"),
         "mode none loads no firewall"
     );
 }

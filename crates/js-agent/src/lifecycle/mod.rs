@@ -811,13 +811,15 @@ fn egress_of(cli: &Cli) -> Result<crate::egress::Config, String> {
     .map_err(|why| why.to_string())?;
     if config.mode() != Mode::None && cli.container_network.is_some() {
         return Err(
-            "--egress and --container-network: there is one network mode; give one of them"
+            "--egress and --container-network: --egress is the crun runtime's network and \
+             --container-network the Podman runtime's; give only one"
                 .to_owned(),
         );
     }
     if config.mode() != Mode::None {
         return Err(format!(
-            "--egress {}: only the crun runtime enforces it, and this build cannot select              that runtime yet; with --container-bin the network is --container-network",
+            "--egress {}: only the crun runtime enforces it, and this build cannot select \
+             that runtime yet; with --container-bin the network is --container-network",
             config.mode()
         ));
     }

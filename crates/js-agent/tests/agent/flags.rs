@@ -478,7 +478,7 @@ fn egress_flags_default_to_none_and_an_allow_list_is_refused_until_crun_is_selec
         let mut both = allow.to_vec();
         both.extend(["--container-network", "jsnet"]);
         let said = refused(&both, &host);
-        assert!(said.contains("there is one network mode"), "{said}");
+        assert!(said.contains("give only one"), "{said}");
         let said = refused(&["--egress", "allow-list"], &host);
         assert!(said.contains("needs at least one --egress-allow"), "{said}");
     }

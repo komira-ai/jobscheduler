@@ -12,7 +12,7 @@
 //! - `JS_B_UID`, `JS_B_GID`: the job user.
 //!
 //! A missing variable or tool is a failure, never a skip. The tests change host-wide state
-//! (the `js_egress` tables, `net.ipv4.ip_forward`, a far network namespace `js-far` standing
+//! (the `js_crun_egress` tables, `net.ipv4.ip_forward`, a far network namespace `js-far` standing
 //! for another host, a veth pair `vfar0`), so they take one lock and run one at a time.
 //!
 //! Two kinds of job stand in each other's place. A *holder* is a process in a network
@@ -30,5 +30,6 @@ mod ipv6;
 mod lifecycle;
 mod modes;
 mod premise;
+mod spoof;
 mod sys;
 mod tamper;
