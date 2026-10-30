@@ -32,9 +32,8 @@ pub mod status;
 pub mod view;
 pub mod watcher;
 
-pub use abort::{Doomed, LambdaTarget, Outcome, Plan, Target, TargetError, abort};
 pub use cli::{main, run};
 pub use config::{Config, ConfigError};
-pub use status::{HttpStatus, Status, StatusError, StatusSource};
+pub use status::{HttpStatus, PoolBeat, Status, StatusError, StatusSource};
 pub use view::{CloudView, LambdaView, Seen, Stray, StrayKind, ViewError};
 pub use watcher::{Report, Settings, Watcher};

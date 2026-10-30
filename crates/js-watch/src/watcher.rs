@@ -33,6 +33,16 @@ pub struct Settings {
     pub repeat_after: Duration,
 }
 
+/// What the watcher has seen of one pool's heartbeat.
+struct Heartbeat {
+    /// The last tick time the server showed.
+    tick_ms: Option<u64>,
+    /// When the watcher first saw that value (or first saw the pool).
+    since: Duration,
+    /// Whether the pool has ever shown a tick time in this watcher's life.
+    ever: bool,
+}
+
 /// What one tick found, for the log and for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
@@ -54,8 +64,8 @@ pub struct Watcher {
     settings: Settings,
     /// The last time the status page was read, or the watcher's start before any read.
     readable_at: Option<Duration>,
-    /// For each pool, the last tick time the server showed and when the watcher first saw it.
-    beats: BTreeMap<String, (Option<u64>, Duration)>,
+    /// For each pool, what the watcher knows of its heartbeat.
+    beats: BTreeMap<String, Heartbeat>,
     /// The machines the server showed on the last read that worked.
     expected: Option<Vec<Machine>>,
     /// For each unexplained instance, in how many ticks in a row.
@@ -136,18 +146,28 @@ impl Watcher {
                 self.expected = Some(status.machines);
                 self.beats.retain(|pool, _| status.beats.contains_key(pool));
                 for (pool, beat) in status.beats {
-                    let seen = self.beats.entry(pool.clone()).or_insert((beat, now));
-                    if seen.0 != beat {
-                        *seen = (beat, now);
+                    let seen = self.beats.entry(pool.clone()).or_insert(Heartbeat {
+                        tick_ms: beat.tick_ms,
+                        since: now,
+                        ever: false,
+                    });
+                    if seen.tick_ms != beat.tick_ms {
+                        seen.tick_ms = beat.tick_ms;
+                        seen.since = now;
                     }
-                    let silent = now.saturating_sub(seen.1);
-                    // A pool whose tick time is null has no scaler (a static pool, say):
-                    // it has no heartbeat to lose, so it never alarms.
-                    if beat.is_some() && silent >= self.settings.stale_after {
+                    seen.ever |= beat.tick_ms.is_some();
+                    let silent = now.saturating_sub(seen.since);
+                    // A pool with no scaler (a static pool) has a null tick time for good and
+                    // no heartbeat to lose. A pool that has a scaler, or has ever shown a
+                    // tick time here, must keep ticking: a null that lasts alarms too, for
+                    // a scaler that wedges on its first tick after a restart shows nothing
+                    // else.
+                    let must_tick = beat.scaler || seen.ever;
+                    if must_tick && silent >= self.settings.stale_after {
                         found.insert(
                             format!("heartbeat:{pool}"),
                             format!(
-                                "the lease server has not ticked pool {pool} for {} seconds: its status answers but the tick time does not move; check the server, and if it is down check for machines still running",
+                                "the lease server has not ticked pool {pool} for {} seconds: its status answers but the tick time does not move (or has never appeared); check the server, and if it is down check for machines still running",
                                 silent.as_secs()
                             ),
                         );

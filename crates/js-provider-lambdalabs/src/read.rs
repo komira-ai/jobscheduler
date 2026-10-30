@@ -69,7 +69,9 @@ impl Reader {
     }
 
     /// A view over the real API at `base_url` (the rules of [`HttpApi::connect`]), with
-    /// `key`. The client is held only as a [`LambdaRead`].
+    /// `key`. The client is held only as a [`LambdaRead`]. For operator tooling that watches
+    /// from outside the server; the key it is given can still terminate, so keep it to
+    /// tools that hold nothing but this view.
     ///
     /// # Errors
     ///

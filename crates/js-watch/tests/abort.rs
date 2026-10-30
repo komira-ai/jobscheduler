@@ -8,8 +8,8 @@ use js_provider_lambdalabs::{
     ACQUIRE_TAG, Aborter, ApiError, Architecture, Call, FakeLambda, Instance, InstanceId,
     InstanceTypeOffer, ManualClock, Region, SCHEDULER_TAG, Tag, TerminateEffect,
 };
+use js_watch::abort::{LambdaTarget, Plan, Target, abort};
 use js_watch::fake::{FakeTarget, doomed};
-use js_watch::{LambdaTarget, Plan, Target, abort};
 
 const SCHEDULER: &str = "sched-one";
 

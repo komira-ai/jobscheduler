@@ -48,14 +48,16 @@ pub struct AbortPlan {
 #[error("{0}")]
 pub struct StopError(String);
 
-/// Lists and stops the instances of one scheduler.
+/// Lists and stops the instances of one scheduler. For operator tooling only (the
+/// `js-watch abort` command): nothing that runs on its own, such as a server or a watcher,
+/// may hold one.
 pub struct Aborter {
     api: Arc<dyn LambdaApi>,
     provider: LambdaProvider,
 }
 
 impl Aborter {
-    /// An aborter for `scheduler`'s instances over `api`.
+    /// An aborter for `scheduler`'s instances over `api`. For operator tooling only.
     pub fn new(api: Arc<dyn LambdaApi>, scheduler: SchedulerId, clock: Arc<dyn Clock>) -> Self {
         let config = ElasticConfig::with_account_key(scheduler, NonZeroUsize::MIN);
         let provider = LambdaProvider::new(Arc::clone(&api), clock, OptionTable::empty(), config);
@@ -63,7 +65,7 @@ impl Aborter {
     }
 
     /// An aborter over the real API at `base_url` (the rules of [`HttpApi::connect`]),
-    /// with `key`.
+    /// with `key`. For operator tooling only: the key it is given can terminate.
     ///
     /// # Errors
     ///

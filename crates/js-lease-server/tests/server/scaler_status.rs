@@ -62,6 +62,7 @@ async fn a_launched_machine_is_in_the_status_and_its_token_is_not() {
     assert_eq!(before["machines"], json!([]));
     // The heartbeat a watcher outside the server reads: the time of the tick that ran.
     assert_eq!(before["last_tick_ms"], T0);
+    assert_eq!(before["scaler"], true);
     assert_eq!(before["last_launch"], Value::Null);
     assert_eq!(before["instances"]["n"], 0);
 

@@ -81,6 +81,7 @@ fn holders() -> Vec<String> {
         ["Http", "Api"].concat(),
         "ElasticProvider".to_owned(),
         "Aborter".to_owned(),
+        "LambdaTarget".to_owned(),
         "client::aborter".to_owned(),
     ]
 }
@@ -118,6 +119,12 @@ fn code_of(text: &str) -> String {
     lines.join("\n")
 }
 
+/// Whether the code of the file `name` of the watch path reaches the abort module: only
+/// `cli.rs`, which dispatches the `abort` command, may.
+fn routes_to_abort(name: &str, code: &str) -> bool {
+    name != "cli.rs" && code.contains("abort::")
+}
+
 /// Asserts the scan sees what it should: a text that names a spend call is caught in each
 /// spelling the list holds, a holder is caught only when asked for, comments of both kinds
 /// hide nothing and show nothing, and clean code is not flagged.
@@ -135,16 +142,32 @@ fn the_scan_finds_a_spend_word_and_only_then() {
     let hidden = "keep // terminate\n/// delete\nx /* kill\n stop */ y /* z */ w";
     assert_eq!(code_of(hidden), "keep \n\nx  y  w");
     assert!(spends(&code_of(hidden), true).is_empty());
+    // The way onto the spend side: the abort module and its target.
+    assert!(routes_to_abort(
+        "watcher.rs",
+        "crate::abort::command(a, b, true, out)"
+    ));
+    assert!(routes_to_abort("lib.rs", "pub use abort::{abort}"));
+    assert!(!routes_to_abort("cli.rs", "abort::command(a)"));
+    assert!(!routes_to_abort("lib.rs", "pub mod abort;"));
+    assert_eq!(
+        spends("abort::LambdaTarget::new(a)", true),
+        ["LambdaTarget"]
+    );
 }
 
-/// Every `.rs` file under `dir`, found by walking it.
+/// Every file under `dir`, found by walking it. Symlinks are not followed and `target` and
+/// `.git` are not entered.
 fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        match path.is_dir() {
-            true => found.extend(rust_files(&path)),
-            false => found.push(path),
+        let entry = entry.unwrap();
+        let kind = entry.file_type().unwrap();
+        let name = entry.file_name();
+        if kind.is_dir() && name != "target" && name != ".git" {
+            found.extend(rust_files(&entry.path()));
+        } else if kind.is_file() {
+            found.push(entry.path());
         }
     }
     found
@@ -174,6 +197,12 @@ fn the_watch_path_names_no_spend_call() {
         let code = code_of(text.split("#[cfg(test)]").next().unwrap());
         let found = spends(&code, types);
         assert!(found.is_empty(), "{}: {found:?}", path.display());
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap();
+        assert!(
+            !routes_to_abort(name, &code),
+            "{} reaches abort::",
+            path.display()
+        );
     }
 }
 
@@ -237,4 +266,62 @@ fn the_traits_the_watcher_is_built_from_have_exactly_their_methods() {
     .unwrap();
     assert_eq!(methods(&scratch, "pub trait T"), set(&["a", "b", "c", "d"]));
     fs::remove_file(&scratch).unwrap();
+}
+
+/// The files of `files` (path from `crates/`, text) that name `Aborter` where it may not be
+/// named: it is for operator tooling, so only the provider crate that defines it and the
+/// abort side of `js-watch` (and the tests of both) may.
+fn aborter_leaks(files: &[(String, String)]) -> Vec<String> {
+    let allowed = [
+        "js-provider-lambdalabs/",
+        "js-watch/src/abort.rs",
+        "js-watch/src/client.rs",
+        "js-watch/tests/abort.rs",
+        "js-watch/tests/read_only.rs",
+    ];
+    files
+        .iter()
+        .filter(|(_, text)| text.contains("Aborter"))
+        .filter(|(path, _)| !allowed.iter().any(|prefix| path.starts_with(prefix)))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// Asserts the rule on planted text (a server module naming the type is caught, the places
+/// that may are not), and then on the workspace: no other crate or module names `Aborter`.
+/// It catches the stop-everything handle being passed to code that has no business with it.
+#[test]
+fn the_aborter_is_named_only_where_operator_tooling_lives() {
+    let planted = [
+        (
+            "js-lease-server/src/x.rs".to_owned(),
+            "use Aborter;".to_owned(),
+        ),
+        ("js-watch/src/watcher.rs".to_owned(), "Aborter".to_owned()),
+        ("js-watch/src/abort.rs".to_owned(), "Aborter".to_owned()),
+        (
+            "js-provider-lambdalabs/src/y.rs".to_owned(),
+            "Aborter".to_owned(),
+        ),
+        ("js-watch/src/view.rs".to_owned(), "nothing".to_owned()),
+    ];
+    assert_eq!(
+        aborter_leaks(&planted),
+        ["js-lease-server/src/x.rs", "js-watch/src/watcher.rs"]
+    );
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let files: Vec<(String, String)> = rust_files(&crates)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| {
+            let relative = path.strip_prefix(&crates).unwrap();
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            (
+                relative,
+                String::from_utf8_lossy(&fs::read(&path).unwrap()).into_owned(),
+            )
+        })
+        .collect();
+    assert!(files.len() > 100, "the scan found {} files", files.len());
+    assert_eq!(aborter_leaks(&files), Vec::<String>::new());
 }

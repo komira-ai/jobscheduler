@@ -25,9 +25,10 @@ of `js_alert::AlertSink`.
 - `heartbeat:<pool>`: that pool's `last_tick_ms` has not changed for `stale_after_secs`. It is per
   pool, so one wedged pool alarms whatever the others do. `heartbeat`: the status page could not be
   read that long. The comparison is on the watcher's own clock, so a skew between the two hosts does
-  not matter. `/v1/pools` lists every configured pool; a pool with no scaler (a static pool) has a
-  null `last_tick_ms`, no heartbeat to lose, and never alarms. The watcher is for servers that launch
-  machines. A tick that
+  not matter. A pool that has a scaler (`scaler: true` on `/v1/pools`), or that has ever shown a
+  tick time to this watcher, must tick: a null that lasts `stale_after_secs` alarms too (a scaler
+  wedged on its first tick after a restart shows nothing else). A pool with no scaler has a null
+  `last_tick_ms` for good and never alarms. The watcher is for servers that launch machines. A tick that
   cannot write the scaler's records (disk full) does nothing else and does not finish, so
   `last_tick_ms` stops moving then and the alarm is meant.
 - `unexplained:<cloud>:<id>`: the cloud lists an instance of the scheduler that the server's machines

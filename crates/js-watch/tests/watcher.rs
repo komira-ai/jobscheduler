@@ -8,7 +8,7 @@ use std::time::Duration;
 use js_alert::FakeSink;
 use js_watch::fake::{FakeCloud, FakeStatus};
 use js_watch::status::Machine;
-use js_watch::{Report, Seen, Settings, Status, Stray, StrayKind, Watcher};
+use js_watch::{PoolBeat, Report, Seen, Settings, Status, Stray, StrayKind, Watcher};
 
 const STALE: u64 = 300;
 const SWEEP: u64 = 1800;
@@ -63,7 +63,7 @@ fn rig_at(stale: u64) -> Rig {
 /// provider id, the id null until the cloud has given one).
 fn shows(beat: Option<u64>, machines: &[(&str, Option<&str>)]) -> Status {
     Status {
-        beats: BTreeMap::from([("gpu".to_owned(), beat)]),
+        beats: BTreeMap::from([("gpu".to_owned(), elastic(beat))]),
         machines: machines
             .iter()
             .map(|(host, id)| Machine {
@@ -71,6 +71,14 @@ fn shows(beat: Option<u64>, machines: &[(&str, Option<&str>)]) -> Status {
                 provider_id: id.map(str::to_owned),
             })
             .collect(),
+    }
+}
+
+/// The heartbeat of a pool that has a scaler.
+fn elastic(tick_ms: Option<u64>) -> PoolBeat {
+    PoolBeat {
+        tick_ms,
+        scaler: true,
     }
 }
 
@@ -136,17 +144,71 @@ fn an_unreadable_status_page_is_silence_too() {
     assert!(text.contains("the status page is down"), "{text}");
 }
 
-/// Asserts that a pool whose tick time is null (a static pool has no scaler, and the server
-/// lists every configured pool) never raises a heartbeat alarm, however long it stays null
-/// and past several repeat periods. It catches a static-only server alarming forever.
+/// A status with one pool, `static`, that has no scaler and a null tick time.
+fn static_pool() -> Status {
+    let beat = PoolBeat {
+        tick_ms: None,
+        scaler: false,
+    };
+    Status {
+        beats: BTreeMap::from([("static".to_owned(), beat)]),
+        machines: Vec::new(),
+    }
+}
+
+/// Asserts that a static pool (no scaler, a null tick time for good) never raises a
+/// heartbeat alarm, however long it stays null and past several repeat periods. It catches
+/// a static-only server alarming forever.
 #[test]
-fn a_pool_with_a_null_tick_time_never_alarms() {
+fn a_static_pool_with_a_null_tick_time_never_alarms() {
     let mut r = rig_at(STALE);
-    r.status.show(shows(None, &[]));
+    r.status.show(static_pool());
     for at in [10, 10 + STALE, 10 + 2 * STALE, 10 + 10 * REPEAT] {
         r.tick(at);
     }
     assert!(r.sink.sent().is_empty());
+}
+
+/// Asserts the wedge a null tick time can hide: a pool that has a scaler and whose tick
+/// time never appears (the scaler wedged on its first tick after a restart, the page still
+/// readable) alarms at `stale_after` from the watcher's first sight of it and not before.
+/// It catches a watcher that waits for a first tick time that never comes.
+#[test]
+fn a_scaler_that_never_ticks_alarms() {
+    let mut r = rig_at(STALE);
+    r.status.show(shows(None, &[]));
+    r.tick(10);
+    r.tick(10 + STALE - 1);
+    assert!(r.sink.sent().is_empty());
+    r.tick(10 + STALE);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
+    assert!(r.sink.sent()[0].text.contains("never appeared"));
+}
+
+/// Asserts that a pool that has shown a tick time in this watcher's life and then shows a
+/// null one alarms when the null lasts `stale_after`, even if the server does not say it
+/// has a scaler. It catches a scaler that restarts wedged and is read as a static pool.
+#[test]
+fn a_pool_that_ticked_and_then_goes_null_alarms() {
+    let mut r = rig_at(STALE);
+    let flag_free = |tick_ms| {
+        let beat = PoolBeat {
+            tick_ms,
+            scaler: false,
+        };
+        Status {
+            beats: BTreeMap::from([("gpu".to_owned(), beat)]),
+            machines: Vec::new(),
+        }
+    };
+    r.status.show(flag_free(Some(5)));
+    r.tick(0);
+    r.status.show(flag_free(None));
+    r.tick(60);
+    r.tick(60 + STALE - 1);
+    assert!(r.sink.sent().is_empty());
+    r.tick(60 + STALE);
+    assert_eq!(r.sink.keys(), ["heartbeat:gpu"]);
 }
 
 /// Asserts the orphan path on a manual clock: an instance the provider lists and the
@@ -359,7 +421,10 @@ fn drive_ticks_on_the_given_clock_until_the_pause_says_stop() {
 fn one_wedged_pool_alarms_whatever_the_other_does() {
     let mut r = rig_at(STALE);
     let two = |gpu: u64| Status {
-        beats: BTreeMap::from([("gpu".to_owned(), Some(gpu)), ("cpu".to_owned(), Some(5))]),
+        beats: BTreeMap::from([
+            ("gpu".to_owned(), elastic(Some(gpu))),
+            ("cpu".to_owned(), elastic(Some(5))),
+        ]),
         machines: Vec::new(),
     };
     for i in 0..7 {

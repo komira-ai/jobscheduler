@@ -10,6 +10,18 @@ use ureq::Agent;
 /// The most bytes of status page read.
 const PAGE_LIMIT: u64 = 8 * 1024 * 1024;
 
+/// A pool's heartbeat as the server shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolBeat {
+    /// The time of the server's last finished scaler tick for the pool, in the server's own
+    /// milliseconds; `None` for a pool that has no scaler and, for one that has, only
+    /// before its first tick.
+    pub tick_ms: Option<u64>,
+    /// Whether the pool has a scaler, so that its tick time must move. A server that
+    /// predates this field shows `false`, and the watcher then relies on having seen a tick.
+    pub scaler: bool,
+}
+
 /// A machine the server's records hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Machine {
@@ -23,13 +35,9 @@ pub struct Machine {
 /// What the status page says that the watcher uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status {
-    /// For each pool the server lists, the time of the server's last finished scaler tick,
-    /// in the server's own milliseconds. It is `None` for a pool that has no scaler (a
-    /// static pool; the server lists every configured pool) and, for a launching pool,
-    /// only before its first tick. Only whether it changes is used, so a skew between the
-    /// two clocks does not matter. A pool whose value is `None` has no heartbeat to
-    /// watch.
-    pub beats: BTreeMap<String, Option<u64>>,
+    /// For each pool the server lists, its heartbeat. Only whether the tick time changes
+    /// is used, so a skew between the two clocks does not matter.
+    pub beats: BTreeMap<String, PoolBeat>,
     /// The machines the server's records hold, orphans left out.
     pub machines: Vec<Machine>,
 }
@@ -110,6 +118,8 @@ struct Pools {
 struct Pool {
     name: String,
     last_tick_ms: Option<u64>,
+    #[serde(default)]
+    scaler: bool,
     machines: Vec<WireMachine>,
 }
 
@@ -130,7 +140,13 @@ pub fn parse(body: &[u8]) -> Result<Status, StatusError> {
     let beats = page
         .pools
         .iter()
-        .map(|pool| (pool.name.clone(), pool.last_tick_ms))
+        .map(|pool| {
+            let beat = PoolBeat {
+                tick_ms: pool.last_tick_ms,
+                scaler: pool.scaler,
+            };
+            (pool.name.clone(), beat)
+        })
         .collect();
     let machines = page
         .pools
@@ -155,7 +171,7 @@ mod tests {
 
     const LIMIT: Duration = Duration::from_secs(30);
 
-    const PAGE: &str = r#"{"pools":[{"name":"gpu","launch":"live","last_tick_ms":1700,
+    const PAGE: &str = r#"{"pools":[{"name":"gpu","launch":"live","last_tick_ms":1700,"scaler":true,
         "machines":[{"host":"js-a","provider_id":"i-1","state":"registered"},
                     {"host":"js-b","provider_id":null,"state":"planned"}],
         "orphans":[{"host":"js-o","provider_id":"i-9"}]},
@@ -169,12 +185,12 @@ mod tests {
     #[test]
     fn the_status_is_each_pools_tick_time_and_the_machines_not_the_orphans() {
         let status = parse(PAGE.as_bytes()).unwrap();
-        let beats: Vec<(&str, Option<u64>)> = status
+        let beats: Vec<(&str, Option<u64>, bool)> = status
             .beats
             .iter()
-            .map(|(pool, beat)| (pool.as_str(), *beat))
+            .map(|(pool, beat)| (pool.as_str(), beat.tick_ms, beat.scaler))
             .collect();
-        assert_eq!(beats, [("cpu", None), ("gpu", Some(1700))]);
+        assert_eq!(beats, [("cpu", None, false), ("gpu", Some(1700), true)]);
         let machines: Vec<(&str, Option<&str>)> = status
             .machines
             .iter()
@@ -195,7 +211,7 @@ mod tests {
         let page = Receiver::start_with(200, PAGE);
         let url = format!("http://{}/v1/pools", page.addr());
         let status = HttpStatus::new(&url, LIMIT).unwrap().read().unwrap();
-        assert_eq!(status.beats["gpu"], Some(1700));
+        assert_eq!(status.beats["gpu"].tick_ms, Some(1700));
         let head = page.requests()[0].head.to_ascii_lowercase();
         assert!(head.starts_with("get /v1/pools http/1.1"), "{head}");
 

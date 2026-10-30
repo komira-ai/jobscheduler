@@ -80,6 +80,9 @@ struct PoolView {
     /// The server's time at the end of the scaler's last finished tick, in milliseconds;
     /// null before the first. A watcher outside the server reads it as the heartbeat.
     last_tick_ms: Option<u64>,
+    /// Whether the pool has a scaler: it ticks, so `last_tick_ms` is a heartbeat that must
+    /// move. A pool without one (a plan-only or static pool) has no heartbeat.
+    scaler: bool,
     next_launch: Option<NextLaunch>,
 }
 
@@ -313,6 +316,7 @@ impl Status {
             machines,
             orphans,
             alerts: self.scaler.as_ref().map(Scaler::alerts).unwrap_or_default(),
+            scaler: self.scaler.is_some(),
             last_tick_ms: self
                 .scaler
                 .as_ref()
