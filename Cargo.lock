@@ -1202,6 +1202,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "js-mac-provision"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "js-testkit",
+ "thiserror",
+]
+
+[[package]]
 name = "js-mac-session"
 version = "0.1.0"
 dependencies = [
