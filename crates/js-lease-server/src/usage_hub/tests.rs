@@ -1,14 +1,20 @@
-//! The usage side without a socket: a recording sink and a map of keys stand in for the
-//! measuring crate and the admission owner.
+//! The server's side of the usage hub without a socket: a recording sink and a map of
+//! keys stand in for the measuring crate and the registry, and heartbeats are the wire's.
+//! What the hub does with plain values is tested in `js-usage`; these tests cover what the
+//! server adds: reading the wire, the acknowledgements, the caught panics, the pool for
+//! blocking calls and the log.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use js_agent_wire::limits::MAX_LOAD_MINUTES;
 use js_agent_wire::{LeaseMinute, LoadDrops, Phase, RunResult};
 use js_lease::{ManualClock, Timestamp};
+use js_usage::GRACE_BEATS;
 
 use super::*;
-use crate::usage::Observation;
+use crate::usage::{DropReason, Observation, Observed, ProfileKey, RunEnd, SinkCounters};
+use crate::usage::{LoadIn, UsageFault};
 
 /// Milliseconds of the clock at the start of every test: wall minute 16.
 const T0_MS: u64 = 1_000_000;
@@ -55,7 +61,7 @@ impl UsageSink for Fake {
         &self,
         host: &HostId,
         epoch: u64,
-        load: &crate::usage::LoadIn,
+        load: &LoadIn,
         _: HostLimits,
         _: u64,
     ) -> Observation {
@@ -134,6 +140,13 @@ fn row(minute: u64) -> NodeRow {
     }
 }
 
+fn limits() -> HostLimits {
+    HostLimits {
+        threads: 8,
+        memory_bytes: 1 << 34,
+    }
+}
+
 /// The usage side over `fake`, with a key for each `(run id, key)`, and its clock.
 fn usage(fake: &Arc<Fake>, keys: &[(&str, &str)]) -> (Usage, ManualClock) {
     let clock = ManualClock::new(Timestamp::from_millis(T0_MS));
@@ -141,15 +154,11 @@ fn usage(fake: &Arc<Fake>, keys: &[(&str, &str)]) -> (Usage, ManualClock) {
         .iter()
         .map(|(run, key)| (run.to_string(), ProfileKey::parse(key).unwrap()))
         .collect();
-    let limits = HostLimits {
-        threads: 8,
-        memory_bytes: 1 << 34,
-    };
     let usage = Usage::new(
         fake.clone(),
         Arc::new(Keys(map)),
         SharedClock::new(clock.clone()),
-        limits,
+        limits(),
     );
     (usage, clock)
 }
@@ -224,15 +233,19 @@ fn quiet_beats(usage: &Usage, host: &str, n: usize) {
     }
 }
 
-/// Asserts the life of a clean run: its lease's minutes are filed as the beats bring
-/// them, an accepted `succeeded` result with a key starts a grace, a minute that comes on
-/// a later beat joins the series (and the larger value of a repeated minute is kept), and
-/// the run is handed to the sink on the second beat of the host after the
-/// acknowledgement, once. It catches a run handed over at the acknowledgement (its last
-/// partial minute lost), one handed over on the first beat of grace, one handed over
-/// twice, and a late minute that begins a series of its own.
+/// The beats of grace a clean run waits out.
+fn grace() -> usize {
+    usize::from(GRACE_BEATS)
+}
+
+/// Asserts the life of a clean run as the wire tells it: minutes arrive in loads, an
+/// accepted `succeeded` result starts the grace, a minute that comes on a later beat
+/// joins the series, and the run is handed to the sink under its key on the second beat
+/// of the host after the acknowledgement. It catches a heartbeat that is read into the
+/// wrong plain values (a lease id swapped for its neighbour, an epoch from the wrong
+/// place) in a way the hub's own tests, which start from plain values, cannot see.
 #[test]
-fn a_clean_run_is_handed_over_after_its_grace_beats_with_its_late_minute() {
+fn a_clean_run_on_the_wire_is_handed_over_after_its_grace_beats() {
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[("run-1-1", "act.build")]);
     let minutes = [("1-1", 0, 1000, 100), ("1-1", 1, 2000, 300)];
@@ -252,80 +265,14 @@ fn a_clean_run_is_handed_over_after_its_grace_beats_with_its_late_minute() {
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].key.as_str(), "act.build");
     assert_eq!(ended[0].lease, LeaseId::new(1, 1));
-    let at = |minute, cores_milli, ws_bytes| RunMinute {
+    let at = |minute, cores_milli, ws_bytes| js_usage::RunMinute {
         minute,
         cores_milli,
         ws_bytes,
     };
     let series = vec![at(0, 1000, 100), at(1, 2500, 300), at(2, 500, 50)];
     assert_eq!(ended[0].series.minutes, series);
-    assert_eq!(ended[0].series.flags, 0);
-    quiet_beats(&usage, "h1", 3);
-    assert_eq!(fake.ended().len(), 1);
     assert_eq!(usage.counters().runs_learned, 1);
-}
-
-/// A key source that names a run's key once and then forgets it, as the registry does
-/// when it evicts a finished run or forgets a lost host's runs.
-struct Forgetting(Mutex<Option<ProfileKey>>);
-
-impl KeySource for Forgetting {
-    fn key_of(&self, _: &str) -> Option<ProfileKey> {
-        self.0.lock().unwrap().take()
-    }
-}
-
-/// Asserts that the key of a clean run is taken when its acknowledgement is read and kept
-/// through the grace: a key source that has forgotten the run by the time the grace ends
-/// (the run evicted from the registry, or its host's runs forgotten) still gives the sink
-/// the run under its key, and the run is not counted as keyless. It catches a hub that
-/// asks for the key after the grace.
-#[test]
-fn a_run_forgotten_by_the_key_source_during_its_grace_is_still_learned() {
-    let fake = Arc::new(Fake::default());
-    let clock = ManualClock::new(Timestamp::from_millis(T0_MS));
-    let limits = HostLimits {
-        threads: 8,
-        memory_bytes: 1 << 34,
-    };
-    let keys = Forgetting(Mutex::new(Some(ProfileKey::parse("act.build").unwrap())));
-    let usage = Usage::new(
-        fake.clone(),
-        Arc::new(keys),
-        SharedClock::new(clock),
-        limits,
-    );
-    let minutes = [("1-1", 0, 1000, 100)];
-    let first = Some(load(1, &minutes));
-    usage.on_beat(&beat("h1", Vec::new()), first, &[], &anyone);
-    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
-    quiet_beats(&usage, "h1", 2);
-    let ended = fake.ended();
-    assert_eq!(ended.len(), 1);
-    assert_eq!(ended[0].key.as_str(), "act.build");
-    assert_eq!(usage.counters().runs_without_key, 0);
-}
-
-/// Asserts that the grace of a run is counted in beats of its own host: beats of another
-/// host do not shorten it. It catches a grace counted over every host's beats, which
-/// hands a run over before its host has sent the minute it was waiting for.
-#[test]
-fn the_grace_counts_the_beats_of_the_runs_own_host() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(1, &[("1-1", 0, 1, 1)])),
-        &[],
-        &anyone,
-    );
-    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
-    quiet_beats(&usage, "h2", 5);
-    assert!(fake.ended().is_empty());
-    quiet_beats(&usage, "h1", 2);
-    assert_eq!(fake.ended().len(), 1);
 }
 
 /// Asserts which results start a grace: only one the registry accepted (not a duplicate,
@@ -386,7 +333,7 @@ fn only_an_accepted_clean_result_starts_a_grace() {
     assert!(fake.ended().is_empty());
     let again = beat("h1", vec![result("run-b", "1-2", Outcome::Failed)]);
     usage.on_beat(&again, None, &[ack("run-b", Ack::Accepted)], &anyone);
-    quiet_beats(&usage, "h1", 2);
+    quiet_beats(&usage, "h1", grace());
     let ended = fake.ended();
     assert_eq!(ended.len(), 1);
     assert_eq!(ended[0].lease, LeaseId::new(1, 2));
@@ -395,45 +342,49 @@ fn only_an_accepted_clean_result_starts_a_grace() {
     assert_eq!(usage.counters().runs_without_series, 1);
 }
 
-/// Asserts that a clean accepted result which cannot be learned from is counted under
-/// the reason: the key source has no key (`runs_without_key`), the lease has no minutes
-/// on file (`runs_without_series`), or the lease id is not `<term>-<seq>`
-/// (`records_dropped`). It catches a silent skip, which would leave an operator with
-/// empty profiles and no number to look at.
+/// Asserts which outcomes are clean: `succeeded` and `failed` are, and every other one
+/// (killed, timed out, out of memory, failed to start, and one this version does not
+/// know) is not. It catches an outcome that teaches admission the cost of a job that was
+/// cut short.
 #[test]
-fn a_run_that_cannot_be_learned_from_is_counted_by_reason() {
+fn only_a_job_that_ran_to_its_own_end_is_clean() {
+    assert_eq!(finish_of(Outcome::Succeeded), Finish::Clean);
+    assert_eq!(finish_of(Outcome::Failed), Finish::Clean);
+    for cut_short in [
+        Outcome::Killed,
+        Outcome::TimedOut,
+        Outcome::OutOfMemory,
+        Outcome::FailedToStart,
+        Outcome::Unknown,
+    ] {
+        assert_eq!(finish_of(cut_short), Finish::Unclean);
+    }
+}
+
+/// Asserts that an accepted result whose lease id is not `<term>-<seq>` is counted in
+/// `records_dropped` and reaches no run, and that the others of its beat are still read
+/// (the lease of the valid one has no minutes, so it is counted as such). It catches a
+/// bad id that fails the whole beat and a silent skip.
+#[test]
+fn an_accepted_result_with_an_unparsable_lease_is_a_dropped_record() {
     let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[]);
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(1, &[("1-5", 0, 1, 1)])),
-        &[],
-        &anyone,
-    );
+    let (usage, _) = usage(&fake, &[("run-1", "k")]);
     let results = vec![
-        result("run-1", "1-5", Outcome::Succeeded),
         result("run-2", "junk", Outcome::Succeeded),
-        result("run-3", "1-9", Outcome::Succeeded),
+        result("run-1", "1-9", Outcome::Succeeded),
     ];
-    let acks = [
-        ack("run-1", Ack::Accepted),
-        ack("run-2", Ack::Accepted),
-        ack("run-3", Ack::Accepted),
-    ];
+    let acks = [ack("run-2", Ack::Accepted), ack("run-1", Ack::Accepted)];
     usage.on_beat(&beat("h1", results), None, &acks, &anyone);
-    quiet_beats(&usage, "h1", 3);
     let counts = usage.counters();
-    assert_eq!(counts.runs_without_key, 1);
     assert_eq!(counts.records_dropped, 1);
     assert_eq!(counts.runs_without_series, 1);
-    assert_eq!(counts.runs_learned, 0);
-    assert!(fake.ended().is_empty());
 }
 
 /// Asserts that a load with a scalar out of range never reaches the sink and is counted
 /// as rejected, and that a load whose records the wire dropped is given to the sink and
-/// has its drops counted, with the epoch of the beat. It catches a bad load handed on, a
-/// rejection that is not counted, and an epoch taken from the wrong place.
+/// has its drops counted (the wire's and the ids that do not parse), with the epoch of the
+/// beat. It catches a bad load handed on, a rejection that is not counted, and an epoch
+/// taken from the wrong place.
 #[test]
 fn a_bad_load_is_counted_and_a_load_with_dropped_records_is_still_read() {
     let fake = Arc::new(Fake::default());
@@ -466,120 +417,21 @@ fn a_heartbeat_with_no_valid_host_records_nothing() {
     assert_eq!(usage.counters().records_dropped, 1);
 }
 
-/// Asserts that a reading the sink drops is counted, kept per host and minute with its
-/// reason, and handed out once its minute is over and not before. It catches a tally
-/// that is reported while readings can still be added to it (two warnings for one
-/// minute) and one that is never cleared.
+/// Asserts that the registry's answer to "does it hold this lease for this host" is the
+/// hub's: a lease the closure does not hold for the beat's host begins no track, so its
+/// run finds no minutes. It catches a closure that is dropped on the way to the hub.
 #[test]
-fn dropped_readings_are_tallied_by_host_and_minute_until_the_minute_is_over() {
+fn the_registrys_holds_check_reaches_the_hub() {
     let fake = Arc::new(Fake::default());
-    *fake.drop_with.lock().unwrap() = Some(DropReason::NoBaseline);
-    let (usage, _) = usage(&fake, &[]);
-    for seq in [1, 2] {
-        usage.on_beat(&beat("h1", Vec::new()), Some(load(seq, &[])), &[], &anyone);
-    }
-    assert_eq!(usage.counters().loads_dropped, 2);
-    let mut hub = usage.hub();
-    assert!(hub.take_drops(16).is_empty());
-    let past = hub.take_drops(17);
-    let key = (16, HostId::new("h1").unwrap());
-    assert_eq!(past.len(), 1);
-    assert_eq!(past[&key][&DropReason::NoBaseline], 2);
-    assert!(hub.drops.is_empty());
-}
-
-/// Asserts the bound on what is kept: at most `MAX_TRACKS` leases have minutes on file,
-/// the one past it is refused and counted, and a lease already on file still takes
-/// minutes at the bound. It catches memory that grows with every lease a node ever ran
-/// and a bound that also starves the leases already being measured.
-#[test]
-fn minutes_are_kept_for_a_bounded_number_of_leases() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[]);
-    let minute = |lease: u64| MinuteIn {
-        lease: LeaseId::new(1, lease),
-        minute: 0,
-        mean_cores_milli: 1,
-        peak_window_milli: 1,
-        working_set_max_bytes: 1,
-    };
-    let h1 = HostId::new("h1").unwrap();
-    let held: BTreeSet<LeaseId> = (0..=MAX_TRACKS as u64)
-        .map(|n| LeaseId::new(1, n))
-        .collect();
-    let mut hub = usage.hub();
-    for lease in 0..=MAX_TRACKS as u64 {
-        hub.add_minutes(&h1, &[minute(lease)], &held, 16);
-    }
-    assert_eq!(hub.running.len(), MAX_TRACKS);
-    assert_eq!(hub.counts.minutes_refused, 1);
-    hub.add_minutes(&h1, &[minute(0)], &held, 16);
-    assert_eq!(hub.counts.minutes_refused, 1);
-}
-
-/// Asserts that minutes are filed for the host that has the lease: a lease the registry
-/// does not hold for the beat's host begins no track (and so cannot fill the table with
-/// invented ids), and the minutes of a lease on file from one host are refused when
-/// another host sends them, whether the lease is running or has ended. Both are counted
-/// in `minutes_unheld`. It catches a host that can move another host's series, or crowd
-/// the real leases out of the table with lease ids it made up.
-#[test]
-fn a_host_files_minutes_only_for_leases_the_registry_holds_for_it() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
-    let h1_only =
-        |lease: &LeaseId, host: &HostId| *lease == LeaseId::new(1, 1) && host.as_str() == "h1";
-    // More invented leases than the table holds, in loads of the most minutes a load has.
-    let invented: Vec<(String, u16, u32, u64)> = (100..100 + 2 * MAX_TRACKS as u64)
-        .map(|n| (format!("1-{n}"), 0, 1, 1))
-        .collect();
-    for (seq, chunk) in invented.chunks(MAX_LOAD_MINUTES).enumerate() {
-        let minutes: Vec<(&str, u16, u32, u64)> = chunk
-            .iter()
-            .map(|(l, m, c, w)| (l.as_str(), *m, *c, *w))
-            .collect();
-        let load = load(seq as u64 + 1, &minutes);
-        usage.on_beat(&beat("h1", Vec::new()), Some(load), &[], &h1_only);
-    }
-    assert_eq!(usage.hub().running.len(), 0);
-    assert_eq!(usage.counters().minutes_unheld, invented.len() as u64);
-    assert_eq!(usage.counters().minutes_refused, 0);
-
-    let mine = [("1-1", 0, 1000, 100)];
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(100, &mine)),
-        &[],
-        &h1_only,
-    );
-    let theirs = [("1-1", 0, 9000, 900), ("1-1", 1, 9000, 900)];
-    usage.on_beat(
-        &beat("h2", Vec::new()),
-        Some(load(1, &theirs)),
-        &[],
-        &anyone,
-    );
-    let before = usage.counters().minutes_unheld;
-    assert_eq!(before, invented.len() as u64 + 2);
-
-    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &h1_only);
-    usage.on_beat(
-        &beat("h2", Vec::new()),
-        Some(load(2, &theirs)),
-        &[],
-        &anyone,
-    );
-    assert_eq!(usage.counters().minutes_unheld, before + 2);
-    quiet_beats(&usage, "h1", 2);
-    let ended = fake.ended();
-    assert_eq!(ended.len(), 1);
-    let only = RunMinute {
-        minute: 0,
-        cores_milli: 1000,
-        ws_bytes: 100,
-    };
-    assert_eq!(ended[0].series.minutes, vec![only]);
+    let (usage, _) = usage(&fake, &[("run-1", "k")]);
+    let nobody = |_: &LeaseId, _: &HostId| false;
+    let minutes = [("1-1", 0, 1, 1)];
+    let first = Some(load(1, &minutes));
+    usage.on_beat(&beat("h1", Vec::new()), first, &[], &nobody);
+    let done = beat("h1", vec![result("run-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)], &nobody);
+    let counts = usage.counters();
+    assert_eq!((counts.minutes_unheld, counts.runs_without_series), (1, 1));
 }
 
 /// Asserts that a panic in the sink during a beat is caught and counted as a fault, that
@@ -588,6 +440,7 @@ fn a_host_files_minutes_only_for_leases_the_registry_holds_for_it() {
 /// the registry had accepted the beat and lose its acknowledgements.
 #[test]
 fn a_panic_in_the_sink_is_a_fault_and_the_hook_returns() {
+    quiet();
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[]);
     fake.panic_on_observe.store(true, Ordering::SeqCst);
@@ -599,62 +452,96 @@ fn a_panic_in_the_sink_is_a_fault_and_the_hook_returns() {
     assert_eq!(fake.observed.lock().unwrap().len(), 1);
 }
 
-/// Asserts that a lease nothing has added to for a day is forgotten, running or ending,
-/// and one added to within the day is kept, at the boundary minute. It catches a lease
-/// that never produced a result staying for ever and filling the bound.
+/// Asserts that a panic in the key source, which is asked while the hub is held, is caught
+/// and counted as a fault, that the call returns, and that the next beat is read as usual.
+/// It catches a panic that unwinds out of the hook, and one that leaves the hub unusable.
 #[test]
-fn a_lease_untouched_for_a_day_is_forgotten() {
+fn a_panic_in_the_key_source_is_a_fault_and_the_hub_goes_on() {
+    quiet();
+    let fake = Arc::new(Fake::default());
+    let clock = ManualClock::new(Timestamp::from_millis(T0_MS));
+    let usage = Usage::new(
+        fake.clone(),
+        Arc::new(BrokenKeys),
+        SharedClock::new(clock),
+        limits(),
+    );
+    let minutes = [("1-1", 0, 1000, 100)];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
+    assert_eq!(usage.counters().faults, 1);
+    assert_eq!(fake.observed.lock().unwrap().len(), 2);
+}
+
+/// Asserts that a panic in the sink while it takes a finished run is caught and counted
+/// as a fault, that the call returns, the run is not counted as learned, and the next beat
+/// is read as usual. It catches a panic that unwinds out of the hook after the run was
+/// taken out of the hub.
+#[test]
+fn a_panic_when_a_run_is_handed_over_is_a_fault_and_the_hook_returns() {
+    quiet();
+    let fake = Arc::new(Fake::default());
+    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
+    let minutes = [("1-1", 0, 1000, 100)];
+    usage.on_beat(
+        &beat("h1", Vec::new()),
+        Some(load(1, &minutes)),
+        &[],
+        &anyone,
+    );
+    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
+    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
+    fake.panic_on_ended.store(true, Ordering::SeqCst);
+    quiet_beats(&usage, "h1", grace());
+    assert_eq!(usage.counters().faults, 1);
+    assert_eq!(usage.counters().runs_learned, 0);
+    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
+    assert_eq!(fake.observed.lock().unwrap().len(), 2);
+}
+
+/// Asserts that a sink that cannot take a finished run costs a count and the run is not
+/// counted as learned, that the sink's own counters are in the total, and that the usage
+/// side reads the server's clock in wall minutes and asks the sink for its curves. It
+/// catches a learned count that rises on failure.
+#[test]
+fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
     let fake = Arc::new(Fake::default());
     let (usage, _) = usage(&fake, &[("run-1", "k")]);
     usage.on_beat(
         &beat("h1", Vec::new()),
-        Some(load(1, &[("1-1", 0, 1, 1), ("1-2", 0, 1, 1)])),
+        Some(load(1, &[("1-1", 0, 1, 1)])),
         &[],
         &anyone,
     );
-    let done = beat("h1", vec![result("run-1", "1-2", Outcome::Succeeded)]);
+    let done = beat("h1", vec![result("run-1", "1-1", Outcome::Succeeded)]);
     usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)], &anyone);
-    let mut hub = usage.hub();
-    hub.expire(16 + TRACK_IDLE_MINUTES);
-    assert_eq!((hub.running.len(), hub.ending.len()), (1, 1));
-    hub.expire(16 + TRACK_IDLE_MINUTES + 1);
-    assert_eq!((hub.running.len(), hub.ending.len()), (0, 0));
+    fake.fail.store(true, Ordering::SeqCst);
+    quiet_beats(&usage, "h1", grace());
+    let counts = usage.counters();
+    assert_eq!((counts.faults, counts.runs_learned), (1, 0));
+    assert_eq!(counts.sink.minutes_deduped, 7);
+    assert_eq!(usage.now_minute(), 16);
+    assert!(usage.curves().is_none());
 }
 
-/// Asserts the schedule: a prune at the first tick and when the day changes and not
-/// between, a flush once five wall minutes have passed since the last (and not at four),
-/// both by the clock the server was given. It catches a flush on every tick, a prune on
-/// every tick, one that ignores the clock, and a flush schedule that restarts from the
-/// wrong minute.
-#[test]
-fn the_schedule_is_five_minutes_for_a_flush_and_a_day_for_a_prune() {
-    let mut hub = Hub {
-        running: BTreeMap::new(),
-        ending: BTreeMap::new(),
-        drops: Drops::new(),
-        counts: UsageCounters::default(),
-        last_flush: 16,
-        last_prune_day: None,
-    };
-    assert_eq!(hub.due(16), (false, true));
-    assert_eq!(hub.due(20), (false, false));
-    assert_eq!(hub.due(21), (true, false));
-    assert_eq!(hub.due(25), (false, false));
-    assert_eq!(hub.due(26), (true, false));
-    assert_eq!(hub.due(1439), (true, false));
-    assert_eq!(hub.due(1440), (false, true));
-}
-
-/// Asserts the ticks of the server drive the sink: nothing is flushed before five
-/// minutes, a flush happens at five and again five later, the prune runs once on the
-/// first tick and again after a day. It catches a tick that reads the schedule but does
-/// not call the sink, and one that calls it every time.
+/// Asserts the ticks of the server drive the sink on the pool for blocking calls: nothing
+/// is flushed before five minutes, a flush happens at five and again five later, the
+/// prune runs once on the first tick and again after a day. It catches a tick that reads
+/// the schedule but does not call the sink, one that calls it every time, and one that
+/// reads the wrong clock.
 #[tokio::test]
 async fn ticks_call_the_sink_on_the_schedule() {
     quiet();
     let fake = Arc::new(Fake::default());
     let (usage, clock) = usage(&fake, &[]);
-    let usage = Arc::new(usage);
     let at = |minute: u64| Timestamp::from_millis(minute * 60_000);
     let seen = |fake: &Fake| {
         (
@@ -682,9 +569,8 @@ async fn ticks_call_the_sink_on_the_schedule() {
 }
 
 /// Asserts the flush at shutdown writes whatever the schedule says, takes the closed
-/// rows the sink returns, and reports (and clears) the dropped readings of minutes that
-/// are over. It catches a final flush that waits for its schedule and a tally that is
-/// never reported.
+/// rows the sink returns, and clears the dropped readings of minutes that are over. It
+/// catches a final flush that waits for its schedule and a tally that is never reported.
 #[tokio::test]
 async fn the_final_flush_does_not_wait_for_its_schedule_and_clears_the_tally() {
     quiet();
@@ -695,13 +581,12 @@ async fn the_final_flush_does_not_wait_for_its_schedule_and_clears_the_tally() {
         .unwrap()
         .push((HostId::new("h1").unwrap(), row(15)));
     let (usage, clock) = usage(&fake, &[]);
-    let usage = Arc::new(usage);
     usage.on_beat(&beat("h1", Vec::new()), Some(load(1, &[])), &[], &anyone);
     clock.set(Timestamp::from_millis(17 * 60_000));
     usage.finish().await;
     assert_eq!(fake.flushes.load(Ordering::SeqCst), 1);
     assert!(fake.closed.lock().unwrap().is_empty());
-    assert!(usage.hub().drops.is_empty());
+    assert_eq!(usage.counters().loads_dropped, 1);
 }
 
 /// Asserts that a sink that fails to flush or to prune costs a count and nothing else:
@@ -713,93 +598,12 @@ async fn a_failing_flush_or_prune_is_counted_and_survived() {
     let fake = Arc::new(Fake::default());
     fake.fail.store(true, Ordering::SeqCst);
     let (usage, _) = usage(&fake, &[]);
-    let usage = Arc::new(usage);
     usage.tick().await;
     assert_eq!(usage.counters().faults, 1);
     usage.finish().await;
     usage.finish().await;
     assert_eq!(usage.counters().faults, 3);
     assert_eq!(fake.flushes.load(Ordering::SeqCst), 2);
-}
-
-/// Asserts that a sink that cannot take a finished run costs a count and the run is not
-/// counted as learned, and that the sink's own counters are in the total. It catches a
-/// learned count that rises on failure.
-#[test]
-fn a_run_the_sink_cannot_take_is_a_fault_and_not_a_learned_run() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[("run-1", "k")]);
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(1, &[("1-1", 0, 1, 1)])),
-        &[],
-        &anyone,
-    );
-    let done = beat("h1", vec![result("run-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1", Ack::Accepted)], &anyone);
-    fake.fail.store(true, Ordering::SeqCst);
-    quiet_beats(&usage, "h1", 2);
-    let counts = usage.counters();
-    assert_eq!((counts.faults, counts.runs_learned), (1, 0));
-    assert_eq!(counts.sink.minutes_deduped, 7);
-    assert_eq!(usage.now_minute(), 16);
-}
-
-/// Asserts that a panic in the key source, which is asked while the hub is held, is caught
-/// and counted as a fault, that the call returns, and that the next beat is read as usual.
-/// It catches a panic that unwinds out of the hook, and one that leaves the hub unusable.
-#[test]
-fn a_panic_in_the_key_source_is_a_fault_and_the_hub_goes_on() {
-    let fake = Arc::new(Fake::default());
-    let (_, clock) = usage(&fake, &[]);
-    let limits = HostLimits {
-        threads: 8,
-        memory_bytes: 1 << 34,
-    };
-    let usage = Usage::new(
-        fake.clone(),
-        Arc::new(BrokenKeys),
-        SharedClock::new(clock),
-        limits,
-    );
-    let minutes = [("1-1", 0, 1000, 100)];
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(1, &minutes)),
-        &[],
-        &anyone,
-    );
-    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
-    assert_eq!(usage.counters().faults, 1);
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
-    assert_eq!(usage.counters().faults, 1);
-    assert_eq!(fake.observed.lock().unwrap().len(), 2);
-}
-
-/// Asserts that a panic in the sink while it takes a finished run is caught and counted
-/// as a fault, that the call returns, the run is not counted as learned, and the next beat
-/// is read as usual. It catches a panic that unwinds out of the hook after the run was
-/// taken out of the hub.
-#[test]
-fn a_panic_when_a_run_is_handed_over_is_a_fault_and_the_hook_returns() {
-    let fake = Arc::new(Fake::default());
-    let (usage, _) = usage(&fake, &[("run-1-1", "k")]);
-    let minutes = [("1-1", 0, 1000, 100)];
-    usage.on_beat(
-        &beat("h1", Vec::new()),
-        Some(load(1, &minutes)),
-        &[],
-        &anyone,
-    );
-    let done = beat("h1", vec![result("run-1-1", "1-1", Outcome::Succeeded)]);
-    usage.on_beat(&done, None, &[ack("run-1-1", Ack::Accepted)], &anyone);
-    fake.panic_on_ended.store(true, Ordering::SeqCst);
-    quiet_beats(&usage, "h1", 2);
-    assert_eq!(usage.counters().faults, 1);
-    assert_eq!(usage.counters().runs_learned, 0);
-    usage.on_beat(&beat("h1", Vec::new()), Some(load(2, &[])), &[], &anyone);
-    assert_eq!(fake.observed.lock().unwrap().len(), 2);
 }
 
 /// A log that is written to a buffer for the thread that made it.
@@ -856,7 +660,6 @@ async fn beats_log_no_node_minute_and_a_flush_logs_one_for_each_closed() {
         closed.push((HostId::new("h2").unwrap(), row(15)));
     }
     let (usage, _) = usage(&fake, &[]);
-    let usage = Arc::new(usage);
     for seq in 1..=12u64 {
         for host in ["h1", "h2"] {
             let minutes = [("1-1", u16::try_from(seq).unwrap(), 1000, 100)];
@@ -871,4 +674,28 @@ async fn beats_log_no_node_minute_and_a_flush_logs_one_for_each_closed() {
     assert_eq!(log.lines_with("node minute"), 0);
     usage.finish().await;
     assert_eq!(log.lines_with("node minute"), 2);
+}
+
+/// Asserts that a flush warns once for each host and minute that had readings dropped,
+/// with the reason's fixed name, once the minute is over, and logs the sink's failure
+/// when a flush or a prune fails. It catches a tally that is not reported and a failure
+/// that is swallowed without a line.
+#[tokio::test]
+async fn a_flush_logs_the_dropped_readings_and_the_failures() {
+    let log = Captured::start();
+    let fake = Arc::new(Fake::default());
+    *fake.drop_with.lock().unwrap() = Some(DropReason::ClockBack);
+    let (usage, clock) = usage(&fake, &[]);
+    for seq in [1, 2] {
+        usage.on_beat(&beat("h1", Vec::new()), Some(load(seq, &[])), &[], &anyone);
+    }
+    clock.set(Timestamp::from_millis(17 * 60_000));
+    usage.finish().await;
+    assert_eq!(log.lines_with("node readings dropped"), 1);
+    assert_eq!(log.lines_with("clock-back=2"), 1);
+    fake.fail.store(true, Ordering::SeqCst);
+    usage.finish().await;
+    usage.tick().await;
+    assert_eq!(log.lines_with("cannot write the usage rows"), 1);
+    assert_eq!(log.lines_with("cannot prune the usage store"), 1);
 }
