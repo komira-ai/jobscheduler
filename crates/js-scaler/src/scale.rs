@@ -541,6 +541,9 @@ impl Pass<'_> {
                 self.blocked.insert(settings.pool.clone(), blocked);
             }
             self.drawn += staged.len();
+            if !staged.is_empty() {
+                self.begin_go(&settings.pool);
+            }
             for record in staged {
                 self.actions.extend(launch_actions(
                     &record,

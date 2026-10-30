@@ -1,5 +1,6 @@
-//! The go of a pool: when it went live, which starts its budget since the go, and what
-//! happens to the records of machines that leave the month window.
+//! The go of a pool: when its first launch since it was last in `Plan` was made, which starts
+//! its budget since the go, and what happens to the records of machines that leave the month
+//! window.
 
 use crate::caps::{MONTH, billed_until, spent_since};
 use crate::pass::Pass;
@@ -7,29 +8,34 @@ use crate::record::{Go, Phase};
 use crate::settings::LaunchMode;
 
 impl Pass<'_> {
-    /// Notes the go of every pool the input has: a pool that is live now and has no go
-    /// begins one at this step; a pool that is in `Plan` mode, by its setting or by its
-    /// `live_until`, loses its go, so the next one begins a new budget. A pool this input
-    /// does not have keeps its go: its absence may be a moment's.
-    ///
-    /// The go is an instant of the clock the step is given and is written with the records
-    /// before any machine of the go is launched, so a restart reads it back and does not
-    /// begin another. A pool that was switched to `Plan` and back to live while the scaler
-    /// was down has no step that saw the switch, so its go stays: the budget since the go
-    /// then covers both goes, which errs toward spending less.
-    pub(crate) fn mark_go(&mut self) {
+    /// Ends the go of every pool the input has that is not live now: in `Plan` mode by its
+    /// setting or by its `live_until`. The go began at the pool's first launch after it was
+    /// last seen not live (see [`Pass::begin_go`]), so the next one begins a new budget. A
+    /// pool this input does not have keeps its go: its absence may be a moment's.
+    pub(crate) fn end_go(&mut self) {
         for pool in &self.input.pools {
-            let name = &pool.settings.pool;
-            if pool.settings.mode(self.now) == LaunchMode::Live {
-                let begun = Go {
-                    at: self.now,
-                    settled: 0,
-                };
-                self.records.go.entry(name.clone()).or_insert(begun);
-            } else {
-                self.records.go.remove(name);
+            if pool.settings.mode(self.now) != LaunchMode::Live {
+                self.records.go.remove(&pool.settings.pool);
             }
         }
+    }
+
+    /// Begins the go of `pool` at this step if it has none: called by the step that makes the
+    /// pool's launch, and so written with the record of that launch before the machine is
+    /// asked for. The go is thus the first launch of a pool since it was last seen in `Plan`.
+    /// No machine exists before it, so the budget since the go loses nothing of what this go
+    /// spent. What a machine of an earlier go that still runs accrues before this first launch
+    /// is not in the budget since the go (it is in the day and month windows).
+    ///
+    /// A pool that was switched to `Plan` and back to live while the scaler was down has no
+    /// step that saw the switch, so its go stays: the budget since the go then covers both
+    /// goes, which errs toward spending less.
+    pub(crate) fn begin_go(&mut self, pool: &str) {
+        let begun = Go {
+            at: self.now,
+            settled: 0,
+        };
+        self.records.go.entry(pool.to_owned()).or_insert(begun);
     }
 
     /// Forgets the records that no longer count and whose billed time has left the month

@@ -26,44 +26,52 @@ fn restart(rig: &Rig, settings: Settings) -> Rig {
     fresh
 }
 
-/// Asserts that the first step that sees a pool live writes its go (and nothing else), that
-/// a later quiet step writes nothing and leaves the go where it was, and that a pool in plan
-/// mode never has one. It catches a go written on every tick (a save per tick) and a go
-/// that moves.
+/// Asserts that the go begins with the pool's first launch (written with that launch, at
+/// its time), that a live pool with nothing to launch has none and writes nothing, that a
+/// later launch leaves the go where it was, and that a pool in plan mode never has one. It
+/// catches a go written on every tick, a go that moves, and a go for a pool that launched
+/// nothing.
 #[test]
-fn the_first_live_step_writes_the_go_and_a_quiet_step_writes_nothing() {
+fn the_first_launch_writes_the_go_and_quiet_steps_write_nothing() {
     let mut rig = Rig::new(settings("gpu"));
-    assert_eq!(kinds(&rig.tick(at(MINUTE))), ["Save"]);
+    assert!(rig.tick(at(0)).is_empty());
+    assert!(rig.state.records.go.is_empty());
+    rig.input.waiting = vec![request("r1")];
+    assert_eq!(kinds(&rig.tick(at(MINUTE))), ["Save", "Mint", "Acquire"]);
     let go = Go {
         at: at(MINUTE),
         settled: 0,
     };
     assert_eq!(rig.state.records.go["gpu"], go);
-    assert!(rig.tick(at(HOUR)).is_empty());
-    assert!(rig.tick(at(2 * DAY)).is_empty());
+    rig.input.waiting = vec![request("r1"), request("r2")];
+    rig.tick(at(HOUR));
     assert_eq!(rig.state.records.go["gpu"], go);
 
     let mut plan = Rig::new(Settings {
         launch: LaunchMode::Plan,
         ..settings("gpu")
     });
+    plan.input.waiting = vec![request("r1")];
     assert!(plan.tick(at(MINUTE)).is_empty());
     assert!(plan.state.records.go.is_empty());
 }
 
 /// Asserts that a pool switched to plan loses its go in the step that sees it (written), and
-/// that switching it live again begins a new go at that time, with nothing settled from the
-/// first: a human's second go is a new budget. It catches a go that outlives the switch.
+/// that its next launch after being switched live again begins a new go at that time, with
+/// nothing settled from the first: a human's second go is a new budget. It catches a go that
+/// outlives the switch.
 #[test]
 fn a_pool_switched_to_plan_loses_its_go_and_the_next_go_begins_again() {
     let mut rig = Rig::new(settings("gpu"));
+    rig.input.waiting = vec![request("r1")];
     rig.tick(at(0));
     rig.state.records.go.get_mut("gpu").unwrap().settled = 500;
     rig.pool().settings.launch = LaunchMode::Plan;
     assert_eq!(kinds(&rig.tick(at(HOUR))), ["Save"]);
     assert!(rig.state.records.go.is_empty());
     rig.pool().settings.launch = LaunchMode::Live;
-    assert_eq!(kinds(&rig.tick(at(2 * HOUR))), ["Save"]);
+    rig.input.waiting = vec![request("r1"), request("r2")];
+    rig.tick(at(2 * HOUR));
     let go = Go {
         at: at(2 * HOUR),
         settled: 0,
@@ -100,7 +108,7 @@ fn a_pool_past_live_until_launches_nothing() {
 
 /// Asserts that the end of a go removes launches and nothing more: a registered host that is
 /// busy when the go ends is not drained, retired or released by the step that sees the end,
-/// which writes only the end of the go. It catches an expiry that cuts work.
+/// which writes only the end of the go (the pool's launch had begun it). It catches an expiry that cuts work.
 #[test]
 fn the_end_of_a_go_drains_and_releases_nothing() {
     let (mut rig, _) = registered(until_an_hour(), "i-1", 2 * SECOND);

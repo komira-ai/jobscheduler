@@ -30,8 +30,8 @@ pub struct Totals {
     /// month), and one more.
     pub per_month: Option<u64>,
     /// The most they may cost since their pool's go ([`Go`]), and one more: a budget that
-    /// a pool brings when it is switched to live and takes away when it is switched back
-    /// or its `live_until` comes.
+    /// a pool begins with its first launch after being switched to live and loses when it is
+    /// switched back or its `live_until` comes.
     pub since_go: Option<u64>,
 }
 

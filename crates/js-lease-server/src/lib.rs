@@ -120,8 +120,8 @@
 //! `launch = "live"` stops spending by itself. Beside the pools' own caps, three totals count
 //! the machines of every pool: `max_spend_per_day_total` (the last 24 hours),
 //! `max_spend_per_month_total` (the last 30 days, rolling) and `max_spend_since_go_total`
-//! (since each pool's go, the step that first saw it `live`; the budget begins again at the
-//! next go). They are strings like the pool caps, may be set in `[server]` (all pools) and
+//! (since each pool's go, its first launch since it was last in `plan`; the budget begins
+//! again at the next go). They are strings like the pool caps, may be set in `[server]` (all pools) and
 //! in a `[budget.<kind>]` table (the pools of that provider kind), and a launch must hold
 //! both; a month total below the day total is refused, and a `[budget]` table of a kind the
 //! server does not build is refused. A total only stops launches (`blocked` shows

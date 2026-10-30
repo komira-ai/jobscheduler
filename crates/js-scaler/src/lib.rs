@@ -30,8 +30,9 @@
 //!   machine that still runs keeps accruing, a launch that waits counts at its least cost).
 //!   Server-wide totals ([`Budgets`]) are held beside the pool's caps: over the records of
 //!   every pool of the server, and of every pool of the provider kind, the cost in the last 24
-//!   hours, in the last 30 days (rolling) and since the pool's go ([`Go`]: the step that first
-//!   saw the pool live, written to the records and lost when the pool is seen in `Plan`) may not
+//!   hours, in the last 30 days (rolling) and since the pool's go ([`Go`]: its first launch since it
+//!   was last in `Plan`, written to the records with that launch and lost when the pool is seen
+//!   in `Plan`) may not
 //!   pass a total with the new machine's least cost added ([`Blocked::MaxSpendTotal`]). A pool
 //!   whose `live_until` has come is in `Plan` ([`Settings::mode`]). A total only keeps a launch
 //!   from being made; the overrun it allows is bounded by [`overrun`]. Records are kept until
@@ -145,7 +146,7 @@ pub use time::Millis;
 pub fn step(state: State, input: &Input, now: Millis) -> (State, Vec<Action>) {
     let before = state.records.clone();
     let mut pass = Pass::new(state, input, now);
-    pass.mark_go();
+    pass.end_go();
     for pool in &input.pools {
         pass.reconcile(pool);
     }

@@ -1027,10 +1027,10 @@ Rules, each tied to a requirement or to existing behaviour:
   hold both, and breaking either shows `blocked: max_spend_total`. Records are kept for the
   month window, not the day, and the cost of a record over a window is the pool cap's rule (billed
   time, whole minutes then whole cents). The month is rolling because it holds at every instant: a
-  calendar month would allow the figure twice across the turn of the month. A go is the step that first
-  sees a pool `live`; it is written to the records (`go`: the instant and the cost of the machines
-  already forgotten), a pool seen in `plan` loses it, and the next go begins a new
-  `max_spend_since_go_total`. A total only stops launches. The machines admitted before it was
+  calendar month would allow the figure twice across the turn of the month. A go is the first launch of a pool
+  since it was last in `plan`; it is written to the records with that launch (`go`: the instant and
+  the cost of the machines already forgotten), a pool seen in `plan` loses it, and the next go begins
+  a new `max_spend_since_go_total`. A total only stops launches. The machines admitted before it was
   reached run on, so a window can pass its total by at most `max_spend_per_hour` times the
   lifetime of a launch (`js_scaler::overrun`). `live_until` ends a go: at that instant the pool is in `plan`,
   in the step (`Settings::mode`) and in a file read afterwards.

@@ -310,14 +310,15 @@ pub struct Cooldown {
     pub reason: CooldownReason,
 }
 
-/// A pool's go: the instant it went from `Plan` to `Live`, and what its machines had cost by
-/// the time they left the records. Kept for as long as the pool stays live. The cost since
+/// A pool's go: the instant of its first launch since it was last in `Plan`, and what its
+/// machines had cost by the time they left the records. Kept for as long as the pool stays
+/// live. The cost since
 /// the go is `settled` plus what the machines still in the records cost from `at` on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Go {
-    /// When the pool went live: the step that first saw it live, or the first step of a
-    /// scaler whose records had no go for a live pool.
+    /// When the go began: the step that made the pool's first launch since the pool was last
+    /// in `Plan`. It is written with the record of that launch.
     pub at: Millis,
     /// The cost since `at`, in cents, of the machines whose records were forgotten when
     /// their billed time left the month window.
@@ -367,9 +368,10 @@ pub struct Records {
     /// pending nothing is written for it. `None` in a file
     /// that has none: the whole span back to each time is taken as downtime.
     pub last_step: Option<Millis>,
-    /// The go of each live pool, by name ([`Go`]). A pool that is not live has none; the
-    /// first step that sees it live writes it, and the first that sees it in `Plan` mode
-    /// (or past `live_until`) removes it, which is how a new go begins a new budget.
+    /// The go of each pool that has launched since it was last in `Plan`, by name ([`Go`]).
+    /// The step that makes the first such launch writes it, and the first step that sees the
+    /// pool in `Plan` mode (or past `live_until`) removes it, which is how a new go begins a
+    /// new budget.
     /// Absent in files written before it existed, which read it empty.
     pub go: BTreeMap<String, Go>,
 }
