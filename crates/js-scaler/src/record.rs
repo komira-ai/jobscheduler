@@ -385,6 +385,11 @@ struct WireIn {
     /// The same for the provider kind each pool launched with.
     #[serde(default, rename = "pool_kinds")]
     _pool_kinds: Option<serde_json::Value>,
+    /// The same for the failure brake of each pool: its count of consecutive failed boots and
+    /// its trip. A server rolled back to this version starts on the file and, having dropped the key
+    /// on its next write, no longer remembers a trip.
+    #[serde(default, rename = "brake")]
+    _brake: Option<serde_json::Value>,
 }
 
 /// Version 1: the same without the two times.
