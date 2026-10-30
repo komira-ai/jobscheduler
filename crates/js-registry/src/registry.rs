@@ -101,7 +101,9 @@ pub struct HostView {
     /// it carries that a consumer has not read before the next beat are lost to it, and a beat
     /// whose reply was lost is sent again, so a consumer that sums minutes must dedupe them by
     /// (lease, minute). Nothing says how much the agent dropped (the wire has no drop counts),
-    /// so no minutes does not mean none were dropped. Zero `cpu_throttled_usec` and
+    /// so no minutes does not mean none were dropped. After a lost gap a reviving beat that
+    /// repeats the old `seq` leaves the old reading in place; it is stale, not wrong, and carries
+    /// its own `mono_usec`. Zero `cpu_throttled_usec` and
     /// `cpu_pressure_some_total_usec` mean not measured. `None` when the
     /// host has not reported one in this session, when its latest heartbeat carried none
     /// (the agent could not measure), and while the host is lost. A new hello clears it.

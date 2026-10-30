@@ -38,7 +38,10 @@ fn lease(text: &str) -> Result<LeaseId, BadLease> {
     Ok(LeaseId::new(term, seq))
 }
 
-/// The wire's load as the scheduler's, field for field.
+/// The wire's load as the scheduler's, field for field. The lease server's usage path
+/// converts the same load with `NodeLoad::from(LoadIn)`, which sets the active file pages to
+/// 0 on purpose; this one keeps them. A test in the lease server pins that this is the only
+/// difference.
 ///
 /// # Errors
 ///

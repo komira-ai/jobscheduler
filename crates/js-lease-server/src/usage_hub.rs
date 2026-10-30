@@ -82,7 +82,7 @@ impl Usage {
     }
 
     /// What a heartbeat that the registry accepted tells the usage side. `load` is the
-    /// heartbeat's load, taken out of it; `acks` are the registry's verdicts on its
+    /// heartbeat's load, cloned from it (the registry keeps its own copy for the hosts view); `acks` are the registry's verdicts on its
     /// results; `holds` says whether the registry holds a lease for a host. Blocks on the
     /// sink: call it on the pool for blocking calls. A panic in the sink or the key source
     /// is caught and counted as a fault: it must not cost the beat its reply.

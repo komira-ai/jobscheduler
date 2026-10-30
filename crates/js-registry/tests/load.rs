@@ -302,3 +302,33 @@ fn an_older_beat_does_not_come_back_after_a_clear() {
     beat_with(&fx, "a", again, Some(at(1)));
     assert_eq!(stored(&fx, "a").unwrap().seq, 1);
 }
+
+/// Asserts the two edges of the session rules. After a lost gap a reviving beat that repeats
+/// the old `seq` leaves the old reading as the host's load (stale, not wrong: it carries its
+/// own `mono_usec`), and a beat of the previous session after a re-hello is refused as
+/// stale-epoch and leaves the new session's load as it was. It catches a refused beat that
+/// still changes the load, and a revival that clears or replaces the reading by a repeat.
+#[test]
+fn a_repeat_after_a_gap_and_a_beat_of_an_old_session_leave_the_load() {
+    let fx = fixture(1);
+    let first = fx.join("a", "t");
+    beat_with(&fx, "a", first, Some(at(8)));
+    fx.pass_grace();
+    assert_eq!(stored(&fx, "a"), None, "hidden while lost");
+    beat_with(&fx, "a", first, Some(at(8)));
+    assert_eq!(
+        stored(&fx, "a").unwrap().seq,
+        8,
+        "the old reading is shown again"
+    );
+    fx.pass_grace();
+    let second = fx.join("a", "t");
+    beat_with(&fx, "a", second, Some(at(3)));
+    let old = js_agent_wire::Heartbeat {
+        load: Some(at(99)),
+        ..fx.heartbeat("a", first)
+    };
+    let refused = fx.registry.heartbeat(&old, &cred("t"));
+    assert!(matches!(refused, Err(js_registry::Refusal::StaleEpoch)));
+    assert_eq!(stored(&fx, "a").unwrap().seq, 3);
+}
