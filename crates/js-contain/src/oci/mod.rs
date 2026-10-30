@@ -22,10 +22,15 @@
 //! **What the container sees:** the unpacked image, read-only, as `/`; the input root
 //! as an overlay at [`ContainerSpec::exec_root`](crate::container::ContainerSpec::exec_root) (lower: the lease's input root; upper: the lease's
 //! upper directory, which outputs are read from); shared read-only trees
-//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp`, `/var/tmp`, `/run` and
-//! `/root` as the lease's own disk directories (`spec::WRITABLE`); `/dev`, `/proc`,
-//! `/sys` and `/dev/shm` as for any container. The image is read-only; those four
-//! directories are where a job writes besides the exec root.
+//! ([`SharedMount`](crate::container::SharedMount)) bound inside it; `/tmp` as a
+//! size-limited `noexec` tmpfs; `/var/tmp`, `/run` and `/root` as the lease's own disk
+//! directories (`spec::WRITABLE`); the host directories of
+//! [`ContainerSpec::mounts`](crate::container::ContainerSpec::mounts) (the run's scratch,
+//! the `--mount-root` mounts, the run's files) as recursive binds with `nosuid` and
+//! `nodev`; `/dev`, `/proc`, `/sys` and `/dev/shm` as for any container. The image is
+//! read-only; those are where a job writes besides the exec root. A job holds no
+//! capability, gains no privilege and writes no core dump (`hardening`, `spec`), and
+//! [`Oci::verify_mounts`] reads the mounts back from the running container.
 //!
 //! **Ids:** inside the container, id 0 is the first subordinate id of the daemon user
 //! ([`DaemonIds`]), the daemon user itself is not mapped, so
@@ -225,6 +230,9 @@ pub enum JobError {
     /// `crun` failed, in its own words.
     #[error("{0}")]
     Crun(String),
+    /// A running container's mounts differ from its bundle ([`mounts::problems`]).
+    #[error("mounts differ from the bundle: {}", .0.join("; "))]
+    Mounts(Vec<String>),
 }
 
 impl From<String> for JobError {

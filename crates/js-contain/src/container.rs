@@ -35,16 +35,22 @@ pub struct ContainerLimits {
     /// `RLIMIT_NOFILE`, soft and hard. Rootless, it cannot exceed the daemon's own hard
     /// limit.
     pub nofile: u64,
-    /// `RLIMIT_NPROC`, soft and hard. The kernel counts it per user, and every
-    /// container's job runs as the same subordinate id (uid 1000 of the range), so it bounds the processes of all the
-    /// node's jobs together, not one container's.
+    /// `RLIMIT_NPROC`, soft and hard. A rootless daemon cannot set it above its own hard
+    /// limit ([`own_nproc_hard_limit`]; [`ContainerLimits::within_nproc`]). The kernel
+    /// counts a user namespace's processes against its creator's, and every container's
+    /// namespace is made by the daemon user, so what bounds all the node's jobs together is
+    /// the daemon's own limit; the `pids` of each lease is the per-job bound.
     pub nproc: u64,
     /// The size of the container's `/tmp` tmpfs, in MiB.
     pub tmp_mib: u64,
 }
 
-/// The `RLIMIT_NPROC` a job is given unless the caller says otherwise.
-pub const NPROC_HIGH: u64 = 32_768;
+/// The `RLIMIT_NPROC` a job is given unless the caller says otherwise: the kernel's
+/// largest pid (`PID_MAX_LIMIT` on a 64-bit machine), so that the lease's `pids.max` is
+/// the only bound on a job's processes. A rootless daemon cannot raise a hard limit above
+/// its own ([`own_nproc_hard_limit`]), so [`ContainerLimits::within_nproc`] cuts this to
+/// what the daemon may give.
+pub const NPROC_HIGH: u64 = 4_194_304;
 
 impl ContainerLimits {
     /// 8192 pids, a 64 MiB `/dev/shm`, 65,536 open files, [`NPROC_HIGH`] processes and a
@@ -59,15 +65,27 @@ impl ContainerLimits {
 
     /// `self` with `nproc` no higher than `ceiling`.
     #[must_use]
-    pub const fn within_nproc(self, _ceiling: u64) -> Self {
-        self
+    pub const fn within_nproc(self, ceiling: u64) -> Self {
+        if self.nproc > ceiling {
+            Self {
+                nproc: ceiling,
+                ..self
+            }
+        } else {
+            self
+        }
     }
 }
 
-/// The hard `RLIMIT_NPROC` of this process.
+/// The hard `RLIMIT_NPROC` of this process: the most a rootless daemon can give a job.
+/// Raising a hard limit takes `CAP_SYS_RESOURCE` in the initial user namespace
+/// (`setrlimit(2)`), which a rootless daemon does not have, so a container asking for more
+/// fails to start in `crun`'s `setrlimit`. `u64::MAX` when there is no limit.
 #[must_use]
 pub fn own_nproc_hard_limit() -> u64 {
-    0
+    rustix::process::getrlimit(rustix::process::Resource::Nproc)
+        .maximum
+        .unwrap_or(u64::MAX)
 }
 
 /// The container to run for one job.

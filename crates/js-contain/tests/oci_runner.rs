@@ -313,9 +313,11 @@ async fn directories_are_opened_and_given_by_a_helper() {
         .expect("given, directories only");
     let mode = |p: PathBuf| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
     assert_eq!(mode(spec.dir.clone()), 0o755);
-    for name in ["tmp", "var-tmp", "run", "home"] {
+    for name in ["var-tmp", "run", "home"] {
         assert_eq!(mode(spec.dir.join("rw").join(name)), 0o755, "{name}");
     }
+    // `/tmp` is a tmpfs, not a directory of the lease.
+    assert!(!spec.dir.join("rw/tmp").exists());
     let helpers: Vec<_> = node
         .calls()
         .into_iter()

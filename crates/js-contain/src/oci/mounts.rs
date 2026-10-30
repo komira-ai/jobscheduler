@@ -21,8 +21,77 @@ use oci_spec::runtime::Spec;
 /// `mountinfo`, against the mounts of its bundle `config`: one line each, naming the
 /// target. Empty when every mount the bundle asked for flags on has them.
 #[must_use]
-pub fn problems(_config: &Spec, _mountinfo: &str) -> Vec<String> {
-    Vec::new()
+pub fn problems(config: &Spec, mountinfo: &str) -> Vec<String> {
+    let live = live(mountinfo);
+    let mut found = Vec::new();
+    for mount in config.mounts().iter().flatten() {
+        if !matches!(mount.typ().as_deref(), Some("bind" | "tmpfs")) {
+            continue;
+        }
+        let target = mount.destination().to_string_lossy().into_owned();
+        let asked = mount.options().as_deref().unwrap_or_default();
+        let asks = |flag: &str| asked.iter().any(|option| option == flag);
+        let Some((_, has)) = live.iter().rev().find(|(point, _)| *point == target) else {
+            found.push(format!("{target}: not mounted"));
+            continue;
+        };
+        for flag in FLAGS {
+            if asks(flag) && !has.contains(&flag) {
+                found.push(format!(
+                    "{target}: {flag} was asked for and is not in effect (mounted {})",
+                    has.join(",")
+                ));
+            }
+        }
+        if has.contains(&"ro") && !asks("ro") {
+            found.push(format!(
+                "{target}: mounted read-only, which was not asked for"
+            ));
+        }
+    }
+    found
+}
+
+/// The flags of a mount the bundle can ask for and `mountinfo` shows.
+const FLAGS: [&str; 4] = ["nosuid", "nodev", "noexec", "ro"];
+
+/// Each mount of `mountinfo`: its mount point, unescaped, and its per-mount options
+/// (the sixth field of a line). A line too short to have them names no mount.
+fn live(mountinfo: &str) -> Vec<(String, Vec<&str>)> {
+    mountinfo
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(' ').skip(4);
+            let point = unescape(fields.next()?);
+            Some((point, fields.next()?.split(',').collect()))
+        })
+        .collect()
+}
+
+/// `field` with the octal escapes of `mountinfo` (`\040` for a space) decoded; a
+/// backslash not followed by three octal digits of a byte stays as it is.
+fn unescape(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'\\')
+            .then(|| bytes.get(at + 1..at + 4))
+            .flatten()
+            .filter(|digits| digits.iter().all(|d| (b'0'..=b'7').contains(d)))
+            .and_then(|digits| {
+                let value = digits.iter().fold(0u32, |n, d| n * 8 + u32::from(d - b'0'));
+                u8::try_from(value).ok()
+            });
+        if let Some(byte) = decoded {
+            out.push(byte);
+            at += 4;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]
@@ -160,6 +229,15 @@ mod tests {
         assert!(problems(&config, &escaped).is_empty());
         let tab = bundle(&[("/a\tb", "bind", &["nosuid"])]);
         assert!(problems(&tab, &line("/a\\011b", "rw,nosuid")).is_empty());
+        // A backslash that starts no escape of a byte stays: too short, not octal, or
+        // above 255.
+        for odd in ["/x\\1", "/x\\9zz", "/x\\777"] {
+            let config = bundle(&[(odd, "bind", &["nosuid"])]);
+            assert!(
+                problems(&config, &line(odd, "rw,nosuid")).is_empty(),
+                "{odd}"
+            );
+        }
     }
 
     /// Catches filesystems `crun` mounts itself, mounts with no flags asked, and a

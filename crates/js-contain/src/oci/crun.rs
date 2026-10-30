@@ -294,6 +294,11 @@ impl Crun {
     /// Runs `crun --root <state> <args>` and waits: `Ok` if it exits 0, else its status
     /// and what it said on stderr.
     fn blocking(&self, state: &Path, args: &[&str], what: &str) -> Result<(), String> {
+        self.stdout_of(state, args, what).map(drop)
+    }
+
+    /// [`Crun::blocking`], returning what `crun` printed on stdout.
+    fn stdout_of(&self, state: &Path, args: &[&str], what: &str) -> Result<String, String> {
         let mut command = std::process::Command::new(&self.program);
         (self.scrub)(&mut command);
         let output = command
@@ -303,7 +308,9 @@ impl Crun {
             .stdin(std::process::Stdio::null())
             .output();
         match output {
-            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) if out.status.success() => {
+                Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            }
             Ok(out) => Err(format!(
                 "crun {what}: {}: {}",
                 out.status,
@@ -311,6 +318,16 @@ impl Crun {
             )),
             Err(e) => Err(format!("run {}: {e}", self.program.display())),
         }
+    }
+
+    /// The pid, on the host, of the first process of the running container `id` of the
+    /// lease in `lease` (`crun state`). Blocking.
+    pub(crate) fn pid(&self, lease: &Path, id: &str) -> Result<u64, String> {
+        let state = self.stdout_of(&state_dir(lease), &["state", id], "state")?;
+        serde_json::from_str::<serde_json::Value>(&state)
+            .ok()
+            .and_then(|state| state["pid"].as_u64())
+            .ok_or_else(|| format!("crun state: no pid in {:?}", state.trim()))
     }
 
     /// The words for a client `crun` could not be found for.
