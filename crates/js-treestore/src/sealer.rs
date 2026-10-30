@@ -2,11 +2,64 @@
 
 use std::path::Path;
 
+use rustix::process::{Gid, Uid, getegid, geteuid};
+
 /// What sealing a stage found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sealed {
     /// The bytes the tree takes on the volume (`st_blocks` times the block size).
     pub bytes: u64,
+}
+
+/// A user and group that own a tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Owner {
+    uid: Uid,
+    gid: Gid,
+}
+
+impl Owner {
+    /// The user and group with these ids; `None` for `u32::MAX`, which `chown` reads as
+    /// "leave as it is".
+    #[must_use]
+    pub fn new(uid: u32, gid: u32) -> Option<Owner> {
+        (uid != u32::MAX && gid != u32::MAX).then(|| Owner {
+            uid: Uid::from_raw(uid),
+            gid: Gid::from_raw(gid),
+        })
+    }
+
+    /// `root:wheel`, for the sealer that runs as root.
+    #[must_use]
+    pub fn root() -> Owner {
+        Owner {
+            uid: Uid::ROOT,
+            gid: Gid::ROOT,
+        }
+    }
+
+    /// The caller's own user and group, for a sealer that does not run as root.
+    #[must_use]
+    pub fn caller() -> Owner {
+        Owner {
+            uid: geteuid(),
+            gid: getegid(),
+        }
+    }
+
+    /// The user and group ids.
+    #[must_use]
+    pub fn ids(self) -> (u32, u32) {
+        (self.uid.as_raw(), self.gid.as_raw())
+    }
+
+    pub(crate) fn uid(self) -> Uid {
+        self.uid
+    }
+
+    pub(crate) fn gid(self) -> Gid {
+        self.gid
+    }
 }
 
 /// The sealer failed.
@@ -52,4 +105,17 @@ pub trait Sealer: Send + Sync + 'static {
     /// # Errors
     /// A call fails.
     fn unseal_for_delete(&self, tree: &Path) -> Result<(), SealError>;
+    /// Makes `dst`, a copy of the sealed tree or file `src` that `owner` can write and that
+    /// shares its data blocks with `src` where the platform allows. `dst` must not exist
+    /// and must have a parent directory that does. A link at `src` is refused, not
+    /// followed. Directories end `0700`, files `0700` if they were executable and `0600`
+    /// otherwise, all owned by `owner` and with no immutable flag; `src` is not changed.
+    ///
+    /// The copy is complete before it returns. If it fails, `dst` may be left partly made:
+    /// the caller removes it, after [`Sealer::unseal_for_delete`].
+    ///
+    /// # Errors
+    /// `src` is not a directory or regular file, the tree holds an entry the sealer does not
+    /// admit (a hard link, a device or pipe, nesting past the depth limit), or a call fails.
+    fn clone_writable(&self, src: &Path, dst: &Path, owner: Owner) -> Result<(), SealError>;
 }

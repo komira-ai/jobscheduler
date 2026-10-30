@@ -9,9 +9,8 @@ use std::path::Path;
 use js_bundle::{MAX_DEPTH, check_target};
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
-use rustix::process::{Gid, Uid, getegid, geteuid};
 
-use crate::sealer::{SealError, Sealed, Sealer};
+use crate::sealer::{Owner, SealError, Sealed, Sealer};
 
 /// `UF_IMMUTABLE`, the `uchg` user flag.
 pub const IMMUTABLE: u32 = 0x2;
@@ -34,37 +33,27 @@ pub trait UserFlags: Send + Sync + 'static {
     fn set(&self, file: BorrowedFd<'_>, flags: u32) -> io::Result<()>;
 }
 
-/// Who owns a sealed tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Owner {
-    uid: Uid,
-    gid: Gid,
-}
+/// Copy-on-write copies, as `clonefile(2)` makes them: the copy has its own inodes and
+/// shares the data blocks, and keeps the owner, mode and flags of what it copies.
+pub trait Cloner: Send + Sync + 'static {
+    /// Clones the directory tree at `src` to `dst`, which must not exist. A link at `src` is
+    /// cloned as a link, not followed.
+    ///
+    /// # Errors
+    /// The call failed.
+    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()>;
 
-impl Owner {
-    /// `root:wheel`, for the sealer that runs as root.
-    #[must_use]
-    pub fn root() -> Owner {
-        Owner {
-            uid: Uid::ROOT,
-            gid: Gid::ROOT,
-        }
-    }
-
-    /// The caller's own user and group, for a sealer that does not run as root.
-    #[must_use]
-    pub fn caller() -> Owner {
-        Owner {
-            uid: geteuid(),
-            gid: getegid(),
-        }
-    }
-
-    /// The user and group ids.
-    #[must_use]
-    pub fn ids(self) -> (u32, u32) {
-        (self.uid.as_raw(), self.gid.as_raw())
-    }
+    /// Clones the open file `src` to `name` in the directory `dst_dir`, which must not
+    /// hold `name`.
+    ///
+    /// # Errors
+    /// The call failed.
+    fn clone_file(
+        &self,
+        src: BorrowedFd<'_>,
+        dst_dir: BorrowedFd<'_>,
+        name: &OsStr,
+    ) -> io::Result<()>;
 }
 
 /// A [`Sealer`] that gives a tree to one owner, takes its write bits and sets the immutable
@@ -82,16 +71,114 @@ impl Owner {
 /// Unsealing clears the flags of everything under a path (and gives directories their
 /// owner's `rwx` back so they can be emptied), carries on past a failure and reports the
 /// first one. Links are skipped: they carry no flag.
-pub struct FlagSealer<F: UserFlags> {
+///
+/// A writable clone is made with `cloner`, which copies owner, mode and flags along with the
+/// data, so the copy of a sealed tree is as sealed as the original. Then, top down and by
+/// descriptor, for each entry: the flags are cleared (a directory first, since an immutable
+/// directory refuses new entries and changes), the entry is given to the new owner, and it
+/// gets mode `0700` (directories, executables) or `0600`. Links are given over without
+/// being followed. Only metadata changes, so the blocks stay shared. A hard link, a device
+/// or pipe, or nesting past [`js_bundle::MAX_DEPTH`] in the copy is refused.
+pub struct FlagSealer<F: UserFlags, C: Cloner> {
     owner: Owner,
     flags: F,
+    cloner: C,
 }
 
-impl<F: UserFlags> FlagSealer<F> {
-    /// A sealer that gives trees to `owner` and sets flags through `flags`.
+impl<F: UserFlags, C: Cloner> FlagSealer<F, C> {
+    /// A sealer that gives trees to `owner`, sets flags through `flags` and makes clones
+    /// through `cloner`.
     #[must_use]
-    pub fn new(owner: Owner, flags: F) -> FlagSealer<F> {
-        FlagSealer { owner, flags }
+    pub fn new(owner: Owner, flags: F, cloner: C) -> FlagSealer<F, C> {
+        FlagSealer {
+            owner,
+            flags,
+            cloner,
+        }
+    }
+
+    fn clone_to(&self, src: &Path, dst: &Path, owner: Owner) -> Result<(), SealError> {
+        let source = rustix::fs::openat(CWD, src, FILE_OPEN, Mode::empty())?;
+        match FileType::from_raw_mode(rustix::fs::fstat(&source)?.st_mode) {
+            FileType::Directory => {
+                self.cloner.clone_dir(src, dst)?;
+                let root = rustix::fs::openat(CWD, dst, DIR_OPEN, Mode::empty())?;
+                self.writable_dir(&root, owner, Path::new(""), 0)
+            }
+            FileType::RegularFile => {
+                let (Some(parent), Some(name)) = (dst.parent(), dst.file_name()) else {
+                    return Err(refuse(dst, "has no parent directory and name"));
+                };
+                let dir = rustix::fs::openat(CWD, parent, DIR_OPEN, Mode::empty())?;
+                self.cloner.clone_file(source.as_fd(), dir.as_fd(), name)?;
+                let file = rustix::fs::openat(&dir, name, FILE_OPEN, Mode::empty())?;
+                self.writable_file(&file, owner, Path::new(""))
+            }
+            _ => Err(refuse(src, "is neither a directory nor a regular file")),
+        }
+    }
+
+    /// Hands a cloned directory and everything in it to `owner`.
+    fn writable_dir(
+        &self,
+        dir: &OwnedFd,
+        owner: Owner,
+        at: &Path,
+        depth: usize,
+    ) -> Result<(), SealError> {
+        self.writable(dir, owner, Mode::RWXU)?;
+        for name in list(dir)? {
+            let here = at.join(&name);
+            if depth + 1 > MAX_DEPTH {
+                return Err(refuse(&here, "is deeper than the depth limit"));
+            }
+            let stat = rustix::fs::statat(dir, &name, AtFlags::SYMLINK_NOFOLLOW)?;
+            match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Directory => {
+                    let child = rustix::fs::openat(dir, &name, DIR_OPEN, Mode::empty())?;
+                    self.writable_dir(&child, owner, &here, depth + 1)?;
+                }
+                FileType::RegularFile => {
+                    let file = rustix::fs::openat(dir, &name, FILE_OPEN, Mode::empty())?;
+                    self.writable_file(&file, owner, &here)?;
+                }
+                FileType::Symlink => rustix::fs::chownat(
+                    dir,
+                    &name,
+                    Some(owner.uid()),
+                    Some(owner.gid()),
+                    AtFlags::SYMLINK_NOFOLLOW,
+                )?,
+                _ => return Err(refuse(&here, "has an unsupported file type")),
+            }
+        }
+        Ok(())
+    }
+
+    fn writable_file(&self, file: &OwnedFd, owner: Owner, at: &Path) -> Result<(), SealError> {
+        let stat = rustix::fs::fstat(file)?;
+        if stat.st_nlink > 1 {
+            return Err(refuse(
+                at,
+                &format!("has {} hard links, not one", stat.st_nlink),
+            ));
+        }
+        let exec = Mode::from_raw_mode(stat.st_mode).contains(Mode::XUSR);
+        let mode = if exec {
+            Mode::RWXU
+        } else {
+            Mode::RUSR | Mode::WUSR
+        };
+        self.writable(file, owner, mode)
+    }
+
+    /// Clears the flags of one open file or directory (before anything else, which an
+    /// immutable one would refuse), gives it to `owner` and sets the exact mode.
+    fn writable(&self, fd: &OwnedFd, owner: Owner, mode: Mode) -> Result<(), SealError> {
+        self.flags.set(fd.as_fd(), 0)?;
+        rustix::fs::fchown(fd, Some(owner.uid()), Some(owner.gid()))?;
+        rustix::fs::fchmod(fd, mode)?;
+        Ok(())
     }
 
     fn seal_dir(
@@ -153,8 +240,8 @@ impl<F: UserFlags> FlagSealer<F> {
         rustix::fs::chownat(
             dir,
             name,
-            Some(self.owner.uid),
-            Some(self.owner.gid),
+            Some(self.owner.uid()),
+            Some(self.owner.gid()),
             AtFlags::SYMLINK_NOFOLLOW,
         )?;
         *bytes += blocks(stat);
@@ -178,7 +265,7 @@ impl<F: UserFlags> FlagSealer<F> {
         let exec = Mode::from_raw_mode(stat.st_mode).contains(Mode::XUSR);
         let mode = if dir | exec { 0o555 } else { 0o444 };
         self.flags.set(fd.as_fd(), 0)?;
-        rustix::fs::fchown(fd, Some(self.owner.uid), Some(self.owner.gid))?;
+        rustix::fs::fchown(fd, Some(self.owner.uid()), Some(self.owner.gid()))?;
         rustix::fs::fchmod(fd, Mode::from_bits_truncate(mode))?;
         self.flags.set(fd.as_fd(), IMMUTABLE)?;
         sync_to_disk(fd)?;
@@ -187,7 +274,7 @@ impl<F: UserFlags> FlagSealer<F> {
     }
 }
 
-impl<F: UserFlags> Sealer for FlagSealer<F> {
+impl<F: UserFlags, C: Cloner> Sealer for FlagSealer<F, C> {
     fn seal(&self, stage: &Path) -> Result<Sealed, SealError> {
         let mut bytes = 0;
         rustix::fs::openat(CWD, stage, DIR_OPEN, Mode::empty())
@@ -212,6 +299,10 @@ impl<F: UserFlags> Sealer for FlagSealer<F> {
         run.first.map_or(Ok(()), |error| {
             Err(refuse(tree, &format!("not fully unsealed: {error}")))
         })
+    }
+
+    fn clone_writable(&self, _src: &Path, _dst: &Path, _owner: Owner) -> Result<(), SealError> {
+        Err(SealError("clone_writable is not implemented".into()))
     }
 }
 
@@ -308,6 +399,60 @@ fn list(dir: &OwnedFd) -> Result<Vec<OsString>, SealError> {
     Ok(names)
 }
 
+/// `clonefile` and `fclonefileat` on macOS.
+#[cfg(target_os = "macos")]
+pub struct Clonefile;
+
+/// `CLONE_NOFOLLOW` of `<sys/clonefile.h>`: a link at the source is cloned as a link.
+#[cfg(target_os = "macos")]
+const CLONE_NOFOLLOW: u32 = 0x0001;
+
+#[cfg(target_os = "macos")]
+impl Cloner for Clonefile {
+    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        let (src, dst) = (c_path(src.as_os_str())?, c_path(dst.as_os_str())?);
+        // FFI-BOUNDARY: both paths are NUL-terminated and outlive the call, which keeps
+        // neither.
+        // SAFETY: as above.
+        check(unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), CLONE_NOFOLLOW) })
+    }
+
+    fn clone_file(
+        &self,
+        src: BorrowedFd<'_>,
+        dst_dir: BorrowedFd<'_>,
+        name: &OsStr,
+    ) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let name = c_path(name)?;
+        // FFI-BOUNDARY: both descriptors are borrowed and open, the name is NUL-terminated
+        // and outlives the call, which keeps none of them.
+        // SAFETY: as above.
+        check(unsafe {
+            libc::fclonefileat(
+                src.as_raw_fd(),
+                dst_dir.as_raw_fd(),
+                name.as_ptr(),
+                CLONE_NOFOLLOW,
+            )
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn c_path(path: &OsStr) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(path.as_bytes()).map_err(io::Error::other)
+}
+
+#[cfg(target_os = "macos")]
+fn check(done: libc::c_int) -> io::Result<()> {
+    if done == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// `fchflags` on macOS.
 #[cfg(target_os = "macos")]
 pub struct Fchflags;
@@ -329,4 +474,4 @@ impl UserFlags for Fchflags {
 
 /// The sealer for a Mac host.
 #[cfg(target_os = "macos")]
-pub type MacSealer = FlagSealer<Fchflags>;
+pub type MacSealer = FlagSealer<Fchflags, Clonefile>;

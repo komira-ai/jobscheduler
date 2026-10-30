@@ -4,11 +4,12 @@
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use js_testkit::dir::TestDir;
 use js_treestore::Sealer as _;
-use js_treestore::mac::{Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
+use js_treestore::mac::{Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
 
 fn flags_of(path: &Path) -> u32 {
     let path = CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -32,7 +33,7 @@ fn tree(dir: &TestDir) -> std::path::PathBuf {
 fn a_sealed_tree_refuses_writes_even_from_its_owner_and_an_unsealed_one_can_be_deleted() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
     let root = tree(&dir);
-    let sealer = MacSealer::new(Owner::caller(), Fchflags);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
     sealer.seal(&root).unwrap();
     assert!(std::fs::write(root.join("a.txt"), b"changed").is_err());
     assert!(std::fs::write(root.join("new.txt"), b"new").is_err());
@@ -47,7 +48,7 @@ fn a_sealed_tree_refuses_writes_even_from_its_owner_and_an_unsealed_one_can_be_d
 fn sealing_sets_uchg_on_files_and_directories_and_unsealing_clears_it() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
     let root = tree(&dir);
-    let sealer = MacSealer::new(Owner::caller(), Fchflags);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
     sealer.seal(&root).unwrap();
     for path in ["", "a.txt", "sub", "sub/b.txt"] {
         assert_eq!(flags_of(&root.join(path)) & IMMUTABLE, IMMUTABLE, "{path}");
@@ -71,4 +72,77 @@ fn the_temp_volume_passes_the_start_checks() {
 fn a_path_that_is_not_there_fails_the_start_checks() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
     assert!(start_checks(&dir.path().join("nowhere"), dir.path()).is_err());
+}
+
+fn mode(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777
+}
+
+#[test]
+fn a_clone_of_a_sealed_tree_is_writable_and_can_be_deleted_and_the_original_stays_sealed() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    sealer.seal(&root).unwrap();
+    let dst = dir.path().join("writable");
+    sealer.clone_writable(&root, &dst, Owner::caller()).unwrap();
+    for path in ["", "a.txt", "sub", "sub/b.txt"] {
+        assert_eq!(flags_of(&dst.join(path)) & IMMUTABLE, 0, "{path}");
+    }
+    assert_eq!((mode(&dst), mode(&dst.join("sub"))), (0o700, 0o700));
+    assert_eq!(mode(&dst.join("a.txt")), 0o600);
+    assert_eq!(
+        std::fs::read_link(dst.join("link")).unwrap(),
+        Path::new("a.txt")
+    );
+    std::fs::write(dst.join("a.txt"), b"changed").unwrap();
+    std::fs::write(dst.join("sub/new.txt"), b"new").unwrap();
+    std::fs::remove_file(dst.join("sub/b.txt")).unwrap();
+    // The original is as it was.
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(std::fs::read(root.join("sub/b.txt")).unwrap(), b"bravo");
+    for path in ["", "a.txt", "sub", "sub/b.txt"] {
+        assert_eq!(flags_of(&root.join(path)) & IMMUTABLE, IMMUTABLE, "{path}");
+    }
+    std::fs::remove_dir_all(&dst).unwrap();
+    sealer.unseal_for_delete(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_clone_of_a_sealed_file_is_writable_and_the_original_stays_sealed() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    sealer.seal(&root).unwrap();
+    let dst = dir.path().join("copy.txt");
+    sealer
+        .clone_writable(&root.join("a.txt"), &dst, Owner::caller())
+        .unwrap();
+    assert_eq!(flags_of(&dst) & IMMUTABLE, 0);
+    assert_eq!(mode(&dst), 0o600);
+    std::fs::write(&dst, b"changed").unwrap();
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+    assert_eq!(flags_of(&root.join("a.txt")) & IMMUTABLE, IMMUTABLE);
+    std::fs::remove_file(&dst).unwrap();
+    sealer.unseal_for_delete(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_link_is_not_followed_when_it_is_the_source_of_a_clone() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-host");
+    let root = tree(&dir);
+    let sealer = MacSealer::new(Owner::caller(), Fchflags, Clonefile);
+    let dst = dir.path().join("copy");
+    assert!(
+        sealer
+            .clone_writable(&root.join("link"), &dst, Owner::caller())
+            .is_err()
+    );
+    assert!(!dst.exists());
 }

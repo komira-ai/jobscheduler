@@ -2,21 +2,24 @@
 //! runs on every platform. What `uchg` does to a write is for the macOS tests.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::io;
-use std::os::fd::BorrowedFd;
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use js_testkit::dir::TestDir;
 use js_treestore::Sealer;
-use js_treestore::mac::{FlagSealer, IMMUTABLE, Owner, UserFlags};
+use js_treestore::mac::{Cloner, FlagSealer, IMMUTABLE, Owner, UserFlags};
 
 #[derive(Clone, Default)]
 struct FakeFlags {
     flags: Arc<Mutex<BTreeMap<u64, u32>>>,
     touched: Arc<Mutex<BTreeSet<u64>>>,
+    /// Inodes in the order their flags were set.
+    order: Arc<Mutex<Vec<u64>>>,
     fail: Arc<AtomicUsize>,
 }
 
@@ -30,6 +33,7 @@ impl UserFlags for FakeFlags {
         let ino = rustix::fs::fstat(file)?.st_ino;
         self.flags.lock().unwrap().insert(ino, flags);
         self.touched.lock().unwrap().insert(ino);
+        self.order.lock().unwrap().push(ino);
         Ok(())
     }
 }
@@ -45,6 +49,20 @@ impl FakeFlags {
         self.touched.lock().unwrap().contains(&ino)
     }
 
+    /// Where the flags of `path` were first set since the order was last forgotten.
+    fn position(&self, path: &Path) -> usize {
+        let ino = std::fs::symlink_metadata(path).unwrap().ino();
+        let order = self.order.lock().unwrap();
+        order
+            .iter()
+            .position(|seen| *seen == ino)
+            .unwrap_or_else(|| panic!("flags of {} were never set", path.display()))
+    }
+
+    fn forget_order(&self) {
+        self.order.lock().unwrap().clear();
+    }
+
     fn flagged(&self) -> usize {
         self.flags
             .lock()
@@ -55,10 +73,84 @@ impl FakeFlags {
     }
 }
 
+/// A copy that keeps modes, links and pipes, and gives each new inode the flags of the one
+/// it copies, as `clonefile` does; it shares no blocks.
+#[derive(Clone)]
+struct FakeClone {
+    flags: FakeFlags,
+}
+
+impl FakeClone {
+    fn copy(&self, src: &Path, dst: &Path, seen: &mut BTreeMap<u64, PathBuf>) -> io::Result<()> {
+        let meta = std::fs::symlink_metadata(src)?;
+        let kind = meta.file_type();
+        if kind.is_dir() {
+            std::fs::create_dir(dst)?;
+            for entry in std::fs::read_dir(src)? {
+                let entry = entry?;
+                self.copy(&entry.path(), &dst.join(entry.file_name()), seen)?;
+            }
+            std::fs::set_permissions(dst, meta.permissions())?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+        } else if kind.is_fifo() {
+            let path = std::ffi::CString::new(dst.to_str().unwrap()).unwrap();
+            // SAFETY: `path` is NUL-terminated and outlives the call.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        } else if let Some(first) = seen.get(&meta.ino()) {
+            std::fs::hard_link(first, dst)?;
+        } else {
+            std::fs::copy(src, dst)?;
+            seen.insert(meta.ino(), dst.to_owned());
+        }
+        if !kind.is_symlink() {
+            self.give_flags(&meta, dst);
+        }
+        Ok(())
+    }
+
+    fn give_flags(&self, from: &std::fs::Metadata, to: &Path) {
+        let flags = self.flags.flags.lock().unwrap().get(&from.ino()).copied();
+        if let Some(flags) = flags {
+            let ino = std::fs::symlink_metadata(to).unwrap().ino();
+            self.flags.flags.lock().unwrap().insert(ino, flags);
+        }
+    }
+}
+
+impl Cloner for FakeClone {
+    fn clone_dir(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        self.copy(src, dst, &mut BTreeMap::new())
+    }
+
+    fn clone_file(
+        &self,
+        src: BorrowedFd<'_>,
+        dst_dir: BorrowedFd<'_>,
+        name: &OsStr,
+    ) -> io::Result<()> {
+        let from = rustix::fs::fstat(src)?;
+        let mut input = std::fs::File::from(src.try_clone_to_owned()?);
+        let out: OwnedFd = rustix::fs::openat(
+            dst_dir,
+            name,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+            rustix::fs::Mode::from_bits_truncate(from.st_mode),
+        )?;
+        let to = rustix::fs::fstat(&out)?;
+        io::copy(&mut input, &mut std::fs::File::from(out))?;
+        let flags = self.flags.flags.lock().unwrap().get(&from.st_ino).copied();
+        if let Some(flags) = flags {
+            self.flags.flags.lock().unwrap().insert(to.st_ino, flags);
+        }
+        Ok(())
+    }
+}
+
 struct Rig {
     dir: TestDir,
     flags: FakeFlags,
-    sealer: Arc<FlagSealer<FakeFlags>>,
+    sealer: Arc<FlagSealer<FakeFlags, FakeClone>>,
 }
 
 impl Rig {
@@ -66,7 +158,13 @@ impl Rig {
         let flags = FakeFlags::default();
         Rig {
             dir: TestDir::under(env!("CARGO_TARGET_TMPDIR"), "mac-seal"),
-            sealer: Arc::new(FlagSealer::new(Owner::caller(), flags.clone())),
+            sealer: Arc::new(FlagSealer::new(
+                Owner::caller(),
+                flags.clone(),
+                FakeClone {
+                    flags: flags.clone(),
+                },
+            )),
             flags,
         }
     }
@@ -97,7 +195,7 @@ impl Rig {
 }
 
 struct Cleanup {
-    sealer: Arc<FlagSealer<FakeFlags>>,
+    sealer: Arc<FlagSealer<FakeFlags, FakeClone>>,
     root: PathBuf,
 }
 
@@ -374,4 +472,323 @@ fn unsealing_a_tree_deeper_than_the_limit_reports_it_after_clearing_what_it_reac
     nest(&deep, js_bundle::MAX_DEPTH + 1);
     let error = rig.sealer.unseal_for_delete(&deep).unwrap_err();
     assert!(error.0.contains("deeper"), "{error}");
+}
+
+// Writable clones.
+
+const TREE_PATHS: [&str; 7] = [
+    "",
+    "a.txt",
+    "run.sh",
+    "sub",
+    "sub/b.txt",
+    "sub/deeper",
+    "sub/deeper/c.txt",
+];
+
+impl Rig {
+    /// The tree of [`Rig::tree`], sealed, and a clone of it that a user can write.
+    fn cloned(&self) -> (PathBuf, PathBuf) {
+        let root = self.tree();
+        self.sealer.seal(&root).unwrap();
+        let dst = self.dir.path().join("writable");
+        (root, dst)
+    }
+}
+
+#[test]
+fn a_clone_of_a_sealed_tree_has_no_flag_left_and_modes_that_let_its_owner_write() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    for path in TREE_PATHS {
+        assert_eq!(rig.flags.of(&dst.join(path)), 0, "flags of {path:?}");
+    }
+    for path in ["", "sub", "sub/deeper"] {
+        assert_eq!(mode(&dst.join(path)), 0o700, "mode of {path:?}");
+    }
+    assert_eq!(mode(&dst.join("run.sh")), 0o700);
+    for path in ["a.txt", "sub/b.txt", "sub/deeper/c.txt"] {
+        assert_eq!(mode(&dst.join(path)), 0o600, "mode of {path:?}");
+    }
+    for path in TREE_PATHS {
+        let meta = std::fs::metadata(dst.join(path)).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), Owner::caller().ids(), "{path:?}");
+    }
+}
+
+#[test]
+fn a_clone_can_be_written_extended_and_deleted() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    std::fs::write(dst.join("a.txt"), b"changed").unwrap();
+    std::fs::write(dst.join("sub/deeper/new.txt"), b"new").unwrap();
+    std::fs::remove_file(dst.join("sub/b.txt")).unwrap();
+    std::fs::remove_dir_all(&dst).unwrap();
+}
+
+#[test]
+fn cloning_leaves_the_sealed_original_sealed_and_unchanged() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    std::fs::write(dst.join("a.txt"), b"changed").unwrap();
+    for path in TREE_PATHS {
+        assert_eq!(rig.flags.of(&root.join(path)), IMMUTABLE, "{path:?}");
+    }
+    assert_eq!(mode(&root), 0o555);
+    assert_eq!(mode(&root.join("sub")), 0o555);
+    assert_eq!(mode(&root.join("a.txt")), 0o444);
+    assert_eq!(mode(&root.join("run.sh")), 0o555);
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+}
+
+#[test]
+fn the_root_of_a_clone_is_freed_before_anything_in_it_and_each_directory_before_its_entries() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    rig.flags.forget_order();
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    let at = |path: &str| rig.flags.position(&dst.join(path));
+    assert_eq!(at(""), 0);
+    assert!(at("sub") < at("sub/b.txt"));
+    assert!(at("sub") < at("sub/deeper"));
+    assert!(at("sub/deeper") < at("sub/deeper/c.txt"));
+}
+
+#[test]
+fn a_clone_keeps_links_as_links_and_never_follows_them() {
+    let rig = Rig::new();
+    let root = rig.tree();
+    let outside = rig.dir.path().join("outside.txt");
+    std::fs::write(&outside, b"not part of the tree").unwrap();
+    std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o664)).unwrap();
+    std::os::unix::fs::symlink("../../outside.txt", root.join("sub/out")).unwrap();
+    std::os::unix::fs::symlink("../..", root.join("sub/up")).unwrap();
+    rig.sealer.seal(&root).unwrap();
+    let _clean = rig.guard(&root);
+    let dst = rig.dir.path().join("writable");
+    let _clean_dst = rig.guard(&dst);
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    assert_eq!(
+        std::fs::read_link(dst.join("link")).unwrap(),
+        Path::new("a.txt")
+    );
+    assert_eq!(
+        std::fs::read_link(dst.join("sub/out")).unwrap(),
+        Path::new("../../outside.txt")
+    );
+    assert!(!rig.flags.touched(&outside));
+    assert_eq!(mode(&outside), 0o664);
+    assert!(!rig.flags.touched(rig.dir.path()));
+}
+
+#[test]
+fn a_set_user_id_bit_on_a_cloned_file_is_cleared() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+    rig.sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap();
+    assert_eq!(mode(&dst.join("run.sh")), 0o700);
+}
+
+#[test]
+fn a_file_with_a_second_hard_link_in_the_clone_is_refused() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    // A sealed directory takes no new entries: open it for the plant.
+    std::fs::set_permissions(root.join("sub"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::hard_link(root.join("a.txt"), root.join("sub/again")).unwrap();
+    let error = rig
+        .sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("hard link"), "{error}");
+}
+
+#[test]
+fn a_pipe_in_the_clone_is_refused() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let error = rig
+        .sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("file type"), "{error}");
+}
+
+#[test]
+fn a_tree_nested_to_the_depth_limit_is_cloned_and_one_level_deeper_is_refused() {
+    let rig = Rig::new();
+    let ok = rig.dir.path().join("ok");
+    nest(&ok, js_bundle::MAX_DEPTH);
+    rig.sealer.seal(&ok).unwrap();
+    let _clean = rig.guard(&ok);
+    let ok_dst = rig.dir.path().join("ok-writable");
+    let _clean_ok = rig.guard(&ok_dst);
+    rig.sealer
+        .clone_writable(&ok, &ok_dst, Owner::caller())
+        .unwrap();
+    let deep = rig.dir.path().join("deep");
+    nest(&deep, js_bundle::MAX_DEPTH + 1);
+    let _clean_deep = rig.guard(&deep);
+    let deep_dst = rig.dir.path().join("deep-writable");
+    let _clean_deep_dst = rig.guard(&deep_dst);
+    let error = rig
+        .sealer
+        .clone_writable(&deep, &deep_dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("deeper"), "{error}");
+}
+
+#[test]
+fn a_flag_call_that_fails_fails_the_clone_and_the_error_names_both_paths() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let _clean_dst = rig.guard(&dst);
+    rig.flags.fail.store(1, Ordering::SeqCst);
+    let error = rig
+        .sealer
+        .clone_writable(&root, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("fchflags refused"), "{error}");
+    assert!(error.0.contains("tree"), "{error}");
+    assert!(error.0.contains("writable"), "{error}");
+}
+
+#[test]
+fn a_destination_that_exists_is_refused_and_left_alone() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    std::fs::create_dir(&dst).unwrap();
+    std::fs::write(dst.join("keep"), b"mine").unwrap();
+    assert!(
+        rig.sealer
+            .clone_writable(&root, &dst, Owner::caller())
+            .is_err()
+    );
+    assert_eq!(std::fs::read(dst.join("keep")).unwrap(), b"mine");
+    assert!(!dst.join("a.txt").exists());
+}
+
+#[test]
+fn a_source_that_is_not_there_is_an_error_naming_it() {
+    let rig = Rig::new();
+    let missing = rig.dir.path().join("nowhere");
+    let dst = rig.dir.path().join("writable");
+    let error = rig
+        .sealer
+        .clone_writable(&missing, &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("nowhere"), "{error}");
+    assert!(!dst.exists());
+}
+
+#[test]
+fn a_source_that_is_a_link_or_a_pipe_is_refused() {
+    let rig = Rig::new();
+    let (root, dst) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let error = rig
+        .sealer
+        .clone_writable(&root.join("link"), &dst, Owner::caller());
+    assert!(error.is_err());
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
+    // SAFETY: `path` is NUL-terminated and outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let error = rig
+        .sealer
+        .clone_writable(&root.join("pipe"), &dst, Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("neither"), "{error}");
+    assert!(!dst.exists());
+}
+
+#[test]
+fn a_clone_of_one_sealed_file_is_writable_and_keeps_its_exec_bit() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    for (name, expected) in [("a.txt", 0o600), ("run.sh", 0o700)] {
+        let dst = rig.dir.path().join(format!("copy-{name}"));
+        rig.sealer
+            .clone_writable(&root.join(name), &dst, Owner::caller())
+            .unwrap();
+        assert_eq!(rig.flags.of(&dst), 0, "{name}");
+        assert_eq!(mode(&dst), expected, "{name}");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            std::fs::read(root.join(name)).unwrap()
+        );
+        std::fs::write(&dst, b"changed").unwrap();
+        assert_eq!(rig.flags.of(&root.join(name)), IMMUTABLE, "{name}");
+    }
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha");
+}
+
+#[test]
+fn a_clone_of_a_file_onto_a_name_that_exists_is_refused_and_leaves_it_alone() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let dst = rig.dir.path().join("taken");
+    std::fs::write(&dst, b"mine").unwrap();
+    assert!(
+        rig.sealer
+            .clone_writable(&root.join("a.txt"), &dst, Owner::caller())
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&dst).unwrap(), b"mine");
+}
+
+#[test]
+fn a_clone_of_a_file_needs_a_destination_with_a_name() {
+    let rig = Rig::new();
+    let (root, _) = rig.cloned();
+    let _clean = rig.guard(&root);
+    let error = rig
+        .sealer
+        .clone_writable(&root.join("a.txt"), Path::new("/"), Owner::caller())
+        .unwrap_err();
+    assert!(error.0.contains("no parent"), "{error}");
+}
+
+#[test]
+fn an_owner_is_made_from_ids_but_not_from_the_value_chown_reads_as_unchanged() {
+    assert_eq!(Owner::new(501, 20).map(Owner::ids), Some((501, 20)));
+    assert_eq!(Owner::new(u32::MAX, 20), None);
+    assert_eq!(Owner::new(501, u32::MAX), None);
 }

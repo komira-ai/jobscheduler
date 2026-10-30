@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use js_treestore::Sealer as _;
-use js_treestore::mac::{IMMUTABLE, MacSealer, Owner, start_checks};
+use js_treestore::mac::{Clonefile, Fchflags, IMMUTABLE, MacSealer, Owner, start_checks};
 
 unsafe extern "C" {
     fn clonefile(src: *const c_char, dst: *const c_char, flags: u32) -> c_int;
@@ -88,7 +88,7 @@ impl Work {
             dir: base.join(format!("{name}-{}", std::process::id())),
             uid,
             gid,
-            sealer: MacSealer::new(Owner::root(), js_treestore::mac::Fchflags),
+            sealer: MacSealer::new(Owner::root(), Fchflags, Clonefile),
         };
         work.clear().expect("clear a former work directory");
         std::fs::create_dir(&work.dir).unwrap();
@@ -248,4 +248,99 @@ fn probe_whether_another_user_can_link_a_sealed_file() {
         work.uid,
         if linked { "allowed" } else { "refused" }
     );
+}
+
+fn owner_of(path: &Path) -> (u32, u32) {
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    (meta.uid(), meta.gid())
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_clone_of_a_root_sealed_tree_is_written_by_the_pool_user_and_the_lease_directory_is_removed() {
+    let work = Work::new("clone-writable");
+    let root = work.tree();
+    std::os::unix::fs::symlink("a.txt", root.join("link")).unwrap();
+    work.sealer.seal(&root).unwrap();
+    let lease = work.dir.join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    std::fs::set_permissions(&lease, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let clone = lease.join("tree-w");
+    let pool = Owner::new(work.uid, work.gid).unwrap();
+    work.sealer.clone_writable(&root, &clone, pool).unwrap();
+    // Every entry is the pool user's, and none is immutable.
+    for path in ["", "a.txt", "sub", "sub/b.txt", "link"] {
+        let at = clone.join(path);
+        assert_eq!(owner_of(&at), (work.uid, work.gid), "owner of {path:?}");
+        assert_eq!(flags_of(&at) & IMMUTABLE, 0, "flags of {path:?}");
+    }
+    assert_eq!(std::fs::metadata(&clone).unwrap().mode() & 0o7777, 0o700);
+    assert_eq!(
+        std::fs::metadata(clone.join("a.txt")).unwrap().mode() & 0o7777,
+        0o600
+    );
+    // The pool user overwrites a file (with the content of another), creates files in the
+    // root and below it, and deletes one.
+    let readable = root.join("a.txt");
+    assert!(work.as_user("/bin/cp", &[&readable, &clone.join("sub/b.txt")]));
+    assert!(work.as_user("/usr/bin/touch", &[&clone.join("new")]));
+    assert!(work.as_user("/usr/bin/touch", &[&clone.join("sub/new")]));
+    assert!(work.as_user("/bin/rm", &[&clone.join("a.txt")]));
+    assert_eq!(std::fs::read(clone.join("sub/b.txt")).unwrap(), b"alpha");
+    // The sealed original is as it was, and still refuses the user.
+    assert_eq!(std::fs::read(root.join("sub/b.txt")).unwrap(), b"bravo");
+    assert_eq!(std::fs::read(&readable).unwrap(), b"alpha");
+    assert_eq!(flags_of(&readable) & IMMUTABLE, IMMUTABLE);
+    assert_eq!(owner_of(&readable), (0, 0));
+    assert!(!work.as_user("/usr/bin/tee", &[Path::new("-a"), &readable]));
+    // Removing the lease directory needs no unsealing, and leaves the original alone.
+    std::fs::remove_dir_all(&lease).unwrap();
+    assert!(!lease.exists());
+    assert_eq!(std::fs::read(&readable).unwrap(), b"alpha");
+    assert_eq!(flags_of(&readable) & IMMUTABLE, IMMUTABLE);
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_clone_of_one_root_sealed_file_is_written_by_the_pool_user() {
+    let work = Work::new("clone-file");
+    let root = work.tree();
+    work.sealer.seal(&root).unwrap();
+    let lease = work.dir.join("lease");
+    std::fs::create_dir(&lease).unwrap();
+    std::fs::set_permissions(&lease, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let clone = lease.join("a.txt");
+    let pool = Owner::new(work.uid, work.gid).unwrap();
+    work.sealer
+        .clone_writable(&root.join("a.txt"), &clone, pool)
+        .unwrap();
+    assert_eq!(owner_of(&clone), (work.uid, work.gid));
+    assert_eq!(flags_of(&clone) & IMMUTABLE, 0);
+    assert!(work.as_user("/usr/bin/tee", &[Path::new("-a"), &clone]));
+    assert_eq!(flags_of(&root.join("a.txt")) & IMMUTABLE, IMMUTABLE);
+    std::fs::remove_dir_all(&lease).unwrap();
+}
+
+#[test]
+#[ignore = "needs root on a provisioned Mac (js-treestore-privileged-tests)"]
+fn a_sealed_tree_is_evicted_by_moving_it_to_the_trash_unsealing_it_and_deleting_it() {
+    let work = Work::new("evict");
+    let root = work.tree();
+    work.sealer.seal(&root).unwrap();
+    let trash = work.dir.join("trash");
+    std::fs::create_dir(&trash).unwrap();
+    let trashed = trash.join("tree");
+    // The store tries the move first; a system that refuses to move an immutable directory
+    // is recorded, and the store's second try follows an unsealing.
+    if let Err(error) = std::fs::rename(&root, &trashed) {
+        eprintln!("PROBE rename of a sealed tree: refused, {error}");
+        work.sealer.unseal_for_delete(&root).unwrap();
+        std::fs::rename(&root, &trashed).unwrap();
+    } else {
+        eprintln!("PROBE rename of a sealed tree: ok");
+    }
+    work.sealer.unseal_for_delete(&trashed).unwrap();
+    std::fs::remove_dir_all(&trashed).unwrap();
+    assert!(!trashed.exists());
+    assert!(!root.exists());
 }
