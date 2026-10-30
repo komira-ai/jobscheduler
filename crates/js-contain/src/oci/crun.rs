@@ -38,6 +38,18 @@ use runc::{Command, Io, Runc, Spawner};
 /// line it starts, so a caller removes what no container runtime should be handed.
 pub type EnvScrub = fn(&mut std::process::Command);
 
+/// The only `crun` a root daemon runs. AppArmor attaches the distribution's profile (which
+/// grants the job user a user namespace) to this path, and a copy of the binary elsewhere
+/// is unconfined and is refused the namespace.
+pub const DISTRO_CRUN: &str = "/usr/bin/crun";
+
+/// Whether the backend may run `runtime`: any program unless the backend drops to a job
+/// user (`drops`, a root daemon), and then only [`DISTRO_CRUN`] by that path, unless
+/// `stand_in` says the runtime is a test double.
+pub(crate) fn runtime_allowed(runtime: &Path, drops: bool, stand_in: bool) -> bool {
+    !drops || stand_in || runtime == Path::new(DISTRO_CRUN)
+}
+
 /// The default [`EnvScrub`]: nothing is removed.
 pub fn no_scrub(_: &mut std::process::Command) {}
 
@@ -45,9 +57,10 @@ pub fn no_scrub(_: &mut std::process::Command) {}
 /// program runs as the dedicated job user, with no supplementary group, from `/`, with
 /// an environment of `PATH` and `HOME` only (so no `XDG_RUNTIME_DIR` and nothing of the
 /// daemon's credentials is inherited). The drop is part of the backend: it does not
-/// depend on the caller's [`EnvScrub`].
+/// depend on the caller's [`EnvScrub`]. The lease's keeper is started with the same drop
+/// ([`crate::keeper::Keeper::watch_as`]).
 #[derive(Clone, Debug)]
-pub(crate) struct JobDrop {
+pub struct JobDrop {
     uid: u32,
     gid: u32,
     /// The `PATH` the program gets: where it finds `newuidmap` and `newgidmap`.
@@ -57,7 +70,8 @@ pub(crate) struct JobDrop {
 impl JobDrop {
     /// The drop for job user `(uid, gid)`, or `None` when this process is not root (a
     /// user that is not root cannot change its ids, and runs `crun` as itself).
-    pub(crate) fn new(
+    #[must_use]
+    pub fn new(
         job: Option<(u32, u32)>,
         path: Option<&std::ffi::OsStr>,
         daemon_uid: u32,
@@ -72,7 +86,7 @@ impl JobDrop {
 
     /// Makes `command` start as the job user: `setgroups([])`, then the gid, then the uid
     /// (the order in which each call is still allowed), all three real, effective and saved.
-    fn apply(&self, command: &mut std::process::Command) {
+    pub(crate) fn apply(&self, command: &mut std::process::Command) {
         use std::os::unix::process::CommandExt as _;
         command
             .env_clear()
@@ -264,6 +278,11 @@ impl Crun {
             scrub,
             job,
         }
+    }
+
+    /// The drop to the job user every command of this driver gets, if any.
+    pub(crate) fn job(&self) -> Option<&JobDrop> {
+        self.job.as_ref()
     }
 
     /// How every command of this driver is prepared.
@@ -638,6 +657,23 @@ mod tests {
             "the caller's scrub runs first and env_clear leaves exactly the allowlist"
         );
         assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+    }
+
+    /// Catches a root daemon allowed a runtime that is a copy (AppArmor refuses the copy its
+    /// user namespace): a daemon that drops runs only the distribution's `crun` by its path
+    /// (a relative name or a copy elsewhere is another path), a test double is
+    /// allowed only when said so, and a daemon that does not drop runs whatever it is given.
+    #[test]
+    fn a_dropping_daemon_is_allowed_the_distribution_crun_and_nothing_else() {
+        let allowed =
+            |path: &str, drops, stand_in| runtime_allowed(Path::new(path), drops, stand_in);
+        assert!(allowed("/usr/bin/crun", true, false));
+        assert!(!allowed("/opt/crun/crun", true, false));
+        assert!(!allowed("/usr/local/bin/crun", true, false));
+        assert!(!allowed("crun", true, false));
+        assert!(allowed("/opt/crun/crun", true, true));
+        assert!(allowed("/opt/crun/crun", false, false));
+        assert_eq!(DISTRO_CRUN, "/usr/bin/crun");
     }
 
     /// Catches the drop's order and its stop at the first failure, with the real calls as an

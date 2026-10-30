@@ -38,6 +38,7 @@ fn config(dir: &Path, ok: bool) -> OciConfig {
         helper_modes: helper::HelperModes::default(),
         scrub_env: crun::no_scrub,
         job_user: None,
+        stand_in_runtime: false,
         logs: LogLimits::default(),
     }
 }
@@ -821,4 +822,26 @@ fn a_lease_names_its_directories_and_who_owns_them() {
     );
     assert_eq!(oci.job_ids(), (uid, gid));
     assert_eq!(oci.container_ids(), (101_000, 201_000));
+}
+
+/// Catches a root daemon started on a copy of `crun` (AppArmor attaches the distribution's
+/// profile to `/usr/bin/crun` alone, and refuses a copy the user namespace): the start-up
+/// check names the path, accepts the distribution's, and accepts anything for a daemon that
+/// does not drop or a stand-in the caller declares.
+#[test]
+fn a_root_daemon_is_refused_a_runtime_that_is_not_the_distribution_crun() {
+    let copy = Path::new("/srv/crun");
+    let refused = check_runtime(copy, true, false).expect_err("a copy");
+    assert!(
+        matches!(&refused, OciError::RuntimePath(p) if p == copy),
+        "{refused:?}"
+    );
+    assert!(
+        refused
+            .to_string()
+            .contains("/srv/crun is not /usr/bin/crun")
+    );
+    check_runtime(Path::new(crun::DISTRO_CRUN), true, false).expect("the distribution's");
+    check_runtime(copy, false, false).expect("no drop, no rule");
+    check_runtime(copy, true, true).expect("a declared stand-in");
 }

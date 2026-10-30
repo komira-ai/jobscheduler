@@ -46,6 +46,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::cgroup::{JOB_OWNED_FILES, ROOT_OWNED_FILES};
 use crate::numa::CpuSet;
 
 /// What a driver lets its leases use of the node, where that is less than the node has.
@@ -169,6 +170,9 @@ pub trait CgroupFs {
     fn mkdir(&self, cgroup: &str) -> io::Result<()>;
     /// Whether this process may make cgroups in `cgroup`.
     fn writable(&self, cgroup: &str) -> io::Result<()>;
+    /// Makes `file` of `cgroup` (the directory itself for an empty `file`) belong to
+    /// `uid` and `gid`, without following a link.
+    fn give(&self, cgroup: &str, file: &str, uid: u32, gid: u32) -> io::Result<()>;
     /// The path of `file` in `cgroup`, for messages.
     fn path(&self, cgroup: &str, file: &str) -> PathBuf;
     /// Waits `how_long` (the tests record it instead).
@@ -194,6 +198,10 @@ impl CgroupFs for Mount<'_> {
     fn writable(&self, cgroup: &str) -> io::Result<()> {
         rustix::fs::access(self.path(cgroup, ""), rustix::fs::Access::WRITE_OK)
             .map_err(io::Error::from)
+    }
+
+    fn give(&self, cgroup: &str, file: &str, uid: u32, gid: u32) -> io::Result<()> {
+        std::os::unix::fs::lchown(self.path(cgroup, file), Some(uid), Some(gid))
     }
 
     fn pause(&self, how_long: Duration) {
@@ -231,6 +239,80 @@ pub fn delegate(
         supervisor_memory_min,
         actions_memory_max,
     )
+}
+
+/// [`delegate`] for a root daemon whose `crun` runs as the job user `job` (`(uid, gid)`):
+/// the cgroups are made as before, and then handed to that user ([`give_delegation`]).
+///
+/// # Errors
+/// As [`delegate`], and a file that could not be given.
+pub fn delegate_for_job(
+    mount: &Path,
+    proc_self_cgroup: &str,
+    supervisor_memory_min: u64,
+    actions_memory_max: Option<u64>,
+    job: (u32, u32),
+) -> Result<Delegation, DelegateError> {
+    delegate_for_job_in(
+        &Mount(mount),
+        proc_self_cgroup,
+        supervisor_memory_min,
+        actions_memory_max,
+        job,
+    )
+}
+
+/// [`delegate_for_job`] over any [`CgroupFs`].
+///
+/// # Errors
+/// As [`delegate_for_job`].
+pub fn delegate_for_job_in(
+    fs: &dyn CgroupFs,
+    proc_self_cgroup: &str,
+    supervisor_memory_min: u64,
+    actions_memory_max: Option<u64>,
+    job: (u32, u32),
+) -> Result<Delegation, DelegateError> {
+    let delegation = delegate_in(
+        fs,
+        proc_self_cgroup,
+        supervisor_memory_min,
+        actions_memory_max,
+    )?;
+    give_delegation(fs, &delegation, job)?;
+    Ok(delegation)
+}
+
+/// Hands the delegated cgroups to the job user `job`, because a unit's `Delegate=` gives
+/// them to the unit's `User=`, which is root for a root daemon, and `crun` runs as the job
+/// user. In the daemon's own cgroup only `cgroup.procs` is given (the kernel lets `crun`
+/// move its first process from the daemon's cgroup into the container's only with write
+/// access to the `cgroup.procs` of their nearest common ancestor); the `actions` cgroup,
+/// where `crun` makes the containers' cgroups, is given with [`JOB_OWNED_FILES`]. The
+/// supervisor leaf stays the daemon's.
+///
+/// # Errors
+/// A file could not be given.
+pub fn give_delegation(
+    fs: &dyn CgroupFs,
+    delegation: &Delegation,
+    job: (u32, u32),
+) -> Result<(), DelegateError> {
+    give_files(fs, &delegation.root, &ROOT_OWNED_FILES, job)?;
+    give_files(fs, &delegation.actions, &JOB_OWNED_FILES, job)
+}
+
+/// Makes each of `files` of `cgroup` (the directory itself for `""`) the job user's.
+pub(crate) fn give_files(
+    fs: &dyn CgroupFs,
+    cgroup: &str,
+    files: &[&str],
+    (uid, gid): (u32, u32),
+) -> Result<(), DelegateError> {
+    files.iter().try_for_each(|file| {
+        fs.give(cgroup, file, uid, gid)
+            .map_err(io_err(fs, "give to the job user", cgroup, file))
+    })
 }
 
 /// Checks the `actions` cgroup someone else set up (a cgroup parent the caller names): cgroup v2 at

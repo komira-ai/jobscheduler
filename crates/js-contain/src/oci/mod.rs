@@ -70,7 +70,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oci_spec::runtime::{LinuxIdMapping, LinuxIdMappingBuilder};
 
-pub use crun::{EnvScrub, RunEnd};
+pub use crun::{DISTRO_CRUN, EnvScrub, JobDrop, RunEnd};
 pub use lease::{LeaseDirs, Owner, RESOLV_CONF, Reports};
 pub use logs::{LogLimits, LogTail, StreamTail, stderr_path, stdout_path};
 
@@ -123,6 +123,11 @@ pub struct OciConfig {
     /// (`id_tool_path`) and `HOME=/` only. By default `None`: the daemon's own user, which
     /// must not be root.
     pub job_user: Option<(u32, u32)>,
+    /// That `runtime` is a test double and may be any path. Off by default: a root daemon
+    /// (one that drops to `job_user`) runs only [`DISTRO_CRUN`], by that path, and
+    /// [`Oci::new`] refuses another ([`OciError::RuntimePath`]). A non-root daemon runs
+    /// whichever `runtime` it is given.
+    pub stand_in_runtime: bool,
     /// How much of a job's output is kept (`logs`): by default 1 MiB of each stream in a
     /// file of the lease directory and the last 64 KiB of it in memory.
     pub logs: LogLimits,
@@ -140,6 +145,7 @@ impl Default for OciConfig {
             helper_modes: helper::HelperModes::default(),
             scrub_env: crun::no_scrub,
             job_user: None,
+            stand_in_runtime: false,
             logs: LogLimits::default(),
         }
     }
@@ -235,6 +241,13 @@ pub enum OciError {
         /// Why not.
         why: String,
     },
+    /// A root daemon was given a runtime other than the distribution's `crun`.
+    #[error(
+        "{0} is not {DISTRO_CRUN}: a root daemon runs the distribution's crun by that path, \
+         because AppArmor attaches its profile (which lets the job user create a user \
+         namespace) to the path, and a copy elsewhere is refused the namespace"
+    )]
+    RuntimePath(PathBuf),
     /// A directory or file of the backend's own state could not be prepared.
     #[error("{0}")]
     Prepare(String),
@@ -342,6 +355,8 @@ impl Oci {
     ) -> Result<Arc<Self>, OciError> {
         let daemon_uid = rustix::process::getuid().as_raw();
         let ids = run_ids(config, daemon_uid, rustix::process::getgid().as_raw())?;
+        let job = crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid);
+        check_runtime(&config.runtime, job.is_some(), config.stand_in_runtime)?;
         for program in [&config.runtime, &config.daemon] {
             if !program.is_file() {
                 return Err(OciError::NoRuntime(program.clone()));
@@ -366,11 +381,7 @@ impl Oci {
             at(scratch, helper::install_daemon(scratch, &config.daemon)).map_err(prepare)?;
         let init = at(scratch, init::install(scratch)).map_err(prepare)?;
         let oci = Arc::new(Self {
-            crun: crun::Crun::new(
-                config.runtime.clone(),
-                config.scrub_env,
-                crun::JobDrop::new(config.job_user, config.id_tool_path.as_deref(), daemon_uid),
-            ),
+            crun: crun::Crun::new(config.runtime.clone(), config.scrub_env, job),
             daemon,
             modes: config.helper_modes.clone(),
             init_dest: config.init_dest.clone(),
@@ -388,6 +399,14 @@ impl Oci {
         let leftovers = oci.images.sweep(&oci);
         leftovers.map_err(OciError::Prepare)?;
         Ok(oci)
+    }
+
+    /// The drop to the job user that every program this backend starts gets, for a root
+    /// daemon; the lease's keeper is started with it too
+    /// ([`Keeper::watch_as`](crate::keeper::Keeper::watch_as)).
+    #[must_use]
+    pub fn job_drop(&self) -> Option<&JobDrop> {
+        self.crun.job()
     }
 
     /// The source the image store fetches with.
@@ -505,6 +524,14 @@ impl Oci {
         self.run_jobs("rm", Mapping::Setup, &jobs).await?;
         at(dir, tokio::fs::remove_dir(dir).await)
     }
+}
+
+/// Refuses `runtime` for a daemon that drops to a job user (`drops`) unless it is
+/// [`DISTRO_CRUN`] by that path, or the caller says it is a test double (`stand_in`).
+fn check_runtime(runtime: &Path, drops: bool, stand_in: bool) -> Result<(), OciError> {
+    crun::runtime_allowed(runtime, drops, stand_in)
+        .then_some(())
+        .ok_or_else(|| OciError::RuntimePath(runtime.to_owned()))
 }
 
 fn prepare(error: JobError) -> OciError {

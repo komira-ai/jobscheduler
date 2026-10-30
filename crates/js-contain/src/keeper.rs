@@ -28,6 +28,8 @@ use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+use crate::oci::JobDrop;
+
 /// How many times, a second apart, the keeper writes `cgroup.kill`.
 pub const KILL_TRIES: u32 = 30;
 
@@ -60,12 +62,24 @@ impl Keeper {
     /// The keeper could not be started, or its program did not answer as a keeper (the
     /// process is killed and reaped).
     pub fn watch(launcher: &impl KeeperLauncher, kill: &Path) -> io::Result<Self> {
+        Self::watch_as(launcher, kill, None)
+    }
+
+    /// [`Keeper::watch`] for a root daemon: with `job` (from
+    /// [`Oci::job_drop`](crate::Oci::job_drop)) the keeper runs as the job user, dropped as
+    /// every `crun` is (`setgroups([])`, the gid, the uid, from `/`, with an environment of
+    /// `PATH` and `HOME=/` only). It then needs write access to the lease cgroup's
+    /// `cgroup.kill`: [`LeaseCgroup::give`](crate::cgroup::LeaseCgroup::give) hands it over.
+    ///
+    /// # Errors
+    /// As [`Keeper::watch`], and the drop failing in the child.
+    pub fn watch_as(
+        launcher: &impl KeeperLauncher,
+        kill: &Path,
+        job: Option<&JobDrop>,
+    ) -> io::Result<Self> {
         let mut command = launcher.command(kill, KILL_TRIES);
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group(0);
+        prepare(&mut command, job);
         let child = command.spawn().map_err(cannot_start)?;
         // Dropped on an error below, the keeper is killed and reaped.
         let mut this = Self { child };
@@ -88,6 +102,18 @@ impl Keeper {
     pub fn orphan(&mut self) {
         drop(self.child.stdin.take());
     }
+}
+
+/// Sets up the keeper's command line after the launcher has: the drop to the job user
+/// (which clears the environment, so it comes before nothing that sets any), the pipes and
+/// the process group.
+fn prepare(command: &mut Command, job: Option<&JobDrop>) {
+    job.into_iter().for_each(|job| job.apply(command));
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
 }
 
 /// `e`, saying that the lease's keeper could not be started.
@@ -170,6 +196,66 @@ mod tests {
             .child
             .wait()
             .expect("the keeper ends once its pipe closes");
+    }
+
+    /// Catches a keeper started without the job-user drop, or with the launcher's
+    /// environment kept: with a drop the command line has the drop's working directory and an
+    /// environment of `PATH` and `HOME=/` alone (the launcher's `TOKEN` is gone), and without
+    /// one the launcher's command is left as it made it.
+    #[test]
+    fn the_keeper_command_gets_the_job_drops_environment_only_when_there_is_a_drop() {
+        let drop = JobDrop::new(Some((900, 901)), Some("/id/tools".as_ref()), 0).expect("drop");
+        let made = || {
+            let mut command = Command::new("true");
+            command.env("TOKEN", "x");
+            command
+        };
+        let mut dropped = made();
+        prepare(&mut dropped, Some(&drop));
+        let envs: Vec<_> = dropped.get_envs().collect();
+        assert_eq!(
+            envs,
+            [
+                (
+                    std::ffi::OsStr::new("HOME"),
+                    Some(std::ffi::OsStr::new("/"))
+                ),
+                (
+                    std::ffi::OsStr::new("PATH"),
+                    Some(std::ffi::OsStr::new("/id/tools"))
+                ),
+            ]
+        );
+        assert_eq!(dropped.get_current_dir(), Some(Path::new("/")));
+        let mut plain = made();
+        prepare(&mut plain, None);
+        let envs: Vec<_> = plain.get_envs().collect();
+        assert_eq!(
+            envs,
+            [(
+                std::ffi::OsStr::new("TOKEN"),
+                Some(std::ffi::OsStr::new("x"))
+            )]
+        );
+        assert_eq!(plain.get_current_dir(), None);
+    }
+
+    /// Catches a drop that is built into the keeper's command line but never run in the
+    /// child: the drop's `setgroups` needs privilege, so as an ordinary user the keeper fails
+    /// to start with the kernel's refusal, and as root it starts (the same expression says
+    /// which, from whether this process is root).
+    #[test]
+    fn a_keeper_started_with_the_drop_runs_it_in_the_child() {
+        let is_root = rustix::process::getuid().is_root();
+        let (uid, gid) = (
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw(),
+        );
+        let drop = JobDrop::new(Some((uid, gid)), Some("/usr/bin:/bin".as_ref()), 0).expect("drop");
+        let started = Keeper::watch_as(&Stand::cat(), Path::new("/k"), Some(&drop));
+        assert_eq!(started.is_ok(), is_root, "{started:?}");
+        let plain = Keeper::watch_as(&Stand::cat(), Path::new("/k"), None);
+        assert!(plain.is_ok(), "without a drop nothing is refused");
     }
 
     /// Catches a keeper that cannot be started taken for one that runs, and an error
