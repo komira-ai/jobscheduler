@@ -189,6 +189,7 @@ mod host;
 pub mod integrity;
 mod jobs;
 pub mod lifecycle;
+pub mod quota;
 mod readiness;
 mod run;
 mod session;
@@ -420,6 +421,15 @@ fn execute(
     local
         .check_filesystems(services.files)
         .map_err(Failure::Usage)?;
+    // What the scratch root's file system could bound a run's disk with. Logged only: no
+    // run uses a quota yet and nothing is advertised.
+    if let Some(root) = &local.scratch {
+        let _ = writeln!(
+            err,
+            "js-agent: scratch quota: {}",
+            quota::probe(root.path())
+        );
+    }
     // The agent must see what its jobs do: a container job runs where the agent's own
     // `/proc` and mounts show it.
     if local.container.is_some() {
