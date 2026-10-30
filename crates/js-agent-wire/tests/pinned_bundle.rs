@@ -199,7 +199,7 @@ fn a_native_job_with_a_bundle_is_accepted() {
     };
     let checked = reply.validate();
     assert!(checked.refused.is_empty());
-    assert_eq!(checked.commands, vec![start]);
+    assert_eq!(checked.commands, vec![&start]);
 }
 
 /// A native job that has an image as well as a bundle is refused `invalid-bundle`, rule
