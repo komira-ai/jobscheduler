@@ -13,7 +13,9 @@
 //!    gives it to the user. It makes the job's three standard streams as files in the
 //!    lifecycle's scratch directory, which only the agent can enter: an empty one for
 //!    standard input and one each for standard output and error.
-//! 3. `run` starts `sandbox-exec -D ... -p <profile> <program> <args>` as the user, with
+//! 3. `run` starts `sandbox-exec -D ... -p <profile> /bin/sh -c <limits> js-native <file
+//!    blocks> <processes> <program> <args>` as the user: the shell sets the run's limits
+//!    inside the profile and becomes the program. The helper starts it with
 //!    the empty file as standard input, the log files as standard output and error, and
 //!    `exec/` as the working directory. The profile is built by
 //!    [`js_mac_pool::seatbelt`] from a policy that grants writes to the home and nothing
@@ -190,7 +192,7 @@ impl NativeRuntime {
             .into_iter()
             .map(|dir| make_dir(dir, uid).map_err(|why| fail(&dir.display(), &why)))
             .collect::<Result<Vec<File>, RuntimeError>>()?;
-        let argv = limited(&self.config, profile_argv(&self.config, native, &home)?);
+        let argv = profile_argv(&self.config, native, &home)?;
         let mut env: Vec<(String, String)> = native
             .env
             .iter()
@@ -370,7 +372,7 @@ impl Runtime for NativeRuntime {
             Err(why) => return vec![format!("native: cannot read the lease journal: {why}")],
         };
         let mut lines = Vec::new();
-        let mut left = Vec::new();
+        let mut retired = Vec::new();
         for lease in live {
             let killed = self.helper.kill_uid(&lease);
             let ended = self.ended(killed, "kill-uid").and_then(|()| {
@@ -378,16 +380,18 @@ impl Runtime for NativeRuntime {
                 self.ended(deleted, "user-delete")
             });
             match ended {
-                Ok(()) => lines.push(format!(
-                    "ended the lease user {lease} an earlier process left"
-                )),
+                Ok(()) => {
+                    lines.push(format!(
+                        "ended the lease user {lease} an earlier process left"
+                    ));
+                    retired.push(lease);
+                }
                 Err(why) => {
                     lines.push(format!("cannot end the lease user {lease}: {}", why.0));
-                    left.push(lease);
                 }
             }
         }
-        if let Err(why) = self.journal.rewrite(&left) {
+        if let Err(why) = self.journal.retire(&retired) {
             lines.push(format!("native: cannot rewrite the lease journal: {why}"));
         }
         lines
@@ -441,26 +445,24 @@ impl Runtime for NativeRuntime {
     }
 }
 
-/// The command of `argv` under the run's limits: a shell that sets the largest file and
-/// the most processes the user may have (both soft and hard, so the run cannot raise them)
-/// and then becomes `argv`. `ulimit -f` counts blocks of 1024 bytes, or of 512 when the
-/// shell is in POSIX mode, so the limit is at most `max_file_bytes`.
-fn limited(config: &NativeConfig, argv: Vec<String>) -> Vec<String> {
-    let blocks = (config.max_file_bytes / 1024).max(1);
-    let mut all = vec![
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"".to_owned(),
-        "js-native".to_owned(),
-        blocks.to_string(),
-        config.max_processes.to_string(),
-    ];
-    all.extend(argv);
-    all
-}
+/// The shell that sets a run's limits, and the script it runs.
+const LIMITER: &str = "/bin/sh";
+
+/// Sets the largest file and the most processes the user may have (both soft and hard, so
+/// the run cannot raise them) and then becomes the program. `ulimit -f` counts blocks of
+/// 1024 bytes, or of 512 when the shell is in POSIX mode, so the limit is at most
+/// `max_file_bytes`.
+const LIMIT_SCRIPT: &str = "ulimit -f \"$1\" && ulimit -u \"$2\" && shift 2 && exec \"$@\"";
 
 /// The `sandbox-exec` command line of `native` under the policy of `config`, run as a user
 /// whose home is `home`.
+///
+/// The limits are set by a shell that `sandbox-exec` starts, so it runs inside the profile
+/// (and `sandbox-exec` is the first program of the command): a shell in front of
+/// `sandbox-exec` would run as the lease user, outside the sandbox, with the job's
+/// environment, and `SHELLOPTS`, `PS4` or an imported function would run a command of the
+/// job's choosing there. The environment names that steer a shell are reserved as well
+/// (`js_types::env::SHELL_ENV_NAMES`), so the job cannot change the limits either.
 fn profile_argv(
     config: &NativeConfig,
     native: &NativeSpec,
@@ -487,8 +489,18 @@ fn profile_argv(
     let profile = Profile::for_policy(&policy).map_err(|why| fail(&"the profile", &why))?;
     let program =
         AbsPath::new(Path::new(&native.program)).map_err(|why| fail(&native.program, &why))?;
-    let args: Vec<OsString> = native.args.iter().map(OsString::from).collect();
-    let argv = profile.argv(&program, &args);
+    let limiter = AbsPath::new(Path::new(LIMITER)).map_err(|why| fail(&LIMITER, &why))?;
+    let blocks = (config.max_file_bytes / 1024).max(1);
+    let mut args: Vec<OsString> = vec![
+        "-c".into(),
+        LIMIT_SCRIPT.into(),
+        "js-native".into(),
+        blocks.to_string().into(),
+        config.max_processes.to_string().into(),
+        program.as_ref().into(),
+    ];
+    args.extend(native.args.iter().map(OsString::from));
+    let argv = profile.argv(&limiter, &args);
     Ok(argv
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())

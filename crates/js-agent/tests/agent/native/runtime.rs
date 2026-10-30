@@ -2,6 +2,7 @@
 //! disk, the command line it builds, how an end is told, the logs, the kill and the removal,
 //! and every way a start fails.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
@@ -15,7 +16,7 @@ use js_mac_session::client::Client;
 use js_mac_session::helper::RESET_ALREADY;
 
 use super::fake_helper::End;
-use super::{Rig, TERM, config, native, parse};
+use super::{LIMITER, Rig, TERM, config, native, parse};
 
 fn handle(lease: &str) -> RunHandle {
     RunHandle(lease.to_owned())
@@ -477,6 +478,34 @@ fn a_native_start_is_checked_against_the_tool_roots_and_what_is_staged() {
         let refused = rig.rt.check_native(&body).unwrap_err();
         assert_eq!(refused.code, refusal::NATIVE_UNSUPPORTED);
     }
+}
+
+/// Asserts that the first program of the command is `sandbox-exec` and that the limiting
+/// shell comes after the profile: a shell that ran before the profile would run with the
+/// job's environment (`SHELLOPTS` with a `PS4` command, an imported `ulimit` function) as
+/// the lease user, outside the sandbox. It catches a command that starts any other program
+/// first.
+#[test]
+fn nothing_but_sandbox_exec_runs_before_the_profile_applies() {
+    let mut rig = Rig::new("first-program");
+    let mut body = native("/usr/bin/id", &["-u"]);
+    body.env = BTreeMap::from([
+        ("SHELLOPTS".to_owned(), "xtrace".to_owned()),
+        (
+            "PS4".to_owned(),
+            "$(touch /private/tmp/js-escape)".to_owned(),
+        ),
+    ]);
+    let spec = rig.spec("r1", body);
+    rig.rt.create_and_start(&spec).unwrap();
+    let argv = rig.fake.run_of("7.0").argv;
+    assert_eq!(argv[0], "/usr/bin/sandbox-exec");
+    let shells = argv.iter().filter(|word| *word == LIMITER).count();
+    assert_eq!(shells, 1, "one limiting shell: {argv:?}");
+    let profile_at = argv.iter().position(|word| word == "-p").unwrap();
+    let shell_at = argv.iter().position(|word| word == LIMITER).unwrap();
+    assert!(profile_at < shell_at, "the profile comes before the shell");
+    assert_eq!(parse(&argv).tail, ["/usr/bin/id", "-u"]);
 }
 
 /// Asserts that the limits of the configuration reach the shell that starts the run: the
