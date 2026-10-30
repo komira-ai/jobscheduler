@@ -35,6 +35,10 @@ impl FileReader for Shared {
     fn device(&self, path: &Path) -> Result<u64, String> {
         self.0.borrow().device(path)
     }
+
+    fn is_tmpfs(&self, path: &Path) -> Result<bool, String> {
+        self.0.borrow().is_tmpfs(path)
+    }
 }
 
 /// A clock the test sets.
