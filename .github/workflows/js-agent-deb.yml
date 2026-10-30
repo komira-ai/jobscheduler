@@ -9,9 +9,10 @@
 # static init for the musl target), the toolchain or the lock file builds and checks it as
 # version 0.0.0 and attests nothing. The build is the one the release makes of the agent
 # (`cargo build --locked --release --target x86_64-unknown-linux-musl -p js-agent --bin
-# js-agent`), and a step checks that the binary is static, so a change that breaks the musl
-# release binary or the deb is red on the pull request and not on the release push. A manual
-# run on main with a version builds and checks the deb of that version,
+# js-agent`), and `cargo xtask pkg check-deb` refuses a deb whose binary is not a static x86-64
+# executable, so a change that breaks the musl release binary or the deb is red on the pull
+# request and not on the release push. A manual run on main with a version builds and checks
+# the deb of that version,
 # then attests it and verifies the attestation as a host would (`gh attestation verify`). Only
 # the `attest` job holds id-token and attestations write, and it runs no repository code.
 #
@@ -80,8 +81,6 @@ jobs:
         run: cargo xtask release stamp --to "$VERSION"
       - name: Build js-agent
         run: cargo build --locked --release --target "$TARGET" -p js-agent --bin js-agent
-      - name: The binary is static
-        run: file "target/$TARGET/release/js-agent" | grep -E 'static-pie linked|statically linked'
       - name: Fetch nfpm (pinned version, checked by SHA-256)
         run: cargo xtask fetch --url "https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" --sha256 "$NFPM_SHA256_X86_64_LINUX" --out "$RUNNER_TEMP/tools/nfpm" --extract tar.gz --member nfpm
       - name: Build the deb

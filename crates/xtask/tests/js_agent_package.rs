@@ -657,15 +657,17 @@ fn the_attest_and_verify_jobs_run_only_for_a_manual_run_on_main() {
     assert!(build.contains("permissions:\n      contents: read\n    steps:"));
     assert!(build.contains("cargo xtask pkg check-deb"));
     assert!(build.contains("nfpm package"));
-    // The musl release binary is built and checked static on a pull request too.
+    // The musl release binary is built on a pull request too, and the deb checker is given it,
+    // so a binary that is not static is refused there.
     assert!(build.contains("-p js-agent --bin js-agent"));
-    assert!(build.contains("grep -E 'static-pie linked|statically linked'"));
+    assert!(build.contains("--binary \"target/$TARGET/release/js-agent\""));
     assert!(build.contains("--sha256 \"$NFPM_SHA256_X86_64_LINUX\""));
 }
 
 /// What starts the workflow: a pull request that touches what the package, its checker or the
-/// agent are made of (any crate, the manifests, the toolchain), and a manual run. Not `pull_request_target`, `workflow_run`, a push or a schedule,
-/// which would give code from outside the repository the workflow's scopes.
+/// agent are made of (any crate, the manifests, the toolchain), and a manual run. Not
+/// `pull_request_target`, `workflow_run`, a push or a schedule, which would give code from
+/// outside the repository the workflow's scopes.
 #[test]
 fn the_workflow_starts_only_on_these_pull_requests_and_by_hand() {
     let text = read(WORKFLOW);
