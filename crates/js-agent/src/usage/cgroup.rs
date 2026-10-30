@@ -1,5 +1,25 @@
-//! Readers for the text of cgroup version 2 files. Each returns `None` for text it does
-//! not fully understand; none guesses a number.
+//! Readers for the text of cgroup version 2 files, and the rule for which directories a
+//! lease's usage may be read from. Each reader returns `None` for text it does not fully
+//! understand; none guesses a number.
+
+use std::path::Path;
+
+/// How a lease's control group sits below the actions control group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// A container engine's own placement: any directory strictly below the actions group
+    /// (Podman's `libpod-<id>.scope` and its `container` child).
+    Engine,
+    /// The direct runner's placement: `<actions>/<lease>/ctr`, the container's group as a
+    /// child of its lease's group.
+    Crun,
+}
+
+/// The layout of `dir` below `actions`, or `None` when `dir` is not a lease's group.
+pub fn layout_of(dir: &Path, actions: &Path) -> Option<Layout> {
+    let _ = (dir, actions);
+    None
+}
 
 /// The value of the line `key value` in a flat-keyed file such as `cpu.stat`.
 ///

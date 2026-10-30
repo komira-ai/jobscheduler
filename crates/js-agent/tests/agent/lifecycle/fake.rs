@@ -59,6 +59,8 @@ struct State {
     marker: Option<PathBuf>,
     /// Whether the next create fails as a start that shows the host is not seen.
     blind: bool,
+    /// What `places_in_cgroup` answers.
+    places: bool,
     /// The log tail `log_tail` answers for the container of a run.
     tails: BTreeMap<String, LogTail>,
     /// The control group directory of the container of each run.
@@ -110,6 +112,12 @@ impl FakeRuntime {
     /// `list`) fail; `u32::MAX` for as long as the test wants.
     pub fn fail(&self, call: &'static str, times: u32) {
         self.state.borrow_mut().failing.insert(call, times);
+    }
+
+    /// Whether the runtime says it puts every container in a control group the agent can
+    /// read (`Runtime::places_in_cgroup`), as the direct runner does. Off by default.
+    pub fn promise_cgroups(&self, on: bool) {
+        self.state.borrow_mut().places = on;
     }
 
     /// How many times the scripted checks were told the host is idle (`CheckHook::idle`).
@@ -360,6 +368,10 @@ impl Runtime for FakeRuntime {
         }
         self.state.borrow_mut().containers.remove(&id.0);
         Ok(())
+    }
+
+    fn places_in_cgroup(&self) -> bool {
+        self.state.borrow().places
     }
 
     fn cgroup(&mut self, id: &RunHandle) -> Option<PathBuf> {
