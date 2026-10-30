@@ -10,8 +10,8 @@ use super::crun::{RunEnd, log_path};
 use super::image::{ImageCheckError, PinnedImage};
 use super::logs::{self, Capture, Launch};
 use super::words::{crun_words, init_words};
-use super::{JobError, Mapping, Oci, at, helper, init, spec};
-use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended};
+use super::{JobError, Mapping, Oci, at, helper, init, mounts, spec};
+use crate::container::{CONTAINER_OWNER, ContainerSpec, Dirs, Ended, own_nproc_hard_limit};
 use crate::running::Running;
 
 /// The files in which `crun` and the container's init say why a container did not run.
@@ -99,7 +99,10 @@ impl Oci {
             init: &self.init,
             init_dest: &self.init_dest,
         };
-        let bytes = spec::render(&spec::action_config(spec, &placement)?)?;
+        // A rootless daemon cannot give a job a process limit above its own hard one.
+        let mut job = spec.clone();
+        job.limits = spec.limits.within_nproc(own_nproc_hard_limit());
+        let bytes = spec::render(&spec::action_config(&job, &placement)?)?;
         let bundle = spec.dir.join("bundle");
         at(&bundle, tokio::fs::create_dir_all(&bundle).await)?;
         let path = bundle.join("config.json");
@@ -118,8 +121,7 @@ impl Oci {
     }
 
     /// One helper container runs this daemon's give mode ([`helper::HelperModes`]) over the directories
-    /// (the lease's `rw` directory, which holds `/tmp` and the other places the job
-    /// writes, among them).
+    /// (the lease's `rw` directory, which holds the job's home directory, among them).
     ///
     /// # Errors
     /// The helper could not be made or failed, in `crun`'s words.
@@ -188,6 +190,34 @@ impl Oci {
         Reports {
             log: log_path(&spec.dir),
             init: init::report_path(&spec.dir),
+        }
+    }
+
+    /// Reads back the mounts of the started container of `spec` and compares them with its
+    /// bundle ([`mounts::problems`]): the replacement for the engine's read-back after a
+    /// create. Blocking: it runs `crun state` and reads a file of `/proc`. The container
+    /// must be running; one that is not yet gives an error, and the caller may ask again.
+    ///
+    /// # Errors
+    /// `crun state` failed, the container's `mountinfo` or the bundle could not be read,
+    /// or a mount the bundle flags lacks the flag.
+    pub fn verify_mounts(&self, spec: &ContainerSpec) -> Result<(), String> {
+        Ok(self.read_back(spec)?)
+    }
+
+    /// [`Oci::verify_mounts`] with its errors typed.
+    fn read_back(&self, spec: &ContainerSpec) -> Result<(), JobError> {
+        let pid = self.crun.pid(&spec.dir, &spec.name)?;
+        let info = PathBuf::from(format!("/proc/{pid}/mountinfo"));
+        let mountinfo = at(&info, std::fs::read_to_string(&info))?;
+        let path = spec.dir.join("bundle/config.json");
+        let bytes = at(&path, std::fs::read(&path))?;
+        let config = serde_json::from_slice(&bytes).map_err(spec::SpecError::Json)?;
+        let found = mounts::problems(&config, &mountinfo);
+        if found.is_empty() {
+            Ok(())
+        } else {
+            Err(JobError::Mounts(found))
         }
     }
 

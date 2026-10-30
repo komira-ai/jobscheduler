@@ -315,6 +315,13 @@ pub struct Cli {
         allow_hyphen_values = true
     )]
     pub readiness_hook_args: Vec<String>,
+    /// A registry and namespace an image may be pulled from, `HOST[:PORT]/PREFIX` such as
+    /// `ghcr.io/komira-ai/`; repeatable. The prefix is whole path components, and a bare
+    /// host (every account on it) is refused at start. An image on no entry is never
+    /// pulled. The runtime that pulls with js-oci reads the list; the Docker and Podman
+    /// runtimes do not.
+    #[arg(long, value_name = "HOST/PREFIX")]
+    pub image_allow: Vec<String>,
     /// How many seconds a container gets to stop on its own before it is killed, whenever
     /// the agent stops one: a `Stop` or `Cancel` from the server, a job past its wall-time
     /// limit, the end of a drain. By default 10; at most 3600. Needs `--container-bin`.
