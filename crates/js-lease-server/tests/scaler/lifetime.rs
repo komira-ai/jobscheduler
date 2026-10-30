@@ -33,14 +33,14 @@ fn leased() -> Option<LeaseId> {
 }
 
 /// Asserts that a launch reaches the provider with `max_age` plus the ceiling plus the
-/// 30 minute margin, two hours here, and that a pool with no `max_age` launches with none.
+/// prepare timeout, `unknown_hold` and margin, 140 minutes here, and that a pool with no `max_age` launches with none.
 /// It catches a lifetime lost between the step and the provider's request.
 #[tokio::test]
 async fn a_launch_hands_the_provider_the_cloud_lifetime() {
     let bound = rig(Default::default(), bounded());
     bound.world().waiting = vec![request("r1")];
     bound.scaler.tick().await;
-    assert_eq!(bound.world().lifetimes, [Some(mins(120))]);
+    assert_eq!(bound.world().lifetimes, [Some(mins(140))]);
 
     let plain = rig(Default::default(), live());
     plain.world().waiting = vec![request("r1")];

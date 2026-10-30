@@ -911,8 +911,13 @@ impl Registry {
         if record.exclusive.awaits_ready() {
             return Err(RunRefusal::NotReady);
         }
-        // A host being scaled away takes no run, as one out of the serving phase takes none.
-        let takes_runs = (record.phase == Phase::Serving) & record.leaving.is_none();
+        // A host being scaled away takes no run, as one out of the serving phase takes none,
+        // with one exception: a retired host (`Registry::retire`, at its maximum age) still
+        // runs work for a lease booked on it, which the check above has just shown this is,
+        // so a retire cuts no lease. No new lease is booked on a marked host. A plainly
+        // drained host (set only on a quiet host) and a releasing one take nothing.
+        let leaving = [None, Some(marks::Leaving::Retiring)].contains(&record.leaving);
+        let takes_runs = (record.phase == Phase::Serving) & leaving;
         if !takes_runs {
             return Err(RunRefusal::NoCapacity);
         }

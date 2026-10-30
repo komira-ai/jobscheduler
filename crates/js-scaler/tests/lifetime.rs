@@ -14,8 +14,9 @@ use js_scaler::{
     Settings, State,
 };
 
-/// Live settings with a `max_age` of an hour, a lease ceiling of 30 minutes and the default
-/// margin of 30 minutes: a cloud lifetime of two hours.
+/// Live settings with a `max_age` of an hour, a lease ceiling of 30 minutes and the
+/// default prepare timeout (10), `unknown_hold` (30) and margin (10): 140 minutes of cloud
+/// lifetime.
 fn bounded() -> Settings {
     Settings {
         max_age: Some(minutes(60)),
@@ -203,7 +204,7 @@ fn a_retire_lost_in_a_crash_is_sent_again() {
 /// that is made up when a term is missing.
 #[test]
 fn a_launch_carries_the_lifetime_the_cloud_is_to_enforce() {
-    assert_eq!(bounded().lifetime(), Some(minutes(60 + 30 + 30)));
+    assert_eq!(bounded().lifetime(), Some(minutes(60 + 30 + 10 + 30 + 10)));
     let no_age = Settings {
         max_age: None,
         ..bounded()
@@ -218,11 +219,47 @@ fn a_launch_carries_the_lifetime_the_cloud_is_to_enforce() {
     let mut rig = Rig::new(bounded());
     rig.input.waiting = vec![request("r1")];
     let plan = acquires(&rig.tick(at(0))).remove(0);
-    assert_eq!(plan.lifetime, Some(minutes(120)));
+    assert_eq!(plan.lifetime, Some(minutes(140)));
 
     let mut plain = Rig::new(settings("gpu"));
     plain.input.waiting = vec![request("r1")];
     assert_eq!(acquires(&plain.tick(at(0)))[0].lifetime, None);
+}
+
+/// Asserts the lifetime term by term, to the second: each of `max_age`, the ceiling, the
+/// prepare timeout, `unknown_hold` and the margin adds exactly its own length. It catches a
+/// lifetime that leaves out the wait before a whole-node lease's wall time starts or the wait
+/// before a silent host is released, which would let the cloud stop a host that is still
+/// legitimately draining.
+#[test]
+fn every_wait_of_a_retire_is_in_the_lifetime() {
+    let base = bounded().lifetime().unwrap();
+    let more = Duration::from_secs(1);
+    let grown = [
+        Settings {
+            max_age: Some(minutes(60) + more),
+            ..bounded()
+        },
+        Settings {
+            max_lease_wall: Some(minutes(30) + more),
+            ..bounded()
+        },
+        Settings {
+            prepare_timeout: minutes(10) + more,
+            ..bounded()
+        },
+        Settings {
+            unknown_hold: minutes(30) + more,
+            ..bounded()
+        },
+        Settings {
+            lifetime_margin: minutes(10) + more,
+            ..bounded()
+        },
+    ];
+    for settings in grown {
+        assert_eq!(settings.lifetime(), Some(base + more));
+    }
 }
 
 /// Asserts that a launch the provider told to wait carries the lifetime when it is retried
@@ -246,7 +283,7 @@ fn a_retried_launch_carries_the_lifetime_after_a_restart() {
     let retry = acquires(&again.tick(at(601 * SECOND))).remove(0);
     assert_eq!(retry.acquire, plan.acquire);
     assert_eq!(retry.attempt, 1);
-    assert_eq!(retry.lifetime, Some(minutes(120)));
+    assert_eq!(retry.lifetime, Some(minutes(140)));
 }
 
 /// Asserts that `idle` drains a host only once it has lived `min_host_lifetime`, to the
@@ -315,14 +352,14 @@ fn dead_server_bill(settings: Settings, dead_hours: u64) -> (u64, Option<Duratio
 
 /// Asserts that a fake cloud which enforces the lifetime it was launched with bills a host at
 /// most lifetime times price when the server dies at ten minutes and stays dead for 30
-/// hours: two hours at 60 cents an hour is 120 cents, not 1800. The control is the same
+/// hours: 140 minutes at 60 cents an hour is 140 cents, not 1800. The control is the same
 /// pool with no `max_age`, which has no lifetime and is billed for all 30 hours, so the
 /// oracle can fail.
 #[test]
 fn a_cloud_that_enforces_the_lifetime_bills_a_dead_scaler_at_most_the_lifetime() {
     let (bill, lifetime) = dead_server_bill(bounded(), 30);
-    assert_eq!(lifetime, Some(minutes(120)));
-    assert_eq!(bill, 120);
+    assert_eq!(lifetime, Some(minutes(140)));
+    assert_eq!(bill, 140);
 
     let (bill, lifetime) = dead_server_bill(settings("gpu"), 30);
     assert_eq!(lifetime, None);
@@ -333,7 +370,7 @@ fn a_cloud_that_enforces_the_lifetime_bills_a_dead_scaler_at_most_the_lifetime()
 /// ceiling allows (`max_age` plus the 30 minute ceiling) is released at that instant and not
 /// before, and that the cloud's bill is within the lifetime it was launched with. It proves
 /// the retire cuts no work and that the lifetime has room for a drain: release at 90
-/// minutes against a lifetime of 120.
+/// minutes against a lifetime of 140.
 #[test]
 fn a_retired_host_is_released_when_its_last_lease_ends_within_the_lifetime() {
     let (mut rig, plan) = registered(bounded(), "i-1", 2 * SECOND);
@@ -359,10 +396,10 @@ fn a_retired_host_is_released_when_its_last_lease_ends_within_the_lifetime() {
         "released at {ended} before the work ended"
     );
     assert!(
-        ended <= 120 * MINUTE,
+        ended <= 140 * MINUTE,
         "released at {ended}, after the lifetime"
     );
-    assert!(cloud.bill(150 * MINUTE) <= 120);
+    assert!(cloud.bill(150 * MINUTE) <= 140);
 }
 
 /// One machine of the churn world.

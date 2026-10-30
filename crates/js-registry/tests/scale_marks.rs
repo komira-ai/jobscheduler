@@ -169,6 +169,66 @@ fn retire_marks_a_busy_host_and_cuts_nothing() {
     assert_eq!(fx.registry.retire(&host("ghost")), Err(Busy::UnknownHost));
 }
 
+/// Asserts that a retired host goes on taking runs for the lease booked on it: the client's
+/// next run under that lease is queued, the plain `drain` and a repeat `retire` of a retired
+/// host change nothing (the runs still queue, the host still shows draining), and `undrain`
+/// ends the retire. It catches a retire that cuts the lease in effect by refusing its runs,
+/// and a repeat call that downgrades the retire to a plain drain.
+#[test]
+fn a_retired_host_takes_runs_for_its_booked_lease() {
+    let fx = fixture(1);
+    fx.join("a", "t");
+    let a = host("a");
+    let mut provider = fx.registry.provider();
+    assert_eq!(started_on(&provider.start(spec(1))), Some("a"));
+    fx.registry.retire(&a).unwrap();
+    assert!(fx.registry.queue_run(&a, &lease(1), job("r1")).is_ok());
+    assert_eq!(fx.registry.drain(&a), Ok(()));
+    assert_eq!(fx.registry.retire(&a), Ok(()));
+    assert_eq!(mark(&fx, "a"), Some(HostMark::Draining));
+    assert!(fx.registry.queue_run(&a, &lease(1), job("r2")).is_ok());
+    assert_eq!(fx.registry.undrain(&a), Ok(()));
+    assert_eq!(mark(&fx, "a"), None);
+}
+
+/// Asserts what a retired host still refuses: a run under a lease that is not booked on it
+/// (`not-held`, whether the lease is another host's or none at all) and a new lease, which
+/// goes to the other host and is refused `no-capacity` when no other host is left. It
+/// catches a retire that lets any run or any lease through.
+#[test]
+fn a_retired_host_refuses_runs_for_other_leases_and_new_leases() {
+    let fx = fixture(2);
+    fx.join("a", "t");
+    fx.join("b", "t");
+    let (a, b) = (host("a"), host("b"));
+    let mut provider = fx.registry.provider();
+    fx.registry.retire(&a).unwrap();
+    assert_eq!(started_on(&provider.start(spec(1))), Some("b"));
+    let other = fx.registry.queue_run(&a, &lease(1), job("r1"));
+    assert_eq!(other.unwrap_err(), RunRefusal::NotHeld);
+    let none = fx.registry.queue_run(&a, &lease(9), job("r1"));
+    assert_eq!(none.unwrap_err(), RunRefusal::NotHeld);
+    fx.registry.retire(&b).unwrap();
+    assert_eq!(
+        provider.start(spec(2)),
+        StartAck::Refused(RefusalCode::NoCapacity)
+    );
+}
+
+/// Asserts that a releasing host takes no run even for a lease seated on it: the release
+/// has begun. It catches the retire exception reaching the releasing mark.
+#[test]
+fn a_releasing_host_takes_no_run() {
+    let fx = fixture(1);
+    fx.join("a", "t");
+    let a = host("a");
+    fx.registry.retire(&a).unwrap();
+    fx.registry.release_host(&a).unwrap();
+    fx.provider.seat(&a, lease(1), None).unwrap();
+    let refused = fx.registry.queue_run(&a, &lease(1), job("r1"));
+    assert_eq!(refused.unwrap_err(), RunRefusal::NoCapacity);
+}
+
 /// Asserts that a host that lists a run is busy with no lease at all: `drain` answers
 /// `Busy::Runs`, and works once a heartbeat lists none. It catches a quiet check that
 /// reads only the lease table: a run the host still holds after its lease ended would be

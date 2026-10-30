@@ -3,8 +3,9 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use js_registry::OsSessions;
+use js_registry::{OsSessions, WholeNodeConfig};
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
@@ -70,6 +71,10 @@ fn settings(plan: &ElasticPlan) -> Settings {
     settings.max_age = plan.max_age;
     settings.min_host_lifetime = plan.min_host_lifetime;
     settings.max_lease_wall = plan.max_lease_wall;
+    // The registry's prepare timeout is the one an elastic file pool gets (its whole-node
+    // settings are the dedicated defaults); a lease's wall time starts after it.
+    let whole = WholeNodeConfig::dedicated(plan.max_instances);
+    settings.prepare_timeout = Duration::from_millis(whole.prepare_timeout_ms);
     settings
 }
 

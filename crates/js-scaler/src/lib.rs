@@ -77,8 +77,8 @@
 //!   [`Record::launched_at`], which is stored, so a restart neither resets it nor stops it
 //!   (the cloud bills through the time the scaler was down). A host the registry does not
 //!   hear from is left to the silence rules above. Each launch also carries
-//!   [`Settings::lifetime`] in [`AcquirePlan::lifetime`]: `max_age` plus the ceiling plus a
-//!   margin, which a provider with a native limit enforces in the cloud.
+//!   [`Settings::lifetime`] in [`AcquirePlan::lifetime`]: `max_age` plus the ceiling plus
+//!   the prepare timeout, `unknown_hold` and a margin, which a provider with a native limit enforces in the cloud.
 //!
 //! * Machines the scaler does not release. An orphan (a listed machine no record knows, or
 //!   one a launch answer named and could not confirm released) is counted and reported and

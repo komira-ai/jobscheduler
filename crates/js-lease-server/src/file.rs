@@ -29,14 +29,17 @@ use crate::agent_tokens::AgentTokens;
 use crate::capacity::CapacitySource;
 use crate::config::{Token, parse_duration};
 use crate::error::StartupError;
-use crate::file_checks::{check_listeners, check_live, https_url, sha256};
+use crate::file_checks::{check_listeners, check_live};
 use crate::kinds::{BuildCtx, Built, ElasticBuilt, Floor, Kinds, SecretFiles};
-use crate::network::{OAuthClient, valid_tag};
+use crate::network::OAuthClient;
 
 mod joined;
+mod lifetime;
+mod pins;
 mod server;
 
 pub use joined::JoinedPool;
+use pins::{LIVE_NEEDS, read_agents, read_network};
 pub(crate) use server::Server;
 use server::{read_client_token, read_server};
 
@@ -704,47 +707,6 @@ fn read_pool(
     Ok(Read { name, pool })
 }
 
-/// Why a pool with accelerators must say how long a host may live.
-const ACCELERATORS_NEED: &str = "required of a pool with accelerators: an idle host costs money by the hour, so the file names how long it may live";
-
-/// The `max_age` and `min_host_lifetime` of an elastic pool, and the refusals that keep a
-/// pool with accelerators (a floor of GPUs or other accelerators) from running up a bill
-/// unbounded: it must set `idle`, `max_age` and `min_host_lifetime`, none with a default,
-/// and the server `max_lease_wall`, since `max_age` plus that ceiling is what a draining
-/// host takes to empty and what the cloud is told to enforce. `max_age` must exceed
-/// `boot_timeout` (a machine would be retired before it could say hello), and
-/// `min_host_lifetime` may not exceed `max_age`.
-fn lifetimes(
-    s: &Section,
-    keys: &ElasticKeys,
-    (accelerators, boot_timeout, ceiling): (bool, Duration, Option<Duration>),
-) -> Result<(Option<Duration>, Duration), StartupError> {
-    if accelerators {
-        if keys.idle.is_none() {
-            return Err(s.fail("idle", ACCELERATORS_NEED));
-        }
-        if keys.max_age.is_none() {
-            return Err(s.fail("max_age", ACCELERATORS_NEED));
-        }
-        if keys.min_host_lifetime.is_none() {
-            return Err(s.fail("min_host_lifetime", ACCELERATORS_NEED));
-        }
-        if ceiling.is_none() {
-            let reason = "required with a pool with accelerators: it bounds how long a lease, and so a draining host, can last";
-            return Err(StartupError::at("server.max_lease_wall", reason));
-        }
-    }
-    let age = keys.max_age.unwrap_or(Duration::MAX);
-    if age <= boot_timeout {
-        return Err(s.fail("max_age", "must be longer than boot_timeout"));
-    }
-    let minimum = keys.min_host_lifetime.unwrap_or(Duration::ZERO);
-    if minimum > age {
-        return Err(s.fail("min_host_lifetime", "must not be longer than max_age"));
-    }
-    Ok((keys.max_age, minimum))
-}
-
 /// What an elastic pool is made from.
 struct Elastic<'a> {
     s: &'a Section,
@@ -788,11 +750,14 @@ impl Elastic<'_> {
             return Err(s.fail("max_spend_per_day", reason));
         }
         let boot_timeout = keys.boot_timeout.unwrap_or(Duration::from_secs(900));
-        let (max_age, min_host_lifetime) = lifetimes(
-            s,
-            &keys,
-            (built.floor.gpus > 0, boot_timeout, max_lease_wall),
-        )?;
+        let given = lifetime::Given {
+            idle: keys.idle,
+            max_age: keys.max_age,
+            min_host_lifetime: keys.min_host_lifetime,
+        };
+        let accelerators = built.floor.gpus > 0;
+        let (max_age, min_host_lifetime) =
+            lifetime::check(s, &given, (accelerators, boot_timeout, max_lease_wall))?;
         let exec = match keys.exec.as_deref().unwrap_or("container") {
             "none" => None,
             other => match other.parse::<ExecMode>() {
@@ -881,51 +846,6 @@ impl Elastic<'_> {
     }
 }
 
-/// What a file with no pin for something a launched host downloads is told.
-const LIVE_NEEDS: &str = "required with launch = \"live\": the bootstrap downloads it";
-
-/// The agent pins by architecture: each key of `table` is an architecture (lower-case
-/// letters, digits and `_`) and holds a pin.
-fn read_agents(
-    table: toml::Table,
-    head: String,
-) -> Result<BTreeMap<String, Artifact>, StartupError> {
-    let mut agents = BTreeMap::new();
-    for (arch, value) in table {
-        let place = format!("{head}{arch}");
-        let letters = arch
-            .chars()
-            .all(|c| c.is_ascii_lowercase() | c.is_ascii_digit() | (c == '_'));
-        if !letters | arch.is_empty() {
-            return Err(StartupError::at(
-                place,
-                "an architecture is lower-case letters, digits and '_', such as x86_64 or aarch64",
-            ));
-        }
-        let toml::Value::Table(pin) = value else {
-            return Err(StartupError::at(place, "must be a table { url, sha256 }"));
-        };
-        let artifact = read_artifact(pin, format!("{head}{arch}."))?;
-        agents.insert(arch, artifact);
-    }
-    Ok(agents)
-}
-
-/// A file a launched host downloads: an `https://` `url` and its `sha256`.
-fn read_artifact(table: toml::Table, head: String) -> Result<Artifact, StartupError> {
-    let mut s = Section::open(table, head);
-    s.only(&["url", "sha256"])?;
-    let url = s.required_string("url")?;
-    if !https_url(&url) {
-        return Err(s.fail("url", "must be an https:// URL: the host refuses any other"));
-    }
-    let hash = s.required_string("sha256")?;
-    match sha256(&hash) {
-        Some(sha256) => Ok(Artifact { url, sha256 }),
-        None => Err(s.fail("sha256", "must be 64 lower-case hex digits")),
-    }
-}
-
 /// `value`, or the refusal that `key` of the pool is required.
 fn require(s: &Section, key: &str, value: Option<u64>) -> Result<u64, StartupError> {
     match value {
@@ -957,46 +877,6 @@ fn registry_pool(
             Err(err) => Err(s.fail("class", &err.to_string())),
         },
         _ => Ok(pool),
-    }
-}
-
-fn read_network(table: Option<toml::Table>, head: String) -> Result<NetworkPlan, StartupError> {
-    let Some(table) = table else {
-        return Ok(NetworkPlan::Default);
-    };
-    let mut s = Section::open(table, head);
-    let kind = s.required_string("kind")?;
-    match kind.as_str() {
-        "default" => {
-            s.only(&["kind"])?;
-            Ok(NetworkPlan::Default)
-        }
-        "tailscale" => {
-            s.only(&["kind", "oauth_client_file", "tag", "binary", "api_url"])?;
-            let file = s.required_path("oauth_client_file")?;
-            let tag = s.required_string("tag")?;
-            if !valid_tag(&tag) {
-                return Err(s.fail("tag", "must be \"tag:\" and letters, digits or '-'"));
-            }
-            let binary = match s.table("binary")? {
-                Some(table) => Some(read_artifact(table, format!("{}binary.", s.head))?),
-                None => None,
-            };
-            let api_url = s.string("api_url")?;
-            match OAuthClient::from_file(&file) {
-                Ok(client) => Ok(NetworkPlan::Tailscale {
-                    client,
-                    tag,
-                    binary,
-                    api_url,
-                }),
-                Err(err) => Err(s.fail("oauth_client_file", &err.to_string())),
-            }
-        }
-        _ => {
-            let reason = format!("{kind:?} is not a kind; known: default, tailscale");
-            Err(s.fail("kind", &reason))
-        }
     }
 }
 

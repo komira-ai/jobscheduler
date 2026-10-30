@@ -124,7 +124,10 @@
 //! provider's floor has one GPU or more) must set `idle`, `max_age` and `min_host_lifetime`,
 //! and the file `server.max_lease_wall`; `max_age` must be longer than `boot_timeout` and
 //! `min_host_lifetime` no longer than `max_age`. Each launch carries `max_age`
-//! plus `max_lease_wall` plus 30 minutes as the lifetime the cloud is to enforce. A `live` pool also needs `agent =
+//! plus `max_lease_wall` plus the prepare timeout, `unknown_hold` and 10 minutes as the
+//! lifetime the cloud is to enforce (a provider whose cloud cannot, Lambda, ignores it: there
+//! only `max_age` with a live server bounds the cost). `max_age` and `max_lease_wall` are at
+//! most 30 days. A `live` pool also needs `agent =
 //! { x86_64 = { url = "https://...", sha256 = "<64 hex digits>" } }`, the build of the agent
 //! the launched machine downloads and checks, one for each CPU architecture its offers
 //! have (an offer of another is never launched with a build of this one), and `server.advertise_url`; with a Tailscale

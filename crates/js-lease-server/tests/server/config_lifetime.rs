@@ -166,3 +166,33 @@ async fn a_lease_above_the_servers_ceiling_is_refused() {
     let granted = h.call("POST", "/v1/leases", Some(&body)).await;
     assert_eq!(granted.status, 201, "{}", granted.body);
 }
+
+/// Asserts the upper bound of 30 days on `max_age` and on `server.max_lease_wall`, to the
+/// second: exactly 30 days loads and one second more is refused naming the key. It catches
+/// a missing bound, which would let a typo make a host or a lease effectively unbounded.
+#[test]
+fn max_age_and_the_lease_ceiling_are_at_most_thirty_days() {
+    let scratch = Scratch::new("life_bounds");
+    let day30 = 30 * 24 * 3600;
+    let server = server_with_agents(&scratch);
+    for (secs, ok) in [(day30, true), (day30 + 1, false)] {
+        let pool = PoolText::elastic(&scratch).set("max_age", &quote(&format!("{secs}s")));
+        let loaded = load(&scratch, &file(&server, &[&pool]));
+        assert_eq!(loaded.is_ok(), ok, "max_age {secs}");
+        let head = server.replace("\"2h\"", &quote(&format!("{secs}s")));
+        let pool = PoolText::elastic(&scratch);
+        let loaded = load(&scratch, &file(&head, &[&pool]));
+        assert_eq!(loaded.is_ok(), ok, "max_lease_wall {secs}");
+    }
+    let pool = PoolText::elastic(&scratch).set("max_age", &quote(&format!("{}s", day30 + 1)));
+    assert_eq!(
+        refusal(&scratch, &file(&server, &[&pool])),
+        "pool \"gpu\": max_age: must not be longer than 30 days"
+    );
+    let head = server.replace("\"2h\"", &quote(&format!("{}s", day30 + 1)));
+    let pool = PoolText::elastic(&scratch);
+    assert_eq!(
+        refusal(&scratch, &file(&head, &[&pool])),
+        "server.max_lease_wall: must not be longer than 30 days"
+    );
+}

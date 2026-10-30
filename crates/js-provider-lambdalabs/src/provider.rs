@@ -637,7 +637,9 @@ impl ElasticProvider for LambdaProvider {
     }
 
     // `request.lifetime` is not read: Lambda has no run-duration limit, and `shutdown -h` on
-    // the instance leaves billing on, so the scheduler's `max_age` is the only bound here.
+    // the instance leaves billing on. So on Lambda nothing bounds the cost if the scheduler
+    // is dead; only `max_age` with a live scheduler does. The server-dead bound needs a
+    // provider whose cloud enforces the lifetime.
     fn acquire(&self, request: &AcquireRequest) -> Acquired {
         if !self.config.enabled {
             return Self::refuse(RefusalCode::Denied, Reason::Disabled);

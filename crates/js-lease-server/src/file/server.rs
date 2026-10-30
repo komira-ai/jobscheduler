@@ -160,10 +160,9 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         Ok(settings) => settings,
         Err(err) => return Err(s.fail("default_ttl", &err.to_string())),
     };
-    // `duration` refuses a zero, which is the only ceiling the settings refuse.
     let max_lease_wall = s.duration("max_lease_wall")?;
     let settings = match max_lease_wall {
-        Some(wall) => settings.with_max_wall(wall).unwrap_or(settings),
+        Some(wall) => with_ceiling(&s, settings, wall)?,
         None => settings,
     };
     Ok(Server {
@@ -182,6 +181,18 @@ pub(super) fn read_server(table: toml::Table) -> Result<Server, StartupError> {
         agents,
         usage,
     })
+}
+
+/// `settings` with `wall` as the ceiling on a lease's wall time: at most 30 days, and
+/// positive (the settings refuse a zero, which `duration` has already refused, and the
+/// refusal is passed on if that ever changes).
+fn with_ceiling(s: &Section, settings: Settings, wall: Duration) -> Result<Settings, StartupError> {
+    if wall > super::lifetime::LONGEST {
+        return Err(s.fail("max_lease_wall", "must not be longer than 30 days"));
+    }
+    settings
+        .with_max_wall(wall)
+        .map_err(|err| s.fail("max_lease_wall", &err.to_string()))
 }
 
 /// The usage keys. The rules are the flags': a budget of at least 1, and no `usage_db`
@@ -218,5 +229,30 @@ pub(super) fn read_client_token(server: &Server, ld: &Load<'_>) -> Result<Token,
             let reason = format!("{} {reason}", path.display());
             Err(StartupError::at(place, reason))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts that a ceiling the settings refuse (a zero) is an error naming the key and
+    /// not a ceiling silently dropped, and that 30 days is the longest accepted. A zero
+    /// cannot come from the file, whose durations are positive, so this is the only way to
+    /// reach the refusal.
+    #[test]
+    fn a_ceiling_is_never_dropped_silently() {
+        let s = Section::open(toml::Table::new(), "server.".to_owned());
+        let base = Settings::new(Duration::from_secs(60), Duration::from_secs(120)).unwrap();
+        let said = with_ceiling(&s, base, Duration::ZERO)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            said,
+            "server.max_lease_wall: the ceiling on the maximum wall time must be positive"
+        );
+        let longest = super::super::lifetime::LONGEST;
+        assert!(with_ceiling(&s, base, longest).is_ok());
+        assert!(with_ceiling(&s, base, longest + Duration::from_secs(1)).is_err());
     }
 }

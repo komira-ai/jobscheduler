@@ -1002,9 +1002,13 @@ Rules, each tied to a requirement or to existing behaviour:
   only once the host is quiet. `max_lease_wall` is the ceiling on the `max_wall` a lease may ask
   for (a 422 `wall-time-above-ceiling` above it), and a lease never outlives its `max_wall`
   whatever its renewals, so a retired host empties within the ceiling. Every launch also carries
-  `max_age + max_lease_wall + 30 minutes` as the lifetime the cloud itself should enforce, in
-  `AcquireRequest::lifetime`; a provider whose cloud has a run-duration limit or a shutdown timer
-  sets it, and Lambda, which has neither, ignores it. `min_host_lifetime` is the least a machine
+  `max_age + max_lease_wall + prepare_timeout + unknown_hold + 10 minutes` as the lifetime the cloud
+  itself should enforce, in `AcquireRequest::lifetime` (the prepare timeout and `unknown_hold` are
+  the two waits a retire can meet: a whole-node lease's wall time starts after the first, a silent
+  host is released after the second). A provider whose cloud has a run-duration limit or a shutdown
+  timer sets it. Lambda has neither and ignores it, so on Lambda only `max_age` with a live
+  scheduler bounds the cost: if the scheduler is dead, nothing stops the bill. The server-dead bound
+  needs a provider whose cloud enforces the lifetime. `max_age` and `max_lease_wall` are at most 30 days. `min_host_lifetime` is the least a machine
   lives before `idle` may drain it, so a short `idle` against a billed boot cannot launch a
   machine per job. Changing `max_lease_wall` does not shorten a lease already granted.
 

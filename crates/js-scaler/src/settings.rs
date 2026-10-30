@@ -74,13 +74,21 @@ pub struct Settings {
     /// The server's ceiling on a lease's `max_wall`, if it has one. With `max_age` it
     /// gives [`Settings::lifetime`].
     pub max_lease_wall: Option<Duration>,
-    /// What [`Settings::lifetime`] adds beyond `max_age` and the ceiling, for the scaler's
-    /// tick, the drain and the provider's clock.
+    /// How long a whole-node lease may wait, pending, before its wall time starts (the
+    /// registry's prepare timeout): a lease booked just before the retire can end this much
+    /// later than the ceiling alone says. Part of [`Settings::lifetime`].
+    pub prepare_timeout: Duration,
+    /// What [`Settings::lifetime`] adds beyond `max_age`, the ceiling, `prepare_timeout` and
+    /// `unknown_hold`, for the scaler's ticks, the drain and release round trips and the
+    /// provider's clock.
     pub lifetime_margin: Duration,
 }
 
-/// The default of [`Settings::lifetime_margin`]: 30 minutes.
-const LIFETIME_MARGIN: Duration = Duration::from_secs(30 * 60);
+/// The default of [`Settings::lifetime_margin`]: 10 minutes.
+const LIFETIME_MARGIN: Duration = Duration::from_secs(10 * 60);
+
+/// The default of [`Settings::prepare_timeout`]: 10 minutes, the registry's default.
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 impl Settings {
     /// A pool in `Plan` mode with the design's defaults: `idle` 10 minutes, `boot_timeout`
@@ -108,6 +116,7 @@ impl Settings {
             max_age: None,
             min_host_lifetime: Duration::ZERO,
             max_lease_wall: None,
+            prepare_timeout: PREPARE_TIMEOUT,
             lifetime_margin: LIFETIME_MARGIN,
         }
     }
@@ -115,18 +124,22 @@ impl Settings {
 
 impl Settings {
     /// The lifetime the cloud itself enforces on every machine of the pool, so that billing
-    /// stops even if this scaler is dead: `max_age` plus the ceiling on a lease's
-    /// `max_wall` plus `lifetime_margin`. A provider with a native limit sets it from this
+    /// stops even if this scaler is dead. It covers the worst case of a retire at `max_age`:
+    /// a whole-node lease booked just before it starts its wall time up to `prepare_timeout`
+    /// later and lasts the ceiling on `max_wall`; a host that went silent is released only
+    /// after `unknown_hold`; and `lifetime_margin` is left for ticks and round trips. So it
+    /// is `max_age + max_lease_wall + prepare_timeout + unknown_hold + lifetime_margin`. A provider with a native limit sets it from this
     /// at launch (a Compute Engine `maxRunDuration`, a shutdown timer); one without (Lambda)
     /// ignores it. `None` unless both `max_age` and the ceiling are set.
     #[must_use]
     pub fn lifetime(&self) -> Option<Duration> {
         let age = self.max_age?;
         let wall = self.max_lease_wall?;
-        Some(
-            age.saturating_add(wall)
-                .saturating_add(self.lifetime_margin),
-        )
+        let waits = self.prepare_timeout.saturating_add(self.unknown_hold);
+        let after = wall
+            .saturating_add(waits)
+            .saturating_add(self.lifetime_margin);
+        Some(age.saturating_add(after))
     }
 
     /// Whether a machine launched at `launched` has reached `max_age` at `now`.
