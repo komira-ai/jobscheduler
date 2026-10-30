@@ -15,16 +15,20 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// the sandbox. The IPC classes are denied because a user's System V and POSIX shared
 /// memory and semaphores outlive its processes: a later run on the same uid (the helper
 /// reuses uids) would find the earlier run's.
-const HEAD: [&str; 9] = [
+const HEAD: [&str; 13] = [
     "(version 1)",
     "(allow default)",
     "(deny file-write*)",
     "(deny job-creation)",
     "(deny lsopen)",
     "(deny user-preference-write)",
-    "(deny ipc-sysv*)",
-    "(deny ipc-posix-sem*)",
-    "(deny ipc-posix-shm-write*)",
+    "(deny ipc-sysv-shm)",
+    "(deny ipc-sysv-sem)",
+    "(deny ipc-sysv-msg)",
+    "(deny ipc-posix-sem)",
+    "(deny ipc-posix-shm-write-create)",
+    "(deny ipc-posix-shm-write-data)",
+    "(deny ipc-posix-shm-write-unlink)",
 ];
 
 /// Process visibility. Measured on a hosted runner: with this rule, with narrower ones
