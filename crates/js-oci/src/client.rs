@@ -132,8 +132,10 @@ impl Client {
     /// [`Error::NotAllowed`] when the policy does not list the registry and namespace.
     pub fn repository(&self, location: Location) -> Result<Repository<'_>, Error> {
         self.http.policy.admit(&location)?;
+        let plain = self.http.policy.plain_http(&location);
         Ok(Repository {
             http: &self.http,
+            plain,
             location,
             token: Mutex::new(None),
         })
@@ -146,6 +148,7 @@ impl Client {
 /// say), since each holds a connection and a sink open.
 pub struct Repository<'c> {
     http: &'c Http,
+    plain: bool,
     location: Location,
     token: Mutex<Option<String>>,
 }
@@ -162,8 +165,9 @@ impl std::fmt::Debug for Repository<'_> {
 
 impl Repository<'_> {
     fn url(&self, kind: &str, reference: &str) -> String {
+        let scheme = if self.plain { "http" } else { "https" };
         format!(
-            "https://{}/v2/{}/{kind}/{reference}",
+            "{scheme}://{}/v2/{}/{kind}/{reference}",
             self.location.endpoint().header(),
             self.location.repository()
         )

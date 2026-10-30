@@ -142,6 +142,7 @@ pub struct Allow {
     prefix: String,
     private: bool,
     loopback: bool,
+    plain_http: bool,
 }
 
 impl Allow {
@@ -164,6 +165,7 @@ impl Allow {
             prefix: prefix.to_owned(),
             private: false,
             loopback: false,
+            plain_http: false,
         })
     }
 
@@ -200,6 +202,13 @@ impl Allow {
     #[must_use]
     pub fn loopback(mut self) -> Self {
         self.loopback = true;
+        self
+    }
+
+    /// This entry as one pulled from over plain http.
+    #[must_use]
+    pub fn plain_http_loopback(mut self) -> Self {
+        self.plain_http = true;
         self
     }
 
@@ -264,6 +273,13 @@ impl Policy {
         let authority = Authority::parse(host).ok_or_else(|| Error::Reference(clip(host)))?;
         self.realms.push(authority);
         Ok(self)
+    }
+
+    /// Whether `location` is pulled over plain http.
+    pub(crate) fn plain_http(&self, location: &Location) -> bool {
+        self.allow
+            .iter()
+            .any(|a| a.admits(location) && a.plain_http)
     }
 
     /// Whether a pin may name `location`.
@@ -720,5 +736,60 @@ mod tests {
         assert!(policy.realm_ok(&host("hub-api.example"), &host("hub-api.example")));
         assert!(!policy.realm_ok(&host("c.example"), &endpoint));
         assert!(!policy.realm_ok(&host("b.example:8443"), &endpoint));
+    }
+
+    /// Catches the flag honoured for more than the two loopback literals: `127.0.0.1` and
+    /// `[::1]`, with or without a port, are plain http; a name (`localhost` included),
+    /// another loopback address, a mapped form, a private address, a public one and an
+    /// unflagged entry are not.
+    #[test]
+    fn plain_http_is_honoured_only_for_the_loopback_literals() {
+        let policy = |entry: &str, flagged: bool| {
+            let allow = Allow::parse(entry).expect("entry");
+            Policy::new(vec![if flagged {
+                allow.plain_http_loopback()
+            } else {
+                allow
+            }])
+        };
+        for entry in [
+            "127.0.0.1/team",
+            "127.0.0.1:5000/team",
+            "[::1]/team",
+            "[::1]:5000/team",
+        ] {
+            let pin = entry.replace("/team", "/team/x");
+            assert!(policy(entry, true).plain_http(&location(&pin)), "{entry}");
+            assert!(!policy(entry, false).plain_http(&location(&pin)), "{entry}");
+        }
+        for entry in [
+            "localhost:5000/team",
+            "registry.test:5000/team",
+            "127.0.0.2:5000/team",
+            "127.1.2.3:5000/team",
+            "[::ffff:127.0.0.1]:5000/team",
+            "[::2]:5000/team",
+            "10.0.0.1:5000/team",
+            "8.8.8.8:5000/team",
+            "ghcr.io/team",
+        ] {
+            let pin = entry.replace("/team", "/team/x");
+            assert!(!policy(entry, true).plain_http(&location(&pin)), "{entry}");
+        }
+    }
+
+    /// Catches the flag taken from a neighbour: only the entry that admits the pin says
+    /// how it is pulled.
+    #[test]
+    fn plain_http_follows_the_entry_that_admits_the_pin() {
+        let policy = Policy::new(vec![
+            Allow::parse("127.0.0.1:5000/plain")
+                .expect("entry")
+                .plain_http_loopback(),
+            Allow::parse("127.0.0.1:5000/secure").expect("entry"),
+        ]);
+        assert!(policy.plain_http(&location("127.0.0.1:5000/plain/x")));
+        assert!(!policy.plain_http(&location("127.0.0.1:5000/secure/x")));
+        assert!(!policy.plain_http(&location("127.0.0.1:5001/plain/x")));
     }
 }

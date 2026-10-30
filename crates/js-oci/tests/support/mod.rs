@@ -149,6 +149,8 @@ struct State {
     manifests: HashMap<String, (String, Vec<u8>)>,
     log: Vec<String>,
     behaviour: Behaviour,
+    /// Served over plain http: the default token realm says so.
+    plain: bool,
 }
 
 pub struct Fixture {
@@ -172,6 +174,16 @@ impl Fixture {
 
     /// A fixture whose certificate is valid for exactly `names`.
     pub async fn start_named(names: Vec<String>) -> Self {
+        Self::start_on(Some(names)).await
+    }
+
+    /// A registry over plain http on 127.0.0.1: no TLS, so no certificate to trust.
+    pub async fn start_plain() -> Self {
+        Self::start_on(None).await
+    }
+
+    async fn start_on(tls: Option<Vec<String>>) -> Self {
+        let names = tls.clone().unwrap_or_else(|| vec![REGISTRY.to_owned()]);
         let made = rcgen::generate_simple_self_signed(names).expect("certificate");
         let cert = made.cert.der().clone();
         let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(made.signing_key.serialize_der()));
@@ -183,10 +195,13 @@ impl Fixture {
         .with_no_client_auth()
         .with_single_cert(vec![cert.clone()], key)
         .expect("server config");
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let acceptor = tls.map(|_| TlsAcceptor::from(Arc::new(config)));
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            plain: acceptor.is_none(),
+            ..State::default()
+        }));
         let shared = Arc::clone(&state);
         let task = tokio::spawn(async move {
             loop {
@@ -196,8 +211,20 @@ impl Fixture {
                 let state = Arc::clone(&shared);
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    if let Ok(stream) = acceptor.accept(stream).await {
-                        serve(stream, state).await;
+                    match acceptor {
+                        Some(acceptor) => {
+                            if let Ok(stream) = acceptor.accept(stream).await {
+                                serve(stream, state).await;
+                            }
+                        }
+                        None => {
+                            // A TLS client hello is not http: hang up at once, so a
+                            // client that wrongly speaks TLS here fails and does not wait.
+                            let mut first = [0u8; 1];
+                            if matches!(stream.peek(&mut first).await, Ok(1)) && first[0] != 0x16 {
+                                serve(stream, state).await;
+                            }
+                        }
                     }
                 });
             }
@@ -448,7 +475,7 @@ fn answer(s: &State, request: &Request) -> Answer {
     if b.token.is_some() || b.refuse_token {
         let wanted = b.token.as_ref().map(|t| format!("Bearer {t}"));
         if b.refuse_token || request.authorization != wanted {
-            return Answer::Bytes(challenge(b, request));
+            return Answer::Bytes(challenge(b, request, s.plain));
         }
     }
     if let Some((_, rest)) = path.split_once("/manifests/") {
@@ -486,7 +513,8 @@ fn answer(s: &State, request: &Request) -> Answer {
 }
 
 /// The 401 that asks for a token.
-fn challenge(b: &Behaviour, request: &Request) -> Vec<u8> {
+fn challenge(b: &Behaviour, request: &Request, plain: bool) -> Vec<u8> {
+    let scheme_of_realm = if plain { "http" } else { "https" };
     let scheme = b.challenge_scheme.as_deref().unwrap_or("Bearer");
     let service = if b.challenge_no_service {
         ""
@@ -502,7 +530,7 @@ fn challenge(b: &Behaviour, request: &Request) -> Vec<u8> {
     let realm = b
         .realm
         .clone()
-        .unwrap_or_else(|| format!("https://{}/token{query}", request.host));
+        .unwrap_or_else(|| format!("{scheme_of_realm}://{}/token{query}", request.host));
     let mut headers = Vec::new();
     if !b.no_challenge {
         headers.push((
