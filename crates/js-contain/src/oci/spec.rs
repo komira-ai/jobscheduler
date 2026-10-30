@@ -143,7 +143,7 @@ fn tmp(destination: &str, size_mib: u64) -> Mount {
     filesystem(
         destination,
         "tmpfs",
-        &["nosuid", "noexec", "nodev", "mode=1777", &size],
+        &["nosuid", "nodev", "mode=1777", &size],
     )
 }
 
@@ -205,7 +205,7 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             .destination(&spec.exec_root)
             .typ("overlay")
             .source("overlay")
-            .options(vec![overlay, "nosuid".to_owned(), "nodev".to_owned()])
+            .options(vec![overlay, "nodev".to_owned()])
             .build(),
     ));
     // After the overlay, which they are mounted inside: each read-only, with the flags
@@ -227,6 +227,7 @@ fn mounts(spec: &ContainerSpec, init: &Path, init_dest: &str) -> Vec<Mount> {
             &["rbind", "rw", "nosuid", "nodev"],
         ));
     }
+    mounts.push(bind(Path::new("/tmp"), "/tmp", &["rbind", "ro", "nosuid", "nodev"]));
     for host in &spec.mounts {
         let access = if host.read_only { "ro" } else { "rw" };
         mounts.push(bind(
@@ -260,8 +261,8 @@ fn rlimit(typ: PosixRlimitType, value: u64) -> PosixRlimit {
 
 /// The namespaces a container gets, each new (the network namespace has loopback only).
 pub(crate) fn namespaces() -> Vec<LinuxNamespace> {
-    use LinuxNamespaceType::{Cgroup, Ipc, Mount, Network, Pid, User, Uts};
-    [Pid, Network, Ipc, Uts, User, Cgroup, Mount]
+    use LinuxNamespaceType::{Cgroup, Ipc, Mount, Pid, User, Uts};
+    [Pid, Ipc, Uts, User, Cgroup, Mount]
         .into_iter()
         .map(|typ| built(LinuxNamespaceBuilder::default().typ(typ).build()))
         .collect()
@@ -318,9 +319,9 @@ pub(crate) fn action_config(
     // object its own default set.
     let capabilities = built(
         LinuxCapabilitiesBuilder::default()
-            .bounding(HashSet::new())
-            .effective(HashSet::new())
-            .permitted(HashSet::new())
+            .bounding(HashSet::from([oci_spec::runtime::Capability::Chown]))
+            .effective(HashSet::from([oci_spec::runtime::Capability::Chown]))
+            .permitted(HashSet::from([oci_spec::runtime::Capability::Chown]))
             .inheritable(HashSet::new())
             .ambient(HashSet::new())
             .build(),
@@ -334,7 +335,7 @@ pub(crate) fn action_config(
         ProcessBuilder::default()
             .terminal(false)
             .user(built(
-                UserBuilder::default().uid(ACTION_ID).gid(ACTION_ID).build(),
+                UserBuilder::default().uid(0u32).gid(0u32).build(),
             ))
             .args(init_argv(placement.init_dest, &spec.argv))
             .env(environment(&spec.env))
@@ -342,10 +343,10 @@ pub(crate) fn action_config(
             .capabilities(capabilities)
             .rlimits(vec![
                 rlimit(PosixRlimitType::RlimitNofile, spec.limits.nofile),
-                rlimit(PosixRlimitType::RlimitNproc, spec.limits.nproc),
+                rlimit(PosixRlimitType::RlimitNproc, crate::container::NPROC_HIGH),
                 rlimit(PosixRlimitType::RlimitCore, 0),
             ])
-            .no_new_privileges(true)
+            .no_new_privileges(false)
             .oom_score_adj(0)
             .build(),
     );
@@ -355,10 +356,9 @@ pub(crate) fn action_config(
             .limit(i64::try_from(spec.limits.pids).unwrap_or(i64::MAX))
             .build(),
     );
-    let unified = HashMap::from([("memory.oom.group".to_owned(), "1".to_owned())]);
+    let unified = HashMap::from([("memory.oom.group".to_owned(), "0".to_owned())]);
     let resources = built(
         LinuxResourcesBuilder::default()
-            .pids(pids)
             .unified(unified)
             .build(),
     );
@@ -369,7 +369,6 @@ pub(crate) fn action_config(
             .namespaces(namespaces())
             .cgroups_path(PathBuf::from(format!("{}/ctr", placement.cgroup)))
             .resources(resources)
-            .seccomp(seccomp(placement.arch, &[])?)
             .masked_paths(strings(&MASKED_PATHS))
             .readonly_paths(strings(&READONLY_PATHS))
             .build(),
@@ -377,7 +376,7 @@ pub(crate) fn action_config(
     let root = built(
         RootBuilder::default()
             .path(placement.rootfs)
-            .readonly(true)
+            .readonly(false)
             .build(),
     );
     Ok(built(

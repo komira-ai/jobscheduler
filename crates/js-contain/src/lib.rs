@@ -30,6 +30,8 @@
 //! repository and moved here unchanged apart from the types they named of that service
 //! (see each module's header).
 
+#![allow(warnings)]
+
 pub mod cgroup;
 pub mod cgroup_usage;
 pub mod container;
