@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use js_registry::{OsSessions, WholeNodeConfig};
+use js_registry::{OsSessions, Registry, WholeNodeConfig};
 use js_scaler::{LaunchMode, Settings};
 use js_types::ExecMode;
 
@@ -56,10 +56,12 @@ fn network_mode(
 
 impl ElasticPlan {
     /// The scaler settings the plan gives: the design's defaults besides the plan's own, and
-    /// the prepare timeout of `whole`, the whole-node settings of the pool the lease table
-    /// and the registry count the same figure from.
-    pub fn scaler_settings(&self, whole: &WholeNodeConfig) -> Settings {
-        settings(self, whole)
+    /// the prepare timeout of the whole-node settings of the pool `registry` serves, the
+    /// figure the lease table and the registry count too. A registry whose pool has no
+    /// whole-node settings gets the dedicated defaults, which an elastic file pool has anyway.
+    pub fn scaler_settings(&self, registry: &Registry) -> Settings {
+        let fallback = WholeNodeConfig::dedicated(self.max_instances);
+        settings(self, registry.whole_node().unwrap_or(&fallback))
     }
 }
 
@@ -128,8 +130,7 @@ pub(crate) fn build(plan: &ElasticPlan, parts: Parts<'_>) -> Result<Scaler, Star
         parts.clock,
         Box::new(OsSessions),
         wiring,
-        // An elastic file pool gets the dedicated whole-node settings.
-        plan.scaler_settings(&WholeNodeConfig::dedicated(plan.max_instances)),
+        plan.scaler_settings(&registry),
         records,
     );
     scaler.retry_removals(unremoved);

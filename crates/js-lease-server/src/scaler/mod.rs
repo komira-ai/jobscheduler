@@ -266,6 +266,11 @@ impl Scaler {
         blocking(move || core.tick()).await;
     }
 
+    /// The settings the scaler was built with.
+    pub fn settings(&self) -> &Settings {
+        &self.core.settings
+    }
+
     /// What the last tick left: the records, why each pool launches nothing, what a plan
     /// pool would launch.
     pub fn state(&self) -> State {

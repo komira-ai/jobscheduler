@@ -525,6 +525,13 @@ impl Registry {
         self.shared.config.name().clone()
     }
 
+    /// The whole-node settings of the pool this registry serves, when it has them: the one
+    /// source of the prepare timeout and the other whole-node figures for everything that
+    /// counts them (the registry, the lease table, the scaler).
+    pub fn whole_node(&self) -> Option<&crate::WholeNodeConfig> {
+        self.shared.config.whole_node()
+    }
+
     fn grace_ms(&self) -> u64 {
         self.shared.config.grace_ms()
     }

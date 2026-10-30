@@ -3,13 +3,17 @@
 //! rules between them, what a pool without accelerators may leave out, and the ceiling on a
 //! lease's wall time on a running server. Nothing here waits.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use js_registry::WholeNodeConfig;
+use js_registry::{PoolConfig, Registry, WholeNodeConfig};
 use js_scaler::LaunchMode;
+use js_types::{ProviderId, ResourceClass, Resources, Shape};
 use serde_json::json;
 
-use crate::config_support::{PoolText, file, load, quote, refusal, server, server_with_agents};
+use crate::config_support::{
+    PoolText, clock, file, load, quote, refusal, server, server_with_agents,
+};
 use crate::support::{Harness, Scratch, ids, lease_body};
 
 /// The reason a pool with accelerators is refused each of its required keys.
@@ -200,21 +204,33 @@ fn max_age_and_the_lease_ceiling_are_at_most_thirty_days() {
 }
 
 /// Asserts that the scaler settings built from a loaded plan carry every lifetime figure of
-/// the file and the prepare timeout of the whole-node settings they are given: with a
-/// prepare timeout of 20 minutes (the default is 10) the settings say 20, and `max_age`,
-/// `min_host_lifetime`, the ceiling and `idle` are the file's. It fails if any of these is
-/// not passed on, and the lifetime sum then follows: 2h + 2h + 20m + 30m + 10m.
+/// the file and the prepare timeout of the whole-node settings of the registry they are
+/// given: a registry whose pool has a prepare timeout of 20 minutes (the default is 10)
+/// gives 20, and `max_age`, `min_host_lifetime`, the ceiling and `idle` are the file's. A
+/// registry whose pool has no whole-node settings gives the dedicated default. It fails if
+/// any of these is not passed on, and the lifetime sum follows: 2h + 2h + 20m + 30m + 10m.
 #[test]
 fn the_scaler_settings_carry_the_lifetime_figures_and_the_prepare_timeout() {
     let scratch = Scratch::new("life_settings");
     let pool = PoolText::elastic(&scratch);
     let config = load(&scratch, &file(&server_with_agents(&scratch), &[&pool])).unwrap();
     let plan = config.elastic_pool().unwrap();
-    let whole = WholeNodeConfig {
-        prepare_timeout_ms: 20 * 60_000,
-        ..WholeNodeConfig::dedicated(plan.max_instances)
+    let registry = |whole: Option<WholeNodeConfig>| {
+        let resources = Resources::new(1000, 1 << 30, 1, Some("nvidia-a10".to_owned())).unwrap();
+        let shape = Shape::new(resources, BTreeMap::new());
+        let name = ProviderId::new("gpu").unwrap();
+        let pool = PoolConfig::new(name, ResourceClass::whole_node(), shape, 4);
+        let pool = match whole {
+            Some(whole) => pool.with_whole_node(whole).unwrap(),
+            None => pool,
+        };
+        Registry::new(pool, clock())
     };
-    let settings = plan.scaler_settings(&whole);
+    let twenty = WholeNodeConfig {
+        prepare_timeout_ms: 20 * 60_000,
+        ..WholeNodeConfig::dedicated(4)
+    };
+    let settings = plan.scaler_settings(&registry(Some(twenty)));
     assert_eq!(settings.prepare_timeout, mins(20));
     assert_eq!(settings.max_age, Some(mins(120)));
     assert_eq!(settings.min_host_lifetime, mins(5));
@@ -222,4 +238,31 @@ fn the_scaler_settings_carry_the_lifetime_figures_and_the_prepare_timeout() {
     assert_eq!(settings.idle, mins(10));
     assert_eq!(settings.launch, LaunchMode::Plan);
     assert_eq!(settings.lifetime(), Some(mins(120 + 120 + 20 + 30 + 10)));
+    let bare = plan.scaler_settings(&registry(None));
+    assert_eq!(bare.prepare_timeout, mins(10));
+}
+
+/// Asserts, on a server started from a file, that the scaler `build` makes carries the
+/// file's figures: the settings of the running scaler have `max_age`, the minimum, the
+/// ceiling and `idle` as the file wrote them (none is a default), and its prepare timeout is
+/// the one the registry's pool has. It fails if `build` hands the scaler settings made from
+/// anything but the plan and the registry it serves.
+#[tokio::test]
+async fn a_started_scaler_carries_the_files_lifetime_figures() {
+    let scratch = Scratch::new("life_started");
+    let pool = PoolText::elastic(&scratch);
+    let text = file(&server_with_agents(&scratch), &[&pool]);
+    let config = load(&scratch, &text).unwrap();
+    let h = Harness::over(scratch, config).await;
+    let scaler = h.running.scaler().unwrap();
+    let settings = scaler.settings();
+    assert_eq!(settings.max_age, Some(mins(120)));
+    assert_eq!(settings.min_host_lifetime, mins(5));
+    assert_eq!(settings.max_lease_wall, Some(mins(120)));
+    assert_eq!(settings.idle, mins(10));
+    let dedicated = WholeNodeConfig::dedicated(4);
+    assert_eq!(
+        settings.prepare_timeout,
+        Duration::from_millis(dedicated.prepare_timeout_ms)
+    );
 }
