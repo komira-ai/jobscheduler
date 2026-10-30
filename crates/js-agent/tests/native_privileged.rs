@@ -68,6 +68,11 @@ fn fixture() -> &'static Fixture {
         };
         fs::create_dir(&fixture.homes).unwrap();
         fs::create_dir(fixture.root.join("scratch")).unwrap();
+        for name in ["secret", "open"] {
+            let folder = fixture.root.join(name);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("f"), "x").unwrap();
+        }
         serve(&fixture);
         fixture
     })
@@ -145,13 +150,29 @@ fn serve(_: &Fixture) {
 }
 
 fn runtime(fixture: &Fixture) -> NativeRuntime {
-    let config = NativeConfig {
+    runtime_with(fixture, |_| {})
+}
+
+/// The production layout of the read denies: the state root and the scratch root (the runs'
+/// standard-stream files are in it), and a directory of the test's own that file modes
+/// leave open to everyone, so only the profile closes it.
+fn runtime_with(fixture: &Fixture, adjust: impl FnOnce(&mut NativeConfig)) -> NativeRuntime {
+    let denied = |path: &Path| AbsPath::new(path).unwrap();
+    let mut config = NativeConfig {
         homes: fs::canonicalize(&fixture.homes).unwrap(),
         net: Net::Off,
         tool_roots: vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")],
-        read_denies: vec![AbsPath::new(&fixture.state).unwrap()],
+        read_denies: vec![
+            denied(&fixture.state),
+            denied(&fixture.root.join("scratch")),
+            denied(&fixture.root.join("secret")),
+        ],
         read_model: ReadModel::Open,
+        journal: fixture.root.join("native-leases"),
+        max_file_bytes: 1 << 30,
+        max_processes: 512,
     };
+    adjust(&mut config);
     let term = TERMS.fetch_add(1, Ordering::SeqCst);
     NativeRuntime::open(Client::new(&fixture.socket), config, term).unwrap()
 }
@@ -337,4 +358,130 @@ fn one_runs_files_are_closed_to_another_run() {
     assert!(tail.stderr.contains("Permission denied"), "{}", tail.stderr);
     rt.remove(&first).unwrap();
     rt.remove(&second).unwrap();
+}
+
+/// Asserts a read deny that file modes do not explain, as a real lease user: the file in the
+/// denied directory is world-readable (root made it, mode 0644, in a directory every user
+/// may search), a file beside it outside the denied directory is read by the same user, and
+/// the profile refuses the first. It also shows the production layout working: the scratch
+/// root is denied and what the runs print still reaches their logs. It catches a read deny
+/// that is only the mode of a directory.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_read_deny_is_refused_to_a_real_user_the_modes_would_let_in() {
+    let fixture = fixture();
+    let mut rt = runtime(fixture);
+    let open = fixture.root.join("open").join("f").display().to_string();
+    let secret = fixture.root.join("secret").join("f").display().to_string();
+    let id = rt
+        .create_and_start(&spec(fixture, "readok", "/bin/cat", &[&open]))
+        .unwrap();
+    assert_eq!(
+        settle(&mut rt, &id),
+        exited(0),
+        "the control file is readable"
+    );
+    assert_eq!(rt.log_tail(&id).unwrap().unwrap().stdout, "x");
+    rt.remove(&id).unwrap();
+    let id = rt
+        .create_and_start(&spec(fixture, "readno", "/bin/cat", &[&secret]))
+        .unwrap();
+    assert_eq!(settle(&mut rt, &id), exited(1));
+    let tail = rt.log_tail(&id).unwrap().unwrap();
+    assert_eq!(tail.stdout, "");
+    assert!(
+        tail.stderr.contains("Operation not permitted"),
+        "{}",
+        tail.stderr
+    );
+    rt.remove(&id).unwrap();
+}
+
+/// Whether anything below `dir` (links not followed) belongs to `uid`.
+fn owned_by(uid: u32, dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let meta = fs::symlink_metadata(entry.path()).unwrap();
+        meta.uid() == uid || (meta.is_dir() && owned_by(uid, &entry.path()))
+    })
+}
+
+const SYSV_SHM: &str = r#"my $id = shmget(0, 64, 0600 | 01000); print defined $id ? "created\n" : "denied\n"; if (defined $id) { shmctl($id, 0, 0) }"#;
+
+/// Asserts that the helper's uids are reused (ten runs on ten uids, so the eleventh runs as
+/// the first did) and that the reuse leaks nothing: the first run tries to make shared
+/// memory and is refused by the profile, no System V IPC object belongs to a lease user
+/// after the run, and nothing on the machine's work volume belongs to that uid once the
+/// user is deleted. It catches a run that finds what an earlier run on its uid left.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_reused_uid_sees_nothing_of_the_previous_run() {
+    let fixture = fixture();
+    let mut rt = runtime(fixture);
+    let mut uids = Vec::new();
+    for n in 0..11 {
+        let (program, args): (&str, Vec<&str>) = match n {
+            0 => ("/usr/bin/perl", vec!["-e", SYSV_SHM]),
+            _ => ("/usr/bin/id", vec!["-u"]),
+        };
+        let id = rt
+            .create_and_start(&spec(fixture, &format!("reuse{n}"), program, &args))
+            .unwrap();
+        assert_eq!(settle(&mut rt, &id), exited(0));
+        let printed = rt.log_tail(&id).unwrap().unwrap().stdout;
+        if n == 0 {
+            assert_eq!(printed, "denied\n", "a run made shared memory");
+        }
+        uids.push(fs::metadata(home_of(fixture, &id)).unwrap().uid());
+        let ipcs = Command::new("/usr/bin/ipcs").arg("-a").output().unwrap();
+        let listing = String::from_utf8_lossy(&ipcs.stdout);
+        assert!(
+            !listing.contains("kbf-lease-"),
+            "IPC left by run {n}: {listing}"
+        );
+        rt.remove(&id).unwrap();
+    }
+    assert_eq!(
+        uids[0], uids[10],
+        "the eleventh run did not reuse the first uid: {uids:?}"
+    );
+    assert!(
+        !owned_by(uids[0], &fixture.root),
+        "files of the first user are left"
+    );
+}
+
+/// Asserts that a fork bomb is held at the process limit and that the stop still works: a
+/// shell that starts sleeps without end reaches a limit of 64 processes of its user, the
+/// helper's kill (which forks as root) ends every one, and the removal deletes the user.
+/// It catches a stop that fails because the user has filled the process table.
+#[test]
+#[ignore = "needs root and creates users"]
+fn a_fork_bomb_stops_at_the_process_limit_and_the_kill_still_works() {
+    let fixture = fixture();
+    let mut rt = runtime_with(fixture, |config| config.max_processes = 64);
+    let script = "while :; do /bin/sleep 600 & done";
+    let id = rt
+        .create_and_start(&spec(fixture, "bomb", "/bin/sh", &["-c", script]))
+        .unwrap();
+    let uid = fs::metadata(home_of(fixture, &id)).unwrap().uid();
+    let mut most = 0;
+    for _ in 0..WATCHES {
+        let count = process_uids().iter().filter(|one| **one == uid).count();
+        most = most.max(count);
+        if count >= 60 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(most >= 60, "the bomb reached only {most} processes");
+    assert!(most <= 64, "the limit did not hold: {most} processes");
+    rt.stop(&id, Duration::from_secs(10)).unwrap();
+    assert!(
+        !process_uids().contains(&uid),
+        "a process of the user is left"
+    );
+    rt.remove(&id).unwrap();
 }
