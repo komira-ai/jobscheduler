@@ -132,6 +132,13 @@ impl Images {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The directory of the image whose digest is `digest` (`sha256:<hex>`), which holds its
+    /// root filesystem.
+    pub(crate) fn dir_of(&self, digest: &str) -> PathBuf {
+        self.dir
+            .join(digest.strip_prefix("sha256:").unwrap_or(digest))
+    }
+
     /// The root filesystem of the image whose digest is `digest` (`sha256:<hex>`).
     pub(crate) fn rootfs_of(&self, digest: &str) -> PathBuf {
         self.dir

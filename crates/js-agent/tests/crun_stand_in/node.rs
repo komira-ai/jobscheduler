@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use js_agent::crun::{CgroupSettings, CrunRuntime, CrunSettings, Hooks, config_dir};
+use js_agent::image::config_path;
 use js_agent::lifecycle::{Body, DirLayout, FilesRoot, RunHandle, RunSpec, label};
 use js_contain::OciConfig;
 use js_contain::oci::image::{FetchError, ImageSource, PinnedImage};
@@ -75,6 +76,25 @@ impl ImageSource for NoImages {
     }
 }
 
+/// An image source that keeps the config of an image it is asked for, as the registry's does,
+/// and counts how often it is asked.
+#[derive(Debug)]
+pub struct Keeping {
+    pub configs: PathBuf,
+    pub fetched: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl ImageSource for Keeping {
+    async fn fetch(&self, image: &PinnedImage, _: &Path) -> Result<Vec<String>, FetchError> {
+        self.fetched
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::fs::write(config_path(&self.configs, &image.digest), CONFIG)
+            .map_err(|e| FetchError::Failed(e.to_string()))?;
+        Ok(Vec::new())
+    }
+}
+
 /// An image source whose fetch never ends.
 #[derive(Debug)]
 pub struct Endless;
@@ -85,6 +105,10 @@ impl ImageSource for Endless {
         std::future::pending().await
     }
 }
+
+/// The config of the image of every test: an entrypoint, an environment and no layers.
+const CONFIG: &str =
+    r#"{"config":{"Entrypoint":["/bin/tool"],"Env":["A=1"]},"rootfs":{"diff_ids":[]}}"#;
 
 /// The stand-in. Its behaviour is chosen by the end of the container's name (a run id such
 /// as `r1-hold`). `delete` makes the lease cgroup's files go, as removing a cgroup does,
@@ -205,11 +229,7 @@ impl Node {
         std::fs::create_dir_all(scratch.join("oci-images").join(hex).join("rootfs"))
             .expect("image");
         std::fs::create_dir_all(config_dir(&scratch)).expect("configs");
-        let config = format!(
-            r#"{{"config":{{"Entrypoint":["/bin/tool"],"Env":["A=1"]}},"rootfs":{{"diff_ids":["sha256:{}"]}}}}"#,
-            "0".repeat(64)
-        );
-        std::fs::write(config_dir(&scratch).join(format!("{hex}.json")), config).expect("config");
+        std::fs::write(config_dir(&scratch).join(format!("{hex}.json")), CONFIG).expect("config");
         Self {
             dir,
             scratch,

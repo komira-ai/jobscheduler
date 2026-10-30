@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use js_agent::crun::{CrunError, CrunRuntime, config_dir};
+use js_agent::crun::{CrunError, CrunRuntime, config_dir, hand_over_no_follow};
 use js_agent::lifecycle::{Prepared, Runtime};
 
 use crate::node::{Endless, LONG, NoImages, Node, given};
@@ -14,29 +14,54 @@ fn why(result: Result<CrunRuntime, CrunError>) -> String {
 }
 
 /// Proves a runtime opens on a node with the system's own hooks, and that opening gives the
-/// job user what `crun`, run as that user, needs of the agent's cgroup: the `cgroup.procs`
-/// of the agent's delegated cgroup, and the directory, `cgroup.procs`, `cgroup.threads` and
-/// `cgroup.subtree_control` of the cgroup the leases are made in, each with the job user's
-/// ids. Catches a `crun` that cannot move its first process into a lease's cgroup.
+/// job user the one file of the agent's cgroup `crun`, run as that user, needs to move its
+/// first process into a lease's cgroup (`cgroup.procs` of the delegated cgroup) and the
+/// cgroup the helper containers are made in, and nothing of the directory the leases'
+/// cgroups are in. Catches a `crun` that cannot start a
+/// container, and a job user that can make or remove the cgroups of other leases.
 #[test]
-fn opening_gives_the_job_user_the_cgroups_crun_moves_processes_in() {
+fn opening_gives_the_job_user_only_the_cgroup_file_crun_moves_processes_with() {
     let node = Node::new("open-gives");
+    // The files a cgroup has and a directory made for a test has not.
+    let helpers = node.cgroups.join("actions/helpers");
+    std::fs::create_dir(&helpers).expect("a cgroup");
+    for file in ["cgroup.procs", "cgroup.threads"] {
+        std::fs::write(helpers.join(file), b"").expect("a cgroup file");
+    }
     let opened = CrunRuntime::open(node.settings("/root"), Arc::new(NoImages)).expect("opens");
     assert!(format!("{opened:?}").contains("node-1"));
     drop(opened);
     node.open();
     let (uid, gid) = (node.uid, node.gid);
-    let actions = node.cgroups.join("actions");
     assert_eq!(
         given(&node.dir),
         [
             (node.cgroups.join("root/cgroup.procs"), uid, gid),
-            (actions.join(""), uid, gid),
-            (actions.join("cgroup.procs"), uid, gid),
-            (actions.join("cgroup.threads"), uid, gid),
-            (actions.join("cgroup.subtree_control"), uid, gid),
+            (helpers.join(""), uid, gid),
+            (helpers.join("cgroup.procs"), uid, gid),
+            (helpers.join("cgroup.threads"), uid, gid),
+            (helpers.join("cgroup.subtree_control"), uid, gid),
         ]
     );
+}
+
+/// Proves the system's way of giving a path away goes by the descriptor of what it opens and
+/// never through a link: a file and a directory are given (to the owner's own ids here), a
+/// link to either is refused, and so is a path that is not there. Catches a hand-over that
+/// follows a link the job put where the agent was about to give a path away.
+#[test]
+fn a_path_is_given_by_descriptor_and_never_through_a_link() {
+    let node = Node::new("open-no-follow");
+    let (file, dir) = (node.dir.join("a-file"), node.dir.join("a-dir"));
+    std::fs::write(&file, b"").expect("file");
+    std::fs::create_dir(&dir).expect("dir");
+    for path in [&file, &dir] {
+        assert!(hand_over_no_follow(path, node.uid, node.gid).is_ok());
+        let link = path.with_extension("link");
+        std::os::unix::fs::symlink(path, &link).expect("link");
+        assert!(hand_over_no_follow(&link, node.uid, node.gid).is_err());
+    }
+    assert!(hand_over_no_follow(&node.dir.join("none"), node.uid, node.gid).is_err());
 }
 
 /// Proves each way a node can be unfit is refused at opening, with the reason: no job user
@@ -70,6 +95,12 @@ fn a_node_that_cannot_run_containers_is_refused_when_the_runtime_opens() {
 
     let settings = node.settings("/refuse-root");
     assert!(why(open(settings)).contains("to the job user"));
+
+    // The cgroup of the helpers is there, as a file.
+    let other = Node::new("open-unfit-file");
+    std::fs::write(other.cgroups.join("actions/helpers"), b"a file").expect("a file");
+    let why = why(open(other.settings("/root")));
+    assert!(why.contains("cgroup of the helper containers"), "{why}");
 }
 
 /// Proves `prepare` is the pull and unpack in the background: an image the store has is
@@ -133,4 +164,23 @@ fn a_forgotten_image_is_pulled_again() {
         panic!("a forgotten image is pulled again");
     };
     assert!(why.to_string().contains("no registry in this test"));
+}
+
+/// Proves a store left with unpacks a killed daemon (or a pull past its limit) did not finish
+/// is swept when the runtime opens: a stage directory and a blobs directory of an unpack
+/// are removed, and the images are not. Catches a store that fills with half-made unpacks.
+#[test]
+fn opening_removes_the_unpacks_a_killed_pull_left() {
+    let node = Node::new("open-sweeps");
+    let store = node.scratch.join("oci-images");
+    let hex = "ab".repeat(32);
+    let (stage, blobs) = (
+        store.join(format!(".stage-{hex}-1-1")),
+        store.join(format!(".stage-{hex}-1-1-blobs")),
+    );
+    std::fs::create_dir(&stage).expect("a stage");
+    std::fs::create_dir(&blobs).expect("blobs");
+    node.open();
+    assert!(!stage.exists() && !blobs.exists());
+    assert!(store.join(&hex).is_dir());
 }

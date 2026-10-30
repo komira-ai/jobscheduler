@@ -111,6 +111,12 @@ impl Oci {
         }
     }
 
+    /// The directory of `image` in the store (its unpacked root is in it), which a caller
+    /// that finds the image unfit removes to have it fetched again.
+    pub fn image_dir(&self, image: &PinnedImage) -> PathBuf {
+        self.images.dir_of(&image.digest)
+    }
+
     /// The job user's uid and gid: the owner of the lease directory ([`Owner::Job`]).
     pub fn job_ids(&self) -> (u32, u32) {
         (self.ids.uid, self.ids.gid)
