@@ -188,7 +188,7 @@ fn under_is_by_whole_components() {
 /// A store with a pinned tree and an unpinned one, and the entrypoints of a bundle that
 /// holds a good one and the hostile shapes of 5.4.
 struct Bundle {
-    scratch: Scratch,
+    _scratch: Scratch,
     pinned: Vec<PinnedTree>,
     entrypoints: BTreeMap<String, PathBuf>,
 }
@@ -219,7 +219,7 @@ fn bundle() -> Bundle {
         entrypoints.insert(name.to_owned(), target);
     }
     Bundle {
-        scratch,
+        _scratch: scratch,
         pinned: vec![pinned],
         entrypoints,
     }
@@ -234,7 +234,6 @@ fn a_program_is_an_entrypoint_that_is_a_regular_file_of_a_pinned_tree() {
         b.entrypoints["tool"].to_str().unwrap()
     );
     assert_eq!(BUNDLE_PREFIX, "@bundle/");
-    let _ = &b.scratch;
 }
 
 #[test]

@@ -144,9 +144,57 @@ fn param(kind: &str, name: &str) -> String {
 /// the run's own places, the pinned trees, the Xcode, the kinds, and the setuid denies.
 /// The grants' `-D` parameters are appended after `RUN` and `UENTRY`.
 pub(super) fn reads(
-    _allow: &AllowGrants,
-    _uid_entry: Option<&AbsPath>,
-    _lines: &mut Vec<String>,
-    _params: &mut Vec<(String, String)>,
+    allow: &AllowGrants,
+    uid_entry: Option<&AbsPath>,
+    lines: &mut Vec<String>,
+    params: &mut Vec<(String, String)>,
 ) {
+    let mut named = vec!["RUN".to_owned()];
+    let mut own = vec![param("subpath", "RUN")];
+    if uid_entry.is_some() {
+        named.push("UENTRY".to_owned());
+        own.push(param("subpath", "UENTRY"));
+    }
+    let mut trees = Vec::new();
+    for (i, tree) in allow.trees().iter().enumerate() {
+        params.push((format!("TREE_{i}"), tree.path().as_str().to_owned()));
+        named.push(format!("TREE_{i}"));
+        trees.push(param("subpath", &format!("TREE_{i}")));
+    }
+    if let Some(xcode) = allow.xcode() {
+        params.push(("XCODE_APP".to_owned(), xcode.app().as_str().to_owned()));
+        named.push("XCODE_APP".to_owned());
+    }
+    let base = allow.major().base();
+
+    lines.push("(deny file-read*)".to_owned());
+    let ancestors: Vec<String> = named.iter().map(|n| param("path-ancestors", n)).collect();
+    lines.push(format!(
+        "(allow file-read-metadata {})",
+        ancestors.join(" ")
+    ));
+    lines.push(format!("(allow file-read* {})", filters(base.reads())));
+    lines.push(format!("(allow file-read* {})", own.join(" ")));
+    if !trees.is_empty() {
+        lines.push(format!("(allow file-read* {})", trees.join(" ")));
+    }
+    if allow.xcode().is_some() {
+        lines.push(format!(
+            "(allow file-read* {} {})",
+            param("subpath", "XCODE_APP"),
+            filters(&XCODE_SUPPORT)
+        ));
+    }
+    for kind in allow.kinds() {
+        let rules = kind_rules(*kind);
+        if !rules.is_empty() {
+            lines.push(format!("(allow file-read* {})", filters(rules)));
+        }
+    }
+    let setuid: Vec<String> = base
+        .setuid()
+        .iter()
+        .map(|path| filter((Match::Literal, *path)))
+        .collect();
+    lines.push(format!("(deny file-read* {})", setuid.join(" ")));
 }

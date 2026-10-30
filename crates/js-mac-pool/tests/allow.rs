@@ -314,14 +314,14 @@ fn no_base_set_or_kind_grants_a_directory_wide_path() {
     for kind in js_bundle::ReadGrantKind::ALL {
         for (how, text) in kind_rules(kind) {
             if *how == Match::Subpath {
-                subpaths.push(text);
+                subpaths.push(*text);
             }
         }
     }
     for major in MacosMajor::ALL {
         for (how, text) in major.base().reads() {
             if *how == Match::Subpath {
-                subpaths.push(text);
+                subpaths.push(*text);
             }
         }
     }

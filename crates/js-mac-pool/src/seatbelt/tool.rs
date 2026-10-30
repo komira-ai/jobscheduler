@@ -66,9 +66,35 @@ impl ToolPath {
         entrypoints: &BTreeMap<String, PathBuf>,
         pinned: &[PinnedTree],
     ) -> Result<Self, ToolError> {
-        let _ = (program, pinned);
-        let path = entrypoints.values().next().cloned().unwrap_or_default();
-        Ok(Self(AbsPath::new(&path).map_err(ToolError::BadPath)?))
+        let name = program
+            .strip_prefix(BUNDLE_PREFIX)
+            .ok_or_else(|| ToolError::NotBundleRef(program.to_owned()))?;
+        let path = entrypoints
+            .get(name)
+            .ok_or_else(|| ToolError::NoSuchEntrypoint(name.to_owned()))?;
+        let path = AbsPath::new(path).map_err(ToolError::BadPath)?;
+        let tree = pinned
+            .iter()
+            .find(|tree| path.starts_with(tree.path()))
+            .ok_or_else(|| ToolError::UnpinnedTree(path.as_str().to_owned()))?;
+        let found = std::fs::symlink_metadata(path.as_str())
+            .map_err(|e| ToolError::Unreadable(e.kind()))?;
+        if found.file_type().is_symlink() {
+            return Err(ToolError::Symlink);
+        }
+        if !found.is_file() {
+            return Err(ToolError::NotRegular);
+        }
+        // A link in a directory above the file can still lead out of the tree. A path
+        // that does not resolve is outside, too.
+        let real = (
+            std::fs::canonicalize(path.as_str()),
+            std::fs::canonicalize(tree.path().as_str()),
+        );
+        match real {
+            (Ok(file), Ok(root)) if file.starts_with(&root) => Ok(Self(path)),
+            _ => Err(ToolError::LeavesTree),
+        }
     }
 
     /// The program's absolute path, for [`Profile::argv`](super::Profile::argv).
@@ -83,6 +109,19 @@ impl ToolPath {
 ///
 /// # Errors
 /// A [`ToolError`] naming the first directory that is not.
-pub fn check_path_dirs(_env: &[(String, String)]) -> Result<(), ToolError> {
+pub fn check_path_dirs(env: &[(String, String)]) -> Result<(), ToolError> {
+    for (_, value) in env.iter().filter(|(name, _)| name == "PATH") {
+        for dir in value.split(':') {
+            let path = AbsPath::parse(dir).map_err(ToolError::BadPath)?;
+            let found = std::fs::symlink_metadata(path.as_str())
+                .map_err(|e| ToolError::Unreadable(e.kind()))?;
+            if found.file_type().is_symlink() {
+                return Err(ToolError::PathEntrySymlink(dir.to_owned()));
+            }
+            if !found.is_dir() {
+                return Err(ToolError::PathEntryNotDir(dir.to_owned()));
+            }
+        }
+    }
     Ok(())
 }

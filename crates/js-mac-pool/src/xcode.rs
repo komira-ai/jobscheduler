@@ -242,8 +242,17 @@ impl Catalog {
         flags: &[XcodeFlag],
         mut ask: impl FnMut(&Question<'_>) -> Reply,
     ) -> Result<Self, CatalogError> {
-        let _ = (flags, &mut ask);
-        Ok(Self { xcodes: Vec::new() })
+        if flags.len() > MAX_LISTED {
+            return Err(CatalogError::TooMany);
+        }
+        let mut seen = BTreeSet::new();
+        for flag in flags {
+            if !seen.insert(flag.build()) {
+                return Err(CatalogError::DuplicateBuild(flag.build().to_owned()));
+            }
+        }
+        let xcodes = flags.iter().map(|flag| check(flag, &mut ask)).collect();
+        Ok(Self { xcodes })
     }
 
     /// Every flagged Xcode, ready or not, in the order of the flags.

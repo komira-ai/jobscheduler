@@ -306,7 +306,12 @@ impl SelfTest {
             ),
         ];
         for (class, canary, dir) in &denied {
-            let _ = (under(canary, dir), &granted, class);
+            if !under(canary, dir) {
+                return Err(SelfTestError::CanaryMisplaced(*class));
+            }
+            if granted.iter().any(|place| canary.starts_with(place)) {
+                return Err(SelfTestError::CanaryGranted(*class));
+            }
         }
 
         let policy = Policy::base(
@@ -387,8 +392,27 @@ impl SelfTest {
     ///
     /// # Errors
     /// The [`Failure`] of each wrong step, in step order.
-    pub fn judge(&self, _ran: &[bool]) -> Result<Assurance, Vec<Failure>> {
-        Ok(Assurance { major: self.major })
+    pub fn judge(&self, ran: &[bool]) -> Result<Assurance, Vec<Failure>> {
+        let mut failures = Vec::new();
+        for (i, step) in self.steps.iter().enumerate() {
+            let why = match (step.role, ran.get(i)) {
+                (_, None) => Some(Why::NotRun),
+                (Role::Denied, Some(true)) => Some(Why::Readable),
+                (Role::Control, Some(false)) => Some(Why::ControlFailed),
+                (Role::Allowed, Some(false)) => Some(Why::Blocked),
+                (Role::Denied, Some(false)) | (Role::Control | Role::Allowed, Some(true)) => None,
+            };
+            if let Some(why) = why {
+                failures.push(Failure {
+                    class: step.class,
+                    why,
+                });
+            }
+        }
+        if failures.is_empty() {
+            return Ok(Assurance { major: self.major });
+        }
+        Err(failures)
     }
 }
 

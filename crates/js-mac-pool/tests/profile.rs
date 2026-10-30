@@ -118,7 +118,7 @@ fn the_argv_is_sandbox_exec_parameters_profile_program_and_arguments() {
     let policy = Policy::base(bare_layout(), caps(Net::Off)).unwrap();
     let profile = Profile::for_policy(&policy).unwrap();
     let args = [OsString::from("-c"), OsString::from("echo hi")];
-    let argv = profile.argv(&path("/bin/sh"), &args);
+    let argv = profile.argv(path("/bin/sh"), &args);
     let expected = [
         OsString::from(SANDBOX_EXEC),
         OsString::from("-D"),
