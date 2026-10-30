@@ -71,6 +71,14 @@ pub struct Settings {
     /// serves at least this long. It does not hold back a drain for `max_age` or for a
     /// host that came up below its offer.
     pub min_host_lifetime: Duration,
+    /// When the pool's go expires, if it does. At and after this instant the pool is in
+    /// `Plan` mode whatever `launch` says ([`Settings::mode`]), so a forgotten `launch =
+    /// "live"` stops spending money by itself. `None` for a go that does not expire.
+    pub live_until: Option<Millis>,
+    /// The provider kind of the pool, such as `lambdalabs`: the key of the totals that
+    /// apply to every pool of the kind ([`Budgets::kinds`](crate::Budgets::kinds)). Empty
+    /// for a pool in no kind.
+    pub kind: String,
     /// The server's ceiling on a lease's `max_wall`, if it has one. With `max_age` it
     /// gives [`Settings::lifetime`].
     pub max_lease_wall: Option<Duration>,
@@ -114,6 +122,8 @@ impl Settings {
             unknown_hold: Duration::from_secs(30 * 60),
             max_step: 1,
             max_age: None,
+            live_until: None,
+            kind: String::new(),
             min_host_lifetime: Duration::ZERO,
             max_lease_wall: None,
             prepare_timeout: PREPARE_TIMEOUT,
@@ -149,6 +159,17 @@ impl Settings {
             .saturating_add(waits)
             .saturating_add(self.lifetime_margin);
         Some(age.saturating_add(after))
+    }
+
+    /// The mode the pool is in at `now`: `launch`, except that a pool whose `live_until` has
+    /// come is in `Plan`. The step and the registry's `Launchable` ask this and never read
+    /// `launch` alone.
+    #[must_use]
+    pub fn mode(&self, now: Millis) -> LaunchMode {
+        match self.live_until {
+            Some(until) if now >= until => LaunchMode::Plan,
+            _ => self.launch,
+        }
     }
 
     /// Whether a machine launched at `launched` has reached `max_age` at `now`.
@@ -213,4 +234,23 @@ pub enum Blocked {
     MaxSpend,
     /// One more machine would take the day's spend over `max_spend_per_day`.
     MaxSpendDay,
+    /// One more machine would take the spend of all the pools, or of all the pools of the
+    /// provider kind, over a total ([`Totals`](crate::Totals)): the day, the month or
+    /// the time since the go.
+    MaxSpendTotal,
+}
+
+impl Blocked {
+    /// The name `/v1/pools` shows for a cap: `Some` for the caps, `None` for the other
+    /// reasons.
+    #[must_use]
+    pub fn cap_name(self) -> Option<&'static str> {
+        match self {
+            Self::MaxInstances => Some("max_instances"),
+            Self::MaxSpend => Some("max_spend"),
+            Self::MaxSpendDay => Some("max_spend_day"),
+            Self::MaxSpendTotal => Some("max_spend_total"),
+            _ => None,
+        }
+    }
 }

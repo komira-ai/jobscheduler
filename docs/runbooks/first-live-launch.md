@@ -444,3 +444,18 @@ The run covers one machine of one type in one region. It does not prove a second
 region, the arm64 pin, behaviour under a restart of the scheduler while the instance is up (restart and
 re-adopt: **CI** only, with fakes; and see #329), the lost-Welcome release at `boot_timeout` (#387 is open), or a stock image other than the one used. Re-run the live steps
 when the stock image, the Tailscale pin or the agent pin changes.
+
+## Rolling back across the spend totals
+
+A server older than the spend totals (`max_spend_per_day_total` and the other two, `live_until`)
+reads the records file, but its next save drops the `go` and `pool_kinds` keys, and it forgets
+records of machines 24 hours after they ended. After rolling forward again:
+
+- the budget since the go starts afresh at the pool's next launch: what was spent under the old go,
+  including what had been settled into it, is forgotten;
+- the month window holds only the days since the rollback, for up to 30 days;
+- a retry of a launch the provider told to wait that happens before the pool's first launch has no
+  go, and is bounded by the day and month totals only.
+
+For that period tighten `max_spend_per_month_total` and `max_spend_since_go_total` by what the
+pools spent before the rollback, or hold the pools in `plan`.

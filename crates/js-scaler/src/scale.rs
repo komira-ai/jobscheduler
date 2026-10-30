@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use js_elastic::{AcquireId, HostName, HostRef, Offer};
 
-use crate::caps::{billed_until, check, choose, nearest_miss, unpriced};
+use crate::budget;
+use crate::caps::{check, choose, nearest_miss, unpriced};
 use crate::input::{HostState, Input, Mark, PoolInput, Waiting};
 use crate::pass::{Pass, host_named};
 use crate::record::{CooldownReason, Phase, Record, Records};
@@ -424,6 +425,10 @@ impl Pass<'_> {
     /// a launch: it is checked against every cap again, with the machines of the pool other
     /// than itself, and one that does not fit stays planned and shows the cap. Returns how
     /// many were sent.
+    ///
+    /// A retry begins no go: it stages nothing, and the go is begun by the launch step. A pool
+    /// that returns to live holding a `Planned` record retries it before the launch step, so
+    /// that launch is outside any go and is bounded by the day and month totals only.
     fn retry_planned(&mut self, settings: &Settings) -> usize {
         let due: Vec<usize> = self
             .indices(&settings.pool)
@@ -450,7 +455,18 @@ impl Pass<'_> {
                 .map(|(_, record)| record.clone())
                 .collect();
             let price = self.records.instances[i].price_cents_per_hour;
-            match check(settings, self.now, &others, &[], &BTreeSet::new(), price) {
+            let within =
+                check(settings, self.now, &others, &[], &BTreeSet::new(), price).and_then(|()| {
+                    budget::check(
+                        self.input,
+                        &self.records,
+                        settings,
+                        self.now,
+                        (&others, &[]),
+                        price,
+                    )
+                });
+            match within {
                 Ok(()) => {
                     self.go(i, Phase::Launching);
                     let now = self.now;
@@ -482,7 +498,7 @@ impl Pass<'_> {
         uncovered: Vec<&'w Waiting>,
     ) -> Vec<&'w Waiting> {
         let settings = &pool.settings;
-        let live = settings.launch == LaunchMode::Live;
+        let live = settings.mode(self.now) == LaunchMode::Live;
         if let Some(blocked) = self.gate(pool) {
             self.blocked.insert(settings.pool.clone(), blocked);
             return uncovered;
@@ -502,6 +518,13 @@ impl Pass<'_> {
         let mut left = Vec::new();
         let mut stopped = None;
         let mut no_price = false;
+        // The go begins before anything is staged, so that the budget since the go counts the
+        // launches staged in this step (with `max_step` above one, the second is checked
+        // against the first); it is taken back if nothing is staged.
+        let fresh = live && !self.records.go.contains_key(&settings.pool);
+        if fresh {
+            self.begin_go(&settings.pool);
+        }
         for request in uncovered {
             let room = [
                 stopped.is_none(),
@@ -530,11 +553,17 @@ impl Pass<'_> {
             }
         }
         let stopped = stopped.or(no_price.then_some(Blocked::Unpriced));
+        if fresh && staged.is_empty() {
+            self.records.go.remove(&settings.pool);
+        }
         if live {
             if let Some(blocked) = stopped {
                 self.blocked.insert(settings.pool.clone(), blocked);
             }
             self.drawn += staged.len();
+            if !staged.is_empty() {
+                self.note_kind(settings);
+            }
             for record in staged {
                 self.actions.extend(launch_actions(
                     &record,
@@ -575,6 +604,15 @@ impl Pass<'_> {
             &self.records.instances,
             staged,
             &BTreeSet::new(),
+            price,
+        )?;
+        let records = (self.records.instances.as_slice(), staged);
+        budget::check(
+            self.input,
+            &self.records,
+            settings,
+            self.now,
+            records,
             price,
         )?;
         let bits = self
@@ -629,25 +667,7 @@ impl Pass<'_> {
     ) -> (State, Vec<Action>) {
         let now = self.now;
         let input: &Input = self.input;
-        self.records.instances.retain(|record| {
-            let boot_timeout = input
-                .pools
-                .iter()
-                .find(|pool| pool.settings.pool == record.pool)
-                .map_or(Duration::ZERO, |pool| pool.settings.boot_timeout);
-            // A refused acquire never was a machine and costs nothing: it goes at once, so
-            // a pool that is refused over and over does not grow its records.
-            let costs = [
-                record.counts(),
-                billed_until(record, boot_timeout, now) > now.back(crate::caps::DAY),
-            ];
-            [
-                record.phase != Phase::Refused,
-                costs.into_iter().any(|keep| keep),
-            ]
-            .into_iter()
-            .all(|keep| keep)
-        });
+        self.forget();
         self.records.silent_since = self.silent_now.clone();
         self.records.missing_since = self.missing_now.clone();
         // The time of the step is written with the records and never alone, so a restart

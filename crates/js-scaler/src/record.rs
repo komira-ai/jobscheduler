@@ -310,6 +310,21 @@ pub struct Cooldown {
     pub reason: CooldownReason,
 }
 
+/// A pool's go: the instant of its first launch since it was last in `Plan`, and what its
+/// machines had cost by the time they left the records. Kept for as long as the pool stays
+/// live. The cost since
+/// the go is `settled` plus what the machines still in the records cost from `at` on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Go {
+    /// When the go began: the step that made the pool's first launch since the pool was last
+    /// in `Plan`. It is written with the record of that launch.
+    pub at: Millis,
+    /// The cost since `at`, in cents, of the machines whose records were forgotten when
+    /// their billed time left the month window.
+    pub settled: u64,
+}
+
 /// The version of the records file this writer writes. Version 2 added the silent and
 /// missing times and the time of the last write.
 pub const VERSION: u32 = 2;
@@ -353,6 +368,17 @@ pub struct Records {
     /// pending nothing is written for it. `None` in a file
     /// that has none: the whole span back to each time is taken as downtime.
     pub last_step: Option<Millis>,
+    /// The go of each pool that has launched since it was last in `Plan`, by name ([`Go`]).
+    /// The step that makes the first such launch writes it, and the first step that sees the
+    /// pool in `Plan` mode (or past `live_until`) removes it, which is how a new go begins a
+    /// new budget.
+    /// Absent in files written before it existed, which read it empty.
+    pub go: BTreeMap<String, Go>,
+    /// The provider kind each pool launched with, by pool name, noted at its launches. A kind
+    /// total still counts the records of a pool that has been taken out of the file because
+    /// the records remember its kind; a pool with no entry (records from before it existed)
+    /// counts in every kind's total. Absent in files written before it existed.
+    pub pool_kinds: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -363,6 +389,10 @@ struct WireOut<'a> {
     silent_since: &'a BTreeMap<String, Millis>,
     missing_since: &'a BTreeMap<String, Millis>,
     last_step: Option<Millis>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    go: &'a BTreeMap<String, Go>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pool_kinds: &'a BTreeMap<String, String>,
 }
 
 /// Version 2.
@@ -377,14 +407,10 @@ struct WireIn {
     missing_since: BTreeMap<String, Millis>,
     #[serde(default)]
     last_step: Option<Millis>,
-    /// Keys a later writer adds (the go of each live pool, and the kinds of the pools). This reader does not know what it
-    /// holds, so it reads it, drops it, and writes the file without it: a server that is rolled
-    /// back to this version starts on a file the newer one wrote.
-    #[serde(default, rename = "go")]
-    _go: Option<serde_json::Value>,
-    /// The same for the provider kind each pool launched with.
-    #[serde(default, rename = "pool_kinds")]
-    _pool_kinds: Option<serde_json::Value>,
+    #[serde(default)]
+    go: BTreeMap<String, Go>,
+    #[serde(default)]
+    pool_kinds: BTreeMap<String, String>,
 }
 
 /// Version 1: the same without the two times.
@@ -430,6 +456,8 @@ impl Records {
             silent_since: &self.silent_since,
             missing_since: &self.missing_since,
             last_step: self.last_step,
+            go: &self.go,
+            pool_kinds: &self.pool_kinds,
         };
         Ok(serde_json::to_string_pretty(&wire)?)
     }
@@ -463,6 +491,8 @@ impl Records {
                 silent_since: wire.silent_since,
                 missing_since: wire.missing_since,
                 last_step: wire.last_step,
+                go: wire.go,
+                pool_kinds: wire.pool_kinds,
             })
         }
     }
