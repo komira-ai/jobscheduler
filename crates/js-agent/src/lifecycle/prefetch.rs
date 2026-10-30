@@ -21,6 +21,13 @@
 //! answered `Failed` (every run that waited on the pull ends), and a call that names no
 //! ticket, or another one, starts a new pull.
 //!
+//! A waiter can miss a failure: the entry of a failed pull is replaced when a call that
+//! names no ticket (a new start) pulls again, and a run that waited on the old pull then
+//! finds the new one; the wait is bounded by that pull's own deadline. [`Prefetcher::forget`]
+//! during a pull lets the old task run on while a new pull of the same image starts, so the
+//! pull function must publish its result atomically and tolerate a concurrent pull of the
+//! same digest.
+//!
 //! A pull that panics is a failed pull; a pull *function* that panics when it is called
 //! leaves no trace of the image, so the next call tries again. Dropping the prefetcher
 //! stops its runtime without waiting for the pulls (tokio's `shutdown_background`), so it

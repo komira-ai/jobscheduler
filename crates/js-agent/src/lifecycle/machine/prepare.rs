@@ -1,5 +1,5 @@
 //! A start that waits for its image: each step asks the runtime again, and the container
-//! is created when the image is here.
+//! is created when the image is here, unless the run was stopped or its lease ended first.
 
 use super::job::{Stage, Waiting};
 use super::{Lifecycle, runtime_failure};
@@ -8,7 +8,7 @@ use crate::lifecycle::runtime::Prepared;
 
 impl Lifecycle {
     /// Takes the job at `index`, if it waits for its image, one step on: stopped or
-    /// cancelled while it waited, it ends without a container; with the image here it is
+    /// cancelled while it waited, or past the end of its lease, it ends without a container; with the image here it is
     /// created and its wall-time limit begins; an image that could not be had ends it as
     /// `failed_to_start`; otherwise it waits on.
     pub(super) fn advance(&mut self, index: usize, events: &mut Vec<Event>) {
@@ -16,7 +16,9 @@ impl Lifecycle {
         let Stage::Preparing(waiting) = &mut job.stage else {
             return;
         };
-        if job.cause.is_some() {
+        // A stopped run, or one whose lease has ended while it waited, is not created: its
+        // container would run for a step with nothing to run for.
+        if job.cause.is_some() || self.clock.now_ms() >= waiting.lease_end_ms {
             job.end_unstarted(events);
             return;
         }

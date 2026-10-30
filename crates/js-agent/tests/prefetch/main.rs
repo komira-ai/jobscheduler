@@ -150,18 +150,23 @@ fn a_failure_is_reported_only_to_the_ticket_of_the_pull_that_failed() {
 }
 
 /// `forget` makes the next call pull again, whether the image was pulled or is still being
-/// pulled; the end of a pull that was let go is ignored.
+/// pulled; the end of a pull that was let go is ignored. One worker thread runs the pulls
+/// in order, and the test hears that the let-go pull's future has ended (it sends from its
+/// last line) and then makes one more round trip through that thread, so the let-go pull's
+/// result has been offered before the check.
 #[test]
 fn a_forgotten_image_is_pulled_again_and_a_pull_let_go_is_ignored() {
     guard();
     let (pulls, gate) = (Arc::new(AtomicUsize::new(0)), Arc::new(Notify::new()));
+    let (ended, ended_rx) = std::sync::mpsc::channel();
     let (counted, held) = (Arc::clone(&pulls), Arc::clone(&gate));
-    let prefetcher = Prefetcher::new(2, move |_| -> PullFuture {
+    let prefetcher = Prefetcher::new(1, move |_| -> PullFuture {
         let first = counted.fetch_add(1, Ordering::SeqCst) == 0;
-        let held = Arc::clone(&held);
+        let (held, ended) = (Arc::clone(&held), ended.clone());
         Box::pin(async move {
             if first {
                 held.notified().await;
+                ended.send(()).expect("the test listens");
                 Err("late and wrong".to_owned())
             } else {
                 Ok(())
@@ -174,6 +179,7 @@ fn a_forgotten_image_is_pulled_again_and_a_pull_let_go_is_ignored() {
     // The second pull answers at once; the first, let go, ends later and must not undo it.
     assert_eq!(prefetcher.wait(A), Prepared::Ready);
     gate.notify_one();
+    ended_rx.recv().expect("the let-go pull ends");
     assert_eq!(prefetcher.wait(B), Prepared::Ready);
     assert_eq!(prefetcher.prepare(A, None), Prepared::Ready);
     prefetcher.forget(A);

@@ -272,3 +272,25 @@ fn a_stop_and_the_image_in_the_same_step_create_nothing() {
     assert!(h.fake.created().is_empty());
     assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
 }
+
+/// A run whose lease ends while it waits for its image is not created, however late the
+/// image comes: it ends `killed` at the first step past the lease end, with no scratch
+/// directory and no container, and the image arriving then creates nothing.
+#[test]
+fn a_run_whose_lease_ended_while_it_waited_is_not_created() {
+    let mut h = Harness::new("prepare-lease-gone");
+    h.fake.pull_pending(COLD);
+    let mut spec = cold("r1");
+    spec.valid_for_ms = 30_000;
+    h.start(spec);
+    h.clock.advance(29_999);
+    assert!(h.life.step().is_empty());
+    h.clock.advance(1);
+    h.fake.pull_done(COLD);
+    assert_eq!(names(&h.life.step())[0], "result r1");
+    assert_eq!(h.life.results()[0].outcome, Outcome::Killed);
+    h.life.step();
+    assert!(h.fake.created().is_empty());
+    assert!(!h.scratch_of("r1").exists());
+    assert!(h.life.busy_slots().is_empty());
+}
