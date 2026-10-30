@@ -67,8 +67,8 @@ fn refused(args: &[&str]) -> String {
     checked(args).unwrap_err()
 }
 
-/// A farm host's flags give the store, the budget in bytes and the defaults the design
-/// names: trust `list`, pull `never`, the open read model, 30 minutes of minimum age, no
+/// A farm host's flags give the store, the budget in bytes and the defaults the
+/// rules name: trust `list`, pull `never`, the open read model, 30 minutes of minimum age, no
 /// low-water mark. It catches a budget kept in GiB, a default of `digest` (any submitter
 /// could run any bundle) or a default of `missing`.
 #[test]
