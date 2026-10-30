@@ -110,3 +110,39 @@ fn inspect_names_a_manifest_by_digest() {
     assert_eq!(shown.code, Some(0), "{}", shown.stderr);
     assert!(shown.stdout.starts_with(&format!("manifest {digest}\n")));
 }
+
+#[test]
+fn inspect_prints_a_hostile_annotation_as_one_escaped_line() {
+    let work = work("inspect-hostile");
+    let (layout, _) = common::packed(&work, "out", "a");
+    common::rewrite(&layout, |manifest, _| {
+        manifest["annotations"] = serde_json::json!({
+            "org.example.k": "x\nmanifest sha256:fake\u{1b}[31m back\\slash \u{202e}",
+            "org.example\u{1b}.j": "plain"
+        });
+    });
+    let shown = run(&strings(&["inspect", &text(&layout)]));
+    assert_eq!(shown.code, Some(0), "{}", shown.stderr);
+    assert_eq!(
+        shown
+            .stdout
+            .lines()
+            .filter(|l| l.starts_with("manifest "))
+            .count(),
+        1
+    );
+    assert!(!shown.stdout.contains('\u{1b}'));
+    assert!(!shown.stdout.contains('\u{202e}'));
+    let lines: Vec<&str> = shown
+        .stdout
+        .lines()
+        .filter(|l| l.starts_with("annotation "))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "annotation org.example\\u{001b}.j plain",
+            "annotation org.example.k x\\u{000a}manifest sha256:fake\\u{001b}[31m back\\\\slash \\u{202e}",
+        ]
+    );
+}

@@ -97,6 +97,8 @@ fn a_different_annotation_gives_a_different_digest_and_the_same_config_and_layer
 
 #[test]
 fn a_duplicate_or_malformed_annotation_is_refused_before_anything_is_written() {
+    let long_value = format!("org.example.k={}", "v".repeat(4097));
+    let long_key = format!("org.{}.k=v", "a".repeat(251));
     for (annotations, reason) in [
         (
             &["org.example.k=v", "org.example.k=w"][..],
@@ -106,6 +108,21 @@ fn a_duplicate_or_malformed_annotation_is_refused_before_anything_is_written() {
         (&["Org.Example.k=v"][..], "reverse-domain"),
         (&["org..k=v"][..], "reverse-domain"),
         (&["org.example.k="][..], "non-empty value"),
+        (&["org.example.k=a\nb"][..], "control or bidirectional"),
+        (
+            &["org.example.k=a\u{1b}[31mb"][..],
+            "control or bidirectional",
+        ),
+        (
+            &["org.example.k=a\u{202e}b"][..],
+            "control or bidirectional",
+        ),
+        (
+            &["org.example.k=a\u{2028}b"][..],
+            "control or bidirectional",
+        ),
+        (&[long_value.as_str()][..], "at most 4096 bytes"),
+        (&[long_key.as_str()][..], "at most 256 bytes"),
     ] {
         let work = work("annotate-bad");
         let (packed, out) = pack_into(&work, "out", annotations);
@@ -117,4 +134,14 @@ fn a_duplicate_or_malformed_annotation_is_refused_before_anything_is_written() {
         );
         assert!(!out.exists(), "{annotations:?}");
     }
+}
+
+#[test]
+fn annotations_at_the_length_caps_are_accepted() {
+    let work = work("annotate-caps");
+    let key = format!("org.{}.k={}", "a".repeat(250), "v".repeat(4096));
+    let (packed, out) = pack_into(&work, "out", &[key.as_str()]);
+    assert_eq!(packed.code, Some(0), "{}", packed.stderr);
+    let verified = run(&verify_args(&out, &work.join("scratch")));
+    assert_eq!(verified.code, Some(0), "{}", verified.stderr);
 }

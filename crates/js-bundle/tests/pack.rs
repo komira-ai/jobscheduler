@@ -339,3 +339,17 @@ fn a_symlinked_root_is_refused() {
     assert!(matches!(pack_error(&link), PackError::RootSymlink { .. }));
     assert!(pack_tar(&scratch.root()).is_ok());
 }
+
+/// A trailing slash makes the system resolve a link, so the check cannot be a plain lstat.
+#[test]
+fn a_symlinked_root_is_refused_with_a_trailing_slash_too() {
+    let scratch = Scratch::new();
+    write(&scratch.root(), "f", b"x", 0o644);
+    let link = scratch.outside().join("root-link");
+    std::os::unix::fs::symlink(scratch.root(), &link).unwrap();
+    let slashed = std::path::PathBuf::from(format!("{}/", link.display()));
+    assert!(matches!(
+        pack_error(&slashed),
+        PackError::RootSymlink { .. }
+    ));
+}

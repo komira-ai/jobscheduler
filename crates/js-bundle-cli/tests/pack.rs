@@ -429,3 +429,69 @@ fn a_flag_with_a_value_outside_its_vocabulary_is_a_usage_error() {
         assert!(run.stderr.contains(reason), "{flag:?}: {}", run.stderr);
     }
 }
+
+#[test]
+fn a_staging_directory_that_already_exists_is_left_alone() {
+    let work = work("pack-staging");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let staging = work.join(".out.partial");
+    fs::create_dir(&staging).unwrap();
+    fs::write(staging.join("keep"), "mine").unwrap();
+    let out = work.join("out");
+    let run = run(&pack_args(&out, &[("main", &tree)]));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains(".out.partial"), "{}", run.stderr);
+    assert_eq!(fs::read_to_string(staging.join("keep")).unwrap(), "mine");
+    assert!(!out.exists(), "a refused pack left its out directory");
+}
+
+/// The longest path the system takes.
+const PATH_MAX: usize = if cfg!(target_os = "macos") {
+    1024
+} else {
+    4096
+};
+
+#[test]
+fn a_failure_after_the_staging_directory_was_made_removes_both_directories() {
+    // The parent is so deep that the staging directory fits and the blobs below it do not.
+    let work = work("pack-deep");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let target = PATH_MAX - 85;
+    let mut parent = work.path().to_path_buf();
+    while parent.as_os_str().len() < target {
+        let room = target - parent.as_os_str().len() - 1;
+        parent.push("d".repeat(room.min(200)));
+        fs::create_dir(&parent).unwrap();
+    }
+    let out = parent.join("out");
+    let run = run(&pack_args(&out, &[("main", &tree)]));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(!out.exists(), "a failed pack left its out directory");
+    assert!(
+        !parent.join(".out.partial").exists(),
+        "a failed pack left its staging directory"
+    );
+}
+
+#[test]
+fn a_symlinked_tree_directory_is_refused_with_a_trailing_slash_too() {
+    let work = work("pack-rootlink-slash");
+    let tree = work.join("tree");
+    fs::create_dir(&tree).unwrap();
+    sample_tree(&tree, "a");
+    let link = work.join("link");
+    symlink(&tree, &link).unwrap();
+    let out = work.join("out");
+    let run = run(&pack_args(
+        &out,
+        &[("main", &Path::new(&format!("{}/", text(&link))))],
+    ));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains("is a symlink"), "{}", run.stderr);
+    assert!(!out.exists());
+}
