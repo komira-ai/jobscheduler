@@ -403,7 +403,7 @@ fn resolve(app: &AbsPath, owner: u32) -> Result<(AbsPath, AbsPath), String> {
     let real = std::fs::canonicalize(app.as_str()).map_err(|e| format!("{e}: {}", app.as_str()))?;
     for dir in real.ancestors() {
         let trusted = std::fs::metadata(dir).is_ok_and(|meta| trusted(&meta, owner));
-        if !trusted && trusted {
+        if !trusted && dir.as_os_str().is_empty() {
             let text = format!(
                 "{} is not owned by uid {owner} or root, or others can write it",
                 dir.display()

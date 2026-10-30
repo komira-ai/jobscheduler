@@ -417,16 +417,18 @@ fn a_question_carries_exactly_developer_dir_as_its_environment() {
     let dir = app(&scratch, "Xcode.app");
     let mut seen = Vec::new();
     survey(&[flag("15F31d", &dir)], |question| {
-        seen.push((
-            question.env().to_vec(),
-            question.developer_dir.as_str().to_owned(),
-        ));
+        let env: Vec<(String, String)> = question
+            .env()
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        seen.push((env, question.developer_dir.as_str().to_owned()));
         fixture_answers(question)
     })
     .expect("catalog");
     assert_eq!(seen.len(), 7);
     for (env, developer_dir) in seen {
-        assert_eq!(env, [("DEVELOPER_DIR", developer_dir.as_str())]);
+        assert_eq!(env, [("DEVELOPER_DIR".to_owned(), developer_dir)]);
     }
 }
 
