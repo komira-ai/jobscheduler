@@ -781,7 +781,9 @@ impl Local {
         for root in self.mounts.writable_paths() {
             if device(root)? == own {
                 return Err(format!(
-                    "--mount-root: {} is on the same file system as the --scratch-root,                      which --scratch-quota bounds: a read-write mount there is outside the                      quota; give it as --mount-root-ro or move it",
+                    "--mount-root: {} is on the same file system as the --scratch-root, which \
+                     --scratch-quota bounds: a read-write mount there is outside the quota; \
+                     give it as --mount-root-ro or move it",
                     root.display()
                 ));
             }

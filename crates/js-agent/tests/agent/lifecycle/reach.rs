@@ -334,10 +334,13 @@ fn mount_root_on_scratch_device_refused_only_with_quota() {
     ];
     let (status, err, sent) = start_on(&same, &quota);
     assert_eq!(status, code(2), "{err}");
-    assert!(
-        err.contains("--mount-root:") && err.contains("--scratch-quota"),
-        "{err}"
+    let said = format!(
+        "--mount-root: {} is on the same file system as the --scratch-root, which \
+         --scratch-quota bounds: a read-write mount there is outside the quota; give it as \
+         --mount-root-ro or move it",
+        fs::canonicalize(&data).unwrap().display()
     );
+    assert!(err.contains(&said), "{err}");
     assert_eq!(sent, 0);
 
     let off = [

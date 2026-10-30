@@ -112,7 +112,7 @@ impl Booking {
         .all(|ok| ok)
     }
 
-    /// What the labels of a container say it booked: the four numbers are present and no GPU is
+    /// What the labels of a container say it booked: the CPU, memory and GPU labels are present and readable, the disk label is a number when there is one, and no GPU is
     /// named twice (the agent never writes such a booking).
     pub(super) fn from_labels(found: &Found) -> Option<Self> {
         let gpus = found
@@ -127,9 +127,13 @@ impl Booking {
         Some(Self {
             cpu_millis: label_number(found, label::CPU_MILLIS)?,
             memory_bytes: label_number(found, label::MEMORY_BYTES)?,
-            // Absent in a container an earlier agent made: no booking is read, and the
-            // container is held as booking everything, like any other unreadable booking.
-            disk_bytes: label_number(found, label::DISK_BYTES)?,
+            // Absent in a container an earlier agent made: it books no disk, the same 0 a
+            // job without `disk_bytes` books now, so a restart adopts it. A value that is
+            // there and is not a number is an unreadable booking like any other.
+            disk_bytes: match found.labels.get(label::DISK_BYTES) {
+                None => 0,
+                Some(text) => text.parse().ok()?,
+            },
             gpus,
         })
     }

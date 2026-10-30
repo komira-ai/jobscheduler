@@ -87,29 +87,70 @@ fn the_disk_booking_survives_a_restart_through_the_label() {
     assert_eq!(names(&h.start(job_with_disk("c", 4))), ["started c"]);
 }
 
-/// Asserts that a container with no `disk-bytes` label (an earlier agent made it) whose
-/// labels are otherwise good is not adopted as a run with a guessed booking: when it cannot
-/// be removed it holds the whole offer, disk included. It catches a missing label read as
-/// zero bytes, which would leave the disk of a possibly running container free to book.
-#[test]
-fn a_container_without_the_disk_label_is_held_as_everything() {
-    let mut h = Harness::new("disk-old-label");
-    let old = [
-        (label::RUN, "old"),
+/// The labels an agent from before the disk label wrote for a run of 1 CPU and 1 GiB.
+fn older_agent_labels(run: &'static str) -> [(&'static str, &'static str); 7] {
+    [
+        (label::RUN, run),
         (label::LEASE, "lease-old"),
         (label::CPU_MILLIS, "1000"),
         (label::MEMORY_BYTES, "1073741824"),
         (label::GPUS, ""),
         (label::WALL_MS, "60000"),
         (label::ISOLATION, "contained"),
-    ];
-    h.fake.leak(&old, 0);
-    h.fake.fail("remove", 5);
-    h.restart().unwrap();
-    let free = h.life.free();
+    ]
+}
+
+/// Asserts that a container an older agent started (every label good, no `disk-bytes`)
+/// is adopted on a restart with a disk booking of 0, and not stopped, removed or tainted
+/// over: the upgrade does not kill running jobs. It catches a missing disk label treated
+/// as an unreadable booking.
+#[test]
+fn a_container_from_an_older_agent_without_the_disk_label_is_adopted_with_disk_0() {
+    let mut h = Harness::new("disk-old-label");
+    let id = h.fake.leak(&older_agent_labels("old"), 0);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["adopted old"]);
+    assert!(h.fake.existing().contains(&id), "it was not removed");
+    assert!(h.fake.stops().is_empty(), "and not stopped");
+    assert!(!h.life.is_tainted());
+    assert_eq!(h.life.free().disk_bytes, 10 * GIB, "it books no disk");
+    assert_eq!(h.life.free().cpu_millis, 3000, "its CPU is booked");
+}
+
+/// Asserts that a disk label that is there and is not a number is still an unreadable
+/// booking: the container is not adopted. It catches a parse failure read as 0.
+#[test]
+fn a_malformed_disk_label_is_not_adopted() {
+    let mut h = Harness::new("disk-bad-label");
+    let mut labels = older_agent_labels("odd").to_vec();
+    labels.push((label::DISK_BYTES, "lots"));
+    h.fake.leak(&labels, 0);
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["finding - unadoptable-container"]);
+    assert!(h.held().is_empty());
+}
+
+/// Asserts that a restart whose offer (the free space now, which excludes what the
+/// adopted runs wrote) is below an adopted run's disk booking still adopts it, that the
+/// booking stays counted, and that a new job is refused when the room left is too small
+/// while one that needs no disk runs. It catches an adopted run evicted for the shrunken
+/// offer, and an offer that is not held against new runs.
+#[test]
+fn a_restart_whose_offer_is_below_an_adopted_disk_booking_adopts_it() {
+    let mut h = Harness::new("disk-shrunk-offer");
+    assert_eq!(names(&h.start(job_with_disk("a", 6))), ["started a"]);
+    h.config.capacity.disk_bytes = 4 * GIB;
+    let events = names(&h.restart().unwrap());
+    assert_eq!(events, ["adopted a"], "adopted, not evicted");
+    assert_eq!(h.held(), ["a"]);
     assert_eq!(
-        (free.cpu_millis, free.memory_bytes, free.disk_bytes),
-        (0, 0, 0),
-        "the whole offer is held"
+        h.life.free().disk_bytes,
+        0,
+        "no room left, without underflow"
     );
+    assert_eq!(
+        names(&h.start(job_with_disk("b", 1))),
+        ["refused b no-capacity"]
+    );
+    assert_eq!(names(&h.start(job("c"))), ["started c"]);
 }

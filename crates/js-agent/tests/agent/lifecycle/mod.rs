@@ -21,6 +21,7 @@ mod running;
 mod scratch;
 mod slots;
 mod taint;
+mod taint_idle;
 
 use std::collections::BTreeSet;
 use std::fs;

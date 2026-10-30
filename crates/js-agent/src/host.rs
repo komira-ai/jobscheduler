@@ -160,6 +160,9 @@ pub fn offer(
     if cli.scratch_low_water_gib.is_some() && cli.scratch_root.is_none() {
         return Err("--scratch-low-water-gib: needs --scratch-root".to_owned());
     }
+    if cli.scratch_quota && cli.scratch_root.is_none() {
+        return Err("--scratch-quota: needs --scratch-root".to_owned());
+    }
     let (disk_bytes, advisory, disk_warning) = disk(cli, runner);
     capabilities.extend(advisory);
     let host_id = id(cli, platform, runner, files)?;

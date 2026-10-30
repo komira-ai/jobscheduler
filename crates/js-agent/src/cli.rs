@@ -79,20 +79,26 @@ pub struct Cli {
     pub allow_host_jobs: bool,
     /// A directory jobs may mount from, as `name=path`; the name is what a mount in a
     /// start refers to. May be given more than once. The path must be an existing
-    /// directory; it is canonicalised when the agent starts. No root, no mount.
+    /// directory; it is canonicalised when the agent starts. No root, no mount. With
+    /// `--scratch-quota` it may not be on the scratch root's file system; that check sees
+    /// the root's own device only, not a scratch device mounted below it (a submount a
+    /// recursive bind brings along), which the operator must see to be absent.
     #[arg(long = "mount-root", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots: Vec<(String, PathBuf)>,
     /// A directory jobs may mount from read-only, as `name=path`; like `--mount-root`, and
     /// it shares its namespace of names, except that a start with a read-write mount from
     /// it is refused. Unlike `--mount-root`, it may be on the scratch root's file system
-    /// when `--scratch-quota` is given. May be given more than once.
+    /// when `--scratch-quota` is given. May be given more than once. The comparison of file
+    /// systems sees the root's own device only: a scratch device mounted below a root (a
+    /// submount that a recursive bind brings along) is not seen, and the operator must
+    /// see to it that there is none.
     #[arg(long = "mount-root-ro", value_name = "NAME=PATH", value_parser = named_path)]
     pub mount_roots_ro: Vec<(String, PathBuf)>,
     /// The scratch root's file system is to bound each run's disk with a quota. Today the
     /// flag only makes the agent refuse to start when a `--mount-root` is on the same file
     /// system as the scratch root (a read-write mount there would be an unbounded path to
     /// its disk); `--mount-root-ro` roots may be there. It enables no quota yet and
-    /// advertises nothing.
+    /// advertises nothing. Needs `--scratch-root`.
     #[arg(long)]
     pub scratch_quota: bool,
     /// The most GiB of the scratch root's free disk the agent keeps back from jobs: the
